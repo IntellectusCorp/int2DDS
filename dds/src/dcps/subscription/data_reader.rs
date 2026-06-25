@@ -26,6 +26,7 @@
 //! - **Status Notifications**: Callbacks for data available, subscription matched, etc.
 
 use arc_swap::ArcSwap;
+use bytes::Bytes;
 use std::{
     any::{Any, TypeId},
     cmp::Ordering as CmpOrdering,
@@ -33,9 +34,10 @@ use std::{
     fmt::Debug,
     marker::PhantomData,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, RwLock, Weak,
     },
+    time::Instant,
 };
 
 use super::{
@@ -69,8 +71,8 @@ use crate::{
         qos_policy::{DestinationOrderQosPolicyKind, HistoryQosPolicyKind, Qos},
         status::{
             LivelinessChangedStatus, RequestedDeadlineMissedStatus, RequestedIncompatibleQosStatus,
-            SampleLostStatus, SampleRejectedStatus, StatusInfo, StatusKind, StatusMask,
-            SubscriptionMatchedStatus,
+            RequestedIncompatibleTypeStatus, SampleLostStatus, SampleRejectedStatus, StatusInfo,
+            StatusKind, StatusMask, SubscriptionMatchedStatus,
         },
         status_condition::StatusCondition,
     },
@@ -98,6 +100,107 @@ use crate::{
     utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
 };
 
+static SERIALIZED_TAKE_PROFILE_COUNT: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_PROFILE_PRECHECK_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_PROFILE_GET_CHANGES_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_PROFILE_SORT_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_PROFILE_FILTER_SETUP_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_PROFILE_INSTANCE_INFO_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_PROFILE_LOOP_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_PROFILE_CLEANUP_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_PROFILE_TOTAL_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_LOOP_PROFILE_COUNT: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_LOOP_PROFILE_SAMPLE_STATE_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_LOOP_PROFILE_INFO_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_LOOP_PROFILE_MATCH_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_LOOP_PROFILE_DATA_BYTES_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_LOOP_PROFILE_SAMPLE_INFO_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_LOOP_PROFILE_REMOVE_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_LOOP_PROFILE_PUSH_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_LOOP_PROFILE_TOTAL_US: AtomicU64 = AtomicU64::new(0);
+
+fn serialized_take_profile_enabled() -> bool {
+    std::env::var_os("RMW_INT2DDS_PROFILE").is_some()
+}
+
+fn elapsed_us(start: Instant, end: Instant) -> u64 {
+    end.duration_since(start).as_micros() as u64
+}
+
+fn record_serialized_take_profile(
+    precheck_us: u64,
+    get_changes_us: u64,
+    sort_us: u64,
+    filter_setup_us: u64,
+    instance_info_us: u64,
+    loop_us: u64,
+    cleanup_us: u64,
+    total_us: u64,
+) {
+    let n = SERIALIZED_TAKE_PROFILE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    SERIALIZED_TAKE_PROFILE_PRECHECK_US.fetch_add(precheck_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_PROFILE_GET_CHANGES_US.fetch_add(get_changes_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_PROFILE_SORT_US.fetch_add(sort_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_PROFILE_FILTER_SETUP_US.fetch_add(filter_setup_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_PROFILE_INSTANCE_INFO_US.fetch_add(instance_info_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_PROFILE_LOOP_US.fetch_add(loop_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_PROFILE_CLEANUP_US.fetch_add(cleanup_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_PROFILE_TOTAL_US.fetch_add(total_us, Ordering::Relaxed);
+
+    if n % 300 == 0 {
+        let divisor = n as f64;
+        eprintln!(
+            "INT2DDS_SERIALIZED_TAKE_PROFILE count={} total_avg_us={:.3} precheck_avg_us={:.3} get_changes_avg_us={:.3} sort_avg_us={:.3} filter_setup_avg_us={:.3} instance_info_avg_us={:.3} loop_avg_us={:.3} cleanup_avg_us={:.3}",
+            n,
+            SERIALIZED_TAKE_PROFILE_TOTAL_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_PROFILE_PRECHECK_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_PROFILE_GET_CHANGES_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_PROFILE_SORT_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_PROFILE_FILTER_SETUP_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_PROFILE_INSTANCE_INFO_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_PROFILE_LOOP_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_PROFILE_CLEANUP_US.load(Ordering::Relaxed) as f64 / divisor,
+        );
+    }
+}
+
+fn record_serialized_take_loop_profile(
+    sample_state_us: u64,
+    info_us: u64,
+    match_us: u64,
+    data_bytes_us: u64,
+    sample_info_us: u64,
+    remove_us: u64,
+    push_us: u64,
+    total_us: u64,
+) {
+    let n = SERIALIZED_TAKE_LOOP_PROFILE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    SERIALIZED_TAKE_LOOP_PROFILE_SAMPLE_STATE_US.fetch_add(sample_state_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_LOOP_PROFILE_INFO_US.fetch_add(info_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_LOOP_PROFILE_MATCH_US.fetch_add(match_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_LOOP_PROFILE_DATA_BYTES_US.fetch_add(data_bytes_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_LOOP_PROFILE_SAMPLE_INFO_US.fetch_add(sample_info_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_LOOP_PROFILE_REMOVE_US.fetch_add(remove_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_LOOP_PROFILE_PUSH_US.fetch_add(push_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_LOOP_PROFILE_TOTAL_US.fetch_add(total_us, Ordering::Relaxed);
+
+    if n % 300 == 0 {
+        let divisor = n as f64;
+        eprintln!(
+            "INT2DDS_SERIALIZED_TAKE_LOOP_PROFILE count={} total_avg_us={:.3} sample_state_avg_us={:.3} info_avg_us={:.3} match_avg_us={:.3} data_bytes_avg_us={:.3} sample_info_avg_us={:.3} remove_avg_us={:.3} push_avg_us={:.3}",
+            n,
+            SERIALIZED_TAKE_LOOP_PROFILE_TOTAL_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_LOOP_PROFILE_SAMPLE_STATE_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_LOOP_PROFILE_INFO_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_LOOP_PROFILE_MATCH_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_LOOP_PROFILE_DATA_BYTES_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_LOOP_PROFILE_SAMPLE_INFO_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_LOOP_PROFILE_REMOVE_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_LOOP_PROFILE_PUSH_US.load(Ordering::Relaxed) as f64 / divisor,
+        );
+    }
+}
+
 // Pub/Sub must contain multiple types of DataWriter/Reader<Foo>,
 // so we use trait objects for runtime polymorphism instead of generics
 pub trait DataReaderBase: DomainEntity + Send + Any {
@@ -106,6 +209,7 @@ pub trait DataReaderBase: DomainEntity + Send + Any {
     fn get_sample_lost_status(&self) -> DdsResult<SampleLostStatus>;
     fn get_requested_deadline_missed_status(&self) -> DdsResult<RequestedDeadlineMissedStatus>;
     fn get_requested_incompatible_qos_status(&self) -> DdsResult<RequestedIncompatibleQosStatus>;
+    fn get_requested_incompatible_type_status(&self) -> DdsResult<RequestedIncompatibleTypeStatus>;
     fn get_subscription_matched_status(&self) -> DdsResult<SubscriptionMatchedStatus>;
     fn get_matched_publication_data(
         &self,
@@ -184,6 +288,7 @@ pub struct DataReader<Foo> {
     sample_rejected_status: Arc<Mutex<SampleRejectedStatus>>,
     requested_deadline_missed_status: Arc<Mutex<RequestedDeadlineMissedStatus>>,
     requested_incompatible_qos_status: Arc<Mutex<RequestedIncompatibleQosStatus>>,
+    requested_incompatible_type_status: Arc<Mutex<RequestedIncompatibleTypeStatus>>,
     subscription_matched_status: Arc<Mutex<SubscriptionMatchedStatus>>,
     sample_lost_status: Arc<Mutex<SampleLostStatus>>,
     deadline_monitor: Arc<Mutex<Option<DeadlineMonitor>>>,
@@ -223,6 +328,10 @@ impl<Foo> Debug for DataReader<Foo> {
                 "requested_incompatible_qos_status",
                 &self.requested_incompatible_qos_status.lock().unwrap(),
             )
+            .field(
+                "requested_incompatible_type_status",
+                &self.requested_incompatible_type_status.lock().unwrap(),
+            )
             .field("subscription_matched_status", &self.subscription_matched_status.lock().unwrap())
             .field("sample_lost_status", &self.sample_lost_status.lock().unwrap())
             .field("_phantom", &self._phantom)
@@ -256,6 +365,7 @@ impl<Foo: 'static + Clone + Debug> Clone for DataReader<Foo> {
             sample_lost_status: self.sample_lost_status.clone(),
             requested_deadline_missed_status: self.requested_deadline_missed_status.clone(),
             requested_incompatible_qos_status: self.requested_incompatible_qos_status.clone(),
+            requested_incompatible_type_status: self.requested_incompatible_type_status.clone(),
             subscription_matched_status: self.subscription_matched_status.clone(),
             deadline_monitor: self.deadline_monitor.clone(),
             change_callback: self.change_callback.clone(),
@@ -498,6 +608,13 @@ impl<Foo: 'static + Clone + Debug> UpdateStatus for DataReader<Foo> {
                 .map_err(|_| DdsError::BadParameter)?;
                 self.handle_requested_incompatible_qos_status(info)
             }
+            StatusKind::REQUESTED_INCOMPATIBLE_TYPE => {
+                let info = Arc::downcast::<RequestedIncompatibleTypeStatus>(
+                    info.ok_or(DdsError::BadParameter)?,
+                )
+                .map_err(|_| DdsError::BadParameter)?;
+                self.handle_requested_incompatible_type_status(info)
+            }
             StatusKind::SAMPLE_LOST => {
                 if info.is_some() {
                     return Err(DdsError::BadParameter);
@@ -536,8 +653,9 @@ impl<Foo: 'static + Clone + Debug> UpdateStatus for DataReader<Foo> {
                     )
                 ) {
                     if let Ok(datareader_cache) = self.datareader_cache.lock() {
-                        datareader_cache.remove_writer_from_owner_candidates(
+                        datareader_cache.revoke_writer_ownership(
                             info.last_publication_handle().to_guid(),
+                            None,
                             true,
                             true,
                         )?;
@@ -784,8 +902,22 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     }
 
     #[inline]
+    pub fn get_requested_incompatible_type_status(
+        &self,
+    ) -> DdsResult<RequestedIncompatibleTypeStatus> {
+        <Self as DataReaderBase>::get_requested_incompatible_type_status(self)
+    }
+
+    #[inline]
     pub fn get_subscription_matched_status(&self) -> DdsResult<SubscriptionMatchedStatus> {
         <Self as DataReaderBase>::get_subscription_matched_status(self)
+    }
+
+    /// Returns the 16-byte RTPS GUID of this DataReader. This is the same endpoint
+    /// GUID advertised over SEDP discovery (the `endpoint_guid` of this reader's
+    /// `SubscriptionBuiltinTopicData`). Read-only accessor; mirrors `DataWriter::guid`.
+    pub fn guid(&self) -> Guid {
+        self.guid
     }
 
     #[inline]
@@ -1057,6 +1189,19 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         status_guard.total_count_change = 0;
         Ok(result)
     }
+    fn take_requested_incompatible_type_status(
+        &self,
+    ) -> DdsResult<RequestedIncompatibleTypeStatus> {
+        let mut status_guard = self
+            .requested_incompatible_type_status
+            .lock()
+            .map_err(|e| DdsError::Error(e.to_string()))?;
+        let result = status_guard.clone();
+
+        // Reset total_count_change
+        status_guard.total_count_change = 0;
+        Ok(result)
+    }
     fn take_subscription_matched_status(&self) -> DdsResult<SubscriptionMatchedStatus> {
         let mut status_guard =
             self.subscription_matched_status.lock().map_err(|e| DdsError::Error(e.to_string()))?;
@@ -1161,6 +1306,25 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
         // StatusCondition
         self.set_communication_status_propagation(&StatusKind::REQUESTED_INCOMPATIBLE_QOS, true)?;
+
+        Ok(())
+    }
+    fn handle_requested_incompatible_type_status(
+        &self,
+        _info: Arc<RequestedIncompatibleTypeStatus>,
+    ) -> DdsResult<()> {
+        {
+            let mut status_guard = self
+                .requested_incompatible_type_status
+                .lock()
+                .map_err(|e| DdsError::Error(e.to_string()))?;
+
+            status_guard.total_count += 1;
+            status_guard.total_count_change += 1;
+        }
+
+        // StatusCondition
+        self.set_communication_status_propagation(&StatusKind::REQUESTED_INCOMPATIBLE_TYPE, true)?;
 
         Ok(())
     }
@@ -1415,6 +1579,10 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         Ok(guard.get_changes().clone())
     }
 
+    pub fn has_cached_data(&self) -> DdsResult<bool> {
+        Ok(!self.get_available_changes()?.is_empty())
+    }
+
     pub(crate) fn get_change(
         &self,
         seq_num: SequenceNumber,
@@ -1544,7 +1712,8 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
             let data = self.type_support.deserialize(change.data_value(), None)?;
             Ok(self.type_support.compute_key(&*data))
         } else {
-            let key_any = self.type_support.deserialize_key(change.data_value())?;
+            // Dispose/unregister carry a wire serializedKey (with encapsulation header).
+            let key_any = self.type_support.deserialize_key_payload(change.data_value())?;
             Ok(self.type_support.compute_key(&*key_any))
         }
     }
@@ -1634,12 +1803,14 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         Ok(synthetic_sample_infos)
     }
 
+    // Returns true if the instance state actually changed (a rejected no-op
+    // transition returns false), so callers can avoid synthesizing notifications.
     pub(crate) fn update_instance_state(
         &self,
         instance_handle: InstanceHandle,
         new_state: InstanceStateKind,
         cache_change: Option<&CacheChange>,
-    ) -> DdsResult<()> {
+    ) -> DdsResult<bool> {
         // Non-keyed topic doesn't have instance state
         // if instance_handle.is_nil() {
         //     return Err(DdsError::BadParameter);
@@ -1656,6 +1827,8 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
             no_writers_generation_count: 0,
             pending_notification: false,
         });
+
+        let prev_state = info.instance_state;
 
         // Update InstanceState based on change kind
         log::trace!("Updating instance state based on change kind: {:?}", new_state);
@@ -1791,7 +1964,12 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                     let monitor_guard =
                         self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
                     if let Some(monitor) = monitor_guard.as_ref() {
-                        monitor.cancel_instance(&instance_handle);
+                        // Keep deadline tracking for synthetic no-writer transitions on non-keyed data.
+                        let synthetic_non_keyed_no_writers =
+                            instance_handle.is_nil() && cache_change.is_none();
+                        if !synthetic_non_keyed_no_writers {
+                            monitor.cancel_instance(&instance_handle);
+                        }
                     }
 
                     let reader_data_lifecycle_qos = &self.get_qos()?.reader_data_lifecycle;
@@ -1819,7 +1997,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
             }
         }
 
-        Ok(())
+        Ok(info.instance_state != prev_state)
     }
 
     fn add_autopurge_timer(
@@ -1917,6 +2095,9 @@ impl<Foo: DdsType> DataReader<Foo> {
             )),
             requested_incompatible_qos_status: Arc::new(Mutex::new(
                 RequestedIncompatibleQosStatus::default(),
+            )),
+            requested_incompatible_type_status: Arc::new(Mutex::new(
+                RequestedIncompatibleTypeStatus::default(),
             )),
             subscription_matched_status: Arc::new(Mutex::new(SubscriptionMatchedStatus::default())),
             deadline_monitor: Arc::new(Mutex::new(None)),
@@ -2373,6 +2554,18 @@ impl<Foo: DdsType> DataReader<Foo> {
         results.into_iter().next().ok_or(DdsError::NoData)
     }
 
+    /// Take a single pre-serialized sample without copying shared receive payloads.
+    pub fn take_next_serialized_bytes(&self) -> DdsResult<(Bytes, SampleInfo)> {
+        let results = self.read_or_take_serialized_bytes(
+            1,
+            &[SampleStateKind::NOT_READ_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::ANY_INSTANCE_STATE],
+            true,
+        )?;
+        results.into_iter().next().ok_or(DdsError::NoData)
+    }
+
     fn read_or_take_serialized(
         &self,
         max_samples: i32,
@@ -2381,6 +2574,29 @@ impl<Foo: DdsType> DataReader<Foo> {
         instance_states: &[InstanceStateKind],
         take: bool,
     ) -> DdsResult<Vec<(Arc<[u8]>, SampleInfo)>> {
+        self.read_or_take_serialized_bytes(
+            max_samples,
+            sample_states,
+            view_states,
+            instance_states,
+            take,
+        )
+        .map(|results| {
+            results.into_iter().map(|(data, info)| (Arc::from(data.as_ref()), info)).collect()
+        })
+    }
+
+    fn read_or_take_serialized_bytes(
+        &self,
+        max_samples: i32,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+        take: bool,
+    ) -> DdsResult<Vec<(Bytes, SampleInfo)>> {
+        let profile = serialized_take_profile_enabled();
+        let total_t0 = Instant::now();
+        let precheck_t0 = Instant::now();
         self.is_enabled()?;
 
         if max_samples == 0 {
@@ -2388,34 +2604,61 @@ impl<Foo: DdsType> DataReader<Foo> {
         }
 
         self.set_read_communication_status(false)?;
-        let mut result: Vec<(Arc<[u8]>, SampleInfo)> = Vec::new();
+        let precheck_us = if profile { elapsed_us(precheck_t0, Instant::now()) } else { 0 };
+        let mut result: Vec<(Bytes, SampleInfo)> = Vec::new();
         let mut remaining = if max_samples == -1 { i32::MAX } else { max_samples };
 
+        let get_changes_t0 = Instant::now();
         let mut changes = self.get_available_changes()?;
+        let get_changes_us = if profile { elapsed_us(get_changes_t0, Instant::now()) } else { 0 };
 
+        let sort_t0 = Instant::now();
         if !changes.is_empty() {
             self.sort_changes_by_timestamp(&mut changes)?;
         }
+        let sort_us = if profile { elapsed_us(sort_t0, Instant::now()) } else { 0 };
 
         // Get ContentFilteredTopic expression for serialized path filtering
+        let filter_setup_t0 = Instant::now();
         let (cft_expression, cft_parameters) = if let Some(cft) = &self.content_filtered_topic {
             let cft = cft
                 .upgrade()
                 .ok_or(DdsError::Error("ContentFilteredTopic is deleted".to_string()))?;
-            (Some(cft.parsed_expression.clone()), cft.get_expression_parameters()?)
+            if cft.is_filter_enabled()? {
+                (Some(cft.get_parsed_expression()?), cft.get_expression_parameters()?)
+            } else {
+                (None, Vec::new())
+            }
         } else {
             (None, Vec::new())
         };
+        let filter_setup_us = if profile { elapsed_us(filter_setup_t0, Instant::now()) } else { 0 };
 
+        let instance_info_t0 = Instant::now();
         let instance_infos = self.get_instance_infos()?;
+        let instance_info_us =
+            if profile { elapsed_us(instance_info_t0, Instant::now()) } else { 0 };
 
+        let loop_t0 = Instant::now();
+        let mut loop_sample_state_us = 0;
+        let mut loop_info_us = 0;
+        let mut loop_match_us = 0;
+        let mut loop_data_bytes_us = 0;
+        let mut loop_sample_info_us = 0;
+        let mut loop_remove_us = 0;
+        let mut loop_push_us = 0;
         for change in changes.iter() {
             if remaining <= 0 {
                 break;
             }
 
+            let sample_state_t0 = Instant::now();
             let sample_state =
                 self.get_sample_state(&change.writer_guid(), &change.sequence_number())?;
+            if profile {
+                loop_sample_state_us += elapsed_us(sample_state_t0, Instant::now());
+            }
+            let info_t0 = Instant::now();
             let info = match instance_infos.get(&change.instance_handle()) {
                 Some(info) => info,
                 None => &InstanceInfo {
@@ -2427,12 +2670,19 @@ impl<Foo: DdsType> DataReader<Foo> {
                     pending_notification: false,
                 },
             };
+            if profile {
+                loop_info_us += elapsed_us(info_t0, Instant::now());
+            }
 
+            let match_t0 = Instant::now();
             if !sample_states.matches(sample_state)
                 || !view_states.matches(info.view_state)
                 || !instance_states.matches(info.instance_state)
             {
                 continue;
+            }
+            if profile {
+                loop_match_us += elapsed_us(match_t0, Instant::now());
             }
 
             let has_valid_data = match change.kind() {
@@ -2442,7 +2692,11 @@ impl<Foo: DdsType> DataReader<Foo> {
                 | ChangeKind::NotAliveDisposedUnregistered => false,
             };
 
-            let serialized_data = Arc::from(change.data_value());
+            let data_bytes_t0 = Instant::now();
+            let serialized_data = change.data_bytes();
+            if profile {
+                loop_data_bytes_us += elapsed_us(data_bytes_t0, Instant::now());
+            }
 
             // ContentFilteredTopic filter for serialized path
             if let Some(cft_expr) = &cft_expression {
@@ -2451,6 +2705,9 @@ impl<Foo: DdsType> DataReader<Foo> {
                     {
                         if let Ok(typed) = deserialized.downcast::<Foo>() {
                             if let Ok(false) = cft_expr.evaluate(&*typed, &cft_parameters) {
+                                // Filtered-out samples should not remain in reader history,
+                                // otherwise later filter broadening/disable can replay stale data.
+                                self.remove_change(change.clone())?;
                                 continue;
                             }
                         }
@@ -2458,6 +2715,7 @@ impl<Foo: DdsType> DataReader<Foo> {
                 }
             }
 
+            let sample_info_t0 = Instant::now();
             let sample_info = SampleInfo {
                 sample_state,
                 view_state: info.view_state,
@@ -2475,17 +2733,42 @@ impl<Foo: DdsType> DataReader<Foo> {
                 publication_handle: InstanceHandle::from_guid(&change.writer_guid()),
                 valid_data: has_valid_data,
             };
+            if profile {
+                loop_sample_info_us += elapsed_us(sample_info_t0, Instant::now());
+            }
 
+            let remove_t0 = Instant::now();
             if take {
                 self.remove_change(change.clone())?;
             } else {
                 self.mark_sample_as_read(&change.writer_guid(), change.sequence_number())?;
             }
+            if profile {
+                loop_remove_us += elapsed_us(remove_t0, Instant::now());
+            }
 
+            let push_t0 = Instant::now();
             result.push((serialized_data, sample_info));
             remaining -= 1;
+            if profile {
+                loop_push_us += elapsed_us(push_t0, Instant::now());
+            }
+        }
+        let loop_us = if profile { elapsed_us(loop_t0, Instant::now()) } else { 0 };
+        if profile {
+            record_serialized_take_loop_profile(
+                loop_sample_state_us,
+                loop_info_us,
+                loop_match_us,
+                loop_data_bytes_us,
+                loop_sample_info_us,
+                loop_remove_us,
+                loop_push_us,
+                loop_us,
+            );
         }
 
+        let cleanup_t0 = Instant::now();
         for sample_info in self.drain_pending_notifications(
             &instance_infos,
             sample_states,
@@ -2494,7 +2777,7 @@ impl<Foo: DdsType> DataReader<Foo> {
             None,
             remaining,
         )? {
-            result.push((Arc::from(Vec::new().as_slice()), sample_info));
+            result.push((Bytes::new(), sample_info));
         }
 
         for (_, sample_info) in &result {
@@ -2502,10 +2785,23 @@ impl<Foo: DdsType> DataReader<Foo> {
         }
 
         self.reevaluate_all_conditions()?;
+        let cleanup_us = if profile { elapsed_us(cleanup_t0, Instant::now()) } else { 0 };
 
         if result.is_empty() {
             Err(DdsError::NoData)
         } else {
+            if profile {
+                record_serialized_take_profile(
+                    precheck_us,
+                    get_changes_us,
+                    sort_us,
+                    filter_setup_us,
+                    instance_info_us,
+                    loop_us,
+                    cleanup_us,
+                    elapsed_us(total_t0, Instant::now()),
+                );
+            }
             Ok(result)
         }
     }
@@ -2625,7 +2921,11 @@ impl<Foo: DdsType> DataReader<Foo> {
             let cft = cft
                 .upgrade()
                 .ok_or(DdsError::Error("ContentFilteredTopic is deleted".to_string()))?;
-            (Some(cft.parsed_expression.clone()), cft.get_expression_parameters()?)
+            if cft.is_filter_enabled()? {
+                (Some(cft.get_parsed_expression()?), cft.get_expression_parameters()?)
+            } else {
+                (None, Vec::new())
+            }
         } else {
             (None, Vec::new())
         };
@@ -2696,6 +2996,9 @@ impl<Foo: DdsType> DataReader<Foo> {
                                 "Skipping change {}: ContentFilteredTopic expression failed",
                                 idx
                             );
+                            // Filtered-out samples should not remain in reader history,
+                            // otherwise later filter broadening/disable can replay stale data.
+                            self.remove_change(change.clone())?;
                             continue;
                         }
                         log::trace!("Change {} passed ContentFilteredTopic", idx);
@@ -3168,6 +3471,18 @@ impl<Foo: 'static + Clone + Debug> DataReaderBase for DataReader<Foo> {
 
         self.set_communication_status_propagation(&StatusKind::REQUESTED_INCOMPATIBLE_QOS, false)?;
         self.take_requested_incompatible_qos_status()
+    }
+
+    fn get_requested_incompatible_type_status(&self) -> DdsResult<RequestedIncompatibleTypeStatus> {
+        // out: DdsError_t, status: RequestedIncompatibleTypeStatus
+        /*
+            This operation provides access to the REQUESTED_INCOMPATIBLE_TYPE communication status.
+            Communication status is described in Section 2.2.4.1, Communication Status.
+        */
+        self.is_deleted()?;
+
+        self.set_communication_status_propagation(&StatusKind::REQUESTED_INCOMPATIBLE_TYPE, false)?;
+        self.take_requested_incompatible_type_status()
     }
 
     fn get_subscription_matched_status(&self) -> DdsResult<SubscriptionMatchedStatus> {
@@ -3670,14 +3985,14 @@ pub(crate) mod tests {
         let data1 = HelloWorld { index: 0, message: "HelloWorld".to_string() };
         let data2 = HelloWorld { index: 1, message: "HelloWorld".to_string() };
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -3780,14 +4095,14 @@ pub(crate) mod tests {
         let data1 = HelloWorld { index: 0, message: "HelloWorld".to_string() };
         let data2 = HelloWorld { index: 1, message: "HelloWorld".to_string() }; // Published by Writer
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -3901,14 +4216,14 @@ pub(crate) mod tests {
         let data1 = HelloWorld { index: 0, message: "HelloWorld".to_string() };
         let data2 = HelloWorld { index: 1, message: "HelloWorld".to_string() };
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -4019,14 +4334,14 @@ pub(crate) mod tests {
         let data1 = HelloWorld { index: 0, message: "HelloWorld".to_string() };
         let data2 = HelloWorld { index: 1, message: "HelloWorld".to_string() };
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -4138,14 +4453,14 @@ pub(crate) mod tests {
         let data1 = HelloWorld { index: 0, message: "HelloWorld".to_string() };
         let data2 = HelloWorld { index: 1, message: "HelloWorld".to_string() };
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -4241,14 +4556,14 @@ pub(crate) mod tests {
         let data1 = HelloWorld { index: 0, message: "HelloWorld".to_string() };
         let data2 = HelloWorld { index: 1, message: "HelloWorld".to_string() };
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -4395,14 +4710,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -4520,14 +4835,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -4745,14 +5060,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -4860,14 +5175,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -4990,14 +5305,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -5131,14 +5446,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -5245,14 +5560,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -5393,14 +5708,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -5526,14 +5841,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -5674,14 +5989,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -5788,14 +6103,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();

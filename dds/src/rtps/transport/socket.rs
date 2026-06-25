@@ -88,10 +88,23 @@ impl Socket {
             );
         }
 
-        // If no specific IP was selected, use all available NICs
+        let use_loopback = crate::common::env::get_use_loopback_interface();
+
+        // If no specific IP was selected, use all available NICs.
+        // Some environments, notably WSL, attach non-127/8 addresses to `lo`.
+        // Treat those as loopback-interface addresses unless loopback use is explicit.
         if ips.is_empty() {
             if let Ok(ifaces) = get_if_addrs::get_if_addrs() {
                 for iface in ifaces {
+                    let is_loopback_interface = Self::is_loopback_interface_name(&iface.name);
+                    if is_loopback_interface && !use_loopback {
+                        log::debug!(
+                            "Skipping loopback interface IP while loopback is disabled: {} ({})",
+                            iface.ip(),
+                            iface.name
+                        );
+                        continue;
+                    }
                     if !iface.ip().is_loopback() {
                         ips.push(iface.ip().to_string());
                         log::debug!("Adding IP from NIC: {}", iface.ip());
@@ -100,7 +113,6 @@ impl Socket {
             }
         }
 
-        let use_loopback = crate::common::env::get_use_loopback_interface();
         let should_add_loopback =
             !from_feature && !ips.contains(&"127.0.0.1".to_string()) && use_loopback;
 
@@ -185,6 +197,10 @@ impl Socket {
         log::debug!("Using multicast interface IP chosen from working IPs: {}", chosen_ip);
         chosen_ip
     }
+
+    fn is_loopback_interface_name(name: &str) -> bool {
+        name == "lo" || name.starts_with("lo:")
+    }
 }
 
 #[cfg(test)]
@@ -212,5 +228,13 @@ mod tests {
         let transport: Arc<dyn TransportPlugin> = Arc::from(transport);
         socket.set_transport(transport);
         assert!(socket.transport.is_some());
+    }
+
+    #[test]
+    fn loopback_interface_name_matches_linux_loopback_only() {
+        assert!(Socket::is_loopback_interface_name("lo"));
+        assert!(Socket::is_loopback_interface_name("lo:0"));
+        assert!(!Socket::is_loopback_interface_name("eth0"));
+        assert!(!Socket::is_loopback_interface_name("wlo1"));
     }
 }

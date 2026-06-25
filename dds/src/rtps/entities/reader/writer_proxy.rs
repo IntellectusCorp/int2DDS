@@ -38,6 +38,7 @@ pub(crate) struct WriterProxy {
     expected_sn: SequenceNumber, // Expected next sequence number from writer
     last_heartbeat_count: Option<u32>,
     last_heartbeat_at: Option<Instant>,
+    last_heartbeat_frag_count: Option<u32>,
     buffered_change: BTreeSet<CacheChange>, // Changes that reader has not processed yet
     publication_builtin_topic_data: PublicationBuiltinTopicData,
     #[allow(clippy::type_complexity)]
@@ -75,6 +76,7 @@ impl WriterProxy {
             nackfrag_count: 0,
             expected_sn: SequenceNumber::UNKNOWN,
             last_heartbeat_count: None,
+            last_heartbeat_frag_count: None,
             last_heartbeat_at: None,
             buffered_change: BTreeSet::new(),
             publication_builtin_topic_data,
@@ -108,6 +110,14 @@ impl WriterProxy {
 
     pub(crate) fn set_last_heartbeat_count(&mut self, count: u32) {
         self.last_heartbeat_count = Some(count);
+    }
+
+    pub(crate) fn last_heartbeat_frag_count(&self) -> Option<u32> {
+        self.last_heartbeat_frag_count
+    }
+
+    pub(crate) fn set_last_heartbeat_frag_count(&mut self, count: u32) {
+        self.last_heartbeat_frag_count = Some(count);
     }
 
     pub(crate) fn last_heartbeat_at(&self) -> Option<Instant> {
@@ -403,12 +413,15 @@ impl WriterProxy {
 
         // Merge this submessage's fragment numbers into the accumulated set
         if let Some(info) = &mut change.fragment_info {
+            // A HEARTBEAT_FRAG may have seeded this entry with a smaller
+            // last-fragment number than the sample's true total; keep the max.
+            info.total_fragments = info.total_fragments.max(total_fragments);
             for fragment in received {
                 info.received_fragments.insert(fragment);
             }
 
             // Update completion status
-            info.is_complete = info.received_fragments.len() == total_fragments as usize;
+            info.is_complete = info.received_fragments.len() == info.total_fragments as usize;
         }
     }
 

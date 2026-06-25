@@ -35,7 +35,7 @@ use crate::{
             submessage_header::SubmessageHeader,
             submessages::{
                 ack_nack::AckNack, data::Data, data_frag::DataFrag, gap::Gap, heartbeat::Heartbeat,
-                info::InfoReplyIp4, nack_frag::NackFrag,
+                heartbeat_frag::HeartbeatFrag, info::InfoReplyIp4, nack_frag::NackFrag,
             },
         },
     },
@@ -55,6 +55,7 @@ pub enum TypedSubmessage<'a> {
     Data(&'a SubmessageHeader, &'a Data<'static>),
     DataFrag(&'a SubmessageHeader, &'a DataFrag<'static>),
     NackFrag(&'a SubmessageHeader, &'a NackFrag),
+    HeartbeatFrag(&'a SubmessageHeader, &'a HeartbeatFrag),
     Gap(&'a SubmessageHeader, &'a Gap),
 }
 
@@ -664,6 +665,12 @@ impl MessageReceiver {
                     }
                     SubmessageBody::NackFrag(nack_frag) => {
                         submessages.push(TypedSubmessage::NackFrag(&submessage.header, nack_frag));
+                    }
+                    SubmessageBody::HeartbeatFrag(heartbeat_frag) => {
+                        submessages.push(TypedSubmessage::HeartbeatFrag(
+                            &submessage.header,
+                            heartbeat_frag,
+                        ));
                     }
                     SubmessageBody::Gap(gap) => {
                         submessages.push(TypedSubmessage::Gap(&submessage.header, gap));

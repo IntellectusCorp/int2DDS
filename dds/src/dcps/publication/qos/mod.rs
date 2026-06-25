@@ -119,11 +119,7 @@ impl ConstDefault for DataWriterQos {
 
 impl Qos for DataWriterQos {
     fn check_unsupported_policies(&self) -> DdsResult<()> {
-        if self.user_data != UserDataQosPolicy::default()
-            // || self.durability.kind == DurabilityQosPolicyKind::Transient
-            // || self.durability.kind == DurabilityQosPolicyKind::Persistent
-            // || self.durability_service != DurabilityServiceQosPolicy::default()
-            || self.latency_budget != LatencyBudgetQosPolicy::default()
+        if self.latency_budget != LatencyBudgetQosPolicy::default()
             // || self.liveliness != LivelinessQosPolicy::default()
             || self.transport_priority != TransportPriorityQosPolicy::default()
         // || self.lifespan != LifespanQosPolicy::default()

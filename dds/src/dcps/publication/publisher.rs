@@ -1286,7 +1286,7 @@ mod tests {
 
         // Wait for publication matched
         let wait_set = WaitSet::new();
-        let mut cond = writer.get_statuscondition().unwrap().clone();
+        let cond = writer.get_statuscondition().unwrap().clone();
         cond.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         wait_set.attach_condition(cond.clone()).unwrap();
         wait_set.wait(Duration::from_seconds(5)).unwrap();
@@ -1295,7 +1295,7 @@ mod tests {
         wait_set.detach_condition(cond).unwrap();
 
         // Wait for subscription matched
-        let mut cond = reader.get_statuscondition().unwrap().clone();
+        let cond = reader.get_statuscondition().unwrap().clone();
         cond.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(cond.clone()).unwrap();
         wait_set.wait(Duration::from_seconds(5)).unwrap();
@@ -1307,7 +1307,7 @@ mod tests {
         publisher.delete_datawriter(writer).unwrap();
 
         // Wait for subscription matched to drop to 0
-        let mut cond = reader.get_statuscondition().unwrap().clone();
+        let cond = reader.get_statuscondition().unwrap().clone();
         cond.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(cond.clone()).unwrap();
         wait_set.wait(Duration::from_seconds(5)).unwrap();
