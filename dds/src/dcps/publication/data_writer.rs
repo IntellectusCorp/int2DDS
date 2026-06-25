@@ -60,7 +60,8 @@ use crate::{
         },
         status::{
             LivelinessLostStatus, OfferedDeadlineMissedStatus, OfferedIncompatibleQosStatus,
-            PublicationMatchedStatus, StatusInfo, StatusKind, StatusMask,
+            OfferedIncompatibleTypeStatus, PublicationMatchedStatus, StatusInfo, StatusKind,
+            StatusMask,
         },
         status_condition::StatusCondition,
     },
@@ -73,7 +74,10 @@ use crate::{
             time::RtpsTime,
             types::{ChangeKind, SerializedData},
         },
-        entities::writer::{StatefulWriter, Writer as RtpsWriter},
+        entities::{
+            history::cache_change::CacheChange,
+            writer::{StatefulWriter, Writer as RtpsWriter},
+        },
         logic::wlp_logic::WlpLogic,
     },
     topic::{
@@ -82,6 +86,20 @@ use crate::{
     },
     DdsType,
 };
+
+pub struct SerializedWriteLoan {
+    change: CacheChange,
+}
+
+impl SerializedWriteLoan {
+    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.change.data_mut().as_mut_ptr()
+    }
+
+    pub fn capacity(&mut self) -> usize {
+        self.change.data_mut().capacity()
+    }
+}
 
 use super::{data_writer_listener::DataWriterListener, publisher::Publisher, qos::DataWriterQos};
 
@@ -92,6 +110,7 @@ pub trait DataWriterBase: DomainEntity + Send + Any {
     fn get_liveliness_lost_status(&self) -> DdsResult<LivelinessLostStatus>;
     fn get_offered_deadline_missed_status(&self) -> DdsResult<OfferedDeadlineMissedStatus>;
     fn get_offered_incompatible_qos_status(&self) -> DdsResult<OfferedIncompatibleQosStatus>;
+    fn get_offered_incompatible_type_status(&self) -> DdsResult<OfferedIncompatibleTypeStatus>;
     fn get_publication_matched_status(&self) -> DdsResult<PublicationMatchedStatus>;
     fn get_topic(&self) -> DdsResult<Topic>;
     fn get_publisher(&self) -> DdsResult<Publisher>;
@@ -143,6 +162,7 @@ pub struct DataWriter<Foo> {
     liveliness_lost_status: Arc<Mutex<LivelinessLostStatus>>,
     offered_deadline_missed_status: Arc<Mutex<OfferedDeadlineMissedStatus>>,
     offered_incompatible_qos_status: Arc<Mutex<OfferedIncompatibleQosStatus>>,
+    offered_incompatible_type_status: Arc<Mutex<OfferedIncompatibleTypeStatus>>,
     publication_matched_status: Arc<Mutex<PublicationMatchedStatus>>,
     deadline_monitor: Arc<Mutex<Option<DeadlineMonitor>>>,
     _phantom: PhantomData<fn() -> Foo>,
@@ -179,6 +199,10 @@ impl<Foo> Debug for DataWriter<Foo> {
                 "offered_incompatible_qos_status",
                 &self.offered_incompatible_qos_status.lock().unwrap(),
             )
+            .field(
+                "offered_incompatible_type_status",
+                &self.offered_incompatible_type_status.lock().unwrap(),
+            )
             .field("publication_matched_status", &self.publication_matched_status.lock().unwrap())
             .field("_phantom", &self._phantom)
             .finish()
@@ -207,6 +231,7 @@ impl<Foo: 'static + Clone> Clone for DataWriter<Foo> {
             liveliness_lost_status: self.liveliness_lost_status.clone(),
             offered_deadline_missed_status: self.offered_deadline_missed_status.clone(),
             offered_incompatible_qos_status: self.offered_incompatible_qos_status.clone(),
+            offered_incompatible_type_status: self.offered_incompatible_type_status.clone(),
             publication_matched_status: self.publication_matched_status.clone(),
             deadline_monitor: self.deadline_monitor.clone(),
             _phantom: self._phantom,
@@ -393,6 +418,13 @@ impl<Foo: 'static + Clone> UpdateStatus for DataWriter<Foo> {
                 .map_err(|_| DdsError::BadParameter)?;
                 self.handle_offered_incompatible_qos_status(info)
             }
+            StatusKind::OFFERED_INCOMPATIBLE_TYPE => {
+                let info = Arc::downcast::<OfferedIncompatibleTypeStatus>(
+                    info.ok_or(DdsError::BadParameter)?,
+                )
+                .map_err(|_| DdsError::BadParameter)?;
+                self.handle_offered_incompatible_type_status(info)
+            }
             StatusKind::LIVELINESS_LOST => {
                 if info.is_some() {
                     return Err(DdsError::BadParameter);
@@ -452,6 +484,9 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             )),
             offered_incompatible_qos_status: Arc::new(Mutex::new(
                 OfferedIncompatibleQosStatus::default(),
+            )),
+            offered_incompatible_type_status: Arc::new(Mutex::new(
+                OfferedIncompatibleTypeStatus::default(),
             )),
             publication_matched_status: Arc::new(Mutex::new(PublicationMatchedStatus::default())),
             deadline_monitor: Arc::new(Mutex::new(None)),
@@ -649,7 +684,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         let (serialized_key, resolved_handle) =
             self.resolve_dispose_key(serialized_key, computed_handle, handle)?;
 
-        self.dispose_inner(serialized_key, resolved_handle, timestamp)
+        self.dispose_inner(serialized_key, resolved_handle, timestamp, Some(data))
     }
 
     /// Publishes a data sample to the topic.
@@ -893,6 +928,72 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         Ok(())
     }
 
+    pub fn prepare_serialized_write(&self, capacity: usize) -> DdsResult<SerializedWriteLoan> {
+        self.is_enabled()?;
+        let mut change = {
+            let mut datawriter_cache =
+                self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            datawriter_cache.acquire_change()
+        };
+
+        let data = change.data_mut();
+        data.clear();
+        if data.capacity() < capacity {
+            data.reserve(capacity - data.capacity());
+        }
+
+        Ok(SerializedWriteLoan { change })
+    }
+
+    pub fn commit_serialized_write(
+        &self,
+        mut loan: SerializedWriteLoan,
+        actual_size: usize,
+        serialized_key: Option<&[u8]>,
+    ) -> DdsResult<()> {
+        if actual_size > loan.change.data_mut().capacity() {
+            return Err(DdsError::BadParameter);
+        }
+
+        let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
+        self.is_enabled()?;
+        Self::validate_timestamp(&timestamp)?;
+
+        let key_info = match serialized_key {
+            Some(key_bytes) if !key_bytes.is_empty() => {
+                let key_data: SerializedData = Arc::from(key_bytes);
+                let computed_handle = Self::compute_instance_handle_from_key(key_bytes);
+                Some((key_data, computed_handle))
+            }
+            _ => None,
+        };
+
+        let (instance_handle, _) =
+            self.resolve_write_instance(key_info, InstanceHandle::NIL, timestamp)?;
+
+        let rtps_writer = self.get_rtps_writer()?;
+        let seq_num = rtps_writer.allocate_sequence_number();
+        loan.change.reset(
+            ChangeKind::Alive,
+            rtps_writer.guid(),
+            instance_handle,
+            seq_num,
+            Some(timestamp.into()),
+        );
+        unsafe {
+            loan.change.data_mut().set_len(actual_size);
+        }
+        loan.change.apply_fragmentation(rtps_writer.data_max_size_serialized() as usize);
+
+        let mut datawriter_cache =
+            self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        datawriter_cache.add_change_with_cleanup(Arc::new(loan.change), false)?;
+
+        self.update_liveliness()?;
+
+        Ok(())
+    }
+
     /// Compute an InstanceHandle from raw key bytes.
     /// If key_bytes fits in 16 bytes, it is used directly as the KeyHash.
     /// Otherwise, MD5 hash is computed.
@@ -962,7 +1063,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         let (serialized_key, resolved_handle) =
             self.resolve_dispose_key(serialized_key, computed_handle, handle)?;
 
-        self.dispose_inner(serialized_key, resolved_handle, timestamp)
+        self.dispose_inner(serialized_key, resolved_handle, timestamp, None)
     }
 
     /// Unregister an instance using raw serialized key bytes.
@@ -994,7 +1095,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         let (serialized_key, resolved_handle) =
             self.resolve_unregister_key(serialized_key, handle)?;
 
-        self.unregister_instance_inner(serialized_key, resolved_handle, timestamp)
+        self.unregister_instance_inner(serialized_key, resolved_handle, timestamp, None)
     }
 
     /// Lookup an instance handle from raw serialized key bytes.
@@ -1133,6 +1234,11 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
     #[inline]
     pub fn get_offered_incompatible_qos_status(&self) -> DdsResult<OfferedIncompatibleQosStatus> {
         <Self as DataWriterBase>::get_offered_incompatible_qos_status(self)
+    }
+
+    #[inline]
+    pub fn get_offered_incompatible_type_status(&self) -> DdsResult<OfferedIncompatibleTypeStatus> {
+        <Self as DataWriterBase>::get_offered_incompatible_type_status(self)
     }
 
     #[inline]
@@ -1359,6 +1465,18 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         status_guard.total_count_change = 0;
         Ok(result)
     }
+    #[allow(dead_code)]
+    fn take_offered_incompatible_type_status(&self) -> DdsResult<OfferedIncompatibleTypeStatus> {
+        let mut status_guard = self
+            .offered_incompatible_type_status
+            .lock()
+            .map_err(|e| DdsError::Error(e.to_string()))?;
+        let result = status_guard.clone();
+
+        // Reset count_change
+        status_guard.total_count_change = 0;
+        Ok(result)
+    }
     fn take_publication_matched_status(&self) -> DdsResult<PublicationMatchedStatus> {
         let mut status_guard =
             self.publication_matched_status.lock().map_err(|e| DdsError::Error(e.to_string()))?;
@@ -1475,6 +1593,26 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
 
         // StatusCondition
         self.set_communication_status_propagation(&StatusKind::OFFERED_INCOMPATIBLE_QOS, true)?;
+
+        Ok(())
+    }
+
+    fn handle_offered_incompatible_type_status(
+        &self,
+        _info: Arc<OfferedIncompatibleTypeStatus>,
+    ) -> DdsResult<()> {
+        {
+            let mut status_guard = self
+                .offered_incompatible_type_status
+                .lock()
+                .map_err(|e| DdsError::Error(e.to_string()))?;
+
+            status_guard.total_count += 1;
+            status_guard.total_count_change += 1;
+        }
+
+        // StatusCondition
+        self.set_communication_status_propagation(&StatusKind::OFFERED_INCOMPATIBLE_TYPE, true)?;
 
         Ok(())
     }
@@ -1646,12 +1784,46 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         Ok(handle)
     }
 
-    /// Common logic for dispose after key resolution and handle validation.
+    // Wrap a headerless big-endian key as a wire serializedKey SerializedPayload in the
+    // writer's data representation. Empty stays empty so no K-flag is set.
+    fn key_to_wire_payload(
+        &self,
+        serialized_key: &[u8],
+        typed: Option<&Foo>,
+    ) -> DdsResult<SerializedData> {
+        if serialized_key.is_empty() {
+            return Ok(Arc::from(Vec::new()));
+        }
+        let format = {
+            let qos = self.qos.load();
+            let extensibility = self.type_support.get_extensibility_kind();
+            Self::resolve_serialization_format(&qos.data_representation.value, extensibility)?
+        };
+        match format {
+            SerializationFormat::Cdr => {
+                let mut payload = Vec::with_capacity(serialized_key.len() + 4);
+                payload.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // CDR_BE, no options
+                payload.extend_from_slice(serialized_key);
+                Ok(Arc::from(payload))
+            }
+            SerializationFormat::Xcdr { .. } => match typed {
+                // Have the value: encode the key straight to XCDR2.
+                Some(data) => self.type_support.serialize_key_payload(data as &dyn Any, &format),
+                // Only the big-endian key bytes: decode them, then re-encode as XCDR2.
+                None => {
+                    let key_any = self.type_support.deserialize_key(serialized_key)?;
+                    self.type_support.serialize_key_payload(&*key_any, &format)
+                }
+            },
+        }
+    }
+
     fn dispose_inner(
         &self,
         serialized_key: SerializedData,
         resolved_handle: InstanceHandle,
         timestamp: Time,
+        typed: Option<&Foo>,
     ) -> DdsResult<()> {
         let mut instances = self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
@@ -1677,9 +1849,12 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             }
         }
 
+        // Carry the key on the wire as a serializedKey payload (K-flag): peers without a
+        // reversible KeyHash (e.g. >16-byte string keys) need it to identify the instance.
+        let wire_key = self.key_to_wire_payload(&serialized_key, typed)?;
         self.add_change_serialized(
             ChangeKind::NotAliveDisposed,
-            &[],
+            &wire_key,
             resolved_handle,
             Some(timestamp.into()),
         )?;
@@ -1695,6 +1870,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         serialized_key: SerializedData,
         resolved_handle: InstanceHandle,
         timestamp: Time,
+        typed: Option<&Foo>,
     ) -> DdsResult<()> {
         let mut instances = self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
@@ -1726,7 +1902,13 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 ChangeKind::NotAliveUnregistered
             };
 
-        self.add_change_serialized(change_kind, &[], resolved_handle, Some(timestamp.into()))?;
+        let wire_key = self.key_to_wire_payload(&serialized_key, typed)?;
+        self.add_change_serialized(
+            change_kind,
+            &wire_key,
+            resolved_handle,
+            Some(timestamp.into()),
+        )?;
 
         self.update_liveliness()?;
 
@@ -1786,7 +1968,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         let monitor_guard =
             self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
         if let Some(monitor) = monitor_guard.as_ref() {
-            if is_new_instance {
+            if is_new_instance || instance_handle.is_nil() {
                 monitor.track_instance(&instance_handle);
             }
             monitor.reschedule_instance(&instance_handle);
@@ -1954,7 +2136,7 @@ where
         let (serialized_key, resolved_handle) =
             self.resolve_unregister_key(serialized_key, handle)?;
 
-        self.unregister_instance_inner(serialized_key, resolved_handle, timestamp)
+        self.unregister_instance_inner(serialized_key, resolved_handle, timestamp, Some(instance))
     }
 }
 
@@ -2043,6 +2225,27 @@ impl<Foo: 'static + Clone> DataWriterBase for DataWriter<Foo> {
         status_guard.total_count_change = 0;
 
         self.set_communication_status_propagation(&StatusKind::OFFERED_INCOMPATIBLE_QOS, false)?;
+
+        Ok(result)
+    }
+
+    fn get_offered_incompatible_type_status(&self) -> DdsResult<OfferedIncompatibleTypeStatus> {
+        /*
+            This operation provides access to the OFFERED_INCOMPATIBLE_TYPE communication status.
+            Refer to Section 2.2.4.1 Communication Status for a description of communication status.
+        */
+        self.is_deleted()?;
+
+        let mut status_guard = self
+            .offered_incompatible_type_status
+            .lock()
+            .map_err(|e| DdsError::Error(e.to_string()))?;
+        let result = status_guard.clone();
+
+        // 1. Reset total_count_change
+        status_guard.total_count_change = 0;
+
+        self.set_communication_status_propagation(&StatusKind::OFFERED_INCOMPATIBLE_TYPE, false)?;
 
         Ok(result)
     }

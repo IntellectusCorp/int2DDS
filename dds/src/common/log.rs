@@ -115,13 +115,14 @@ pub fn setting_log() {
         return;
     }
 
-    let log_file_name = format!("log_{}.log", chrono::Local::now().format("%Y%m%d_%H%M%S"));
+    // Use UTC timestamps here to avoid thread-local timezone access during thread teardown.
+    let log_file_name = format!("log_{}.log", chrono::Utc::now().format("%Y%m%d_%H%M%S"));
 
     let base =
         fern::Dispatch::new().level(log::LevelFilter::Trace).format(|out, message, record| {
             out.finish(format_args!(
                 "[{}][{}][{}][{}] {}",
-                chrono::Local::now().format("%Y-%m-%d %H:%M:%S.%f"),
+                chrono::Utc::now().format("%Y-%m-%d %H:%M:%S.%f"),
                 record.level(),
                 std::thread::current().name().unwrap_or("unknown"),
                 record.target(),

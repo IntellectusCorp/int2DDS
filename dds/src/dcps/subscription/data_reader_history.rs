@@ -220,7 +220,7 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
             }
         }
 
-        // Check ownership & update instance state
+        // Reject changes from a non-owner writer and advance the instance state.
         self.update_instance_state(&immutable_change)?;
 
         // Check lifespan qos
@@ -465,7 +465,8 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
     }
 
     // Updates the instance state based on the CacheChange kind.
-    fn update_instance_state(&self, cache_change: &CacheChange) -> DdsResult<()> {
+    // Returns true if this change actually changed the instance state.
+    fn update_instance_state(&self, cache_change: &CacheChange) -> DdsResult<bool> {
         // if cache_change.instance_handle().is_nil() {
         //     return Ok(());
         // }
@@ -476,6 +477,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
             .ok_or(DdsError::Error("DataReader has been dropped".to_string()))?;
 
         let change_kind = cache_change.kind();
+        let mut state_changed = false;
 
         match change_kind {
             ChangeKind::Alive
@@ -501,7 +503,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
                     _ => InstanceStateKind::NOT_ALIVE_DISPOSED_INSTANCE_STATE,
                 };
 
-                data_reader.update_instance_state(
+                state_changed |= data_reader.update_instance_state(
                     cache_change.instance_handle(),
                     new_state,
                     Some(cache_change),
@@ -514,46 +516,95 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
             change_kind,
             ChangeKind::NotAliveUnregistered | ChangeKind::NotAliveDisposedUnregistered
         ) {
-            self.remove_writer_from_owner_candidates(cache_change.writer_guid(), true, false)?;
+            state_changed |= self.revoke_writer_ownership(
+                cache_change.writer_guid(),
+                Some(cache_change.instance_handle()),
+                true,
+                false,
+            )?;
         }
 
-        Ok(())
+        Ok(state_changed)
     }
 
     // Removes the writer from owner candidates.
-    pub(crate) fn remove_writer_from_owner_candidates(
+    // instance_handle None removes it from every instance; Some only from that instance.
+    // Returns true if any instance's state actually changed to NOT_ALIVE_NO_WRITERS.
+    pub(crate) fn revoke_writer_ownership(
         &self,
         remote_writer_guid: Guid,
+        instance_handle: Option<InstanceHandle>,
         update_state: bool, // should update instance state to NOT_ALIVE_NO_WRITERS if no candidates left
         synthesize_notification: bool, // should data reader create an invalid-data sample
-    ) -> DdsResult<()> {
+    ) -> DdsResult<bool> {
         debug!("Removing writer {} from owner candidates", remote_writer_guid);
-        for mut entry in self.owner_candidates.iter_mut() {
-            let writers = entry.value_mut();
-            writers.retain(|owner_info| owner_info.owner_guid != remote_writer_guid);
-
-            if writers.is_empty() {
-                debug!("No writers left for instance {}", *entry.key());
-                if update_state {
-                    let data_reader = self
-                        .data_reader
-                        .upgrade()
-                        .ok_or(DdsError::Error("DataReader has been dropped".to_string()))?;
-                    data_reader.update_instance_state(
-                        *entry.key(),
-                        InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE,
-                        None,
+        let mut any_changed = false;
+        match instance_handle {
+            Some(target) => {
+                if let Some(mut entry) = self.owner_candidates.get_mut(&target) {
+                    any_changed |= self.revoke_writer_ownership_for_instance(
+                        target,
+                        entry.value_mut(),
+                        remote_writer_guid,
+                        update_state,
+                        synthesize_notification,
                     )?;
-                    if synthesize_notification {
-                        data_reader.mark_pending_notification(*entry.key())?;
-                    }
                 }
-            } else {
-                debug!("Now the owner is {:?}", writers.first());
+            }
+            None => {
+                for mut entry in self.owner_candidates.iter_mut() {
+                    let key = *entry.key();
+                    any_changed |= self.revoke_writer_ownership_for_instance(
+                        key,
+                        entry.value_mut(),
+                        remote_writer_guid,
+                        update_state,
+                        synthesize_notification,
+                    )?;
+                }
             }
         }
 
-        Ok(())
+        Ok(any_changed)
+    }
+
+    // Removes the writer from a single instance's candidate set, updating its state to
+    // NOT_ALIVE_NO_WRITERS when none remain. Returns true if the state actually changed.
+    fn revoke_writer_ownership_for_instance(
+        &self,
+        instance_handle: InstanceHandle,
+        writers: &mut BTreeSet<OwnershipInfo>,
+        remote_writer_guid: Guid,
+        update_state: bool,
+        synthesize_notification: bool,
+    ) -> DdsResult<bool> {
+        writers.retain(|owner_info| owner_info.owner_guid != remote_writer_guid);
+
+        if !writers.is_empty() {
+            debug!("Now the owner is {:?}", writers.first());
+            return Ok(false);
+        }
+
+        debug!("No writers left for instance {}", instance_handle);
+        if !update_state {
+            return Ok(false);
+        }
+
+        let data_reader = self
+            .data_reader
+            .upgrade()
+            .ok_or(DdsError::Error("DataReader has been dropped".to_string()))?;
+        let state_changed = data_reader.update_instance_state(
+            instance_handle,
+            InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE,
+            None,
+        )?;
+        // Skip the synthetic sample when the transition was rejected (e.g. the
+        // instance is already DISPOSED): no state change, no notification.
+        if synthesize_notification && state_changed {
+            data_reader.mark_pending_notification(instance_handle)?;
+        }
+        Ok(state_changed)
     }
 
     // Revokes the current owner of the instance without updating instance state.
@@ -567,7 +618,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
 
         let current_owner = self.get_owner_of_instance(instance_handle);
         if let Some(owner_guid) = current_owner {
-            self.remove_writer_from_owner_candidates(owner_guid, false, false)?;
+            self.revoke_writer_ownership(owner_guid, Some(instance_handle), false, false)?;
         }
 
         Ok(())
@@ -2458,6 +2509,138 @@ mod tests {
             let instance_info = data_reader.get_instance_infos().unwrap();
             let info = instance_info.get(&instance_handle).unwrap();
             assert_eq!(info.instance_state, InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE);
+        }
+
+        #[test]
+        fn test_unregister_one_instance_keeps_other_instances_alive() {
+            let reader_qos = DataReaderQos {
+                ownership: OwnershipQosPolicy { kind: OwnershipQosPolicyKind::Exclusive },
+                ..Default::default()
+            };
+
+            let data_reader = create_with_key_datareader(reader_qos);
+            let datareader_cache = data_reader.get_datareader_cache().unwrap();
+            let mut datareader_cache = datareader_cache.lock().unwrap();
+
+            let writer = Guid::new(
+                [1; 12],
+                EntityId::new([0, 0, 1], EntityKind::USER_DEFINED_WRITER_WITH_KEY),
+            );
+
+            let instance_a = InstanceHandle::new([1; 16]);
+            let instance_b = InstanceHandle::new([2; 16]);
+
+            let data = vec![
+                0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0, 20,
+                0, 0, 0, 0, 0, 0, 0,
+            ];
+
+            // Same writer owns both instances
+            let mut alive_a = CacheChange::new(
+                ChangeKind::Alive,
+                writer.clone(),
+                instance_a,
+                SequenceNumber::from_i64(1),
+                data.clone(),
+                None,
+            );
+            alive_a.set_ownership_strength(Some(20));
+            datareader_cache.add_change_with_cleanup(Arc::new(alive_a), false).unwrap();
+
+            let mut alive_b = CacheChange::new(
+                ChangeKind::Alive,
+                writer.clone(),
+                instance_b,
+                SequenceNumber::from_i64(2),
+                data.clone(),
+                None,
+            );
+            alive_b.set_ownership_strength(Some(20));
+            datareader_cache.add_change_with_cleanup(Arc::new(alive_b), false).unwrap();
+
+            // Writer unregisters only instance A
+            let mut unregister_a = CacheChange::new(
+                ChangeKind::NotAliveUnregistered,
+                writer.clone(),
+                instance_a,
+                SequenceNumber::from_i64(3),
+                vec![],
+                None,
+            );
+            unregister_a.set_ownership_strength(Some(20));
+            datareader_cache.add_change_with_cleanup(Arc::new(unregister_a), false).unwrap();
+
+            // A loses its only writer; B is untouched and stays ALIVE
+            let instance_info = data_reader.get_instance_infos().unwrap();
+            assert_eq!(
+                instance_info.get(&instance_a).unwrap().instance_state,
+                InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE
+            );
+            assert_eq!(
+                instance_info.get(&instance_b).unwrap().instance_state,
+                InstanceStateKind::ALIVE_INSTANCE_STATE
+            );
+        }
+
+        #[test]
+        fn test_dispose_twice_keeps_both_samples_in_cache() {
+            let data_reader = create_with_key_datareader(DataReaderQos {
+                history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+                ..Default::default()
+            });
+            let datareader_cache = data_reader.get_datareader_cache().unwrap();
+            let mut cache = datareader_cache.lock().unwrap();
+
+            let writer = Guid::new(
+                [1; 12],
+                EntityId::new([0, 0, 1], EntityKind::USER_DEFINED_WRITER_WITH_KEY),
+            );
+            let instance = InstanceHandle::new([1; 16]);
+            let data = vec![
+                0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0, 20,
+                0, 0, 0, 0, 0, 0, 0,
+            ];
+
+            let alive = CacheChange::new(
+                ChangeKind::Alive,
+                writer.clone(),
+                instance,
+                SequenceNumber::from_i64(1),
+                data,
+                None,
+            );
+            cache.add_change_with_cleanup(Arc::new(alive), false).unwrap();
+
+            // The remote disposes the same instance twice; the second moves no state.
+            let dispose1 = CacheChange::new(
+                ChangeKind::NotAliveDisposed,
+                writer.clone(),
+                instance,
+                SequenceNumber::from_i64(2),
+                vec![],
+                None,
+            );
+            cache.add_change_with_cleanup(Arc::new(dispose1), false).unwrap();
+
+            let dispose2 = CacheChange::new(
+                ChangeKind::NotAliveDisposed,
+                writer.clone(),
+                instance,
+                SequenceNumber::from_i64(3),
+                vec![],
+                None,
+            );
+            cache.add_change_with_cleanup(Arc::new(dispose2), false).unwrap();
+
+            // KeepAll history: both dispose samples must be retained.
+            let disposed_in_cache = cache
+                .changes
+                .iter()
+                .filter(|c| {
+                    c.kind() == ChangeKind::NotAliveDisposed && c.instance_handle() == instance
+                })
+                .count();
+            assert_eq!(disposed_in_cache, 2);
         }
     }
 }

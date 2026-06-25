@@ -7,9 +7,9 @@
 use int2dds::infrastructure::qos_policy::QosPolicyId;
 use int2dds::infrastructure::status::{
     LivelinessChangedStatus, LivelinessLostStatus, OfferedDeadlineMissedStatus,
-    OfferedIncompatibleQosStatus, PublicationMatchedStatus, RequestedDeadlineMissedStatus,
-    RequestedIncompatibleQosStatus, SampleLostStatus, SampleRejectedStatus,
-    SampleRejectedStatusKind, SubscriptionMatchedStatus,
+    OfferedIncompatibleQosStatus, OfferedIncompatibleTypeStatus, PublicationMatchedStatus,
+    RequestedDeadlineMissedStatus, RequestedIncompatibleQosStatus, RequestedIncompatibleTypeStatus,
+    SampleLostStatus, SampleRejectedStatus, SampleRejectedStatusKind, SubscriptionMatchedStatus,
 };
 
 // ============================================================================
@@ -295,6 +295,26 @@ impl From<&RequestedIncompatibleQosStatus> for Int2DdsRequestedIncompatibleQosSt
 }
 
 // ============================================================================
+// Requested Incompatible Type Status
+// ============================================================================
+
+/// C-compatible requested incompatible type status
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct Int2DdsRequestedIncompatibleTypeStatus {
+    /// Total cumulative count of incompatible type
+    pub total_count: i32,
+    /// Change in total_count since last access
+    pub total_count_change: i32,
+}
+
+impl From<&RequestedIncompatibleTypeStatus> for Int2DdsRequestedIncompatibleTypeStatus {
+    fn from(status: &RequestedIncompatibleTypeStatus) -> Self {
+        Self { total_count: status.total_count(), total_count_change: status.total_count_change() }
+    }
+}
+
+// ============================================================================
 // Sample Lost Status
 // ============================================================================
 
@@ -366,6 +386,26 @@ impl From<&OfferedIncompatibleQosStatus> for Int2DdsOfferedIncompatibleQosStatus
             last_policy_id: status.last_policy_id().into(),
             policies_count: 0, // Policies list not exposed in Phase 1
         }
+    }
+}
+
+// ============================================================================
+// Offered Incompatible Type Status
+// ============================================================================
+
+/// C-compatible offered incompatible type status
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct Int2DdsOfferedIncompatibleTypeStatus {
+    /// Total cumulative count of incompatible type
+    pub total_count: i32,
+    /// Change in total_count since last access
+    pub total_count_change: i32,
+}
+
+impl From<&OfferedIncompatibleTypeStatus> for Int2DdsOfferedIncompatibleTypeStatus {
+    fn from(status: &OfferedIncompatibleTypeStatus) -> Self {
+        Self { total_count: status.total_count(), total_count_change: status.total_count_change() }
     }
 }
 

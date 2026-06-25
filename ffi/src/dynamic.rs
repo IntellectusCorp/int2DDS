@@ -230,7 +230,7 @@ pub unsafe extern "C" fn int2dds_take_publication_data(
     let sub = &(*builtin_sub).inner;
     let reader = ffi_try!(sub.lookup_datareader::<PublicationBuiltinTopicData>("DCPSPublication"));
 
-    let mut cond = ffi_try!(reader.get_statuscondition()).clone();
+    let cond = ffi_try!(reader.get_statuscondition()).clone();
     let _ = cond.set_enabled_statuses(StatusMask::DATA_AVAILABLE);
     let waitset = WaitSet::new();
     let _ = waitset.attach_condition(cond);
