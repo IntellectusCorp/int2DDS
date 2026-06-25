@@ -262,7 +262,7 @@ mod tests {
             .unwrap();
 
         // Wait for matching
-        let mut condition = reader.get_statuscondition().unwrap().clone();
+        let condition = reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
@@ -405,7 +405,7 @@ mod tests {
             .create_datawriter::<HelloWorldType>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
 
         let wait_set = WaitSet::new();
@@ -531,7 +531,7 @@ mod tests {
             .unwrap();
 
         // Wait for matching
-        let mut condition = reader.get_statuscondition().unwrap().clone();
+        let condition = reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
