@@ -1,4 +1,4 @@
-/// IDL Abstract Syntax Tree node definitions.
+//! IDL Abstract Syntax Tree node definitions.
 
 /// Top-level IDL definition.
 #[derive(Debug, Clone)]

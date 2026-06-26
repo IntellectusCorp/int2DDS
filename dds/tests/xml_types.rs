@@ -194,6 +194,51 @@ fn byte_identical_annotations_vs_derive() {
 }
 
 #[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", type_name = "sensors::Thing")]
+struct ScopedThing {
+    value: i32,
+}
+
+#[test]
+fn byte_identical_type_name_override_vs_xml() {
+    // The TypeObject's QualifiedTypeName must reflect the type_name override
+    // (the ROS2 mangling path relies on this), byte-identical to the XML module path.
+    let registry = load(
+        r#"<types><module name="sensors">
+             <struct name="Thing"><member name="value" type="int32"/></struct>
+           </module></types>"#,
+    );
+    let from_xml = registry.get_type_object("sensors::Thing").unwrap();
+    let from_derive = ScopedThing::complete_type_object();
+    assert_eq!(from_xml.serialize(), from_derive.serialize());
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds")]
+struct HolderOfScoped {
+    thing: ScopedThing,
+}
+
+#[test]
+fn nested_member_ref_matches_registered_id() {
+    // A type_name override must NOT desync the name-based nested id scheme: a referencing
+    // struct's member id (derived from the Rust type ident) must equal the id under which
+    // the referenced type registers itself in the nested set.
+    let mut scoped_set = Vec::new();
+    ScopedThing::collect_nested_type_objects(&mut scoped_set);
+    let scoped_reg_id = scoped_set[0].0.clone();
+
+    let member_id = match HolderOfScoped::complete_type_object() {
+        CompleteTypeObject::Struct(s) => s.member_seq[0].common.member_type_id.clone(),
+        other => panic!("expected struct, got {other:?}"),
+    };
+    assert_eq!(
+        member_id, scoped_reg_id,
+        "nested member ref must resolve to the referenced type's registered nested id"
+    );
+}
+
+#[derive(DdsType)]
 #[dds_type(crate_path = "int2dds", nested)]
 struct NestedAnnotated {
     x: i32,
