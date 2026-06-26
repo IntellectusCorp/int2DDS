@@ -3323,20 +3323,14 @@ impl<Foo: DdsType> DataReader<Foo> {
             return Ok(first);
         }
 
-        // 4. Find the instance after previous_handle
-        let mut found_previous = false;
+        // 4. Return the smallest available handle strictly greater than previous_handle
         for handle in sorted_handles {
-            if found_previous {
-                // log::debug!("Found next instance after {:?}: {:?}", previous_handle, handle);
+            if handle > previous_handle {
                 return Ok(handle);
-            }
-            if handle == previous_handle {
-                found_previous = true;
             }
         }
 
-        // 5. Return NIL if no next instance
-        // log::debug!("No next instance found after {:?}, returning NIL", previous_handle);
+        // 5. No greater handle remains: the iteration is finished.
         Ok(InstanceHandle::NIL)
     }
 
