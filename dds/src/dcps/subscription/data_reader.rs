@@ -2621,21 +2621,8 @@ impl<Foo: DdsType> DataReader<Foo> {
         }
         let sort_us = if profile { elapsed_us(sort_t0, Instant::now()) } else { 0 };
 
-        // Get ContentFilteredTopic expression for serialized path filtering
-        let filter_setup_t0 = Instant::now();
-        let (cft_expression, cft_parameters) = if let Some(cft) = &self.content_filtered_topic {
-            let cft = cft
-                .upgrade()
-                .ok_or(DdsError::Error("ContentFilteredTopic is deleted".to_string()))?;
-            if cft.is_filter_enabled()? {
-                (Some(cft.get_parsed_expression()?), cft.get_expression_parameters()?)
-            } else {
-                (None, Vec::new())
-            }
-        } else {
-            (None, Vec::new())
-        };
-        let filter_setup_us = if profile { elapsed_us(filter_setup_t0, Instant::now()) } else { 0 };
+        // ContentFilteredTopic is applied on the receive path, so the cache is already filtered.
+        let filter_setup_us = 0u64;
 
         let instance_info_t0 = Instant::now();
         let instance_infos = self.get_instance_infos()?;
@@ -2699,23 +2686,6 @@ impl<Foo: DdsType> DataReader<Foo> {
             let serialized_data = change.data_bytes();
             if profile {
                 loop_data_bytes_us += elapsed_us(data_bytes_t0, Instant::now());
-            }
-
-            // ContentFilteredTopic filter for serialized path
-            if let Some(cft_expr) = &cft_expression {
-                if has_valid_data {
-                    if let Ok(deserialized) = self.type_support.deserialize(&serialized_data, None)
-                    {
-                        if let Ok(typed) = deserialized.downcast::<Foo>() {
-                            if let Ok(false) = cft_expr.evaluate(&*typed, &cft_parameters) {
-                                // Filtered-out samples should not remain in reader history,
-                                // otherwise later filter broadening/disable can replay stale data.
-                                self.remove_change(change.clone())?;
-                                continue;
-                            }
-                        }
-                    }
-                }
             }
 
             let sample_info_t0 = Instant::now();
