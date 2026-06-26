@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 
 use int2dds_idl::codegen;
@@ -193,8 +193,317 @@ OPTIONS:
     );
 }
 
+/// Abort the wizard (e.g. on Ctrl-C / ESC).
+fn wizard_cancelled() -> ! {
+    eprintln!("취소되었습니다.");
+    process::exit(1);
+}
+
+/// Shell-style path Tab-completion: each Tab cycles to the next candidate.
+#[derive(Default)]
+struct PathCompletion {
+    state: std::cell::RefCell<CycleState>,
+}
+
+#[derive(Default)]
+struct CycleState {
+    last_returned: Option<String>,
+    candidates: Vec<String>,
+    idx: usize,
+}
+
+impl dialoguer::Completion for PathCompletion {
+    fn get(&self, input: &str) -> Option<String> {
+        let mut st = self.state.borrow_mut();
+
+        // Same buffer as last suggestion: cycle to the next sibling. A single
+        // candidate falls through so the next Tab descends into it.
+        if st.last_returned.as_deref() == Some(input) && st.candidates.len() > 1 {
+            st.idx = (st.idx + 1) % st.candidates.len();
+            let next = st.candidates[st.idx].clone();
+            st.last_returned = Some(next.clone());
+            return Some(next);
+        }
+
+        let candidates = path_candidates(input);
+        if candidates.is_empty() {
+            st.last_returned = None;
+            st.candidates.clear();
+            return None;
+        }
+        let first = candidates[0].clone();
+        st.candidates = candidates;
+        st.idx = 0;
+        st.last_returned = Some(first.clone());
+        Some(first)
+    }
+}
+
+/// Sorted full paths matching `input` (directories get a trailing separator).
+fn path_candidates(input: &str) -> Vec<String> {
+    let (dir, prefix) = match input.rfind(['/', '\\']) {
+        Some(idx) => (&input[..=idx], &input[idx + 1..]),
+        None => ("", input),
+    };
+    let sep = if input.contains('\\') { '\\' } else { '/' };
+    let search_dir = if dir.is_empty() { Path::new(".") } else { Path::new(dir) };
+
+    let mut matches: Vec<String> = match std::fs::read_dir(search_dir) {
+        Ok(rd) => rd
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with(prefix) {
+                    let suffix =
+                        if entry.path().is_dir() { sep.to_string() } else { String::new() };
+                    Some(format!("{}{}{}", dir, name, suffix))
+                } else {
+                    None
+                }
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    matches.sort();
+    matches
+}
+
+/// Find `.idl` files under the cwd (bounded depth) for the wizard's pick list.
+fn discover_idl_files() -> Vec<String> {
+    fn walk(dir: &Path, depth: usize, out: &mut Vec<String>) {
+        if depth > 4 {
+            return;
+        }
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if matches!(name, "target" | ".git" | "node_modules" | ".cargo") {
+                    continue;
+                }
+                walk(&path, depth + 1, out);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("idl") {
+                if let Some(s) = path.to_str() {
+                    out.push(s.replace('\\', "/"));
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(Path::new("."), 0, &mut out);
+    out.sort();
+    out
+}
+
+/// Interactive prompts for input, languages, output dir, and advanced settings.
+fn run_wizard() -> Args {
+    use dialoguer::{theme::ColorfulTheme, Confirm, Input, MultiSelect, Select};
+
+    let theme = ColorfulTheme::default();
+    eprintln!("int2dds-idl 대화형 코드 생성 마법사\n");
+
+    let completion = PathCompletion::default();
+
+    // 1) IDL input file
+    let prompt_path = |theme: &ColorfulTheme| -> String {
+        Input::<String>::with_theme(theme)
+            .with_prompt("IDL 파일 경로 (Tab 자동완성)")
+            .completion_with(&completion)
+            .validate_with(|s: &String| {
+                if Path::new(s.trim()).is_file() {
+                    Ok(())
+                } else {
+                    Err("파일을 찾을 수 없습니다")
+                }
+            })
+            .interact_text()
+            .unwrap_or_else(|_| wizard_cancelled())
+            .trim()
+            .to_string()
+    };
+
+    let input_file = {
+        let mut files = discover_idl_files();
+        if files.is_empty() {
+            prompt_path(&theme)
+        } else {
+            files.push("직접 경로 입력…".to_string());
+            let manual_idx = files.len() - 1;
+            let sel = Select::with_theme(&theme)
+                .with_prompt("IDL 파일 선택")
+                .items(&files)
+                .default(0)
+                .interact()
+                .unwrap_or_else(|_| wizard_cancelled());
+            if sel == manual_idx {
+                prompt_path(&theme)
+            } else {
+                files[sel].clone()
+            }
+        }
+    };
+
+    // 2) Target languages (checkbox multi-select)
+    let lang_items = ["Rust", "C", "Python", "C#", "XML", "RPC"];
+    let lang_defaults = [true, false, false, false, false, false];
+    let chosen = MultiSelect::with_theme(&theme)
+        .with_prompt("생성할 언어 (↑↓ 이동, space 선택, enter 확정)")
+        .items(&lang_items)
+        .defaults(&lang_defaults)
+        .interact()
+        .unwrap_or_else(|_| wizard_cancelled());
+    if chosen.is_empty() {
+        eprintln!("선택된 언어가 없습니다.");
+        process::exit(1);
+    }
+    let want = |i: usize| chosen.contains(&i);
+    let (gen_rust, gen_c, gen_python, gen_csharp, gen_xml, gen_rpc) =
+        (want(0), want(1), want(2), want(3), want(4), want(5));
+
+    // 3) Output directory
+    let output_dir: String = Input::with_theme(&theme)
+        .with_prompt("출력 디렉터리 (Tab 자동완성)")
+        .completion_with(&completion)
+        .default("generated".to_string())
+        .interact_text()
+        .unwrap_or_else(|_| wizard_cancelled());
+
+    // 4) Optional advanced settings
+    let mut crate_path = "int2dds".to_string();
+    let mut python_module = "int2dds".to_string();
+    let mut csharp_namespace = "GeneratedTypes".to_string();
+    let mut default_string_bound = 256u32;
+    let mut string_pointer = false;
+    let mut ros2 = false;
+    let mut ros2_package = None;
+    let mut ros2_kind = None;
+    let mut include_dirs = Vec::new();
+
+    let advanced = Confirm::with_theme(&theme)
+        .with_prompt("고급 옵션 설정?")
+        .default(false)
+        .interact()
+        .unwrap_or(false);
+
+    if advanced {
+        if gen_rust || gen_rpc {
+            crate_path = Input::with_theme(&theme)
+                .with_prompt("Rust crate-path")
+                .default(crate_path)
+                .interact_text()
+                .unwrap_or_else(|_| wizard_cancelled());
+        }
+        if gen_python {
+            python_module = Input::with_theme(&theme)
+                .with_prompt("Python 모듈 경로")
+                .default(python_module)
+                .interact_text()
+                .unwrap_or_else(|_| wizard_cancelled());
+        }
+        if gen_csharp {
+            csharp_namespace = Input::with_theme(&theme)
+                .with_prompt("C# namespace")
+                .default(csharp_namespace)
+                .interact_text()
+                .unwrap_or_else(|_| wizard_cancelled());
+        }
+        if gen_c {
+            string_pointer = Confirm::with_theme(&theme)
+                .with_prompt("C 문자열을 char* 포인터로 생성?")
+                .default(false)
+                .interact()
+                .unwrap_or(false);
+            default_string_bound = Input::with_theme(&theme)
+                .with_prompt("C 기본 문자열 크기")
+                .default(256u32)
+                .interact_text()
+                .unwrap_or_else(|_| wizard_cancelled());
+        }
+
+        ros2 = Confirm::with_theme(&theme)
+            .with_prompt("ROS2 호환 타입 네이밍 사용?")
+            .default(false)
+            .interact()
+            .unwrap_or(false);
+        if ros2 {
+            let pkg: String = Input::with_theme(&theme)
+                .with_prompt("ROS2 패키지명 (비우면 파일 경로에서 추론)")
+                .allow_empty(true)
+                .default(String::new())
+                .interact_text()
+                .unwrap_or_else(|_| wizard_cancelled());
+            if !pkg.trim().is_empty() {
+                ros2_package = Some(pkg.trim().to_string());
+                let kinds = ["msg", "srv", "action"];
+                let k = Select::with_theme(&theme)
+                    .with_prompt("인터페이스 종류")
+                    .items(&kinds)
+                    .default(0)
+                    .interact()
+                    .unwrap_or_else(|_| wizard_cancelled());
+                ros2_kind = Some(kinds[k].to_string());
+            }
+        }
+
+        let inc: String = Input::with_theme(&theme)
+            .with_prompt("#include 검색 경로 (쉼표 구분, 없으면 비움)")
+            .allow_empty(true)
+            .default(String::new())
+            .interact_text()
+            .unwrap_or_else(|_| wizard_cancelled());
+        for d in inc.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            include_dirs.push(PathBuf::from(d));
+        }
+    }
+
+    // Auto-named output paths for the selected languages only.
+    let filename = input_file.rsplit(['/', '\\']).next().unwrap_or(&input_file);
+    let base = naming::idl_to_output_name(filename);
+    let dir = output_dir.trim().trim_end_matches(['/', '\\']);
+    let join = |name: String| {
+        if dir.is_empty() {
+            name
+        } else {
+            format!("{}/{}", dir, name)
+        }
+    };
+
+    let rust_output = gen_rust.then(|| join(format!("{}.rs", base)));
+    let c_output = gen_c.then(|| join(format!("{}.h", base)));
+    let python_output = gen_python.then(|| join(format!("{}.py", base)));
+    let csharp_output = gen_csharp.then(|| join(format!("{}.cs", naming::to_pascal_case(&base))));
+    let xml_output = gen_xml.then(|| join(format!("{}.xml", base)));
+    let rpc_output = gen_rpc.then(|| join(format!("{}_rpc.rs", base)));
+
+    eprintln!();
+    Args {
+        input_file,
+        rust_output,
+        c_output,
+        python_output,
+        csharp_output,
+        xml_output,
+        output_dir: None,
+        crate_path,
+        python_module,
+        csharp_namespace,
+        default_string_bound,
+        string_pointer,
+        rpc_output,
+        ros2,
+        ros2_package,
+        ros2_kind,
+        include_dirs,
+    }
+}
+
 fn main() {
-    let args = parse_args();
+    // No arguments -> interactive wizard; any argument -> batch mode.
+    let args = if std::env::args().len() <= 1 { run_wizard() } else { parse_args() };
 
     if let Some(kind) = &args.ros2_kind {
         if !matches!(kind.as_str(), "msg" | "srv" | "action") {
@@ -404,4 +713,59 @@ fn write_file(path: &str, content: &str) -> std::io::Result<()> {
         }
     }
     std::fs::write(path, content)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dialoguer::Completion;
+
+    // Tests run from the crate root, where `input/` holds the sample .idl files.
+
+    #[test]
+    fn completes_leaf_in_current_dir() {
+        // A directory in the cwd completes with a trailing separator.
+        let cands = path_candidates("inp");
+        assert!(cands.iter().any(|c| c == "input/"), "got {:?}", cands);
+    }
+
+    #[test]
+    fn completes_file_inside_subdirectory() {
+        // Navigating into another directory completes its files.
+        let cands = path_candidates("input/Hel");
+        assert!(cands.iter().any(|c| c == "input/HelloWorld.idl"), "got {:?}", cands);
+    }
+
+    #[test]
+    fn lists_all_entries_when_prefix_empty() {
+        // A bare directory yields every entry as a candidate.
+        let cands = path_candidates("input/");
+        assert!(cands.len() > 1, "got {:?}", cands);
+        assert!(cands.iter().all(|c| c.starts_with("input/")));
+    }
+
+    #[test]
+    fn tab_cycles_through_candidates() {
+        let comp = PathCompletion::default();
+        let first = comp.get("input/").expect("first candidate");
+        // Pressing Tab again (buffer == first suggestion) advances to the next.
+        let second = comp.get(&first).expect("second candidate");
+        assert_ne!(first, second, "Tab should cycle to a different candidate");
+    }
+
+    #[test]
+    fn tab_descends_into_completed_directory() {
+        // Tab once completes the directory; Tab again steps inside it.
+        let comp = PathCompletion::default();
+        let dir = comp.get("inp").expect("dir completion");
+        assert_eq!(dir, "input/");
+        let inside = comp.get(&dir).expect("descend into dir");
+        assert!(inside.starts_with("input/") && inside != "input/", "got {}", inside);
+    }
+
+    #[test]
+    fn no_match_returns_none() {
+        let comp = PathCompletion::default();
+        assert!(comp.get("definitely_nonexistent_xyz").is_none());
+    }
 }
