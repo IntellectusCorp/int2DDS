@@ -2138,6 +2138,9 @@ impl<Foo: DdsType> DataReader<Foo> {
             let mut datareader_cache =
                 reader.datareader_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
             datareader_cache.set_datareader(weak_ref);
+            if reader.content_filtered_topic.is_some() {
+                datareader_cache.set_content_filter();
+            }
             datareader_cache.set_update_status(status_callback.clone());
         }
 
@@ -2916,20 +2919,6 @@ impl<Foo: DdsType> DataReader<Foo> {
             (None, Vec::new())
         };
 
-        // Get ContentFilteredTopic expression (independently!)
-        let (cft_expression, cft_parameters) = if let Some(cft) = &self.content_filtered_topic {
-            let cft = cft
-                .upgrade()
-                .ok_or(DdsError::Error("ContentFilteredTopic is deleted".to_string()))?;
-            if cft.is_filter_enabled()? {
-                (Some(cft.get_parsed_expression()?), cft.get_expression_parameters()?)
-            } else {
-                (None, Vec::new())
-            }
-        } else {
-            (None, Vec::new())
-        };
-
         log::debug!("Processing {} changes, need {} samples", changes.len(), remaining_samples);
 
         // Get instance_infos once outside the loop to avoid repeated lock acquisition and cloning
@@ -2990,19 +2979,8 @@ impl<Foo: DdsType> DataReader<Foo> {
                         }
                         log::trace!("Change {} passed QueryCondition", idx);
                     }
-                    if let Some(cft_expr) = &cft_expression {
-                        if !cft_expr.evaluate(&data_sample.data()?, &cft_parameters)? {
-                            log::trace!(
-                                "Skipping change {}: ContentFilteredTopic expression failed",
-                                idx
-                            );
-                            // Filtered-out samples should not remain in reader history,
-                            // otherwise later filter broadening/disable can replay stale data.
-                            self.remove_change(change.clone())?;
-                            continue;
-                        }
-                        log::trace!("Change {} passed ContentFilteredTopic", idx);
-                    }
+                    // ContentFilteredTopic is applied on the receive path, so non-matching
+                    // samples are never in the cache here.
                     // self.mark_instance_as_viewed(change.instance_handle());
                     if take {
                         self.remove_change(change.clone())?;
@@ -3332,6 +3310,38 @@ impl<Foo: DdsType> DataReader<Foo> {
 
         // 5. No greater handle remains: the iteration is finished.
         Ok(InstanceHandle::NIL)
+    }
+
+    // True if the change should be kept for this reader's ContentFilteredTopic.
+    // No CFT, a disabled filter, or non-Alive (key-only) samples always pass.
+    pub(crate) fn passes_content_filter(&self, change: &CacheChange) -> DdsResult<bool> {
+        let cft = match &self.content_filtered_topic {
+            Some(weak) => match weak.upgrade() {
+                Some(cft) => cft,
+                None => return Ok(true),
+            },
+            None => return Ok(true),
+        };
+        if !cft.is_filter_enabled()? {
+            return Ok(true);
+        }
+        if !matches!(change.kind(), ChangeKind::Alive | ChangeKind::AliveFiltered) {
+            return Ok(true);
+        }
+        let expr = cft.get_parsed_expression()?;
+        let parameters = cft.get_expression_parameters()?;
+        let serialized_data = change.data_bytes();
+        let typed = match self.type_support.deserialize(&serialized_data, None) {
+            Ok(deserialized) => match deserialized.downcast::<Foo>() {
+                Ok(typed) => typed,
+                Err(_) => return Ok(true),
+            },
+            Err(_) => return Ok(true),
+        };
+        match expr.evaluate(&*typed, &parameters) {
+            Ok(false) => Ok(false),
+            _ => Ok(true),
+        }
     }
 
     fn get_available_instance_handles(&self) -> DdsResult<Vec<InstanceHandle>> {
