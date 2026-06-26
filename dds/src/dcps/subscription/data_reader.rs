@@ -3250,15 +3250,22 @@ impl<Foo: DdsType> DataReader<Foo> {
         &self,
         previous_handle: InstanceHandle,
     ) -> DdsResult<InstanceHandle> {
-        // 1. Collect all available instance handles
-        let available_handles = self.get_available_instance_handles()?;
+        // 1. Candidate instances: those with available changes, plus those carrying a
+        // pending synthetic NOT_ALIVE_NO_WRITERS notification whose cache is already empty.
+        let mut handles: std::collections::HashSet<InstanceHandle> =
+            self.get_available_instance_handles()?.into_iter().collect();
+        for (instance_handle, info) in self.get_instance_infos()? {
+            if info.pending_notification {
+                handles.insert(instance_handle);
+            }
+        }
 
-        if available_handles.is_empty() {
+        if handles.is_empty() {
             return Ok(InstanceHandle::NIL);
         }
 
         // 2. Sort instance handles
-        let mut sorted_handles = available_handles;
+        let mut sorted_handles: Vec<InstanceHandle> = handles.into_iter().collect();
         sorted_handles.sort();
 
         // log::debug!("find_next_instance_handle: previous_handle={:?}, sorted_handles={:?}",
@@ -5741,6 +5748,124 @@ pub(crate) mod tests {
         assert_ne!(first_index, second_index);
         assert!(first_index == 0 || first_index == 1);
         assert!(second_index == 0 || second_index == 1);
+    }
+
+    #[test]
+    fn test_take_next_instance_surfaces_no_writers_after_writer_deleted() {
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic = participant
+            .create_topic::<HelloWorldWithKey>(
+                "HelloWorldWithKeyNoWriters",
+                "HelloWorldWithKeyType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let writer = publisher
+            .create_datawriter::<HelloWorldWithKey>(&topic, writer_qos, None, StatusMask::default())
+            .unwrap();
+
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
+        let read_listener = SubKeyListener { counter_sender };
+        let data_reader = subscriber
+            .create_datareader::<HelloWorldWithKey>(
+                &topic,
+                reader_qos,
+                Some(Arc::new(read_listener)),
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let condition = writer.get_statuscondition().unwrap().clone();
+        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
+        let wait_set = WaitSet::new();
+        wait_set.attach_condition(condition.clone()).unwrap();
+        wait_set.wait(Duration::infinite()).unwrap();
+        writer.get_publication_matched_status().unwrap();
+        wait_set.detach_condition(condition).unwrap();
+        let sub_condition = data_reader.get_statuscondition().unwrap().clone();
+        sub_condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
+        wait_set.attach_condition(sub_condition.clone()).unwrap();
+        wait_set.wait(Duration::infinite()).unwrap();
+        data_reader.get_subscription_matched_status().unwrap();
+        wait_set.detach_condition(sub_condition).unwrap();
+
+        // One sample for a single instance, then drain it so its cache is empty.
+        let data = HelloWorldWithKey { index: 0, message: "A".to_string() };
+        let handle = writer.register_instance(&data).unwrap();
+        writer.write(&data, handle).unwrap();
+        counter_receiver.recv().unwrap();
+
+        let alive = data_reader
+            .take_next_instance(
+                10,
+                InstanceHandle::NIL,
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+            .unwrap();
+        assert_eq!(alive.len(), 1);
+        assert!(alive[0].sample_info().valid_data);
+
+        // Delete the writer and wait for the reader to process the departure. The reader sets the
+        // instance to NOT_ALIVE_NO_WRITERS while handling LIVELINESS_CHANGED, before that status
+        // wakes the wait set, so the synthetic notification is set once wait returns.
+        let liveliness = data_reader.get_statuscondition().unwrap().clone();
+        liveliness.set_enabled_statuses(StatusMask::LIVELINESS_CHANGED).unwrap();
+        wait_set.attach_condition(liveliness.clone()).unwrap();
+        publisher.delete_datawriter(writer).unwrap();
+        wait_set.wait(Duration::infinite()).unwrap();
+        wait_set.detach_condition(liveliness).unwrap();
+
+        // The instance's cache is empty, so NO_WRITERS only exists as a synthetic pending sample.
+        let no_writers = data_reader
+            .take_next_instance(
+                10,
+                InstanceHandle::NIL,
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+            .unwrap();
+        assert_eq!(no_writers.len(), 1);
+        let info = no_writers[0].sample_info();
+        assert!(!info.valid_data);
+        assert_eq!(info.instance_state, InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE);
     }
 
     #[test]
