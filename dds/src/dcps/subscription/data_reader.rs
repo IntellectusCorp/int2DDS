@@ -5619,6 +5619,130 @@ pub(crate) mod tests {
         assert_eq!(result.unwrap_err(), DdsError::NoData);
     }
 
+    // take_next_instance must advance past an instance whose samples were already
+    // taken, using the returned handle as previous_handle even though it is gone from the cache.
+    #[test]
+    fn test_take_next_instance_advances_past_taken_handle() {
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic = participant
+            .create_topic::<HelloWorldWithKey>(
+                "HelloWorldWithKeyAdvance",
+                "HelloWorldWithKeyType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let writer = publisher
+            .create_datawriter::<HelloWorldWithKey>(&topic, writer_qos, None, StatusMask::default())
+            .unwrap();
+
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
+        let read_listener = SubKeyListener { counter_sender };
+        let data_reader = subscriber
+            .create_datareader::<HelloWorldWithKey>(
+                &topic,
+                reader_qos,
+                Some(Arc::new(read_listener)),
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let condition = writer.get_statuscondition().unwrap().clone();
+        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
+        let wait_set = WaitSet::new();
+        wait_set.attach_condition(condition.clone()).unwrap();
+        wait_set.wait(Duration::infinite()).unwrap();
+        writer.get_publication_matched_status().unwrap();
+        wait_set.detach_condition(condition).unwrap();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
+        condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
+        wait_set.attach_condition(condition.clone()).unwrap();
+        wait_set.wait(Duration::infinite()).unwrap();
+        data_reader.get_subscription_matched_status().unwrap();
+        wait_set.detach_condition(condition).unwrap();
+
+        // Two distinct instances (keys 0 and 1), one sample each.
+        let data_a = HelloWorldWithKey { index: 0, message: "A".to_string() };
+        let data_b = HelloWorldWithKey { index: 1, message: "B".to_string() };
+        let handle_a = writer.register_instance(&data_a).unwrap();
+        let handle_b = writer.register_instance(&data_b).unwrap();
+        writer.write(&data_a, handle_a).unwrap();
+        writer.write(&data_b, handle_b).unwrap();
+
+        let mut count = 0;
+        while counter_receiver.recv().is_ok() {
+            count += 1;
+            if count == 2 {
+                break;
+            }
+        }
+
+        // Take the first (smallest-handle) instance; capture its handle, then it is removed.
+        let first = data_reader
+            .take_next_instance(
+                10,
+                InstanceHandle::NIL,
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        let first_handle = first[0].sample_info().instance_handle;
+        let first_index = first[0].data().unwrap().index;
+
+        // Advance with the now-vanished handle: must return the OTHER instance, not NoData.
+        let second = data_reader
+            .take_next_instance(
+                10,
+                first_handle,
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+            .unwrap();
+        assert_eq!(second.len(), 1);
+        let second_index = second[0].data().unwrap().index;
+
+        assert_ne!(first_index, second_index);
+        assert!(first_index == 0 || first_index == 1);
+        assert!(second_index == 0 || second_index == 1);
+    }
+
     #[test]
     fn test_read_next_instance_with_view_state_filter() {
         let domain_id = unique_domain_id();
