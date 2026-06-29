@@ -44,6 +44,7 @@ use crate::{
         sample_info::InstanceStateKind,
         time_based_filter::{FilterOutcome, TimeBasedFilter},
     },
+    topic::type_support::DdsType,
     utils::timer::timer_id::TimerId,
 };
 
@@ -88,6 +89,8 @@ pub(crate) struct DataReaderHistoryCache<Foo> {
     // Reader-side TIME_BASED_FILTER state. Always present; min_separation is read live per
     // sample so a runtime QoS change takes effect immediately.
     time_based_filter: TimeBasedFilter,
+    // Receive-side ContentFilteredTopic hook (type-erased so the trait impl can call it).
+    content_filter: Option<Arc<dyn Fn(&CacheChange) -> bool + Send + Sync>>,
 }
 
 impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> {
@@ -180,6 +183,13 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
         apply_filter: bool,
     ) -> DdsResult<(Option<Arc<CacheChange>>, bool)> {
         let writer_guid = immutable_change.writer_guid();
+
+        // ContentFilteredTopic: drop non-matching samples at receipt so they never enter the history.
+        if let Some(filter) = &self.content_filter {
+            if !filter(&immutable_change) {
+                return Ok((None, false));
+            }
+        }
 
         // Ensure ownership candidate is registered before any ownership check.
         self.add_to_owner_candidate_if_new(
@@ -396,6 +406,19 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
     }
 }
 
+impl<Foo: DdsType> DataReaderHistoryCache<Foo> {
+    // Install the receive-side ContentFilteredTopic hook. Requires set_datareader first.
+    pub(crate) fn set_content_filter(&mut self) {
+        let data_reader = self.data_reader.clone();
+        self.content_filter = Some(Arc::new(move |change: &CacheChange| {
+            data_reader
+                .upgrade()
+                .map(|dr| dr.passes_content_filter(change).unwrap_or(true))
+                .unwrap_or(true)
+        }));
+    }
+}
+
 impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
     pub(crate) fn new(
         data_reader: Weak<DataReader<Foo>>,
@@ -451,6 +474,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
             lifespan_timers: Arc::new(Mutex::new(HashMap::new())),
             status_callback: Arc::new(Mutex::new(None)),
             time_based_filter: TimeBasedFilter::new(),
+            content_filter: None,
         }
     }
 
