@@ -263,27 +263,13 @@ impl Parser {
 
         match self.peek() {
             Token::Module => {
-                if !annotations.is_empty() {
-                    let cur = self.current();
-                    return Err(ParseError {
-                        line: cur.line,
-                        col: cur.col,
-                        message: "annotations on modules are not supported".to_string(),
-                    });
-                }
+                // Annotations (e.g. @verbatim) on modules are accepted and ignored.
                 Ok(Definition::Module(self.parse_module()?))
             }
             Token::Struct => Ok(Definition::Struct(self.parse_struct(annotations)?)),
             Token::Enum => Ok(Definition::Enum(self.parse_enum(annotations)?)),
             Token::Typedef => {
-                if !annotations.is_empty() {
-                    let cur = self.current();
-                    return Err(ParseError {
-                        line: cur.line,
-                        col: cur.col,
-                        message: "annotations on typedefs are not supported".to_string(),
-                    });
-                }
+                // Annotations on typedefs are accepted and ignored.
                 Ok(Definition::Typedef(self.parse_typedef()?))
             }
             Token::Bitmask => Ok(Definition::Bitmask(self.parse_bitmask(annotations)?)),
@@ -291,25 +277,11 @@ impl Parser {
             Token::Union => Ok(Definition::Union(self.parse_union(annotations)?)),
             Token::Interface => Ok(Definition::Interface(self.parse_interface(annotations)?)),
             Token::Exception => {
-                if !annotations.is_empty() {
-                    let cur = self.current();
-                    return Err(ParseError {
-                        line: cur.line,
-                        col: cur.col,
-                        message: "annotations on exceptions are not supported".to_string(),
-                    });
-                }
+                // Annotations on exceptions are accepted and ignored.
                 Ok(Definition::Exception(self.parse_exception()?))
             }
             Token::Const => {
-                if !annotations.is_empty() {
-                    let cur = self.current();
-                    return Err(ParseError {
-                        line: cur.line,
-                        col: cur.col,
-                        message: "annotations on constants are not supported".to_string(),
-                    });
-                }
+                // Annotations on constants are accepted and ignored.
                 Ok(Definition::Const(self.parse_const()?))
             }
             _ => {
@@ -398,7 +370,13 @@ impl Parser {
             }
             Token::StringLiteral(s) => {
                 self.advance();
-                Ok(ConstExpr::String(s))
+                // IDL/C adjacent string literal concatenation: "a" "b" -> "ab"
+                let mut combined = s;
+                while let Token::StringLiteral(next) = self.peek().clone() {
+                    self.advance();
+                    combined.push_str(&next);
+                }
+                Ok(ConstExpr::String(combined))
             }
             Token::True => {
                 self.advance();
@@ -1020,6 +998,45 @@ mod tests {
         let tokens = tokenize(input).expect("lex error");
         let mut parser = Parser::new(tokens);
         parser.parse().expect("parse error")
+    }
+
+    #[test]
+    fn test_adjacent_string_literal_concatenation() {
+        // IDL/C string literal juxtaposition (used by rosidl @verbatim comments).
+        let defs = parse_str(r#"const string MSG = "a" "\n" "b";"#);
+        match &defs[0] {
+            Definition::Const(c) => {
+                assert!(matches!(&c.value, ConstExpr::String(s) if s == "a\nb"));
+            }
+            _ => panic!("expected const"),
+        }
+    }
+
+    #[test]
+    fn test_verbatim_annotation_with_concatenation() {
+        // @verbatim on a struct with concatenated text must parse cleanly.
+        let defs = parse_str(
+            r#"
+            @verbatim (language="comment", text="line1" "\n" "line2")
+            struct T { long x; };
+            "#,
+        );
+        assert!(matches!(&defs[0], Definition::Struct(_)));
+    }
+
+    #[test]
+    fn test_annotations_on_module_and_const_ignored() {
+        // Annotations on module/const are accepted (ignored), not rejected.
+        let defs = parse_str(
+            r#"
+            @verbatim (language="comment", text="m")
+            module pkg {
+                @verbatim (language="comment", text="c")
+                const long N = 5;
+            };
+            "#,
+        );
+        assert!(matches!(&defs[0], Definition::Module(_)));
     }
 
     #[test]

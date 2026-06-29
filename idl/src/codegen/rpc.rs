@@ -93,7 +93,7 @@ impl<'a> RpcGen<'a> {
         self.indent += 1;
         for m in &exc.members {
             let field_name = rs_ident(&m.name);
-            let field_type = self.type_to_rust(&m.resolved_type);
+            let field_type = Self::type_to_rust(&m.resolved_type);
             self.line(&format!("pub {}: {},", field_name, field_type));
         }
         self.indent -= 1;
@@ -244,7 +244,7 @@ impl<'a> RpcGen<'a> {
             self.line("pub dummy: UnusedMember,");
         } else {
             for p in &in_params {
-                let type_str = self.type_to_rust(&p.resolved_type);
+                let type_str = Self::type_to_rust(&p.resolved_type);
                 let param_name = naming::escape_keyword(&p.name, naming::TargetLang::Rust);
                 self.line(&format!("pub {}: {},", param_name, type_str));
             }
@@ -281,14 +281,14 @@ impl<'a> RpcGen<'a> {
             self.line("pub dummy: UnusedMember,");
         } else {
             for p in &out_params {
-                let type_str = self.type_to_rust(&p.resolved_type);
+                let type_str = Self::type_to_rust(&p.resolved_type);
                 let param_name = naming::escape_keyword(&p.name, naming::TargetLang::Rust);
                 self.line(&format!("pub {}: {},", param_name, type_str));
             }
 
             if let Some(ret_type) = &op.return_type {
                 let return_name = Self::resolve_return_name(&out_params);
-                let type_str = self.type_to_rust(ret_type);
+                let type_str = Self::type_to_rust(ret_type);
                 self.line(&format!("pub {}: {},", return_name, type_str));
             }
         }
@@ -477,22 +477,22 @@ impl<'a> RpcGen<'a> {
             for p in &op.params {
                 match p.direction {
                     ResolvedParamDirection::In => {
-                        let ty = self.type_to_rust(&p.resolved_type);
+                        let ty = Self::type_to_rust(&p.resolved_type);
                         params.push_str(&format!(", {}: {}", rs_ident(&p.name), ty));
                     }
                     ResolvedParamDirection::Out => {
-                        let ty = self.type_to_rust(&p.resolved_type);
+                        let ty = Self::type_to_rust(&p.resolved_type);
                         params.push_str(&format!(", {}: &mut {}", rs_ident(&p.name), ty));
                     }
                     ResolvedParamDirection::Inout => {
-                        let ty = self.type_to_rust(&p.resolved_type);
+                        let ty = Self::type_to_rust(&p.resolved_type);
                         params.push_str(&format!(", {}: &mut {}", rs_ident(&p.name), ty));
                     }
                 }
             }
 
             let inner_ret = if let Some(ret_type) = &op.return_type {
-                self.type_to_rust(ret_type)
+                Self::type_to_rust(ret_type)
             } else {
                 "()".to_string()
             };
@@ -864,13 +864,13 @@ impl<'a> RpcGen<'a> {
         // Build method signature params
         let mut sig_params = String::from("&self");
         for p in &in_params {
-            let ty = self.type_to_rust(&p.resolved_type);
+            let ty = Self::type_to_rust(&p.resolved_type);
             sig_params.push_str(&format!(", {}: {}", rs_ident(&p.name), ty));
         }
         sig_params.push_str(", timeout: Duration");
 
         // Inner value type (what's extracted from Out struct)
-        let inner_ret = Self::client_return_type(op, &out_params, |t| self.type_to_rust(t));
+        let inner_ret = Self::client_return_type(op, &out_params, Self::type_to_rust);
 
         // Full return type with DdsRpcResult<T> or DdsRpcResult<T, E>
         let ret_sig = if op.raises.is_empty() {
@@ -936,8 +936,7 @@ impl<'a> RpcGen<'a> {
                 fields.push(format!("out.{}.clone()", rs_ident(&p.name)));
             }
             if has_return {
-                let return_name =
-                    Self::resolve_return_name(&out_params.iter().map(|p| *p).collect::<Vec<_>>());
+                let return_name = Self::resolve_return_name(&out_params.to_vec());
                 fields.push(format!("out.{}.clone()", return_name));
             }
             if fields.len() == 1 {
@@ -1023,7 +1022,7 @@ impl<'a> RpcGen<'a> {
             for p in &op.params {
                 match p.direction {
                     ResolvedParamDirection::In | ResolvedParamDirection::Inout => {
-                        let ty = self.type_to_rust(&p.resolved_type);
+                        let ty = Self::type_to_rust(&p.resolved_type);
                         if Self::is_copy_type(&p.resolved_type) {
                             sig_params.push_str(&format!(", {}: {}", rs_ident(&p.name), ty));
                         } else {
@@ -1059,7 +1058,7 @@ impl<'a> RpcGen<'a> {
             })
             .collect();
 
-        let inner_ret = Self::client_return_type(op, &out_params, |t| self.type_to_rust(t));
+        let inner_ret = Self::client_return_type(op, &out_params, Self::type_to_rust);
 
         let ret_sig = if op.raises.is_empty() {
             format!("DdsRpcResult<{}>", inner_ret)
@@ -1120,9 +1119,7 @@ impl<'a> RpcGen<'a> {
                     fields.push(format!("out.{}.clone()", rs_ident(&p.name)));
                 }
                 if has_return {
-                    let return_name = Self::resolve_return_name(
-                        &out_params.iter().map(|p| *p).collect::<Vec<_>>(),
-                    );
+                    let return_name = Self::resolve_return_name(&out_params.to_vec());
                     fields.push(format!("out.{}.clone()", return_name));
                 }
                 if fields.len() == 1 {
@@ -1205,7 +1202,7 @@ impl<'a> RpcGen<'a> {
             // Signature
             let mut sig_params = String::from("&self");
             for p in &in_params {
-                let ty = self.type_to_rust(&p.resolved_type);
+                let ty = Self::type_to_rust(&p.resolved_type);
                 if Self::is_copy_type(&p.resolved_type) {
                     sig_params.push_str(&format!(", {}: {}", rs_ident(&p.name), ty));
                 } else {
@@ -1327,8 +1324,7 @@ impl<'a> RpcGen<'a> {
             }
         }
         if op.return_type.is_some() {
-            let return_name =
-                Self::resolve_return_name(&out_params.iter().map(|p| *p).collect::<Vec<_>>());
+            let return_name = Self::resolve_return_name(out_params);
             out_fields.push(format!("{}: return_", return_name));
         }
         out_fields
@@ -1392,7 +1388,7 @@ impl<'a> RpcGen<'a> {
         )
     }
 
-    fn type_to_rust(&self, ty: &ResolvedType) -> String {
+    fn type_to_rust(ty: &ResolvedType) -> String {
         match ty {
             ResolvedType::Bool => "bool".to_string(),
             ResolvedType::U8 => "u8".to_string(),
@@ -1410,13 +1406,13 @@ impl<'a> RpcGen<'a> {
             ResolvedType::String { .. } => "String".to_string(),
             ResolvedType::WString { .. } => "WString".to_string(),
             ResolvedType::Sequence { element, .. } => {
-                format!("Vec<{}>", self.type_to_rust(element))
+                format!("Vec<{}>", Self::type_to_rust(element))
             }
             ResolvedType::Array { element, size } => {
-                format!("[{}; {}]", self.type_to_rust(element), size)
+                format!("[{}; {}]", Self::type_to_rust(element), size)
             }
             ResolvedType::Map { key, value, .. } => {
-                format!("HashMap<{}, {}>", self.type_to_rust(key), self.type_to_rust(value))
+                format!("HashMap<{}, {}>", Self::type_to_rust(key), Self::type_to_rust(value))
             }
             ResolvedType::Struct(name) | ResolvedType::Enum(name) | ResolvedType::Bitmask(name) => {
                 let simple = name.rsplit("::").next().unwrap_or(name);

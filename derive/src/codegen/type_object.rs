@@ -96,8 +96,12 @@ fn type_to_identifier(
         SerializationMethod::Char => quote! { #crate_path::xtypes::TypeIdentifier::Char8 },
         SerializationMethod::String => quote! { #crate_path::xtypes::TypeIdentifier::String8 },
         SerializationMethod::WString => quote! { #crate_path::xtypes::TypeIdentifier::String16 },
-        // Composite (struct / enum / union): name-based MinimalTypeId, matching
-        // the id under which `collect_nested_type_objects` registers the child.
+        // Composite (struct / enum / union): name-based MinimalTypeId hashing the Rust
+        // ident, matching the id under which `collect_nested_type_objects` registers the
+        // child. A referenced type's `type_name` override (e.g. ROS2 dds_::Name_) is NOT
+        // visible here, so nested references intentionally use the ident; only a type's own
+        // header/discovery name is mangled. Full nested ROS2 matching would need runtime
+        // resolution of the referenced type's `dds_type_name()`.
         _ => {
             let type_str = quote!(#ty).to_string();
             name_based_minimal_id(crate_path, &type_str)
@@ -180,7 +184,7 @@ pub fn generate_has_type_object_impl(
     gc: &super::type_struct::GenCtx,
 ) -> proc_macro2::TokenStream {
     let crate_path = &type_config.crate_path;
-    let type_name_str = name.to_string();
+    let type_name_str = type_config.type_name.clone().unwrap_or_else(|| name.to_string());
     let autoid = type_config.autoid;
 
     // Find parent field (struct inheritance) for base_type reference
@@ -309,7 +313,7 @@ pub fn generate_has_type_object_impl(
             .filter(|f| !parse_field_attributes(f).non_serialized)
             .map(|f| &f.ty)
             .collect();
-        generate_collect_nested(crate_path, &type_name_str, &nested_field_types)
+        generate_collect_nested(crate_path, &name.to_string(), &nested_field_types)
     };
 
     let type_identifier_impl = if gc.has_type_params {
@@ -379,9 +383,9 @@ pub fn generate_has_type_object_alias_impl(
     type_config: &DdsTypeConfig,
 ) -> proc_macro2::TokenStream {
     let crate_path = &type_config.crate_path;
-    let type_name_str = name.to_string();
+    let type_name_str = type_config.type_name.clone().unwrap_or_else(|| name.to_string());
     let related_type = type_to_identifier(inner_ty, crate_path, false);
-    let collect_nested_impl = generate_collect_nested(crate_path, &type_name_str, &[inner_ty]);
+    let collect_nested_impl = generate_collect_nested(crate_path, &name.to_string(), &[inner_ty]);
 
     quote! {
         impl #crate_path::xtypes::HasTypeObject for #name {
@@ -433,7 +437,7 @@ pub fn generate_has_type_object_enum_impl(
     disc_type: DiscriminantType,
 ) -> proc_macro2::TokenStream {
     let crate_path = &type_config.crate_path;
-    let type_name_str = name.to_string();
+    let type_name_str = type_config.type_name.clone().unwrap_or_else(|| name.to_string());
     let bit_bound = disc_type.bit_bound();
 
     let literal_flag_expr = |variant: &syn::Variant| {
@@ -485,7 +489,7 @@ pub fn generate_has_type_object_enum_impl(
         })
         .collect();
 
-    let collect_nested_impl = generate_collect_nested(crate_path, &type_name_str, &[]);
+    let collect_nested_impl = generate_collect_nested(crate_path, &name.to_string(), &[]);
 
     quote! {
         impl #crate_path::xtypes::HasTypeObject for #name {
@@ -537,7 +541,7 @@ pub fn generate_has_type_object_union_impl(
     disc_type: DiscriminantType,
 ) -> proc_macro2::TokenStream {
     let crate_path = &type_config.crate_path;
-    let type_name_str = name.to_string();
+    let type_name_str = type_config.type_name.clone().unwrap_or_else(|| name.to_string());
 
     let union_ext_kind = xtypes_extensibility_tokens(type_config.extensibility, crate_path);
     let union_flags = quote! { #crate_path::xtypes::TypeFlag::new(#union_ext_kind, false, false) };
@@ -600,7 +604,7 @@ pub fn generate_has_type_object_union_impl(
     let nested_field_types: Vec<&syn::Type> =
         variants.iter().filter(|v| variant_has_data(v)).filter_map(get_variant_type).collect();
     let collect_nested_impl =
-        generate_collect_nested(crate_path, &type_name_str, &nested_field_types);
+        generate_collect_nested(crate_path, &name.to_string(), &nested_field_types);
 
     quote! {
         impl #crate_path::xtypes::HasTypeObject for #name {
@@ -651,7 +655,7 @@ pub fn generate_has_type_object_bitmask_impl(
     type_config: &DdsTypeConfig,
 ) -> proc_macro2::TokenStream {
     let crate_path = &type_config.crate_path;
-    let type_name_str = name.to_string();
+    let type_name_str = type_config.type_name.clone().unwrap_or_else(|| name.to_string());
     let bit_bound = type_config.bit_bound.unwrap_or(32) as u16;
 
     let minimal_flags: Vec<_> = variants
@@ -688,7 +692,7 @@ pub fn generate_has_type_object_bitmask_impl(
         })
         .collect();
 
-    let collect_nested_impl = generate_collect_nested(crate_path, &type_name_str, &[]);
+    let collect_nested_impl = generate_collect_nested(crate_path, &name.to_string(), &[]);
 
     quote! {
         impl #crate_path::xtypes::HasTypeObject for #name {
@@ -737,7 +741,7 @@ pub fn generate_has_type_object_bitset_impl(
     type_config: &DdsTypeConfig,
 ) -> proc_macro2::TokenStream {
     let crate_path = &type_config.crate_path;
-    let type_name_str = name.to_string();
+    let type_name_str = type_config.type_name.clone().unwrap_or_else(|| name.to_string());
 
     let mut position: u16 = 0;
     let minimal_fields: Vec<_> = fields
@@ -785,7 +789,7 @@ pub fn generate_has_type_object_bitset_impl(
         })
         .collect();
 
-    let collect_nested_impl = generate_collect_nested(crate_path, &type_name_str, &[]);
+    let collect_nested_impl = generate_collect_nested(crate_path, &name.to_string(), &[]);
 
     quote! {
         impl #crate_path::xtypes::HasTypeObject for #name {
