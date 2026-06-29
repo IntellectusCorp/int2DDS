@@ -15,9 +15,27 @@ impl Default for RustOptions {
 }
 
 pub fn generate(model: &IdlModel, idl_filename: &str, opts: &RustOptions) -> String {
-    let mut gen = RustGen { out: String::new(), indent: 0, opts, model };
+    let mut gen =
+        RustGen { out: String::new(), indent: 0, opts, model, own_quals: own_type_quals(model) };
     gen.emit_file(idl_filename);
     gen.out
+}
+
+/// Unmangled qualified names of every type this file emits. A *qualified* reference
+/// not in this set is external (resolved from an `#include`d file) and is referenced
+/// by its full package path instead of a bare leaf. `qualified_name` is unmangled so
+/// the comparison holds under `--ros2` (member references are never mangled).
+fn own_type_quals(model: &IdlModel) -> std::collections::HashSet<String> {
+    model
+        .structs
+        .iter()
+        .map(|s| s.qualified_name.as_str())
+        .chain(model.enums.iter().map(|e| e.qualified_name.as_str()))
+        .chain(model.bitmasks.iter().map(|b| b.qualified_name.as_str()))
+        .chain(model.bitsets.iter().map(|b| b.qualified_name.as_str()))
+        .chain(model.unions.iter().map(|u| u.qualified_name.as_str()))
+        .map(naming::ros2_unmangle)
+        .collect()
 }
 
 struct RustGen<'a> {
@@ -25,6 +43,7 @@ struct RustGen<'a> {
     indent: usize,
     opts: &'a RustOptions,
     model: &'a IdlModel,
+    own_quals: std::collections::HashSet<String>,
 }
 
 impl<'a> RustGen<'a> {
@@ -45,6 +64,8 @@ impl<'a> RustGen<'a> {
             self.line("use std::collections::HashMap;");
         }
         self.line("");
+
+        self.emit_constants();
 
         for e in &self.model.enums {
             self.emit_enum(e);
@@ -76,50 +97,84 @@ impl<'a> RustGen<'a> {
         self.model
             .structs
             .iter()
-            .any(|s| s.members.iter().any(|m| self.type_uses_wchar(&m.resolved_type)))
+            .any(|s| s.members.iter().any(|m| Self::type_uses_wchar(&m.resolved_type)))
     }
 
     fn needs_hashmap_import(&self) -> bool {
         self.model
             .structs
             .iter()
-            .any(|s| s.members.iter().any(|m| self.type_uses_map(&m.resolved_type)))
+            .any(|s| s.members.iter().any(|m| Self::type_uses_map(&m.resolved_type)))
             || self.model.unions.iter().any(|u| {
-                u.cases.iter().any(|c| self.type_uses_map(&c.member.resolved_type))
+                u.cases.iter().any(|c| Self::type_uses_map(&c.member.resolved_type))
                     || u.default_case
                         .as_ref()
-                        .is_some_and(|dc| self.type_uses_map(&dc.resolved_type))
+                        .is_some_and(|dc| Self::type_uses_map(&dc.resolved_type))
             })
     }
 
-    fn type_uses_wchar(&self, ty: &ResolvedType) -> bool {
+    fn type_uses_wchar(ty: &ResolvedType) -> bool {
         match ty {
             ResolvedType::WChar | ResolvedType::WString { .. } => true,
             ResolvedType::Sequence { element, .. } | ResolvedType::Array { element, .. } => {
-                self.type_uses_wchar(element)
+                Self::type_uses_wchar(element)
             }
             ResolvedType::Map { key, value, .. } => {
-                self.type_uses_wchar(key) || self.type_uses_wchar(value)
+                Self::type_uses_wchar(key) || Self::type_uses_wchar(value)
             }
             _ => false,
         }
     }
 
-    fn type_uses_map(&self, ty: &ResolvedType) -> bool {
+    fn type_uses_map(ty: &ResolvedType) -> bool {
         match ty {
             ResolvedType::Map { .. } => true,
             ResolvedType::Sequence { element, .. } | ResolvedType::Array { element, .. } => {
-                self.type_uses_map(element)
+                Self::type_uses_map(element)
             }
             _ => false,
+        }
+    }
+
+    fn emit_constants(&mut self) {
+        if self.model.constants.is_empty() {
+            return;
+        }
+        for c in &self.model.constants {
+            let name = naming::escape_keyword(&c.name, naming::TargetLang::Rust);
+            let ty = self.const_rust_type(&c.resolved_type);
+            let val = self.const_rust_value(&c.value);
+            self.line(&format!("pub const {}: {} = {};", name, ty, val));
+        }
+        self.line("");
+    }
+
+    /// Rust type for a `const`: strings become `&str`, everything else mirrors fields.
+    fn const_rust_type(&self, ty: &ResolvedType) -> String {
+        match ty {
+            ResolvedType::String { .. } | ResolvedType::WString { .. } => "&str".to_string(),
+            _ => self.type_to_rust(ty),
+        }
+    }
+
+    fn const_rust_value(&self, value: &ConstValue) -> String {
+        match value {
+            ConstValue::Int(v) => v.to_string(),
+            ConstValue::Float(v) => format!("{:?}", v),
+            ConstValue::Bool(v) => v.to_string(),
+            ConstValue::Str(v) => format!("{:?}", v),
+            ConstValue::Ident(v) => {
+                let simple = v.rsplit("::").next().unwrap_or(v);
+                naming::escape_keyword(simple, naming::TargetLang::Rust)
+            }
         }
     }
 
     fn emit_enum(&mut self, e: &ResolvedEnum) {
         let rust_name = naming::to_pascal_case(&e.name);
         self.line("#[derive(DdsType)]");
-        // Preserve original IDL type name when it differs from PascalCase Rust name
-        if e.name != rust_name {
+        // Preserve the registered DDS type name when it differs from the Rust name
+        if e.qualified_name != rust_name {
             self.line(&format!("#[dds_type(type_name = \"{}\")]", e.qualified_name));
         }
         self.line("#[repr(i32)]");
@@ -137,7 +192,11 @@ impl<'a> RustGen<'a> {
     fn emit_bitmask(&mut self, b: &ResolvedBitmask) {
         let rust_name = naming::to_pascal_case(&b.name);
         self.line("#[derive(DdsType)]");
-        self.line(&format!("#[dds_type(bitmask, bit_bound = {})]", b.bit_bound));
+        let mut attrs = format!("bitmask, bit_bound = {}", b.bit_bound);
+        if b.qualified_name != rust_name {
+            attrs.push_str(&format!(", type_name = \"{}\"", b.qualified_name));
+        }
+        self.line(&format!("#[dds_type({})]", attrs));
         self.line(&format!("pub enum {} {{", rust_name));
         self.indent += 1;
         for flag in &b.flags {
@@ -155,7 +214,11 @@ impl<'a> RustGen<'a> {
     fn emit_bitset(&mut self, b: &ResolvedBitset) {
         let rust_name = naming::to_pascal_case(&b.name);
         self.line("#[derive(DdsType)]");
-        self.line("#[dds_type(bitset)]");
+        if b.qualified_name != rust_name {
+            self.line(&format!("#[dds_type(bitset, type_name = \"{}\")]", b.qualified_name));
+        } else {
+            self.line("#[dds_type(bitset)]");
+        }
         self.line(&format!("pub struct {} {{", rust_name));
         self.indent += 1;
         for f in &b.fields {
@@ -172,6 +235,9 @@ impl<'a> RustGen<'a> {
         let rust_name = naming::to_pascal_case(&u.name);
 
         self.line("#[derive(DdsType)]");
+        if u.qualified_name != rust_name {
+            self.line(&format!("#[dds_type(type_name = \"{}\")]", u.qualified_name));
+        }
 
         // Determine repr type from discriminant
         let repr = self.discriminant_repr(&u.discriminant_type);
@@ -260,8 +326,9 @@ impl<'a> RustGen<'a> {
         if self.opts.crate_path != "int2dds" {
             type_attrs.push(format!("crate_path = \"{}\"", self.opts.crate_path));
         }
-        // Preserve original IDL type name when it differs from PascalCase Rust name
-        if s.name != rust_name {
+        // Preserve the registered DDS type name when it differs from the Rust name
+        // (case conversion, module scope, or ROS2 mangling)
+        if s.qualified_name != rust_name {
             type_attrs.push(format!("type_name = \"{}\"", s.qualified_name));
         }
         match s.extensibility {
@@ -415,14 +482,29 @@ impl<'a> RustGen<'a> {
                 format!("HashMap<{}, {}>", self.type_to_rust(key), self.type_to_rust(value))
             }
             ResolvedType::Struct(name) | ResolvedType::Enum(name) => {
-                let simple = name.rsplit("::").next().unwrap_or(name);
-                naming::to_pascal_case(simple)
+                if self.is_external(name) {
+                    naming::rust_external_path(name)
+                } else {
+                    let simple = name.rsplit("::").next().unwrap_or(name);
+                    naming::to_pascal_case(simple)
+                }
             }
             ResolvedType::Bitmask(name) => {
-                let simple = name.rsplit("::").next().unwrap_or(name);
-                format!("{}Value", naming::to_pascal_case(simple))
+                if self.is_external(name) {
+                    format!("{}Value", naming::rust_external_path(name))
+                } else {
+                    let simple = name.rsplit("::").next().unwrap_or(name);
+                    format!("{}Value", naming::to_pascal_case(simple))
+                }
             }
         }
+    }
+
+    /// A type reference is external when it is qualified (names another package's
+    /// scope) and is not one of the types this file emits. Bare leaf references are
+    /// always local — a foreign type cannot be named without qualifying it.
+    fn is_external(&self, name: &str) -> bool {
+        name.contains("::") && !self.own_quals.contains(name)
     }
 
     fn line(&mut self, text: &str) {
@@ -559,6 +641,98 @@ mod tests {
         let code = generate(&model, "Data.idl", &RustOptions::default());
 
         assert!(code.contains("#[dds(default = 42)]"));
+    }
+
+    #[test]
+    fn test_constants_codegen() {
+        let defs = parse_idl(
+            r#"
+            module T_Constants {
+                const int8 STATUS_NO_FIX = -1;
+                const double GAIN = 1.5;
+                const string MODE = "auto";
+                const boolean ENABLED = TRUE;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "T.idl", &RustOptions::default());
+
+        assert!(code.contains("pub const STATUS_NO_FIX: i8 = -1;"), "{}", code);
+        assert!(code.contains("pub const GAIN: f64 = 1.5;"), "{}", code);
+        assert!(code.contains("pub const MODE: &str = \"auto\";"), "{}", code);
+        assert!(code.contains("pub const ENABLED: bool = true;"), "{}", code);
+    }
+
+    #[test]
+    fn test_scoped_dependency_reference_codegen() {
+        // resolve-only include: the dependency type (Header) is resolved but not
+        // emitted. The root type references it by leaf name; the consuming build
+        // must provide that type in scope. This pins that contract for the Rust
+        // backend so a regression in the reference form is caught.
+        use crate::resolver::resolve_scoped;
+        let dep =
+            parse_idl("module std_msgs { module msg { struct Header { uint32 stamp; }; }; };")
+                .unwrap();
+        let root = parse_idl(
+            "module sensor_msgs { module msg { struct Imu { std_msgs::msg::Header header; double v[3]; }; }; };",
+        )
+        .unwrap();
+        let mut all = dep.clone();
+        all.extend(root.clone());
+        let model = resolve_scoped(&root, all).unwrap();
+        let code = generate(&model, "Imu.idl", &RustOptions::default());
+
+        assert!(code.contains("pub struct Imu {"), "{}", code);
+        // External (included) type is referenced by its full package path so the
+        // output compiles against the dependency's own generated module.
+        assert!(code.contains("pub header: std_msgs::msg::Header,"), "{}", code);
+        // The included type is not re-emitted in this file.
+        assert!(!code.contains("pub struct Header"), "{}", code);
+    }
+
+    #[test]
+    fn test_local_nested_reference_unchanged() {
+        // A type defined in the same file is still referenced by bare leaf name.
+        let defs = parse_idl(
+            "module p { module msg {
+                struct Inner { long a; };
+                struct Outer { Inner inner; long b; };
+            }; };",
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "P.idl", &RustOptions::default());
+        assert!(code.contains("pub inner: Inner,"), "{}", code);
+        // The field type is the bare leaf, not a package path.
+        assert!(!code.contains(": p::msg::Inner"), "{}", code);
+    }
+
+    #[test]
+    fn test_external_same_leaf_collision() {
+        // The root defines `Status` and also references a different package's
+        // `Status`. Qualified-name detection keeps the local one bare and the
+        // external one fully pathed, so they don't collapse onto each other.
+        use crate::resolver::resolve_scoped;
+        let dep =
+            parse_idl("module other_pkg { module msg { struct Status { long x; }; }; };").unwrap();
+        let root = parse_idl(
+            "module my_pkg { module msg {
+                struct Status { long a; };
+                struct Holder { Status local_status; other_pkg::msg::Status ext_status; };
+            }; };",
+        )
+        .unwrap();
+        let mut all = dep.clone();
+        all.extend(root.clone());
+        let model = resolve_scoped(&root, all).unwrap();
+        let code = generate(&model, "Holder.idl", &RustOptions::default());
+
+        assert!(code.contains("pub local_status: Status,"), "{}", code);
+        assert!(code.contains("pub ext_status: other_pkg::msg::Status,"), "{}", code);
+        // The local Status is emitted; the external one is not re-defined.
+        assert!(code.contains("pub struct Status {"), "{}", code);
     }
 
     #[test]
