@@ -33,6 +33,17 @@ pub fn generate(model: &IdlModel, idl_filename: &str, opts: &COptions) -> String
     gen.out
 }
 
+/// Render a constant value as a C `#define` body.
+fn c_const_value(value: &ConstValue) -> String {
+    match value {
+        ConstValue::Int(v) => v.to_string(),
+        ConstValue::Float(v) => format!("{:?}", v),
+        ConstValue::Bool(v) => v.to_string(),
+        ConstValue::Str(v) => format!("{:?}", v),
+        ConstValue::Ident(v) => v.rsplit("::").next().unwrap_or(v).to_string(),
+    }
+}
+
 struct CGen<'a> {
     out: String,
     opts: &'a COptions,
@@ -54,6 +65,8 @@ impl<'a> CGen<'a> {
         }
 
         self.raw("\n#include \"int2dds_cdr.h\"\n\n");
+
+        self.emit_constants();
 
         // Enums first (may be referenced by structs)
         for e in &self.model.enums {
@@ -492,6 +505,18 @@ impl<'a> CGen<'a> {
         } else {
             self.type_to_c_declaration(&m.resolved_type, &escaped)
         }
+    }
+
+    /// IDL constants map to `#define` (classic OMG IDL-to-C mapping).
+    fn emit_constants(&mut self) {
+        if self.model.constants.is_empty() {
+            return;
+        }
+        for c in &self.model.constants {
+            let name = naming::escape_keyword(&c.name, naming::TargetLang::C);
+            self.raw(&format!("#define {} {}\n", name, c_const_value(&c.value)));
+        }
+        self.raw("\n");
     }
 
     fn type_to_c_declaration(&self, ty: &ResolvedType, name: &str) -> String {
@@ -1521,7 +1546,10 @@ impl<'a> CGen<'a> {
 
         self.raw(&format!("static inline Int2DdsTypeInfo* {}_type_info(void) {{\n", s.name));
         self.raw("    Int2DdsTypeInfo *ti;\n");
-        self.raw(&format!("    int2dds_type_info_create(\"{}\", {}, &ti);\n", s.name, ext_int));
+        self.raw(&format!(
+            "    int2dds_type_info_create(\"{}\", {}, &ti);\n",
+            s.qualified_name, ext_int
+        ));
 
         for m in &s.members {
             self.emit_type_info_field(m);
@@ -2196,5 +2224,45 @@ mod tests {
         assert!(code.contains("int32_t sensor_id;"));
         assert!(!code.contains("data_"));
         assert!(!code.contains("sensor_id_"));
+    }
+
+    #[test]
+    fn test_type_info_registers_qualified_name() {
+        let defs = parse_idl(
+            r#"
+            module pkg { module msg {
+                struct Status { long code; };
+            }; };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Status.idl", &COptions::default());
+
+        // Registered DDS type name is the qualified name, not the bare leaf.
+        assert!(code.contains("int2dds_type_info_create(\"pkg::msg::Status\""));
+        // The C function/identifier still uses the bare leaf.
+        assert!(code.contains("Status_type_info(void)"));
+    }
+
+    #[test]
+    fn test_type_info_registers_ros2_mangled_name() {
+        let defs = parse_idl(
+            r#"
+            module pkg { module msg {
+                struct Status { long code; };
+            }; };
+            "#,
+        )
+        .unwrap();
+        let mut model = resolve(defs).unwrap();
+        // Mirror the --ros2 mangling applied in main.rs.
+        model.map_qualified_names(|q| naming::ros2_type_name(q, None));
+        let code = generate(&model, "Status.idl", &COptions::default());
+
+        assert!(code.contains("int2dds_type_info_create(\"pkg::msg::dds_::Status_\""));
+        // Language identifiers are never mangled.
+        assert!(code.contains("Status_type_info(void)"));
+        assert!(code.contains("struct Status {"));
     }
 }

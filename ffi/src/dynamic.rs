@@ -1314,7 +1314,7 @@ mod tests {
             assert_eq!(info.member_id, *id);
             assert_eq!((info.flags & INT2DDS_MEMBER_KEY) != 0, *is_key);
 
-            let mut buf = [0i8; 64];
+            let mut buf = [0 as c_char; 64];
             let mut nlen = 0usize;
             assert_eq!(
                 unsafe {
@@ -1581,7 +1581,7 @@ mod tests {
     fn string_getter_round_trip() {
         let (bytes, h) = prim_all_bytes_and_handle();
         let cn = std::ffi::CString::new("s").unwrap();
-        let mut buf = [0i8; 64];
+        let mut buf = [0 as c_char; 64];
         let mut out_len: usize = 0;
         let ret = unsafe {
             int2dds_dynamic_sample_get_string(
@@ -1605,7 +1605,7 @@ mod tests {
     fn string_getter_buffer_too_small() {
         let (bytes, h) = prim_all_bytes_and_handle();
         let cn = std::ffi::CString::new("s").unwrap();
-        let mut buf = [0i8; 3]; // too small for "hello\0"
+        let mut buf = [0 as c_char; 3]; // too small for "hello\0"
         let mut out_len: usize = 0;
         let ret = unsafe {
             int2dds_dynamic_sample_get_string(
@@ -1681,7 +1681,7 @@ mod tests {
         assert_eq!(x, 11);
 
         let p = CString::new("inner.name").unwrap();
-        let mut buf = [0i8; 16];
+        let mut buf = [0 as c_char; 16];
         let mut nlen = 0usize;
         assert_eq!(
             unsafe {
