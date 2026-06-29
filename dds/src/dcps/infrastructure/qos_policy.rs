@@ -56,7 +56,7 @@ use speedy::{Readable, Writable};
 
 use crate::{
     core::{
-        error::DdsResult,
+        error::{DdsError, DdsResult},
         time::Duration,
         types::{deserialize_i32_or_unlimited, serialize_i32_or_unlimited, LENGTH_UNLIMITED},
     },
@@ -1779,6 +1779,19 @@ impl ConstDefault for ResourceLimitsQosPolicy {
 impl QosPolicy for ResourceLimitsQosPolicy {
     fn name(&self) -> &str {
         RESOURCELIMITS_QOS_POLICY_NAME
+    }
+}
+
+impl ResourceLimitsQosPolicy {
+    // max_samples must be at least max_samples_per_instance; LENGTH_UNLIMITED means unbounded
+    pub(crate) fn is_consistent(&self) -> DdsResult<()> {
+        if self.max_samples != LENGTH_UNLIMITED
+            && (self.max_samples_per_instance == LENGTH_UNLIMITED
+                || self.max_samples < self.max_samples_per_instance)
+        {
+            return Err(DdsError::InconsistentPolicy);
+        }
+        Ok(())
     }
 }
 
