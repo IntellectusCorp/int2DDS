@@ -8,7 +8,7 @@ use int2dds_idl::preprocess;
 use int2dds_idl::resolver;
 
 struct Args {
-    input_file: String,
+    input_files: Vec<String>,
     rust_output: Option<String>,
     c_output: Option<String>,
     python_output: Option<String>,
@@ -25,12 +25,15 @@ struct Args {
     ros2_package: Option<String>,
     ros2_kind: Option<String>,
     include_dirs: Vec<PathBuf>,
+    // Restrict auto-naming to these languages (rust, c, python, csharp, xml, rpc).
+    // None = unrestricted (batch -o emits every language).
+    langs: Option<[bool; 6]>,
 }
 
 fn parse_args() -> Args {
     let args: Vec<String> = std::env::args().collect();
 
-    let mut input_file = None;
+    let mut input_files: Vec<String> = Vec::new();
     let mut rust_output = None;
     let mut c_output = None;
     let mut python_output = None;
@@ -128,23 +131,20 @@ fn parse_args() -> Args {
                 process::exit(1);
             }
             _ => {
-                input_file = Some(args[i].clone());
+                input_files.push(args[i].clone());
             }
         }
         i += 1;
     }
 
-    let input_file = match input_file {
-        Some(f) => f,
-        None => {
-            eprintln!("error: no input file specified");
-            print_usage();
-            process::exit(1);
-        }
-    };
+    if input_files.is_empty() {
+        eprintln!("error: no input file specified");
+        print_usage();
+        process::exit(1);
+    }
 
     Args {
-        input_file,
+        input_files,
         rust_output,
         c_output,
         python_output,
@@ -161,12 +161,13 @@ fn parse_args() -> Args {
         ros2_package,
         ros2_kind,
         include_dirs,
+        langs: None,
     }
 }
 
 fn print_usage() {
     eprintln!(
-        "Usage: int2dds-idl [OPTIONS] <INPUT.idl>
+        "Usage: int2dds-idl [OPTIONS] <INPUT.idl>...
 
 Generates Rust, C, Python, and C# code from OMG IDL files.
 
@@ -195,7 +196,7 @@ OPTIONS:
 
 /// Abort the wizard (e.g. on Ctrl-C / ESC).
 fn wizard_cancelled() -> ! {
-    eprintln!("취소되었습니다.");
+    eprintln!("Cancelled.");
     process::exit(1);
 }
 
@@ -304,46 +305,66 @@ fn run_wizard() -> Args {
     use dialoguer::{theme::ColorfulTheme, Confirm, Input, MultiSelect, Select};
 
     let theme = ColorfulTheme::default();
-    eprintln!("int2dds-idl 대화형 코드 생성 마법사\n");
+    eprintln!("int2dds-idl interactive code generation wizard\n");
 
     let completion = PathCompletion::default();
 
-    // 1) IDL input file
-    let prompt_path = |theme: &ColorfulTheme| -> String {
-        Input::<String>::with_theme(theme)
-            .with_prompt("IDL 파일 경로 (Tab 자동완성)")
-            .completion_with(&completion)
-            .validate_with(|s: &String| {
-                if Path::new(s.trim()).is_file() {
-                    Ok(())
+    // 1) IDL input files (one or more). Manual entry loops until a blank line.
+    let prompt_paths = || -> Vec<String> {
+        let mut paths = Vec::new();
+        loop {
+            let p: String = Input::<String>::with_theme(&theme)
+                .with_prompt(if paths.is_empty() {
+                    "IDL file path (Tab to autocomplete)"
                 } else {
-                    Err("파일을 찾을 수 없습니다")
+                    "Additional IDL file path (Enter to finish)"
+                })
+                .completion_with(&completion)
+                .allow_empty(true)
+                .validate_with(|s: &String| {
+                    let t = s.trim();
+                    if t.is_empty() || Path::new(t).is_file() {
+                        Ok(())
+                    } else {
+                        Err("file not found")
+                    }
+                })
+                .interact_text()
+                .unwrap_or_else(|_| wizard_cancelled());
+            let t = p.trim().to_string();
+            if t.is_empty() {
+                if paths.is_empty() {
+                    continue;
                 }
-            })
-            .interact_text()
-            .unwrap_or_else(|_| wizard_cancelled())
-            .trim()
-            .to_string()
+                break;
+            }
+            paths.push(t);
+        }
+        paths
     };
 
-    let input_file = {
-        let mut files = discover_idl_files();
-        if files.is_empty() {
-            prompt_path(&theme)
+    let input_files = {
+        let discovered = discover_idl_files();
+        if discovered.is_empty() {
+            prompt_paths()
         } else {
-            files.push("직접 경로 입력…".to_string());
-            let manual_idx = files.len() - 1;
-            let sel = Select::with_theme(&theme)
-                .with_prompt("IDL 파일 선택")
-                .items(&files)
-                .default(0)
+            let mut items = discovered.clone();
+            items.push("Enter path manually…".to_string());
+            let manual_idx = items.len() - 1;
+            let sel = MultiSelect::with_theme(&theme)
+                .with_prompt("Select IDL files (space to toggle, enter to confirm)")
+                .items(&items)
                 .interact()
                 .unwrap_or_else(|_| wizard_cancelled());
-            if sel == manual_idx {
-                prompt_path(&theme)
-            } else {
-                files[sel].clone()
+            let mut files: Vec<String> =
+                sel.iter().filter(|&&i| i != manual_idx).map(|&i| discovered[i].clone()).collect();
+            if sel.contains(&manual_idx) {
+                files.extend(prompt_paths());
             }
+            if files.is_empty() {
+                files = prompt_paths();
+            }
+            files
         }
     };
 
@@ -351,13 +372,13 @@ fn run_wizard() -> Args {
     let lang_items = ["Rust", "C", "Python", "C#", "XML", "RPC"];
     let lang_defaults = [true, false, false, false, false, false];
     let chosen = MultiSelect::with_theme(&theme)
-        .with_prompt("생성할 언어 (↑↓ 이동, space 선택, enter 확정)")
+        .with_prompt("Languages to generate (↑↓ move, space to toggle, enter to confirm)")
         .items(&lang_items)
         .defaults(&lang_defaults)
         .interact()
         .unwrap_or_else(|_| wizard_cancelled());
     if chosen.is_empty() {
-        eprintln!("선택된 언어가 없습니다.");
+        eprintln!("No language selected.");
         process::exit(1);
     }
     let want = |i: usize| chosen.contains(&i);
@@ -366,7 +387,7 @@ fn run_wizard() -> Args {
 
     // 3) Output directory
     let output_dir: String = Input::with_theme(&theme)
-        .with_prompt("출력 디렉터리 (Tab 자동완성)")
+        .with_prompt("Output directory (Tab to autocomplete)")
         .completion_with(&completion)
         .default("generated".to_string())
         .interact_text()
@@ -384,12 +405,37 @@ fn run_wizard() -> Args {
     let mut include_dirs = Vec::new();
 
     let advanced = Confirm::with_theme(&theme)
-        .with_prompt("고급 옵션 설정?")
+        .with_prompt("Configure advanced options?")
         .default(false)
         .interact()
         .unwrap_or(false);
 
     if advanced {
+        ros2 = Confirm::with_theme(&theme)
+            .with_prompt("Use ROS2-compatible type naming?")
+            .default(false)
+            .interact()
+            .unwrap_or(false);
+        if ros2 {
+            let pkg: String = Input::with_theme(&theme)
+                .with_prompt("ROS2 package name (leave empty to infer from file path)")
+                .allow_empty(true)
+                .default(String::new())
+                .interact_text()
+                .unwrap_or_else(|_| wizard_cancelled());
+            if !pkg.trim().is_empty() {
+                ros2_package = Some(pkg.trim().to_string());
+                let kinds = ["msg", "srv", "action"];
+                let k = Select::with_theme(&theme)
+                    .with_prompt("Interface kind")
+                    .items(&kinds)
+                    .default(0)
+                    .interact()
+                    .unwrap_or_else(|_| wizard_cancelled());
+                ros2_kind = Some(kinds[k].to_string());
+            }
+        }
+
         if gen_rust || gen_rpc {
             crate_path = Input::with_theme(&theme)
                 .with_prompt("Rust crate-path")
@@ -399,7 +445,7 @@ fn run_wizard() -> Args {
         }
         if gen_python {
             python_module = Input::with_theme(&theme)
-                .with_prompt("Python 모듈 경로")
+                .with_prompt("Python module path")
                 .default(python_module)
                 .interact_text()
                 .unwrap_or_else(|_| wizard_cancelled());
@@ -413,44 +459,19 @@ fn run_wizard() -> Args {
         }
         if gen_c {
             string_pointer = Confirm::with_theme(&theme)
-                .with_prompt("C 문자열을 char* 포인터로 생성?")
+                .with_prompt("Generate C strings as char* pointers?")
                 .default(false)
                 .interact()
                 .unwrap_or(false);
             default_string_bound = Input::with_theme(&theme)
-                .with_prompt("C 기본 문자열 크기")
+                .with_prompt("Default C string size")
                 .default(256u32)
                 .interact_text()
                 .unwrap_or_else(|_| wizard_cancelled());
         }
 
-        ros2 = Confirm::with_theme(&theme)
-            .with_prompt("ROS2 호환 타입 네이밍 사용?")
-            .default(false)
-            .interact()
-            .unwrap_or(false);
-        if ros2 {
-            let pkg: String = Input::with_theme(&theme)
-                .with_prompt("ROS2 패키지명 (비우면 파일 경로에서 추론)")
-                .allow_empty(true)
-                .default(String::new())
-                .interact_text()
-                .unwrap_or_else(|_| wizard_cancelled());
-            if !pkg.trim().is_empty() {
-                ros2_package = Some(pkg.trim().to_string());
-                let kinds = ["msg", "srv", "action"];
-                let k = Select::with_theme(&theme)
-                    .with_prompt("인터페이스 종류")
-                    .items(&kinds)
-                    .default(0)
-                    .interact()
-                    .unwrap_or_else(|_| wizard_cancelled());
-                ros2_kind = Some(kinds[k].to_string());
-            }
-        }
-
         let inc: String = Input::with_theme(&theme)
-            .with_prompt("#include 검색 경로 (쉼표 구분, 없으면 비움)")
+            .with_prompt("#include search paths (comma-separated, leave empty if none)")
             .allow_empty(true)
             .default(String::new())
             .interact_text()
@@ -460,44 +481,29 @@ fn run_wizard() -> Args {
         }
     }
 
-    // Auto-named output paths for the selected languages only.
-    let filename = input_file.rsplit(['/', '\\']).next().unwrap_or(&input_file);
-    let base = naming::idl_to_output_name(filename);
-    let dir = output_dir.trim().trim_end_matches(['/', '\\']);
-    let join = |name: String| {
-        if dir.is_empty() {
-            name
-        } else {
-            format!("{}/{}", dir, name)
-        }
-    };
-
-    let rust_output = gen_rust.then(|| join(format!("{}.rs", base)));
-    let c_output = gen_c.then(|| join(format!("{}.h", base)));
-    let python_output = gen_python.then(|| join(format!("{}.py", base)));
-    let csharp_output = gen_csharp.then(|| join(format!("{}.cs", naming::to_pascal_case(&base))));
-    let xml_output = gen_xml.then(|| join(format!("{}.xml", base)));
-    let rpc_output = gen_rpc.then(|| join(format!("{}_rpc.rs", base)));
+    // Each selected language is auto-named per input file under the output dir.
+    let dir = output_dir.trim().trim_end_matches(['/', '\\']).to_string();
 
     eprintln!();
     Args {
-        input_file,
-        rust_output,
-        c_output,
-        python_output,
-        csharp_output,
-        xml_output,
-        output_dir: None,
+        input_files,
+        rust_output: None,
+        c_output: None,
+        python_output: None,
+        csharp_output: None,
+        xml_output: None,
+        output_dir: Some(dir),
         crate_path,
         python_module,
         csharp_namespace,
         default_string_bound,
         string_pointer,
-        rpc_output,
+        rpc_output: None,
         ros2,
         ros2_package,
         ros2_kind,
         include_dirs,
+        langs: Some([gen_rust, gen_c, gen_python, gen_csharp, gen_xml, gen_rpc]),
     }
 }
 
@@ -512,9 +518,16 @@ fn main() {
         }
     }
 
+    for input_file in &args.input_files {
+        process_file(&args, input_file);
+    }
+}
+
+/// Generate the selected outputs for a single input IDL file.
+fn process_file(args: &Args, input_file: &str) {
     // Read input, resolving #include directives into a single translation unit.
     let source = match preprocess::load_with_includes(
-        std::path::Path::new(&args.input_file),
+        std::path::Path::new(input_file),
         &args.include_dirs,
     ) {
         Ok((s, missing)) => {
@@ -524,7 +537,7 @@ fn main() {
             s
         }
         Err(e) => {
-            eprintln!("error: cannot read '{}': {}", args.input_file, e);
+            eprintln!("error: cannot read '{}': {}", input_file, e);
             process::exit(1);
         }
     };
@@ -535,19 +548,19 @@ fn main() {
     let parse = |src: &str| match parser::parse_idl(src) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("{}:{}", args.input_file, e);
+            eprintln!("{}:{}", input_file, e);
             process::exit(1);
         }
     };
     let all_defs = parse(&source);
-    let root_src = std::fs::read_to_string(&args.input_file).unwrap_or_else(|_| source.clone());
+    let root_src = std::fs::read_to_string(input_file).unwrap_or_else(|_| source.clone());
     let root_defs = parse(&root_src);
 
     // Resolve
     let mut model = match resolver::resolve_scoped(&root_defs, all_defs) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("{}: {}", args.input_file, e);
+            eprintln!("{}: {}", input_file, e);
             process::exit(1);
         }
     };
@@ -557,7 +570,7 @@ fn main() {
     // code is untouched; only the registered/TypeObject name changes.
     if args.ros2 {
         let flat_scope = naming::ros2_flat_scope(
-            &args.input_file,
+            input_file,
             args.ros2_package.as_deref(),
             args.ros2_kind.as_deref(),
         );
@@ -571,30 +584,35 @@ fn main() {
         model.map_qualified_names(|q| naming::ros2_type_name(q, flat_scope.as_deref()));
     }
 
-    let idl_filename = args.input_file.rsplit(['/', '\\']).next().unwrap_or(&args.input_file);
+    let idl_filename = input_file.rsplit(['/', '\\']).next().unwrap_or(input_file);
     let base_name = naming::idl_to_output_name(idl_filename);
 
-    // Determine output paths
-    let rust_path = args
-        .rust_output
-        .or_else(|| args.output_dir.as_ref().map(|dir| format!("{}/{}.rs", dir, base_name)));
-    let c_path = args
-        .c_output
-        .or_else(|| args.output_dir.as_ref().map(|dir| format!("{}/{}.h", dir, base_name)));
-    let python_path = args
-        .python_output
-        .or_else(|| args.output_dir.as_ref().map(|dir| format!("{}/{}.py", dir, base_name)));
-    let rpc_path = args
-        .rpc_output
-        .or_else(|| args.output_dir.as_ref().map(|dir| format!("{}/{}_rpc.rs", dir, base_name)));
-    let csharp_path = args.csharp_output.or_else(|| {
+    // Auto-name into output_dir for languages allowed by `langs` (None = all).
+    let allowed = |i: usize| args.langs.map_or(true, |s| s[i]);
+    let auto = |ext: &str, i: usize| {
         args.output_dir
             .as_ref()
+            .filter(|_| allowed(i))
+            .map(|dir| format!("{}/{}.{}", dir, base_name, ext))
+    };
+
+    // Determine output paths
+    let rust_path = args.rust_output.clone().or_else(|| auto("rs", 0));
+    let c_path = args.c_output.clone().or_else(|| auto("h", 1));
+    let python_path = args.python_output.clone().or_else(|| auto("py", 2));
+    let rpc_path = args.rpc_output.clone().or_else(|| {
+        args.output_dir
+            .as_ref()
+            .filter(|_| allowed(5))
+            .map(|dir| format!("{}/{}_rpc.rs", dir, base_name))
+    });
+    let csharp_path = args.csharp_output.clone().or_else(|| {
+        args.output_dir
+            .as_ref()
+            .filter(|_| allowed(3))
             .map(|dir| format!("{}/{}.cs", dir, naming::to_pascal_case(&base_name)))
     });
-    let xml_path = args
-        .xml_output
-        .or_else(|| args.output_dir.as_ref().map(|dir| format!("{}/{}.xml", dir, base_name)));
+    let xml_path = args.xml_output.clone().or_else(|| auto("xml", 4));
 
     // If neither -r, -c, -p, nor -o specified, default to generating Rust and C
     let (rust_path, c_path, python_path, rpc_path, csharp_path, xml_path) = if rust_path.is_none()
@@ -693,7 +711,7 @@ fn main() {
         ) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("{}: {}", args.input_file, e);
+                eprintln!("{}: {}", input_file, e);
                 process::exit(1);
             }
         };
