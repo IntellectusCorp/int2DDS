@@ -156,9 +156,9 @@ impl Qos for DataReaderQos {
     }
 
     fn is_consistent(&self) -> DdsResult<()> {
+        self.resource_limits.is_consistent()?;
         if self.resource_limits.max_samples_per_instance != LENGTH_UNLIMITED
             && self.history.depth() > Some(self.resource_limits.max_samples_per_instance)
-            || self.resource_limits.max_samples < self.resource_limits.max_samples_per_instance
             || self.time_based_filter.minimum_separation > self.deadline.period
         {
             return Err(DdsError::InconsistentPolicy);
