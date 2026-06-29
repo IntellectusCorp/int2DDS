@@ -19,6 +19,26 @@ pub fn compute_member_id_hash(name: &str) -> u32 {
     u32::from_le_bytes(bytes) & 0x0FFF_FFFF
 }
 
+/// First positional argument, or the `value` named argument.
+/// Covers both `@ann(x)` and the OMG standard named form `@ann(value=x)`.
+fn annotation_value(ann: &Annotation) -> Option<&ConstExpr> {
+    ann.params.iter().find_map(|p| match p {
+        AnnotationParam::Positional(e) => Some(e),
+        AnnotationParam::Named(k, e) => (k == "value").then_some(e),
+    })
+}
+
+/// Lower a parsed constant expression to a resolved constant value.
+fn const_value(expr: &ConstExpr) -> ConstValue {
+    match expr {
+        ConstExpr::Int(v) => ConstValue::Int(*v),
+        ConstExpr::Float(v) => ConstValue::Float(*v),
+        ConstExpr::String(v) => ConstValue::Str(v.clone()),
+        ConstExpr::Bool(v) => ConstValue::Bool(*v),
+        ConstExpr::Ident(v) => ConstValue::Ident(v.clone()),
+    }
+}
+
 #[derive(Debug)]
 pub struct ResolveError {
     pub message: String,
@@ -36,6 +56,34 @@ pub fn resolve(definitions: Vec<Definition>) -> Result<IdlModel, ResolveError> {
     resolver.resolve_all()
 }
 
+/// Resolve the full translation unit `all` (root file plus everything it
+/// `#include`s) but emit only the types and constants declared directly in
+/// `root`. Included definitions still populate the symbol table so cross-file
+/// references resolve; they are dropped from the returned model so each file's
+/// output stays self-contained and free of duplicate/colliding definitions.
+pub fn resolve_scoped(root: &[Definition], all: Vec<Definition>) -> Result<IdlModel, ResolveError> {
+    let keep = declared_qualified_names(root)?;
+    let mut model = resolve(all)?;
+    model.retain_qualified(&keep);
+    Ok(model)
+}
+
+/// Qualified names of every emittable definition declared in `defs`.
+fn declared_qualified_names(defs: &[Definition]) -> Result<HashSet<String>, ResolveError> {
+    let mut r = Resolver::new();
+    r.collect_definitions(defs, "")?;
+    let mut keep = HashSet::new();
+    keep.extend(r.struct_defs.iter().map(|(q, _)| q.clone()));
+    keep.extend(r.enum_defs.iter().map(|(q, _)| q.clone()));
+    keep.extend(r.bitmask_defs.iter().map(|(q, _)| q.clone()));
+    keep.extend(r.bitset_defs.iter().map(|(q, _)| q.clone()));
+    keep.extend(r.union_defs.iter().map(|(q, _)| q.clone()));
+    keep.extend(r.interface_defs.iter().map(|(q, _)| q.clone()));
+    keep.extend(r.exception_defs.iter().map(|(q, _)| q.clone()));
+    keep.extend(r.const_defs.iter().map(|(q, _)| q.clone()));
+    Ok(keep)
+}
+
 struct Resolver {
     typedefs: HashMap<String, TypeSpec>,
     struct_defs: Vec<(String, StructDef)>, // (qualified_name, def)
@@ -45,6 +93,7 @@ struct Resolver {
     union_defs: Vec<(String, UnionDef)>,
     interface_defs: Vec<(String, InterfaceDef)>,
     exception_defs: Vec<(String, ExceptionDef)>,
+    const_defs: Vec<(String, ConstDef)>,
     known_types: HashSet<String>,
 }
 
@@ -59,6 +108,7 @@ impl Resolver {
             union_defs: Vec::new(),
             interface_defs: Vec::new(),
             exception_defs: Vec::new(),
+            const_defs: Vec::new(),
             known_types: HashSet::new(),
         }
     }
@@ -130,7 +180,10 @@ impl Resolver {
                     self.known_types.insert(exc.name.clone());
                     self.exception_defs.push((qname, exc.clone()));
                 }
-                Definition::Const(_) => {}
+                Definition::Const(c) => {
+                    let qname = Self::qualified_name(scope, &c.name);
+                    self.const_defs.push((qname, c.clone()));
+                }
             }
         }
         Ok(())
@@ -176,7 +229,26 @@ impl Resolver {
             exceptions.push(self.resolve_exception(qname, edef)?);
         }
 
-        Ok(IdlModel { structs, enums, bitmasks, bitsets, unions, interfaces, exceptions })
+        let mut constants = Vec::new();
+        for (qname, cdef) in &self.const_defs {
+            constants.push(ResolvedConst {
+                name: cdef.name.clone(),
+                qualified_name: qname.to_string(),
+                resolved_type: self.resolve_type_spec(&cdef.type_spec)?,
+                value: const_value(&cdef.value),
+            });
+        }
+
+        Ok(IdlModel {
+            structs,
+            enums,
+            bitmasks,
+            bitsets,
+            unions,
+            interfaces,
+            exceptions,
+            constants,
+        })
     }
 
     fn resolve_enum(&self, qname: &str, edef: &EnumDef) -> Result<ResolvedEnum, ResolveError> {
@@ -213,10 +285,7 @@ impl Resolver {
         let mut next_position: u32 = 0;
 
         for flag in &bdef.flags {
-            let position = self.extract_position(&flag.annotations)?.unwrap_or_else(|| {
-                let pos = next_position;
-                pos
-            });
+            let position = self.extract_position(&flag.annotations)?.unwrap_or(next_position);
             if position >= bit_bound {
                 return Err(ResolveError {
                     message: format!(
@@ -353,10 +422,10 @@ impl Resolver {
 
         let explicit_id = m.annotations.iter().find_map(|a| {
             if a.name == "id" {
-                a.params.first().and_then(|p| match p {
-                    AnnotationParam::Positional(ConstExpr::Int(v)) => Some(*v as u32),
+                match annotation_value(a) {
+                    Some(ConstExpr::Int(v)) => Some(*v as u32),
                     _ => None,
-                })
+                }
             } else {
                 None
             }
@@ -465,10 +534,10 @@ impl Resolver {
     ) -> Result<ExtensibilityKind, ResolveError> {
         for ann in annotations {
             if ann.name == "extensibility" {
-                if let Some(param) = ann.params.first() {
+                if let Some(param) = annotation_value(ann) {
                     let value = match param {
-                        AnnotationParam::Positional(ConstExpr::Ident(s)) => s.as_str(),
-                        AnnotationParam::Positional(ConstExpr::String(s)) => s.as_str(),
+                        ConstExpr::Ident(s) => s.as_str(),
+                        ConstExpr::String(s) => s.as_str(),
                         _ => {
                             return Err(ResolveError {
                                 message: "invalid @extensibility parameter".to_string(),
@@ -502,10 +571,10 @@ impl Resolver {
     ) -> Result<Option<AutoIdKind>, ResolveError> {
         for ann in annotations {
             if ann.name == "autoid" {
-                if let Some(param) = ann.params.first() {
+                if let Some(param) = annotation_value(ann) {
                     let value = match param {
-                        AnnotationParam::Positional(ConstExpr::Ident(s)) => s.as_str(),
-                        AnnotationParam::Positional(ConstExpr::String(s)) => s.as_str(),
+                        ConstExpr::Ident(s) => s.as_str(),
+                        ConstExpr::String(s) => s.as_str(),
                         _ => {
                             return Err(ResolveError {
                                 message: "invalid @autoid parameter".to_string(),
@@ -530,7 +599,7 @@ impl Resolver {
     fn extract_bit_bound(&self, annotations: &[Annotation]) -> Result<Option<u32>, ResolveError> {
         for ann in annotations {
             if ann.name == "bit_bound" {
-                if let Some(AnnotationParam::Positional(ConstExpr::Int(v))) = ann.params.first() {
+                if let Some(ConstExpr::Int(v)) = annotation_value(ann) {
                     return Ok(Some(*v as u32));
                 }
             }
@@ -541,7 +610,7 @@ impl Resolver {
     fn extract_value(&self, annotations: &[Annotation]) -> Option<i64> {
         for ann in annotations {
             if ann.name == "value" {
-                if let Some(AnnotationParam::Positional(ConstExpr::Int(v))) = ann.params.first() {
+                if let Some(ConstExpr::Int(v)) = annotation_value(ann) {
                     return Some(*v);
                 }
             }
@@ -552,7 +621,7 @@ impl Resolver {
     fn extract_position(&self, annotations: &[Annotation]) -> Result<Option<u32>, ResolveError> {
         for ann in annotations {
             if ann.name == "position" {
-                if let Some(AnnotationParam::Positional(ConstExpr::Int(v))) = ann.params.first() {
+                if let Some(ConstExpr::Int(v)) = annotation_value(ann) {
                     return Ok(Some(*v as u32));
                 }
             }
@@ -563,24 +632,7 @@ impl Resolver {
     fn extract_default(&self, annotations: &[Annotation]) -> Option<ConstValue> {
         for ann in annotations {
             if ann.name == "default" {
-                if let Some(param) = ann.params.first() {
-                    return match param {
-                        AnnotationParam::Positional(ConstExpr::Int(v)) => Some(ConstValue::Int(*v)),
-                        AnnotationParam::Positional(ConstExpr::Float(v)) => {
-                            Some(ConstValue::Float(*v))
-                        }
-                        AnnotationParam::Positional(ConstExpr::String(v)) => {
-                            Some(ConstValue::Str(v.clone()))
-                        }
-                        AnnotationParam::Positional(ConstExpr::Bool(v)) => {
-                            Some(ConstValue::Bool(*v))
-                        }
-                        AnnotationParam::Positional(ConstExpr::Ident(v)) => {
-                            Some(ConstValue::Ident(v.clone()))
-                        }
-                        _ => None,
-                    };
-                }
+                return Some(const_value(annotation_value(ann)?));
             }
         }
         None
@@ -589,9 +641,7 @@ impl Resolver {
     fn extract_hashid(&self, annotations: &[Annotation]) -> Option<Option<String>> {
         for ann in annotations {
             if ann.name == "hashid" {
-                return if let Some(AnnotationParam::Positional(ConstExpr::String(name))) =
-                    ann.params.first()
-                {
+                return if let Some(ConstExpr::String(name)) = annotation_value(ann) {
                     Some(Some(name.clone()))
                 } else {
                     Some(None) // bare @hashid -> hash field name
@@ -684,7 +734,7 @@ impl Resolver {
 
         for (i, s) in structs.iter().enumerate() {
             for m in &s.members {
-                self.collect_struct_deps(&m.resolved_type, &name_to_idx, i, &mut deps);
+                Self::collect_struct_deps(&m.resolved_type, &name_to_idx, i, &mut deps);
             }
             // base_type dependency
             if let Some(base) = &s.base_type {
@@ -727,7 +777,6 @@ impl Resolver {
     }
 
     fn collect_struct_deps(
-        &self,
         ty: &ResolvedType,
         name_to_idx: &HashMap<&str, usize>,
         from: usize,
@@ -742,11 +791,11 @@ impl Resolver {
                 }
             }
             ResolvedType::Sequence { element, .. } | ResolvedType::Array { element, .. } => {
-                self.collect_struct_deps(element, name_to_idx, from, deps);
+                Self::collect_struct_deps(element, name_to_idx, from, deps);
             }
             ResolvedType::Map { key, value, .. } => {
-                self.collect_struct_deps(key, name_to_idx, from, deps);
-                self.collect_struct_deps(value, name_to_idx, from, deps);
+                Self::collect_struct_deps(key, name_to_idx, from, deps);
+                Self::collect_struct_deps(value, name_to_idx, from, deps);
             }
             _ => {}
         }
@@ -898,6 +947,105 @@ mod tests {
         .unwrap();
         let model = resolve(defs).unwrap();
         assert!(matches!(model.structs[0].members[0].default_value, Some(ConstValue::Int(42))));
+    }
+
+    #[test]
+    fn test_resolve_default_named_param() {
+        // rosidl emits the OMG named form `@default(value=X)`.
+        let defs = parse_idl(
+            r#"
+            struct Data {
+                @default(value=42) long count;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        assert!(matches!(model.structs[0].members[0].default_value, Some(ConstValue::Int(42))));
+    }
+
+    #[test]
+    fn test_resolve_constants() {
+        let defs = parse_idl(
+            r#"
+            module pkg { module msg {
+                module T_Constants {
+                    const int8 STATUS_NO_FIX = -1;
+                    const uint8 STATUS_FIX = 0;
+                    const string MODE = "auto";
+                };
+            }; };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        assert_eq!(model.constants.len(), 3);
+        let no_fix = model.constants.iter().find(|c| c.name == "STATUS_NO_FIX").unwrap();
+        assert_eq!(no_fix.qualified_name, "pkg::msg::T_Constants::STATUS_NO_FIX");
+        assert!(matches!(no_fix.resolved_type, ResolvedType::I8));
+        assert!(matches!(no_fix.value, ConstValue::Int(-1)));
+        let mode = model.constants.iter().find(|c| c.name == "MODE").unwrap();
+        assert!(matches!(&mode.value, ConstValue::Str(s) if s == "auto"));
+    }
+
+    #[test]
+    fn test_resolve_scoped_emits_only_root() {
+        // Simulates `#include`: `included` is the dependency's definitions,
+        // `root` references it. Only the root's own types/constants are emitted.
+        let included = parse_idl(
+            "module dep { module msg {
+                struct Header { uint32 stamp; };
+                const long DEP_OK = 1;
+            }; };",
+        )
+        .unwrap();
+        let root = parse_idl(
+            "module app { module msg {
+                struct Msg { dep::msg::Header header; long x; };
+                const long APP_OK = 2;
+            }; };",
+        )
+        .unwrap();
+
+        let mut all = included.clone();
+        all.extend(root.clone());
+
+        let model = resolve_scoped(&root, all).unwrap();
+
+        // Root type emitted; included Header dropped, but still resolved as a member.
+        assert_eq!(model.structs.len(), 1);
+        let msg = &model.structs[0];
+        assert_eq!(msg.qualified_name, "app::msg::Msg");
+        assert!(matches!(
+            &msg.members[0].resolved_type,
+            ResolvedType::Struct(n) if n.ends_with("Header")
+        ));
+
+        // Only the root constant survives.
+        assert_eq!(model.constants.len(), 1);
+        assert_eq!(model.constants[0].qualified_name, "app::msg::APP_OK");
+    }
+
+    #[test]
+    fn test_resolve_scoped_avoids_leaf_collision() {
+        // Two packages declare a same-leaf `Status`; root declares only one.
+        let included =
+            parse_idl("module dep { module msg { struct Status { long a; }; }; };").unwrap();
+        let root = parse_idl("module app { module msg { struct Status { long b; }; }; };").unwrap();
+        let mut all = included.clone();
+        all.extend(root.clone());
+
+        let model = resolve_scoped(&root, all).unwrap();
+        assert_eq!(model.structs.len(), 1);
+        assert_eq!(model.structs[0].qualified_name, "app::msg::Status");
+    }
+
+    #[test]
+    fn test_resolve_scoped_no_includes_is_identity() {
+        // With root == all (no includes) nothing is filtered out.
+        let defs = parse_idl("struct A { long x; }; struct B { long y; };").unwrap();
+        let model = resolve_scoped(&defs, defs.clone()).unwrap();
+        assert_eq!(model.structs.len(), 2);
     }
 
     #[test]
