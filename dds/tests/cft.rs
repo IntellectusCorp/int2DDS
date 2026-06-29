@@ -171,6 +171,91 @@ fn test_content_filtered_topic_read() {
 }
 
 #[test]
+fn test_content_filtered_topic_take_serialized() {
+    let domain_id = next_domain_id();
+    let factory = DomainParticipantFactory::get_instance();
+    let participant = factory
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+
+    let topic = participant
+        .create_topic::<KeyedDataType>(
+            "CFT_Serialized_Test",
+            KeyedDataType::get_type_name(),
+            TopicQos::default(),
+            None,
+            StatusMask::default(),
+        )
+        .unwrap();
+
+    let publisher =
+        participant.create_publisher(PublisherQos::default(), None, StatusMask::default()).unwrap();
+
+    let data_writer = publisher
+        .create_datawriter::<KeyedDataType>(
+            &topic,
+            DataWriterQos::default(),
+            None,
+            StatusMask::default(),
+        )
+        .unwrap();
+
+    let cft = participant
+        .create_contentfilteredtopic::<KeyedDataType>(
+            "CFT_Serialized_Test",
+            &topic,
+            "key > %0",
+            vec!["1".to_string()],
+        )
+        .unwrap();
+
+    let subscriber = participant
+        .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+        .unwrap();
+
+    let data_reader = subscriber
+        .create_datareader::<KeyedDataType>(
+            &cft,
+            DataReaderQos::default(),
+            None,
+            StatusMask::default(),
+        )
+        .unwrap();
+
+    wait_for_reader_status(
+        &data_reader,
+        StatusMask::SUBSCRIPTION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
+    wait_for_writer_status(
+        &data_writer,
+        StatusMask::PUBLICATION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
+
+    for (key, value) in [(0, 1), (1, 1), (2, 0), (3, 0)] {
+        data_writer.write(&KeyedDataType { key, value }, InstanceHandle::NIL).unwrap();
+    }
+
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
+    // Serialized take goes through read_or_take_serialized_bytes. CFT is applied on the
+    // receive path, so only key > 1 (keys 2 and 3) should remain in the cache.
+    let result = data_reader.take_serialized(
+        10,
+        &[SampleStateKind::ANY_SAMPLE_STATE],
+        &[ViewStateKind::ANY_VIEW_STATE],
+        &[InstanceStateKind::ANY_INSTANCE_STATE],
+    );
+
+    assert!(result.is_ok());
+    let samples = result.unwrap();
+    assert_eq!(samples.len(), 2);
+}
+
+#[test]
 fn test_content_filtered_topic_with_read_condition() {
     let domain_id = next_domain_id();
     let factory = DomainParticipantFactory::get_instance();

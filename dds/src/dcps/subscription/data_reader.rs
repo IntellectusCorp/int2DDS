@@ -2138,6 +2138,9 @@ impl<Foo: DdsType> DataReader<Foo> {
             let mut datareader_cache =
                 reader.datareader_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
             datareader_cache.set_datareader(weak_ref);
+            if reader.content_filtered_topic.is_some() {
+                datareader_cache.set_content_filter();
+            }
             datareader_cache.set_update_status(status_callback.clone());
         }
 
@@ -2618,21 +2621,8 @@ impl<Foo: DdsType> DataReader<Foo> {
         }
         let sort_us = if profile { elapsed_us(sort_t0, Instant::now()) } else { 0 };
 
-        // Get ContentFilteredTopic expression for serialized path filtering
-        let filter_setup_t0 = Instant::now();
-        let (cft_expression, cft_parameters) = if let Some(cft) = &self.content_filtered_topic {
-            let cft = cft
-                .upgrade()
-                .ok_or(DdsError::Error("ContentFilteredTopic is deleted".to_string()))?;
-            if cft.is_filter_enabled()? {
-                (Some(cft.get_parsed_expression()?), cft.get_expression_parameters()?)
-            } else {
-                (None, Vec::new())
-            }
-        } else {
-            (None, Vec::new())
-        };
-        let filter_setup_us = if profile { elapsed_us(filter_setup_t0, Instant::now()) } else { 0 };
+        // ContentFilteredTopic is applied on the receive path, so the cache is already filtered.
+        let filter_setup_us = 0u64;
 
         let instance_info_t0 = Instant::now();
         let instance_infos = self.get_instance_infos()?;
@@ -2696,23 +2686,6 @@ impl<Foo: DdsType> DataReader<Foo> {
             let serialized_data = change.data_bytes();
             if profile {
                 loop_data_bytes_us += elapsed_us(data_bytes_t0, Instant::now());
-            }
-
-            // ContentFilteredTopic filter for serialized path
-            if let Some(cft_expr) = &cft_expression {
-                if has_valid_data {
-                    if let Ok(deserialized) = self.type_support.deserialize(&serialized_data, None)
-                    {
-                        if let Ok(typed) = deserialized.downcast::<Foo>() {
-                            if let Ok(false) = cft_expr.evaluate(&*typed, &cft_parameters) {
-                                // Filtered-out samples should not remain in reader history,
-                                // otherwise later filter broadening/disable can replay stale data.
-                                self.remove_change(change.clone())?;
-                                continue;
-                            }
-                        }
-                    }
-                }
             }
 
             let sample_info_t0 = Instant::now();
@@ -2916,20 +2889,6 @@ impl<Foo: DdsType> DataReader<Foo> {
             (None, Vec::new())
         };
 
-        // Get ContentFilteredTopic expression (independently!)
-        let (cft_expression, cft_parameters) = if let Some(cft) = &self.content_filtered_topic {
-            let cft = cft
-                .upgrade()
-                .ok_or(DdsError::Error("ContentFilteredTopic is deleted".to_string()))?;
-            if cft.is_filter_enabled()? {
-                (Some(cft.get_parsed_expression()?), cft.get_expression_parameters()?)
-            } else {
-                (None, Vec::new())
-            }
-        } else {
-            (None, Vec::new())
-        };
-
         log::debug!("Processing {} changes, need {} samples", changes.len(), remaining_samples);
 
         // Get instance_infos once outside the loop to avoid repeated lock acquisition and cloning
@@ -2990,19 +2949,8 @@ impl<Foo: DdsType> DataReader<Foo> {
                         }
                         log::trace!("Change {} passed QueryCondition", idx);
                     }
-                    if let Some(cft_expr) = &cft_expression {
-                        if !cft_expr.evaluate(&data_sample.data()?, &cft_parameters)? {
-                            log::trace!(
-                                "Skipping change {}: ContentFilteredTopic expression failed",
-                                idx
-                            );
-                            // Filtered-out samples should not remain in reader history,
-                            // otherwise later filter broadening/disable can replay stale data.
-                            self.remove_change(change.clone())?;
-                            continue;
-                        }
-                        log::trace!("Change {} passed ContentFilteredTopic", idx);
-                    }
+                    // ContentFilteredTopic is applied on the receive path, so non-matching
+                    // samples are never in the cache here.
                     // self.mark_instance_as_viewed(change.instance_handle());
                     if take {
                         self.remove_change(change.clone())?;
@@ -3302,15 +3250,22 @@ impl<Foo: DdsType> DataReader<Foo> {
         &self,
         previous_handle: InstanceHandle,
     ) -> DdsResult<InstanceHandle> {
-        // 1. Collect all available instance handles
-        let available_handles = self.get_available_instance_handles()?;
+        // 1. Candidate instances: those with available changes, plus those carrying a
+        // pending synthetic NOT_ALIVE_NO_WRITERS notification whose cache is already empty.
+        let mut handles: std::collections::HashSet<InstanceHandle> =
+            self.get_available_instance_handles()?.into_iter().collect();
+        for (instance_handle, info) in self.get_instance_infos()? {
+            if info.pending_notification {
+                handles.insert(instance_handle);
+            }
+        }
 
-        if available_handles.is_empty() {
+        if handles.is_empty() {
             return Ok(InstanceHandle::NIL);
         }
 
         // 2. Sort instance handles
-        let mut sorted_handles = available_handles;
+        let mut sorted_handles: Vec<InstanceHandle> = handles.into_iter().collect();
         sorted_handles.sort();
 
         // log::debug!("find_next_instance_handle: previous_handle={:?}, sorted_handles={:?}",
@@ -3323,21 +3278,47 @@ impl<Foo: DdsType> DataReader<Foo> {
             return Ok(first);
         }
 
-        // 4. Find the instance after previous_handle
-        let mut found_previous = false;
+        // 4. Return the smallest available handle strictly greater than previous_handle
         for handle in sorted_handles {
-            if found_previous {
-                // log::debug!("Found next instance after {:?}: {:?}", previous_handle, handle);
+            if handle > previous_handle {
                 return Ok(handle);
-            }
-            if handle == previous_handle {
-                found_previous = true;
             }
         }
 
-        // 5. Return NIL if no next instance
-        // log::debug!("No next instance found after {:?}, returning NIL", previous_handle);
+        // 5. No greater handle remains: the iteration is finished.
         Ok(InstanceHandle::NIL)
+    }
+
+    // True if the change should be kept for this reader's ContentFilteredTopic.
+    // No CFT, a disabled filter, or non-Alive (key-only) samples always pass.
+    pub(crate) fn passes_content_filter(&self, change: &CacheChange) -> DdsResult<bool> {
+        let cft = match &self.content_filtered_topic {
+            Some(weak) => match weak.upgrade() {
+                Some(cft) => cft,
+                None => return Ok(true),
+            },
+            None => return Ok(true),
+        };
+        if !cft.is_filter_enabled()? {
+            return Ok(true);
+        }
+        if !matches!(change.kind(), ChangeKind::Alive | ChangeKind::AliveFiltered) {
+            return Ok(true);
+        }
+        let expr = cft.get_parsed_expression()?;
+        let parameters = cft.get_expression_parameters()?;
+        let serialized_data = change.data_bytes();
+        let typed = match self.type_support.deserialize(&serialized_data, None) {
+            Ok(deserialized) => match deserialized.downcast::<Foo>() {
+                Ok(typed) => typed,
+                Err(_) => return Ok(true),
+            },
+            Err(_) => return Ok(true),
+        };
+        match expr.evaluate(&*typed, &parameters) {
+            Ok(false) => Ok(false),
+            _ => Ok(true),
+        }
     }
 
     fn get_available_instance_handles(&self) -> DdsResult<Vec<InstanceHandle>> {
@@ -5643,6 +5624,248 @@ pub(crate) mod tests {
 
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), DdsError::NoData);
+    }
+
+    // take_next_instance must advance past an instance whose samples were already
+    // taken, using the returned handle as previous_handle even though it is gone from the cache.
+    #[test]
+    fn test_take_next_instance_advances_past_taken_handle() {
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic = participant
+            .create_topic::<HelloWorldWithKey>(
+                "HelloWorldWithKeyAdvance",
+                "HelloWorldWithKeyType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let writer = publisher
+            .create_datawriter::<HelloWorldWithKey>(&topic, writer_qos, None, StatusMask::default())
+            .unwrap();
+
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
+        let read_listener = SubKeyListener { counter_sender };
+        let data_reader = subscriber
+            .create_datareader::<HelloWorldWithKey>(
+                &topic,
+                reader_qos,
+                Some(Arc::new(read_listener)),
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let condition = writer.get_statuscondition().unwrap().clone();
+        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
+        let wait_set = WaitSet::new();
+        wait_set.attach_condition(condition.clone()).unwrap();
+        wait_set.wait(Duration::infinite()).unwrap();
+        writer.get_publication_matched_status().unwrap();
+        wait_set.detach_condition(condition).unwrap();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
+        condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
+        wait_set.attach_condition(condition.clone()).unwrap();
+        wait_set.wait(Duration::infinite()).unwrap();
+        data_reader.get_subscription_matched_status().unwrap();
+        wait_set.detach_condition(condition).unwrap();
+
+        // Two distinct instances (keys 0 and 1), one sample each.
+        let data_a = HelloWorldWithKey { index: 0, message: "A".to_string() };
+        let data_b = HelloWorldWithKey { index: 1, message: "B".to_string() };
+        let handle_a = writer.register_instance(&data_a).unwrap();
+        let handle_b = writer.register_instance(&data_b).unwrap();
+        writer.write(&data_a, handle_a).unwrap();
+        writer.write(&data_b, handle_b).unwrap();
+
+        let mut count = 0;
+        while counter_receiver.recv().is_ok() {
+            count += 1;
+            if count == 2 {
+                break;
+            }
+        }
+
+        // Take the first (smallest-handle) instance; capture its handle, then it is removed.
+        let first = data_reader
+            .take_next_instance(
+                10,
+                InstanceHandle::NIL,
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        let first_handle = first[0].sample_info().instance_handle;
+        let first_index = first[0].data().unwrap().index;
+
+        // Advance with the now-vanished handle: must return the OTHER instance, not NoData.
+        let second = data_reader
+            .take_next_instance(
+                10,
+                first_handle,
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+            .unwrap();
+        assert_eq!(second.len(), 1);
+        let second_index = second[0].data().unwrap().index;
+
+        assert_ne!(first_index, second_index);
+        assert!(first_index == 0 || first_index == 1);
+        assert!(second_index == 0 || second_index == 1);
+    }
+
+    #[test]
+    fn test_take_next_instance_surfaces_no_writers_after_writer_deleted() {
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic = participant
+            .create_topic::<HelloWorldWithKey>(
+                "HelloWorldWithKeyNoWriters",
+                "HelloWorldWithKeyType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let writer = publisher
+            .create_datawriter::<HelloWorldWithKey>(&topic, writer_qos, None, StatusMask::default())
+            .unwrap();
+
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
+        let read_listener = SubKeyListener { counter_sender };
+        let data_reader = subscriber
+            .create_datareader::<HelloWorldWithKey>(
+                &topic,
+                reader_qos,
+                Some(Arc::new(read_listener)),
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let condition = writer.get_statuscondition().unwrap().clone();
+        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
+        let wait_set = WaitSet::new();
+        wait_set.attach_condition(condition.clone()).unwrap();
+        wait_set.wait(Duration::infinite()).unwrap();
+        writer.get_publication_matched_status().unwrap();
+        wait_set.detach_condition(condition).unwrap();
+        let sub_condition = data_reader.get_statuscondition().unwrap().clone();
+        sub_condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
+        wait_set.attach_condition(sub_condition.clone()).unwrap();
+        wait_set.wait(Duration::infinite()).unwrap();
+        data_reader.get_subscription_matched_status().unwrap();
+        wait_set.detach_condition(sub_condition).unwrap();
+
+        // One sample for a single instance, then drain it so its cache is empty.
+        let data = HelloWorldWithKey { index: 0, message: "A".to_string() };
+        let handle = writer.register_instance(&data).unwrap();
+        writer.write(&data, handle).unwrap();
+        counter_receiver.recv().unwrap();
+
+        let alive = data_reader
+            .take_next_instance(
+                10,
+                InstanceHandle::NIL,
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+            .unwrap();
+        assert_eq!(alive.len(), 1);
+        assert!(alive[0].sample_info().valid_data);
+
+        // Delete the writer and wait for the reader to process the departure. The reader sets the
+        // instance to NOT_ALIVE_NO_WRITERS while handling LIVELINESS_CHANGED, before that status
+        // wakes the wait set, so the synthetic notification is set once wait returns.
+        let liveliness = data_reader.get_statuscondition().unwrap().clone();
+        liveliness.set_enabled_statuses(StatusMask::LIVELINESS_CHANGED).unwrap();
+        wait_set.attach_condition(liveliness.clone()).unwrap();
+        publisher.delete_datawriter(writer).unwrap();
+        wait_set.wait(Duration::infinite()).unwrap();
+        wait_set.detach_condition(liveliness).unwrap();
+
+        // The instance's cache is empty, so NO_WRITERS only exists as a synthetic pending sample.
+        let no_writers = data_reader
+            .take_next_instance(
+                10,
+                InstanceHandle::NIL,
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+            .unwrap();
+        assert_eq!(no_writers.len(), 1);
+        let info = no_writers[0].sample_info();
+        assert!(!info.valid_data);
+        assert_eq!(info.instance_state, InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE);
     }
 
     #[test]
