@@ -1,4 +1,5 @@
 /// Internal representation (IR) for resolved IDL types.
+use std::collections::HashSet;
 
 /// Fully resolved type information.
 #[derive(Debug, Clone)]
@@ -26,7 +27,7 @@ pub enum ResolvedType {
     Bitmask(String),
 }
 
-/// Constant value for @default annotation.
+/// Constant value for @default annotation and `const` declarations.
 #[derive(Debug, Clone)]
 pub enum ConstValue {
     Int(i64),
@@ -34,6 +35,15 @@ pub enum ConstValue {
     Str(String),
     Bool(bool),
     Ident(String),
+}
+
+/// A resolved `const` declaration.
+#[derive(Debug, Clone)]
+pub struct ResolvedConst {
+    pub name: String,
+    pub qualified_name: String,
+    pub resolved_type: ResolvedType,
+    pub value: ConstValue,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,4 +210,55 @@ pub struct IdlModel {
     pub unions: Vec<ResolvedUnion>,
     pub interfaces: Vec<ResolvedInterface>,
     pub exceptions: Vec<ResolvedException>,
+    pub constants: Vec<ResolvedConst>,
+}
+
+impl IdlModel {
+    /// Iterate the qualified name of every named type in the model.
+    pub fn qualified_names(&self) -> impl Iterator<Item = &str> {
+        self.structs
+            .iter()
+            .map(|s| s.qualified_name.as_str())
+            .chain(self.enums.iter().map(|e| e.qualified_name.as_str()))
+            .chain(self.bitmasks.iter().map(|b| b.qualified_name.as_str()))
+            .chain(self.bitsets.iter().map(|b| b.qualified_name.as_str()))
+            .chain(self.unions.iter().map(|u| u.qualified_name.as_str()))
+            .chain(self.exceptions.iter().map(|e| e.qualified_name.as_str()))
+    }
+
+    /// Drop every named type and constant whose qualified name is not in `keep`.
+    /// Used for resolve-only `#include` handling: types pulled in from included
+    /// files populate the resolver symbol table but are not emitted.
+    pub fn retain_qualified(&mut self, keep: &HashSet<String>) {
+        self.structs.retain(|s| keep.contains(&s.qualified_name));
+        self.enums.retain(|e| keep.contains(&e.qualified_name));
+        self.bitmasks.retain(|b| keep.contains(&b.qualified_name));
+        self.bitsets.retain(|b| keep.contains(&b.qualified_name));
+        self.unions.retain(|u| keep.contains(&u.qualified_name));
+        self.interfaces.retain(|i| keep.contains(&i.qualified_name));
+        self.exceptions.retain(|e| keep.contains(&e.qualified_name));
+        self.constants.retain(|c| keep.contains(&c.qualified_name));
+    }
+
+    /// Rewrite the qualified name of every named type through `f`.
+    pub fn map_qualified_names(&mut self, f: impl Fn(&str) -> String) {
+        for s in &mut self.structs {
+            s.qualified_name = f(&s.qualified_name);
+        }
+        for e in &mut self.enums {
+            e.qualified_name = f(&e.qualified_name);
+        }
+        for b in &mut self.bitmasks {
+            b.qualified_name = f(&b.qualified_name);
+        }
+        for b in &mut self.bitsets {
+            b.qualified_name = f(&b.qualified_name);
+        }
+        for u in &mut self.unions {
+            u.qualified_name = f(&u.qualified_name);
+        }
+        for ex in &mut self.exceptions {
+            ex.qualified_name = f(&ex.qualified_name);
+        }
+    }
 }
