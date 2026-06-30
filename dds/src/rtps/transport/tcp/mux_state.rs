@@ -379,7 +379,6 @@ impl MuxState {
         conn_id
     }
 
-
     // ── connection / peer cleanup ────────────────────────────────────────────
 
     /// Update peer_connections bookkeeping then remove the connection entry.

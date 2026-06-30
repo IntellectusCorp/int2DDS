@@ -48,6 +48,12 @@ pub enum TransportErrorCode {
     /// PORT_BIND was rejected (invalid/expired cookie) or no PORT_BIND_ACK received.
     TcpHandshakeBindFailed = 722,
 
+    // ── 730: TCP connection maintenance / monitoring ────────────────────
+    /// Send skipped because the peer is in exponential reconnect backoff (its
+    /// recent connect attempts keep failing). A deferral, not a hard failure —
+    /// the triggering connect failure is reported separately.
+    TcpReconnectBackoff = 730,
+
     // ── 740: TCP framing ────────────────────────────────────────────────
     /// Frame magic bytes were not "INT2".
     TcpFrameInvalidMagic = 740,
@@ -106,6 +112,8 @@ impl TransportErrorCode {
             | Self::TcpHandshakeReserveFailed
             | Self::TcpHandshakeBindFailed => io::ErrorKind::InvalidData,
 
+            Self::TcpReconnectBackoff => io::ErrorKind::WouldBlock,
+
             Self::TcpFrameInvalidMagic | Self::TcpFrameTooLarge | Self::TcpFrameInvalidLength => {
                 io::ErrorKind::InvalidData
             }
@@ -137,6 +145,8 @@ impl TransportErrorCode {
             Self::TcpHandshakeHelloFailed => "TCP PEER_HELLO handshake failed",
             Self::TcpHandshakeReserveFailed => "TCP PORT_RESERVE handshake failed",
             Self::TcpHandshakeBindFailed => "TCP PORT_BIND handshake failed",
+
+            Self::TcpReconnectBackoff => "peer in reconnect backoff",
 
             Self::TcpFrameInvalidMagic => "TCP frame invalid magic",
             Self::TcpFrameTooLarge => "TCP frame too large",
