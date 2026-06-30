@@ -411,6 +411,26 @@ impl Subscriber {
         self.create_datareader::<Foo>(topic_description, qos, listener, mask)
     }
 
+    /// Creates a `DataReader` from a `<domain_participant_library>` declaration at `path`
+    /// (`ParticipantLibrary::Participant::Subscriber::Reader`). The topic (name, type, QoS)
+    /// it follows and the reader QoS all come from the XML; only the Rust type `Foo` is in code.
+    pub fn create_datareader_from_config<Foo: DdsType>(
+        &self,
+        path: &str,
+        listener: Option<Arc<dyn DataReaderListener<Foo = Foo>>>,
+        mask: StatusMask,
+    ) -> DdsResult<DataReader<Foo>> {
+        let resolved = DomainParticipantFactory::get_instance().resolve_datareader(path)?;
+        let topic = self.get_participant()?.create_topic::<Foo>(
+            &resolved.topic.topic_name,
+            &resolved.topic.type_name,
+            resolved.topic.topic_qos,
+            None,
+            mask,
+        )?;
+        self.create_datareader::<Foo>(&topic, resolved.qos, listener, mask)
+    }
+
     /// Creates a `DataReader` for `DynamicData` using a `DynamicTypeSupport`.
     ///
     /// This method is used when the data type is not known at compile time.
