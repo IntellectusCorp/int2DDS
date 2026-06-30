@@ -15,8 +15,8 @@ use std::time::Duration;
 use crate::dcps::infrastructure::qos_policy::{
     PropertyQosPolicy, PROP_INITIAL_PEERS, PROP_MULTICAST_TTL, PROP_TCP_ASYNC_WORKERS,
     PROP_TCP_BIND_PORT, PROP_TCP_BIND_TIMEOUT_MS, PROP_TCP_CONNECT_TIMEOUT_MS,
-    PROP_TCP_INCOMING_IDLE_TIMEOUT_MS, PROP_TCP_KEEPALIVE_INTERVAL_MS,
-    PROP_TCP_KEEPALIVE_MAX_MISSES, PROP_TCP_KEEPALIVE_TIMEOUT_MS, PROP_TCP_NODELAY,
+    PROP_TCP_KEEPALIVE_INTERVAL_MS, PROP_TCP_KEEPALIVE_MAX_MISSES, PROP_TCP_KEEPALIVE_TIMEOUT_MS,
+    PROP_TCP_NODELAY,
     PROP_TCP_PUBLIC_ADDRESS, PROP_TCP_SO_RCVBUF, PROP_TCP_SO_SNDBUF, PROP_TCP_UNACKED_TIMEOUT_MS,
     PROP_TRANSPORT,
 };
@@ -84,7 +84,6 @@ pub(crate) struct TcpConfig {
     pub keepalive_interval: Duration,
     pub keepalive_timeout: Duration,
     pub keepalive_max_misses: u32,
-    pub incoming_idle_timeout: Duration,
     pub so_rcvbuf: Option<usize>,
     pub so_sndbuf: Option<usize>,
     pub async_workers: Option<usize>,
@@ -119,7 +118,6 @@ impl TransportConfig for TcpConfig {
             keepalive_timeout: ms(PROP_TCP_KEEPALIVE_TIMEOUT_MS, 5_000),
             keepalive_max_misses: prop_parse::<u32>(property, PROP_TCP_KEEPALIVE_MAX_MISSES)
                 .unwrap_or(3),
-            incoming_idle_timeout: ms(PROP_TCP_INCOMING_IDLE_TIMEOUT_MS, 60_000),
             so_rcvbuf: prop_parse::<usize>(property, PROP_TCP_SO_RCVBUF),
             so_sndbuf: prop_parse::<usize>(property, PROP_TCP_SO_SNDBUF),
             async_workers: prop_parse::<usize>(property, PROP_TCP_ASYNC_WORKERS),
@@ -210,7 +208,6 @@ mod tests {
         assert_eq!(cfg.keepalive_interval, Duration::from_millis(10_000));
         assert_eq!(cfg.keepalive_timeout, Duration::from_millis(5_000));
         assert_eq!(cfg.keepalive_max_misses, 3);
-        assert_eq!(cfg.incoming_idle_timeout, Duration::from_millis(60_000));
         assert_eq!(cfg.so_rcvbuf, None);
         assert_eq!(cfg.so_sndbuf, None);
         assert_eq!(cfg.async_workers, None);

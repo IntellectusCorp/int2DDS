@@ -20,7 +20,7 @@ use crate::rtps::common::locator::Locator;
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::plugin::{IncomingMessage, MessageSource, SendTarget, TransportPlugin};
 use crate::rtps::transport::port_manager::PortManager;
-use crate::rtps::transport::tcp::mux_state::TcpSocketTuning;
+use crate::rtps::transport::tcp::mux_state::{KeepaliveParams, TcpSocketTuning};
 use crate::rtps::transport::tcp::tcp_mux_listener::TcpMuxListener;
 use crate::rtps::transport::tcp::tcp_sender::TcpSender;
 use crate::rtps::transport::tcp::tls::TlsConfig;
@@ -143,12 +143,18 @@ impl TcpTransportPlugin {
                 })?,
         );
 
-        let idle_timeout = tcp_config.incoming_idle_timeout;
         let tuning = TcpSocketTuning {
             nodelay: tcp_config.nodelay,
             so_rcvbuf: tcp_config.so_rcvbuf,
             so_sndbuf: tcp_config.so_sndbuf,
             unacked_timeout: tcp_config.unacked_timeout,
+            // OS keepalive reuses the keepalive config: idle time before the
+            // first probe, the probe interval, and the probe count tolerated.
+            keepalive: Some(KeepaliveParams {
+                time: tcp_config.keepalive_interval,
+                interval: tcp_config.keepalive_timeout,
+                retries: tcp_config.keepalive_max_misses,
+            }),
         };
 
         // Build listener + sender inside a runtime context — both
@@ -162,7 +168,6 @@ impl TcpTransportPlugin {
                 discovery_tx,
                 user_data_tx,
                 tls_config.clone(),
-                idle_timeout,
                 tuning,
             )
             .map_err(|e| {

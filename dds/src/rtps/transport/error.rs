@@ -84,8 +84,6 @@ pub enum TransportErrorCode {
     TcpReadError = 771,
     /// Failed to send a control response to a connected peer.
     TcpControlSendFailed = 772,
-    /// Incoming connection pruned due to idle timeout.
-    TcpConnectionIdlePruned = 773,
     /// Orphan data connections pruned after control connection loss.
     TcpOrphanPruned = 774,
 
@@ -120,9 +118,8 @@ impl TransportErrorCode {
             | Self::TcpHandshakeBindFailed => io::ErrorKind::InvalidData,
 
             Self::TcpKeepaliveTimeout | Self::TcpIdleTimeout => io::ErrorKind::TimedOut,
-            // BrokenPipe so the RTPS layer maps any write failure (incl. the OS
-            // unacked-data timeout) to PeerDisconnected — see user_logic send path.
-            Self::TcpSendFailed => io::ErrorKind::BrokenPipe,
+
+            Self::TcpSendFailed => io::ErrorKind::Other,
 
             Self::TcpFrameInvalidMagic | Self::TcpFrameTooLarge | Self::TcpFrameInvalidLength => {
                 io::ErrorKind::InvalidData
@@ -137,7 +134,6 @@ impl TransportErrorCode {
             Self::TcpAcceptFailed => io::ErrorKind::ConnectionAborted,
             Self::TcpReadError => io::ErrorKind::ConnectionReset,
             Self::TcpControlSendFailed => io::ErrorKind::BrokenPipe,
-            Self::TcpConnectionIdlePruned => io::ErrorKind::TimedOut,
             Self::TcpOrphanPruned => io::ErrorKind::TimedOut,
 
             Self::TlsMissingProperty => io::ErrorKind::InvalidInput,
@@ -175,7 +171,6 @@ impl TransportErrorCode {
             Self::TcpAcceptFailed => "TCP accept failed",
             Self::TcpReadError => "TCP read error on accepted connection",
             Self::TcpControlSendFailed => "TCP control response send failed",
-            Self::TcpConnectionIdlePruned => "TCP idle connection pruned",
             Self::TcpOrphanPruned => "TCP orphan data connections pruned",
 
             Self::TlsMissingProperty => "TLS required property missing",

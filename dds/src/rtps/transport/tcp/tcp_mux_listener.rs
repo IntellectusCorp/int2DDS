@@ -7,15 +7,14 @@
 //! connection so a slow TLS handshake does not stall new accepts; each
 //! connection then gets its own conn_actor pair via `spawn_conn_actor`.
 
+use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::{io, time::Duration};
 
 use log::{debug, error, info, warn};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
 use crate::rtps::transport::tcp::conn_actor::{inbox_capacity, spawn_conn_actor};
@@ -25,14 +24,9 @@ use crate::rtps::{
     common::guid::GuidPrefix,
     transport::{
         plugin::IncomingMessage,
-        tcp::mux_state::{apply_unacked_timeout, MuxState, TcpSocketTuning},
+        tcp::mux_state::{apply_keepalive, apply_unacked_timeout, MuxState, TcpSocketTuning},
     },
 };
-
-/// How often the prune ticker scans for idle connections. Independent of the
-/// idle timeout itself — small enough that a freshly-timed-out connection
-/// gets cleaned up within ~500 ms.
-const PRUNE_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
 /// TCP multiplexed listener — owns the listener-side tasks and the shared
 /// `MuxState`.
@@ -48,7 +42,7 @@ pub(crate) struct TcpMuxListener {
 
 impl TcpMuxListener {
     /// Bind the listen socket and spawn all listener-side tasks on the
-    /// current tokio runtime: accept loop, idle prune.
+    /// current tokio runtime: accept loop.
     ///
     /// Must be called from within a tokio runtime context — the spawn calls
     /// require `Handle::current()` to be valid. From sync code, wrap the call
@@ -64,7 +58,6 @@ impl TcpMuxListener {
         discovery_tx: crossbeam_channel::Sender<IncomingMessage>,
         user_data_tx: crossbeam_channel::Sender<IncomingMessage>,
         tls_config: Option<Arc<TlsConfig>>,
-        idle_timeout: Duration,
         tuning: TcpSocketTuning,
     ) -> io::Result<Self> {
         let std_listener = bind_listener(port)?;
@@ -80,16 +73,11 @@ impl TcpMuxListener {
         ));
         let cancel = CancellationToken::new();
 
-        let mut handles = Vec::with_capacity(2);
+        let mut handles = Vec::with_capacity(1);
         handles.push(tokio::spawn(accept_loop_task(
             std_listener,
             shared.clone(),
             tls_config,
-            cancel.clone(),
-        )));
-        handles.push(tokio::spawn(prune_interval_task(
-            shared.clone(),
-            idle_timeout,
             cancel.clone(),
         )));
 
@@ -185,6 +173,7 @@ async fn accept_loop_task(
                             let _ = socket2::SockRef::from(&tcp).set_send_buffer_size(sz);
                         }
                         apply_unacked_timeout(&tcp, shared.tuning.unacked_timeout);
+                        apply_keepalive(&tcp, shared.tuning.keepalive);
 
                         // Spawn off — do NOT await handshake in the accept loop.
                         let shared = shared.clone();
@@ -256,26 +245,6 @@ async fn handshake_and_register_task(
     let _ = spawn_conn_actor(stream, conn_id, shared.clone(), conn_cancel, tx, rx);
 }
 
-/// Periodic ticker: cancel connections whose `last_activity` has exceeded
-/// `timeout`. Wakes every `PRUNE_CHECK_INTERVAL` and delegates to
-/// `MuxState::prune_idle_connections`.
-async fn prune_interval_task(shared: Arc<MuxState>, timeout: Duration, cancel: CancellationToken) {
-    let mut ticker = tokio::time::interval(PRUNE_CHECK_INTERVAL);
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-    loop {
-        tokio::select! {
-            _ = ticker.tick() => {
-                let n = shared.prune_idle_connections(timeout);
-                if n > 0 {
-                    debug!("pruned {} idle connections", n);
-                }
-            }
-            _ = cancel.cancelled() => break,
-        }
-    }
-}
-
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -283,12 +252,10 @@ mod tests {
     use super::*;
     use crate::rtps::transport::tcp::framing::write_framed_message;
     use crate::rtps::transport::tcp::mux_state::ConnectionState;
-    use crate::rtps::transport::tcp::protocol::{
-        ControlMsg, ERR_CODE_IDLE_TIMEOUT, MSG_ERROR, MSG_PEER_HELLO_ACK, OP_IDLE_TIMEOUT,
-    };
+    use crate::rtps::transport::tcp::protocol::{ControlMsg, MSG_PEER_HELLO_ACK};
     use crossbeam_channel::bounded;
     use socket2::{Domain, SockAddr, Socket, Type};
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::oneshot;
 
@@ -305,8 +272,7 @@ mod tests {
         (d_tx, d_rx, u_tx, u_rx)
     }
 
-    /// Helper: standard listener with no TLS, generous idle timeout so tests
-    /// can ignore the prune ticker unless they explicitly exercise it.
+    /// Helper: standard listener with no TLS.
     fn make_listener() -> TcpMuxListener {
         let (d_tx, _d_rx, u_tx, _u_rx) = make_channels();
         TcpMuxListener::bind_and_spawn(
@@ -317,7 +283,6 @@ mod tests {
             d_tx,
             u_tx,
             None,
-            Duration::from_secs(60),
             TcpSocketTuning::default(),
         )
         .expect("bind_and_spawn")
@@ -404,131 +369,6 @@ mod tests {
 
         listener.shutdown().await;
         let _ = client.await;
-    }
-
-    // ── idle prune ───────────────────────────────────────────────────────────
-
-    /// A connection whose `last_activity` exceeds the idle timeout is removed
-    /// by the prune ticker.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn prune_removes_idle_connection() {
-        let (d_tx, _, u_tx, _) = make_channels();
-
-        // Very short idle timeout so the test does not have to wait long.
-        let listener = TcpMuxListener::bind_and_spawn(
-            0,
-            0,
-            0,
-            [0u8; 12],
-            d_tx,
-            u_tx,
-            None,
-            Duration::from_millis(50), // idle timeout
-            TcpSocketTuning::default(),
-        )
-        .expect("bind_and_spawn");
-        let port = listener.port();
-
-        let client = tokio::spawn(async move {
-            let _stream = TcpStream::connect(("127.0.0.1", port)).await.expect("client connect");
-            tokio::time::sleep(Duration::from_secs(2)).await;
-        });
-
-        // Wait for the connection to register first.
-        let deadline = Instant::now() + Duration::from_secs(2);
-        assert!(
-            wait_until(deadline, || listener.shared().connection_count() == 1).await,
-            "connection was not registered",
-        );
-
-        // Idle (50ms) + at least one prune cycle (500ms) + slack.
-        let deadline = Instant::now() + Duration::from_secs(3);
-        assert!(
-            wait_until(deadline, || listener.shared().connection_count() == 0).await,
-            "idle connection was not pruned within deadline",
-        );
-
-        listener.shutdown().await;
-        let _ = client.await;
-    }
-
-    /// A fresh connection (last_activity recent) survives multiple prune
-    /// ticks unchanged — counterpart to `prune_removes_idle_connection`.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn prune_keeps_fresh_connections() {
-        // Default fixture uses 60s idle timeout, so fresh connections are safe.
-        let listener = make_listener();
-        let port = listener.port();
-
-        let client = tokio::spawn(async move {
-            let _stream = TcpStream::connect(("127.0.0.1", port)).await.expect("client connect");
-            tokio::time::sleep(Duration::from_secs(2)).await;
-        });
-
-        let shared = listener.shared().clone();
-        let deadline = Instant::now() + Duration::from_secs(2);
-        assert!(
-            wait_until(deadline, || shared.connection_count() == 1).await,
-            "connection was not registered",
-        );
-
-        // Cover ~3 prune cycles (500 ms each).
-        tokio::time::sleep(Duration::from_millis(1600)).await;
-        assert_eq!(shared.connection_count(), 1, "fresh connection got pruned");
-
-        listener.shutdown().await;
-        let _ = client.await;
-    }
-
-    /// Pruning an idle connection pushes an `ERROR(IDLE_TIMEOUT)` control
-    /// frame to the peer before tearing the connection down.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn prune_emits_idle_timeout_error_to_peer() {
-        let (d_tx, _, u_tx, _) = make_channels();
-        let listener = TcpMuxListener::bind_and_spawn(
-            0,
-            0,
-            0,
-            [0u8; 12],
-            d_tx,
-            u_tx,
-            None,
-            Duration::from_millis(50),
-            TcpSocketTuning::default(),
-        )
-        .expect("bind_and_spawn");
-        let port = listener.port();
-
-        // Client connects and waits for the listener to send ERROR(IDLE_TIMEOUT).
-        let client = tokio::spawn(async move {
-            let mut stream = TcpStream::connect(("127.0.0.1", port)).await.expect("client connect");
-
-            let mut len_buf = [0u8; 4];
-            tokio::time::timeout(Duration::from_secs(3), stream.read_exact(&mut len_buf))
-                .await
-                .expect("read length timed out")
-                .expect("read length");
-            let len = u32::from_be_bytes(len_buf) as usize;
-
-            let mut data = vec![0u8; len];
-            tokio::time::timeout(Duration::from_secs(1), stream.read_exact(&mut data))
-                .await
-                .expect("read payload timed out")
-                .expect("read payload");
-            data
-        });
-
-        let received = client.await.expect("client task");
-
-        // Frame on the wire: [4B length][4B "INT2"][payload].
-        assert_eq!(&received[..4], b"INT2", "frame magic mismatch");
-        let payload = &received[4..];
-        assert_eq!(payload[0], MSG_ERROR);
-        assert_eq!(payload[1], OP_IDLE_TIMEOUT);
-        let code = u16::from_be_bytes([payload[2], payload[3]]);
-        assert_eq!(code, ERR_CODE_IDLE_TIMEOUT);
-
-        listener.shutdown().await;
     }
 
     // ── handshake state machine ──────────────────────────────────────────────

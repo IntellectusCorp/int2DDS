@@ -12,14 +12,13 @@
 //! reader task routes back via `MuxState::dispatch`.
 
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use std::{io, mem};
 
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
-use log::{debug, info, warn};
+use log::{debug, warn};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, Mutex as TokioMutex, Notify};
 use tokio::task::JoinHandle;
@@ -31,14 +30,14 @@ use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::tcp::conn_actor::{inbox_capacity, spawn_conn_actor, SharedWriteHalf};
 use crate::rtps::transport::tcp::framing::{read_framed_message, write_framed_message};
-use crate::rtps::transport::tcp::mux_state::{apply_unacked_timeout, MuxState};
+use crate::rtps::transport::tcp::mux_state::{apply_keepalive, apply_unacked_timeout, MuxState};
 use crate::rtps::transport::tcp::protocol::ControlMsg;
 use crate::rtps::transport::tcp::stream::{wrap_plain, AsyncConnStream};
 use crate::rtps::transport::tcp::tls::{connect_tls_async, TlsConfig};
 use crate::rtps::transport::TcpConfig;
 
 /// Logical port 0 = control connection — carries PEER_HELLO,
-/// PORT_RESERVE, KEEPALIVE; never RTPS data.
+/// PORT_RESERVE; never RTPS data.
 pub(crate) const CONTROL_LOGICAL_PORT: u16 = 0;
 
 const ORPHAN_PRUNE_INTERVAL: Duration = Duration::from_millis(500);
@@ -58,6 +57,10 @@ struct OutboundEntry {
     /// `runtime.block_on(write_half.lock().await)` and perform the wire
     /// `writev` inline on the calling thread.
     write_half: SharedWriteHalf,
+    /// Cancel token for this connection's actor pair (the same token stored in
+    /// `MuxState::ConnectionEntry::cancel`). `evict_connection` fires it to tear
+    /// down just this connection on a write failure, without touching the peer.
+    cancel: CancellationToken,
     control: Option<ControlExtras>,
 }
 
@@ -119,9 +122,6 @@ pub(crate) struct TcpSender {
 
     connect_timeout: Duration,
     handshake_timeout: Duration,
-    keepalive_interval: Duration,
-    keepalive_timeout: Duration,
-    max_missed_keepalives: u32,
 
     tls_config: Option<Arc<TlsConfig>>,
     shared: Arc<MuxState>,
@@ -147,8 +147,8 @@ pub(crate) struct TcpSender {
 }
 
 impl TcpSender {
-    /// Build a sender and spawn its long-running tasks (keepalive, orphan
-    /// prune). Must be called inside a tokio runtime context.
+    /// Build a sender and spawn its long-running tasks (orphan prune).
+    /// Must be called inside a tokio runtime context.
     pub(crate) fn new(
         domain_id: u32,
         participant_id: u32,
@@ -172,9 +172,6 @@ impl TcpSender {
             local_guid_prefix,
             connect_timeout: tcp_config.connect_timeout,
             handshake_timeout: tcp_config.bind_timeout,
-            keepalive_interval: tcp_config.keepalive_interval,
-            keepalive_timeout: tcp_config.keepalive_timeout,
-            max_missed_keepalives: tcp_config.keepalive_max_misses,
             tls_config,
             shared,
             connections: Arc::new(DashMap::new()),
@@ -189,9 +186,6 @@ impl TcpSender {
         // explicitly so this is robust even if `new()` is somehow called
         // from a context where `tokio::spawn` would not be valid.
         let mut handles = sender.task_handles.lock().expect("task_handles lock");
-        handles.push(
-            runtime_handle.spawn(keepalive_interval_task(Arc::clone(&sender), cancel.clone())),
-        );
         handles.push(
             runtime_handle.spawn(orphan_prune_interval_task(Arc::clone(&sender), cancel.clone())),
         );
@@ -241,24 +235,17 @@ impl TcpSender {
         })
     }
 
-    /// Tear down every cached connection to `addr` (control + data) and
-    /// notify the dead-peer channel. Used on keepalive failure / explicit
-    /// peer eviction.
-    pub(crate) fn disconnect_peer(&self, addr: SocketAddr) {
-        // 1. Cancel + drop all sender-cached entries for this addr.
-        self.connections.retain(|(peer_addr, _), _entry| *peer_addr != addr);
-
-        // 2. Tear down the peer group on the shared mux state — this also
-        //    cancels the corresponding conn_actors via their tokens.
-        let synthetic_guid = addr_to_guid(addr);
-        self.shared.remove_peer(synthetic_guid);
-
-        // 3. Notify upper layer.
-        if let Some(tx) = self.dead_peer_tx.get() {
-            let _ = tx.try_send(addr);
+    /// Tear down a single cached connection `(addr, logical_port)` and its
+    /// actor pair, leaving every other connection to the peer untouched.
+    ///
+    /// Used on a write failure: the write proves only that *this* connection is
+    /// unusable, not that the peer is gone. Firing the cancel token wakes the
+    /// conn_actor, whose reader exit calls `MuxState::remove_connection` to drop
+    /// the shared-state entry. Peer liveness / unmatch stays with the DDS layer.
+    fn evict_connection(&self, addr: SocketAddr, logical_port: u16) {
+        if let Some((_, entry)) = self.connections.remove(&(addr, logical_port)) {
+            entry.cancel.cancel();
         }
-
-        info!("TcpSender: Disconnected peer {:?}", addr);
     }
 
     /// Graceful shutdown — cancels lifecycle tasks then awaits them. Does
@@ -337,7 +324,10 @@ impl TcpSender {
                     "TcpSender: write to {:?} (port={}) failed: {:?} — evicting connection",
                     addr, logical_port, e
                 );
-                self.disconnect_peer(addr);
+                // Connection-only teardown: drop just this connection. The peer
+                // and its other connections survive; the next send re-dials.
+                // Declaring the peer dead is the DDS layer's job (lease).
+                self.evict_connection(addr, logical_port);
                 Err(transport_io_error(
                     TransportErrorCode::TcpSendFailed,
                     format!("write to {addr} (port {logical_port}) failed: {e}"),
@@ -418,22 +408,22 @@ async fn do_connect_control(
     );
 
     // 5. Spawn the actor pair.
-    let write_half =
-        spawn_conn_actor(stream, conn_id, Arc::clone(&sender.shared), conn_cancel, tx.clone(), rx);
+    let write_half = spawn_conn_actor(
+        stream,
+        conn_id,
+        Arc::clone(&sender.shared),
+        conn_cancel.clone(),
+        tx.clone(),
+        rx,
+    );
 
-    // 6. Seed liveness state: send first KEEPALIVE so that the
-    //    interval task's first tick has not fail. (timeout)
-    let _ = tx.try_send(ControlMsg::Keepalive.to_bytes());
-    if let Some(e) = sender.shared.connections.get(&conn_id) {
-        *e.last_keepalive_sent_at.lock().expect("...") = Some(Instant::now());
-    }
-
-    // 7. Cache for future sends + future PORT_RESERVE round-trips.
+    // 6. Cache for future sends + future PORT_RESERVE round-trips.
     sender.connections.insert(
         (addr, CONTROL_LOGICAL_PORT),
         OutboundEntry {
             writer_tx: tx.clone(),
             write_half,
+            cancel: conn_cancel,
             control: Some(ControlExtras { pending_ack, request_lock }),
         },
     );
@@ -476,13 +466,19 @@ async fn do_connect_data(
         tx.clone(),
         conn_cancel.clone(),
     );
-    let write_half =
-        spawn_conn_actor(stream, conn_id, Arc::clone(&sender.shared), conn_cancel, tx.clone(), rx);
+    let write_half = spawn_conn_actor(
+        stream,
+        conn_id,
+        Arc::clone(&sender.shared),
+        conn_cancel.clone(),
+        tx.clone(),
+        rx,
+    );
 
     // 7. Cache.
     sender.connections.insert(
         (addr, logical_port),
-        OutboundEntry { writer_tx: tx.clone(), write_half, control: None },
+        OutboundEntry { writer_tx: tx.clone(), write_half, cancel: conn_cancel, control: None },
     );
 
     debug!(
@@ -595,6 +591,7 @@ async fn open_stream(sender: &Arc<TcpSender>, addr: SocketAddr) -> io::Result<As
         let _ = socket2::SockRef::from(&tcp).set_send_buffer_size(sz);
     }
     apply_unacked_timeout(&tcp, sender.shared.tuning.unacked_timeout);
+    apply_keepalive(&tcp, sender.shared.tuning.keepalive);
 
     // 2. Optional TLS handshake (also timeout-bounded).
     if let Some(cfg) = &sender.tls_config {
@@ -683,99 +680,6 @@ async fn port_bind_handshake(
 
 // ── Lifecycle tasks ──────────────────────────────────────────────────────────
 
-/// Per-tick keepalive cycle on every outbound control connection.
-///
-/// Each tick judges the previous round-trip from `last_keepalive_sent_at`
-/// (set here) and `last_keepalive_ack_at` (set by `mux_state` on
-/// KEEPALIVE_ACK):
-/// - timely (`ack_at >= sent_at` and gap ≤ `keepalive_timeout`) → reset
-///   `missed_keepalives`.
-/// - otherwise → increment it; past `max_missed_keepalives` the peer is
-///   declared dead and torn down via `disconnect_peer`.
-///
-/// Then a fresh KEEPALIVE is pushed and `last_keepalive_sent_at` set to `now`.
-async fn keepalive_interval_task(sender: Arc<TcpSender>, cancel: CancellationToken) {
-    let mut ticker = tokio::time::interval(sender.keepalive_interval);
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-    loop {
-        tokio::select! {
-            _ = ticker.tick() => {
-                let now = Instant::now();
-                let mut dead: Vec<SocketAddr> = Vec::new();
-
-                for entry in sender.shared.connections.iter() {
-                    // Filter to OUTBOUND CONTROL connections only. (skipping DATA conncections)
-                    if entry.pending_ack.is_none() {
-                        continue;
-                    }
-
-                    let key = (entry.remote_addr, CONTROL_LOGICAL_PORT);
-                    if !sender.connections.contains_key(&key) {
-                        continue; // sender cache may have evicted concurrently
-                    }
-
-                    // Read previous cycle's send/ack timestamps from the
-                    // shared ConnectionEntry — mux_state::dispatch updates
-                    // `last_keepalive_ack_at` on KEEPALIVE_ACK.
-                    let sent_at = *entry
-                        .last_keepalive_sent_at
-                        .lock()
-                        .expect("last_keepalive_sent_at lock");
-                    let ack_at = *entry
-                        .last_keepalive_ack_at
-                        .lock()
-                        .expect("last_keepalive_ack_at lock");
-
-                    // Was the previous round-trip timely?
-                    //  - sent_at == None: first-ever tick → no judgment yet
-                    //  - ack_at < sent_at: latest ACK is from an older cycle
-                    //  - gap > timeout: ACK arrived late
-                    let timely = match (sent_at, ack_at) {
-                        (Some(s), Some(a)) => {
-                            a >= s && a.duration_since(s) <= sender.keepalive_timeout
-                        }
-                        _ => false,
-                    };
-
-                    if timely {
-                        entry.missed_keepalives.store(0, Ordering::Relaxed);
-                    } else {
-                        // Previous keepalive went unacked or late.
-                        let new_count = entry
-                            .missed_keepalives
-                            .fetch_add(1, Ordering::Relaxed)
-                            + 1;
-                        if new_count > sender.max_missed_keepalives {
-                            dead.push(entry.remote_addr);
-                            continue; // skip sending the next KEEPALIVE
-                        }
-                    }
-                    // First-ever tick (sent_at None): just send below.
-
-                    // Record send time, then push the KEEPALIVE frame.
-                    *entry
-                        .last_keepalive_sent_at
-                        .lock()
-                        .expect("last_keepalive_sent_at lock") = Some(now);
-                    let _ = entry
-                        .writer_tx
-                        .try_send(ControlMsg::Keepalive.to_bytes());
-                }
-
-                for addr in dead {
-                    warn!(
-                        "TcpSender: peer {:?} missed > {} keepalives — disconnecting",
-                        addr, sender.max_missed_keepalives
-                    );
-                    sender.disconnect_peer(addr);
-                }
-            }
-            _ = cancel.cancelled() => break,
-        }
-    }
-}
-
 /// Drop cache entries whose writer channel is closed (conn_actor exited),
 /// so stale entries don't pile up on dead links.
 async fn orphan_prune_interval_task(sender: Arc<TcpSender>, cancel: CancellationToken) {
@@ -790,19 +694,6 @@ async fn orphan_prune_interval_task(sender: Arc<TcpSender>, cancel: Cancellation
             _ = cancel.cancelled() => break,
         }
     }
-}
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-/// Mirror of `mux_state::addr_to_guid` — same synthetic-guid derivation so
-/// `disconnect_peer` can target the right peer group.
-fn addr_to_guid(addr: SocketAddr) -> GuidPrefix {
-    let mut g = [0u8; 12];
-    if let SocketAddr::V4(v4) = addr {
-        g[0..4].copy_from_slice(&v4.ip().octets());
-        g[4..6].copy_from_slice(&v4.port().to_be_bytes());
-    }
-    g
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -943,7 +834,6 @@ mod tests {
             b_disc_tx,
             b_user_tx,
             None,
-            Duration::from_secs(60),
             TcpSocketTuning::default(),
         )
         .expect("listener bind_and_spawn");
@@ -983,7 +873,6 @@ mod tests {
             b_disc_tx,
             b_user_tx,
             None,
-            Duration::from_secs(60),
             TcpSocketTuning::default(),
         )
         .expect("listener bind_and_spawn");
@@ -1022,9 +911,10 @@ mod tests {
         listener.shutdown().await;
     }
 
-    /// `disconnect_peer` evicts every cached connection for the given address.
+    /// `evict_connection` tears down only the targeted connection, leaving the
+    /// peer's other connections (here, the control connection) in the cache.
     #[tokio::test(flavor = "multi_thread")]
-    async fn disconnect_peer_evicts_cached_entries() {
+    async fn evict_connection_removes_only_that_connection() {
         let (b_disc_tx, b_disc_rx, b_user_tx, _b_user_rx) = make_channels();
         let listener = TcpMuxListener::bind_and_spawn(
             0,
@@ -1034,7 +924,6 @@ mod tests {
             b_disc_tx,
             b_user_tx,
             None,
-            Duration::from_secs(60),
             TcpSocketTuning::default(),
         )
         .expect("listener bind_and_spawn");
@@ -1044,16 +933,21 @@ mod tests {
         let target: SocketAddr = format!("127.0.0.1:{}", b_port).parse().unwrap();
         blocking_send_discovery(&sender, target, b"RTPS\x00\x00\x00\x00").await.expect("send");
 
-        // Wait for cache to populate.
+        // Wait for cache to populate (control + discovery-data entries).
         let deadline = Instant::now() + Duration::from_secs(5);
         wait_for_recv(&b_disc_rx, deadline).await.expect("send did not deliver within 5s");
-        assert!(sender.connections.len() > 0);
+        assert!(sender.connections.len() >= 2, "expected control + data entries in cache");
 
-        sender.disconnect_peer(target);
-        assert_eq!(
-            sender.connections.len(),
-            0,
-            "disconnect_peer should evict all cached entries to that peer",
+        let disc_port = PortManager::get_discovery_traffic_unicast_port(0, 0);
+        sender.evict_connection(target, disc_port);
+
+        assert!(
+            sender.connections.get(&(target, disc_port)).is_none(),
+            "evicted data connection must be gone",
+        );
+        assert!(
+            sender.connections.get(&(target, CONTROL_LOGICAL_PORT)).is_some(),
+            "control connection must survive single-connection eviction",
         );
 
         sender.shutdown().await;
