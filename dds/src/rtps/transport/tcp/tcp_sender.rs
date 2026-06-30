@@ -14,7 +14,7 @@
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
@@ -37,6 +37,11 @@ use crate::rtps::transport::TcpConfig;
 /// Logical port 0 = control connection — carries PEER_HELLO,
 /// PORT_RESERVE; never RTPS data.
 pub(crate) const CONTROL_LOGICAL_PORT: u16 = 0;
+
+/// First reconnect-backoff delay after a connect failure.
+const BACKOFF_BASE: Duration = Duration::from_millis(500);
+/// Cap for the exponential reconnect-backoff growth.
+const BACKOFF_MAX: Duration = Duration::from_secs(30);
 
 // ── Cache entry types ───────────────────────────────────────────────────────
 
@@ -106,6 +111,14 @@ enum InFlightAcquisition {
     AlreadyDone,
 }
 
+/// Per-peer reconnect backoff. After a failed connect, no new connect to the
+/// peer is attempted until `next_attempt`; `delay` doubles per consecutive
+/// failure (capped at `BACKOFF_MAX`). A successful connect clears the entry.
+struct BackoffState {
+    next_attempt: Instant,
+    delay: Duration,
+}
+
 // ── TcpSender ────────────────────────────────────────────────────────────────
 
 /// Outbound side of the TCP mux transport. See module-level docs.
@@ -129,6 +142,9 @@ pub(crate) struct TcpSender {
     /// Marks peers currently being connected, so duplicate concurrent
     /// connects to the same peer are prevented. See `InFlightGuard`.
     in_flight: Arc<DashMap<(SocketAddr, u16), Arc<Notify>>>,
+
+    /// Per-peer reconnect backoff windows, keyed by peer address.
+    backoff: DashMap<SocketAddr, BackoffState>,
 
     /// Handle to the runtime, saved when the sender is built.
     /// The sync `send_to_*` methods run outside the runtime, so they cannot
@@ -169,6 +185,7 @@ impl TcpSender {
             shared,
             connections: Arc::new(DashMap::new()),
             in_flight: Arc::new(DashMap::new()),
+            backoff: DashMap::new(),
             runtime_handle,
             cancel,
         })
@@ -201,6 +218,19 @@ impl TcpSender {
             self.evict_connection(addr, logical_port);
         }
 
+        // Reconnect backoff: while the peer is in its backoff window from a
+        // recent failure, fail fast instead of attempting (and blocking on) a
+        // fresh connect. This bounds reconnect churn during a long outage.
+        if let Some(retry_in) = self.backoff_remaining(addr) {
+            debug!(
+                "TcpSender: send to {addr} deferred — reconnect backoff ({retry_in:?} remaining)"
+            );
+            return Err(transport_io_error(
+                TransportErrorCode::TcpReconnectBackoff,
+                format!("peer {addr} in reconnect backoff ({retry_in:?} remaining)"),
+            ));
+        }
+
         let result = if logical_port == CONTROL_LOGICAL_PORT {
             do_connect_control(self, addr).await.map(|_| ())
         } else {
@@ -211,8 +241,10 @@ impl TcpSender {
                 "TcpSender: outbound connect to {:?} (port={}) failed: {:?}",
                 addr, logical_port, e
             );
+            self.note_connect_failure(addr);
             return Err(e);
         }
+        self.note_connect_success(addr);
 
         self.connections.get(&key).map(|entry| Arc::clone(&entry.write_half)).ok_or_else(|| {
             io::Error::new(io::ErrorKind::Other, "connect succeeded but cache entry missing")
@@ -230,6 +262,33 @@ impl TcpSender {
         if let Some((_, entry)) = self.connections.remove(&(addr, logical_port)) {
             entry.cancel.cancel();
         }
+    }
+
+    /// Time left in `addr`'s reconnect-backoff window, or `None` if a connect
+    /// may be attempted now.
+    fn backoff_remaining(&self, addr: SocketAddr) -> Option<Duration> {
+        let entry = self.backoff.get(&addr)?;
+        let now = Instant::now();
+        (entry.next_attempt > now).then(|| entry.next_attempt - now)
+    }
+
+    /// Record a connect failure, growing `addr`'s backoff window exponentially
+    /// (BACKOFF_BASE, then doubling, capped at BACKOFF_MAX).
+    fn note_connect_failure(&self, addr: SocketAddr) {
+        let now = Instant::now();
+        let mut entry = self
+            .backoff
+            .entry(addr)
+            .or_insert(BackoffState { next_attempt: now, delay: Duration::ZERO });
+        let delay =
+            if entry.delay.is_zero() { BACKOFF_BASE } else { (entry.delay * 2).min(BACKOFF_MAX) };
+        entry.delay = delay;
+        entry.next_attempt = now + delay;
+    }
+
+    /// Clear `addr`'s backoff after a successful connect.
+    fn note_connect_success(&self, addr: SocketAddr) {
+        self.backoff.remove(&addr);
     }
 
     /// Graceful shutdown — cancels the shared token, tearing down every
@@ -922,6 +981,30 @@ mod tests {
 
         sender.shutdown().await;
         listener.shutdown().await;
+    }
+
+    /// Reconnect backoff grows exponentially per consecutive connect failure
+    /// and is cleared by a success.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reconnect_backoff_grows_and_resets() {
+        let (sender, _) = make_sender(0, [0xAA; 12], 12345);
+        let addr: SocketAddr = "192.0.2.1:7400".parse().unwrap();
+
+        assert!(sender.backoff_remaining(addr).is_none(), "no backoff initially");
+
+        sender.note_connect_failure(addr);
+        let first = sender.backoff_remaining(addr).expect("backoff after first failure");
+        assert!(first > Duration::ZERO && first <= BACKOFF_BASE);
+
+        sender.note_connect_failure(addr);
+        let second = sender.backoff_remaining(addr).expect("backoff after second failure");
+        assert!(second > BACKOFF_BASE, "delay must grow on a repeat failure");
+        assert!(second <= BACKOFF_BASE * 2);
+
+        sender.note_connect_success(addr);
+        assert!(sender.backoff_remaining(addr).is_none(), "success clears backoff");
+
+        sender.shutdown().await;
     }
 
     /// A send to our own listener port is refused without spawning a connect
