@@ -16,8 +16,6 @@
 //! | 0x04 | PORT_RESERVE_ACK | Server → Client  | 16B connection_cookie      |
 //! | 0x05 | PORT_BIND        | Client → Server  | 16B connection_cookie      |
 //! | 0x06 | PORT_BIND_ACK    | Server → Client  | (empty)                    |
-//! | 0x08 | KEEPALIVE        | Either           | (empty)                    |
-//! | 0x09 | KEEPALIVE_ACK    | Either           | (empty)                    |
 //! | 0x0A | ERROR            | Server → Client  | 1B operation + 2B code + 2B len + string  |
 //!
 //! ## ERROR Operation Field
@@ -43,8 +41,6 @@ pub(crate) const MSG_PORT_RESERVE: u8 = 0x03;
 pub(crate) const MSG_PORT_RESERVE_ACK: u8 = 0x04;
 pub(crate) const MSG_PORT_BIND: u8 = 0x05;
 pub(crate) const MSG_PORT_BIND_ACK: u8 = 0x06;
-pub(crate) const MSG_KEEPALIVE: u8 = 0x08;
-pub(crate) const MSG_KEEPALIVE_ACK: u8 = 0x09;
 pub(crate) const MSG_ERROR: u8 = 0x0A;
 
 // ─── Locator Encoding ───────────────────────────────────────────────────────
@@ -97,10 +93,6 @@ pub(crate) enum ControlMsg {
 
     PortBindAck,
 
-    Keepalive,
-
-    KeepaliveAck,
-
     /// Error response. `operation` reuses MSG_* (handshake step) or an OP_* marker.
     Error {
         operation: u8,
@@ -114,21 +106,14 @@ pub(crate) enum ControlMsg {
 // These constants populate the `operation` / `code` fields of a
 // `ControlMsg::Error`. They are NOT control message types of their own.
 //
-// `operation` reuses the MSG_* constants when the failure happened during a
-// real handshake step (PORT_RESERVE / PORT_BIND), and synthetic OP_*
-// markers (>= 0xF0, outside the MSG_* range) for non-handshake failures.
-
-// Synthetic operation markers (must not collide with MSG_* constants)
-/// Incoming connection torn down for exceeding the idle threshold.
-pub(crate) const OP_IDLE_TIMEOUT: u8 = 0xF0;
+// `operation` reuses the MSG_* constant of the handshake step that failed
+// (PORT_RESERVE / PORT_BIND).
 
 // Error codes
 /// PORT_RESERVE: requested logical port is not recognized.
 pub(crate) const ERR_CODE_INVALID_PORT: u16 = 1;
 /// PORT_BIND: cookie is unknown or expired.
 pub(crate) const ERR_CODE_INVALID_COOKIE: u16 = 2;
-/// IDLE_TIMEOUT: connection pruned by idle-timeout sweep.
-pub(crate) const ERR_CODE_IDLE_TIMEOUT: u16 = 3;
 
 impl ControlMsg {
     /// Serialize to bytes (the payload portion, after frame magic).
@@ -162,9 +147,6 @@ impl ControlMsg {
                 buf
             }
             ControlMsg::PortBindAck => vec![MSG_PORT_BIND_ACK],
-
-            ControlMsg::Keepalive => vec![MSG_KEEPALIVE],
-            ControlMsg::KeepaliveAck => vec![MSG_KEEPALIVE_ACK],
 
             ControlMsg::Error { operation, code, message } => {
                 let mut buf = Vec::with_capacity(6 + message.len());
@@ -236,9 +218,6 @@ impl ControlMsg {
             }
             MSG_PORT_BIND_ACK => Ok(ControlMsg::PortBindAck),
 
-            MSG_KEEPALIVE => Ok(ControlMsg::Keepalive),
-            MSG_KEEPALIVE_ACK => Ok(ControlMsg::KeepaliveAck),
-
             MSG_ERROR => {
                 if payload.len() < 6 {
                     return Err(transport_io_error(
@@ -273,8 +252,6 @@ impl ControlMsg {
             ControlMsg::PortReserveAck { .. } => "PORT_RESERVE_ACK",
             ControlMsg::PortBind { .. } => "PORT_BIND",
             ControlMsg::PortBindAck => "PORT_BIND_ACK",
-            ControlMsg::Keepalive => "KEEPALIVE",
-            ControlMsg::KeepaliveAck => "KEEPALIVE_ACK",
             ControlMsg::Error { .. } => "ERROR",
         }
     }
@@ -343,15 +320,6 @@ mod tests {
     }
 
     #[test]
-    fn test_keepalive_roundtrip() {
-        let msg = ControlMsg::Keepalive;
-        let bytes = msg.to_bytes();
-        assert_eq!(bytes, vec![MSG_KEEPALIVE]);
-        let parsed = ControlMsg::from_bytes(&bytes).unwrap();
-        assert_eq!(parsed, msg);
-    }
-
-    #[test]
     fn test_error_roundtrip() {
         let msg = ControlMsg::Error {
             operation: MSG_PORT_RESERVE,
@@ -374,12 +342,7 @@ mod tests {
 
     #[test]
     fn test_all_simple_types() {
-        for msg in [
-            ControlMsg::PeerHelloAck,
-            ControlMsg::PortBindAck,
-            ControlMsg::Keepalive,
-            ControlMsg::KeepaliveAck,
-        ] {
+        for msg in [ControlMsg::PeerHelloAck, ControlMsg::PortBindAck] {
             let bytes = msg.to_bytes();
             assert_eq!(bytes.len(), 1);
             let parsed = ControlMsg::from_bytes(&bytes).unwrap();

@@ -12,9 +12,9 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crossbeam_channel::Sender;
 use dashmap::DashMap;
@@ -26,7 +26,7 @@ use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::transport::error::TransportErrorCode;
 use crate::rtps::transport::plugin::IncomingMessage;
 use crate::rtps::transport::port_manager::PortManager;
-use crate::rtps::transport::tcp::protocol::{ControlMsg, ERR_CODE_IDLE_TIMEOUT, OP_IDLE_TIMEOUT};
+use crate::rtps::transport::tcp::protocol::ControlMsg;
 
 mod handlers;
 
@@ -40,11 +40,10 @@ pub(crate) type ConnectionId = usize;
 pub(crate) enum ConnectionState {
     /// Awaiting the first PEER_HELLO(Control conn) or PORT_BIND frame(Data conn).
     AwaitingFirstMessage,
-    /// Control connection: PORT_RESERVE / KEEPALIVE.
+    /// Control connection: PORT_RESERVE.
     Control,
     /// Data connection: RTPS frames.
     Active,
-    Closing,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,7 +55,7 @@ pub(crate) enum ConnectionDirection {
 }
 
 /// Groups the control / discovery / user-data connections of one remote
-/// participant so `remove_peer` can tear down all three together.
+/// participant for per-connection bookkeeping and lookup.
 #[derive(Debug, Default)]
 pub(crate) struct PeerConnectionGroup {
     pub(crate) control_conn: Option<ConnectionId>,
@@ -89,28 +88,26 @@ pub(crate) struct ConnectionEntry {
     pub(crate) direction: ConnectionDirection,
     pub(crate) bound_logical_port: Option<u16>,
     pub(crate) remote_guid_prefix: Option<GuidPrefix>,
-    pub(crate) last_activity: Instant,
     /// conn_actor inbox: pushing a frame here sends it on this connection.
     pub(crate) writer_tx: mpsc::Sender<Vec<u8>>,
     /// Child token for the actor pair; cancelling it tears the pair down.
     pub(crate) cancel: CancellationToken,
     pub(crate) pending_ack: Option<Arc<Mutex<Option<oneshot::Sender<ControlMsg>>>>>,
-    /// Consecutive intervals where KEEPALIVE_ACK missed `keepalive_timeout`.
-    /// Maintained by the sender's keepalive_interval_task (this module only
-    /// observes); peer is declared dead past `max_missed_keepalives`.
-    pub(crate) missed_keepalives: AtomicU32,
-
-    /// When the sender last pushed a KEEPALIVE. Set by
-    /// `TcpSender::keepalive_interval_task`; `None` before the first tick.
-    pub(crate) last_keepalive_sent_at: Mutex<Option<Instant>>,
-
-    /// When `dispatch` last saw a KEEPALIVE_ACK; `None` until the first ACK.
-    /// The sender compares it with `last_keepalive_sent_at` to judge whether
-    /// the previous round-trip met the timeout.
-    pub(crate) last_keepalive_ack_at: Mutex<Option<Instant>>,
 }
 
 // ── MuxState ─────────────────────────────────────────────────────────────────
+
+/// OS keepalive tuning (`SO_KEEPALIVE` + `TCP_KEEPIDLE/INTVL/CNT`) applied to
+/// every connection. `time` is the idle period before the first probe,
+/// `interval` the gap between probes, `retries` the unanswered probes tolerated
+/// before the OS tears the connection down. This is how a connection that went
+/// silent (peer crashed, link gone) is reaped without an application keepalive.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct KeepaliveParams {
+    pub(crate) time: Duration,
+    pub(crate) interval: Duration,
+    pub(crate) retries: u32,
+}
 
 /// Socket-level tuning applied to both accepted (inbound) and dialed (outbound)
 /// TCP streams. Resolved per participant from `TcpConfig`.
@@ -122,18 +119,26 @@ pub(crate) struct TcpSocketTuning {
     /// Bound on outstanding unacked data before the OS drops the connection
     /// (so a stuck write fails fast). `None` = OS default.
     pub(crate) unacked_timeout: Option<Duration>,
+    /// OS keepalive for idle-connection liveness. `None` = leave OS defaults.
+    pub(crate) keepalive: Option<KeepaliveParams>,
 }
 
 impl Default for TcpSocketTuning {
     fn default() -> Self {
-        Self { nodelay: true, so_rcvbuf: None, so_sndbuf: None, unacked_timeout: None }
+        Self {
+            nodelay: true,
+            so_rcvbuf: None,
+            so_sndbuf: None,
+            unacked_timeout: None,
+            keepalive: None,
+        }
     }
 }
 
 /// Bound how long unacknowledged data may stay outstanding before the OS drops
 /// the connection, so a dead link surfaces as a write error (instead of blocking
 /// the sender ~indefinitely). Applied to every dialed/accepted stream. Per-OS
-/// mechanism; a no-op where unsupported (app-level keepalive is the fallback).
+/// mechanism; a no-op where unsupported (OS keepalive then reaps idle links).
 pub(crate) fn apply_unacked_timeout(tcp: &tokio::net::TcpStream, timeout: Option<Duration>) {
     let Some(t) = timeout else { return };
     #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -157,10 +162,43 @@ pub(crate) fn apply_unacked_timeout(tcp: &tokio::net::TcpStream, timeout: Option
         }
     }
     // TODO(windows): TCP_MAXRTMS (ms) / TCP_MAXRT (s) via setsockopt(IPPROTO_TCP)
-    // once a Windows test environment is available; until then keepalive covers it.
+    // once a Windows test environment is available; until then OS keepalive covers it.
     #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
     {
         let _ = (tcp, t);
+    }
+}
+
+/// Enable OS keepalive on a dialed/accepted stream so an idle connection whose
+/// peer has silently gone (crash, link loss) is reaped by the kernel without an
+/// application-level keepalive. `with_time`/`with_interval`/`with_retries` map to
+/// `TCP_KEEPIDLE`/`TCP_KEEPINTVL`/`TCP_KEEPCNT`; Windows lacks `TCP_KEEPCNT`, and
+/// other platforms fall back to enabling `SO_KEEPALIVE` with the idle time only.
+pub(crate) fn apply_keepalive(tcp: &tokio::net::TcpStream, params: Option<KeepaliveParams>) {
+    let Some(p) = params else { return };
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    {
+        let ka = socket2::TcpKeepalive::new()
+            .with_time(p.time)
+            .with_interval(p.interval)
+            .with_retries(p.retries);
+        let _ = socket2::SockRef::from(tcp).set_tcp_keepalive(&ka);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // TCP_KEEPCNT (with_retries) is unsupported on Windows; set idle + interval.
+        let ka = socket2::TcpKeepalive::new().with_time(p.time).with_interval(p.interval);
+        let _ = socket2::SockRef::from(tcp).set_tcp_keepalive(&ka);
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "windows"
+    )))]
+    {
+        let ka = socket2::TcpKeepalive::new().with_time(p.time);
+        let _ = socket2::SockRef::from(tcp).set_tcp_keepalive(&ka);
     }
 }
 
@@ -244,14 +282,10 @@ impl MuxState {
                 direction: ConnectionDirection::Inbound,
                 bound_logical_port: None,
                 remote_guid_prefix: None,
-                last_activity: Instant::now(),
                 writer_tx,
                 cancel,
                 // Inbound connections never await outbound responses — slot stays None.
                 pending_ack: None,
-                missed_keepalives: AtomicU32::new(0),
-                last_keepalive_sent_at: Mutex::new(None),
-                last_keepalive_ack_at: Mutex::new(None),
             },
         );
         conn_id
@@ -284,13 +318,9 @@ impl MuxState {
                 direction: ConnectionDirection::Outbound,
                 bound_logical_port: None,
                 remote_guid_prefix: Some(synthetic_guid),
-                last_activity: Instant::now(),
                 writer_tx,
                 cancel,
                 pending_ack: Some(pending_ack),
-                missed_keepalives: AtomicU32::new(0),
-                last_keepalive_sent_at: Mutex::new(None),
-                last_keepalive_ack_at: Mutex::new(None),
             },
         );
 
@@ -328,13 +358,9 @@ impl MuxState {
                 direction: ConnectionDirection::Outbound,
                 bound_logical_port: Some(logical_port),
                 remote_guid_prefix: Some(synthetic_guid),
-                last_activity: Instant::now(),
                 writer_tx,
                 cancel,
                 pending_ack: None,
-                missed_keepalives: AtomicU32::new(0),
-                last_keepalive_sent_at: Mutex::new(None),
-                last_keepalive_ack_at: Mutex::new(None),
             },
         );
 
@@ -353,89 +379,8 @@ impl MuxState {
         conn_id
     }
 
-    // ── idle pruning ─────────────────────────────────────────────────────────
-
-    /// Cancel any connection whose last_activity is older than `timeout`.
-    ///
-    /// Each pruned connection gets its cancel token fired; the conn_actor
-    /// reader task wakes up, the writer task drains any remaining frames,
-    /// and the pair tears down on its own. No more polled "shutdown" /
-    /// "error_on_exit" flags from the sync version.
-    /// Returns the number of connections pruned.
-    pub(crate) fn prune_idle_connections(&self, timeout: Duration) -> usize {
-        let now = Instant::now();
-        // Only INBOUND connections are subject to the listener's idle prune.
-        // Outbound entries have no inbound traffic on data conns (peer doesn't
-        // reply on a send-only stream) so `last_activity` never refreshes, and
-        // their lifecycle is already managed by `TcpSender` (mpsc-Closed
-        // eviction, keepalive disconnect, orphan_prune). Pruning them here
-        // would tear down healthy send-only streams and emit Error frames the
-        // peer's `handle_active_frame` discards anyway.
-        let stale: Vec<ConnectionId> = self
-            .connections
-            .iter()
-            .filter(|e| e.direction == ConnectionDirection::Inbound)
-            .filter(|e| now.duration_since(e.last_activity) > timeout)
-            .map(|e| *e.key())
-            .collect();
-
-        let mut pruned = 0;
-        for conn_id in &stale {
-            // Re-check + transition to Closing under the entry's write lock.
-            // The held guard serialises with `dispatch`'s `get_mut`, so any
-            // frame that races us either:
-            //   - lands BEFORE this guard: refreshes `last_activity` → we skip
-            //   - lands AFTER this guard:  sees `state == Closing` → `dispatch`
-            //                              drops it (no response generated)
-            // This closes the window where a PORT_RESERVE was handled (and
-            // PORT_RESERVE_ACK emitted) between the stale snapshot and the
-            // eviction.
-            let (writer_tx, remote_addr, idle_for) = match self.connections.get_mut(conn_id) {
-                Some(mut entry) => {
-                    let idle_for = now.duration_since(entry.last_activity);
-                    if idle_for <= timeout {
-                        continue; // refreshed since snapshot — not actually idle
-                    }
-                    entry.state = ConnectionState::Closing;
-                    (entry.writer_tx.clone(), entry.remote_addr, idle_for)
-                }
-                None => continue,
-            };
-
-            warn!(
-                "TcpMuxListener [{}]: Pruning idle conn {} from {:?} (idle {:?})",
-                TransportErrorCode::TcpConnectionIdlePruned,
-                conn_id,
-                remote_addr,
-                idle_for,
-            );
-
-            let err = ControlMsg::Error {
-                operation: OP_IDLE_TIMEOUT,
-                code: ERR_CODE_IDLE_TIMEOUT,
-                message: "incoming connection idle timeout".to_string(),
-            };
-            let _ = writer_tx.try_send(err.to_bytes());
-
-            self.remove_connection(*conn_id);
-            pruned += 1;
-        }
-
-        pruned
-    }
 
     // ── connection / peer cleanup ────────────────────────────────────────────
-
-    /// Drop every connection associated with `guid` (control + discovery + user).
-    pub(crate) fn remove_peer(&self, guid: GuidPrefix) {
-        let group = self.peer_connections.lock().expect("peer_connections lock").remove(&guid);
-        if let Some(group) = group {
-            for conn_id in group.all_conns() {
-                self.remove_connection_inner(conn_id);
-            }
-            debug!("TcpMuxListener: Removed peer {:?}", guid);
-        }
-    }
 
     /// Update peer_connections bookkeeping then remove the connection entry.
     pub(crate) fn remove_connection(&self, conn_id: ConnectionId) {

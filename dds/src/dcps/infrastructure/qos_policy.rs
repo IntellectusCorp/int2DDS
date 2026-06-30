@@ -864,15 +864,12 @@ pub const PROP_TCP_BIND_TIMEOUT_MS: &str = "int2dds.transport.TCPv4.bind_timeout
 /// the connection, so a dead link surfaces as a write error instead of blocking
 /// the sender ~indefinitely. Default `5000`; `0` uses the OS default.
 pub const PROP_TCP_UNACKED_TIMEOUT_MS: &str = "int2dds.transport.TCPv4.unacked_timeout_ms";
-/// Control keepalive send interval, milliseconds. Default `10000`.
+/// OS keepalive idle time before the first probe (`TCP_KEEPIDLE`), ms. Default `10000`.
 pub const PROP_TCP_KEEPALIVE_INTERVAL_MS: &str = "int2dds.transport.TCPv4.keepalive_interval_ms";
-/// Keepalive response timeout, milliseconds. Default `5000`.
+/// OS keepalive interval between probes (`TCP_KEEPINTVL`), ms. Default `5000`.
 pub const PROP_TCP_KEEPALIVE_TIMEOUT_MS: &str = "int2dds.transport.TCPv4.keepalive_timeout_ms";
-/// Keepalive max consecutive misses before disconnect. Default `3`.
+/// OS keepalive probe count before the connection is dropped (`TCP_KEEPCNT`). Default `3`.
 pub const PROP_TCP_KEEPALIVE_MAX_MISSES: &str = "int2dds.transport.TCPv4.keepalive_max_misses";
-/// Idle timeout for incoming connections, milliseconds. Default `60000`.
-pub const PROP_TCP_INCOMING_IDLE_TIMEOUT_MS: &str =
-    "int2dds.transport.TCPv4.incoming_idle_timeout_ms";
 /// Forced `SO_RCVBUF` in bytes. Default OS-managed (absent).
 pub const PROP_TCP_SO_RCVBUF: &str = "int2dds.transport.TCPv4.so_rcvbuf";
 /// Forced `SO_SNDBUF` in bytes. Default OS-managed (absent).
