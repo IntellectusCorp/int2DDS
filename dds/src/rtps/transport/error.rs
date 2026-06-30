@@ -48,15 +48,6 @@ pub enum TransportErrorCode {
     /// PORT_BIND was rejected (invalid/expired cookie) or no PORT_BIND_ACK received.
     TcpHandshakeBindFailed = 722,
 
-    // ── 730: TCP connection maintenance ─────────────────────────────────
-    /// Keepalive ACKs were missed beyond the configured threshold.
-    TcpKeepaliveTimeout = 730,
-    /// Incoming connection had no activity for longer than the idle timeout.
-    TcpIdleTimeout = 731,
-    /// A write to an established connection failed (broken pipe / reset, or the
-    /// OS unacked-data timeout fired). The connection is torn down.
-    TcpSendFailed = 732,
-
     // ── 740: TCP framing ────────────────────────────────────────────────
     /// Frame magic bytes were not "INT2".
     TcpFrameInvalidMagic = 740,
@@ -84,8 +75,6 @@ pub enum TransportErrorCode {
     TcpReadError = 771,
     /// Failed to send a control response to a connected peer.
     TcpControlSendFailed = 772,
-    /// Orphan data connections pruned after control connection loss.
-    TcpOrphanPruned = 774,
 
     // ── 780: TLS configuration and handshake ────────────────────────────
     /// A required TLS property is missing in the participant QoS.
@@ -117,10 +106,6 @@ impl TransportErrorCode {
             | Self::TcpHandshakeReserveFailed
             | Self::TcpHandshakeBindFailed => io::ErrorKind::InvalidData,
 
-            Self::TcpKeepaliveTimeout | Self::TcpIdleTimeout => io::ErrorKind::TimedOut,
-
-            Self::TcpSendFailed => io::ErrorKind::Other,
-
             Self::TcpFrameInvalidMagic | Self::TcpFrameTooLarge | Self::TcpFrameInvalidLength => {
                 io::ErrorKind::InvalidData
             }
@@ -134,7 +119,6 @@ impl TransportErrorCode {
             Self::TcpAcceptFailed => io::ErrorKind::ConnectionAborted,
             Self::TcpReadError => io::ErrorKind::ConnectionReset,
             Self::TcpControlSendFailed => io::ErrorKind::BrokenPipe,
-            Self::TcpOrphanPruned => io::ErrorKind::TimedOut,
 
             Self::TlsMissingProperty => io::ErrorKind::InvalidInput,
             Self::TlsFileIoError => io::ErrorKind::NotFound,
@@ -154,10 +138,6 @@ impl TransportErrorCode {
             Self::TcpHandshakeReserveFailed => "TCP PORT_RESERVE handshake failed",
             Self::TcpHandshakeBindFailed => "TCP PORT_BIND handshake failed",
 
-            Self::TcpKeepaliveTimeout => "TCP keepalive timeout",
-            Self::TcpIdleTimeout => "TCP idle connection timeout",
-            Self::TcpSendFailed => "TCP write failed; connection torn down",
-
             Self::TcpFrameInvalidMagic => "TCP frame invalid magic",
             Self::TcpFrameTooLarge => "TCP frame too large",
             Self::TcpFrameInvalidLength => "TCP frame invalid length",
@@ -171,7 +151,6 @@ impl TransportErrorCode {
             Self::TcpAcceptFailed => "TCP accept failed",
             Self::TcpReadError => "TCP read error on accepted connection",
             Self::TcpControlSendFailed => "TCP control response send failed",
-            Self::TcpOrphanPruned => "TCP orphan data connections pruned",
 
             Self::TlsMissingProperty => "TLS required property missing",
             Self::TlsFileIoError => "TLS PEM file I/O error",

@@ -11,18 +11,16 @@
 //! `oneshot::Sender`, writes the request, then awaits the reply that the
 //! reader task routes back via `MuxState::dispatch`.
 
+use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
-use std::{io, mem};
 
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use log::{debug, warn};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, Mutex as TokioMutex, Notify};
-use tokio::task::JoinHandle;
-use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
 use crate::rtps::common::guid::GuidPrefix;
@@ -40,8 +38,6 @@ use crate::rtps::transport::TcpConfig;
 /// PORT_RESERVE; never RTPS data.
 pub(crate) const CONTROL_LOGICAL_PORT: u16 = 0;
 
-const ORPHAN_PRUNE_INTERVAL: Duration = Duration::from_millis(500);
-
 // ── Cache entry types ───────────────────────────────────────────────────────
 
 /// An entry in the sender's outbound cache. `control` is `Some` only for
@@ -50,8 +46,9 @@ const ORPHAN_PRUNE_INTERVAL: Duration = Duration::from_millis(500);
 /// responses through the control connection's pending_ack slot.
 struct OutboundEntry {
     /// Control inbox feeding the connection's `writer_task`. Used by the
-    /// reader task and lifecycle tasks (keepalive, PORT_RESERVE) to enqueue
-    /// protocol frames; not used by the user-data send path.
+    /// reader task and the PORT_RESERVE round-trip to enqueue protocol frames;
+    /// not used by the user-data send path. A closed inbox means the conn_actor
+    /// has exited, which the send path treats as a dead connection.
     writer_tx: mpsc::Sender<Vec<u8>>,
     /// User-data writes acquire this directly via
     /// `runtime.block_on(write_half.lock().await)` and perform the wire
@@ -133,9 +130,6 @@ pub(crate) struct TcpSender {
     /// connects to the same peer are prevented. See `InFlightGuard`.
     in_flight: Arc<DashMap<(SocketAddr, u16), Arc<Notify>>>,
 
-    /// Dead-peer notifier, installed once by the plugin during init.
-    dead_peer_tx: OnceLock<crossbeam_channel::Sender<SocketAddr>>,
-
     /// Handle to the runtime, saved when the sender is built.
     /// The sync `send_to_*` methods run outside the runtime, so they cannot
     /// use `tokio::spawn` (it would panic). They use this handle instead to
@@ -143,12 +137,11 @@ pub(crate) struct TcpSender {
     runtime_handle: tokio::runtime::Handle,
 
     cancel: CancellationToken,
-    task_handles: StdMutex<Vec<JoinHandle<()>>>,
 }
 
 impl TcpSender {
-    /// Build a sender and spawn its long-running tasks (orphan prune).
-    /// Must be called inside a tokio runtime context.
+    /// Build a sender. Must be called inside a tokio runtime context so the
+    /// captured `Handle` is valid for the sync `send_to_*` block_on path.
     pub(crate) fn new(
         domain_id: u32,
         participant_id: u32,
@@ -164,7 +157,7 @@ impl TcpSender {
         // spawn connect tasks even though they are not in runtime context.
         let runtime_handle = tokio::runtime::Handle::current();
 
-        let sender = Arc::new(Self {
+        Arc::new(Self {
             domain_id,
             participant_id,
             working_ip,
@@ -176,27 +169,9 @@ impl TcpSender {
             shared,
             connections: Arc::new(DashMap::new()),
             in_flight: Arc::new(DashMap::new()),
-            dead_peer_tx: OnceLock::new(),
-            runtime_handle: runtime_handle.clone(),
-            cancel: cancel.clone(),
-            task_handles: StdMutex::new(Vec::new()),
-        });
-
-        // Spawn lifecycle tasks now that we have an Arc. Use the handle
-        // explicitly so this is robust even if `new()` is somehow called
-        // from a context where `tokio::spawn` would not be valid.
-        let mut handles = sender.task_handles.lock().expect("task_handles lock");
-        handles.push(
-            runtime_handle.spawn(orphan_prune_interval_task(Arc::clone(&sender), cancel.clone())),
-        );
-        drop(handles);
-
-        sender
-    }
-
-    /// Plug in the dead-peer notifier. Idempotent; subsequent calls are no-ops.
-    pub(crate) fn set_dead_peer_tx(&self, tx: crossbeam_channel::Sender<SocketAddr>) {
-        let _ = self.dead_peer_tx.set(tx);
+            runtime_handle,
+            cancel,
+        })
     }
 
     /// Resolve the connection's shared write half, establishing it on cache
@@ -210,8 +185,20 @@ impl TcpSender {
     ) -> io::Result<SharedWriteHalf> {
         let key = (addr, logical_port);
 
-        if let Some(entry) = self.connections.get(&key) {
-            return Ok(Arc::clone(&entry.write_half));
+        // Reuse a live cached connection. A dead one — conn_actor gone, its
+        // writer inbox closed — is evicted here so the connect below rebuilds it.
+        // This on-demand check replaces the periodic orphan-prune sweep; a data
+        // connection always (re)establishes its control connection first via
+        // `do_connect_data`, so no orphaned data link can linger.
+        let cached_dead = match self.connections.get(&key) {
+            Some(entry) if !entry.writer_tx.is_closed() => {
+                return Ok(Arc::clone(&entry.write_half));
+            }
+            Some(_) => true,
+            None => false,
+        };
+        if cached_dead {
+            self.evict_connection(addr, logical_port);
         }
 
         let result = if logical_port == CONTROL_LOGICAL_PORT {
@@ -224,9 +211,6 @@ impl TcpSender {
                 "TcpSender: outbound connect to {:?} (port={}) failed: {:?}",
                 addr, logical_port, e
             );
-            if let Some(tx) = self.dead_peer_tx.get() {
-                let _ = tx.try_send(addr);
-            }
             return Err(e);
         }
 
@@ -248,14 +232,11 @@ impl TcpSender {
         }
     }
 
-    /// Graceful shutdown — cancels lifecycle tasks then awaits them. Does
-    /// not consume `self` so the plugin can hold an `Arc<TcpSender>`.
+    /// Graceful shutdown — cancels the shared token, tearing down every
+    /// connection actor via its child token. Does not consume `self` so the
+    /// plugin can hold an `Arc<TcpSender>`.
     pub(crate) async fn shutdown(&self) {
         self.cancel.cancel();
-        let handles = mem::take(&mut *self.task_handles.lock().expect("task_handles lock"));
-        for h in handles {
-            let _ = h.await;
-        }
     }
 
     /// Heuristic: is this address our own listener? Avoids loopback
@@ -276,8 +257,8 @@ impl TcpSender {
 // Sends a single RTPS frame inline on the user thread. The connection's
 // `SharedWriteHalf` is locked for the duration of one `write_vectored`
 // syscall; the calling thread waits via `runtime.block_on` until the
-// kernel accepts the bytes. Connections, TLS, keepalive, and the protocol
-// handshake remain on the async task pair created by `spawn_conn_actor`.
+// kernel accepts the bytes. Connections, TLS, and the protocol handshake
+// remain on the async task pair created by `spawn_conn_actor`.
 impl TcpSender {
     /// SPDP bootstrap fan-out to an initial peer we have not discovered yet.
     /// The peer's participant id (hence its logical port) is unknown, so we
@@ -307,8 +288,16 @@ impl TcpSender {
     ) -> io::Result<()> {
         let key = (addr, logical_port);
 
-        let write_half = match self.connections.get(&key) {
-            Some(entry) => Arc::clone(&entry.write_half),
+        // Fast path: reuse a live cached connection. A dead entry (writer inbox
+        // closed) falls through to ensure_connection, which evicts and rebuilds.
+        // The cache guard is dropped before block_on so the rebuild can remove
+        // the dead entry without a DashMap shard self-deadlock.
+        let cached = match self.connections.get(&key) {
+            Some(entry) if !entry.writer_tx.is_closed() => Some(Arc::clone(&entry.write_half)),
+            _ => None,
+        };
+        let write_half = match cached {
+            Some(wh) => wh,
             None => self.runtime_handle.block_on(self.ensure_connection(addr, logical_port))?,
         };
 
@@ -326,12 +315,11 @@ impl TcpSender {
                 );
                 // Connection-only teardown: drop just this connection. The peer
                 // and its other connections survive; the next send re-dials.
-                // Declaring the peer dead is the DDS layer's job (lease).
+                // Declaring the peer dead is the DDS layer's job (lease). The raw
+                // io::Error is returned transparently (like UDP); the RTPS layer
+                // logs and continues, and its kind no longer drives any unmatch.
                 self.evict_connection(addr, logical_port);
-                Err(transport_io_error(
-                    TransportErrorCode::TcpSendFailed,
-                    format!("write to {addr} (port {logical_port}) failed: {e}"),
-                ))
+                Err(e)
             }
         }
     }
@@ -339,8 +327,8 @@ impl TcpSender {
 
 impl Drop for TcpSender {
     fn drop(&mut self) {
-        // Best-effort — Drop can't await the lifecycle handles, but
-        // cancelling the token tells them to exit at their next yield.
+        // Cancel the shared token so every connection actor (child token) exits
+        // at its next yield. Best-effort — Drop cannot await their teardown.
         self.cancel.cancel();
     }
 }
@@ -678,24 +666,6 @@ async fn port_bind_handshake(
     }
 }
 
-// ── Lifecycle tasks ──────────────────────────────────────────────────────────
-
-/// Drop cache entries whose writer channel is closed (conn_actor exited),
-/// so stale entries don't pile up on dead links.
-async fn orphan_prune_interval_task(sender: Arc<TcpSender>, cancel: CancellationToken) {
-    let mut ticker = tokio::time::interval(ORPHAN_PRUNE_INTERVAL);
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-    loop {
-        tokio::select! {
-            _ = ticker.tick() => {
-                sender.connections.retain(|_key, entry| !entry.writer_tx.is_closed());
-            }
-            _ = cancel.cancelled() => break,
-        }
-    }
-}
-
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -780,8 +750,8 @@ mod tests {
 
     // ── construction smoke ───────────────────────────────────────────────────
 
-    /// `TcpSender::new` inside a tokio context succeeds and the lifecycle
-    /// tasks (keepalive, orphan prune) shut down cleanly.
+    /// `TcpSender::new` inside a tokio context succeeds and `shutdown()`
+    /// completes cleanly (it just cancels the shared token).
     #[tokio::test(flavor = "multi_thread")]
     async fn new_in_runtime_succeeds_and_shuts_down() {
         let (sender, _disc_rx) = make_sender(0, [0xAA; 12], 12345);

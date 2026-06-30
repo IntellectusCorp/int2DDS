@@ -66,7 +66,6 @@ pub(crate) struct TcpTransportPlugin {
     /// Take-once receivers handed out via `take_*_source()`.
     discovery_rx: Mutex<Option<crossbeam_channel::Receiver<IncomingMessage>>>,
     user_data_rx: Mutex<Option<crossbeam_channel::Receiver<IncomingMessage>>>,
-    dead_peer_rx: Mutex<Option<crossbeam_channel::Receiver<SocketAddr>>>,
 }
 
 impl TcpTransportPlugin {
@@ -125,7 +124,6 @@ impl TcpTransportPlugin {
         // layer reads from *_rx via `take_*_source()`.
         let (discovery_tx, discovery_rx) = bounded::<IncomingMessage>(CHANNEL_BUFFER_SIZE);
         let (user_data_tx, user_data_rx) = bounded::<IncomingMessage>(USER_CHANNEL_CAPACITY);
-        let (dead_peer_tx, dead_peer_rx) = bounded::<SocketAddr>(CHANNEL_BUFFER_SIZE);
 
         // Runtime worker count (per participant). Default keeps a small footprint.
         let worker_threads = tcp_config.async_workers.unwrap_or_else(default_worker_count);
@@ -206,8 +204,6 @@ impl TcpTransportPlugin {
                 &tcp_config,
             );
 
-            sender.set_dead_peer_tx(dead_peer_tx);
-
             Ok::<_, io::Error>((listener, sender))
         })?;
 
@@ -230,7 +226,6 @@ impl TcpTransportPlugin {
             mux_listener: Mutex::new(Some(mux_listener)),
             discovery_rx: Mutex::new(Some(discovery_rx)),
             user_data_rx: Mutex::new(Some(user_data_rx)),
-            dead_peer_rx: Mutex::new(Some(dead_peer_rx)),
         })
     }
 
@@ -345,10 +340,6 @@ impl TransportPlugin for TcpTransportPlugin {
         Some(MessageSource::Channel { rx })
     }
 
-    fn take_dead_peer_receiver(&self) -> Option<crossbeam_channel::Receiver<SocketAddr>> {
-        self.dead_peer_rx.lock().expect("dead_peer_rx lock").take()
-    }
-
     fn port(&self) -> u16 {
         self.listener_port
     }
@@ -460,9 +451,6 @@ mod tests {
         assert!(plugin.take_user_data_unicast_source().is_some());
         assert!(plugin.take_user_data_unicast_source().is_none());
 
-        assert!(plugin.take_dead_peer_receiver().is_some());
-        assert!(plugin.take_dead_peer_receiver().is_none());
-
         plugin.close();
     }
 
@@ -483,8 +471,8 @@ mod tests {
     }
 
     /// Sending to a TCP locator does not panic / block the caller.
-    /// The connect_task internally either succeeds or notifies dead_peer;
-    /// the sync `send` call itself is fire-and-forget.
+    /// The connect path either succeeds or returns an error; the sync `send`
+    /// call itself is fire-and-forget.
     #[test]
     fn send_to_unreachable_does_not_panic() {
         let plugin = make_plugin(next_test_domain());
