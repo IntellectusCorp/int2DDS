@@ -17,7 +17,8 @@ use crate::dcps::infrastructure::qos_policy::{
     PROP_TCP_BIND_PORT, PROP_TCP_BIND_TIMEOUT_MS, PROP_TCP_CONNECT_TIMEOUT_MS,
     PROP_TCP_INCOMING_IDLE_TIMEOUT_MS, PROP_TCP_KEEPALIVE_INTERVAL_MS,
     PROP_TCP_KEEPALIVE_MAX_MISSES, PROP_TCP_KEEPALIVE_TIMEOUT_MS, PROP_TCP_NODELAY,
-    PROP_TCP_PUBLIC_ADDRESS, PROP_TCP_SO_RCVBUF, PROP_TCP_SO_SNDBUF, PROP_TRANSPORT,
+    PROP_TCP_PUBLIC_ADDRESS, PROP_TCP_SO_RCVBUF, PROP_TCP_SO_SNDBUF, PROP_TCP_UNACKED_TIMEOUT_MS,
+    PROP_TRANSPORT,
 };
 use crate::rtps::transport::TransportType;
 
@@ -77,6 +78,9 @@ pub(crate) struct TcpConfig {
     pub nodelay: bool,
     pub connect_timeout: Duration,
     pub bind_timeout: Duration,
+    /// Bound on outstanding unacked data before the OS drops the connection
+    /// (so a stuck write fails fast). `None` = use the OS default.
+    pub unacked_timeout: Option<Duration>,
     pub keepalive_interval: Duration,
     pub keepalive_timeout: Duration,
     pub keepalive_max_misses: u32,
@@ -105,6 +109,12 @@ impl TransportConfig for TcpConfig {
             nodelay: prop_parse::<bool>(property, PROP_TCP_NODELAY).unwrap_or(true),
             connect_timeout: ms(PROP_TCP_CONNECT_TIMEOUT_MS, 5_000),
             bind_timeout: ms(PROP_TCP_BIND_TIMEOUT_MS, 5_000),
+            // Default 5000ms; explicit 0 = OS default (no bound).
+            unacked_timeout: match prop_parse::<u64>(property, PROP_TCP_UNACKED_TIMEOUT_MS) {
+                Some(0) => None,
+                Some(v) => Some(Duration::from_millis(v)),
+                None => Some(Duration::from_millis(5_000)),
+            },
             keepalive_interval: ms(PROP_TCP_KEEPALIVE_INTERVAL_MS, 10_000),
             keepalive_timeout: ms(PROP_TCP_KEEPALIVE_TIMEOUT_MS, 5_000),
             keepalive_max_misses: prop_parse::<u32>(property, PROP_TCP_KEEPALIVE_MAX_MISSES)
@@ -196,6 +206,7 @@ mod tests {
         assert!(cfg.nodelay);
         assert_eq!(cfg.connect_timeout, Duration::from_millis(5_000));
         assert_eq!(cfg.bind_timeout, Duration::from_millis(5_000));
+        assert_eq!(cfg.unacked_timeout, Some(Duration::from_millis(5_000)));
         assert_eq!(cfg.keepalive_interval, Duration::from_millis(10_000));
         assert_eq!(cfg.keepalive_timeout, Duration::from_millis(5_000));
         assert_eq!(cfg.keepalive_max_misses, 3);

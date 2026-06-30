@@ -53,6 +53,9 @@ pub enum TransportErrorCode {
     TcpKeepaliveTimeout = 730,
     /// Incoming connection had no activity for longer than the idle timeout.
     TcpIdleTimeout = 731,
+    /// A write to an established connection failed (broken pipe / reset, or the
+    /// OS unacked-data timeout fired). The connection is torn down.
+    TcpSendFailed = 732,
 
     // ── 740: TCP framing ────────────────────────────────────────────────
     /// Frame magic bytes were not "INT2".
@@ -117,6 +120,9 @@ impl TransportErrorCode {
             | Self::TcpHandshakeBindFailed => io::ErrorKind::InvalidData,
 
             Self::TcpKeepaliveTimeout | Self::TcpIdleTimeout => io::ErrorKind::TimedOut,
+            // BrokenPipe so the RTPS layer maps any write failure (incl. the OS
+            // unacked-data timeout) to PeerDisconnected — see user_logic send path.
+            Self::TcpSendFailed => io::ErrorKind::BrokenPipe,
 
             Self::TcpFrameInvalidMagic | Self::TcpFrameTooLarge | Self::TcpFrameInvalidLength => {
                 io::ErrorKind::InvalidData
@@ -154,6 +160,7 @@ impl TransportErrorCode {
 
             Self::TcpKeepaliveTimeout => "TCP keepalive timeout",
             Self::TcpIdleTimeout => "TCP idle connection timeout",
+            Self::TcpSendFailed => "TCP write failed; connection torn down",
 
             Self::TcpFrameInvalidMagic => "TCP frame invalid magic",
             Self::TcpFrameTooLarge => "TCP frame too large",

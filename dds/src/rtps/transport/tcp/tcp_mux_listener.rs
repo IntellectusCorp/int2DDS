@@ -25,7 +25,7 @@ use crate::rtps::{
     common::guid::GuidPrefix,
     transport::{
         plugin::IncomingMessage,
-        tcp::mux_state::{MuxState, TcpSocketTuning},
+        tcp::mux_state::{apply_unacked_timeout, MuxState, TcpSocketTuning},
     },
 };
 
@@ -184,6 +184,7 @@ async fn accept_loop_task(
                         if let Some(sz) = shared.tuning.so_sndbuf {
                             let _ = socket2::SockRef::from(&tcp).set_send_buffer_size(sz);
                         }
+                        apply_unacked_timeout(&tcp, shared.tuning.unacked_timeout);
 
                         // Spawn off — do NOT await handshake in the accept loop.
                         let shared = shared.clone();
