@@ -48,10 +48,7 @@ use crate::{
             user_logic::UserLogic,
         },
         messages::sedp_message::SEDPMessage,
-        task::{
-            peer_monitor::PeerMonitor, sending_handler::SendingHandler,
-            thread_monitor::ThreadMonitor,
-        },
+        task::{sending_handler::SendingHandler, thread_monitor::ThreadMonitor},
         transport::{
             plugin::{TransportPlugin, TransportPluginFactory},
             socket::Socket,
@@ -218,12 +215,6 @@ impl DcpsBridge {
                 .start_user_traffic(self.domain_id, transport.take_user_data_unicast_source())?;
         } else {
             log::error!("user_logic is not set");
-        }
-
-        // Start dead peer monitoring (TCP keepalive-based)
-        if let Some(dead_peer_rx) = transport.take_dead_peer_receiver() {
-            let mut peer_monitor = PeerMonitor::new(&self.participant, dead_peer_rx);
-            peer_monitor.start();
         }
 
         // Initialize thread monitoring
