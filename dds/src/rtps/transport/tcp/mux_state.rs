@@ -119,11 +119,48 @@ pub(crate) struct TcpSocketTuning {
     pub(crate) nodelay: bool,
     pub(crate) so_rcvbuf: Option<usize>,
     pub(crate) so_sndbuf: Option<usize>,
+    /// Bound on outstanding unacked data before the OS drops the connection
+    /// (so a stuck write fails fast). `None` = OS default.
+    pub(crate) unacked_timeout: Option<Duration>,
 }
 
 impl Default for TcpSocketTuning {
     fn default() -> Self {
-        Self { nodelay: true, so_rcvbuf: None, so_sndbuf: None }
+        Self { nodelay: true, so_rcvbuf: None, so_sndbuf: None, unacked_timeout: None }
+    }
+}
+
+/// Bound how long unacknowledged data may stay outstanding before the OS drops
+/// the connection, so a dead link surfaces as a write error (instead of blocking
+/// the sender ~indefinitely). Applied to every dialed/accepted stream. Per-OS
+/// mechanism; a no-op where unsupported (app-level keepalive is the fallback).
+pub(crate) fn apply_unacked_timeout(tcp: &tokio::net::TcpStream, timeout: Option<Duration>) {
+    let Some(t) = timeout else { return };
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        // TCP_USER_TIMEOUT, milliseconds.
+        let _ = socket2::SockRef::from(tcp).set_tcp_user_timeout(Some(t));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // TCP_RXT_CONNDROPTIME, whole seconds (round up, min 1).
+        use std::os::unix::io::AsRawFd;
+        let secs = t.as_secs().max(1) as libc::c_int;
+        unsafe {
+            libc::setsockopt(
+                tcp.as_raw_fd(),
+                libc::IPPROTO_TCP,
+                libc::TCP_RXT_CONNDROPTIME,
+                &secs as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+        }
+    }
+    // TODO(windows): TCP_MAXRTMS (ms) / TCP_MAXRT (s) via setsockopt(IPPROTO_TCP)
+    // once a Windows test environment is available; until then keepalive covers it.
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+    {
+        let _ = (tcp, t);
     }
 }
 

@@ -148,6 +148,7 @@ impl TcpTransportPlugin {
             nodelay: tcp_config.nodelay,
             so_rcvbuf: tcp_config.so_rcvbuf,
             so_sndbuf: tcp_config.so_sndbuf,
+            unacked_timeout: tcp_config.unacked_timeout,
         };
 
         // Build listener + sender inside a runtime context — both

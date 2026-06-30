@@ -860,6 +860,10 @@ pub const PROP_TCP_NODELAY: &str = "int2dds.transport.TCPv4.nodelay";
 pub const PROP_TCP_CONNECT_TIMEOUT_MS: &str = "int2dds.transport.TCPv4.connect_timeout_ms";
 /// BIND handshake response timeout, milliseconds. Default `5000`.
 pub const PROP_TCP_BIND_TIMEOUT_MS: &str = "int2dds.transport.TCPv4.bind_timeout_ms";
+/// Max time (ms) unacknowledged data may stay outstanding before the OS drops
+/// the connection, so a dead link surfaces as a write error instead of blocking
+/// the sender ~indefinitely. Default `5000`; `0` uses the OS default.
+pub const PROP_TCP_UNACKED_TIMEOUT_MS: &str = "int2dds.transport.TCPv4.unacked_timeout_ms";
 /// Control keepalive send interval, milliseconds. Default `10000`.
 pub const PROP_TCP_KEEPALIVE_INTERVAL_MS: &str = "int2dds.transport.TCPv4.keepalive_interval_ms";
 /// Keepalive response timeout, milliseconds. Default `5000`.

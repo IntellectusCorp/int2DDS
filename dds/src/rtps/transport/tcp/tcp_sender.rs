@@ -31,7 +31,7 @@ use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::tcp::conn_actor::{inbox_capacity, spawn_conn_actor, SharedWriteHalf};
 use crate::rtps::transport::tcp::framing::{read_framed_message, write_framed_message};
-use crate::rtps::transport::tcp::mux_state::MuxState;
+use crate::rtps::transport::tcp::mux_state::{apply_unacked_timeout, MuxState};
 use crate::rtps::transport::tcp::protocol::ControlMsg;
 use crate::rtps::transport::tcp::stream::{wrap_plain, AsyncConnStream};
 use crate::rtps::transport::tcp::tls::{connect_tls_async, TlsConfig};
@@ -326,10 +326,24 @@ impl TcpSender {
         };
 
         let payload = data.to_vec();
-        self.runtime_handle.block_on(async move {
+        let res = self.runtime_handle.block_on(async move {
             let mut wh = write_half.lock().await;
             write_framed_message(&mut *wh, &payload).await
-        })
+        });
+        match res {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                warn!(
+                    "TcpSender: write to {:?} (port={}) failed: {:?} — evicting connection",
+                    addr, logical_port, e
+                );
+                self.disconnect_peer(addr);
+                Err(transport_io_error(
+                    TransportErrorCode::TcpSendFailed,
+                    format!("write to {addr} (port {logical_port}) failed: {e}"),
+                ))
+            }
+        }
     }
 }
 
@@ -580,6 +594,7 @@ async fn open_stream(sender: &Arc<TcpSender>, addr: SocketAddr) -> io::Result<As
     if let Some(sz) = sender.shared.tuning.so_sndbuf {
         let _ = socket2::SockRef::from(&tcp).set_send_buffer_size(sz);
     }
+    apply_unacked_timeout(&tcp, sender.shared.tuning.unacked_timeout);
 
     // 2. Optional TLS handshake (also timeout-bounded).
     if let Some(cfg) = &sender.tls_config {
