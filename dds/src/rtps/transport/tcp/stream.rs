@@ -30,6 +30,16 @@ impl AsyncConnStream {
         }
     }
 
+    /// Local socket address of this connection — the concrete endpoint the OS
+    /// chose for the route to the peer.
+    pub(crate) fn local_addr(&self) -> io::Result<SocketAddr> {
+        match self {
+            Self::Plain(t) => t.local_addr(),
+            Self::Tls(TlsStream::Server(s)) => s.get_ref().0.local_addr(),
+            Self::Tls(TlsStream::Client(s)) => s.get_ref().0.local_addr(),
+        }
+    }
+
     /// Set TCP_NODELAY on the underlying TCP socket.
     pub(crate) fn set_nodelay(&self, on: bool) -> io::Result<()> {
         match self {
