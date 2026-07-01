@@ -252,7 +252,10 @@ mod tests {
     use super::*;
     use crate::rtps::transport::tcp::framing::write_framed_message;
     use crate::rtps::transport::tcp::mux_state::ConnectionState;
-    use crate::rtps::transport::tcp::protocol::{ControlMsg, MSG_PEER_HELLO_ACK};
+    use crate::rtps::transport::tcp::protocol::{
+        encode_locator, ControlMsg, ERR_CODE_MISSING_LOCATOR, MSG_ERROR, MSG_PEER_HELLO,
+        MSG_PEER_HELLO_ACK,
+    };
     use crossbeam_channel::bounded;
     use socket2::{Domain, SockAddr, Socket, Type};
     use std::time::{Duration, Instant};
@@ -388,7 +391,9 @@ mod tests {
         let client = tokio::spawn(async move {
             let mut stream = TcpStream::connect(("127.0.0.1", port)).await.expect("client connect");
 
-            let hello = ControlMsg::PeerHello { locator: [0u8; 16] };
+            let hello = ControlMsg::PeerHello {
+                locator: encode_locator(Ipv4Addr::new(127, 0, 0, 1), 40000),
+            };
             write_framed_message(&mut stream, &hello.to_bytes()).await.expect("write PEER_HELLO");
 
             let mut len_buf = [0u8; 4];
@@ -413,6 +418,37 @@ mod tests {
         let received = client.await.expect("client task");
         assert_eq!(&received[..4], b"INT2");
         assert_eq!(received[4], MSG_PEER_HELLO_ACK);
+
+        listener.shutdown().await;
+    }
+
+    /// A PEER_HELLO with a zero (missing) locator is rejected with an ERROR
+    /// carrying `ERR_CODE_MISSING_LOCATOR` — a peer must advertise its locator.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_hello_without_locator_is_rejected() {
+        let listener = make_listener();
+        let port = listener.port();
+
+        let client = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).await.expect("client connect");
+            let hello = ControlMsg::PeerHello { locator: [0u8; 16] };
+            write_framed_message(&mut stream, &hello.to_bytes()).await.expect("write PEER_HELLO");
+
+            let mut len_buf = [0u8; 4];
+            stream.read_exact(&mut len_buf).await.expect("read length");
+            let len = u32::from_be_bytes(len_buf) as usize;
+            let mut data = vec![0u8; len];
+            stream.read_exact(&mut data).await.expect("read payload");
+            data
+        });
+
+        let received = client.await.expect("client task");
+        // Frame: [4B "INT2"][MSG_ERROR][operation][2B code]...
+        assert_eq!(&received[..4], b"INT2");
+        assert_eq!(received[4], MSG_ERROR, "expected an ERROR response");
+        assert_eq!(received[5], MSG_PEER_HELLO, "operation should be PEER_HELLO");
+        let code = u16::from_be_bytes([received[6], received[7]]);
+        assert_eq!(code, ERR_CODE_MISSING_LOCATOR);
 
         listener.shutdown().await;
     }

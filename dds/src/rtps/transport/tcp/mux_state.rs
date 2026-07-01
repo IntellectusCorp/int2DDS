@@ -421,6 +421,22 @@ impl MuxState {
         }
     }
 
+    /// Tear down every connection (inbound + outbound) grouped under the peer at
+    /// `addr`, cancelling their actor pairs and purging its pending cookies.
+    /// Used by the DDS-unmatch cleanup path so a peer's inbound connections are
+    /// released too — they group under the peer's advertised listener address.
+    pub(crate) fn remove_peer_by_addr(&self, addr: SocketAddr) {
+        let guid = addr_to_guid(addr);
+        let conns = {
+            let mut pc = self.peer_connections.lock().expect("peer_connections lock");
+            pc.remove(&guid).map(|g| g.all_conns()).unwrap_or_default()
+        };
+        for conn_id in conns {
+            self.remove_connection_inner(conn_id);
+        }
+        self.purge_cookies_for_guid(guid);
+    }
+
     fn remove_connection_inner(&self, conn_id: ConnectionId) {
         if let Some((_, entry)) = self.connections.remove(&conn_id) {
             // Wake the conn_actor pair so they can tear down even if the

@@ -8,7 +8,7 @@
 //! the transition logic is isolated here; a child module can still reach the
 //! parent type's private fields.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::Ordering;
 
 use log::{debug, warn};
@@ -19,8 +19,8 @@ use crate::rtps::transport::plugin::IncomingMessage;
 use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::tcp::framing::{classify_frame, TcpFrameKind};
 use crate::rtps::transport::tcp::protocol::{
-    generate_cookie, ControlMsg, ERR_CODE_INVALID_COOKIE, ERR_CODE_INVALID_PORT, MSG_PORT_BIND,
-    MSG_PORT_RESERVE,
+    decode_locator, generate_cookie, ControlMsg, ERR_CODE_INVALID_COOKIE, ERR_CODE_INVALID_PORT,
+    ERR_CODE_MISSING_LOCATOR, MSG_PEER_HELLO, MSG_PORT_BIND, MSG_PORT_RESERVE,
 };
 
 use super::{
@@ -85,24 +85,47 @@ impl MuxState {
         };
 
         match msg {
-            ControlMsg::PeerHello { locator: _ } => {
+            ControlMsg::PeerHello { locator } => {
+                // A peer must advertise its listener locator so we can identify it
+                // (and group its inbound connection with its outbound ones). A
+                // missing/zero locator is a contract violation — reject it.
+                let (adv_ip, adv_port) = decode_locator(&locator);
+                if adv_port == 0 || adv_ip.is_unspecified() {
+                    warn!(
+                        "TcpMuxListener [{}]: PEER_HELLO without a locator on conn {} — rejecting",
+                        TransportErrorCode::TcpHandshakeHelloFailed,
+                        conn_id
+                    );
+                    send_control(
+                        writer_tx,
+                        &ControlMsg::Error {
+                            operation: MSG_PEER_HELLO,
+                            code: ERR_CODE_MISSING_LOCATOR,
+                            message: "PEER_HELLO missing advertised locator".to_string(),
+                        },
+                    );
+                    if let Some(entry) = self.connections.get(&conn_id) {
+                        entry.cancel.cancel();
+                    }
+                    return;
+                }
+
                 send_control(writer_tx, &ControlMsg::PeerHelloAck);
 
                 if let Some(mut conn) = self.connections.get_mut(&conn_id) {
                     conn.state = ConnectionState::Control;
                 }
 
-                // Register in peer group (synthetic guid from remote address).
-                let remote_addr = self.connections.get(&conn_id).map(|c| c.remote_addr);
-                if let Some(addr) = remote_addr {
-                    let synthetic_guid = addr_to_guid(addr);
-                    let mut pc = self.peer_connections.lock().expect("peer_connections lock");
-                    let group = pc.entry(synthetic_guid).or_insert_with(PeerConnectionGroup::new);
-                    group.control_conn = Some(conn_id);
+                // Group this inbound connection under the peer's advertised
+                // listener address, matching its outbound connections.
+                let addr = SocketAddr::new(IpAddr::V4(adv_ip), adv_port);
+                let synthetic_guid = addr_to_guid(addr);
+                let mut pc = self.peer_connections.lock().expect("peer_connections lock");
+                let group = pc.entry(synthetic_guid).or_insert_with(PeerConnectionGroup::new);
+                group.control_conn = Some(conn_id);
 
-                    if let Some(mut conn) = self.connections.get_mut(&conn_id) {
-                        conn.remote_guid_prefix = Some(synthetic_guid);
-                    }
+                if let Some(mut conn) = self.connections.get_mut(&conn_id) {
+                    conn.remote_guid_prefix = Some(synthetic_guid);
                 }
 
                 debug!("TcpMuxListener: PEER_HELLO ok (conn={})", conn_id);

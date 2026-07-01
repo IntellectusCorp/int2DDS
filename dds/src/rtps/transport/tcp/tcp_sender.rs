@@ -29,7 +29,7 @@ use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::tcp::conn_actor::{inbox_capacity, spawn_conn_actor, SharedWriteHalf};
 use crate::rtps::transport::tcp::framing::{read_framed_message, write_framed_message};
 use crate::rtps::transport::tcp::mux_state::{apply_keepalive, apply_unacked_timeout, MuxState};
-use crate::rtps::transport::tcp::protocol::ControlMsg;
+use crate::rtps::transport::tcp::protocol::{encode_locator, ControlMsg};
 use crate::rtps::transport::tcp::stream::{wrap_plain, AsyncConnStream};
 use crate::rtps::transport::tcp::tls::{connect_tls_async, TlsConfig};
 use crate::rtps::transport::TcpConfig;
@@ -127,6 +127,10 @@ pub(crate) struct TcpSender {
     participant_id: u32,
     working_ip: String,
     listener_port: u16,
+    /// The address we advertise to peers (public_address for WAN, else
+    /// working_ip:listener_port). Sent in PEER_HELLO so a peer identifies this
+    /// connection by our real identity — the same address it dials us on.
+    advertised_addr: Option<SocketAddr>,
     #[allow(dead_code)]
     local_guid_prefix: GuidPrefix,
 
@@ -173,11 +177,21 @@ impl TcpSender {
         // spawn connect tasks even though they are not in runtime context.
         let runtime_handle = tokio::runtime::Handle::current();
 
+        // Prefer the configured public address (WAN/NAT); otherwise fall back to
+        // this node's working IP + listener port.
+        let advertised_addr = tcp_config.public_address.or_else(|| {
+            working_ip
+                .parse::<std::net::Ipv4Addr>()
+                .ok()
+                .map(|ip| SocketAddr::new(IpAddr::V4(ip), listener_port))
+        });
+
         Arc::new(Self {
             domain_id,
             participant_id,
             working_ip,
             listener_port,
+            advertised_addr,
             local_guid_prefix,
             connect_timeout: tcp_config.connect_timeout,
             handshake_timeout: tcp_config.bind_timeout,
@@ -278,6 +292,10 @@ impl TcpSender {
             keep
         });
         self.backoff.remove(&addr);
+        // Also tear down the peer's shared-state group, which now holds the
+        // inbound connections too (they group under the peer's listener addr
+        // via PEER_HELLO).
+        self.shared.remove_peer_by_addr(addr);
     }
 
     /// Time left in `addr`'s reconnect-backoff window, or `None` if a connect
@@ -453,7 +471,13 @@ async fn do_connect_control(
     let mut stream = open_stream(sender, addr).await?;
 
     // 2. PEER_HELLO + PEER_HELLO_ACK (inline, before conn_actor takes the stream).
-    peer_hello_handshake(&mut stream, sender.handshake_timeout).await?;
+    // Advertise our address (public for WAN, else working IP + listener port) so
+    // the peer identifies this connection by the same address it dials us on.
+    let local_locator = match sender.advertised_addr {
+        Some(SocketAddr::V4(v4)) => encode_locator(*v4.ip(), v4.port()),
+        _ => [0u8; 16],
+    };
+    peer_hello_handshake(&mut stream, local_locator, sender.handshake_timeout).await?;
 
     // 3. Channel + cancel + pending_ack mailbox.
     let (tx, rx) = mpsc::channel::<Vec<u8>>(inbox_capacity());
@@ -678,11 +702,14 @@ async fn open_stream(sender: &Arc<TcpSender>, addr: SocketAddr) -> io::Result<As
     }
 }
 
-async fn peer_hello_handshake(stream: &mut AsyncConnStream, timeout: Duration) -> io::Result<()> {
-    // Locator field is opaque to the peer in this protocol; the sync version
-    // sends a zero locator. TODO: thread the real local locator through once
-    // the plugin wiring is in place.
-    let hello = ControlMsg::PeerHello { locator: [0u8; 16] };
+async fn peer_hello_handshake(
+    stream: &mut AsyncConnStream,
+    local_locator: [u8; 16],
+    timeout: Duration,
+) -> io::Result<()> {
+    // Carry our listener locator so the peer can identify us by our real
+    // (advertised) address rather than this connection's ephemeral source port.
+    let hello = ControlMsg::PeerHello { locator: local_locator };
     write_framed_message(stream, &hello.to_bytes()).await?;
 
     let response_bytes = tokio::time::timeout(timeout, read_framed_message(stream))
