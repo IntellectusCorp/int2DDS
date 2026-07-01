@@ -1576,7 +1576,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         // Enforce Lifespan QoS at read time so expired samples are never returned,
         // even if the periodic cleanup timer hasn't fired yet.
         guard.purge_expired_on_read()?;
-        Ok(guard.get_changes().clone())
+        Ok(guard.get_changes())
     }
 
     pub fn has_cached_data(&self) -> DdsResult<bool> {
@@ -2111,6 +2111,7 @@ impl<Foo: DdsType> DataReader<Foo> {
                 qos.resource_limits,
                 type_support.is_compute_key_provided(),
                 qos.ownership.kind,
+                qos.destination_order.kind,
             ))),
         };
 

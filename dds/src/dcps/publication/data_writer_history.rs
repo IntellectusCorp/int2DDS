@@ -123,8 +123,8 @@ pub(crate) struct DataWriterHistoryCache<Foo> {
 
 impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
     // Returns a reference to the list of CacheChanges.
-    fn get_changes(&self) -> &Vec<Arc<CacheChange>> {
-        &self.changes
+    fn get_changes(&self) -> Vec<Arc<CacheChange>> {
+        self.changes.clone()
     }
 
     fn insert_change_sorted(&mut self, change: Arc<CacheChange>) {
@@ -137,13 +137,6 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
             })
             .unwrap_or_else(|pos| pos);
         self.changes.insert(pos, change);
-    }
-
-    // Returns the instance map that tracks CacheChanges per instance.
-    fn get_instance_map(
-        &self,
-    ) -> Arc<Mutex<HashMap<InstanceHandle, Vec<std::sync::Weak<CacheChange>>>>> {
-        self.instance_map.clone()
     }
 
     // Returns the maximum number of samples allowed.
