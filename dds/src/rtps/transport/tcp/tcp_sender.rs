@@ -209,10 +209,9 @@ impl TcpSender {
         let key = (addr, logical_port);
 
         // Reuse a live cached connection. A dead one — conn_actor gone, its
-        // writer inbox closed — is evicted here so the connect below rebuilds it.
-        // This on-demand check replaces the periodic orphan-prune sweep; a data
-        // connection always (re)establishes its control connection first via
-        // `do_connect_data`, so no orphaned data link can linger.
+        // writer inbox closed — is evicted here so the connect below rebuilds it
+        // on demand. A data connection always (re)establishes its control
+        // connection first via `do_connect_data`, so no orphaned data link lingers.
         let cached_dead = match self.connections.get(&key) {
             Some(entry) if !entry.writer_tx.is_closed() => {
                 return Ok(Arc::clone(&entry.write_half));
@@ -247,6 +246,9 @@ impl TcpSender {
                 "TcpSender: outbound connect to {:?} (port={}) failed: {:?}",
                 addr, logical_port, e
             );
+            // Report the failure and trigger backoff. Any connection-specific
+            // teardown (e.g. a dead control on PORT_RESERVE failure) is done at
+            // the point of failure, so nothing extra is evicted here.
             self.note_connect_failure(addr);
             return Err(e);
         }
@@ -529,10 +531,22 @@ async fn do_connect_data(
     // 1. Ensure we have a control connection.
     let control = ensure_control_connection(sender, addr).await?;
 
-    // 2. PORT_RESERVE round-trip → cookie.
-    let cookie = port_reserve_round_trip(&control, logical_port, sender.handshake_timeout).await?;
+    // 2. PORT_RESERVE round-trip → cookie. A failure here means the control
+    //    connection itself is unusable (its socket is dead even if the actor has
+    //    not noticed, so `is_closed` cannot catch it). Evict it, or the next
+    //    attempt reuses the same dead control and times out again, forever.
+    let cookie =
+        match port_reserve_round_trip(&control, logical_port, sender.handshake_timeout).await {
+            Ok(cookie) => cookie,
+            Err(e) => {
+                sender.evict_connection(addr, CONTROL_LOGICAL_PORT);
+                return Err(e);
+            }
+        };
 
-    // 3. Open a fresh TCP for the data connection (+ TLS).
+    // 3. Open a fresh TCP for the data connection (+ TLS). A failure in step 3/4
+    //    leaves the control connection healthy (PORT_RESERVE just succeeded on
+    //    it), so it is kept; the data stream drops on the error return.
     let mut stream = open_stream(sender, addr).await?;
 
     // 4. PORT_BIND + PORT_BIND_ACK (inline, before conn_actor).
@@ -602,12 +616,19 @@ async fn ensure_control_connection(
 }
 
 fn lookup_control_handle(sender: &TcpSender, key: (SocketAddr, u16)) -> Option<ControlConnHandle> {
-    sender.connections.get(&key).and_then(|entry| {
-        entry.control.as_ref().map(|extras| ControlConnHandle {
-            writer_tx: entry.writer_tx.clone(),
-            extras: extras.clone(),
-        })
-    })
+    if let Some(entry) = sender.connections.get(&key) {
+        if !entry.writer_tx.is_closed() {
+            return entry.control.as_ref().map(|extras| ControlConnHandle {
+                writer_tx: entry.writer_tx.clone(),
+                extras: extras.clone(),
+            });
+        }
+    }
+
+    if let Some((_, dead)) = sender.connections.remove_if(&key, |_, e| e.writer_tx.is_closed()) {
+        dead.cancel.cancel();
+    }
+    None
 }
 
 // ── PORT_RESERVE round-trip via single-slot oneshot ─────────────────────────
