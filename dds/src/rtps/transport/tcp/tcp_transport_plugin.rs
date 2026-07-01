@@ -363,10 +363,27 @@ impl TransportPlugin for TcpTransportPlugin {
             }
         }
 
-        // 2. Tear down the sender's lifecycle tasks (keepalive, orphan prune).
+        // 2. Cancel the sender's shared token, tearing down every connection actor.
         self.runtime.block_on(self.sender.shutdown());
 
         debug!("[TcpTransportPlugin] Closed");
+    }
+
+    fn disconnect_peer(&self, locators: &[Locator]) {
+        let mut seen: Vec<SocketAddr> = Vec::new();
+        for locator in locators {
+            if !locator.is_tcp() {
+                continue;
+            }
+            let addr = SocketAddr::new(
+                std::net::IpAddr::V4(locator.to_ip_v4_addr()),
+                locator.tcp_physical_port(),
+            );
+            if !seen.contains(&addr) {
+                seen.push(addr);
+                self.sender.disconnect_peer(addr);
+            }
+        }
     }
 }
 

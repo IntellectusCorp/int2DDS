@@ -144,6 +144,13 @@ pub(crate) trait TransportPlugin: Send + Sync {
 
     /// Release all resources (sockets, connections, threads).
     fn close(&self);
+
+    /// Close every transport connection to a peer, identified by its advertised
+    /// locators. Called when the DDS layer unmatches a remote participant, so
+    /// per-peer resources (sockets, cache entries) are released promptly instead
+    /// of lingering until OS keepalive. Connectionless transports have nothing
+    /// to close — default no-op; only the TCP plugin overrides this.
+    fn disconnect_peer(&self, _locators: &[Locator]) {}
 }
 
 /// Factory for creating transport plugin instances.

@@ -91,6 +91,8 @@ pub struct Participant {
     user_logic: OnceLock<Arc<Option<UserLogic>>>,
     wlp_logic: Arc<OnceLock<WlpLogic>>,
 
+    transport: OnceLock<Arc<dyn TransportPlugin>>,
+
     // Entity ID used each time RTPS data reader/writer is added (incremented by one)
     current_entity_id: Arc<Mutex<[u8; 3]>>,
 
@@ -178,6 +180,7 @@ impl Participant {
             sedp_logic: OnceLock::new(),
             user_logic: OnceLock::new(),
             wlp_logic: Arc::new(OnceLock::new()),
+            transport: OnceLock::new(),
             current_entity_id: Arc::new(Mutex::new([0, 0, 0])),
             remote_publications: Arc::new(DashMap::new()),
             remote_subscriptions: Arc::new(DashMap::new()),
@@ -904,6 +907,16 @@ impl Participant {
         &self,
         terminated_participant_guid: &Guid,
     ) -> RtpsResult<()> {
+        // Capture the peer's locators before removing its proxy, so the transport
+        // connections to it can be closed after the DDS-level cleanup below.
+        let peer_locators = self
+            .find_remote_participant_proxy_data(terminated_participant_guid.prefix())
+            .map(|data| {
+                let mut locs = data.metatraffic_unicast_locator_list().clone();
+                locs.extend(data.default_unicast_locator_list().iter().cloned());
+                locs
+            });
+
         // Remove participant proxy
         if !self.remove_remote_participant_proxy_data(*terminated_participant_guid) {
             debug!("Remote participant not found, participant may have already been unmatched");
@@ -932,6 +945,12 @@ impl Participant {
                     writer_entity_id,
                 });
             }
+        }
+
+        // Close transport connections to the now-unmatched peer so its per-peer
+        // resources are released promptly, rather than lingering until OS keepalive.
+        if let (Some(transport), Some(locators)) = (self.transport.get(), peer_locators) {
+            transport.disconnect_peer(&locators);
         }
 
         info!("Successfully unmatched with remote participant: {}", terminated_participant_guid);
@@ -1052,6 +1071,9 @@ impl Participant {
         if !initial_peers.is_empty() {
             log::info!("Configured initial peers for SPDP: {:?}", initial_peers);
         }
+
+        // Keep a handle to the transport so unmatch can close per-peer connections.
+        let _ = self.transport.set(transport.clone());
 
         // Create SPDP logic
         let spdp_logic =

@@ -264,6 +264,22 @@ impl TcpSender {
         }
     }
 
+    /// Tear down every outbound connection to `addr` (all logical ports) and its
+    /// actor pairs, and clear the peer's reconnect backoff. Called when the DDS
+    /// layer unmatches the peer, so its transport resources are released promptly
+    /// instead of lingering until OS keepalive. Cancelling each actor wakes its
+    /// reader, which drops the matching `MuxState` entry.
+    pub(crate) fn disconnect_peer(&self, addr: SocketAddr) {
+        self.connections.retain(|(peer_addr, _), entry| {
+            let keep = *peer_addr != addr;
+            if !keep {
+                entry.cancel.cancel();
+            }
+            keep
+        });
+        self.backoff.remove(&addr);
+    }
+
     /// Time left in `addr`'s reconnect-backoff window, or `None` if a connect
     /// may be attempted now.
     fn backoff_remaining(&self, addr: SocketAddr) -> Option<Duration> {
@@ -978,6 +994,48 @@ mod tests {
             sender.connections.get(&(target, CONTROL_LOGICAL_PORT)).is_some(),
             "control connection must survive single-connection eviction",
         );
+
+        sender.shutdown().await;
+        listener.shutdown().await;
+    }
+
+    /// `disconnect_peer` evicts every cached connection to the addr (all logical
+    /// ports) and clears its backoff — the DDS-unmatch cleanup path.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn disconnect_peer_evicts_all_connections_and_backoff() {
+        let (b_disc_tx, b_disc_rx, b_user_tx, _b_user_rx) = make_channels();
+        let listener = TcpMuxListener::bind_and_spawn(
+            0,
+            0,
+            0,
+            [0u8; 12],
+            b_disc_tx,
+            b_user_tx,
+            None,
+            TcpSocketTuning::default(),
+        )
+        .expect("listener bind_and_spawn");
+        let b_port = listener.port();
+
+        let (sender, _) = make_sender(0, [0xAA; 12], 12345);
+        let target: SocketAddr = format!("127.0.0.1:{}", b_port).parse().unwrap();
+        blocking_send_discovery(&sender, target, b"RTPS\x00\x00\x00\x00").await.expect("send");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        wait_for_recv(&b_disc_rx, deadline).await.expect("send did not deliver within 5s");
+        assert!(sender.connections.len() >= 2, "expected control + data entries");
+
+        // Seed a backoff entry to confirm it is cleared too.
+        sender.note_connect_failure(target);
+        assert!(sender.backoff_remaining(target).is_some());
+
+        sender.disconnect_peer(target);
+        assert_eq!(
+            sender.connections.iter().filter(|e| e.key().0 == target).count(),
+            0,
+            "disconnect_peer must evict every connection to the addr",
+        );
+        assert!(sender.backoff_remaining(target).is_none(), "backoff must be cleared");
 
         sender.shutdown().await;
         listener.shutdown().await;
