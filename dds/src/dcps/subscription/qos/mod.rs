@@ -180,10 +180,9 @@ pub struct SubscriberQos {
 
 impl Qos for SubscriberQos {
     fn check_unsupported_policies(&self) -> DdsResult<()> {
-        if self.presentation != PresentationQosPolicy::default()
-            // || self.partition != PartitionQosPolicy::default()
-            || self.group_data != GroupDataQosPolicy::default()
-        {
+        if
+        // || self.partition != PartitionQosPolicy::default()
+        self.group_data != GroupDataQosPolicy::default() {
             return Err(DdsError::Unsupported);
         }
 
