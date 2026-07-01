@@ -1,14 +1,12 @@
 //! Per-connection state shared across the tasks that drive a connection.
 //!
-//! Each TCP connection is driven by several tasks at once — the reader/writer
-//! task pair plus the keepalive and prune tasks — and they all need to see
-//! the same connection state.
-//! `MuxState` is that single source of truth: held in an `Arc`,
-//! it keeps one `ConnectionEntry` per connection (state, remote
-//! addr, writer inbox, cancel token, keepalive timing) and routes inbound
-//! frames via `dispatch` — RTPS data to the DDS layer through the crossbeam
-//! senders, control frames to their handlers. A connection is torn down by
-//! firing its `CancellationToken`.
+//! Each TCP connection is driven by a reader/writer task pair that both need to
+//! see the same connection state. `MuxState` is that single source of truth:
+//! held in an `Arc`, it keeps one `ConnectionEntry` per connection (state,
+//! remote addr, writer inbox, cancel token) and routes inbound frames via
+//! `dispatch` — RTPS data to the DDS layer through the crossbeam senders,
+//! control frames to their handlers. A connection is torn down by firing its
+//! `CancellationToken`.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -385,24 +383,42 @@ impl MuxState {
     pub(crate) fn remove_connection(&self, conn_id: ConnectionId) {
         let guid_opt = self.connections.get(&conn_id).and_then(|e| e.remote_guid_prefix);
         if let Some(guid) = guid_opt {
-            let mut pc = self.peer_connections.lock().expect("peer_connections lock");
-            if let Some(group) = pc.get_mut(&guid) {
-                if group.control_conn == Some(conn_id) {
-                    group.control_conn = None;
-                }
-                if group.discovery_conn == Some(conn_id) {
-                    group.discovery_conn = None;
-                }
-                if group.user_data_conn == Some(conn_id) {
-                    group.user_data_conn = None;
-                }
+            let mut control_removed = false;
+            {
+                let mut pc = self.peer_connections.lock().expect("peer_connections lock");
+                if let Some(group) = pc.get_mut(&guid) {
+                    if group.control_conn == Some(conn_id) {
+                        group.control_conn = None;
+                        control_removed = true;
+                    }
+                    if group.discovery_conn == Some(conn_id) {
+                        group.discovery_conn = None;
+                    }
+                    if group.user_data_conn == Some(conn_id) {
+                        group.user_data_conn = None;
+                    }
 
-                if group.all_conns().is_empty() {
-                    pc.remove(&guid);
+                    if group.all_conns().is_empty() {
+                        pc.remove(&guid);
+                    }
                 }
+            }
+
+            if control_removed {
+                self.purge_cookies_for_guid(guid);
             }
         }
         self.remove_connection_inner(conn_id);
+    }
+
+    /// Drop every pending PORT_RESERVE cookie issued for `guid`.
+    fn purge_cookies_for_guid(&self, guid: GuidPrefix) {
+        let stale: Vec<[u8; 16]> =
+            self.cookie_to_guid.iter().filter(|e| *e.value() == guid).map(|e| *e.key()).collect();
+        for cookie in stale {
+            self.cookie_to_guid.remove(&cookie);
+            self.cookie_to_port.remove(&cookie);
+        }
     }
 
     fn remove_connection_inner(&self, conn_id: ConnectionId) {
@@ -459,5 +475,40 @@ mod tests {
         group.user_data_conn = Some(102);
         assert_eq!(group.all_conns().len(), 3);
         assert!(group.has_data_conns());
+    }
+
+    /// Removing a control connection purges its pending PORT_RESERVE cookies
+    /// (reserved but never bound), without touching another peer's cookies.
+    #[test]
+    fn remove_control_connection_purges_pending_cookies() {
+        use crossbeam_channel::bounded;
+
+        let (d_tx, _d_rx) = bounded(8);
+        let (u_tx, _u_rx) = bounded(8);
+        let shared = MuxState::new(0, 0, [0u8; 12], TcpSocketTuning::default(), d_tx, u_tx);
+
+        let addr: SocketAddr = "127.0.0.1:7400".parse().unwrap();
+        let (tx, _rx) = mpsc::channel::<Vec<u8>>(8);
+        let conn_id = shared.register_outbound_control_connection(
+            addr,
+            tx,
+            CancellationToken::new(),
+            Arc::new(Mutex::new(None)),
+        );
+        let guid = addr_to_guid(addr);
+
+        // Two pending cookies for this peer, one for another peer.
+        shared.cookie_to_guid.insert([1u8; 16], guid);
+        shared.cookie_to_port.insert([1u8; 16], 100);
+        let other = addr_to_guid("127.0.0.1:7500".parse().unwrap());
+        shared.cookie_to_guid.insert([9u8; 16], other);
+        shared.cookie_to_port.insert([9u8; 16], 200);
+
+        shared.remove_connection(conn_id);
+
+        assert!(shared.cookie_to_guid.get(&[1u8; 16]).is_none(), "peer cookie purged");
+        assert!(shared.cookie_to_port.get(&[1u8; 16]).is_none(), "peer cookie port purged");
+        assert!(shared.cookie_to_guid.get(&[9u8; 16]).is_some(), "other peer's cookie kept");
+        assert!(shared.cookie_to_port.get(&[9u8; 16]).is_some(), "other peer's cookie port kept");
     }
 }
