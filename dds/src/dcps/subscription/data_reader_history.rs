@@ -12,7 +12,7 @@
 //! - TimeBasedFilter enforcement
 
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt::Debug,
     sync::{Arc, Mutex, Weak},
 };
@@ -30,8 +30,9 @@ use crate::{
     infrastructure::{
         history_cache::HistoryCache,
         qos_policy::{
-            HistoryQosPolicy, HistoryQosPolicyKind, OwnershipQosPolicyKind, ReliabilityQosPolicy,
-            ReliabilityQosPolicyKind, ResourceLimitsQosPolicy,
+            DestinationOrderQosPolicyKind, HistoryQosPolicy, HistoryQosPolicyKind,
+            OwnershipQosPolicyKind, ReliabilityQosPolicy, ReliabilityQosPolicyKind,
+            ResourceLimitsQosPolicy,
         },
         status::{SampleRejectedStatus, SampleRejectedStatusKind, StatusInfo, StatusKind},
     },
@@ -77,8 +78,10 @@ pub(crate) struct DataReaderHistoryCache<Foo> {
     max_samples: i32,
     max_instances: i32,
     max_samples_per_instance: i32,
-    changes: Vec<Arc<CacheChange>>,
-    instance_map: Arc<Mutex<HashMap<InstanceHandle, Vec<Weak<CacheChange>>>>>, // NoKey Reader shall not use this
+    // Instance-organized primary store; BTreeMap key order gives deterministic instance blocks,
+    // each bucket kept in DESTINATION_ORDER. NoKey reader uses the NIL bucket.
+    instance_map: Arc<Mutex<BTreeMap<InstanceHandle, Vec<Arc<CacheChange>>>>>,
+    destination_order_kind: DestinationOrderQosPolicyKind,
     can_auto_remove: bool, // auto remove oldest changes when full
     ownership_kind: OwnershipQosPolicyKind,
     owner_candidates: Arc<DashMap<InstanceHandle, BTreeSet<OwnershipInfo>>>, // Track valid writers per instance (includes writers that missed deadline or unregistered, not just strictly alive ones by Liveliness QoS)
@@ -93,29 +96,45 @@ pub(crate) struct DataReaderHistoryCache<Foo> {
     content_filter: Option<Arc<dyn Fn(&CacheChange) -> bool + Send + Sync>>,
 }
 
+// DESTINATION_ORDER comparison key: reception or source timestamp, then sequence number.
+fn dest_order_key(
+    change: &CacheChange,
+    kind: DestinationOrderQosPolicyKind,
+) -> (Option<RtpsTime>, SequenceNumber) {
+    let ts = if kind == DestinationOrderQosPolicyKind::ByReceptionTimestamp {
+        change.reception_timestamp()
+    } else {
+        change.source_timestamp()
+    };
+    (ts, change.sequence_number())
+}
+
 impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> {
     // Returns a reference to the list of CacheChanges.
-    fn get_changes(&self) -> &Vec<Arc<CacheChange>> {
-        &self.changes
+    // Walk instance buckets in handle order, flattening each bucket's ordered samples.
+    fn get_changes(&self) -> Vec<Arc<CacheChange>> {
+        self.instance_map
+            .lock()
+            .map(|m| m.values().flatten().cloned().collect())
+            .unwrap_or_default()
     }
 
+    // Insert into the change's instance bucket in DESTINATION_ORDER.
     fn insert_change_sorted(&mut self, change: Arc<CacheChange>) {
-        let change_ts =
-            change.source_timestamp().or(change.reception_timestamp()).unwrap_or(RtpsTime::ZERO);
-        let pos = self
-            .changes
-            .binary_search_by_key(&change_ts, |c| {
-                c.source_timestamp().or(c.reception_timestamp()).unwrap_or(RtpsTime::ZERO)
-            })
-            .unwrap_or_else(|pos| pos);
-        self.changes.insert(pos, change);
-    }
-
-    // Returns the instance map that tracks CacheChanges per instance.
-    fn get_instance_map(
-        &self,
-    ) -> Arc<Mutex<HashMap<InstanceHandle, Vec<std::sync::Weak<CacheChange>>>>> {
-        self.instance_map.clone()
+        let kind = self.destination_order_kind;
+        if let Ok(mut map) = self.instance_map.lock() {
+            let bucket = map.entry(change.instance_handle()).or_default();
+            if kind == DestinationOrderQosPolicyKind::ByReceptionTimestamp {
+                // reception_timestamp is stamped just before insertion (add_info_to_cache_change,
+                // under this lock), so arrival order equals reception order — append at the tail.
+                bucket.push(change);
+            } else {
+                // BY_SOURCE_TIMESTAMP: source timestamp may arrive out of order, so position by key.
+                let key = dest_order_key(&change, kind);
+                let pos = bucket.partition_point(|c| dest_order_key(c, kind) <= key);
+                bucket.insert(pos, change);
+            }
+        }
     }
 
     // Returns the maximum number of samples allowed.
@@ -134,7 +153,7 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
     }
 
     fn sample_count(&self) -> usize {
-        self.changes.len()
+        self.instance_map.lock().map(|m| m.values().map(|b| b.len()).sum()).unwrap_or(0)
     }
 
     fn instance_count(&self) -> usize {
@@ -150,6 +169,47 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
             .lock()
             .map(|m| m.get(&instance_handle).map_or(0, |v| v.len()))
             .unwrap_or(0)
+    }
+
+    // Buckets are DESTINATION_ORDER sorted, not globally source-timestamp ordered. Each BY_SOURCE
+    // bucket is source-sorted, so early-break within it; BY_RECEPTION buckets are arrival order, so
+    // full-scan. Earliest survivor is tracked across buckets for the next timer.
+    fn collect_lifespan_expired(
+        &self,
+        writer_guid: Guid,
+        lifespan_duration: Duration,
+        now: RtpsTime,
+    ) -> (Vec<Arc<CacheChange>>, Option<RtpsTime>) {
+        let source_ordered =
+            self.destination_order_kind == DestinationOrderQosPolicyKind::BySourceTimestamp;
+        let mut expired = Vec::new();
+        let mut earliest_survivor: Option<RtpsTime> = None;
+        if let Ok(map) = self.instance_map.lock() {
+            for bucket in map.values() {
+                for change in bucket.iter() {
+                    if change.writer_guid() != writer_guid {
+                        continue;
+                    }
+                    let Some(source_ts) = change.source_timestamp() else {
+                        expired.push(change.clone());
+                        continue;
+                    };
+                    let expiry = source_ts.add_nanos(lifespan_duration.as_nanos().max(0) as u64);
+                    if now >= expiry {
+                        expired.push(change.clone());
+                    } else {
+                        earliest_survivor = Some(match earliest_survivor {
+                            Some(e) if e <= expiry => e,
+                            _ => expiry,
+                        });
+                        if source_ordered {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        (expired, earliest_survivor)
     }
 
     // Returns the map of lifespan timers keyed by writer GUID.
@@ -290,12 +350,7 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
 
         let removed_change = self.ensure_capacity(immutable_change.instance_handle())?;
 
-        self.add_change_to_instance_map(immutable_change.clone())?;
-        if lifespan_duration.is_some() {
-            self.insert_change_sorted(immutable_change.clone());
-        } else {
-            self.changes.push(immutable_change.clone());
-        }
+        self.insert_change_sorted(immutable_change.clone());
 
         Ok((removed_change, false))
     }
@@ -313,13 +368,15 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
         Ok(())
     }
 
-    // Removes the given CacheChange from the history vector and map.
+    // Removes the given CacheChange from its instance bucket.
     fn remove_change(&mut self, a_change: Arc<CacheChange>) -> DdsResult<()> {
-        self.changes.retain(|c| {
-            !(c.sequence_number() == a_change.sequence_number()
-                && c.writer_guid() == a_change.writer_guid())
-        });
-        self.remove_change_from_instance_map(&a_change)?;
+        let mut map = self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        if let Some(bucket) = map.get_mut(&a_change.instance_handle()) {
+            bucket.retain(|c| {
+                !(c.sequence_number() == a_change.sequence_number()
+                    && c.writer_guid() == a_change.writer_guid())
+            });
+        }
         Ok(())
     }
 
@@ -388,9 +445,18 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
         Ok(None)
     }
 
-    // Removes the oldest change from all instances.
+    // Removes the oldest change across all instances (DESTINATION_ORDER).
     fn try_remove_oldest_change_of_all(&mut self) -> DdsResult<Arc<CacheChange>> {
-        let oldest = self.changes.iter().min_by_key(|c| c.source_timestamp()).map(Arc::clone);
+        let kind = self.destination_order_kind;
+        let oldest = {
+            let map = self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            // Each bucket is DESTINATION_ORDER sorted, so its front is that instance's oldest;
+            // the global oldest is the minimum of the fronts.
+            map.values()
+                .filter_map(|bucket| bucket.first())
+                .min_by_key(|c| dest_order_key(c, kind))
+                .map(Arc::clone)
+        };
 
         match oldest {
             Some(change) => {
@@ -403,21 +469,17 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
         }
     }
 
-    // Removes the oldest change from the specified instance.
+    // Removes the oldest change from the specified instance (DESTINATION_ORDER).
     fn try_remove_oldest_change_of_instance(
         &mut self,
         instance_handle: InstanceHandle,
     ) -> DdsResult<Arc<CacheChange>> {
-        let instance_map = self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-
-        let oldest = instance_map.get(&instance_handle).and_then(|changes_vec| {
-            changes_vec
-                .iter()
-                .filter_map(|weak| weak.upgrade())
-                .min_by_key(|c| c.source_timestamp())
-        });
-
-        drop(instance_map);
+        let oldest = {
+            let instance_map =
+                self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            // Bucket is DESTINATION_ORDER sorted; its front is the instance's oldest sample.
+            instance_map.get(&instance_handle).and_then(|bucket| bucket.first()).map(Arc::clone)
+        };
 
         match oldest {
             Some(change) => {
@@ -453,6 +515,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
         resource_limits_qos: ResourceLimitsQosPolicy,
         has_key: bool,
         ownership_kind: OwnershipQosPolicyKind,
+        destination_order_kind: DestinationOrderQosPolicyKind,
     ) -> Self {
         #[inline]
         fn cap(v: i32) -> i32 {
@@ -491,8 +554,8 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
             max_samples,
             max_instances,
             max_samples_per_instance,
-            changes: Vec::new(),
-            instance_map: Arc::new(Mutex::new(HashMap::new())),
+            instance_map: Arc::new(Mutex::new(BTreeMap::new())),
+            destination_order_kind,
             can_auto_remove: history_qos.kind != HistoryQosPolicyKind::KeepAll
                 || reliability_qos.kind == ReliabilityQosPolicyKind::BestEffort, // 2.2.3.18 - 3. If keep_all && resource limits reached, then the behavior will depend on the RELIABILITY QoS.
             owner_candidates: Arc::new(DashMap::new()),
@@ -777,33 +840,6 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
         Ok(self.get_owner_of_instance(instance_handle).is_none())
     }
 
-    // Adds CacheChange to the instance map.
-    fn add_change_to_instance_map(&self, a_change: Arc<CacheChange>) -> DdsResult<()> {
-        let mut instance_map =
-            self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-        instance_map
-            .entry(a_change.instance_handle())
-            .or_insert_with(Vec::new)
-            .push(Arc::downgrade(&a_change));
-        Ok(())
-    }
-
-    // Removes CacheChange from the instance map.
-    fn remove_change_from_instance_map(&self, a_change: &Arc<CacheChange>) -> DdsResult<()> {
-        let mut instance_map =
-            self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-        if let Some(changes) = instance_map.get_mut(&a_change.instance_handle()) {
-            changes.retain(|weak_change| {
-                if let Some(strong_change) = weak_change.upgrade() {
-                    !Arc::ptr_eq(&strong_change, a_change)
-                } else {
-                    false
-                }
-            });
-        }
-        Ok(())
-    }
-
     // Removes all samples of the specified instance.
     pub(crate) fn remove_all_changes_of_instance(
         &mut self,
@@ -815,9 +851,6 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
             changes.clear();
         }
 
-        let changes = &mut self.changes;
-        changes.retain(|change| change.instance_handle() != instance_handle);
-
         Ok(())
     }
 
@@ -827,10 +860,14 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
         seq_num: SequenceNumber,
         writer_guid: Guid,
     ) -> Option<Arc<CacheChange>> {
-        let change = self.changes.iter().find(|change| {
-            change.sequence_number() == seq_num && change.writer_guid() == writer_guid
-        });
-        change.cloned()
+        let instance_map = self.instance_map.lock().ok()?;
+        instance_map
+            .values()
+            .flatten()
+            .find(|change| {
+                change.sequence_number() == seq_num && change.writer_guid() == writer_guid
+            })
+            .cloned()
     }
 
     // Retrieves all change identifiers (writer GUID and sequence number) of the specified instance.
@@ -839,10 +876,9 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
         instance_handle: InstanceHandle,
     ) -> DdsResult<HashSet<ReaderChangeId>> {
         let instance_map = self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-        let changes = if let Some(weak_changes) = instance_map.get(&instance_handle) {
-            weak_changes
+        let changes = if let Some(changes) = instance_map.get(&instance_handle) {
+            changes
                 .iter()
-                .filter_map(|weak| weak.upgrade())
                 .map(|change| (change.writer_guid(), change.sequence_number()))
                 .collect::<HashSet<ReaderChangeId>>()
         } else {
@@ -964,6 +1000,25 @@ mod tests {
         ))
     }
 
+    // Keyed test CacheChange with an explicit source_timestamp (for DESTINATION_ORDER tests).
+    fn create_change_with_key_src(
+        seq: i64,
+        handle: InstanceHandle,
+        source: RtpsTime,
+    ) -> CacheChange {
+        CacheChange::new(
+            ChangeKind::Alive,
+            Guid::new([1; 12], EntityId::new([0, 0, 1], EntityKind::USER_DEFINED_WRITER_WITH_KEY)),
+            handle,
+            SequenceNumber::from_i64(seq),
+            vec![
+                0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0, 20,
+                0, 0, 0, 0, 0, 0, 0,
+            ],
+            Some(source),
+        )
+    }
+
     // Helper function to create a test CacheChange
     fn create_change_no_key(seq: i64, handle: InstanceHandle) -> Arc<CacheChange> {
         Arc::new(CacheChange::new(
@@ -1056,21 +1111,128 @@ mod tests {
             .add_change_with_cleanup(create_change_with_key(1, handle), true)
             .unwrap();
 
-        assert!(cache_arc.lock().unwrap().get_instance_map().lock().unwrap().contains_key(&handle));
+        assert!(cache_arc.lock().unwrap().contains_instance(handle));
         assert!(reader.get_instance_infos().unwrap().contains_key(&handle));
         assert!(cache_arc.lock().unwrap().time_based_filter.tracks_instance(handle));
 
         cache_arc.lock().unwrap().remove_all_instance_resources(handle);
 
-        assert!(!cache_arc
-            .lock()
-            .unwrap()
-            .get_instance_map()
-            .lock()
-            .unwrap()
-            .contains_key(&handle));
+        assert!(!cache_arc.lock().unwrap().contains_instance(handle));
         assert!(!reader.get_instance_infos().unwrap().contains_key(&handle));
         assert!(!cache_arc.lock().unwrap().time_based_filter.tracks_instance(handle));
+    }
+
+    #[test]
+    fn get_changes_returns_instance_blocks_not_insertion_order() {
+        // Interleave two instances so insertion order (B1,A2,B3,A4) differs from
+        // instance-block order (A2,A4,B1,B3). get_changes must walk instance buckets.
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_millis(100),
+            },
+            resource_limits: ResourceLimitsQosPolicy {
+                max_samples: 10,
+                max_instances: 2,
+                max_samples_per_instance: 10,
+            },
+            ..Default::default()
+        };
+
+        let data_reader = create_with_key_datareader(reader_qos);
+        let datareader_cache = data_reader.get_datareader_cache().unwrap();
+        let mut datareader_cache = datareader_cache.lock().unwrap();
+
+        let instance_a = InstanceHandle::new([1; 16]);
+        let instance_b = InstanceHandle::new([2; 16]);
+
+        datareader_cache
+            .add_change_with_cleanup(create_change_with_key(1, instance_b), false)
+            .unwrap();
+        datareader_cache
+            .add_change_with_cleanup(create_change_with_key(2, instance_a), false)
+            .unwrap();
+        datareader_cache
+            .add_change_with_cleanup(create_change_with_key(3, instance_b), false)
+            .unwrap();
+        datareader_cache
+            .add_change_with_cleanup(create_change_with_key(4, instance_a), false)
+            .unwrap();
+
+        let seqs: Vec<i64> =
+            datareader_cache.get_changes().iter().map(|c| c.sequence_number().to_i64()).collect();
+        // Instance A (handle [1;16]) block first, then instance B; within a block, arrival order.
+        assert_eq!(seqs, vec![2, 4, 1, 3]);
+    }
+
+    #[test]
+    fn by_source_timestamp_orders_bucket_by_source_not_arrival() {
+        // BY_SOURCE_TIMESTAMP: a sample with a smaller source_timestamp arriving later still
+        // sorts ahead of an earlier-arriving sample with a larger source_timestamp.
+        let mut reader_qos = DataReaderQos::default();
+        reader_qos.history = HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true };
+        reader_qos.destination_order.kind = DestinationOrderQosPolicyKind::BySourceTimestamp;
+
+        let data_reader = create_with_key_datareader(reader_qos);
+        let datareader_cache = data_reader.get_datareader_cache().unwrap();
+        let mut datareader_cache = datareader_cache.lock().unwrap();
+
+        let handle = InstanceHandle::new([1; 16]);
+        // seq1 arrives first with a later source ts; seq2 arrives second with an earlier one.
+        datareader_cache
+            .add_change_with_cleanup(
+                Arc::new(create_change_with_key_src(1, handle, RtpsTime::from_nanos(200))),
+                false,
+            )
+            .unwrap();
+        datareader_cache
+            .add_change_with_cleanup(
+                Arc::new(create_change_with_key_src(2, handle, RtpsTime::from_nanos(100))),
+                false,
+            )
+            .unwrap();
+
+        let seqs: Vec<i64> =
+            datareader_cache.get_changes().iter().map(|c| c.sequence_number().to_i64()).collect();
+        // Ordered by source timestamp ascending: seq2 (100) ahead of seq1 (200).
+        assert_eq!(seqs, vec![2, 1]);
+    }
+
+    #[test]
+    fn add_change_stores_samples_in_reception_timestamp_order() {
+        // reader_history::add_change stamps reception_timestamp (add_info_to_cache_change) right
+        // before inserting, so the stored history ends up in reception order — the property the
+        // BY_RECEPTION tail push relies on. Drives the real add_change path; if stamping is
+        // removed or ordered after the insert, reception_timestamp is unset/out of order here.
+        let data_reader = create_with_key_datareader(DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            ..Default::default()
+        });
+        let rtps_reader = data_reader.get_rtps_reader().unwrap();
+        let handle = InstanceHandle::new([1; 16]);
+        {
+            let reader_cache = rtps_reader.reader_cache();
+            let mut reader_cache = reader_cache.lock().unwrap();
+            for seq in 1..=3 {
+                reader_cache
+                    .add_change(create_change_with_key_src(seq, handle, RtpsTime::ZERO), false)
+                    .unwrap();
+            }
+        }
+
+        let datareader_cache = data_reader.get_datareader_cache().unwrap();
+        let datareader_cache = datareader_cache.lock().unwrap();
+        let stamps: Vec<RtpsTime> = datareader_cache
+            .get_changes()
+            .iter()
+            .map(|c| {
+                c.reception_timestamp().expect("reception_timestamp must be stamped at add_change")
+            })
+            .collect();
+        let mut expected = stamps.clone();
+        expected.sort();
+        assert_eq!(stamps, expected, "stored order must follow reception_timestamp");
     }
 
     mod history_qos {
@@ -2684,7 +2846,7 @@ mod tests {
 
             // KeepAll history: both dispose samples must be retained.
             let disposed_in_cache = cache
-                .changes
+                .get_changes()
                 .iter()
                 .filter(|c| {
                     c.kind() == ChangeKind::NotAliveDisposed && c.instance_handle() == instance

@@ -30,10 +30,7 @@ use crate::{
 };
 
 pub(crate) trait HistoryCache {
-    fn get_changes(&self) -> &Vec<Arc<CacheChange>>;
-    fn get_instance_map(
-        &self,
-    ) -> Arc<Mutex<HashMap<InstanceHandle, Vec<std::sync::Weak<CacheChange>>>>>;
+    fn get_changes(&self) -> Vec<Arc<CacheChange>>;
     fn get_max_samples(&self) -> i32;
     fn get_max_instances(&self) -> i32;
     fn get_max_samples_per_instance(&self) -> i32;
@@ -164,6 +161,36 @@ pub(crate) trait HistoryCache {
         Ok(())
     }
 
+    // Collect a writer's lifespan-expired changes plus the earliest expiry among the survivors
+    // (for the next timer interval). Default assumes get_changes() is source-timestamp ordered
+    // and early-breaks; stores that are not source-ordered override this.
+    fn collect_lifespan_expired(
+        &self,
+        writer_guid: Guid,
+        lifespan_duration: Duration,
+        now: RtpsTime,
+    ) -> (Vec<Arc<CacheChange>>, Option<RtpsTime>) {
+        let mut expired = Vec::new();
+        let mut earliest_survivor = None;
+        for change in self.get_changes().iter() {
+            if change.writer_guid() != writer_guid {
+                continue;
+            }
+            let Some(source_ts) = change.source_timestamp() else {
+                expired.push(change.clone());
+                continue;
+            };
+            let expiry = source_ts.add_nanos(lifespan_duration.as_nanos().max(0) as u64);
+            if now >= expiry {
+                expired.push(change.clone());
+            } else {
+                earliest_survivor = Some(expiry);
+                break;
+            }
+        }
+        (expired, earliest_survivor)
+    }
+
     fn remove_lifespan_expired_changes(
         &mut self,
         writer_guid: Guid,
@@ -172,33 +199,8 @@ pub(crate) trait HistoryCache {
         use log::debug;
 
         let current_rtps_time = RtpsTime::now();
-        let changes = self.get_changes();
-
-        let mut expired_changes = Vec::new();
-        let mut first_non_expired: Option<(Arc<CacheChange>, RtpsTime)> = None;
-
-        for change in changes.iter() {
-            if change.writer_guid() != writer_guid {
-                continue;
-            }
-
-            let Some(source_ts) = change.source_timestamp() else {
-                // If no source_timestamp, mark for removal
-                expired_changes.push(change.clone());
-                continue;
-            };
-
-            let expiry_rtps_time = source_ts.add_nanos(lifespan_duration.as_nanos().max(0) as u64);
-
-            if current_rtps_time >= expiry_rtps_time {
-                // If expired, mark for removal
-                expired_changes.push(change.clone());
-            } else {
-                // When encountering first non-expired change, all subsequent changes are non-expired, so stop
-                first_non_expired = Some((change.clone(), expiry_rtps_time));
-                break;
-            }
-        }
+        let (expired_changes, earliest_survivor) =
+            self.collect_lifespan_expired(writer_guid, lifespan_duration, current_rtps_time);
 
         // Remove all expired changes at once
         for expired_change in expired_changes {
@@ -214,7 +216,7 @@ pub(crate) trait HistoryCache {
         }
 
         // If there are non-expired changes, update timer interval
-        if let Some((_, expiry_rtps_time)) = first_non_expired {
+        if let Some(expiry_rtps_time) = earliest_survivor {
             let interval_nanos =
                 expiry_rtps_time.to_nanos().saturating_sub(current_rtps_time.to_nanos());
             let interval_duration = std::time::Duration::from_nanos(interval_nanos);
