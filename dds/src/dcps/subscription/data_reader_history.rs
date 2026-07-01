@@ -18,7 +18,7 @@ use std::{
 };
 
 use dashmap::DashMap;
-use log::debug;
+use log::{debug, error};
 
 use crate::{
     common::instance_handle::InstanceHandle,
@@ -565,6 +565,54 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
             time_based_filter: TimeBasedFilter::new(),
             content_filter: None,
         }
+    }
+
+    // TOPIC ordered_access: merge the per-instance buckets (each already DESTINATION_ORDER
+    // sorted) into one globally DESTINATION_ORDER ordered list via k-way merge of sorted runs.
+    pub(crate) fn get_changes_for_topic_scoped_ordered_access(&self) -> Vec<Arc<CacheChange>> {
+        let kind = self.destination_order_kind;
+        self.instance_map
+            .lock()
+            .map(|map| {
+                // K-way merge of sorted runs: each instance bucket is already DESTINATION_ORDER sorted.
+                let buckets: Vec<&Vec<Arc<CacheChange>>> = map.values().collect();
+
+                // Initialize cursors for each bucket.
+                let mut cursor = vec![0usize; buckets.len()];
+
+                // Prepare the output vector with the total capacity.
+                let total: usize = buckets.iter().map(|b| b.len()).sum();
+                let mut out = Vec::with_capacity(total);
+
+                // Perform the k-way merge by repeatedly selecting the next smallest element from the buckets.
+                for _ in 0..total {
+                    // Pick the bucket whose next sample has the smallest DESTINATION_ORDER key.
+                    let mut best: Option<usize> = None;
+                    for (i, bucket) in buckets.iter().enumerate() {
+                        if cursor[i] >= bucket.len() {
+                            continue;
+                        }
+                        // Compare the current sample in this bucket with the best candidate found so far.
+                        let is_smaller = best.is_none_or(|bi| {
+                            dest_order_key(&bucket[cursor[i]], kind)
+                                < dest_order_key(&buckets[bi][cursor[bi]], kind)
+                        });
+                        if is_smaller {
+                            best = Some(i);
+                        }
+                    }
+                    let Some(bi) = best else {
+                        error!(
+                            "All buckets exhausted during k-way merge, this should never happen"
+                        );
+                        break;
+                    };
+                    out.push(buckets[bi][cursor[bi]].clone());
+                    cursor[bi] += 1;
+                }
+                out
+            })
+            .unwrap_or_default()
     }
 
     // Must be called immediately after DataReaderHistoryCache creation.
@@ -1233,6 +1281,44 @@ mod tests {
         let mut expected = stamps.clone();
         expected.sort();
         assert_eq!(stamps, expected, "stored order must follow reception_timestamp");
+    }
+
+    #[test]
+    fn topic_ordered_merges_instances_by_creation_order() {
+        // Two instances A,B interleaved by ascending source timestamp: A0,B0,A1,B1.
+        // get_changes() returns instance blocks; get_changes_for_topic_scoped_ordered_access()
+        // k-way merges the buckets into one globally source-ordered list.
+        let mut reader_qos = DataReaderQos::default();
+        reader_qos.history = HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true };
+        reader_qos.destination_order.kind = DestinationOrderQosPolicyKind::BySourceTimestamp;
+
+        let data_reader = create_with_key_datareader(reader_qos);
+        let datareader_cache = data_reader.get_datareader_cache().unwrap();
+        let mut datareader_cache = datareader_cache.lock().unwrap();
+
+        let a = InstanceHandle::new([1; 16]);
+        let b = InstanceHandle::new([2; 16]);
+        for (seq, handle, ts) in [(1, a, 10u64), (2, b, 20), (3, a, 30), (4, b, 40)] {
+            datareader_cache
+                .add_change_with_cleanup(
+                    Arc::new(create_change_with_key_src(seq, handle, RtpsTime::from_nanos(ts))),
+                    false,
+                )
+                .unwrap();
+        }
+
+        // INSTANCE scope: bucket A (seq 1,3) then bucket B (seq 2,4).
+        let blocks: Vec<i64> =
+            datareader_cache.get_changes().iter().map(|c| c.sequence_number().to_i64()).collect();
+        assert_eq!(blocks, vec![1, 3, 2, 4]);
+
+        // TOPIC+ordered: global source-timestamp order across buckets.
+        let merged: Vec<i64> = datareader_cache
+            .get_changes_for_topic_scoped_ordered_access()
+            .iter()
+            .map(|c| c.sequence_number().to_i64())
+            .collect();
+        assert_eq!(merged, vec![1, 2, 3, 4]);
     }
 
     mod history_qos {

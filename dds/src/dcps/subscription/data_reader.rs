@@ -68,7 +68,7 @@ use crate::{
             EnableChild, Entity, EntityInternal, UpdateStatus,
         },
         history_cache::HistoryCache as DcpsHistoryCache,
-        qos_policy::{HistoryQosPolicyKind, Qos},
+        qos_policy::{HistoryQosPolicyKind, PresentationQosAccessScopeKind, Qos},
         status::{
             LivelinessChangedStatus, RequestedDeadlineMissedStatus, RequestedIncompatibleQosStatus,
             RequestedIncompatibleTypeStatus, SampleLostStatus, SampleRejectedStatus, StatusInfo,
@@ -1570,13 +1570,30 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     }
 
     pub(crate) fn get_available_changes(&self) -> DdsResult<Vec<Arc<CacheChange>>> {
+        let topic_ordered = self.subscriber_topic_ordered();
         let datareader_cache = self.get_datareader_cache();
         let arc = datareader_cache?;
         let mut guard = arc.lock().map_err(|e| DdsError::Error(e.to_string()))?;
         // Enforce Lifespan QoS at read time so expired samples are never returned,
         // even if the periodic cleanup timer hasn't fired yet.
         guard.purge_expired_on_read()?;
-        Ok(guard.get_changes())
+        // TOPIC ordered_access presents samples in topic-wide DESTINATION_ORDER across instances;
+        // otherwise return the per-instance storage order.
+        if topic_ordered {
+            Ok(guard.get_changes_for_topic_scoped_ordered_access())
+        } else {
+            Ok(guard.get_changes())
+        }
+    }
+
+    fn subscriber_topic_ordered(&self) -> bool {
+        self.get_subscriber()
+            .and_then(|s| s.get_qos())
+            .map(|q| {
+                q.presentation.ordered_access
+                    && q.presentation.access_scope == PresentationQosAccessScopeKind::Topic
+            })
+            .unwrap_or(false)
     }
 
     pub fn has_cached_data(&self) -> DdsResult<bool> {
