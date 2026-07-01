@@ -127,10 +127,7 @@ pub(crate) struct TcpSender {
     participant_id: u32,
     working_ip: String,
     listener_port: u16,
-    /// The address we advertise to peers (public_address for WAN, else
-    /// working_ip:listener_port). Sent in PEER_HELLO so a peer identifies this
-    /// connection by our real identity — the same address it dials us on.
-    advertised_addr: Option<SocketAddr>,
+    public_addr: Option<SocketAddr>,
     #[allow(dead_code)]
     local_guid_prefix: GuidPrefix,
 
@@ -179,19 +176,14 @@ impl TcpSender {
 
         // Prefer the configured public address (WAN/NAT); otherwise fall back to
         // this node's working IP + listener port.
-        let advertised_addr = tcp_config.public_address.or_else(|| {
-            working_ip
-                .parse::<std::net::Ipv4Addr>()
-                .ok()
-                .map(|ip| SocketAddr::new(IpAddr::V4(ip), listener_port))
-        });
+        let public_addr = tcp_config.public_address;
 
         Arc::new(Self {
             domain_id,
             participant_id,
             working_ip,
             listener_port,
-            advertised_addr,
+            public_addr,
             local_guid_prefix,
             connect_timeout: tcp_config.connect_timeout,
             handshake_timeout: tcp_config.bind_timeout,
@@ -471,11 +463,15 @@ async fn do_connect_control(
     let mut stream = open_stream(sender, addr).await?;
 
     // 2. PEER_HELLO + PEER_HELLO_ACK (inline, before conn_actor takes the stream).
-    // Advertise our address (public for WAN, else working IP + listener port) so
-    // the peer identifies this connection by the same address it dials us on.
-    let local_locator = match sender.advertised_addr {
-        Some(SocketAddr::V4(v4)) => encode_locator(*v4.ip(), v4.port()),
-        _ => [0u8; 16],
+    let local_locator = if let Some(SocketAddr::V4(pub_v4)) = sender.public_addr {
+        encode_locator(*pub_v4.ip(), pub_v4.port())
+    } else if let Some(ext_ip) = crate::common::env::get_external_address() {
+        encode_locator(ext_ip, sender.listener_port)
+    } else {
+        match stream.local_addr()?.ip() {
+            IpAddr::V4(ip) => encode_locator(ip, sender.listener_port),
+            IpAddr::V6(_) => [0u8; 16], // TCPv6: Unsupported
+        }
     };
     peer_hello_handshake(&mut stream, local_locator, sender.handshake_timeout).await?;
 
