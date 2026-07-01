@@ -31,7 +31,6 @@ use crate::{
 
 pub(crate) trait HistoryCache {
     fn get_changes(&self) -> &Vec<Arc<CacheChange>>;
-    fn get_changes_mut(&mut self) -> &mut Vec<Arc<CacheChange>>;
     fn get_instance_map(
         &self,
     ) -> Arc<Mutex<HashMap<InstanceHandle, Vec<std::sync::Weak<CacheChange>>>>>;
@@ -95,19 +94,8 @@ pub(crate) trait HistoryCache {
                 >= self.get_max_samples_per_instance())
     }
 
-    // Used when lifespan qos is enabled
-    fn insert_change_sorted(&mut self, change: Arc<CacheChange>) {
-        let change_ts =
-            change.source_timestamp().or(change.reception_timestamp()).unwrap_or(RtpsTime::ZERO);
-
-        let changes = self.get_changes_mut();
-        let pos = changes
-            .binary_search_by_key(&change_ts, |c| {
-                c.source_timestamp().or(c.reception_timestamp()).unwrap_or(RtpsTime::ZERO)
-            })
-            .unwrap_or_else(|pos| pos);
-        changes.insert(pos, change);
-    }
+    // Insert keeping source/reception-timestamp order. Used when lifespan qos is enabled.
+    fn insert_change_sorted(&mut self, change: Arc<CacheChange>);
 
     fn register_lifespan_timer(
         &self,
@@ -184,7 +172,7 @@ pub(crate) trait HistoryCache {
         use log::debug;
 
         let current_rtps_time = RtpsTime::now();
-        let changes = self.get_changes_mut();
+        let changes = self.get_changes();
 
         let mut expired_changes = Vec::new();
         let mut first_non_expired: Option<(Arc<CacheChange>, RtpsTime)> = None;
