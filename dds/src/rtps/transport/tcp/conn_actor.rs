@@ -160,9 +160,8 @@ async fn writer_task(
         }
     }
 
-    // Drain any frames the inbox already holds before sending FIN — e.g. the
-    // idle-timeout Error pushed by `prune_idle_connections` immediately
-    // before cancel, which would otherwise be lost to the `select!` race.
+    // Drain any frames the inbox already holds before sending FIN, so a frame
+    // enqueued just before cancel is not lost to the `select!` race.
     let mut wh = write_half.lock().await;
     while let Ok(frame) = rx.try_recv() {
         if write_framed_message(&mut *wh, &frame).await.is_err() {

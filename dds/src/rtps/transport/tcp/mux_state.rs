@@ -79,7 +79,7 @@ impl PeerConnectionGroup {
     }
 }
 
-/// Per-connection bookkeeping shared across the actor pair and the prune task.
+/// Per-connection bookkeeping shared across the actor pair.
 pub(crate) struct ConnectionEntry {
     pub(crate) remote_addr: SocketAddr,
     pub(crate) state: ConnectionState,

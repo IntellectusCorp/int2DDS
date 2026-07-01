@@ -1,7 +1,7 @@
 //! Inbound side of the TCP mux transport.
 //!
-//! `TcpMuxListener` owns the listener-side tasks (accept loop, idle prune) and
-//! exposes the shared `MuxState` via `shared()`.
+//! `TcpMuxListener` owns the listener-side accept loop and exposes the shared
+//! `MuxState` via `shared()`.
 //!
 //! The accept loop spawns a short-lived `handshake_and_register_task` per
 //! connection so a slow TLS handshake does not stall new accepts; each
