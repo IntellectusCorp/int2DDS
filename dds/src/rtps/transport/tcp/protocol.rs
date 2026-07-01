@@ -114,6 +114,8 @@ pub(crate) enum ControlMsg {
 pub(crate) const ERR_CODE_INVALID_PORT: u16 = 1;
 /// PORT_BIND: cookie is unknown or expired.
 pub(crate) const ERR_CODE_INVALID_COOKIE: u16 = 2;
+/// PEER_HELLO: no advertised locator — the peer must identify itself.
+pub(crate) const ERR_CODE_MISSING_LOCATOR: u16 = 3;
 
 impl ControlMsg {
     /// Serialize to bytes (the payload portion, after frame magic).
