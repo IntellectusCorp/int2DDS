@@ -38,6 +38,11 @@ pub(crate) trait HistoryCache {
     fn get_max_samples(&self) -> i32;
     fn get_max_instances(&self) -> i32;
     fn get_max_samples_per_instance(&self) -> i32;
+    // Storage-agnostic counts backing the resource-limit checks below.
+    fn sample_count(&self) -> usize;
+    fn instance_count(&self) -> usize;
+    fn contains_instance(&self, instance_handle: InstanceHandle) -> bool;
+    fn sample_count_of_instance(&self, instance_handle: InstanceHandle) -> usize;
     fn get_lifespan_timers(&self) -> Arc<Mutex<HashMap<Guid, TimerId>>>;
     fn get_timer_handler(&self, guid_prefix: GuidPrefix) -> DdsResult<Arc<Mutex<TimerHandler>>> {
         Ok(TimerHandler::get_instance(guid_prefix))
@@ -68,17 +73,12 @@ pub(crate) trait HistoryCache {
     ) -> DdsResult<Arc<CacheChange>>;
 
     fn is_max_instances_exceeded(&self, instance_handle: InstanceHandle) -> DdsResult<bool> {
-        let instance_map = self.get_instance_map();
-        let instance_map_guard = instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-
-        let exceeded = !instance_map_guard.contains_key(&instance_handle)
-            && instance_map_guard.len() as i32 >= self.get_max_instances();
-
-        Ok(exceeded)
+        Ok(!self.contains_instance(instance_handle)
+            && self.instance_count() as i32 >= self.get_max_instances())
     }
 
     fn is_max_samples_exceeded(&self) -> bool {
-        self.get_changes().len() as i32 >= self.get_max_samples()
+        self.sample_count() as i32 >= self.get_max_samples()
     }
 
     fn is_max_samples_per_instance_exceeded(
@@ -90,14 +90,9 @@ pub(crate) trait HistoryCache {
             return Ok(self.is_max_samples_exceeded());
         }
 
-        let instance_map = self.get_instance_map();
-        let instance_map_guard = instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-
-        let exceeded = instance_map_guard.contains_key(&instance_handle)
-            && instance_map_guard[&instance_handle].len() as i32
-                >= self.get_max_samples_per_instance();
-
-        Ok(exceeded)
+        Ok(self.contains_instance(instance_handle)
+            && self.sample_count_of_instance(instance_handle) as i32
+                >= self.get_max_samples_per_instance())
     }
 
     // Used when lifespan qos is enabled

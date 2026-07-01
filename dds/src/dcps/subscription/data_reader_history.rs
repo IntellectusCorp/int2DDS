@@ -126,6 +126,25 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
         self.max_samples_per_instance
     }
 
+    fn sample_count(&self) -> usize {
+        self.changes.len()
+    }
+
+    fn instance_count(&self) -> usize {
+        self.instance_map.lock().map(|m| m.len()).unwrap_or(0)
+    }
+
+    fn contains_instance(&self, instance_handle: InstanceHandle) -> bool {
+        self.instance_map.lock().map(|m| m.contains_key(&instance_handle)).unwrap_or(false)
+    }
+
+    fn sample_count_of_instance(&self, instance_handle: InstanceHandle) -> usize {
+        self.instance_map
+            .lock()
+            .map(|m| m.get(&instance_handle).map_or(0, |v| v.len()))
+            .unwrap_or(0)
+    }
+
     // Returns the map of lifespan timers keyed by writer GUID.
     fn get_lifespan_timers(&self) -> Arc<Mutex<HashMap<Guid, TimerId>>> {
         self.lifespan_timers.clone()
