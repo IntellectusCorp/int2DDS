@@ -38,7 +38,7 @@ use crate::{
     },
     publication::data_writer::DataWriter,
     rtps::{
-        common::{guid::Guid, sequence::SequenceNumber},
+        common::{guid::Guid, sequence::SequenceNumber, time::RtpsTime},
         entities::{
             history::{
                 cache_change::CacheChange, cache_change_pool::CacheChangePool,
@@ -127,9 +127,16 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
         &self.changes
     }
 
-    // Returns a mutable reference to the list of CacheChanges.
-    fn get_changes_mut(&mut self) -> &mut Vec<Arc<CacheChange>> {
-        &mut self.changes
+    fn insert_change_sorted(&mut self, change: Arc<CacheChange>) {
+        let change_ts =
+            change.source_timestamp().or(change.reception_timestamp()).unwrap_or(RtpsTime::ZERO);
+        let pos = self
+            .changes
+            .binary_search_by_key(&change_ts, |c| {
+                c.source_timestamp().or(c.reception_timestamp()).unwrap_or(RtpsTime::ZERO)
+            })
+            .unwrap_or_else(|pos| pos);
+        self.changes.insert(pos, change);
     }
 
     // Returns the instance map that tracks CacheChanges per instance.
