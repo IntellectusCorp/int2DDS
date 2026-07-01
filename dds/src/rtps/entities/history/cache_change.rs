@@ -86,6 +86,14 @@ fn concat_chunks(chunks: &[Bytes]) -> Bytes {
     Bytes::from(buf)
 }
 
+// Per-sample inline QoS metadata carried in a Data submessage's inline QoS list.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct GroupPresentationInfo {
+    pub coherent_set: Option<SequenceNumber>, // PID_COHERENT_SET (writer's first member seq)
+    pub group_seq_num: Option<SequenceNumber>, // PID_GROUP_SEQ_NUM (sample's own group seq)
+    pub group_coherent_set: Option<SequenceNumber>, // PID_GROUP_COHERENT_SET (group set's first seq)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CacheChange {
     kind: ChangeKind,
@@ -94,8 +102,7 @@ pub(crate) struct CacheChange {
     writer_guid: Guid,
     pub(crate) sequence_number: SequenceNumber,
     data_payload: DataPayload,
-    // inline_qos is RTPS version 2.5
-    // inline_qos: ParameterList
+    inline_qos: GroupPresentationInfo,
     instance_handle: InstanceHandle,
     source_timestamp: Option<RtpsTime>,
     reception_timestamp: Option<RtpsTime>,
@@ -115,7 +122,7 @@ impl std::fmt::Display for CacheChange {
              data_payload_len: {}, instance_handle: {}, source_timestamp: {:?}, \
              reception_timestamp: {:?}, fragmented: {}, fragment_set: {:?}, \
              total_fragments: {}, fragment_size: {}, writer_ownership_strength: {:?}, \
-             lifespan_duration: {:?} }}",
+             lifespan_duration: {:?}, inline_qos: {:?} }}",
             self.kind,
             self.writer_guid,
             self.sequence_number,
@@ -128,7 +135,8 @@ impl std::fmt::Display for CacheChange {
             self.total_fragments,
             self.fragment_size,
             self.writer_ownership_strength,
-            self.lifespan_duration
+            self.lifespan_duration,
+            self.inline_qos
         )
     }
 }
@@ -160,6 +168,7 @@ impl CacheChange {
             writer_ownership_strength: None,
             instance_handle,
             data_payload: DataPayload::Owned(data_value),
+            inline_qos: GroupPresentationInfo::default(),
             sequence_number,
             source_timestamp,
             reception_timestamp: None,
@@ -179,6 +188,7 @@ impl CacheChange {
             writer_ownership_strength: None,
             instance_handle: InstanceHandle::default(),
             data_payload: DataPayload::Owned(Vec::new()),
+            inline_qos: GroupPresentationInfo::default(),
             sequence_number: SequenceNumber::UNKNOWN,
             source_timestamp: None,
             reception_timestamp: None,
@@ -209,6 +219,7 @@ impl CacheChange {
                 self.data_payload = DataPayload::Owned(Vec::new());
             }
         }
+        self.inline_qos = GroupPresentationInfo::default();
         self.sequence_number = sequence_number;
         self.source_timestamp = source_timestamp;
         self.reception_timestamp = None;
