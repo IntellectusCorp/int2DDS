@@ -23,12 +23,16 @@
     After building, a distributable archive is assembled (unless -NoPackage):
 
         ffi/dist/int2dds-ffi-<version>-linux.tar.gz
-        ├── int2dds-ffi.manifest.yaml   # version/commit/per-arch sha256/min_glibc
+        ├── int2dds-ffi.manifest.yaml   # version/commit/per-arch sha256/min_glibc/soname
         ├── int2dds-ffi.h
         ├── LICENSE                      # repo-root Apache-2.0
-        ├── linux-x86_64/libint2dds_ffi.so
-        ├── linux-aarch64/libint2dds_ffi.so
-        └── linux-armhf/libint2dds_ffi.so
+        └── linux-x86_64/               # (one dir per built arch)
+            ├── libint2dds_ffi.so         -> libint2dds_ffi.so.<major>  (dev symlink)
+            ├── libint2dds_ffi.so.<major> -> libint2dds_ffi.so.<ver>    (soname symlink)
+            └── libint2dds_ffi.so.<ver>                                 (real file)
+
+    Each arch keeps its real .so plus the soname/dev symlinks, preserved as
+    links in the archive (GNU tar + cp -d).
 
     sha256 and min_glibc are detected from the built binaries; version comes
     from [workspace.package].version in the root Cargo.toml.
@@ -143,7 +147,7 @@ foreach ($t in $Targets) {
     }
 
     # The container now emits a versioned layout: libint2dds_ffi.so.<ver> (real),
-    # libint2dds_ffi.so.<major.minor> and libint2dds_ffi.so (soname/dev symlinks).
+    # libint2dds_ffi.so.<major> and libint2dds_ffi.so (soname/dev symlinks).
     $soLink = Join-Path $DistRoot "$dist\libint2dds_ffi.so"
     if (-not (Test-Path $soLink)) { throw "Artifact missing for $plat at $soLink" }
     # Real file is the largest libint2dds_ffi.so.* (the symlinks are tiny).
@@ -205,13 +209,21 @@ for entry in \
   real="/src/ffi/dist/${d}/libint2dds_ffi.so.${ver}"
   if [ ! -e "$real" ]; then echo "  -- skip ${d}: not built this run"; continue; fi
   mkdir -p "${stage}/${d}"
-  cp "$real" "${stage}/${d}/libint2dds_ffi.so"
-  sha=$(sha256sum "${stage}/${d}/libint2dds_ffi.so" | cut -d' ' -f1)
+  # Copy the real .so plus its soname/dev symlinks, preserving links as links
+  # (-d = --no-dereference --preserve=links). This keeps the on-disk layout
+  #   libint2dds_ffi.so -> .so.<major> -> .so.<ver>
+  # intact inside the archive instead of flattening to a single file.
+  cp -d "/src/ffi/dist/${d}/libint2dds_ffi.so"* "${stage}/${d}/"
+  sha=$(sha256sum "${stage}/${d}/libint2dds_ffi.so.${ver}" | cut -d' ' -f1)
+  # SONAME the runtime linker resolves (e.g. libint2dds_ffi.so.0), read from the ELF.
+  soname=$(readelf -d "${stage}/${d}/libint2dds_ffi.so.${ver}" 2>/dev/null | grep -oP 'SONAME.*\[\K[^]]+')
+  [ -n "$soname" ] || soname="libint2dds_ffi.so.${ver%%.*}"
   {
     echo "  - os: linux"
     echo "    arch: ${deb}"
     echo "    triple: ${triple}"
-    echo "    file: ${d}/libint2dds_ffi.so"
+    echo "    file: ${d}/libint2dds_ffi.so.${ver}"
+    echo "    soname: ${soname}"
     echo "    sha256: ${sha}"
   } >> "$manifest"
   if [ "$libc" = musl ]; then
