@@ -14,6 +14,7 @@ path = "src/lib.rs"
 
 [dependencies]
 md5 = "0.8.0"
+dialoguer = { version = "0.11", default-features = false, features = ["completion"] }
 
 [dev-dependencies]
 int2dds = { path = "../dds" }
