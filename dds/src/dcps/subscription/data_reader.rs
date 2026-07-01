@@ -68,7 +68,7 @@ use crate::{
             EnableChild, Entity, EntityInternal, UpdateStatus,
         },
         history_cache::HistoryCache as DcpsHistoryCache,
-        qos_policy::{DestinationOrderQosPolicyKind, HistoryQosPolicyKind, Qos},
+        qos_policy::{HistoryQosPolicyKind, Qos},
         status::{
             LivelinessChangedStatus, RequestedDeadlineMissedStatus, RequestedIncompatibleQosStatus,
             RequestedIncompatibleTypeStatus, SampleLostStatus, SampleRejectedStatus, StatusInfo,
@@ -2613,14 +2613,10 @@ impl<Foo: DdsType> DataReader<Foo> {
         let mut remaining = if max_samples == -1 { i32::MAX } else { max_samples };
 
         let get_changes_t0 = Instant::now();
-        let mut changes = self.get_available_changes()?;
+        let changes = self.get_available_changes()?;
         let get_changes_us = if profile { elapsed_us(get_changes_t0, Instant::now()) } else { 0 };
 
-        let sort_t0 = Instant::now();
-        if !changes.is_empty() {
-            self.sort_changes_by_timestamp(&mut changes)?;
-        }
-        let sort_us = if profile { elapsed_us(sort_t0, Instant::now()) } else { 0 };
+        let sort_us = 0u64;
 
         // ContentFilteredTopic is applied on the receive path, so the cache is already filtered.
         let filter_setup_us = 0u64;
@@ -2856,22 +2852,13 @@ impl<Foo: DdsType> DataReader<Foo> {
                 if let Some(order_by_fields) = query_condition.get_order_by_fields() {
                     log::debug!("QueryCondition ORDER BY detected: {:?}", order_by_fields);
                     self.sort_changes_by_order_fields(&mut changes, order_by_fields)?;
-                } else {
-                    // Default sorting if no ORDER BY
-                    log::debug!("No ORDER BY, using timestamp sort");
-                    self.sort_changes_by_timestamp(&mut changes)?;
                 }
-            } else {
-                // Default sorting for ReadCondition
-                log::debug!("ReadCondition detected, using timestamp sort");
-                self.sort_changes_by_timestamp(&mut changes)?;
             }
             states
         } else if let (Some(sample_states), Some(view_states), Some(instance_states)) =
             (direct_sample_states, direct_view_states, direct_instance_states)
         {
             log::debug!("Using direct state masks");
-            self.sort_changes_by_timestamp(&mut changes)?;
             (sample_states, view_states, instance_states)
         } else {
             // No mask
@@ -3163,26 +3150,6 @@ impl<Foo: DdsType> DataReader<Foo> {
             valid_data: has_valid_data,
         };
         Ok(DataSample::new(data, sample_info, Some(self.type_support.clone())))
-    }
-
-    fn sort_changes_by_timestamp(&self, changes: &mut [Arc<CacheChange>]) -> DdsResult<()> {
-        let destination_kind = self.get_qos()?.destination_order.kind;
-        changes.sort_by(|a, b| {
-            if destination_kind == DestinationOrderQosPolicyKind::ByReceptionTimestamp {
-                // Sort by reception_timestamp (oldest to newest)
-                a.reception_timestamp()
-                    .cmp(&b.reception_timestamp())
-                    // If timestamp is same, compare by sequence_number (safety mechanism)
-                    .then_with(|| a.sequence_number().cmp(&b.sequence_number()))
-            } else {
-                // Sort by source_timestamp (oldest to newest)
-                a.source_timestamp()
-                    .cmp(&b.source_timestamp())
-                    // If timestamp is same, compare by sequence_number (safety mechanism)
-                    .then_with(|| a.sequence_number().cmp(&b.sequence_number()))
-            }
-        });
-        Ok(())
     }
 
     /// Sort changes according to ORDER BY fields
