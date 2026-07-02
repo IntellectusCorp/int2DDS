@@ -142,13 +142,14 @@ pub(crate) fn apply_unacked_timeout(tcp: &tokio::net::TcpStream, timeout: Option
     #[cfg(target_os = "macos")]
     {
         // TCP_RXT_CONNDROPTIME, whole seconds (round up, min 1).
+        const TCP_RXT_CONNDROPTIME: libc::c_int = 0x80;
         use std::os::unix::io::AsRawFd;
         let secs = t.as_secs().max(1) as libc::c_int;
         unsafe {
             libc::setsockopt(
                 tcp.as_raw_fd(),
                 libc::IPPROTO_TCP,
-                libc::TCP_RXT_CONNDROPTIME,
+                TCP_RXT_CONNDROPTIME,
                 &secs as *const _ as *const libc::c_void,
                 std::mem::size_of::<libc::c_int>() as libc::socklen_t,
             );
