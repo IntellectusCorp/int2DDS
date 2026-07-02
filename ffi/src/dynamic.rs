@@ -926,14 +926,14 @@ unsafe impl Sync for Int2DdsDynamicTypeSupport {}
 
 /// Opaque handle to a dynamic DataWriter (`DataWriter<DynamicData>`).
 pub struct Int2DdsDynamicDataWriter {
-    inner: DataWriter<DynamicData>,
+    pub(crate) inner: DataWriter<DynamicData>,
 }
 unsafe impl Send for Int2DdsDynamicDataWriter {}
 unsafe impl Sync for Int2DdsDynamicDataWriter {}
 
 /// Opaque handle to a dynamic DataReader (`DataReader<DynamicData>`).
 pub struct Int2DdsDynamicDataReader {
-    inner: DataReader<DynamicData>,
+    pub(crate) inner: DataReader<DynamicData>,
 }
 unsafe impl Send for Int2DdsDynamicDataReader {}
 unsafe impl Sync for Int2DdsDynamicDataReader {}
