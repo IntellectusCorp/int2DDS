@@ -40,15 +40,6 @@ impl AsyncConnStream {
         }
     }
 
-    /// Set TCP_NODELAY on the underlying TCP socket.
-    pub(crate) fn set_nodelay(&self, on: bool) -> io::Result<()> {
-        match self {
-            Self::Plain(t) => t.set_nodelay(on),
-            Self::Tls(TlsStream::Server(s)) => s.get_ref().0.set_nodelay(on),
-            Self::Tls(TlsStream::Client(s)) => s.get_ref().0.set_nodelay(on),
-        }
-    }
-
     /// Whether this connection is TLS-encrypted.
     pub(crate) fn is_tls(&self) -> bool {
         matches!(self, Self::Tls(_))

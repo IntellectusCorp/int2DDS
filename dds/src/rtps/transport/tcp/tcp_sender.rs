@@ -21,9 +21,7 @@ use tokio_util::sync::CancellationToken;
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::port_manager::PortManager;
-use crate::rtps::transport::tcp::connection_registry::{
-    apply_keepalive, apply_unacked_timeout, ConnectionRegistry,
-};
+use crate::rtps::transport::tcp::connection_registry::{apply_socket_tuning, ConnectionRegistry};
 use crate::rtps::transport::tcp::connection_tasks::{
     inbox_capacity, spawn_connection_tasks, SharedWriteHalf,
 };
@@ -637,16 +635,7 @@ async fn create_stream(sender: &Arc<TcpSender>, addr: SocketAddr) -> io::Result<
             )
         })??;
 
-    let _ = tcp.set_nodelay(sender.shared.tuning.nodelay);
-
-    if let Some(sz) = sender.shared.tuning.so_rcvbuf {
-        let _ = socket2::SockRef::from(&tcp).set_recv_buffer_size(sz);
-    }
-    if let Some(sz) = sender.shared.tuning.so_sndbuf {
-        let _ = socket2::SockRef::from(&tcp).set_send_buffer_size(sz);
-    }
-    apply_unacked_timeout(&tcp, sender.shared.tuning.unacked_timeout);
-    apply_keepalive(&tcp, sender.shared.tuning.keepalive);
+    apply_socket_tuning(&tcp, &sender.shared.tuning);
 
     // 2. Optional TLS handshake.
     if let Some(cfg) = &sender.tls_config {
@@ -677,7 +666,7 @@ async fn peer_hello_handshake(
     locator: [u8; 16],
     timeout: Duration,
 ) -> io::Result<()> {
-    let hello = ControlMsg::PeerHello { locator: locator };
+    let hello = ControlMsg::PeerHello { locator };
     write_framed_message(stream, &hello.to_bytes()).await?;
 
     let response_bytes =
