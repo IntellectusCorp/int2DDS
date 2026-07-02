@@ -1751,7 +1751,9 @@ impl SedpLogic {
             return Ok(false);
         };
         for locator in remote_participant_data.metatraffic_unicast_locator_list() {
-            self.send_to_single_locator(buffer, locator.clone(), message_type)?;
+            if let Err(e) = self.send_to_single_locator(buffer, locator.clone(), message_type) {
+                debug!("[{}] send to {:?} skipped: {}", message_type, locator, e);
+            }
         }
         Ok(true)
     }
@@ -1770,7 +1772,9 @@ impl SedpLogic {
 
         for remote_participant_data in remote_participant_datas_guard.iter() {
             for locator in remote_participant_data.metatraffic_unicast_locator_list() {
-                self.send_to_single_locator(buffer, locator.clone(), message_type)?;
+                if let Err(e) = self.send_to_single_locator(buffer, locator.clone(), message_type) {
+                    debug!("[{}] fan-out to {:?} skipped: {}", message_type, locator, e);
+                }
             }
         }
         drop(remote_participant_datas_guard);
