@@ -568,7 +568,7 @@ impl SedpLogic {
                     return Ok(());
                 }
             } else {
-                error!("Inline qos STATUS_INFO not parsed in SubscriptionBuiltinTopicData");
+                debug!("ALIVE SubscriptionBuiltinTopicData, no STATUS_INFO parameter found");
             }
         }
 
@@ -979,7 +979,7 @@ impl SedpLogic {
                     return Ok(());
                 }
             } else {
-                error!("Inline qos STATUS_INFO not parsed in PublicationBuiltinTopicData");
+                debug!("ALIVE SubscriptionBuiltinTopicData, no STATUS_INFO parameter found");
             }
         }
 

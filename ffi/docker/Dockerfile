@@ -58,23 +58,24 @@ ENV DIST=unknown \
 # QEMU (head closes the pipe before the slow emulated writer finishes), which
 # pipefail would wrongly treat as a build failure (exit 141). `set -eu` still
 # aborts on a real cargo build failure since cargo runs as a standalone command.
-# Versioned install layout (standard ELF 3-tier):
+# Versioned install layout (standard ELF 3-tier, chained like libtool/ldconfig):
 #   libint2dds_ffi.so.<major.minor.patch>   real file (full version from Cargo.toml)
-#   libint2dds_ffi.so.<major.minor>         soname symlink (matches DT_SONAME set by build.rs)
-#   libint2dds_ffi.so                       dev/link symlink
-# The major.minor soname is embedded by ffi/build.rs from CARGO_PKG_VERSION_*.
+#   libint2dds_ffi.so.<major>     -> .so.<major.minor.patch>   soname symlink (matches DT_SONAME)
+#   libint2dds_ffi.so             -> .so.<major>               dev/link symlink (points at the soname,
+#                                                              not a specific patch, so it rides upgrades)
+# The major-only soname is embedded by ffi/build.rs from CARGO_PKG_VERSION_MAJOR.
 CMD ["bash", "-lc", "\
     set -eu; \
     echo \"== platform: $(uname -m)  ->  dist/$DIST ==\"; \
     ldd --version | head -1 || true; rustc -vV | grep host || true; \
     cargo build --release -p int2dds-ffi; \
     ver=$(grep -m1 '^version' /src/Cargo.toml | cut -d'\"' -f2); \
-    mm=${ver%.*}; \
-    real=libint2dds_ffi.so.$ver; son=libint2dds_ffi.so.$mm; \
+    maj=${ver%%.*}; \
+    real=libint2dds_ffi.so.$ver; son=libint2dds_ffi.so.$maj; \
     out=/src/ffi/dist/$DIST; mkdir -p \"$out\"; \
     cp -v \"$CARGO_TARGET_DIR/release/libint2dds_ffi.so\" \"$out/$real\"; \
     ln -sfn \"$real\" \"$out/$son\"; \
-    ln -sfn \"$real\" \"$out/libint2dds_ffi.so\"; \
+    ln -sfn \"$son\" \"$out/libint2dds_ffi.so\"; \
     cp -v /src/ffi/include/int2dds-ffi.h /src/ffi/dist/ 2>/dev/null || true; \
     echo '== artifact =='; \
     readelf -h \"$out/$real\" | grep -E 'Class|Machine|Type' || true; \
