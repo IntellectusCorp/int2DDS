@@ -117,6 +117,11 @@ impl ConnectionRegistry {
                 // Group this inbound connection under the peer's advertised
                 // listener address, matching its outbound connections.
                 let addr = SocketAddr::new(IpAddr::V4(adv_ip), adv_port);
+
+                // The peer reached us, so it is up: clear any outbound reconnect
+                // backoff for its address so our next dial is not delayed.
+                self.clear_backoff(addr);
+
                 let synthetic_guid = addr_to_guid(addr);
                 let mut pc = self.peer_connections.lock().expect("peer_connections lock");
                 let group = pc.entry(synthetic_guid).or_insert_with(PeerConnectionGroup::new);

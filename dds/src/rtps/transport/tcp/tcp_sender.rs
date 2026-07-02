@@ -9,7 +9,7 @@
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
@@ -35,11 +35,6 @@ use crate::rtps::transport::TcpConfig;
 
 /// Logical port 0 = control connection
 pub(crate) const CONTROL_LOGICAL_PORT: u16 = 0;
-
-/// First reconnect-backoff delay after a connect failure.
-const BACKOFF_BASE: Duration = Duration::from_millis(500);
-/// Cap for the exponential reconnect-backoff growth.
-const BACKOFF_MAX: Duration = Duration::from_secs(30);
 
 // ── Cache entry types ───────────────────────────────────────────────────────
 
@@ -108,14 +103,6 @@ enum InFlightAcquisition {
     AlreadyDone,
 }
 
-/// Per-peer reconnect backoff. After a failed connect, no new connect to the
-/// peer is attempted until `next_attempt`; `delay` doubles per consecutive
-/// failure (capped at `BACKOFF_MAX`). A successful connect clears the entry.
-struct BackoffState {
-    next_attempt: Instant,
-    delay: Duration,
-}
-
 // ── TcpSender ────────────────────────────────────────────────────────────────
 
 /// Outbound side of the TCP mux transport. See module-level docs.
@@ -140,9 +127,6 @@ pub(crate) struct TcpSender {
     /// Marks peers currently being connected, so duplicate concurrent
     /// connects to the same peer are prevented. See `InFlightGuard`.
     in_flight: Arc<DashMap<(SocketAddr, u16), Arc<Notify>>>,
-
-    /// Per-peer reconnect backoff windows, keyed by peer address.
-    backoff: DashMap<SocketAddr, BackoffState>,
 
     /// Handle to the runtime, saved when the sender is built.
     /// The sync `send_to_*` methods run outside the runtime, so they cannot
@@ -185,7 +169,6 @@ impl TcpSender {
             shared,
             connections: Arc::new(DashMap::new()),
             in_flight: Arc::new(DashMap::new()),
-            backoff: DashMap::new(),
             runtime_handle,
             cancel,
         })
@@ -277,35 +260,23 @@ impl TcpSender {
             }
             keep
         });
-        self.backoff.remove(&addr);
+        self.shared.clear_backoff(addr);
         self.shared.remove_peer_by_addr(addr);
     }
 
-    /// Time left in `addr`'s reconnect-backoff window, or `None` if a connect
-    /// may be attempted now.
+    // Reconnect backoff lives in `ConnectionRegistry` (shared with the inbound
+    // path); these thin wrappers keep the outbound call sites unchanged.
+
     fn backoff_remaining(&self, addr: SocketAddr) -> Option<Duration> {
-        let entry = self.backoff.get(&addr)?;
-        let now = Instant::now();
-        (entry.next_attempt > now).then(|| entry.next_attempt - now)
+        self.shared.backoff_remaining(addr)
     }
 
-    /// Record a connect failure, growing `addr`'s backoff window exponentially
-    /// (BACKOFF_BASE, then doubling, capped at BACKOFF_MAX).
     fn note_connect_failure(&self, addr: SocketAddr) {
-        let now = Instant::now();
-        let mut entry = self
-            .backoff
-            .entry(addr)
-            .or_insert(BackoffState { next_attempt: now, delay: Duration::ZERO });
-        let delay =
-            if entry.delay.is_zero() { BACKOFF_BASE } else { (entry.delay * 2).min(BACKOFF_MAX) };
-        entry.delay = delay;
-        entry.next_attempt = now + delay;
+        self.shared.note_connect_failure(addr);
     }
 
-    /// Clear `addr`'s backoff after a successful connect.
     fn note_connect_success(&self, addr: SocketAddr) {
-        self.backoff.remove(&addr);
+        self.shared.clear_backoff(addr);
     }
 
     /// Graceful shutdown — cancels the shared token, tearing down every
@@ -776,7 +747,7 @@ async fn port_bind_handshake(
 mod tests {
     use super::*;
     use crate::rtps::transport::plugin::IncomingMessage;
-    use crate::rtps::transport::tcp::connection_registry::TcpSocketTuning;
+    use crate::rtps::transport::tcp::connection_registry::{TcpSocketTuning, BACKOFF_BASE};
     use crate::rtps::transport::tcp::tcp_mux_listener::TcpMuxListener;
     use crossbeam_channel::bounded;
     use std::time::Instant;

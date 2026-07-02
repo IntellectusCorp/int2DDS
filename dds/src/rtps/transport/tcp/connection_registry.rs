@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
 use dashmap::DashMap;
@@ -194,6 +194,21 @@ pub(crate) fn apply_keepalive(tcp: &tokio::net::TcpStream, params: Option<Keepal
     }
 }
 
+/// First reconnect-backoff delay after a failed outbound connect.
+pub(crate) const BACKOFF_BASE: Duration = Duration::from_millis(500);
+/// Cap for the exponential reconnect-backoff growth (kept high on purpose so a
+/// truly unreachable peer is not hammered).
+const BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// Per-peer reconnect backoff. After a failed outbound connect, no new connect
+/// to the peer is attempted until `next_attempt`; `delay` doubles per
+/// consecutive failure (capped at `BACKOFF_MAX`). Cleared on an outbound success
+/// or when the peer proves reachable via its inbound PEER_HELLO.
+struct BackoffState {
+    next_attempt: Instant,
+    delay: Duration,
+}
+
 /// Thread-safe shared state for the mux listener.
 pub(crate) struct ConnectionRegistry {
     pub(crate) domain_id: u32,
@@ -205,6 +220,8 @@ pub(crate) struct ConnectionRegistry {
 
     pub(crate) connections: DashMap<ConnectionId, ConnectionEntry>,
     peer_connections: Mutex<HashMap<GuidPrefix, PeerConnectionGroup>>,
+
+    backoff: DashMap<SocketAddr, BackoffState>,
 
     /// Cookie issued at PORT_RESERVE → consumed at PORT_BIND.
     cookie_to_port: DashMap<[u8; 16], u16>,
@@ -233,6 +250,7 @@ impl ConnectionRegistry {
             tuning,
             connections: DashMap::new(),
             peer_connections: Mutex::new(HashMap::new()),
+            backoff: DashMap::new(),
             cookie_to_port: DashMap::new(),
             cookie_to_guid: DashMap::new(),
             next_cookie: AtomicU8::new(0x31),
@@ -250,6 +268,33 @@ impl ConnectionRegistry {
 
     pub(crate) fn peer_count(&self) -> usize {
         self.peer_connections.lock().expect("peer_connections lock").len()
+    }
+
+    // ── reconnect backoff ──────────────────────────────────────────────────────
+
+    /// Remaining fail-fast window for `addr`, or `None` if a connect may proceed.
+    pub(crate) fn backoff_remaining(&self, addr: SocketAddr) -> Option<Duration> {
+        let entry = self.backoff.get(&addr)?;
+        let now = Instant::now();
+        (entry.next_attempt > now).then(|| entry.next_attempt - now)
+    }
+
+    /// Record a failed outbound connect: grow the backoff (exponential, capped).
+    pub(crate) fn note_connect_failure(&self, addr: SocketAddr) {
+        let now = Instant::now();
+        let mut entry = self
+            .backoff
+            .entry(addr)
+            .or_insert(BackoffState { next_attempt: now, delay: Duration::ZERO });
+        let delay =
+            if entry.delay.is_zero() { BACKOFF_BASE } else { (entry.delay * 2).min(BACKOFF_MAX) };
+        entry.delay = delay;
+        entry.next_attempt = now + delay;
+    }
+
+    /// Clear a peer's backoff.
+    pub(crate) fn clear_backoff(&self, addr: SocketAddr) {
+        self.backoff.remove(&addr);
     }
 
     /// Register a freshly-accepted inbound connection.
