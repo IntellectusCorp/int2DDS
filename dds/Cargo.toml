@@ -92,22 +92,6 @@ name = "hello_world_sub"
 path = "examples/hello_world/hello_world_sub.rs"
 
 [[example]]
-name = "hello_world_xml_pub"
-path = "examples/hello_world/hello_world_xml_pub.rs"
-
-[[example]]
-name = "hello_world_xml_sub"
-path = "examples/hello_world/hello_world_xml_sub.rs"
-
-[[example]]
-name = "hello_world_xml_dyn_pub"
-path = "examples/hello_world/hello_world_xml_dyn_pub.rs"
-
-[[example]]
-name = "hello_world_xml_dyn_sub"
-path = "examples/hello_world/hello_world_xml_dyn_sub.rs"
-
-[[example]]
 name = "dynamic_type_publisher"
 path = "examples/xtypes/dynamic_type_publisher.rs"
 
