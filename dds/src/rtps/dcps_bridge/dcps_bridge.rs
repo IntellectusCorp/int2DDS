@@ -171,7 +171,7 @@ impl DcpsBridge {
 
         let (spdp_logic, sedp_logic, user_logic) = participant.get_logics();
 
-        let _ = SendingHandler::get_instance(participant.clone(), Some(transport));
+        let _ = SendingHandler::get_instance(participant.clone(), Some(transport.port()));
 
         if let Ok(mut participants) = PARTICIPANTS.write() {
             participants.push(Arc::downgrade(&participant));
