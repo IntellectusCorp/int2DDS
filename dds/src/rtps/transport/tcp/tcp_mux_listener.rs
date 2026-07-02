@@ -20,9 +20,7 @@ use crate::rtps::{
     common::guid::GuidPrefix,
     transport::{
         plugin::IncomingMessage,
-        tcp::connection_registry::{
-            apply_keepalive, apply_unacked_timeout, ConnectionRegistry, TcpSocketTuning,
-        },
+        tcp::connection_registry::{apply_socket_tuning, ConnectionRegistry, TcpSocketTuning},
     },
 };
 
@@ -153,14 +151,7 @@ async fn accept_loop_task(
                     Ok((tcp, addr)) => {
                         debug!("Accepted from {:?}", addr);
 
-                        if let Some(sz) = shared.tuning.so_rcvbuf {
-                            let _ = socket2::SockRef::from(&tcp).set_recv_buffer_size(sz);
-                        }
-                        if let Some(sz) = shared.tuning.so_sndbuf {
-                            let _ = socket2::SockRef::from(&tcp).set_send_buffer_size(sz);
-                        }
-                        apply_unacked_timeout(&tcp, shared.tuning.unacked_timeout);
-                        apply_keepalive(&tcp, shared.tuning.keepalive);
+                        apply_socket_tuning(&tcp, &shared.tuning);
 
                         let shared = shared.clone();
                         let tls = tls_config.clone();
@@ -212,8 +203,6 @@ async fn handshake_and_register_task(
         },
         None => wrap_plain(tcp),
     };
-
-    let _ = stream.set_nodelay(shared.tuning.nodelay);
 
     // Channel created here, NOT inside spawn_connection_tasks — so we can register
     // the entry (with tx) before the reader task starts polling.

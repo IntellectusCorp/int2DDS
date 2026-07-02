@@ -194,6 +194,21 @@ pub(crate) fn apply_keepalive(tcp: &tokio::net::TcpStream, params: Option<Keepal
     }
 }
 
+/// Apply the full socket tuning (`nodelay`, send/recv buffers, unacked timeout,
+/// keepalive) to a freshly established stream. Shared by the outbound connect
+/// (`create_stream`) and the inbound accept loop so both sides tune identically.
+pub(crate) fn apply_socket_tuning(tcp: &tokio::net::TcpStream, tuning: &TcpSocketTuning) {
+    let _ = tcp.set_nodelay(tuning.nodelay);
+    if let Some(sz) = tuning.so_rcvbuf {
+        let _ = socket2::SockRef::from(tcp).set_recv_buffer_size(sz);
+    }
+    if let Some(sz) = tuning.so_sndbuf {
+        let _ = socket2::SockRef::from(tcp).set_send_buffer_size(sz);
+    }
+    apply_unacked_timeout(tcp, tuning.unacked_timeout);
+    apply_keepalive(tcp, tuning.keepalive);
+}
+
 /// First reconnect-backoff delay after a failed outbound connect.
 pub(crate) const BACKOFF_BASE: Duration = Duration::from_millis(500);
 /// Cap for the exponential reconnect-backoff growth (kept high on purpose so a

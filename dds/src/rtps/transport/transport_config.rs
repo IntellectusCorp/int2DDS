@@ -115,8 +115,14 @@ impl TransportConfig for TcpConfig {
             },
             keepalive_interval: ms(PROP_TCP_KEEPALIVE_INTERVAL_MS, 10_000),
             keepalive_timeout: ms(PROP_TCP_KEEPALIVE_TIMEOUT_MS, 5_000),
-            keepalive_max_misses: prop_parse::<u32>(property, PROP_TCP_KEEPALIVE_MAX_MISSES)
-                .unwrap_or(3),
+            keepalive_max_misses: match prop_parse::<u32>(property, PROP_TCP_KEEPALIVE_MAX_MISSES) {
+                Some(0) => {
+                    log::warn!("{PROP_TCP_KEEPALIVE_MAX_MISSES} = 0 is invalid (min 1); using 1");
+                    1
+                }
+                Some(v) => v,
+                None => 3,
+            },
             so_rcvbuf: prop_parse::<usize>(property, PROP_TCP_SO_RCVBUF),
             so_sndbuf: prop_parse::<usize>(property, PROP_TCP_SO_SNDBUF),
             async_workers: prop_parse::<usize>(property, PROP_TCP_ASYNC_WORKERS),
@@ -230,5 +236,14 @@ mod tests {
         assert_eq!(cfg.keepalive_max_misses, 7);
         assert_eq!(cfg.public_address, Some("203.0.113.5:7400".parse().unwrap()));
         assert_eq!(cfg.so_rcvbuf, None);
+    }
+
+    #[test]
+    fn keepalive_max_misses_zero_is_clamped_to_one() {
+        // TCP_KEEPCNT must be >= 1; a 0 property is clamped rather than passed
+        // through to the OS where it would be rejected.
+        let mut p = PropertyQosPolicy::default();
+        p.add_property(PROP_TCP_KEEPALIVE_MAX_MISSES, "0", false);
+        assert_eq!(TcpConfig::from_property(&p).keepalive_max_misses, 1);
     }
 }
