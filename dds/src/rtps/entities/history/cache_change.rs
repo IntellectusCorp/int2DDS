@@ -88,7 +88,7 @@ fn concat_chunks(chunks: &[Bytes]) -> Bytes {
 
 // Per-sample inline QoS metadata carried in a Data submessage's inline QoS list.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) struct GroupPresentationInfo {
+pub(crate) struct PresentationInfo {
     pub coherent_set: Option<SequenceNumber>, // PID_COHERENT_SET (writer's first member seq)
     pub group_seq_num: Option<SequenceNumber>, // PID_GROUP_SEQ_NUM (sample's own group seq)
     pub group_coherent_set: Option<SequenceNumber>, // PID_GROUP_COHERENT_SET (group set's first seq)
@@ -102,7 +102,7 @@ pub(crate) struct CacheChange {
     writer_guid: Guid,
     pub(crate) sequence_number: SequenceNumber,
     data_payload: DataPayload,
-    inline_qos: GroupPresentationInfo,
+    presentation_info: PresentationInfo,
     instance_handle: InstanceHandle,
     source_timestamp: Option<RtpsTime>,
     reception_timestamp: Option<RtpsTime>,
@@ -122,7 +122,7 @@ impl std::fmt::Display for CacheChange {
              data_payload_len: {}, instance_handle: {}, source_timestamp: {:?}, \
              reception_timestamp: {:?}, fragmented: {}, fragment_set: {:?}, \
              total_fragments: {}, fragment_size: {}, writer_ownership_strength: {:?}, \
-             lifespan_duration: {:?}, inline_qos: {:?} }}",
+             lifespan_duration: {:?}, presentation_info: {:?} }}",
             self.kind,
             self.writer_guid,
             self.sequence_number,
@@ -136,7 +136,7 @@ impl std::fmt::Display for CacheChange {
             self.fragment_size,
             self.writer_ownership_strength,
             self.lifespan_duration,
-            self.inline_qos
+            self.presentation_info
         )
     }
 }
@@ -168,7 +168,7 @@ impl CacheChange {
             writer_ownership_strength: None,
             instance_handle,
             data_payload: DataPayload::Owned(data_value),
-            inline_qos: GroupPresentationInfo::default(),
+            presentation_info: PresentationInfo::default(),
             sequence_number,
             source_timestamp,
             reception_timestamp: None,
@@ -188,7 +188,7 @@ impl CacheChange {
             writer_ownership_strength: None,
             instance_handle: InstanceHandle::default(),
             data_payload: DataPayload::Owned(Vec::new()),
-            inline_qos: GroupPresentationInfo::default(),
+            presentation_info: PresentationInfo::default(),
             sequence_number: SequenceNumber::UNKNOWN,
             source_timestamp: None,
             reception_timestamp: None,
@@ -219,7 +219,7 @@ impl CacheChange {
                 self.data_payload = DataPayload::Owned(Vec::new());
             }
         }
-        self.inline_qos = GroupPresentationInfo::default();
+        self.presentation_info = PresentationInfo::default();
         self.sequence_number = sequence_number;
         self.source_timestamp = source_timestamp;
         self.reception_timestamp = None;
@@ -256,6 +256,14 @@ impl CacheChange {
 
     pub(crate) fn set_instance_handle(&mut self, instance_handle: InstanceHandle) {
         self.instance_handle = instance_handle;
+    }
+
+    pub(crate) fn presentation_info(&self) -> &PresentationInfo {
+        &self.presentation_info
+    }
+
+    pub(crate) fn set_presentation_info(&mut self, presentation_info: PresentationInfo) {
+        self.presentation_info = presentation_info;
     }
 
     pub(crate) fn sequence_number(&self) -> SequenceNumber {

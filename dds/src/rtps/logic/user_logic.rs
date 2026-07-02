@@ -22,7 +22,7 @@ use crate::rtps::common::types::ChangeKind;
 use crate::rtps::common::types::DomainId;
 use crate::rtps::entities::endpoint::Endpoint;
 use crate::rtps::entities::entity::Entity;
-use crate::rtps::entities::history::cache_change::CacheChange;
+use crate::rtps::entities::history::cache_change::{CacheChange, PresentationInfo};
 use crate::rtps::entities::history::history_cache::HistoryCache;
 use crate::rtps::entities::history::writer_history::WriterHistoryCache;
 use crate::rtps::entities::reader::{
@@ -1554,6 +1554,13 @@ impl UserLogic {
                 cache_change.set_kind(ChangeKind::AliveFiltered);
             }
         }
+
+        // Restore per-sample coherent/group presentation metadata.
+        cache_change.set_presentation_info(PresentationInfo {
+            coherent_set: inline_qos.get_coherent_set(),
+            group_seq_num: inline_qos.get_group_seq_num(),
+            group_coherent_set: inline_qos.get_group_coherent_set(),
+        });
 
         Ok(())
     }
