@@ -107,11 +107,11 @@ impl TransportConfig for TcpConfig {
             nodelay: prop_parse::<bool>(property, PROP_TCP_NODELAY).unwrap_or(true),
             connect_timeout: ms(PROP_TCP_CONNECT_TIMEOUT_MS, 5_000),
             bind_timeout: ms(PROP_TCP_BIND_TIMEOUT_MS, 5_000),
-            // Default 5000ms; explicit 0 = OS default (no bound).
+            // Default 20000ms; explicit 0 = OS default (no bound).
             unacked_timeout: match prop_parse::<u64>(property, PROP_TCP_UNACKED_TIMEOUT_MS) {
                 Some(0) => None,
                 Some(v) => Some(Duration::from_millis(v)),
-                None => Some(Duration::from_millis(5_000)),
+                None => Some(Duration::from_millis(20_000)),
             },
             keepalive_interval: ms(PROP_TCP_KEEPALIVE_INTERVAL_MS, 10_000),
             keepalive_timeout: ms(PROP_TCP_KEEPALIVE_TIMEOUT_MS, 5_000),
@@ -203,7 +203,7 @@ mod tests {
         assert!(cfg.nodelay);
         assert_eq!(cfg.connect_timeout, Duration::from_millis(5_000));
         assert_eq!(cfg.bind_timeout, Duration::from_millis(5_000));
-        assert_eq!(cfg.unacked_timeout, Some(Duration::from_millis(5_000)));
+        assert_eq!(cfg.unacked_timeout, Some(Duration::from_millis(20_000)));
         assert_eq!(cfg.keepalive_interval, Duration::from_millis(10_000));
         assert_eq!(cfg.keepalive_timeout, Duration::from_millis(5_000));
         assert_eq!(cfg.keepalive_max_misses, 3);
