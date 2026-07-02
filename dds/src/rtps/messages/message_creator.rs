@@ -35,6 +35,7 @@ use crate::rtps::{
         submessages::{data::Data, data_frag::DataFrag},
     },
 };
+use crate::serialize::pl_cdr::InlineQosParameters;
 
 pub(crate) struct MessageCreator {}
 
@@ -223,6 +224,18 @@ impl MessageCreator {
                     ));
                     debug!("Added ContentFilterInfo to inline QoS");
                 }
+            }
+
+            // Attach per-sample coherent/group presentation metadata.
+            let inline = cache_change.presentation_info();
+            if let Some(sn) = inline.coherent_set {
+                param_list.set_coherent_set(sn);
+            }
+            if let Some(sn) = inline.group_seq_num {
+                param_list.set_group_seq_num(sn);
+            }
+            if let Some(sn) = inline.group_coherent_set {
+                param_list.set_group_coherent_set(sn);
             }
 
             if !param_list.parameters().is_empty() {

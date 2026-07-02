@@ -1,11 +1,15 @@
 use std::convert::TryInto;
 
 use smallvec::SmallVec;
+use speedy::{Endianness, Readable, Writable};
 
 use crate::{
     common::instance_handle::InstanceHandle,
     infrastructure::qos_policy::{DataRepresentationId, DataRepresentationQosPolicy},
-    rtps::common::parameters::{Parameter, ParameterId, ParameterList, StatusInfo},
+    rtps::common::{
+        parameters::{Parameter, ParameterId, ParameterList, StatusInfo},
+        sequence::SequenceNumber,
+    },
 };
 
 fn make_parameter<V>(id: ParameterId, value: V) -> Parameter
@@ -13,6 +17,21 @@ where
     V: Into<SmallVec<[u8; 16]>>,
 {
     Parameter::new(id, value)
+}
+
+// PID_COHERENT_SET / PID_GROUP_SEQ_NUM / PID_GROUP_COHERENT_SET each carry a
+// SequenceNumber_t (CDR: high i32 then low u32). Inline QoS values use little-endian.
+fn encode_sequence_number(sn: SequenceNumber) -> SmallVec<[u8; 16]> {
+    sn.write_to_vec_with_ctx(Endianness::LittleEndian)
+        .map(|bytes| SmallVec::from_slice(&bytes))
+        .unwrap_or_default()
+}
+
+fn decode_sequence_number(bytes: &[u8]) -> Option<SequenceNumber> {
+    if bytes.len() != 8 {
+        return None;
+    }
+    SequenceNumber::read_from_buffer_with_ctx(Endianness::LittleEndian, bytes).ok()
 }
 
 pub trait InlineQosParameters {
@@ -25,14 +44,14 @@ pub trait InlineQosParameters {
     fn get_expects_inline_qos(&self) -> Option<bool>;
     fn set_expects_inline_qos(&mut self, expects: bool);
 
-    fn get_group_seq_num(&self) -> Option<u64>;
-    fn set_group_seq_num(&mut self, seq_num: u64);
+    fn get_group_seq_num(&self) -> Option<SequenceNumber>;
+    fn set_group_seq_num(&mut self, seq_num: SequenceNumber);
 
     fn get_content_filter_info(&self) -> Option<Vec<u8>>;
     fn set_content_filter_info(&mut self, info: Vec<u8>);
 
-    fn get_coherent_set(&self) -> Option<Vec<u8>>;
-    fn set_coherent_set(&mut self, coherent_set: Vec<u8>);
+    fn get_coherent_set(&self) -> Option<SequenceNumber>;
+    fn set_coherent_set(&mut self, coherent_set: SequenceNumber);
 
     fn get_directed_write(&self) -> Option<Vec<u8>>;
     fn set_directed_write(&mut self, directed_write: Vec<u8>);
@@ -40,8 +59,8 @@ pub trait InlineQosParameters {
     fn get_original_writer_info(&self) -> Option<Vec<u8>>;
     fn set_original_writer_info(&mut self, info: Vec<u8>);
 
-    fn get_group_coherent_set(&self) -> Option<Vec<u8>>;
-    fn set_group_coherent_set(&mut self, coherent_set: Vec<u8>);
+    fn get_group_coherent_set(&self) -> Option<SequenceNumber>;
+    fn set_group_coherent_set(&mut self, coherent_set: SequenceNumber);
 
     fn get_writer_group_info(&self) -> Option<Vec<u8>>;
     fn set_writer_group_info(&mut self, info: Vec<u8>);
@@ -119,20 +138,17 @@ impl InlineQosParameters for ParameterList {
         self.add_parameter(make_parameter(ParameterId::PidExpectsInlineQos, value));
     }
 
-    fn get_group_seq_num(&self) -> Option<u64> {
+    fn get_group_seq_num(&self) -> Option<SequenceNumber> {
         self.iter()
-            .find(|param| {
-                param.parameter_id() == ParameterId::PidGroupSeqNum && param.value().len() == 8
-            })
-            .and_then(|param| param.value().try_into().ok())
-            .map(u64::from_le_bytes)
+            .find(|param| param.parameter_id() == ParameterId::PidGroupSeqNum)
+            .and_then(|param| decode_sequence_number(param.value()))
     }
 
-    fn set_group_seq_num(&mut self, seq_num: u64) {
+    fn set_group_seq_num(&mut self, seq_num: SequenceNumber) {
         self.retain_parameters(|p| p.parameter_id() != ParameterId::PidGroupSeqNum);
         self.add_parameter(make_parameter(
             ParameterId::PidGroupSeqNum,
-            SmallVec::from_slice(&seq_num.to_le_bytes()),
+            encode_sequence_number(seq_num),
         ));
     }
 
@@ -147,15 +163,18 @@ impl InlineQosParameters for ParameterList {
         self.add_parameter(make_parameter(ParameterId::PidContentFilterInfo, info));
     }
 
-    fn get_coherent_set(&self) -> Option<Vec<u8>> {
+    fn get_coherent_set(&self) -> Option<SequenceNumber> {
         self.iter()
             .find(|param| param.parameter_id() == ParameterId::PidCoherentSet)
-            .map(|param| param.value().to_vec())
+            .and_then(|param| decode_sequence_number(param.value()))
     }
 
-    fn set_coherent_set(&mut self, coherent_set: Vec<u8>) {
+    fn set_coherent_set(&mut self, coherent_set: SequenceNumber) {
         self.retain_parameters(|p| p.parameter_id() != ParameterId::PidCoherentSet);
-        self.add_parameter(make_parameter(ParameterId::PidCoherentSet, coherent_set));
+        self.add_parameter(make_parameter(
+            ParameterId::PidCoherentSet,
+            encode_sequence_number(coherent_set),
+        ));
     }
 
     fn get_directed_write(&self) -> Option<Vec<u8>> {
@@ -180,15 +199,18 @@ impl InlineQosParameters for ParameterList {
         self.add_parameter(make_parameter(ParameterId::PidOriginalWriterInfo, info));
     }
 
-    fn get_group_coherent_set(&self) -> Option<Vec<u8>> {
+    fn get_group_coherent_set(&self) -> Option<SequenceNumber> {
         self.iter()
             .find(|param| param.parameter_id() == ParameterId::PidGroupCoherentSet)
-            .map(|param| param.value().to_vec())
+            .and_then(|param| decode_sequence_number(param.value()))
     }
 
-    fn set_group_coherent_set(&mut self, coherent_set: Vec<u8>) {
+    fn set_group_coherent_set(&mut self, coherent_set: SequenceNumber) {
         self.retain_parameters(|p| p.parameter_id() != ParameterId::PidGroupCoherentSet);
-        self.add_parameter(make_parameter(ParameterId::PidGroupCoherentSet, coherent_set));
+        self.add_parameter(make_parameter(
+            ParameterId::PidGroupCoherentSet,
+            encode_sequence_number(coherent_set),
+        ));
     }
 
     fn get_writer_group_info(&self) -> Option<Vec<u8>> {
@@ -268,5 +290,37 @@ impl InlineQosParameters for ParameterList {
         }
 
         self.add_parameter(make_parameter(ParameterId::PidDataRepresentation, serialized));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coherent_pids_roundtrip_as_sequence_number_t() {
+        // high word non-zero to catch the SequenceNumber_t (high i32, low u32) layout
+        // rather than a plain u64 little-endian encoding.
+        let sn = SequenceNumber::new(1, 3);
+        let mut list = ParameterList::default();
+        list.set_coherent_set(sn);
+
+        // Wire value: high(i32) LE followed by low(u32) LE.
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&1i32.to_le_bytes());
+        expected.extend_from_slice(&3u32.to_le_bytes());
+        let bytes: Vec<u8> = list
+            .iter()
+            .find(|p| p.parameter_id() == ParameterId::PidCoherentSet)
+            .map(|p| p.value().to_vec())
+            .unwrap_or_default();
+        assert_eq!(bytes, expected);
+        assert_eq!(list.get_coherent_set(), Some(sn));
+
+        // Same helper drives the other two PIDs; confirm each round-trips on its own id.
+        list.set_group_seq_num(sn);
+        list.set_group_coherent_set(sn);
+        assert_eq!(list.get_group_seq_num(), Some(sn));
+        assert_eq!(list.get_group_coherent_set(), Some(sn));
     }
 }
