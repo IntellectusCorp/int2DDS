@@ -1081,6 +1081,19 @@ ffi.cdef("""
     Int2DdsRet int2dds_dynamic_value_union_value(const Int2DdsDynamicValue *value, Int2DdsDynamicValue **out);
 """)
 
+# XML configuration: load QoS profiles + build whole participant trees from a
+# <domain_participant_library> (mirrors the Rust DomainParticipantFactory config APIs).
+ffi.cdef("""
+    typedef struct Int2DdsConfiguredParticipant Int2DdsConfiguredParticipant;
+
+    Int2DdsRet int2dds_load_profiles(const Int2DdsParticipantFactory *factory, const char *const *paths, size_t count);
+    Int2DdsRet int2dds_get_dynamic_type_support(const Int2DdsParticipantFactory *factory, const char *type_name, Int2DdsDynamicTypeSupport **out);
+    Int2DdsRet int2dds_create_participant_from_config(const Int2DdsParticipantFactory *factory, const char *path, Int2DdsConfiguredParticipant **out);
+    Int2DdsRet int2dds_configured_participant_get_datawriter(const Int2DdsConfiguredParticipant *configured, const char *name, Int2DdsDynamicDataWriter **out);
+    Int2DdsRet int2dds_configured_participant_get_datareader(const Int2DdsConfiguredParticipant *configured, const char *name, Int2DdsDynamicDataReader **out);
+    void int2dds_configured_participant_destroy(Int2DdsConfiguredParticipant *configured);
+""")
+
 
 def _find_library() -> str:
     """Find the int2dds_ffi library path."""

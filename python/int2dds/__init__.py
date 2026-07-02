@@ -61,6 +61,12 @@ try:
         DdsPreconditionNotMet,
         DdsTimeout,
     )
+    from int2dds.config import (
+        ConfiguredParticipant,
+        create_participant_from_config,
+        get_dynamic_type_support,
+        load_profiles,
+    )
     from int2dds import env
 except ImportError as e:
     import warnings
@@ -114,6 +120,11 @@ __all__ = [
     "DdsNoData",
     "DdsInvalidArgument",
     "DdsPreconditionNotMet",
+    # XML configuration (QoS profiles + participant tree)
+    "load_profiles",
+    "get_dynamic_type_support",
+    "create_participant_from_config",
+    "ConfiguredParticipant",
     # Environment configuration
     "env",
 ]
