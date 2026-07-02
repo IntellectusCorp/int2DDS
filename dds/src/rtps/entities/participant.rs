@@ -1055,9 +1055,6 @@ impl Participant {
 
     /// Initialize all logic instances. Must be called immediately after creating Participant.
     /// This creates SPDP, SEDP, User, and WLP logic instances using the provided transport.
-    ///
-    /// `property` is consulted first for `int2dds.initial_peers`; if absent, falls back to the
-    /// `INT2DDS_INITIAL_PEERS` environment variable.
     pub(crate) fn init_logics(
         self: &Arc<Self>,
         transport: Arc<dyn TransportPlugin>,

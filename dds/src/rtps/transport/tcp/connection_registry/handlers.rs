@@ -1,12 +1,9 @@
-//! Inbound-frame dispatch — the connection state machine over `MuxState`.
+//! Inbound-frame dispatch — the connection state machine over `ConnectionRegistry`.
 //!
-//! These `impl MuxState` methods consume frames read by
-//! `conn_actor::reader_task` and advance each connection through its state:
+//! These `impl ConnectionRegistry` methods consume frames read by
+//! `connection_tasks::reader_task` and advance each connection through its state:
 //! handshake (PEER_HELLO / PORT_BIND), control traffic (PORT_RESERVE),
-//! and RTPS data forwarding into the DDS layer. They live in a
-//! child module so the state definition and storage stay in the parent while
-//! the transition logic is isolated here; a child module can still reach the
-//! parent type's private fields.
+//! and RTPS data forwarding into the DDS layer.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::Ordering;
@@ -24,11 +21,12 @@ use crate::rtps::transport::tcp::protocol::{
 };
 
 use super::{
-    addr_to_guid, send_control, ConnectionId, ConnectionState, MuxState, PeerConnectionGroup,
+    addr_to_guid, send_control, ConnectionId, ConnectionRegistry, ConnectionState,
+    PeerConnectionGroup,
 };
 
-impl MuxState {
-    // ── dispatch — entry point from conn_actor::reader_task ──────────────────
+impl ConnectionRegistry {
+    // ── dispatch — entry point from connection_tasks::reader_task ──────────────────
 
     /// Route one inbound frame based on the connection's current state.
     ///

@@ -1,11 +1,7 @@
 //! Inbound side of the TCP mux transport.
 //!
 //! `TcpMuxListener` owns the listener-side accept loop and exposes the shared
-//! `MuxState` via `shared()`.
-//!
-//! The accept loop spawns a short-lived `handshake_and_register_task` per
-//! connection so a slow TLS handshake does not stall new accepts; each
-//! connection then gets its own conn_actor pair via `spawn_conn_actor`.
+//! `ConnectionRegistry` via `shared()`.
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -17,39 +13,32 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::rtps::transport::tcp::conn_actor::{inbox_capacity, spawn_conn_actor};
+use crate::rtps::transport::tcp::connection_tasks::{inbox_capacity, spawn_connection_tasks};
 use crate::rtps::transport::tcp::stream::wrap_plain;
 use crate::rtps::transport::tcp::tls::{accept_tls_async, TlsConfig};
 use crate::rtps::{
     common::guid::GuidPrefix,
     transport::{
         plugin::IncomingMessage,
-        tcp::mux_state::{apply_keepalive, apply_unacked_timeout, MuxState, TcpSocketTuning},
+        tcp::connection_registry::{
+            apply_keepalive, apply_unacked_timeout, ConnectionRegistry, TcpSocketTuning,
+        },
     },
 };
 
 /// TCP multiplexed listener — owns the listener-side tasks and the shared
-/// `MuxState`.
+/// `ConnectionRegistry`.
 ///
 /// Dropping or calling `shutdown()` cancels all tasks; cancellation
-/// propagates into every conn_actor pair via child tokens.
+/// propagates into every reader/writer task pair via child tokens.
 pub(crate) struct TcpMuxListener {
     port: u16,
-    pub(crate) shared: Arc<MuxState>,
+    pub(crate) shared: Arc<ConnectionRegistry>,
     cancel: CancellationToken,
     task_handles: Vec<JoinHandle<()>>,
 }
 
 impl TcpMuxListener {
-    /// Bind the listen socket and spawn all listener-side tasks on the
-    /// current tokio runtime: accept loop.
-    ///
-    /// Must be called from within a tokio runtime context — the spawn calls
-    /// require `Handle::current()` to be valid. From sync code, wrap the call
-    /// in `runtime.block_on(async { ... })` or use `runtime.handle().enter()`.
-    ///
-    /// `port = 0` requests an OS-assigned ephemeral port; the actual port is
-    /// captured into `port()` for advertising back to peers.
     pub(crate) fn bind_and_spawn(
         port: u16,
         domain_id: u32,
@@ -63,7 +52,7 @@ impl TcpMuxListener {
         let std_listener = bind_listener(port)?;
         let actual_port = std_listener.local_addr()?.port();
 
-        let shared = Arc::new(MuxState::new(
+        let shared = Arc::new(ConnectionRegistry::new(
             domain_id,
             participant_id,
             local_guid_prefix,
@@ -94,7 +83,7 @@ impl TcpMuxListener {
     /// Shared mux state — connection map, peer groupings, dispatch logic.
     /// The sender uses this to look up writer channels for outbound frames;
     /// external consumers use it for metrics.
-    pub(crate) fn shared(&self) -> &Arc<MuxState> {
+    pub(crate) fn shared(&self) -> &Arc<ConnectionRegistry> {
         &self.shared
     }
 
@@ -119,13 +108,12 @@ impl Drop for TcpMuxListener {
 /// Sync bind. Returns a `std::net::TcpListener` configured for async use
 /// (`set_nonblocking(true)`). Conversion to `tokio::net::TcpListener` is
 /// deferred to the spawned accept task so this function can be called
-/// outside a runtime context (e.g. straight from the plugin constructor).
+/// outside a runtime context.
 fn bind_listener(port: u16) -> io::Result<std::net::TcpListener> {
     let addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
     let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)?;
     // SO_REUSEADDR semantics differ by OS. On Unix it only relaxes rebinding a
-    // port left in TIME_WAIT — two live listeners on the same port still
-    // conflict — so we keep it for clean restarts. On Windows it would instead
+    // port left in TIME_WAIT. On Windows it would instead
     // let a second listener share/hijack the same port, silently defeating the
     // per-participant bind-collision detection; leaving it off there preserves
     // the EADDRINUSE failure we rely on.
@@ -146,7 +134,7 @@ fn bind_listener(port: u16) -> io::Result<std::net::TcpListener> {
 /// handshake does not stall new accepts.
 async fn accept_loop_task(
     std_listener: std::net::TcpListener,
-    shared: Arc<MuxState>,
+    shared: Arc<ConnectionRegistry>,
     tls_config: Option<Arc<TlsConfig>>,
     cancel: CancellationToken,
 ) {
@@ -165,7 +153,6 @@ async fn accept_loop_task(
                     Ok((tcp, addr)) => {
                         debug!("Accepted from {:?}", addr);
 
-                        // Optional socket buffer overrides (per-participant config).
                         if let Some(sz) = shared.tuning.so_rcvbuf {
                             let _ = socket2::SockRef::from(&tcp).set_recv_buffer_size(sz);
                         }
@@ -175,7 +162,6 @@ async fn accept_loop_task(
                         apply_unacked_timeout(&tcp, shared.tuning.unacked_timeout);
                         apply_keepalive(&tcp, shared.tuning.keepalive);
 
-                        // Spawn off — do NOT await handshake in the accept loop.
                         let shared = shared.clone();
                         let tls = tls_config.clone();
                         let parent_cancel = cancel.clone();
@@ -197,17 +183,15 @@ async fn accept_loop_task(
 }
 
 /// Short-lived per-accept task: completes the optional TLS handshake,
-/// registers the connection in `MuxState`, then spawns the conn_actor pair.
+/// registers the connection in `ConnectionRegistry`, then spawns the reader/writer task pair.
 ///
-/// Registration happens **before** spawning the conn_actor — this guarantees
-/// the reader task finds its `ConnectionEntry` in `MuxState.connections` when
-/// the first inbound frame arrives. Reversing the order opens a race window
-/// where the first frame's dispatch lookup returns `None` and the connection
-/// gets stuck in `AwaitingFirstMessage` forever.
+/// Registration happens **before** spawning the tasks — this guarantees
+/// the reader task finds its `ConnectionEntry` in `ConnectionRegistry.connections` when
+/// the first inbound frame arrives.
 async fn handshake_and_register_task(
     tcp: TcpStream,
     addr: SocketAddr,
-    shared: Arc<MuxState>,
+    shared: Arc<ConnectionRegistry>,
     tls_config: Option<Arc<TlsConfig>>,
     parent_cancel: CancellationToken,
 ) {
@@ -231,7 +215,7 @@ async fn handshake_and_register_task(
 
     let _ = stream.set_nodelay(shared.tuning.nodelay);
 
-    // Channel created here, NOT inside spawn_conn_actor — so we can register
+    // Channel created here, NOT inside spawn_connection_tasks — so we can register
     // the entry (with tx) before the reader task starts polling.
     let (tx, rx) = mpsc::channel::<Vec<u8>>(inbox_capacity());
     let conn_cancel = parent_cancel.child_token();
@@ -242,7 +226,7 @@ async fn handshake_and_register_task(
     // acks via the writer_tx inbox. The user-data send path never targets
     // an inbound connection, so the returned `SharedWriteHalf` is dropped
     // here — only the writer_task uses it.
-    let _ = spawn_conn_actor(stream, conn_id, shared.clone(), conn_cancel, tx, rx);
+    let _ = spawn_connection_tasks(stream, conn_id, shared.clone(), conn_cancel, tx, rx);
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -250,8 +234,8 @@ async fn handshake_and_register_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rtps::transport::tcp::connection_registry::ConnectionState;
     use crate::rtps::transport::tcp::framing::write_framed_message;
-    use crate::rtps::transport::tcp::mux_state::ConnectionState;
     use crate::rtps::transport::tcp::protocol::{
         encode_locator, ControlMsg, ERR_CODE_MISSING_LOCATOR, MSG_ERROR, MSG_PEER_HELLO,
         MSG_PEER_HELLO_ACK,
@@ -353,7 +337,7 @@ mod tests {
     // ── accept + register ────────────────────────────────────────────────────
 
     /// Connecting to the bound port causes `accept_loop_task` to accept and
-    /// `handshake_and_register_task` to register the entry in `MuxState`.
+    /// `handshake_and_register_task` to register the entry in `ConnectionRegistry`.
     #[tokio::test(flavor = "multi_thread")]
     async fn accept_registers_inbound_connection() {
         let listener = make_listener();
@@ -456,7 +440,7 @@ mod tests {
     // ── connection cleanup on RST / FIN ──────────────────────────────────────
 
     /// A client that resets the connection (`linger=0` + drop) causes the
-    /// conn_actor reader to detect the RST and remove the connection entry.
+    /// reader task to detect the RST and remove the connection entry.
     #[tokio::test(flavor = "multi_thread")]
     async fn rst_close_cleans_up_connection_and_token() {
         let listener = make_listener();
@@ -479,7 +463,7 @@ mod tests {
         listener.shutdown().await;
     }
 
-    /// A client that issues a graceful FIN causes the conn_actor reader to
+    /// A client that issues a graceful FIN causes the reader task to
     /// detect EOF and remove the connection entry.
     #[tokio::test(flavor = "multi_thread")]
     async fn fin_close_cleans_up_connection_and_token() {
