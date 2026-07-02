@@ -220,9 +220,6 @@ impl TcpSender {
         // recent failure, fail fast instead of attempting (and blocking on) a
         // fresh connect. This bounds reconnect churn during a long outage.
         if let Some(retry_in) = self.backoff_remaining(addr) {
-            debug!(
-                "TcpSender: send to {addr} deferred — reconnect backoff ({retry_in:?} remaining)"
-            );
             return Err(transport_io_error(
                 TransportErrorCode::TcpReconnectBackoff,
                 format!("peer {addr} in reconnect backoff ({retry_in:?} remaining)"),
@@ -636,7 +633,10 @@ async fn port_reserve_round_trip(
         Err(_) => {
             // Timeout — clean up our slot in case dispatch never ran.
             *control.extras.pending_ack.lock().expect("pending_ack lock") = None;
-            return Err(io::Error::new(io::ErrorKind::TimedOut, "PORT_RESERVE response timeout"));
+            return Err(transport_io_error(
+                TransportErrorCode::TcpHandshakeReserveFailed,
+                "PORT_RESERVE response timeout",
+            ));
         }
     };
 
@@ -660,7 +660,10 @@ async fn create_stream(sender: &Arc<TcpSender>, addr: SocketAddr) -> io::Result<
     let tcp = tokio::time::timeout(sender.connect_timeout, TcpStream::connect(addr))
         .await
         .map_err(|_| {
-            io::Error::new(io::ErrorKind::TimedOut, format!("tcp connect timeout to {:?}", addr))
+            transport_io_error(
+                TransportErrorCode::TcpConnectionTimeout,
+                format!("tcp connect timeout to {:?}", addr),
+            )
         })??;
 
     let _ = tcp.set_nodelay(sender.shared.tuning.nodelay);
@@ -688,7 +691,9 @@ async fn create_stream(sender: &Arc<TcpSender>, addr: SocketAddr) -> io::Result<
             connect_tls_async(tcp, client_cfg, &sni),
         )
         .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "tls handshake timeout"))??;
+        .map_err(|_| {
+            transport_io_error(TransportErrorCode::TlsHandshakeFailed, "tls handshake timeout")
+        })??;
 
         Ok(stream)
     } else {
@@ -704,9 +709,13 @@ async fn peer_hello_handshake(
     let hello = ControlMsg::PeerHello { locator: locator };
     write_framed_message(stream, &hello.to_bytes()).await?;
 
-    let response_bytes = tokio::time::timeout(timeout, read_framed_message(stream))
-        .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "PEER_HELLO_ACK timeout"))??;
+    let response_bytes =
+        tokio::time::timeout(timeout, read_framed_message(stream)).await.map_err(|_| {
+            transport_io_error(
+                TransportErrorCode::TcpHandshakeHelloFailed,
+                "PEER_HELLO_ACK timeout",
+            )
+        })??;
 
     let response = ControlMsg::from_bytes(&response_bytes).map_err(|e| {
         transport_io_error(
@@ -736,9 +745,10 @@ async fn port_bind_handshake(
     let bind = ControlMsg::PortBind { cookie };
     write_framed_message(stream, &bind.to_bytes()).await?;
 
-    let response_bytes = tokio::time::timeout(timeout, read_framed_message(stream))
-        .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "PORT_BIND_ACK timeout"))??;
+    let response_bytes =
+        tokio::time::timeout(timeout, read_framed_message(stream)).await.map_err(|_| {
+            transport_io_error(TransportErrorCode::TcpHandshakeBindFailed, "PORT_BIND_ACK timeout")
+        })??;
 
     let response = ControlMsg::from_bytes(&response_bytes).map_err(|e| {
         transport_io_error(
