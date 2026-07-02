@@ -4,7 +4,7 @@
 //! a connection without caring whether it is plaintext or TLS-encrypted: the
 //! Plain/Tls branch is resolved once here, and every downstream task just uses
 //! the `AsyncRead` / `AsyncWrite` impls. `into_split` yields owned read/write
-//! halves so the conn_actor's reader and writer tasks can each own one end, and
+//! halves so the reader and writer tasks can each own one end, and
 //! the write half forwards vectored writes (`writev`) used by the framing path.
 
 use std::net::SocketAddr;

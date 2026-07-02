@@ -1,7 +1,7 @@
 //! Per-connection state shared across the tasks that drive a connection.
 //!
 //! Each TCP connection is driven by a reader/writer task pair that both need to
-//! see the same connection state. `MuxState` is that single source of truth:
+//! see the same connection state. `ConnectionRegistry` is that single source of truth:
 //! held in an `Arc`, it keeps one `ConnectionEntry` per connection (state,
 //! remote addr, writer inbox, cancel token) and routes inbound frames via
 //! `dispatch` — RTPS data to the DDS layer through the crossbeam senders,
@@ -30,7 +30,7 @@ mod handlers;
 
 // ── ID + state types ─────────────────────────────────────────────────────────
 
-/// Unique connection id, issued monotonically by `MuxState::next_conn_id`.
+/// Unique connection id, issued monotonically by `ConnectionRegistry::next_conn_id`.
 pub(crate) type ConnectionId = usize;
 
 /// Connection state machine — drives which dispatch handler runs.
@@ -86,20 +86,19 @@ pub(crate) struct ConnectionEntry {
     pub(crate) direction: ConnectionDirection,
     pub(crate) bound_logical_port: Option<u16>,
     pub(crate) remote_guid_prefix: Option<GuidPrefix>,
-    /// conn_actor inbox: pushing a frame here sends it on this connection.
+    /// writer inbox: pushing a frame here sends it on this connection.
     pub(crate) writer_tx: mpsc::Sender<Vec<u8>>,
     /// Child token for the actor pair; cancelling it tears the pair down.
     pub(crate) cancel: CancellationToken,
     pub(crate) pending_ack: Option<Arc<Mutex<Option<oneshot::Sender<ControlMsg>>>>>,
 }
 
-// ── MuxState ─────────────────────────────────────────────────────────────────
+// ── ConnectionRegistry ─────────────────────────────────────────────────────────────────
 
 /// OS keepalive tuning (`SO_KEEPALIVE` + `TCP_KEEPIDLE/INTVL/CNT`) applied to
 /// every connection. `time` is the idle period before the first probe,
 /// `interval` the gap between probes, `retries` the unanswered probes tolerated
-/// before the OS tears the connection down. This is how a connection that went
-/// silent (peer crashed, link gone) is reaped without an application keepalive.
+/// before the OS tears the connection down.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct KeepaliveParams {
     pub(crate) time: Duration,
@@ -107,17 +106,14 @@ pub(crate) struct KeepaliveParams {
     pub(crate) retries: u32,
 }
 
-/// Socket-level tuning applied to both accepted (inbound) and dialed (outbound)
+/// Socket-level tuning applied to both inbound and outbound
 /// TCP streams. Resolved per participant from `TcpConfig`.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TcpSocketTuning {
     pub(crate) nodelay: bool,
     pub(crate) so_rcvbuf: Option<usize>,
     pub(crate) so_sndbuf: Option<usize>,
-    /// Bound on outstanding unacked data before the OS drops the connection
-    /// (so a stuck write fails fast). `None` = OS default.
     pub(crate) unacked_timeout: Option<Duration>,
-    /// OS keepalive for idle-connection liveness. `None` = leave OS defaults.
     pub(crate) keepalive: Option<KeepaliveParams>,
 }
 
@@ -135,8 +131,7 @@ impl Default for TcpSocketTuning {
 
 /// Bound how long unacknowledged data may stay outstanding before the OS drops
 /// the connection, so a dead link surfaces as a write error (instead of blocking
-/// the sender ~indefinitely). Applied to every dialed/accepted stream. Per-OS
-/// mechanism; a no-op where unsupported (OS keepalive then reaps idle links).
+/// the sender ~indefinitely). Applied to every outbound/inbound stream.
 pub(crate) fn apply_unacked_timeout(tcp: &tokio::net::TcpStream, timeout: Option<Duration>) {
     let Some(t) = timeout else { return };
     #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -167,11 +162,9 @@ pub(crate) fn apply_unacked_timeout(tcp: &tokio::net::TcpStream, timeout: Option
     }
 }
 
-/// Enable OS keepalive on a dialed/accepted stream so an idle connection whose
+/// Enable OS keepalive on a inbound/outbound stream so an idle connection whose
 /// peer has silently gone (crash, link loss) is reaped by the kernel without an
-/// application-level keepalive. `with_time`/`with_interval`/`with_retries` map to
-/// `TCP_KEEPIDLE`/`TCP_KEEPINTVL`/`TCP_KEEPCNT`; Windows lacks `TCP_KEEPCNT`, and
-/// other platforms fall back to enabling `SO_KEEPALIVE` with the idle time only.
+/// application-level keepalive.
 pub(crate) fn apply_keepalive(tcp: &tokio::net::TcpStream, params: Option<KeepaliveParams>) {
     let Some(p) = params else { return };
     #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
@@ -201,13 +194,12 @@ pub(crate) fn apply_keepalive(tcp: &tokio::net::TcpStream, params: Option<Keepal
 }
 
 /// Thread-safe shared state for the mux listener.
-pub(crate) struct MuxState {
+pub(crate) struct ConnectionRegistry {
     pub(crate) domain_id: u32,
     pub(crate) participant_id: u32,
     #[allow(dead_code)]
     local_guid_prefix: GuidPrefix,
 
-    /// Socket tuning shared with the accept loop and the outbound sender.
     pub(crate) tuning: TcpSocketTuning,
 
     pub(crate) connections: DashMap<ConnectionId, ConnectionEntry>,
@@ -220,12 +212,11 @@ pub(crate) struct MuxState {
 
     pub(crate) next_conn_id: AtomicUsize,
 
-    /// Async→sync bridge for inbound RTPS data; the DDS layer owns the receivers.
     discovery_tx: Sender<IncomingMessage>,
     user_data_tx: Sender<IncomingMessage>,
 }
 
-impl MuxState {
+impl ConnectionRegistry {
     pub(crate) fn new(
         domain_id: u32,
         participant_id: u32,
@@ -262,7 +253,7 @@ impl MuxState {
 
     /// Register a freshly-accepted inbound connection.
     ///
-    /// Called by `mux_listener::accept_task` after spawning the conn_actor pair.
+    /// Called by `mux_listener::accept_task` after spawning the reader/writer task pair.
     /// Returns the assigned `ConnectionId` so the caller can keep a local handle
     /// for logging / metrics.
     pub(crate) fn register_inbound_connection(
@@ -439,7 +430,7 @@ impl MuxState {
 
     fn remove_connection_inner(&self, conn_id: ConnectionId) {
         if let Some((_, entry)) = self.connections.remove(&conn_id) {
-            // Wake the conn_actor pair so they can tear down even if the
+            // Wake the reader/writer task pair so they can tear down even if the
             // caller did not cancel them explicitly.
             entry.cancel.cancel();
             debug!("TcpMuxListener: Removed conn {} (addr={:?})", conn_id, entry.remote_addr);
@@ -501,7 +492,8 @@ mod tests {
 
         let (d_tx, _d_rx) = bounded(8);
         let (u_tx, _u_rx) = bounded(8);
-        let shared = MuxState::new(0, 0, [0u8; 12], TcpSocketTuning::default(), d_tx, u_tx);
+        let shared =
+            ConnectionRegistry::new(0, 0, [0u8; 12], TcpSocketTuning::default(), d_tx, u_tx);
 
         let addr: SocketAddr = "127.0.0.1:7400".parse().unwrap();
         let (tx, _rx) = mpsc::channel::<Vec<u8>>(8);
