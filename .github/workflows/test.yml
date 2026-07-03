@@ -9,10 +9,19 @@ on:
 
 jobs:
   cargo-test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-2022]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Disable Windows Defender realtime monitoring
+        if: runner.os == 'Windows'
+        run: Set-MpPreference -DisableRealtimeMonitoring $true
+        shell: powershell
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -27,6 +36,8 @@ jobs:
           save-if: false
 
       - name: Run all tests
+        shell: bash
         env:
           INT2DDS_UDP_SOCKET_BUFFER: 5242880
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C linker=lld-link' || '' }}
         run: cargo test -- --test-threads=1
