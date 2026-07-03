@@ -3879,7 +3879,10 @@ pub(crate) mod tests {
 
         println!("{:?}", status_condition.get_entity());
 
-        assert!(status_condition.get_entity().is_err())
+        assert!(status_condition.get_entity().is_err());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     struct SubListener {
@@ -4008,6 +4011,9 @@ pub(crate) mod tests {
         assert_eq!(samples[1].sample_info().sample_rank, 0);
         assert_eq!(samples[0].data().unwrap().index, data1.index);
         assert_eq!(samples[1].data().unwrap().index, data2.index);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -4129,6 +4135,9 @@ pub(crate) mod tests {
         assert_eq!(sample2[0].sample_info().sample_rank, 0);
         assert_eq!(sample1[0].data().unwrap().index, data1.index);
         assert_eq!(sample2[0].data().unwrap().index, data1.index);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -4247,6 +4256,9 @@ pub(crate) mod tests {
             &[InstanceStateKind::ANY_INSTANCE_STATE],
         );
         assert!(second_take.is_err());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -4366,6 +4378,9 @@ pub(crate) mod tests {
             &[InstanceStateKind::ANY_INSTANCE_STATE],
         );
         assert!(second_take.is_err());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -4469,6 +4484,9 @@ pub(crate) mod tests {
         assert_eq!(sample1.sample_info().sample_rank, 0);
         assert_eq!(sample0.data().unwrap().index, data1.index);
         assert_eq!(sample1.data().unwrap().index, data2.index);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -4572,6 +4590,9 @@ pub(crate) mod tests {
         assert_eq!(sample1.sample_info().sample_rank, 0);
         assert_eq!(sample0.data().unwrap().index, data1.index);
         assert_eq!(sample1.data().unwrap().index, data2.index);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     struct SubKeyListener {
@@ -4751,6 +4772,9 @@ pub(crate) mod tests {
         for sample in &samples {
             assert_eq!(sample.sample_info().instance_handle, instance_handle_1);
         }
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -4896,6 +4920,9 @@ pub(crate) mod tests {
             .expect("Failed to take remaining instance samples");
 
         assert_eq!(remaining_samples.len(), 2);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -4976,6 +5003,9 @@ pub(crate) mod tests {
 
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), DdsError::BadParameter);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -5091,6 +5121,9 @@ pub(crate) mod tests {
 
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), DdsError::NoData);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -5221,6 +5254,9 @@ pub(crate) mod tests {
             .expect("Failed to read read samples");
 
         assert_eq!(read_samples.len(), 2);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -5362,6 +5398,9 @@ pub(crate) mod tests {
         let samples = result.unwrap();
         assert_eq!(samples.len(), 1);
         assert_eq!(*samples[0].data().unwrap().serialize().unwrap(), *payload3);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -5476,6 +5515,9 @@ pub(crate) mod tests {
 
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), DdsError::NoData);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -5624,6 +5666,9 @@ pub(crate) mod tests {
 
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), DdsError::NoData);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     // take_next_instance must advance past an instance whose samples were already
@@ -5748,6 +5793,9 @@ pub(crate) mod tests {
         assert_ne!(first_index, second_index);
         assert!(first_index == 0 || first_index == 1);
         assert!(second_index == 0 || second_index == 1);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -5866,6 +5914,9 @@ pub(crate) mod tests {
         let info = no_writers[0].sample_info();
         assert!(!info.valid_data);
         assert_eq!(info.instance_state, InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -5999,6 +6050,9 @@ pub(crate) mod tests {
         let samples = result.unwrap();
         assert_eq!(samples.len(), 1);
         assert_eq!(*samples[0].data().unwrap().serialize().unwrap(), *payload2);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -6147,6 +6201,9 @@ pub(crate) mod tests {
         let samples = result.unwrap();
         assert_eq!(samples.len(), 1); // 1 sample of the third instance
         assert_eq!(*samples[0].data().unwrap().serialize().unwrap(), *payload4);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -6261,6 +6318,9 @@ pub(crate) mod tests {
         );
 
         assert_eq!(result.unwrap_err(), DdsError::NoData); // In current implementation, compares by instance_handle size..
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -6381,6 +6441,9 @@ pub(crate) mod tests {
         assert!(result.is_ok());
         let samples = result.unwrap();
         assert_eq!(samples.len(), 1); // Return only 1 out of 2
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
     //
 
@@ -6439,6 +6502,9 @@ pub(crate) mod tests {
         reader.delete_contained_entities().unwrap();
 
         assert!(reader.get_readconditions().unwrap().is_empty());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -6479,16 +6545,22 @@ pub(crate) mod tests {
             let rtps_reader = reader.get_rtps_reader();
             assert!(rtps_reader.is_ok());
         }
-        let mut dcps_bridge = domain_participant.get_dcps_bridge().unwrap();
-        let dcps_bridge = dcps_bridge.as_mut().unwrap();
-        dcps_bridge
-            .delete_rtps_reader(
-                "hello_world".to_string(),
-                reader.get_instance_handle().unwrap().to_guid().entity_id(),
-            )
-            .unwrap();
+        {
+            let mut dcps_bridge = domain_participant.get_dcps_bridge().unwrap();
+            let dcps_bridge = dcps_bridge.as_mut().unwrap();
+            dcps_bridge
+                .delete_rtps_reader(
+                    "hello_world".to_string(),
+                    reader.get_instance_handle().unwrap().to_guid().entity_id(),
+                )
+                .unwrap();
+        }
         let rtps_reader = reader.get_rtps_reader();
         assert!(rtps_reader.is_err());
+
+        drop(reader);
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -6569,5 +6641,8 @@ pub(crate) mod tests {
             .unwrap();
 
         std::thread::sleep(std::time::Duration::from_secs(10));
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 }

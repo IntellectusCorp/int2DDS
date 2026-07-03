@@ -826,7 +826,9 @@ mod tests {
         ))
     }
 
-    fn create_datawriter(datawriter_qos: DataWriterQos) -> DataWriter<TestData> {
+    fn create_datawriter(
+        datawriter_qos: DataWriterQos,
+    ) -> (crate::domain::domain_participant::DomainParticipant, DataWriter<TestData>) {
         let domain_participant_factory = DomainParticipantFactory::get_instance();
         let domain_participant = domain_participant_factory
             .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
@@ -850,7 +852,7 @@ mod tests {
             .create_datawriter::<TestData>(&topic, datawriter_qos, None, StatusMask::default())
             .unwrap();
 
-        writer
+        (domain_participant, writer)
     }
 
     #[test]
@@ -869,7 +871,7 @@ mod tests {
             ..Default::default()
         };
 
-        let data_writer = create_datawriter(writer_qos);
+        let (participant, data_writer) = create_datawriter(writer_qos);
         let rtps_writer = data_writer.get_rtps_writer().unwrap();
         let stateful_writer = rtps_writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
 
@@ -926,6 +928,10 @@ mod tests {
         // Successshould
         assert!(result.is_ok());
         assert!(cache_guard.changes.len() == 2);
+
+        drop(cache_guard);
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -944,7 +950,7 @@ mod tests {
             ..Default::default()
         };
 
-        let data_writer = create_datawriter(writer_qos);
+        let (participant, data_writer) = create_datawriter(writer_qos);
         let rtps_writer = data_writer.get_rtps_writer().unwrap();
         let stateful_writer = rtps_writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
 
@@ -998,6 +1004,10 @@ mod tests {
 
         assert!(result.is_err());
         assert!(matches!(result, Err(DdsError::OutOfResources)));
+
+        drop(cache_guard);
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -1016,7 +1026,7 @@ mod tests {
             ..Default::default()
         };
 
-        let data_writer = create_datawriter(writer_qos);
+        let (participant, data_writer) = create_datawriter(writer_qos);
         let rtps_writer = data_writer.get_rtps_writer().unwrap();
         let stateful_writer = rtps_writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
 
@@ -1060,6 +1070,10 @@ mod tests {
 
         assert!(result.is_err());
         assert!(matches!(result, Err(DdsError::OutOfResources)));
+
+        drop(cache_guard);
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -1078,7 +1092,7 @@ mod tests {
             ..Default::default()
         };
 
-        let data_writer = create_datawriter(writer_qos);
+        let (participant, data_writer) = create_datawriter(writer_qos);
         let rtps_writer = data_writer.get_rtps_writer().unwrap();
         let stateful_writer = rtps_writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
 
@@ -1121,6 +1135,10 @@ mod tests {
 
         assert!(result.is_err());
         assert!(matches!(result, Err(DdsError::OutOfResources)));
+
+        drop(cache_guard);
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -1139,7 +1157,7 @@ mod tests {
             ..Default::default()
         };
 
-        let data_writer = create_datawriter(writer_qos);
+        let (participant, data_writer) = create_datawriter(writer_qos);
         let rtps_writer = data_writer.get_rtps_writer().unwrap();
         let stateful_writer = rtps_writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
 
@@ -1196,6 +1214,10 @@ mod tests {
 
         assert!(result.is_err());
         assert!(matches!(result, Err(DdsError::OutOfResources)));
+
+        drop(cache_guard);
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -1214,7 +1236,7 @@ mod tests {
             ..Default::default()
         };
 
-        let data_writer = create_datawriter(writer_qos);
+        let (participant, data_writer) = create_datawriter(writer_qos);
         let rtps_writer = data_writer.get_rtps_writer().unwrap();
         let stateful_writer = rtps_writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
 
@@ -1274,6 +1296,10 @@ mod tests {
 
         assert!(result.is_ok());
         assert!(cache_guard.changes.len() == 2);
+
+        drop(cache_guard);
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -1285,7 +1311,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let data_writer = create_datawriter(writer_qos);
+        let (participant, data_writer) = create_datawriter(writer_qos);
         let rtps_writer = data_writer.get_rtps_writer().unwrap();
         let stateful_writer = rtps_writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
 
@@ -1345,6 +1371,10 @@ mod tests {
         let first_acked_change = first_acked_change.unwrap();
         assert!(first_acked_change.is_some());
         assert_eq!(first_acked_change.unwrap().sequence_number(), SequenceNumber::from_i64(1));
+
+        drop(cache_guard);
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -1356,7 +1386,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let data_writer = create_datawriter(writer_qos);
+        let (participant, data_writer) = create_datawriter(writer_qos);
         let rtps_writer = data_writer.get_rtps_writer().unwrap();
         let stateful_writer = rtps_writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
 
@@ -1407,6 +1437,10 @@ mod tests {
         // Successshould
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), change1);
+
+        drop(cache_guard);
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -1418,7 +1452,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let data_writer = create_datawriter(writer_qos);
+        let (participant, data_writer) = create_datawriter(writer_qos);
         let rtps_writer = data_writer.get_rtps_writer().unwrap();
         let stateful_writer = rtps_writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
 
@@ -1483,6 +1517,10 @@ mod tests {
         // OutOfResources error should occur
         assert!(result.is_err());
         assert!(matches!(result, Err(DdsError::OutOfResources)));
+
+        drop(cache_guard);
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -1676,7 +1714,7 @@ mod tests {
 
     #[test]
     fn test_volatile_keepall_nonstrict_removes_acked_changes() {
-        let writer = create_datawriter(keepall_writer_qos(
+        let (participant, writer) = create_datawriter(keepall_writer_qos(
             ReliabilityQosPolicyKind::Reliable,
             DurabilityQosPolicyKind::Volatile,
             false,
@@ -1698,11 +1736,14 @@ mod tests {
         stateful_writer.process_acked_changes();
         assert_eq!(changes_len(&writer), 1);
         assert_eq!(rtps_changes_len(&writer), 1);
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_volatile_keepall_nonstrict_min_acked_across_reliable_readers() {
-        let writer = create_datawriter(keepall_writer_qos(
+        let (participant, writer) = create_datawriter(keepall_writer_qos(
             ReliabilityQosPolicyKind::Reliable,
             DurabilityQosPolicyKind::Volatile,
             false,
@@ -1719,11 +1760,14 @@ mod tests {
 
         assert_eq!(changes_len(&writer), 2, "min acked is seq 1, so seq 2 and 3 remain");
         assert_eq!(rtps_changes_len(&writer), 2, "RTPS queue must match the DDS cache");
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_transient_keepall_nonstrict_keeps_acked_changes() {
-        let writer = create_datawriter(keepall_writer_qos(
+        let (participant, writer) = create_datawriter(keepall_writer_qos(
             ReliabilityQosPolicyKind::Reliable,
             DurabilityQosPolicyKind::TransientLocal,
             false,
@@ -1738,11 +1782,14 @@ mod tests {
 
         assert_eq!(changes_len(&writer), 3, "transient-local must retain acked samples");
         assert_eq!(rtps_changes_len(&writer), 3);
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_strict_keepall_keeps_acked_changes() {
-        let writer = create_datawriter(keepall_writer_qos(
+        let (participant, writer) = create_datawriter(keepall_writer_qos(
             ReliabilityQosPolicyKind::Reliable,
             DurabilityQosPolicyKind::Volatile,
             true,
@@ -1757,11 +1804,14 @@ mod tests {
 
         assert_eq!(changes_len(&writer), 3, "strict keep-all must retain acked samples");
         assert_eq!(rtps_changes_len(&writer), 3);
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_best_effort_volatile_nonstrict_keepall_purges_on_write() {
-        let writer = create_datawriter(keepall_writer_qos(
+        let (participant, writer) = create_datawriter(keepall_writer_qos(
             ReliabilityQosPolicyKind::BestEffort,
             DurabilityQosPolicyKind::Volatile,
             false,
@@ -1779,11 +1829,14 @@ mod tests {
             0,
             "RTPS queue must be drained after synchronous send"
         );
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_best_effort_volatile_strict_keepall_keeps_samples() {
-        let writer = create_datawriter(keepall_writer_qos(
+        let (participant, writer) = create_datawriter(keepall_writer_qos(
             ReliabilityQosPolicyKind::BestEffort,
             DurabilityQosPolicyKind::Volatile,
             true,
@@ -1793,11 +1846,14 @@ mod tests {
 
         assert_eq!(changes_len(&writer), 3, "strict best-effort keep-all must retain samples");
         assert_eq!(rtps_changes_len(&writer), 3);
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_unmatch_lagging_reliable_reader_advances_floor() {
-        let writer = create_datawriter(keepall_writer_qos(
+        let (participant, writer) = create_datawriter(keepall_writer_qos(
             ReliabilityQosPolicyKind::Reliable,
             DurabilityQosPolicyKind::Volatile,
             false,
@@ -1817,11 +1873,14 @@ mod tests {
         stateful_writer.remove_matched_reader_and_update_status(reader_slow).unwrap();
         assert_eq!(changes_len(&writer), 0, "unmatch advances floor over remaining readers");
         assert_eq!(rtps_changes_len(&writer), 0);
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_unmatch_all_reliable_readers_purges_to_highest_sent() {
-        let writer = create_datawriter(keepall_writer_qos(
+        let (participant, writer) = create_datawriter(keepall_writer_qos(
             ReliabilityQosPolicyKind::Reliable,
             DurabilityQosPolicyKind::Volatile,
             false,
@@ -1838,11 +1897,14 @@ mod tests {
         stateful_writer.remove_matched_reader_and_update_status(reader).unwrap();
         assert_eq!(changes_len(&writer), 0, "no reliable reader left -> purge to highest-sent");
         assert_eq!(rtps_changes_len(&writer), 0);
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_best_effort_reader_only_reliable_writer_purges_after_send() {
-        let writer = create_datawriter(keepall_writer_qos(
+        let (participant, writer) = create_datawriter(keepall_writer_qos(
             ReliabilityQosPolicyKind::Reliable,
             DurabilityQosPolicyKind::Volatile,
             false,
@@ -1856,11 +1918,14 @@ mod tests {
         stateful_writer.process_acked_changes();
         assert_eq!(changes_len(&writer), 0, "best-effort-only reliable writer purges after send");
         assert_eq!(rtps_changes_len(&writer), 0);
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_mixed_readers_best_effort_does_not_hold_floor() {
-        let writer = create_datawriter(keepall_writer_qos(
+        let (participant, writer) = create_datawriter(keepall_writer_qos(
             ReliabilityQosPolicyKind::Reliable,
             DurabilityQosPolicyKind::Volatile,
             false,
@@ -1875,5 +1940,8 @@ mod tests {
         stateful_writer.process_acked_changes();
         assert_eq!(changes_len(&writer), 0, "best-effort reader must not pin the floor");
         assert_eq!(rtps_changes_len(&writer), 0);
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 }
