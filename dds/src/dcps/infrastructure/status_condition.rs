@@ -263,5 +263,8 @@ mod tests {
         println!("result: {:?}", result);
 
         subscriber.delete_datareader(reader).unwrap();
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 }

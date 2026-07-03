@@ -489,6 +489,9 @@ mod tests {
         let res = wait_set.wait(Duration::from_seconds(10));
 
         assert!(res.is_ok());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -528,6 +531,9 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), DdsError::Timeout);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -601,6 +607,9 @@ mod tests {
 
         let result = wait_set.wait(Duration::from_seconds(5));
         assert!(result.is_ok());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -677,6 +686,9 @@ mod tests {
 
         let result = wait_set.wait(Duration::from_seconds(10));
         assert!(result.is_ok());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -744,6 +756,9 @@ mod tests {
 
         let result = wait_set.wait(Duration::from_seconds(20));
         assert!(result.is_ok());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -844,6 +859,9 @@ mod tests {
         assert!(result2.is_ok());
         // Check final state
         assert_eq!(wait_set.get_conditions().unwrap().len(), 1);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -897,6 +915,9 @@ mod tests {
 
         wait_set.attach_condition(condition.clone()).unwrap();
         assert_eq!(wait_set.get_conditions().unwrap().len(), 1);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -955,5 +976,8 @@ mod tests {
         let result = wait_set.detach_condition(condition);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), DdsError::PreconditionNotMet);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 }

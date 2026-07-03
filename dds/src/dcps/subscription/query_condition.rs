@@ -350,6 +350,9 @@ mod tests {
 
         assert_eq!(query_condition.get_trigger_value(), Ok(false));
         log::info!("=== ORDER BY Test Completed Successfully ===");
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -461,6 +464,9 @@ mod tests {
         }
 
         assert_eq!(query_condition.get_trigger_value(), Ok(false));
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[derive(DdsType)]
@@ -598,5 +604,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(remaining.len(), 2);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 }

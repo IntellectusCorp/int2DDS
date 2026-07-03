@@ -333,5 +333,8 @@ mod tests {
         }
 
         assert_eq!(read_condition.get_trigger_value(), Ok(false));
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 }
