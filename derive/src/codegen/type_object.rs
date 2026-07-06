@@ -36,20 +36,26 @@ fn xtypes_extensibility_tokens(
     }
 }
 
-/// Generate TypeIdentifier expression for a Rust type.
 fn type_to_identifier(
     ty: &syn::Type,
     crate_path: &proc_macro2::TokenStream,
     as_char: bool,
+    minimal: bool,
 ) -> proc_macro2::TokenStream {
     if let syn::Type::Array(array) = ty {
-        let inner_id = type_to_identifier(&array.elem, crate_path, as_char);
+        let inner_id = type_to_identifier(&array.elem, crate_path, as_char, minimal);
         let size = &array.len;
         return quote! {
-            #crate_path::xtypes::TypeIdentifier::PlainArrayLarge {
-                header: #crate_path::xtypes::PlainCollectionHeader::default(),
-                array_bound_seq: vec![#size as u32],
-                element_identifier: Box::new(#inner_id),
+            {
+                let __elem = #inner_id;
+                #crate_path::xtypes::TypeIdentifier::PlainArrayLarge {
+                    header: #crate_path::xtypes::PlainCollectionHeader {
+                        equiv_kind: #crate_path::xtypes::plain_collection_equiv_kind(&__elem),
+                        element_flags: #crate_path::xtypes::CollectionElementFlag::default(),
+                    },
+                    array_bound_seq: vec![#size as u32],
+                    element_identifier: Box::new(__elem),
+                }
             }
         };
     }
@@ -60,13 +66,19 @@ fn type_to_identifier(
             if matches!(wrapper.as_str(), "Vec" | "Option" | "Box") {
                 if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
                     if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
-                        let inner_id = type_to_identifier(inner_ty, crate_path, false);
+                        let inner_id = type_to_identifier(inner_ty, crate_path, false, minimal);
                         if wrapper == "Vec" {
                             return quote! {
-                                #crate_path::xtypes::TypeIdentifier::PlainSequenceLarge {
-                                    header: #crate_path::xtypes::PlainCollectionHeader::default(),
-                                    bound: 0,
-                                    element_identifier: Box::new(#inner_id),
+                                {
+                                    let __elem = #inner_id;
+                                    #crate_path::xtypes::TypeIdentifier::PlainSequenceLarge {
+                                        header: #crate_path::xtypes::PlainCollectionHeader {
+                                            equiv_kind: #crate_path::xtypes::plain_collection_equiv_kind(&__elem),
+                                            element_flags: #crate_path::xtypes::CollectionElementFlag::default(),
+                                        },
+                                        bound: 0,
+                                        element_identifier: Box::new(__elem),
+                                    }
                                 }
                             };
                         }
@@ -96,15 +108,75 @@ fn type_to_identifier(
         SerializationMethod::Char => quote! { #crate_path::xtypes::TypeIdentifier::Char8 },
         SerializationMethod::String => quote! { #crate_path::xtypes::TypeIdentifier::String8 },
         SerializationMethod::WString => quote! { #crate_path::xtypes::TypeIdentifier::String16 },
-        // Composite (struct / enum / union): name-based MinimalTypeId hashing the Rust
-        // ident, matching the id under which `collect_nested_type_objects` registers the
-        // child. A referenced type's `type_name` override (e.g. ROS2 dds_::Name_) is NOT
-        // visible here, so nested references intentionally use the ident; only a type's own
-        // header/discovery name is mangled. Full nested ROS2 matching would need runtime
-        // resolution of the referenced type's `dds_type_name()`.
         _ => {
             let type_str = quote!(#ty).to_string();
-            name_based_minimal_id(crate_path, &type_str)
+            let fallback = name_based_minimal_id(crate_path, &type_str);
+            let method = if minimal {
+                quote! { minimal_member_id }
+            } else {
+                quote! { complete_member_id }
+            };
+            quote! {
+                {
+                    use #crate_path::xtypes::member_id::MemberIdFallback as _;
+                    #crate_path::xtypes::member_id::Probe::<#ty>(::core::marker::PhantomData)
+                        .#method(#fallback)
+                }
+            }
+        }
+    }
+}
+
+/// Generate the `type_identifier()` (EK_COMPLETE) and `minimal_type_identifier()`
+/// (EK_MINIMAL) method bodies, both wrapped in the reentrancy guard. Non-generic
+/// types cache in a `OnceLock`; generic types recompute each call.
+fn generate_type_id_methods(
+    crate_path: &proc_macro2::TokenStream,
+    name: &syn::Ident,
+    has_type_params: bool,
+) -> proc_macro2::TokenStream {
+    let fallback = name_based_minimal_id(crate_path, &name.to_string());
+    if has_type_params {
+        quote! {
+            fn type_identifier() -> #crate_path::xtypes::TypeIdentifier {
+                #crate_path::xtypes::recursion_guard::with_type_id_guard::<Self>(#fallback, || {
+                    let complete = Self::complete_type_object();
+                    let hash = #crate_path::xtypes::TypeObject::Complete(complete).compute_hash();
+                    #crate_path::xtypes::TypeIdentifier::CompleteTypeId(hash)
+                })
+            }
+
+            fn minimal_type_identifier() -> #crate_path::xtypes::TypeIdentifier {
+                #crate_path::xtypes::recursion_guard::with_type_id_guard::<Self>(#fallback, || {
+                    let minimal = Self::minimal_type_object();
+                    let hash = #crate_path::xtypes::TypeObject::Minimal(minimal).compute_hash();
+                    #crate_path::xtypes::TypeIdentifier::MinimalTypeId(hash)
+                })
+            }
+        }
+    } else {
+        quote! {
+            fn type_identifier() -> #crate_path::xtypes::TypeIdentifier {
+                static TYPE_ID: std::sync::OnceLock<#crate_path::xtypes::TypeIdentifier> = std::sync::OnceLock::new();
+                #crate_path::xtypes::recursion_guard::with_type_id_guard::<Self>(#fallback, || {
+                    TYPE_ID.get_or_init(|| {
+                        let complete = Self::complete_type_object();
+                        let hash = #crate_path::xtypes::TypeObject::Complete(complete).compute_hash();
+                        #crate_path::xtypes::TypeIdentifier::CompleteTypeId(hash)
+                    }).clone()
+                })
+            }
+
+            fn minimal_type_identifier() -> #crate_path::xtypes::TypeIdentifier {
+                static MINIMAL_ID: std::sync::OnceLock<#crate_path::xtypes::TypeIdentifier> = std::sync::OnceLock::new();
+                #crate_path::xtypes::recursion_guard::with_type_id_guard::<Self>(#fallback, || {
+                    MINIMAL_ID.get_or_init(|| {
+                        let minimal = Self::minimal_type_object();
+                        let hash = #crate_path::xtypes::TypeObject::Minimal(minimal).compute_hash();
+                        #crate_path::xtypes::TypeIdentifier::MinimalTypeId(hash)
+                    }).clone()
+                })
+            }
         }
     }
 }
@@ -152,7 +224,8 @@ fn generate_collect_nested(
     } else {
         quote! { use #crate_path::xtypes::nested_closure::CollectFallback as _; }
     };
-    let id_expr = name_based_minimal_id(crate_path, type_name_str);
+    let _ = type_name_str;
+    let id_expr = quote! { <Self as #crate_path::xtypes::HasTypeObject>::type_identifier() };
     quote! {
         fn collect_nested_type_objects(
             out: &mut Vec<(#crate_path::xtypes::TypeIdentifier, #crate_path::xtypes::TypeObject)>,
@@ -192,13 +265,13 @@ pub fn generate_has_type_object_impl(
         let fc = parse_field_attributes(f);
         fc.parent
     });
-    let base_type_expr = if let Some(pf) = parent_field {
+    let (base_type_expr_complete, base_type_expr_minimal) = if let Some(pf) = parent_field {
         let parent_type = &pf.ty;
-        let parent_type_str = quote!(#parent_type).to_string();
-        let parent_id = name_based_minimal_id(crate_path, &parent_type_str);
-        quote! { Some(#parent_id) }
+        let complete_id = type_to_identifier(parent_type, crate_path, false, false);
+        let minimal_id = type_to_identifier(parent_type, crate_path, false, true);
+        (quote! { Some(#complete_id) }, quote! { Some(#minimal_id) })
     } else {
-        quote! { None }
+        (quote! { None }, quote! { None })
     };
 
     // Generate member definitions for MinimalStructType
@@ -213,7 +286,7 @@ pub fn generate_has_type_object_impl(
                 return None;
             }
             let member_id = resolve_member_id(&field_config, &field_name_str, index, autoid);
-            let type_id = type_to_identifier(&field.ty, crate_path, field_config.as_char);
+            let type_id = type_to_identifier(&field.ty, crate_path, field_config.as_char, true);
 
             let is_key = field_config.key;
             let is_optional = field_config.optional;
@@ -251,7 +324,7 @@ pub fn generate_has_type_object_impl(
                 return None;
             }
             let member_id = resolve_member_id(&field_config, &field_name_str, index, autoid);
-            let type_id = type_to_identifier(&field.ty, crate_path, field_config.as_char);
+            let type_id = type_to_identifier(&field.ty, crate_path, field_config.as_char, false);
 
             let is_key = field_config.key;
             let is_optional = field_config.optional;
@@ -316,31 +389,7 @@ pub fn generate_has_type_object_impl(
         generate_collect_nested(crate_path, &name.to_string(), &nested_field_types)
     };
 
-    let type_identifier_impl = if gc.has_type_params {
-        // Generic types cannot use static OnceLock; compute each time
-        quote! {
-            fn type_identifier() -> #crate_path::xtypes::TypeIdentifier {
-                let complete = Self::complete_type_object();
-                let type_obj = #crate_path::xtypes::TypeObject::Complete(complete);
-                let hash = type_obj.compute_hash();
-                #crate_path::xtypes::TypeIdentifier::CompleteTypeId(hash)
-            }
-        }
-    } else {
-        quote! {
-            fn type_identifier() -> #crate_path::xtypes::TypeIdentifier {
-                // For complex types, compute hash from CompleteTypeObject
-                // This ensures consistency with DynamicTypeSupport which also uses CompleteTypeObject
-                static TYPE_ID: std::sync::OnceLock<#crate_path::xtypes::TypeIdentifier> = std::sync::OnceLock::new();
-                TYPE_ID.get_or_init(|| {
-                    let complete = Self::complete_type_object();
-                    let type_obj = #crate_path::xtypes::TypeObject::Complete(complete);
-                    let hash = type_obj.compute_hash();
-                    #crate_path::xtypes::TypeIdentifier::CompleteTypeId(hash)
-                }).clone()
-            }
-        }
-    };
+    let type_identifier_impl = generate_type_id_methods(crate_path, name, gc.has_type_params);
 
     quote! {
         impl #impl_generics #crate_path::xtypes::HasTypeObject for #name #ty_generics #where_clause {
@@ -349,7 +398,7 @@ pub fn generate_has_type_object_impl(
             fn minimal_type_object() -> #crate_path::xtypes::MinimalTypeObject {
                 let mut struct_type = #crate_path::xtypes::MinimalStructType::new(
                     #crate_path::xtypes::TypeFlag::new(#ext_kind, #is_nested, #is_autoid_hash),
-                    #base_type_expr
+                    #base_type_expr_minimal
                 );
                 #(struct_type.add_member(#minimal_members);)*
                 #crate_path::xtypes::MinimalTypeObject::Struct(struct_type)
@@ -359,7 +408,7 @@ pub fn generate_has_type_object_impl(
                 let mut struct_type = #crate_path::xtypes::CompleteStructType::new(
                     #crate_path::xtypes::TypeFlag::new(#ext_kind, #is_nested, #is_autoid_hash),
                     #type_name_str.to_string(),
-                    #base_type_expr
+                    #base_type_expr_complete
                 );
                 #(struct_type.add_member(#complete_members);)*
                 #type_ann_expr
@@ -384,27 +433,21 @@ pub fn generate_has_type_object_alias_impl(
 ) -> proc_macro2::TokenStream {
     let crate_path = &type_config.crate_path;
     let type_name_str = type_config.type_name.clone().unwrap_or_else(|| name.to_string());
-    let related_type = type_to_identifier(inner_ty, crate_path, false);
+    let related_type_complete = type_to_identifier(inner_ty, crate_path, false, false);
+    let related_type_minimal = type_to_identifier(inner_ty, crate_path, false, true);
     let collect_nested_impl = generate_collect_nested(crate_path, &name.to_string(), &[inner_ty]);
+    let id_methods = generate_type_id_methods(crate_path, name, false);
 
     quote! {
         impl #crate_path::xtypes::HasTypeObject for #name {
-            fn type_identifier() -> #crate_path::xtypes::TypeIdentifier {
-                static TYPE_ID: std::sync::OnceLock<#crate_path::xtypes::TypeIdentifier> = std::sync::OnceLock::new();
-                TYPE_ID.get_or_init(|| {
-                    let complete = Self::complete_type_object();
-                    let type_obj = #crate_path::xtypes::TypeObject::Complete(complete);
-                    let hash = type_obj.compute_hash();
-                    #crate_path::xtypes::TypeIdentifier::CompleteTypeId(hash)
-                }).clone()
-            }
+            #id_methods
 
             fn minimal_type_object() -> #crate_path::xtypes::MinimalTypeObject {
                 #crate_path::xtypes::MinimalTypeObject::Alias(
                     #crate_path::xtypes::MinimalAliasType::new(
                         #crate_path::xtypes::TypeFlag::default(),
                         #crate_path::xtypes::MemberFlag::default(),
-                        #related_type,
+                        #related_type_minimal,
                     )
                 )
             }
@@ -415,7 +458,7 @@ pub fn generate_has_type_object_alias_impl(
                         #crate_path::xtypes::TypeFlag::default(),
                         #type_name_str.to_string(),
                         #crate_path::xtypes::MemberFlag::default(),
-                        #related_type,
+                        #related_type_complete,
                     )
                 )
             }
@@ -490,20 +533,11 @@ pub fn generate_has_type_object_enum_impl(
         .collect();
 
     let collect_nested_impl = generate_collect_nested(crate_path, &name.to_string(), &[]);
+    let id_methods = generate_type_id_methods(crate_path, name, false);
 
     quote! {
         impl #crate_path::xtypes::HasTypeObject for #name {
-            fn type_identifier() -> #crate_path::xtypes::TypeIdentifier {
-                // For complex types, compute hash from CompleteTypeObject
-                // This ensures consistency with DynamicTypeSupport which also uses CompleteTypeObject
-                static TYPE_ID: std::sync::OnceLock<#crate_path::xtypes::TypeIdentifier> = std::sync::OnceLock::new();
-                TYPE_ID.get_or_init(|| {
-                    let complete = Self::complete_type_object();
-                    let type_obj = #crate_path::xtypes::TypeObject::Complete(complete);
-                    let hash = type_obj.compute_hash();
-                    #crate_path::xtypes::TypeIdentifier::CompleteTypeId(hash)
-                }).clone()
-            }
+            #id_methods
 
             fn minimal_type_object() -> #crate_path::xtypes::MinimalTypeObject {
                 let mut enum_type = #crate_path::xtypes::MinimalEnumeratedType::new(
@@ -561,7 +595,7 @@ pub fn generate_has_type_object_union_impl(
             let variant_name_str = variant.ident.to_string();
             let disc_value = get_discriminant_value(variant, index) as i32;
             let member_type_id = match get_variant_type(variant) {
-                Some(ty) => type_to_identifier(ty, crate_path, false),
+                Some(ty) => type_to_identifier(ty, crate_path, false, true),
                 None => quote! { #crate_path::xtypes::TypeIdentifier::None },
             };
 
@@ -585,7 +619,7 @@ pub fn generate_has_type_object_union_impl(
             let variant_name_str = variant.ident.to_string();
             let disc_value = get_discriminant_value(variant, index) as i32;
             let member_type_id = match get_variant_type(variant) {
-                Some(ty) => type_to_identifier(ty, crate_path, false),
+                Some(ty) => type_to_identifier(ty, crate_path, false, false),
                 None => quote! { #crate_path::xtypes::TypeIdentifier::None },
             };
 
@@ -605,18 +639,11 @@ pub fn generate_has_type_object_union_impl(
         variants.iter().filter(|v| variant_has_data(v)).filter_map(get_variant_type).collect();
     let collect_nested_impl =
         generate_collect_nested(crate_path, &name.to_string(), &nested_field_types);
+    let id_methods = generate_type_id_methods(crate_path, name, false);
 
     quote! {
         impl #crate_path::xtypes::HasTypeObject for #name {
-            fn type_identifier() -> #crate_path::xtypes::TypeIdentifier {
-                static TYPE_ID: std::sync::OnceLock<#crate_path::xtypes::TypeIdentifier> = std::sync::OnceLock::new();
-                TYPE_ID.get_or_init(|| {
-                    let complete = Self::complete_type_object();
-                    let type_obj = #crate_path::xtypes::TypeObject::Complete(complete);
-                    let hash = type_obj.compute_hash();
-                    #crate_path::xtypes::TypeIdentifier::CompleteTypeId(hash)
-                }).clone()
-            }
+            #id_methods
 
             fn minimal_type_object() -> #crate_path::xtypes::MinimalTypeObject {
                 let mut union_type = #crate_path::xtypes::MinimalUnionType::new(
@@ -693,18 +720,11 @@ pub fn generate_has_type_object_bitmask_impl(
         .collect();
 
     let collect_nested_impl = generate_collect_nested(crate_path, &name.to_string(), &[]);
+    let id_methods = generate_type_id_methods(crate_path, name, false);
 
     quote! {
         impl #crate_path::xtypes::HasTypeObject for #name {
-            fn type_identifier() -> #crate_path::xtypes::TypeIdentifier {
-                static TYPE_ID: std::sync::OnceLock<#crate_path::xtypes::TypeIdentifier> = std::sync::OnceLock::new();
-                TYPE_ID.get_or_init(|| {
-                    let complete = Self::complete_type_object();
-                    let type_obj = #crate_path::xtypes::TypeObject::Complete(complete);
-                    let hash = type_obj.compute_hash();
-                    #crate_path::xtypes::TypeIdentifier::CompleteTypeId(hash)
-                }).clone()
-            }
+            #id_methods
 
             fn minimal_type_object() -> #crate_path::xtypes::MinimalTypeObject {
                 let mut bitmask_type = #crate_path::xtypes::MinimalBitmaskType::new(
@@ -750,7 +770,7 @@ pub fn generate_has_type_object_bitset_impl(
             let field_name = field.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
             let attrs = parse_field_attributes(field);
             let bitcount = attrs.bitfield.unwrap_or(1) as u8;
-            let field_type_id = type_to_identifier(&field.ty, crate_path, false);
+            let field_type_id = type_to_identifier(&field.ty, crate_path, false, true);
             let pos = position;
             position += bitcount as u16;
 
@@ -773,7 +793,7 @@ pub fn generate_has_type_object_bitset_impl(
             let field_name = field.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
             let attrs = parse_field_attributes(field);
             let bitcount = attrs.bitfield.unwrap_or(1) as u8;
-            let field_type_id = type_to_identifier(&field.ty, crate_path, false);
+            let field_type_id = type_to_identifier(&field.ty, crate_path, false, false);
             let pos = position;
             position += bitcount as u16;
 
@@ -790,18 +810,11 @@ pub fn generate_has_type_object_bitset_impl(
         .collect();
 
     let collect_nested_impl = generate_collect_nested(crate_path, &name.to_string(), &[]);
+    let id_methods = generate_type_id_methods(crate_path, name, false);
 
     quote! {
         impl #crate_path::xtypes::HasTypeObject for #name {
-            fn type_identifier() -> #crate_path::xtypes::TypeIdentifier {
-                static TYPE_ID: std::sync::OnceLock<#crate_path::xtypes::TypeIdentifier> = std::sync::OnceLock::new();
-                TYPE_ID.get_or_init(|| {
-                    let complete = Self::complete_type_object();
-                    let type_obj = #crate_path::xtypes::TypeObject::Complete(complete);
-                    let hash = type_obj.compute_hash();
-                    #crate_path::xtypes::TypeIdentifier::CompleteTypeId(hash)
-                }).clone()
-            }
+            #id_methods
 
             fn minimal_type_object() -> #crate_path::xtypes::MinimalTypeObject {
                 let mut bitset_type = #crate_path::xtypes::MinimalBitsetType::new(

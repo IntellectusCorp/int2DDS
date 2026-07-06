@@ -1056,7 +1056,7 @@ mod resolution_tests {
     /// the top type under its own identifier, then nested members under their
     /// name-based ids.
     fn closure_of<T: HasTypeObject>() -> Vec<(TypeIdentifier, TypeObject)> {
-        let mut out = vec![(T::type_identifier(), TypeObject::Complete(T::complete_type_object()))];
+        let mut out = Vec::new();
         T::collect_nested_type_objects(&mut out);
         out
     }
