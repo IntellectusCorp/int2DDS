@@ -122,7 +122,7 @@ RUST_LOG=debug cargo test
 ### Running Examples
 
 ```bash
-# List all examples
+# List the core hello_world examples
 ls dds/examples/
 
 # Run specific example
@@ -130,8 +130,8 @@ cargo run --example hello_world_pub -- --domain 0
 cargo run --example hello_world_sub -- --domain 0
 
 # Run with environment variables
-INT2DDS_THREAD_MONITORING=true cargo run --example hello_world_pub(sub)
-RUST_LOG=info cargo run --example perftest_publisher
+INT2DDS_THREAD_MONITORING=true cargo run --example hello_world_pub -- --domain 0
+RUST_LOG=info cargo run --example hello_world_sub -- --domain 0
 ```
 
 ### Linting and Formatting
