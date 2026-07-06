@@ -237,14 +237,6 @@ impl Participant {
         self.type_registry.clone()
     }
 
-    pub(crate) fn register_local_type(&self, type_object: Option<&crate::xtypes::TypeObject>) {
-        if let Some(obj) = type_object {
-            if let Ok(mut registry) = self.type_registry.write() {
-                registry.register_type_object(obj.clone());
-            }
-        }
-    }
-
     pub(crate) fn register_local_type_objects(
         &self,
         objects: &[(crate::xtypes::TypeIdentifier, crate::xtypes::TypeObject)],
@@ -253,9 +245,7 @@ impl Participant {
             return;
         }
         if let Ok(mut registry) = self.type_registry.write() {
-            for (id, obj) in objects {
-                registry.register_type_object_with_id(id, obj.clone());
-            }
+            registry.register_closure(objects);
         }
     }
 
