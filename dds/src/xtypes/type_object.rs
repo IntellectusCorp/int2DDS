@@ -19,10 +19,6 @@
 // because primitive types need to implement HasTypeObject
 // but don't need full serialization support.
 
-// ============================================================================
-// Constants from DDS-XTYPES 1.3 Specification
-// ============================================================================
-
 /// TypeIdentifier discriminator values (Table 7.23)
 pub mod type_kind {
     // Primitive types
@@ -63,8 +59,9 @@ pub mod type_kind {
     pub const TI_STRONGLY_CONNECTED_COMPONENT: u8 = 0xB0;
 
     // TypeObject equivalence kinds
-    pub const EK_COMPLETE: u8 = 0xF1;
-    pub const EK_MINIMAL: u8 = 0xF2;
+    pub const EK_MINIMAL: u8 = 0xF1;
+    pub const EK_COMPLETE: u8 = 0xF2;
+    pub const EK_BOTH: u8 = 0xF3;
 }
 
 /// Member flags bit positions
@@ -88,13 +85,7 @@ pub mod type_flag {
     pub const IS_AUTOID_HASH: u16 = 1 << 3;
 }
 
-// ============================================================================
-// EquivalenceHash
-// ============================================================================
-
 /// 14-byte equivalence hash computed from serialized MinimalTypeObject.
-///
-/// The hash is computed as: `MD5(XCDR2_serialize(MinimalTypeObject))[0:14]`
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EquivalenceHash(pub [u8; 14]);
 
@@ -153,14 +144,7 @@ impl std::fmt::Display for EquivalenceHash {
     }
 }
 
-// ============================================================================
-// TypeIdentifier
-// ============================================================================
-
 /// TypeIdentifier - compact type reference.
-///
-/// For primitive types, this is just the discriminator byte.
-/// For complex types, this includes an EquivalenceHash.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeIdentifier {
     // Primitive types (no additional data)
@@ -699,10 +683,6 @@ impl TypeIdentifier {
     }
 }
 
-// ============================================================================
-// Collection Headers and Flags
-// ============================================================================
-
 /// Collection element flags (for sequences, arrays, maps).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct CollectionElementFlag(pub u8);
@@ -748,16 +728,16 @@ impl PlainCollectionHeader {
 #[repr(u8)]
 pub enum EquivalenceKind {
     #[default]
-    Minimal = 0xF2,
-    Complete = 0xF1,
+    Minimal = 0xF1,
+    Complete = 0xF2,
     Both = 0xF3,
 }
 
 impl EquivalenceKind {
     pub fn from_u8(value: u8) -> Self {
         match value {
-            0xF1 => EquivalenceKind::Complete,
-            0xF2 => EquivalenceKind::Minimal,
+            0xF1 => EquivalenceKind::Minimal,
+            0xF2 => EquivalenceKind::Complete,
             0xF3 => EquivalenceKind::Both,
             _ => EquivalenceKind::Minimal, // Default fallback
         }
@@ -784,10 +764,6 @@ impl TryConstructKind {
         }
     }
 }
-
-// ============================================================================
-// Type Flags
-// ============================================================================
 
 /// Extensibility kind for types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -918,21 +894,12 @@ impl MemberFlag {
     }
 }
 
-// ============================================================================
-// Name Hash
-// ============================================================================
-
-/// Compute name hash from a string.
-/// Returns first 4 bytes of MD5(name) masked with 0x0FFFFFFF.
+/// Compute name hash from a string: first 4 bytes of MD5(name) as a
+/// big-endian u32 (spec NameHash, no mask).
 pub fn compute_name_hash(name: &str) -> u32 {
     let hash = ::md5::compute(name.as_bytes());
-    let bytes = [hash[0], hash[1], hash[2], hash[3]];
-    u32::from_be_bytes(bytes) & 0x0FFFFFFF
+    u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]])
 }
-
-// ============================================================================
-// Struct Member Types
-// ============================================================================
 
 /// Minimal struct member for hash computation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1475,10 +1442,6 @@ impl AppliedAnnotation {
     }
 }
 
-// ============================================================================
-// Struct Type Definitions
-// ============================================================================
-
 /// Minimal struct type for hash computation.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MinimalStructType {
@@ -1520,8 +1483,7 @@ impl MinimalStructType {
 
     /// Compute the equivalence hash for this type.
     pub fn compute_hash(&self) -> EquivalenceHash {
-        let serialized = self.serialize();
-        EquivalenceHash::compute(&serialized)
+        MinimalTypeObject::Struct(self.clone()).compute_hash()
     }
 
     pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
@@ -1873,10 +1835,6 @@ impl AppliedBuiltinTypeAnnotations {
     }
 }
 
-// ============================================================================
-// Enumerated Type Definitions
-// ============================================================================
-
 /// Minimal enumerated literal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MinimalEnumeratedLiteral {
@@ -2037,8 +1995,7 @@ impl MinimalEnumeratedType {
     }
 
     pub fn compute_hash(&self) -> EquivalenceHash {
-        let serialized = self.serialize();
-        EquivalenceHash::compute(&serialized)
+        MinimalTypeObject::Enum(self.clone()).compute_hash()
     }
 
     pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
@@ -2205,10 +2162,6 @@ impl CompleteEnumeratedHeader {
         Ok((CompleteEnumeratedHeader { common, detail }, pos))
     }
 }
-
-// ============================================================================
-// Union Type Definitions
-// ============================================================================
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommonUnionMember {
@@ -2413,7 +2366,7 @@ impl MinimalUnionType {
     }
 
     pub fn compute_hash(&self) -> EquivalenceHash {
-        EquivalenceHash::compute(&self.serialize())
+        MinimalTypeObject::Union(self.clone()).compute_hash()
     }
 
     pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
@@ -2514,10 +2467,6 @@ impl CompleteUnionType {
     }
 }
 
-// ============================================================================
-// Alias Type Definitions
-// ============================================================================
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommonAliasBody {
     pub related_flags: MemberFlag,
@@ -2569,7 +2518,7 @@ impl MinimalAliasType {
     }
 
     pub fn compute_hash(&self) -> EquivalenceHash {
-        EquivalenceHash::compute(&self.serialize())
+        MinimalTypeObject::Alias(self.clone()).compute_hash()
     }
 
     pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
@@ -2626,10 +2575,6 @@ impl CompleteAliasType {
         Ok((CompleteAliasType { alias_flags, header, body }, pos))
     }
 }
-
-// ============================================================================
-// Bitmask Type Definitions
-// ============================================================================
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommonBitflag {
@@ -2744,7 +2689,7 @@ impl MinimalBitmaskType {
     }
 
     pub fn compute_hash(&self) -> EquivalenceHash {
-        EquivalenceHash::compute(&self.serialize())
+        MinimalTypeObject::Bitmask(self.clone()).compute_hash()
     }
 
     pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
@@ -2834,10 +2779,6 @@ impl CompleteBitmaskType {
         Ok((CompleteBitmaskType { bitmask_flags, header, flag_seq }, pos))
     }
 }
-
-// ============================================================================
-// Bitset Type Definitions
-// ============================================================================
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommonBitfield {
@@ -2972,7 +2913,7 @@ impl MinimalBitsetType {
     }
 
     pub fn compute_hash(&self) -> EquivalenceHash {
-        EquivalenceHash::compute(&self.serialize())
+        MinimalTypeObject::Bitset(self.clone()).compute_hash()
     }
 
     pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
@@ -3057,10 +2998,6 @@ impl CompleteBitsetType {
         Ok((CompleteBitsetType { bitset_flags, header, field_seq }, pos))
     }
 }
-
-// ============================================================================
-// TypeInformation (DDS-XTypes 1.3 Section 7.6.3.3)
-// ============================================================================
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeIdentifierWithSize {
@@ -3225,6 +3162,76 @@ impl TypeInformation {
         }
     }
 
+    /// Build enriched TypeInformation from a type's `(id, object)` closure: element 0
+    /// is the root, the rest are transitive dependencies. Each entry advertises the
+    /// serialized size of its TypeObject. Returns None for an empty closure.
+    pub fn from_closure(closure: &[(TypeIdentifier, TypeObject)]) -> Option<Self> {
+        use crate::xtypes::type_object_xcdr::{serialize_type_object, spec_hash};
+        let (root_id, root_obj) = closure.first()?;
+        let spec_size = |obj: &TypeObject| serialize_type_object(obj).len() as u32;
+        let min_size = |m: &MinimalTypeObject| {
+            serialize_type_object(&TypeObject::Minimal(m.clone())).len() as u32
+        };
+        let root_hash = spec_hash(root_obj);
+
+        // Derive the minimal equivalent of every Complete entry so each advertised
+        // complete id has a matching minimal id/size (spec §7.6.3.2.1).
+        let completes: Vec<(TypeIdentifier, CompleteTypeObject)> = closure
+            .iter()
+            .filter_map(|(id, obj)| match obj {
+                TypeObject::Complete(c) => Some((id.clone(), c.clone())),
+                _ => None,
+            })
+            .collect();
+        let min_map: std::collections::HashMap<
+            EquivalenceHash,
+            (EquivalenceHash, MinimalTypeObject),
+        > = crate::xtypes::type_registry::build_minimal_closure(&completes)
+            .into_iter()
+            .map(|(ck, mh, mo)| (ck, (mh, mo)))
+            .collect();
+        let minimal_of = |id: &TypeIdentifier| -> Option<TypeIdentifierWithSize> {
+            let (mh, mo) = min_map.get(id.equivalence_hash()?)?;
+            Some(TypeIdentifierWithSize::new(TypeIdentifier::MinimalTypeId(*mh), min_size(mo)))
+        };
+
+        // COMPLETE slot: root + deps as advertised, spec byte sizes. The closure may
+        // re-list the root under another id; the root is not its own dependency, so
+        // drop it and dedup the rest by content hash. Build minimal deps in lockstep.
+        let complete_root = TypeIdentifierWithSize::new(root_id.clone(), spec_size(root_obj));
+        let mut seen = std::collections::HashSet::new();
+        let mut complete_deps = Vec::new();
+        let mut minimal_deps = Vec::new();
+        for (id, obj) in &closure[1..] {
+            if spec_hash(obj) == root_hash {
+                continue;
+            }
+            if !id.equivalence_hash().map_or(true, |h| seen.insert(*h)) {
+                continue;
+            }
+            complete_deps.push(TypeIdentifierWithSize::new(id.clone(), spec_size(obj)));
+            if let Some(md) = minimal_of(id) {
+                minimal_deps.push(md);
+            }
+        }
+        let complete = TypeIdentifierWithDependencies {
+            typeid_with_size: complete_root,
+            dependent_typeids: complete_deps,
+        };
+
+        // MINIMAL slot: the derived minimal ids/sizes. If the root has no minimal
+        // (e.g. a non-Complete closure), fall back to the complete slot.
+        let minimal = match minimal_of(root_id) {
+            Some(minimal_root) => TypeIdentifierWithDependencies {
+                typeid_with_size: minimal_root,
+                dependent_typeids: minimal_deps,
+            },
+            None => complete.clone(),
+        };
+
+        Some(Self { minimal, complete })
+    }
+
     pub fn minimal_type_id(&self) -> &TypeIdentifier {
         &self.minimal.typeid_with_size.type_id
     }
@@ -3312,10 +3319,6 @@ impl TypeInformation {
     }
 }
 
-// ============================================================================
-// TypeObject - Top Level
-// ============================================================================
-
 /// Discriminator values for TypeObject kinds.
 pub mod type_object_kind {
     pub const TK_NONE: u8 = 0x00;
@@ -3378,8 +3381,7 @@ impl MinimalTypeObject {
     }
 
     pub fn compute_hash(&self) -> EquivalenceHash {
-        let serialized = self.serialize();
-        EquivalenceHash::compute(&serialized)
+        crate::xtypes::type_object_xcdr::spec_hash(&TypeObject::Minimal(self.clone()))
     }
 
     pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
@@ -3486,10 +3488,7 @@ pub enum TypeObject {
 
 impl TypeObject {
     pub fn compute_hash(&self) -> EquivalenceHash {
-        match self {
-            TypeObject::Complete(c) => EquivalenceHash::compute(&c.serialize()),
-            TypeObject::Minimal(m) => m.compute_hash(),
-        }
+        crate::xtypes::type_object_xcdr::spec_hash(self)
     }
 
     /// Serialize TypeObject to bytes.
@@ -3540,17 +3539,17 @@ impl TypeObject {
     }
 }
 
-// ============================================================================
-// HasTypeObject Trait
-// ============================================================================
-
 /// Trait for types that have TypeObject representation.
-///
-/// This trait provides type metadata for DDS-XTypes support.
-/// It is automatically implemented by the `#[derive(DdsType)]` macro.
 pub trait HasTypeObject {
     /// Get the TypeIdentifier for this type.
     fn type_identifier() -> TypeIdentifier;
+
+    /// Get the EK_MINIMAL content hash `TypeIdentifier` for this type.
+    fn minimal_type_identifier() -> TypeIdentifier {
+        TypeIdentifier::MinimalTypeId(
+            TypeObject::Minimal(Self::minimal_type_object()).compute_hash(),
+        )
+    }
 
     /// Get the MinimalTypeObject for this type.
     fn minimal_type_object() -> MinimalTypeObject;
@@ -3583,15 +3582,126 @@ pub mod nested_closure {
     }
 }
 
-// ============================================================================
-// Primitive Type Implementations
-// ============================================================================
+/// Autoref-specialization probe resolving a member/element `TypeIdentifier` per
+/// equivalence kind: for `T: HasTypeObject` it returns the content-based id, and
+/// for any other `T` it degrades to the name-based fallback the macro supplies.
+pub mod member_id {
+    use super::{HasTypeObject, TypeIdentifier};
+
+    pub struct Probe<T>(pub core::marker::PhantomData<T>);
+
+    /// Fallback for member types that do NOT implement `HasTypeObject`.
+    pub trait MemberIdFallback {
+        fn complete_member_id(&self, fallback: TypeIdentifier) -> TypeIdentifier {
+            fallback
+        }
+        fn minimal_member_id(&self, fallback: TypeIdentifier) -> TypeIdentifier {
+            fallback
+        }
+    }
+    impl<T> MemberIdFallback for Probe<T> {}
+
+    /// Preferred path for member types that implement `HasTypeObject`.
+    impl<T: HasTypeObject> Probe<T> {
+        pub fn complete_member_id(&self, _fallback: TypeIdentifier) -> TypeIdentifier {
+            T::type_identifier()
+        }
+        pub fn minimal_member_id(&self, _fallback: TypeIdentifier) -> TypeIdentifier {
+            T::minimal_type_identifier()
+        }
+    }
+}
+
+/// Thread-local reentrancy guard for content-hash id computation.
+pub mod recursion_guard {
+    use super::TypeIdentifier;
+    use std::cell::RefCell;
+    use std::collections::HashSet;
+
+    thread_local! {
+        static ACTIVE: RefCell<HashSet<&'static str>> = RefCell::new(HashSet::new());
+    }
+
+    pub fn with_type_id_guard<T: ?Sized>(
+        fallback: TypeIdentifier,
+        f: impl FnOnce() -> TypeIdentifier,
+    ) -> TypeIdentifier {
+        let key = core::any::type_name::<T>();
+        let entered = ACTIVE.with(|s| s.borrow_mut().insert(key));
+        if !entered {
+            log::warn!(
+                "xtypes recursion guard: cyclic type reference for {}; using name-based \
+                 fallback id (mutually-recursive types are unsupported)",
+                key
+            );
+            return fallback;
+        }
+        let out = f();
+        ACTIVE.with(|s| {
+            s.borrow_mut().remove(key);
+        });
+        out
+    }
+}
+
+/// Compute the `PlainCollectionHeader.equiv_kind` for a plain collection whose
+/// element id is `element`: `Both` when the element (transitively) is fully
+/// descriptive (primitives/strings/plain collections of the same), else the
+/// equivalence kind of the hash id it contains.
+pub fn plain_collection_equiv_kind(element: &TypeIdentifier) -> EquivalenceKind {
+    fn combine(a: EquivalenceKind, b: EquivalenceKind) -> EquivalenceKind {
+        match (a, b) {
+            (EquivalenceKind::Both, other) | (other, EquivalenceKind::Both) => other,
+            (x, _) => x,
+        }
+    }
+    fn kind_of(id: &TypeIdentifier) -> EquivalenceKind {
+        match id {
+            TypeIdentifier::MinimalTypeId(_) => EquivalenceKind::Minimal,
+            TypeIdentifier::CompleteTypeId(_) => EquivalenceKind::Complete,
+            TypeIdentifier::PlainSequenceSmall { element_identifier, .. }
+            | TypeIdentifier::PlainSequenceLarge { element_identifier, .. }
+            | TypeIdentifier::PlainArraySmall { element_identifier, .. }
+            | TypeIdentifier::PlainArrayLarge { element_identifier, .. } => {
+                kind_of(element_identifier)
+            }
+            TypeIdentifier::PlainMapSmall { key_identifier, element_identifier, .. }
+            | TypeIdentifier::PlainMapLarge { key_identifier, element_identifier, .. } => {
+                combine(kind_of(key_identifier), kind_of(element_identifier))
+            }
+            _ => EquivalenceKind::Both,
+        }
+    }
+    kind_of(element)
+}
+
+/// Return `id` with its plain-collection header `equiv_kind` recomputed from its
+/// (current) element/key via [`plain_collection_equiv_kind`]. Callers rewrite inner
+/// ids first, so applying this bottom-up keeps nested collection headers correct
+/// (e.g. `Vec<Vec<Inner>>`). Non-collection ids pass through unchanged.
+pub fn recompute_collection_kind(mut id: TypeIdentifier) -> TypeIdentifier {
+    let kind = plain_collection_equiv_kind(&id);
+    match &mut id {
+        TypeIdentifier::PlainSequenceSmall { header, .. }
+        | TypeIdentifier::PlainSequenceLarge { header, .. }
+        | TypeIdentifier::PlainArraySmall { header, .. }
+        | TypeIdentifier::PlainArrayLarge { header, .. }
+        | TypeIdentifier::PlainMapSmall { header, .. }
+        | TypeIdentifier::PlainMapLarge { header, .. } => header.equiv_kind = kind,
+        _ => {}
+    }
+    id
+}
 
 macro_rules! impl_primitive_has_type_object {
     ($($rust_type:ty => $identifier:ident, $name:literal),* $(,)?) => {
         $(
             impl HasTypeObject for $rust_type {
                 fn type_identifier() -> TypeIdentifier {
+                    TypeIdentifier::$identifier
+                }
+
+                fn minimal_type_identifier() -> TypeIdentifier {
                     TypeIdentifier::$identifier
                 }
 
@@ -3631,6 +3741,10 @@ impl HasTypeObject for String {
         TypeIdentifier::String8
     }
 
+    fn minimal_type_identifier() -> TypeIdentifier {
+        TypeIdentifier::String8
+    }
+
     fn minimal_type_object() -> MinimalTypeObject {
         MinimalTypeObject::Struct(MinimalStructType::default())
     }
@@ -3646,10 +3760,26 @@ impl HasTypeObject for String {
 
 impl<T: HasTypeObject> HasTypeObject for Vec<T> {
     fn type_identifier() -> TypeIdentifier {
+        let element = T::type_identifier();
         TypeIdentifier::PlainSequenceLarge {
-            header: PlainCollectionHeader::default(),
+            header: PlainCollectionHeader {
+                equiv_kind: plain_collection_equiv_kind(&element),
+                element_flags: CollectionElementFlag::default(),
+            },
             bound: 0, // unbounded
-            element_identifier: Box::new(T::type_identifier()),
+            element_identifier: Box::new(element),
+        }
+    }
+
+    fn minimal_type_identifier() -> TypeIdentifier {
+        let element = T::minimal_type_identifier();
+        TypeIdentifier::PlainSequenceLarge {
+            header: PlainCollectionHeader {
+                equiv_kind: plain_collection_equiv_kind(&element),
+                element_flags: CollectionElementFlag::default(),
+            },
+            bound: 0,
+            element_identifier: Box::new(element),
         }
     }
 
@@ -3675,6 +3805,10 @@ impl<T: HasTypeObject> HasTypeObject for Option<T> {
         T::type_identifier()
     }
 
+    fn minimal_type_identifier() -> TypeIdentifier {
+        T::minimal_type_identifier()
+    }
+
     fn minimal_type_object() -> MinimalTypeObject {
         T::minimal_type_object()
     }
@@ -3695,6 +3829,10 @@ impl<T: HasTypeObject> HasTypeObject for Option<T> {
 impl<T: HasTypeObject> HasTypeObject for Box<T> {
     fn type_identifier() -> TypeIdentifier {
         T::type_identifier()
+    }
+
+    fn minimal_type_identifier() -> TypeIdentifier {
+        T::minimal_type_identifier()
     }
 
     fn minimal_type_object() -> MinimalTypeObject {
@@ -3720,10 +3858,26 @@ macro_rules! impl_array_has_type_object {
         $(
             impl<T: HasTypeObject> HasTypeObject for [T; $n] {
                 fn type_identifier() -> TypeIdentifier {
+                    let element = T::type_identifier();
                     TypeIdentifier::PlainArrayLarge {
-                        header: PlainCollectionHeader::default(),
+                        header: PlainCollectionHeader {
+                            equiv_kind: plain_collection_equiv_kind(&element),
+                            element_flags: CollectionElementFlag::default(),
+                        },
                         array_bound_seq: vec![$n],
-                        element_identifier: Box::new(T::type_identifier()),
+                        element_identifier: Box::new(element),
+                    }
+                }
+
+                fn minimal_type_identifier() -> TypeIdentifier {
+                    let element = T::minimal_type_identifier();
+                    TypeIdentifier::PlainArrayLarge {
+                        header: PlainCollectionHeader {
+                            equiv_kind: plain_collection_equiv_kind(&element),
+                            element_flags: CollectionElementFlag::default(),
+                        },
+                        array_bound_seq: vec![$n],
+                        element_identifier: Box::new(element),
                     }
                 }
 
@@ -3751,10 +3905,6 @@ impl_array_has_type_object! {
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
     20, 24, 32, 48, 64, 128, 256, 512, 1024
 }
-
-// ============================================================================
-// CDR/XCDR Serialization Traits for TypeIdentifier
-// ============================================================================
 
 use crate::serialize::cdr::{
     CdrDeserialize, CdrError, CdrResult, CdrSerialize, CdrSerializer, CdrSerializerCommon, LcHint,
@@ -3832,9 +3982,10 @@ impl CdrDeserialize for TypeObject {
 
 impl XcdrSerialize for TypeObject {
     fn serialize_xcdr(&self, serializer: &mut Xcdr2Serializer) -> XcdrResult<()> {
-        let bytes = self.serialize();
-        let len = bytes.len() as u32;
-        serializer.serialize_u32(len)?;
+        while serializer.position() % 4 != 0 {
+            serializer.buffer_mut().push(0);
+        }
+        let bytes = crate::xtypes::type_object_xcdr::serialize_type_object(self);
         serializer.buffer_mut().extend_from_slice(&bytes);
         Ok(())
     }
@@ -3842,11 +3993,13 @@ impl XcdrSerialize for TypeObject {
 
 impl XcdrDeserialize for TypeObject {
     fn deserialize_xcdr(deserializer: &mut Xcdr2Deserializer) -> XcdrResult<Self> {
-        let len = deserializer.deserialize_u32()? as usize;
-        let bytes = deserializer.deserialize_byte_array(len)?;
-        TypeObject::deserialize(&bytes)
-            .map(|(obj, _)| obj)
-            .map_err(|e| crate::serialize::cdr::XcdrError::DeserializationError(e))
+        // The (4-aligned) DHEADER frames the object: peek it, slice 4+dheader bytes.
+        let dheader = deserializer.deserialize_u32()? as usize;
+        let after = deserializer.position();
+        deserializer.skip(dheader)?;
+        let slice = &deserializer.get_data()[after - 4..after + dheader];
+        crate::xtypes::type_object_xcdr::deserialize_type_object(slice)
+            .map_err(crate::serialize::cdr::XcdrError::DeserializationError)
     }
 }
 
@@ -3958,13 +4111,71 @@ impl XcdrDeserialize for TypeInformation {
     }
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn type_information_from_closure_carries_sizes_and_deps() {
+        use crate::xtypes::type_object_xcdr::{serialize_type_object, spec_hash};
+        let mk = |name: &str| {
+            let s = CompleteStructType::new(
+                TypeFlag::new(ExtensibilityKind::Appendable, false, false),
+                name.to_string(),
+                None,
+            );
+            TypeObject::Complete(CompleteTypeObject::Struct(s))
+        };
+        let root_obj = mk("Root");
+        let dep_obj = mk("Dep");
+        let root_id = TypeIdentifier::CompleteTypeId(spec_hash(&root_obj));
+        let dep_id = TypeIdentifier::CompleteTypeId(spec_hash(&dep_obj));
+        let closure = vec![(root_id.clone(), root_obj.clone()), (dep_id.clone(), dep_obj.clone())];
+
+        let ti = TypeInformation::from_closure(&closure).expect("non-empty closure");
+        // COMPLETE slot: advertised complete ids, spec byte sizes.
+        assert_eq!(ti.complete.typeid_with_size.type_id, root_id);
+        assert_eq!(
+            ti.complete.typeid_with_size.typeobject_serialized_size,
+            serialize_type_object(&root_obj).len() as u32
+        );
+        assert_eq!(ti.complete.dependent_typeids.len(), 1);
+        assert_eq!(ti.complete.dependent_typeids[0].type_id, dep_id);
+        assert_eq!(
+            ti.complete.dependent_typeids[0].typeobject_serialized_size,
+            serialize_type_object(&dep_obj).len() as u32
+        );
+
+        // MINIMAL slot: must hold DIFFERENT (minimal) ids than the complete slot.
+        assert!(matches!(ti.minimal.typeid_with_size.type_id, TypeIdentifier::MinimalTypeId(_)));
+        assert_ne!(ti.minimal.typeid_with_size.type_id, ti.complete.typeid_with_size.type_id);
+        assert_eq!(ti.minimal.dependent_typeids.len(), 1);
+        assert!(matches!(
+            ti.minimal.dependent_typeids[0].type_id,
+            TypeIdentifier::MinimalTypeId(_)
+        ));
+        assert_ne!(ti.minimal.dependent_typeids[0].type_id, dep_id);
+
+        // Enriched deps survive the 0x0075 parameter round-trip.
+        let bytes = ti.serialize_for_parameter();
+        let parsed = TypeInformation::deserialize_for_parameter(&bytes).expect("parse");
+        assert_eq!(parsed.complete.dependent_typeids.len(), 1);
+        assert_eq!(parsed.complete.dependent_typeids[0].type_id, dep_id);
+        assert_eq!(parsed.minimal.typeid_with_size.type_id, ti.minimal.typeid_with_size.type_id);
+
+        assert!(TypeInformation::from_closure(&[]).is_none());
+
+        // The root re-listed under another id is not its own dependency.
+        let root_name_id = TypeIdentifier::CompleteTypeId(EquivalenceHash::compute(b"Root"));
+        let dup_closure = vec![
+            (root_id.clone(), root_obj.clone()),
+            (root_name_id, root_obj.clone()),
+            (dep_id.clone(), dep_obj),
+        ];
+        let ti = TypeInformation::from_closure(&dup_closure).expect("non-empty closure");
+        assert_eq!(ti.complete.dependent_typeids.len(), 1);
+        assert_eq!(ti.complete.dependent_typeids[0].type_id, dep_id);
+    }
 
     #[test]
     fn test_equivalence_hash_compute() {
@@ -3990,8 +4201,8 @@ mod tests {
         let hash3 = compute_name_hash("field2");
         assert_ne!(hash1, hash3);
 
-        // Verify mask is applied
-        assert_eq!(hash1 & 0xF0000000, 0);
+        // Spec reference vector: NameHash("color") = {0x70, 0xDD, 0xA5, 0xDF}
+        assert_eq!(compute_name_hash("color").to_be_bytes(), [0x70, 0xDD, 0xA5, 0xDF]);
     }
 
     #[test]
