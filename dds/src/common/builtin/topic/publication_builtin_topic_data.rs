@@ -15,7 +15,7 @@ use crate::{
     publication::qos::{DataWriterQos, PublisherQos},
     rtps::common::{guid::Guid, locator::Locator, types::SerializedData},
     topic::{qos::TopicQos, type_support::DdsType},
-    xtypes::{TypeIdentifier, TypeObject},
+    xtypes::{TypeIdentifier, TypeInformation, TypeObject},
 };
 
 use super::builtin_topic_key::BuiltinTopicKey;
@@ -78,6 +78,8 @@ pub struct PublicationBuiltinTopicData {
     type_identifier: Option<TypeIdentifier>,
     #[dds(optional, id = 0x0072)] // PID_TYPE_OBJECTV1
     type_object: Option<TypeObject>,
+    #[dds(non_serialized)] // enriched 0x0075 payload; emitted by the manual serializer
+    type_information: Option<TypeInformation>,
     #[dds(non_serialized)]
     writer_reliability_extension: WriterReliabilityExtensionQosPolicy,
 }
@@ -118,6 +120,7 @@ impl PublicationBuiltinTopicData {
             data_representation: datawriter_qos.data_representation.clone(),
             type_identifier: None,
             type_object: None,
+            type_information: None,
             writer_reliability_extension: datawriter_qos.writer_reliability_extension,
         }
     }
@@ -303,6 +306,14 @@ impl PublicationBuiltinTopicData {
 
     pub fn set_type_object(&mut self, type_obj: Option<TypeObject>) {
         self.type_object = type_obj;
+    }
+
+    pub fn type_information(&self) -> Option<&TypeInformation> {
+        self.type_information.as_ref()
+    }
+
+    pub fn set_type_information(&mut self, type_info: Option<TypeInformation>) {
+        self.type_information = type_info;
     }
 
     pub fn writer_reliability_extension(&self) -> &WriterReliabilityExtensionQosPolicy {
@@ -531,6 +542,48 @@ mod tests {
     }
     const PID_TYPE_IDV1: u16 = 0x0069;
     const PID_TYPE_INFORMATION: u16 = 0x0075;
+    const PID_TYPE_OBJECT: u16 = 0x0072;
+
+    #[test]
+    fn publication_never_emits_inline_type_object() {
+        let mut p = publication_with_type_info();
+        p.set_type_object(Some(TypeObject::Minimal(MinimalTypeObject::default())));
+        let bytes = p.to_serialized_data().to_vec();
+
+        // XTypes 1.2/1.3: SEDP carries TypeInformation only; TypeObject is served via TypeLookup.
+        assert_eq!(count_pid_occurrences(&bytes, PID_TYPE_OBJECT), 0);
+        assert_eq!(count_pid_occurrences(&bytes, PID_TYPE_INFORMATION), 1);
+    }
+
+    #[test]
+    fn publication_emits_enriched_type_information_deps() {
+        let mut p = publication_with_type_info();
+        // Distinct COMPLETE and MINIMAL slots: each slot carries its own EK ids/sizes.
+        let complete_root = TypeIdentifier::CompleteTypeId(EquivalenceHash::new([7; 14]));
+        let complete_dep = TypeIdentifier::CompleteTypeId(EquivalenceHash::new([8; 14]));
+        let minimal_root = TypeIdentifier::MinimalTypeId(EquivalenceHash::new([70; 14]));
+        let minimal_dep = TypeIdentifier::MinimalTypeId(EquivalenceHash::new([80; 14]));
+        let complete = TypeIdentifierWithDependencies {
+            typeid_with_size: TypeIdentifierWithSize::new(complete_root, 40),
+            dependent_typeids: vec![TypeIdentifierWithSize::new(complete_dep.clone(), 16)],
+        };
+        let minimal = TypeIdentifierWithDependencies {
+            typeid_with_size: TypeIdentifierWithSize::new(minimal_root.clone(), 32),
+            dependent_typeids: vec![TypeIdentifierWithSize::new(minimal_dep.clone(), 12)],
+        };
+        p.set_type_information(Some(TypeInformation::new(minimal, complete)));
+
+        let bytes = p.to_serialized_data().to_vec();
+        let v75 = find_pid_value(&bytes, PID_TYPE_INFORMATION).expect("0x0075 present");
+        let ti = TypeInformation::deserialize_for_parameter(v75).expect("parse 0x0075");
+        assert_eq!(ti.complete.dependent_typeids.len(), 1);
+        assert_eq!(ti.complete.dependent_typeids[0].type_id, complete_dep);
+        assert_eq!(ti.complete.dependent_typeids[0].typeobject_serialized_size, 16);
+        // The minimal slot holds different (minimal) ids/sizes than the complete slot.
+        assert_eq!(ti.minimal.typeid_with_size.type_id, minimal_root);
+        assert_eq!(ti.minimal.dependent_typeids[0].type_id, minimal_dep);
+        assert_eq!(ti.minimal.dependent_typeids[0].typeobject_serialized_size, 12);
+    }
 
     const PL_CDR2_LE_HEADER: [u8; 4] = [0x00, 0x0b, 0x00, 0x00];
     /// CDR_LE (XCDRv1) encapsulation header expected at the start of 0x0072 / standard 0x0069.

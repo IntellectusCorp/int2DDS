@@ -484,9 +484,11 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
             if let Some(type_obj) = self.type_support.get_type_object() {
                 subscription_builtin_topic_data.set_type_object(Some(type_obj));
             }
+            let type_closure = self.type_support.get_type_object_closure();
+            subscription_builtin_topic_data
+                .set_type_information(crate::xtypes::TypeInformation::from_closure(&type_closure));
             if let Ok(rtps_participant) = participant.get_rtps_participant() {
-                rtps_participant
-                    .register_local_type_objects(&self.type_support.get_type_object_closure());
+                rtps_participant.register_local_type_objects(&type_closure);
             }
 
             let status_callback = self
@@ -551,6 +553,11 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
         if let Some(type_obj) = self.type_support.get_type_object() {
             subscription_builtin_topic_data.set_type_object(Some(type_obj));
         }
+        subscription_builtin_topic_data.set_type_information(
+            crate::xtypes::TypeInformation::from_closure(
+                &self.type_support.get_type_object_closure(),
+            ),
+        );
 
         let rtps_reader = self.get_rtps_reader()?;
         rtps_reader
