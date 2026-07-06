@@ -2777,8 +2777,9 @@ impl DomainParticipant {
 
         // Resolve from the registry (populated by an earlier TypeLookup reply).
         if let Ok(registry) = rtps_participant.type_registry().read() {
-            if let Some(obj) = registry.resolve_type(&type_id) {
-                return Ok(crate::xtypes::TypeObject::Complete(obj.clone()));
+            use crate::xtypes::TypeResolver;
+            if let Some(obj) = registry.resolve_complete(&type_id) {
+                return Ok(obj);
             }
         }
 
