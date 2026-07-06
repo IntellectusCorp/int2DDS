@@ -97,6 +97,9 @@ fn test_unmatch_after_set_qos() {
 
     let res = receiver.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
     assert!(!res);
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -149,6 +152,9 @@ fn test_match_after_set_qos() {
 
     let res = receiver.recv_timeout(std::time::Duration::from_millis(500)).unwrap();
     assert!(res);
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 // Reader's set_qos to an incompatible deadline must remove the writer match

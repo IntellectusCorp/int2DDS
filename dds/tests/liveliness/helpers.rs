@@ -41,6 +41,8 @@ use crate::common::*;
 
 pub struct Scenario {
     pub writer_participant: DomainParticipant,
+    // Second participant of the inter topology; None for intra.
+    pub reader_participant: Option<DomainParticipant>,
     pub publisher: Publisher,
     pub subscriber: Subscriber,
     writer_topic: Topic,
@@ -61,6 +63,7 @@ impl Scenario {
             .unwrap();
         Self {
             writer_participant: participant,
+            reader_participant: None,
             publisher,
             subscriber,
             writer_topic: topic.clone(),
@@ -96,7 +99,25 @@ impl Scenario {
         let subscriber = reader_participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        Self { writer_participant, publisher, subscriber, writer_topic, reader_topic }
+        Self {
+            writer_participant,
+            reader_participant: Some(reader_participant),
+            publisher,
+            subscriber,
+            writer_topic,
+            reader_topic,
+        }
+    }
+
+    // Deletes contained entities and participants; call at the end of a test.
+    pub fn teardown(self) {
+        let factory = DomainParticipantFactory::get_instance();
+        self.writer_participant.delete_contained_entities().unwrap();
+        factory.delete_participant(self.writer_participant).unwrap();
+        if let Some(reader_participant) = self.reader_participant {
+            reader_participant.delete_contained_entities().unwrap();
+            factory.delete_participant(reader_participant).unwrap();
+        }
     }
 
     pub fn create_writer(&self, qos: DataWriterQos) -> DataWriter<KeyedDataType> {
