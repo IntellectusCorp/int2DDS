@@ -27,6 +27,9 @@ fn autoenable_created_entities_true() {
     // DataWriter should be automatically enabled
     let res = data_writer.write(&KeyedDataType::new(1, 100), InstanceHandle::NIL);
     assert!(res.is_ok());
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -74,6 +77,9 @@ fn autoenable_created_entities_false_direct_parent() {
     // Now write() should succeed
     let res_2 = writer.write(&KeyedDataType::new(1, 100), InstanceHandle::NIL);
     assert!(res_2.is_ok());
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -122,4 +128,7 @@ fn autoenable_created_entities_false_dp() {
     // Now write() should succeed
     let res_2 = writer.write(&KeyedDataType::new(1, 100), InstanceHandle::NIL);
     assert!(res_2.is_ok());
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }

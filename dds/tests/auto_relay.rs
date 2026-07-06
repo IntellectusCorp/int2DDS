@@ -178,6 +178,16 @@ fn auto_relay_discovers_and_forwards_topic() {
         .unwrap();
     let values: Vec<i16> = samples.iter().filter_map(|s| s.data().ok().map(|d| d.value)).collect();
     assert_eq!(values, vec![11, 22, 33, 44]);
+
+    drop(auto);
+    publisher_participant.delete_contained_entities().unwrap();
+    factory.delete_participant(publisher_participant).unwrap();
+    subscriber_participant.delete_contained_entities().unwrap();
+    factory.delete_participant(subscriber_participant).unwrap();
+    local_node.delete_contained_entities().unwrap();
+    factory.delete_participant((*local_node).clone()).unwrap();
+    remote_node.delete_contained_entities().unwrap();
+    factory.delete_participant((*remote_node).clone()).unwrap();
 }
 
 #[test]
@@ -220,7 +230,9 @@ fn auto_relay_filter_excludes_nonmatching_topics() {
             .unwrap(),
     );
 
-    let auto = AutoRelay::new(local_node, remote_node, TopicFilter::new("sensor/*")).unwrap();
+    let auto =
+        AutoRelay::new(local_node.clone(), remote_node.clone(), TopicFilter::new("sensor/*"))
+            .unwrap();
 
     // Run discovery several times: even though the publication is discoverable,
     // it must not produce a relay because the topic name does not match.
@@ -234,6 +246,14 @@ fn auto_relay_filter_excludes_nonmatching_topics() {
         0,
         "AutoRelay created relays for topics that do not match the filter"
     );
+
+    drop(auto);
+    publisher_participant.delete_contained_entities().unwrap();
+    factory.delete_participant(publisher_participant).unwrap();
+    local_node.delete_contained_entities().unwrap();
+    factory.delete_participant((*local_node).clone()).unwrap();
+    remote_node.delete_contained_entities().unwrap();
+    factory.delete_participant((*remote_node).clone()).unwrap();
 }
 
 #[test]
@@ -264,13 +284,20 @@ fn auto_relay_skips_builtin_topics() {
             .unwrap(),
     );
 
-    let auto = AutoRelay::new(local_node, remote_node, TopicFilter::default()).unwrap();
+    let auto =
+        AutoRelay::new(local_node.clone(), remote_node.clone(), TopicFilter::default()).unwrap();
 
     for _ in 0..10 {
         let _ = auto.discover_once();
         sleep(std::time::Duration::from_millis(50));
     }
     assert_eq!(auto.relay_count(), 0);
+
+    drop(auto);
+    local_node.delete_contained_entities().unwrap();
+    factory.delete_participant((*local_node).clone()).unwrap();
+    remote_node.delete_contained_entities().unwrap();
+    factory.delete_participant((*remote_node).clone()).unwrap();
 }
 
 #[test]

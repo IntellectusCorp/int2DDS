@@ -121,4 +121,7 @@ fn test_lifespan() {
     );
 
     assert!(res.is_err(), "No data should be received by late joiner because data writer cache is empty due to lifespan expiration");
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }

@@ -179,6 +179,16 @@ fn topic_relay_forwards_local_to_remote() {
 
     let values: Vec<i16> = samples.iter().filter_map(|s| s.data().ok().map(|d| d.value)).collect();
     assert_eq!(values, vec![10, 20, 30, 40, 50]);
+
+    drop(relay);
+    publisher_participant.delete_contained_entities().unwrap();
+    factory.delete_participant(publisher_participant).unwrap();
+    subscriber_participant.delete_contained_entities().unwrap();
+    factory.delete_participant(subscriber_participant).unwrap();
+    local_node.delete_contained_entities().unwrap();
+    factory.delete_participant(local_node).unwrap();
+    remote_node.delete_contained_entities().unwrap();
+    factory.delete_participant(remote_node).unwrap();
 }
 
 #[test]
@@ -280,6 +290,16 @@ fn topic_relay_forwards_remote_to_local() {
         .unwrap();
     let values: Vec<i16> = samples.iter().filter_map(|s| s.data().ok().map(|d| d.value)).collect();
     assert_eq!(values, vec![100, 200, 300]);
+
+    drop(relay);
+    publisher_participant.delete_contained_entities().unwrap();
+    factory.delete_participant(publisher_participant).unwrap();
+    subscriber_participant.delete_contained_entities().unwrap();
+    factory.delete_participant(subscriber_participant).unwrap();
+    local_node.delete_contained_entities().unwrap();
+    factory.delete_participant(local_node).unwrap();
+    remote_node.delete_contained_entities().unwrap();
+    factory.delete_participant(remote_node).unwrap();
 }
 
 #[test]
@@ -315,4 +335,10 @@ fn topic_relay_no_data_when_no_publisher() {
     assert_eq!(l2r, 0);
     assert_eq!(r2l, 0);
     assert_eq!(relay.topic_name(), KeyedDataType::get_topic_name());
+
+    drop(relay);
+    local_node.delete_contained_entities().unwrap();
+    factory.delete_participant(local_node).unwrap();
+    remote_node.delete_contained_entities().unwrap();
+    factory.delete_participant(remote_node).unwrap();
 }

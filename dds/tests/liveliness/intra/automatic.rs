@@ -42,6 +42,8 @@ fn match_alive() {
     let reader = s.create_reader(rqos);
 
     wait_for_liveliness_changed_state(&reader, 1, 0, StdDuration::from_secs(2)).unwrap();
+
+    s.teardown();
 }
 
 #[test]
@@ -57,6 +59,8 @@ fn unmatch_alive() {
     // not_alive_count — the writer leaves the match cleanly, it didn't fail.
     s.publisher.delete_datawriter(writer).unwrap();
     wait_for_liveliness_changed_state(&reader, 0, 0, StdDuration::from_secs(2)).unwrap();
+
+    s.teardown();
 }
 
 #[test]
@@ -83,4 +87,6 @@ fn unmatch_propagation_to_reader() {
     wait_for_subscription_matched_count(&reader, 0, StdDuration::from_secs(2)).unwrap();
     wait_for_liveliness_changed_state(&reader, 0, 0, StdDuration::from_secs(2)).unwrap();
     wait_for_no_writers_sample(&reader, StdDuration::from_secs(2)).unwrap();
+
+    s.teardown();
 }

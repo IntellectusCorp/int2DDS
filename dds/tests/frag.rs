@@ -122,6 +122,9 @@ fn test_large_data_best_effort() {
         assert_eq!(sample.data().unwrap().index, i as i32);
         assert_eq!(sample.data().unwrap().data.len(), 1024 * 1024);
     }
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -216,4 +219,7 @@ fn test_large_data_reliable() {
         assert_eq!(sample.data().unwrap().index, i as i32);
         assert_eq!(sample.data().unwrap().data.len(), 1024 * 1024);
     }
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
