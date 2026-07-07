@@ -59,6 +59,11 @@ pub fn serialize_type_object(obj: &TypeObject) -> Vec<u8> {
 
 /// Deserialize a `TypeObject` from the spec XCDR2 byte stream.
 pub fn deserialize_type_object(data: &[u8]) -> Result<TypeObject, String> {
+    deserialize_type_object_with_len(data).map(|(obj, _)| obj)
+}
+
+/// Deserialize a `TypeObject` and return the number of bytes consumed (DHEADER + value).
+pub fn deserialize_type_object_with_len(data: &[u8]) -> Result<(TypeObject, usize), String> {
     let mut r = R::new(data);
     let end = r.begin_dheader()?;
     let ek = r.u8()?;
@@ -68,7 +73,7 @@ pub fn deserialize_type_object(data: &[u8]) -> Result<TypeObject, String> {
         _ => return Err(format!("unknown TypeObject EquivalenceKind: 0x{:02X}", ek)),
     };
     r.set_pos(end);
-    Ok(obj)
+    Ok((obj, end))
 }
 
 /// Compute the 14-byte EquivalenceHash = MD5(spec XCDR2 bytes)[0..14].

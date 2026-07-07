@@ -128,6 +128,18 @@ impl TypeRegistry {
         self.dependencies.insert(hash, deps);
     }
 
+    /// Record a peer-supplied COMPLETE<->MINIMAL hash correspondence (from a
+    /// `getTypes` reply's `complete_to_minimal`). Never overrides a locally derived
+    /// mapping, so our own (authoritative) derivation wins on conflict.
+    pub fn note_complete_to_minimal(
+        &mut self,
+        complete: EquivalenceHash,
+        minimal: EquivalenceHash,
+    ) {
+        self.complete_to_minimal.entry(complete).or_insert(minimal);
+        self.minimal_to_complete.entry(minimal).or_insert(complete);
+    }
+
     pub fn lookup_complete(&self, hash: &EquivalenceHash) -> Option<&CompleteTypeObject> {
         self.complete_objects.get(hash)
     }

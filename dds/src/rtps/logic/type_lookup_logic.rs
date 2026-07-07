@@ -128,7 +128,7 @@ impl SedpLogic {
     ) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
         match reply.data {
-            TypeLookupReturn::GetTypes(GetTypesOut { types }) => {
+            TypeLookupReturn::GetTypes(GetTypesOut { types, complete_to_minimal }) => {
                 let related = &reply.header.related_request_id;
                 let pending =
                     self.type_lookup_pending.lock().ok().and_then(|mut map| map.remove(related));
@@ -144,6 +144,15 @@ impl SedpLogic {
                 if let Ok(mut registry) = participant.type_registry().write() {
                     for (type_id, type_object) in &types {
                         registry.register_type_object_with_id(type_id, type_object.clone());
+                    }
+                    // Preserve any COMPLETE->MINIMAL correspondences the replier sent
+                    // (e.g. COMPLETE served for a MINIMAL request); ours take precedence.
+                    for (complete, minimal) in &complete_to_minimal {
+                        if let (Some(c), Some(m)) =
+                            (complete.equivalence_hash(), minimal.equivalence_hash())
+                        {
+                            registry.note_complete_to_minimal(*c, *m);
+                        }
                     }
                     for (type_id, _) in &types {
                         if let Some(hash) = type_id.equivalence_hash() {
@@ -258,7 +267,7 @@ impl SedpLogic {
                 }
             }
         }
-        GetTypesOut { types }
+        GetTypesOut { types, complete_to_minimal: Vec::new() }
     }
 
     fn serve_get_type_dependencies(
