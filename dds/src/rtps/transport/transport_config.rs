@@ -15,9 +15,9 @@ use std::time::Duration;
 use crate::dcps::infrastructure::qos_policy::{
     PropertyQosPolicy, PROP_INITIAL_PEERS, PROP_MULTICAST_TTL, PROP_TCP_ASYNC_WORKERS,
     PROP_TCP_BIND_PORT, PROP_TCP_BIND_TIMEOUT_MS, PROP_TCP_CONNECT_TIMEOUT_MS,
-    PROP_TCP_INCOMING_IDLE_TIMEOUT_MS, PROP_TCP_KEEPALIVE_INTERVAL_MS,
-    PROP_TCP_KEEPALIVE_MAX_MISSES, PROP_TCP_KEEPALIVE_TIMEOUT_MS, PROP_TCP_NODELAY,
-    PROP_TCP_PUBLIC_ADDRESS, PROP_TCP_SO_RCVBUF, PROP_TCP_SO_SNDBUF, PROP_TRANSPORT,
+    PROP_TCP_KEEPALIVE_INTERVAL_MS, PROP_TCP_KEEPALIVE_MAX_MISSES, PROP_TCP_KEEPALIVE_TIMEOUT_MS,
+    PROP_TCP_NODELAY, PROP_TCP_PUBLIC_ADDRESS, PROP_TCP_SO_RCVBUF, PROP_TCP_SO_SNDBUF,
+    PROP_TCP_UNACKED_TIMEOUT_MS, PROP_TRANSPORT,
 };
 use crate::rtps::transport::TransportType;
 
@@ -77,10 +77,12 @@ pub(crate) struct TcpConfig {
     pub nodelay: bool,
     pub connect_timeout: Duration,
     pub bind_timeout: Duration,
+    /// Bound on outstanding unacked data before the OS drops the connection
+    /// (so a stuck write fails fast). `None` = use the OS default.
+    pub unacked_timeout: Option<Duration>,
     pub keepalive_interval: Duration,
     pub keepalive_timeout: Duration,
     pub keepalive_max_misses: u32,
-    pub incoming_idle_timeout: Duration,
     pub so_rcvbuf: Option<usize>,
     pub so_sndbuf: Option<usize>,
     pub async_workers: Option<usize>,
@@ -105,11 +107,22 @@ impl TransportConfig for TcpConfig {
             nodelay: prop_parse::<bool>(property, PROP_TCP_NODELAY).unwrap_or(true),
             connect_timeout: ms(PROP_TCP_CONNECT_TIMEOUT_MS, 5_000),
             bind_timeout: ms(PROP_TCP_BIND_TIMEOUT_MS, 5_000),
+            // Default 20000ms; explicit 0 = OS default (no bound).
+            unacked_timeout: match prop_parse::<u64>(property, PROP_TCP_UNACKED_TIMEOUT_MS) {
+                Some(0) => None,
+                Some(v) => Some(Duration::from_millis(v)),
+                None => Some(Duration::from_millis(20_000)),
+            },
             keepalive_interval: ms(PROP_TCP_KEEPALIVE_INTERVAL_MS, 10_000),
             keepalive_timeout: ms(PROP_TCP_KEEPALIVE_TIMEOUT_MS, 5_000),
-            keepalive_max_misses: prop_parse::<u32>(property, PROP_TCP_KEEPALIVE_MAX_MISSES)
-                .unwrap_or(3),
-            incoming_idle_timeout: ms(PROP_TCP_INCOMING_IDLE_TIMEOUT_MS, 60_000),
+            keepalive_max_misses: match prop_parse::<u32>(property, PROP_TCP_KEEPALIVE_MAX_MISSES) {
+                Some(0) => {
+                    log::warn!("{PROP_TCP_KEEPALIVE_MAX_MISSES} = 0 is invalid (min 1); using 1");
+                    1
+                }
+                Some(v) => v,
+                None => 3,
+            },
             so_rcvbuf: prop_parse::<usize>(property, PROP_TCP_SO_RCVBUF),
             so_sndbuf: prop_parse::<usize>(property, PROP_TCP_SO_SNDBUF),
             async_workers: prop_parse::<usize>(property, PROP_TCP_ASYNC_WORKERS),
@@ -196,10 +209,10 @@ mod tests {
         assert!(cfg.nodelay);
         assert_eq!(cfg.connect_timeout, Duration::from_millis(5_000));
         assert_eq!(cfg.bind_timeout, Duration::from_millis(5_000));
+        assert_eq!(cfg.unacked_timeout, Some(Duration::from_millis(20_000)));
         assert_eq!(cfg.keepalive_interval, Duration::from_millis(10_000));
         assert_eq!(cfg.keepalive_timeout, Duration::from_millis(5_000));
         assert_eq!(cfg.keepalive_max_misses, 3);
-        assert_eq!(cfg.incoming_idle_timeout, Duration::from_millis(60_000));
         assert_eq!(cfg.so_rcvbuf, None);
         assert_eq!(cfg.so_sndbuf, None);
         assert_eq!(cfg.async_workers, None);
@@ -223,5 +236,14 @@ mod tests {
         assert_eq!(cfg.keepalive_max_misses, 7);
         assert_eq!(cfg.public_address, Some("203.0.113.5:7400".parse().unwrap()));
         assert_eq!(cfg.so_rcvbuf, None);
+    }
+
+    #[test]
+    fn keepalive_max_misses_zero_is_clamped_to_one() {
+        // TCP_KEEPCNT must be >= 1; a 0 property is clamped rather than passed
+        // through to the OS where it would be rejected.
+        let mut p = PropertyQosPolicy::default();
+        p.add_property(PROP_TCP_KEEPALIVE_MAX_MISSES, "0", false);
+        assert_eq!(TcpConfig::from_property(&p).keepalive_max_misses, 1);
     }
 }

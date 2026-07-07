@@ -40,7 +40,7 @@ use crate::{
         error::{DdsError, DdsResult},
         time::Duration,
     },
-    dcps::topic::type_support::TypeSupport,
+    dcps::topic::type_support::{DdsType, TypeSupport},
     domain::{
         domain_participant::DomainParticipant, domain_participant_factory::DomainParticipantFactory,
     },
@@ -393,6 +393,26 @@ impl Publisher {
     ) -> DdsResult<DataWriter<Foo>> {
         let qos = self.get_datawriter_qos_from_profile(qos_path)?;
         self.create_datawriter::<Foo>(topic, qos, listener, mask)
+    }
+
+    /// Creates a `DataWriter` from a `<domain_participant_library>` declaration at `path`
+    /// (`ParticipantLibrary::Participant::Publisher::Writer`). The topic (name, type, QoS)
+    /// it follows and the writer QoS all come from the XML; only the Rust type `Foo` is in code.
+    pub fn create_datawriter_from_config<Foo: DdsType + 'static + Clone>(
+        &self,
+        path: &str,
+        listener: Option<Arc<dyn DataWriterListener<Foo = Foo>>>,
+        mask: StatusMask,
+    ) -> DdsResult<DataWriter<Foo>> {
+        let resolved = DomainParticipantFactory::get_instance().resolve_datawriter(path)?;
+        let topic = self.get_participant()?.create_topic::<Foo>(
+            &resolved.topic.topic_name,
+            &resolved.topic.type_name,
+            resolved.topic.topic_qos,
+            None,
+            mask,
+        )?;
+        self.create_datawriter::<Foo>(&topic, resolved.qos, listener, mask)
     }
 
     /// Creates a `DataWriter` for `DynamicData` using a `DynamicTypeSupport`.
@@ -1014,7 +1034,9 @@ impl Publisher {
         if let Some(weak_ref) = self.participant.as_ref() {
             // Attempt to upgrade Weak<T> to Arc<T>
             if let Some(participant_arc) = weak_ref.upgrade() {
-                return Ok((*participant_arc).clone());
+                let mut participant = (*participant_arc).clone();
+                participant.self_ref = Some(participant_arc);
+                return Ok(participant);
             }
         }
 

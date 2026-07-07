@@ -4,15 +4,20 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     config::types::{
+        domain_library::DomainLibrary,
         entity_qos::{
             DataReaderQos as ConfigDataReaderQos, DataWriterQos as ConfigDataWriterQos,
             DomainParticipantQos as ConfigDomainParticipantQos, MergeQos,
             PublisherQos as ConfigPublisherQos, SubscriberQos as ConfigSubscriberQos,
             TopicQos as ConfigTopicQos,
         },
+        participant_library::{ParticipantDecl, ParticipantLibrary},
         qos_profile::{QosLibrary, QosProfile, SingleOrSeq},
     },
-    core::error::{DdsError, DdsResult},
+    core::{
+        error::{DdsError, DdsResult},
+        types::DomainId,
+    },
     dcps::{
         domain::qos::DomainParticipantQos,
         publication::qos::{DataWriterQos, PublisherQos},
@@ -111,6 +116,21 @@ macro_rules! impl_get_qos {
     };
 }
 
+// Resolves an inline entity QoS declaration: if it carries a `base_name`, merge it
+// over the referenced library/profile QoS, then convert to the internal QoS type.
+macro_rules! resolve_decl_qos {
+    ($self:ident, $decl:expr, $getter:ident, $cfg:ty) => {{
+        let config: $cfg = match $decl {
+            Some(qos) => match &qos.base_name {
+                Some(base) => $self.$getter(base).map_or_else(|| qos.clone(), |b| qos.merge(&b)),
+                None => qos.clone(),
+            },
+            None => <$cfg>::default(),
+        };
+        config.into()
+    }};
+}
+
 /// A provider for loading and retrieving QoS configurations from JSON files.
 ///
 /// `QosProvider` allows loading QoS profiles from one or more JSON files and
@@ -155,6 +175,59 @@ macro_rules! impl_get_qos {
 #[derive(Default, Serialize, Deserialize)]
 pub struct QosProvider {
     libraries: HashMap<String, QosLibrary>,
+    #[serde(default)]
+    domain_libraries: HashMap<String, DomainLibrary>,
+    #[serde(default)]
+    participant_libraries: HashMap<String, ParticipantLibrary>,
+}
+
+/// A topic declaration resolved from a `<domain_library>`: the topic name, its
+/// registered type name, the referenced type definition, and the resolved topic QoS.
+pub struct ResolvedTopic {
+    pub topic_name: String,
+    pub type_name: String,
+    pub type_ref: String,
+    pub topic_qos: TopicQos,
+}
+
+/// A datawriter declaration resolved from a `<domain_participant_library>`: the topic
+/// it references (with type and QoS) and its own datawriter QoS.
+pub struct ResolvedDataWriter {
+    pub topic: ResolvedTopic,
+    pub qos: DataWriterQos,
+}
+
+/// A datareader declaration resolved from a `<domain_participant_library>`.
+pub struct ResolvedDataReader {
+    pub topic: ResolvedTopic,
+    pub qos: DataReaderQos,
+}
+
+/// A whole participant tree resolved from a `<domain_participant_library>`, ready for
+/// the factory to instantiate as `DynamicData` entities.
+pub struct ResolvedParticipant {
+    pub domain_id: DomainId,
+    pub participant_qos: DomainParticipantQos,
+    pub publishers: Vec<ResolvedPublisher>,
+    pub subscribers: Vec<ResolvedSubscriber>,
+}
+
+pub struct ResolvedPublisher {
+    pub name: String,
+    pub qos: PublisherQos,
+    pub writers: Vec<ResolvedEndpoint<ResolvedDataWriter>>,
+}
+
+pub struct ResolvedSubscriber {
+    pub name: String,
+    pub qos: SubscriberQos,
+    pub readers: Vec<ResolvedEndpoint<ResolvedDataReader>>,
+}
+
+/// A named endpoint (`"publisher::writer"`-addressable) plus its resolved spec.
+pub struct ResolvedEndpoint<T> {
+    pub name: String,
+    pub spec: T,
 }
 
 impl QosProvider {
@@ -205,6 +278,12 @@ impl QosProvider {
     pub(crate) fn load_xml(&mut self, xml: &str) -> DdsResult<()> {
         for lib in super::xml::parse_qos_libraries(xml)? {
             self.libraries.insert(lib.name.clone(), lib);
+        }
+        for lib in super::xml::parse_domain_libraries(xml)? {
+            self.domain_libraries.insert(lib.name.clone(), lib);
+        }
+        for lib in super::xml::parse_participant_libraries(xml)? {
+            self.participant_libraries.insert(lib.name.clone(), lib);
         }
         Ok(())
     }
@@ -323,6 +402,194 @@ impl QosProvider {
         domain_participant_qos,
         "Retrieves a `DomainParticipantQos` from the provider. See `get_datawriter_qos` for argument details."
     );
+
+    /// Resolves a topic declaration path `DomainLibrary::Domain::Topic` into its
+    /// name, registered type, and topic QoS (with `base_name` inheritance applied).
+    pub fn resolve_topic(&self, path: &str) -> Option<ResolvedTopic> {
+        let [library, domain, topic] = split_path::<3>(path)?;
+        self.resolve_topic_in(library, domain, topic)
+    }
+
+    fn resolve_topic_in(&self, library: &str, domain: &str, topic: &str) -> Option<ResolvedTopic> {
+        let domain =
+            self.domain_libraries.get(library)?.domains.iter().find(|d| d.name == domain)?;
+        let decl = domain.topics.iter().find(|t| t.name == topic)?;
+        let register_type =
+            domain.register_types.iter().find(|r| r.name == decl.register_type_ref)?;
+        Some(ResolvedTopic {
+            topic_name: decl.name.clone(),
+            type_name: register_type.name.clone(),
+            type_ref: register_type.type_ref.clone(),
+            topic_qos: resolve_decl_qos!(
+                self,
+                &decl.topic_qos,
+                get_topic_qos_internal,
+                ConfigTopicQos
+            ),
+        })
+    }
+
+    // Resolves a `domain_ref` (`DomainLibrary::Domain`) + `topic_ref` (topic name).
+    fn resolve_topic_ref(&self, domain_ref: &str, topic_ref: &str) -> Option<ResolvedTopic> {
+        let [library, domain] = split_path::<2>(domain_ref)?;
+        self.resolve_topic_in(library, domain, topic_ref)
+    }
+
+    /// Resolves a datawriter declaration path
+    /// `ParticipantLibrary::Participant::Publisher::Writer`.
+    pub fn resolve_datawriter(&self, path: &str) -> Option<ResolvedDataWriter> {
+        let [lib, part, publ, writer] = split_path::<4>(path)?;
+        let participant = self.participant_decl(lib, part)?;
+        let decl = participant
+            .publishers
+            .iter()
+            .find(|p| p.name == publ)?
+            .data_writers
+            .iter()
+            .find(|w| w.name == writer)?;
+        Some(ResolvedDataWriter {
+            topic: self.resolve_topic_ref(&participant.domain_ref, &decl.topic_ref)?,
+            qos: resolve_decl_qos!(
+                self,
+                &decl.datawriter_qos,
+                get_datawriter_qos_internal,
+                ConfigDataWriterQos
+            ),
+        })
+    }
+
+    /// Resolves a datareader declaration path
+    /// `ParticipantLibrary::Participant::Subscriber::Reader`.
+    pub fn resolve_datareader(&self, path: &str) -> Option<ResolvedDataReader> {
+        let [lib, part, sub, reader] = split_path::<4>(path)?;
+        let participant = self.participant_decl(lib, part)?;
+        let decl = participant
+            .subscribers
+            .iter()
+            .find(|s| s.name == sub)?
+            .data_readers
+            .iter()
+            .find(|r| r.name == reader)?;
+        Some(ResolvedDataReader {
+            topic: self.resolve_topic_ref(&participant.domain_ref, &decl.topic_ref)?,
+            qos: resolve_decl_qos!(
+                self,
+                &decl.datareader_qos,
+                get_datareader_qos_internal,
+                ConfigDataReaderQos
+            ),
+        })
+    }
+
+    /// Resolves a whole participant tree path `ParticipantLibrary::Participant` into the
+    /// domain, QoS, and endpoint specs the factory needs to build `DynamicData` entities.
+    pub fn resolve_participant(&self, path: &str) -> Option<ResolvedParticipant> {
+        let [lib, part] = split_path::<2>(path)?;
+        let participant = self.participant_decl(lib, part)?;
+        let [dlib, dom] = split_path::<2>(&participant.domain_ref)?;
+        let domain_id = self
+            .domain_libraries
+            .get(dlib)?
+            .domains
+            .iter()
+            .find(|d| d.name == dom)?
+            .domain_id
+            .unwrap_or(0);
+
+        let publishers = participant
+            .publishers
+            .iter()
+            .map(|p| {
+                let writers = p
+                    .data_writers
+                    .iter()
+                    .map(|w| {
+                        Some(ResolvedEndpoint {
+                            name: w.name.clone(),
+                            spec: ResolvedDataWriter {
+                                topic: self
+                                    .resolve_topic_ref(&participant.domain_ref, &w.topic_ref)?,
+                                qos: resolve_decl_qos!(
+                                    self,
+                                    &w.datawriter_qos,
+                                    get_datawriter_qos_internal,
+                                    ConfigDataWriterQos
+                                ),
+                            },
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Some(ResolvedPublisher {
+                    name: p.name.clone(),
+                    qos: resolve_decl_qos!(
+                        self,
+                        &p.publisher_qos,
+                        get_publisher_qos_internal,
+                        ConfigPublisherQos
+                    ),
+                    writers,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+
+        let subscribers = participant
+            .subscribers
+            .iter()
+            .map(|s| {
+                let readers = s
+                    .data_readers
+                    .iter()
+                    .map(|r| {
+                        Some(ResolvedEndpoint {
+                            name: r.name.clone(),
+                            spec: ResolvedDataReader {
+                                topic: self
+                                    .resolve_topic_ref(&participant.domain_ref, &r.topic_ref)?,
+                                qos: resolve_decl_qos!(
+                                    self,
+                                    &r.datareader_qos,
+                                    get_datareader_qos_internal,
+                                    ConfigDataReaderQos
+                                ),
+                            },
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Some(ResolvedSubscriber {
+                    name: s.name.clone(),
+                    qos: resolve_decl_qos!(
+                        self,
+                        &s.subscriber_qos,
+                        get_subscriber_qos_internal,
+                        ConfigSubscriberQos
+                    ),
+                    readers,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+
+        Some(ResolvedParticipant {
+            domain_id,
+            participant_qos: resolve_decl_qos!(
+                self,
+                &participant.domain_participant_qos,
+                get_domainparticipant_qos_internal,
+                ConfigDomainParticipantQos
+            ),
+            publishers,
+            subscribers,
+        })
+    }
+
+    fn participant_decl(&self, library: &str, name: &str) -> Option<&ParticipantDecl> {
+        self.participant_libraries.get(library)?.domain_participants.iter().find(|p| p.name == name)
+    }
+}
+
+// Splits a `::`-separated path into exactly `N` segments, or `None`.
+fn split_path<const N: usize>(path: &str) -> Option<[&str; N]> {
+    let parts: Vec<&str> = path.split("::").collect();
+    parts.try_into().ok()
 }
 
 // Picks XML vs JSON by extension, falling back to the first non-space character.
