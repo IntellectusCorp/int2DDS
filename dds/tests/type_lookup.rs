@@ -106,7 +106,7 @@ fn get_types_closure_reply_resolves_nested_on_requester() {
             ),
             remote_exception_code: 0,
         },
-        data: TypeLookupReturn::GetTypes(GetTypesOut { types }),
+        data: TypeLookupReturn::GetTypes(GetTypesOut { types, complete_to_minimal: Vec::new() }),
     };
 
     // Wire round-trip (what the requester actually receives).

@@ -9,10 +9,10 @@
 //! `TypeLookup_Request`/`TypeLookup_Reply` carrying `@final` RPC headers, the
 //! operation-hash `TypeLookup_Call`/`TypeLookup_Return` unions (the reply
 //! nests a `*_Result` union with a `RETCODE_OK` discriminator), and `@mutable`
-//! `*_In`/`*_Out` structs whose `@hashid` members use EMHEADER encoding. The
-//! leaf `TypeIdentifier`/`TypeObject`/`TypeIdentifierWithSize` payloads reuse
-//! their existing serializers, matching how SEDP already places them on the
-//! wire.
+//! `*_In`/`*_Out` structs whose `@hashid` members use EMHEADER encoding. Leaf
+//! payloads follow their spec extensibility: `TypeObject` (APPENDABLE union)
+//! and `TypeIdentifierWithSize` (APPENDABLE struct) use aligned-DHEADER XCDR2
+//! encodings, while `TypeIdentifier` (FINAL union) keeps its packed serializer.
 
 use crate::rtps::common::{guid::Guid, sequence::SequenceNumber};
 use crate::serialize::cdr::{
@@ -22,6 +22,7 @@ use crate::serialize::cdr::{
 use crate::serialize::DeserializerReader;
 
 use super::type_object::{TypeIdentifier, TypeIdentifierWithSize, TypeObject};
+use super::type_object_xcdr::{deserialize_type_object_with_len, serialize_type_object};
 
 /// Operation discriminator for `getTypes`.
 pub const TYPE_LOOKUP_GETTYPES_HASH: i32 = 0x018252d3;
@@ -218,10 +219,10 @@ pub struct GetTypeDependenciesIn {
 impl GetTypeDependenciesIn {
     fn write(&self, s: &mut Xcdr2Serializer) -> Result<(), CdrError> {
         let top = s.begin_struct()?;
-        s.write_member_with_lc(hashid("type_ids"), false, LcHint::Auto, |s| {
+        s.write_member_with_lc(hashid("type_ids"), false, LcHint::Dheader, |s| {
             write_type_ids(s, &self.type_ids)
         })?;
-        s.write_member_with_lc(hashid("continuation_point"), false, LcHint::Auto, |s| {
+        s.write_member_with_lc(hashid("continuation_point"), false, LcHint::Dheader, |s| {
             s.serialize_byte_sequence(&self.continuation_point)
         })?;
         s.end_struct(top)
@@ -256,15 +257,15 @@ pub struct GetTypeDependenciesOut {
 impl GetTypeDependenciesOut {
     fn write(&self, s: &mut Xcdr2Serializer) -> Result<(), CdrError> {
         let top = s.begin_struct()?;
-        s.write_member_with_lc(hashid("dependent_typeids"), false, LcHint::Auto, |s| {
+        s.write_member_with_lc(hashid("dependent_typeids"), false, LcHint::Dheader, |s| {
             write_nonprimitive_seq(s, self.dependent_typeids.len(), |s| {
                 for dep in &self.dependent_typeids {
-                    dep.serialize_into(s.buffer_mut());
+                    dep.write_xcdr2(s)?;
                 }
                 Ok(())
             })
         })?;
-        s.write_member_with_lc(hashid("continuation_point"), false, LcHint::Auto, |s| {
+        s.write_member_with_lc(hashid("continuation_point"), false, LcHint::Dheader, |s| {
             s.serialize_byte_sequence(&self.continuation_point)
         })?;
         s.end_struct(top)
@@ -280,11 +281,7 @@ impl GetTypeDependenciesOut {
                 let count = read_nonprimitive_seq_count(d)?;
                 dependent_typeids = Vec::new();
                 for _ in 0..count {
-                    let pos = d.get_position();
-                    let (dep, consumed) = TypeIdentifierWithSize::deserialize(&d.get_data()[pos..])
-                        .map_err(CdrError::DeserializationError)?;
-                    d.set_position(pos + consumed);
-                    dependent_typeids.push(dep);
+                    dependent_typeids.push(TypeIdentifierWithSize::read_xcdr2(d)?);
                 }
             } else if member_id == id_cp {
                 continuation_point = d.deserialize_byte_sequence()?;
@@ -306,7 +303,7 @@ pub struct GetTypesIn {
 impl GetTypesIn {
     fn write(&self, s: &mut Xcdr2Serializer) -> Result<(), CdrError> {
         let top = s.begin_struct()?;
-        s.write_member_with_lc(hashid("type_ids"), false, LcHint::Auto, |s| {
+        s.write_member_with_lc(hashid("type_ids"), false, LcHint::Dheader, |s| {
             write_type_ids(s, &self.type_ids)
         })?;
         s.end_struct(top)
@@ -331,16 +328,28 @@ impl GetTypesIn {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GetTypesOut {
     pub types: Vec<(TypeIdentifier, TypeObject)>,
+    pub complete_to_minimal: Vec<(TypeIdentifier, TypeIdentifier)>,
 }
 
 impl GetTypesOut {
     fn write(&self, s: &mut Xcdr2Serializer) -> Result<(), CdrError> {
         let top = s.begin_struct()?;
-        s.write_member_with_lc(hashid("types"), false, LcHint::Auto, |s| {
+        s.write_member_with_lc(hashid("types"), false, LcHint::Dheader, |s| {
             write_nonprimitive_seq(s, self.types.len(), |s| {
                 for (type_id, type_object) in &self.types {
                     type_id.serialize_into(s.buffer_mut());
-                    type_object.serialize_into(s.buffer_mut());
+                    s.align(4);
+                    s.buffer_mut().extend_from_slice(&serialize_type_object(type_object));
+                }
+                Ok(())
+            })
+        })?;
+
+        s.write_member_with_lc(hashid("complete_to_minimal"), false, LcHint::Dheader, |s| {
+            write_nonprimitive_seq(s, self.complete_to_minimal.len(), |s| {
+                for (complete, minimal) in &self.complete_to_minimal {
+                    complete.serialize_into(s.buffer_mut());
+                    minimal.serialize_into(s.buffer_mut());
                 }
                 Ok(())
             })
@@ -350,28 +359,47 @@ impl GetTypesOut {
 
     fn read(d: &mut Xcdr2Deserializer) -> Result<Self, CdrError> {
         let mut types = Vec::new();
+        let mut complete_to_minimal = Vec::new();
         let id_types = hashid("types");
+        let id_c2m = hashid("complete_to_minimal");
         read_mutable_members(d, |d, member_id| {
             if member_id == id_types {
                 let count = read_nonprimitive_seq_count(d)?;
                 types = Vec::new();
                 for _ in 0..count {
-                    let mut pos = d.get_position();
+                    let pos = d.get_position();
                     let (type_id, consumed) = TypeIdentifier::deserialize(&d.get_data()[pos..])
                         .map_err(CdrError::DeserializationError)?;
-                    pos += consumed;
-                    let (type_object, consumed) = TypeObject::deserialize(&d.get_data()[pos..])
-                        .map_err(CdrError::DeserializationError)?;
-                    pos += consumed;
-                    d.set_position(pos);
+                    d.set_position(pos + consumed);
+                    DeserializerReader::align(d, 4);
+                    let pos = d.get_position();
+                    let (type_object, consumed) =
+                        deserialize_type_object_with_len(&d.get_data()[pos..])
+                            .map_err(CdrError::DeserializationError)?;
+                    d.set_position(pos + consumed);
                     types.push((type_id, type_object));
+                }
+                Ok(true)
+            } else if member_id == id_c2m {
+                let count = read_nonprimitive_seq_count(d)?;
+                complete_to_minimal = Vec::new();
+                for _ in 0..count {
+                    let pos = d.get_position();
+                    let (complete, c1) = TypeIdentifier::deserialize(&d.get_data()[pos..])
+                        .map_err(CdrError::DeserializationError)?;
+                    d.set_position(pos + c1);
+                    let pos = d.get_position();
+                    let (minimal, c2) = TypeIdentifier::deserialize(&d.get_data()[pos..])
+                        .map_err(CdrError::DeserializationError)?;
+                    d.set_position(pos + c2);
+                    complete_to_minimal.push((complete, minimal));
                 }
                 Ok(true)
             } else {
                 Ok(false)
             }
         })?;
-        Ok(Self { types })
+        Ok(Self { types, complete_to_minimal })
     }
 }
 
@@ -663,6 +691,7 @@ mod tests {
             header: ReplyHeader { related_request_id: sample_identity(), remote_exception_code: 0 },
             data: TypeLookupReturn::GetTypes(GetTypesOut {
                 types: vec![(TypeIdentifier::CompleteTypeId(hash), type_object)],
+                complete_to_minimal: Vec::new(),
             }),
         };
         let bytes = reply.serialize();
@@ -683,7 +712,10 @@ mod tests {
             .collect();
         let reply = TypeLookupReply {
             header: ReplyHeader { related_request_id: sample_identity(), remote_exception_code: 0 },
-            data: TypeLookupReturn::GetTypes(GetTypesOut { types }),
+            data: TypeLookupReturn::GetTypes(GetTypesOut {
+                types,
+                complete_to_minimal: Vec::new(),
+            }),
         };
         let bytes = reply.serialize();
         assert_eq!(TypeLookupReply::deserialize(&bytes).unwrap(), reply);
