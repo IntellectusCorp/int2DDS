@@ -365,6 +365,7 @@ impl SubscriptionBuiltinTopicData {
         // DDS-XTypes fields
         subscription_data.type_identifier = parsed.type_identifier;
         subscription_data.type_object = parsed.type_object;
+        subscription_data.type_information = parsed.type_information;
         if let Some(tce) = parsed.type_consistency_enforcement {
             subscription_data.type_consistency_enforcement = tce;
         }

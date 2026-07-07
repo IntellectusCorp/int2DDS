@@ -380,6 +380,7 @@ impl PublicationBuiltinTopicData {
         // DDS-XTypes fields
         publication_data.type_identifier = parsed.type_identifier;
         publication_data.type_object = parsed.type_object;
+        publication_data.type_information = parsed.type_information;
 
         Ok(publication_data)
     }

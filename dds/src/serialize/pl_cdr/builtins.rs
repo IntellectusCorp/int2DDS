@@ -363,15 +363,14 @@ impl ParsedBuiltinTopicData {
             }
             ParameterId::PidTypeInformation => {
                 if let ParameterValue::TypeInformation(type_info) = parameter.value {
-                    let complete_id = type_info.complete.typeid_with_size.type_id;
-                    if complete_id != TypeIdentifier::None {
-                        self.type_identifier = Some(complete_id);
-                    } else {
-                        let minimal_id = type_info.minimal.typeid_with_size.type_id;
-                        if minimal_id != TypeIdentifier::None {
-                            self.type_identifier = Some(minimal_id);
-                        }
+                    let complete_id = &type_info.complete.typeid_with_size.type_id;
+                    if *complete_id != TypeIdentifier::None {
+                        self.type_identifier = Some(complete_id.clone());
+                    } else if type_info.minimal.typeid_with_size.type_id != TypeIdentifier::None {
+                        self.type_identifier =
+                            Some(type_info.minimal.typeid_with_size.type_id.clone());
                     }
+                    self.type_information = Some(type_info);
                 }
             }
             ParameterId::PidTypeIdV1 => {
