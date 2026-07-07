@@ -36,25 +36,79 @@ fn xtypes_extensibility_tokens(
     }
 }
 
+/// Emit a String8/String16 `TypeIdentifier`, honoring an optional `#[dds(bound = N)]`.
+/// Unbounded (`None` or `0`) -> `String8`/`String16`; `bound <= 255` -> `*Small`; else `*Large`.
+/// The SMALL/LARGE choice mirrors the plain-collection rule so the serialized identifier
+/// matches other DDS implementations byte-for-byte.
+fn string_identifier(
+    crate_path: &proc_macro2::TokenStream,
+    bound: Option<usize>,
+    wide: bool,
+) -> proc_macro2::TokenStream {
+    match bound {
+        Some(b) if b > 0 && b <= 255 => {
+            let b = b as u8;
+            if wide {
+                quote! { #crate_path::xtypes::TypeIdentifier::String16Small { bound: #b } }
+            } else {
+                quote! { #crate_path::xtypes::TypeIdentifier::String8Small { bound: #b } }
+            }
+        }
+        Some(b) if b > 255 => {
+            let b = b as u32;
+            if wide {
+                quote! { #crate_path::xtypes::TypeIdentifier::String16Large { bound: #b } }
+            } else {
+                quote! { #crate_path::xtypes::TypeIdentifier::String8Large { bound: #b } }
+            }
+        }
+        _ => {
+            if wide {
+                quote! { #crate_path::xtypes::TypeIdentifier::String16 }
+            } else {
+                quote! { #crate_path::xtypes::TypeIdentifier::String8 }
+            }
+        }
+    }
+}
+
+/// Compute the `TypeIdentifier` for a field type.
 fn type_to_identifier(
     ty: &syn::Type,
     crate_path: &proc_macro2::TokenStream,
     as_char: bool,
+    as_uint8: bool,
+    bound: Option<usize>,
     minimal: bool,
 ) -> proc_macro2::TokenStream {
     if let syn::Type::Array(array) = ty {
-        let inner_id = type_to_identifier(&array.elem, crate_path, as_char, minimal);
+        let inner_id =
+            type_to_identifier(&array.elem, crate_path, as_char, as_uint8, None, minimal);
         let size = &array.len;
         return quote! {
             {
                 let __elem = #inner_id;
-                #crate_path::xtypes::TypeIdentifier::PlainArrayLarge {
-                    header: #crate_path::xtypes::PlainCollectionHeader {
-                        equiv_kind: #crate_path::xtypes::plain_collection_equiv_kind(&__elem),
-                        element_flags: #crate_path::xtypes::CollectionElementFlag::default(),
-                    },
-                    array_bound_seq: vec![#size as u32],
-                    element_identifier: Box::new(__elem),
+                let __equiv = #crate_path::xtypes::plain_collection_equiv_kind(&__elem);
+                let __flags = #crate_path::xtypes::CollectionElementFlag::default();
+                let __n: usize = #size;
+                if __n <= 255 {
+                    #crate_path::xtypes::TypeIdentifier::PlainArraySmall {
+                        header: #crate_path::xtypes::PlainCollectionHeader {
+                            equiv_kind: __equiv,
+                            element_flags: __flags,
+                        },
+                        array_bound_seq: vec![__n as u8],
+                        element_identifier: Box::new(__elem),
+                    }
+                } else {
+                    #crate_path::xtypes::TypeIdentifier::PlainArrayLarge {
+                        header: #crate_path::xtypes::PlainCollectionHeader {
+                            equiv_kind: __equiv,
+                            element_flags: __flags,
+                        },
+                        array_bound_seq: vec![__n as u32],
+                        element_identifier: Box::new(__elem),
+                    }
                 }
             }
         };
@@ -66,8 +120,28 @@ fn type_to_identifier(
             if matches!(wrapper.as_str(), "Vec" | "Option" | "Box") {
                 if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
                     if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
-                        let inner_id = type_to_identifier(inner_ty, crate_path, false, minimal);
                         if wrapper == "Vec" {
+                            let inner_id = type_to_identifier(
+                                inner_ty, crate_path, as_char, as_uint8, None, minimal,
+                            );
+                            let seq_bound = bound.unwrap_or(0);
+                            if seq_bound <= 255 {
+                                let b = seq_bound as u8;
+                                return quote! {
+                                    {
+                                        let __elem = #inner_id;
+                                        #crate_path::xtypes::TypeIdentifier::PlainSequenceSmall {
+                                            header: #crate_path::xtypes::PlainCollectionHeader {
+                                                equiv_kind: #crate_path::xtypes::plain_collection_equiv_kind(&__elem),
+                                                element_flags: #crate_path::xtypes::CollectionElementFlag::default(),
+                                            },
+                                            bound: #b,
+                                            element_identifier: Box::new(__elem),
+                                        }
+                                    }
+                                };
+                            }
+                            let b = seq_bound as u32;
                             return quote! {
                                 {
                                     let __elem = #inner_id;
@@ -76,21 +150,29 @@ fn type_to_identifier(
                                             equiv_kind: #crate_path::xtypes::plain_collection_equiv_kind(&__elem),
                                             element_flags: #crate_path::xtypes::CollectionElementFlag::default(),
                                         },
-                                        bound: 0,
+                                        bound: #b,
                                         element_identifier: Box::new(__elem),
                                     }
                                 }
                             };
                         }
-                        return inner_id;
+                        // Option<T> / Box<T>: transparent wrappers; propagate all hints to the inner type.
+                        return type_to_identifier(
+                            inner_ty, crate_path, as_char, as_uint8, bound, minimal,
+                        );
                     }
                 }
             }
         }
     }
 
-    if as_char && matches!(get_serialization_method(ty), SerializationMethod::U8) {
-        return quote! { #crate_path::xtypes::TypeIdentifier::Char8 };
+    if matches!(get_serialization_method(ty), SerializationMethod::U8) {
+        if as_char {
+            return quote! { #crate_path::xtypes::TypeIdentifier::Char8 };
+        }
+        if as_uint8 {
+            return quote! { #crate_path::xtypes::TypeIdentifier::Uint8 };
+        }
     }
 
     match get_serialization_method(ty) {
@@ -106,8 +188,8 @@ fn type_to_identifier(
         SerializationMethod::F32 => quote! { #crate_path::xtypes::TypeIdentifier::Float32 },
         SerializationMethod::F64 => quote! { #crate_path::xtypes::TypeIdentifier::Float64 },
         SerializationMethod::Char => quote! { #crate_path::xtypes::TypeIdentifier::Char8 },
-        SerializationMethod::String => quote! { #crate_path::xtypes::TypeIdentifier::String8 },
-        SerializationMethod::WString => quote! { #crate_path::xtypes::TypeIdentifier::String16 },
+        SerializationMethod::String => string_identifier(crate_path, bound, false),
+        SerializationMethod::WString => string_identifier(crate_path, bound, true),
         _ => {
             let type_str = quote!(#ty).to_string();
             let fallback = name_based_minimal_id(crate_path, &type_str);
@@ -267,8 +349,8 @@ pub fn generate_has_type_object_impl(
     });
     let (base_type_expr_complete, base_type_expr_minimal) = if let Some(pf) = parent_field {
         let parent_type = &pf.ty;
-        let complete_id = type_to_identifier(parent_type, crate_path, false, false);
-        let minimal_id = type_to_identifier(parent_type, crate_path, false, true);
+        let complete_id = type_to_identifier(parent_type, crate_path, false, false, None, false);
+        let minimal_id = type_to_identifier(parent_type, crate_path, false, false, None, true);
         (quote! { Some(#complete_id) }, quote! { Some(#minimal_id) })
     } else {
         (quote! { None }, quote! { None })
@@ -286,11 +368,19 @@ pub fn generate_has_type_object_impl(
                 return None;
             }
             let member_id = resolve_member_id(&field_config, &field_name_str, index, autoid);
-            let type_id = type_to_identifier(&field.ty, crate_path, field_config.as_char, true);
+            let type_id = type_to_identifier(
+                &field.ty,
+                crate_path,
+                field_config.as_char,
+                field_config.as_uint8,
+                field_config.bound,
+                true,
+            );
 
             let is_key = field_config.key;
             let is_optional = field_config.optional;
-            let is_must_understand = field_config.must_understand;
+            // XTypes 7.2.2.4.4.4.7: key members are implicitly must-understand.
+            let is_must_understand = field_config.must_understand || field_config.key;
             let is_external = field_config.external;
             let try_construct = try_construct_to_tokens(field_config.try_construct, crate_path);
 
@@ -324,11 +414,19 @@ pub fn generate_has_type_object_impl(
                 return None;
             }
             let member_id = resolve_member_id(&field_config, &field_name_str, index, autoid);
-            let type_id = type_to_identifier(&field.ty, crate_path, field_config.as_char, false);
+            let type_id = type_to_identifier(
+                &field.ty,
+                crate_path,
+                field_config.as_char,
+                field_config.as_uint8,
+                field_config.bound,
+                false,
+            );
 
             let is_key = field_config.key;
             let is_optional = field_config.optional;
-            let is_must_understand = field_config.must_understand;
+            // XTypes 7.2.2.4.4.4.7: key members are implicitly must-understand.
+            let is_must_understand = field_config.must_understand || field_config.key;
             let is_external = field_config.external;
             let try_construct = try_construct_to_tokens(field_config.try_construct, crate_path);
             let hashid_expr = match field_config.hashid.as_ref() {
@@ -433,8 +531,8 @@ pub fn generate_has_type_object_alias_impl(
 ) -> proc_macro2::TokenStream {
     let crate_path = &type_config.crate_path;
     let type_name_str = type_config.type_name.clone().unwrap_or_else(|| name.to_string());
-    let related_type_complete = type_to_identifier(inner_ty, crate_path, false, false);
-    let related_type_minimal = type_to_identifier(inner_ty, crate_path, false, true);
+    let related_type_complete = type_to_identifier(inner_ty, crate_path, false, false, None, false);
+    let related_type_minimal = type_to_identifier(inner_ty, crate_path, false, false, None, true);
     let collect_nested_impl = generate_collect_nested(crate_path, &name.to_string(), &[inner_ty]);
     let id_methods = generate_type_id_methods(crate_path, name, false);
 
@@ -595,7 +693,7 @@ pub fn generate_has_type_object_union_impl(
             let variant_name_str = variant.ident.to_string();
             let disc_value = get_discriminant_value(variant, index) as i32;
             let member_type_id = match get_variant_type(variant) {
-                Some(ty) => type_to_identifier(ty, crate_path, false, true),
+                Some(ty) => type_to_identifier(ty, crate_path, false, false, None, true),
                 None => quote! { #crate_path::xtypes::TypeIdentifier::None },
             };
 
@@ -619,7 +717,7 @@ pub fn generate_has_type_object_union_impl(
             let variant_name_str = variant.ident.to_string();
             let disc_value = get_discriminant_value(variant, index) as i32;
             let member_type_id = match get_variant_type(variant) {
-                Some(ty) => type_to_identifier(ty, crate_path, false, false),
+                Some(ty) => type_to_identifier(ty, crate_path, false, false, None, false),
                 None => quote! { #crate_path::xtypes::TypeIdentifier::None },
             };
 
@@ -770,7 +868,7 @@ pub fn generate_has_type_object_bitset_impl(
             let field_name = field.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
             let attrs = parse_field_attributes(field);
             let bitcount = attrs.bitfield.unwrap_or(1) as u8;
-            let field_type_id = type_to_identifier(&field.ty, crate_path, false, true);
+            let field_type_id = type_to_identifier(&field.ty, crate_path, false, false, None, true);
             let pos = position;
             position += bitcount as u16;
 
@@ -793,7 +891,8 @@ pub fn generate_has_type_object_bitset_impl(
             let field_name = field.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
             let attrs = parse_field_attributes(field);
             let bitcount = attrs.bitfield.unwrap_or(1) as u8;
-            let field_type_id = type_to_identifier(&field.ty, crate_path, false, false);
+            let field_type_id =
+                type_to_identifier(&field.ty, crate_path, false, false, None, false);
             let pos = position;
             position += bitcount as u16;
 

@@ -394,7 +394,8 @@ fn struct_to_type_object(s: &XmlStruct) -> DdsResult<CompleteTypeObject> {
                 m.try_construct,
                 m.external,
                 m.optional,
-                m.must_understand,
+                // XTypes 7.2.2.4.4.4.7: key members are implicitly must-understand.
+                m.must_understand || m.key,
                 m.key,
                 false,
             ),
@@ -416,7 +417,8 @@ fn struct_to_type_object(s: &XmlStruct) -> DdsResult<CompleteTypeObject> {
     Ok(CompleteTypeObject::Struct(struct_type))
 }
 
-// Small/large split at bound 255; unbounded sequences and arrays use Large to byte-match derive.
+// SMALL/LARGE split at bound 255; unbounded (bound 0) collections use the SMALL form,
+// matching the derive output and RTI/Fast (XTypes 7.3.4.5).
 fn member_type_id(ty: &XmlMemberType) -> TypeIdentifier {
     match ty {
         XmlMemberType::Primitive(id) => id.clone(),
@@ -433,7 +435,7 @@ fn member_type_id(ty: &XmlMemberType) -> TypeIdentifier {
         XmlMemberType::Sequence { element, bound } => {
             let element_identifier = Box::new(member_type_id(element));
             match bound {
-                None => TypeIdentifier::PlainSequenceLarge {
+                None => TypeIdentifier::PlainSequenceSmall {
                     header: PlainCollectionHeader::default(),
                     bound: 0,
                     element_identifier,
@@ -452,11 +454,23 @@ fn member_type_id(ty: &XmlMemberType) -> TypeIdentifier {
                 },
             }
         }
-        XmlMemberType::Array { element, dims } => TypeIdentifier::PlainArrayLarge {
-            header: PlainCollectionHeader::default(),
-            array_bound_seq: dims.clone(),
-            element_identifier: Box::new(member_type_id(element)),
-        },
+        XmlMemberType::Array { element, dims } => {
+            let element_identifier = Box::new(member_type_id(element));
+            let header = PlainCollectionHeader::default();
+            if dims.iter().all(|d| *d <= 255) {
+                TypeIdentifier::PlainArraySmall {
+                    header,
+                    array_bound_seq: dims.iter().map(|d| *d as u8).collect(),
+                    element_identifier,
+                }
+            } else {
+                TypeIdentifier::PlainArrayLarge {
+                    header,
+                    array_bound_seq: dims.clone(),
+                    element_identifier,
+                }
+            }
+        }
         XmlMemberType::Map { key, value, bound } => {
             let key_identifier = Box::new(member_type_id(key));
             let element_identifier = Box::new(member_type_id(value));
@@ -626,7 +640,7 @@ mod tests {
         assert_eq!(id(3), &TypeIdentifier::String16Small { bound: 16 });
         assert_eq!(
             id(4),
-            &TypeIdentifier::PlainSequenceLarge {
+            &TypeIdentifier::PlainSequenceSmall {
                 header: PlainCollectionHeader::default(),
                 bound: 0,
                 element_identifier: Box::new(TypeIdentifier::Int32),
@@ -650,7 +664,7 @@ mod tests {
         );
         assert_eq!(
             id(7),
-            &TypeIdentifier::PlainArrayLarge {
+            &TypeIdentifier::PlainArraySmall {
                 header: PlainCollectionHeader::default(),
                 array_bound_seq: vec![2, 3],
                 element_identifier: Box::new(TypeIdentifier::Float64),
@@ -658,7 +672,7 @@ mod tests {
         );
         assert_eq!(
             id(8),
-            &TypeIdentifier::PlainSequenceLarge {
+            &TypeIdentifier::PlainSequenceSmall {
                 header: PlainCollectionHeader::default(),
                 bound: 0,
                 element_identifier: Box::new(TypeIdentifier::String8),
@@ -723,7 +737,7 @@ mod tests {
         assert_eq!(s.member_seq[0].common.member_type_id, name_based_type_id("Point"));
         assert_eq!(
             s.member_seq[1].common.member_type_id,
-            TypeIdentifier::PlainSequenceLarge {
+            TypeIdentifier::PlainSequenceSmall {
                 header: PlainCollectionHeader::default(),
                 bound: 0,
                 element_identifier: Box::new(name_based_type_id("Point")),
@@ -785,7 +799,7 @@ mod tests {
         let s = as_struct(&obj);
         assert_eq!(
             &s.member_seq[0].common.member_type_id,
-            &TypeIdentifier::PlainArrayLarge {
+            &TypeIdentifier::PlainArraySmall {
                 header: PlainCollectionHeader::default(),
                 array_bound_seq: vec![2],
                 element_identifier: Box::new(TypeIdentifier::PlainSequenceSmall {

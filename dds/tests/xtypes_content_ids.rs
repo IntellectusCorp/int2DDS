@@ -69,22 +69,22 @@ fn composite_sequence_carries_per_ek_element_and_kind() {
     let complete = Outer::complete_type_object();
     let many_c = &complete_members(&complete)[1].common.member_type_id;
     match many_c {
-        TypeIdentifier::PlainSequenceLarge { header, element_identifier, .. } => {
+        TypeIdentifier::PlainSequenceSmall { header, element_identifier, .. } => {
             assert_eq!(**element_identifier, Inner::type_identifier());
             assert_eq!(header.equiv_kind, EquivalenceKind::Complete);
         }
-        other => panic!("many must be PlainSequenceLarge, got {:?}", other),
+        other => panic!("many must be PlainSequenceSmall, got {:?}", other),
     }
 
     // Minimal: Vec<Inner> element == Inner minimal id, header equiv_kind == Minimal.
     let minimal = Outer::minimal_type_object();
     let many_m = &minimal_members(&minimal)[1].common.member_type_id;
     match many_m {
-        TypeIdentifier::PlainSequenceLarge { header, element_identifier, .. } => {
+        TypeIdentifier::PlainSequenceSmall { header, element_identifier, .. } => {
             assert_eq!(**element_identifier, Inner::minimal_type_identifier());
             assert_eq!(header.equiv_kind, EquivalenceKind::Minimal);
         }
-        other => panic!("many must be PlainSequenceLarge, got {:?}", other),
+        other => panic!("many must be PlainSequenceSmall, got {:?}", other),
     }
 }
 
@@ -93,7 +93,7 @@ fn primitive_sequence_stays_fully_descriptive() {
     let complete = Outer::complete_type_object();
     let scalars = &complete_members(&complete)[2].common.member_type_id;
     match scalars {
-        TypeIdentifier::PlainSequenceLarge { header, element_identifier, .. } => {
+        TypeIdentifier::PlainSequenceSmall { header, element_identifier, .. } => {
             assert_eq!(**element_identifier, TypeIdentifier::Int32);
             assert_eq!(
                 *header,
@@ -101,7 +101,7 @@ fn primitive_sequence_stays_fully_descriptive() {
             );
             assert!(element_identifier.equivalence_hash().is_none());
         }
-        other => panic!("scalars must be PlainSequenceLarge, got {:?}", other),
+        other => panic!("scalars must be PlainSequenceSmall, got {:?}", other),
     }
 }
 
@@ -160,10 +160,10 @@ fn nested_composite_collection_minimal_matches_registry() {
     // The recomputed headers at both nesting levels must be EK_MINIMAL.
     match registry_min {
         MinimalTypeObject::Struct(s) => match &s.member_seq[0].common.member_type_id {
-            TypeIdentifier::PlainSequenceLarge { header, element_identifier, .. } => {
+            TypeIdentifier::PlainSequenceSmall { header, element_identifier, .. } => {
                 assert_eq!(header.equiv_kind, EquivalenceKind::Minimal, "outer header");
                 match &**element_identifier {
-                    TypeIdentifier::PlainSequenceLarge { header, element_identifier, .. } => {
+                    TypeIdentifier::PlainSequenceSmall { header, element_identifier, .. } => {
                         assert_eq!(header.equiv_kind, EquivalenceKind::Minimal, "inner header");
                         assert_eq!(**element_identifier, Inner::minimal_type_identifier());
                     }

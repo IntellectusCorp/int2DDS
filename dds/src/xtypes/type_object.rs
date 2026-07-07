@@ -3027,7 +3027,7 @@ impl TypeIdentifierWithSize {
     }
 
     /// Write as an APPENDABLE (DELIMIT_CDR2) struct: DHEADER + type_id union + u32 size.
-    fn write_xcdr2(&self, s: &mut Xcdr2Serializer) -> Result<(), CdrError> {
+    pub(crate) fn write_xcdr2(&self, s: &mut Xcdr2Serializer) -> Result<(), CdrError> {
         let pos = s.begin_struct()?;
         s.buffer_mut().extend_from_slice(&self.type_id.serialize());
         s.serialize_u32(self.typeobject_serialized_size)?;
@@ -3035,7 +3035,7 @@ impl TypeIdentifierWithSize {
     }
 
     /// Read an APPENDABLE (DELIMIT_CDR2) TypeIdentifierWithSize.
-    fn read_xcdr2(d: &mut Xcdr2Deserializer) -> Result<Self, CdrError> {
+    pub(crate) fn read_xcdr2(d: &mut Xcdr2Deserializer) -> Result<Self, CdrError> {
         let (size, start) = d.begin_struct()?;
         let (type_id, consumed) = TypeIdentifier::deserialize(&d.get_data()[d.get_position()..])
             .map_err(|_| CdrError::DeserializationError("TypeIdentifier".to_string()))?;
@@ -3761,19 +3761,20 @@ impl HasTypeObject for String {
 impl<T: HasTypeObject> HasTypeObject for Vec<T> {
     fn type_identifier() -> TypeIdentifier {
         let element = T::type_identifier();
-        TypeIdentifier::PlainSequenceLarge {
+        // Unbounded sequence: bound 0 fits the SMALL form, matching RTI/Fast (XTypes 7.3.4.5).
+        TypeIdentifier::PlainSequenceSmall {
             header: PlainCollectionHeader {
                 equiv_kind: plain_collection_equiv_kind(&element),
                 element_flags: CollectionElementFlag::default(),
             },
-            bound: 0, // unbounded
+            bound: 0,
             element_identifier: Box::new(element),
         }
     }
 
     fn minimal_type_identifier() -> TypeIdentifier {
         let element = T::minimal_type_identifier();
-        TypeIdentifier::PlainSequenceLarge {
+        TypeIdentifier::PlainSequenceSmall {
             header: PlainCollectionHeader {
                 equiv_kind: plain_collection_equiv_kind(&element),
                 element_flags: CollectionElementFlag::default(),
@@ -3859,25 +3860,45 @@ macro_rules! impl_array_has_type_object {
             impl<T: HasTypeObject> HasTypeObject for [T; $n] {
                 fn type_identifier() -> TypeIdentifier {
                     let element = T::type_identifier();
-                    TypeIdentifier::PlainArrayLarge {
-                        header: PlainCollectionHeader {
-                            equiv_kind: plain_collection_equiv_kind(&element),
-                            element_flags: CollectionElementFlag::default(),
-                        },
-                        array_bound_seq: vec![$n],
-                        element_identifier: Box::new(element),
+                    let header = PlainCollectionHeader {
+                        equiv_kind: plain_collection_equiv_kind(&element),
+                        element_flags: CollectionElementFlag::default(),
+                    };
+                    let n: usize = $n;
+                    if n <= 255 {
+                        TypeIdentifier::PlainArraySmall {
+                            header,
+                            array_bound_seq: vec![n as u8],
+                            element_identifier: Box::new(element),
+                        }
+                    } else {
+                        TypeIdentifier::PlainArrayLarge {
+                            header,
+                            array_bound_seq: vec![n as u32],
+                            element_identifier: Box::new(element),
+                        }
                     }
                 }
 
                 fn minimal_type_identifier() -> TypeIdentifier {
                     let element = T::minimal_type_identifier();
-                    TypeIdentifier::PlainArrayLarge {
-                        header: PlainCollectionHeader {
-                            equiv_kind: plain_collection_equiv_kind(&element),
-                            element_flags: CollectionElementFlag::default(),
-                        },
-                        array_bound_seq: vec![$n],
-                        element_identifier: Box::new(element),
+                    let header = PlainCollectionHeader {
+                        equiv_kind: plain_collection_equiv_kind(&element),
+                        element_flags: CollectionElementFlag::default(),
+                    };
+                    let n: usize = $n;
+                    if n <= 255 {
+                        TypeIdentifier::PlainArraySmall {
+                            header,
+                            array_bound_seq: vec![n as u8],
+                            element_identifier: Box::new(element),
+                        }
+                    } else {
+                        TypeIdentifier::PlainArrayLarge {
+                            header,
+                            array_bound_seq: vec![n as u32],
+                            element_identifier: Box::new(element),
+                        }
                     }
                 }
 
@@ -4272,11 +4293,11 @@ mod tests {
     #[test]
     fn test_sequence_type_identifier() {
         let vec_id = Vec::<i32>::type_identifier();
-        if let TypeIdentifier::PlainSequenceLarge { element_identifier, bound, .. } = vec_id {
+        if let TypeIdentifier::PlainSequenceSmall { element_identifier, bound, .. } = vec_id {
             assert_eq!(*element_identifier, TypeIdentifier::Int32);
-            assert_eq!(bound, 0); // unbounded
+            assert_eq!(bound, 0); // unbounded (bound 0 fits the SMALL form)
         } else {
-            panic!("Expected PlainSequenceLarge");
+            panic!("Expected PlainSequenceSmall");
         }
     }
 
@@ -4375,12 +4396,12 @@ mod tests {
     #[test]
     fn test_array_type_identifier() {
         let arr_id = <[i32; 10]>::type_identifier();
-        if let TypeIdentifier::PlainArrayLarge { array_bound_seq, element_identifier, .. } = arr_id
+        if let TypeIdentifier::PlainArraySmall { array_bound_seq, element_identifier, .. } = arr_id
         {
             assert_eq!(*element_identifier, TypeIdentifier::Int32);
-            assert_eq!(array_bound_seq, vec![10]);
+            assert_eq!(array_bound_seq, vec![10u8]);
         } else {
-            panic!("Expected PlainArrayLarge");
+            panic!("Expected PlainArraySmall");
         }
     }
 
