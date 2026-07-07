@@ -57,6 +57,12 @@ pub(crate) trait HistoryCache {
         Ok(())
     }
 
+    // True when the owning reader requests TOPIC-scope coherent access.
+    // Default: false. Only DataReaderHistoryCache overrides this.
+    fn topic_coherent_access(&self) -> bool {
+        false
+    }
+
     fn remove_change(&mut self, a_change: Arc<CacheChange>) -> DdsResult<()>;
     fn ensure_capacity(
         &mut self,
