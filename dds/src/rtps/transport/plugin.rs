@@ -129,16 +129,6 @@ pub(crate) trait TransportPlugin: Send + Sync {
     /// is moved into `UserUnicastListeningTask`.
     fn take_user_data_unicast_source(&self) -> Option<MessageSource>;
 
-    /// Take ownership of the dead peer event receiver.
-    ///
-    /// Returns `None` if the transport does not support connection-level peer monitoring (e.g., UDP).
-    /// TCP transports return a channel that emits the SocketAddr of peers whose connections are lost
-    /// (detected via keepalive timeout). The upper layer resolves the SocketAddr to an RTPS
-    /// GuidPrefix via SPDP participant data. Called once during initialization.
-    fn take_dead_peer_receiver(&self) -> Option<crossbeam_channel::Receiver<SocketAddr>> {
-        None
-    }
-
     /// Get the local port number used by this transport's sender.
     fn port(&self) -> u16;
 
@@ -154,6 +144,13 @@ pub(crate) trait TransportPlugin: Send + Sync {
 
     /// Release all resources (sockets, connections, threads).
     fn close(&self);
+
+    /// Close every transport connection to a peer, identified by its advertised
+    /// locators. Called when the DDS layer unmatches a remote participant, so
+    /// per-peer resources (sockets, cache entries) are released promptly instead
+    /// of lingering until OS keepalive. Connectionless transports have nothing
+    /// to close — default no-op; only the TCP plugin overrides this.
+    fn disconnect_peer(&self, _locators: &[Locator]) {}
 }
 
 /// Factory for creating transport plugin instances.
