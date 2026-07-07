@@ -1,12 +1,23 @@
 //! Per-connection actor: owns one TCP/TLS stream and runs a reader/writer
 //! task pair against it.
 //!
-//! The reader hands incoming frames to `MuxState::dispatch`; the writer
-//! drains an mpsc inbox of control-plane frames (keepalive, PORT_RESERVE,
-//! peer-hello replies) onto the wire. User-data frames bypass the inbox and
-//! are written inline against the returned [`SharedWriteHalf`], so the
-//! writer is a low-rate path. Both tasks share a child `CancellationToken`
-//! so the pair always tears down together.
+//! The write half is written two ways, chosen by whether the caller needs the
+//! write result back:
+//!
+//! - **Inline** — the user-data send path locks [`SharedWriteHalf`] and calls
+//!   `write_framed_message` on the caller's (sync) thread. A DDS `write()` must
+//!   see the wire error (RST / unacked timeout) synchronously, and getting the
+//!   result requires blocking the caller anyway; inline does that with the
+//!   least overhead, so the high-rate data path uses it.
+//! - **Indirect** — control-plane frames produced *inside* the runtime go
+//!   through `writer_tx` to the writer task. The reader produces these
+//!   (handshake ACK/Error replies, PORT_RESERVE requests) and must not block
+//!   its read loop on a write (backpressure deadlock), so it enqueues and keeps
+//!   reading; the writer task drains the inbox. A reply value that must return
+//!   travels via the pending_ack oneshot.
+//!
+//! The reader hands incoming frames to `ConnectionRegistry::dispatch`; both
+//! tasks share a child `CancellationToken` so the pair tears down together.
 
 use std::sync::Arc;
 
@@ -16,15 +27,15 @@ use tokio::sync::{mpsc, Mutex as TokioMutex};
 use tokio_util::sync::CancellationToken;
 
 use crate::rtps::transport::tcp::{
+    connection_registry::{ConnectionId, ConnectionRegistry},
     framing::{read_framed_message, write_framed_message},
-    mux_state::{ConnectionId, MuxState},
     stream::{AsyncConnReadHalf, AsyncConnStream, AsyncConnWriteHalf},
 };
 
 /// Per-connection writer inbox capacity. The inbox carries control-plane
-/// frames only (keepalive seed + PORT_RESERVE round-trips + PEER_HELLO_ACK
-/// replies); user-data writes bypass it. 256 gives ample headroom for the
-/// control protocol burst while keeping memory bounded.
+/// frames only (PORT_RESERVE round-trips + handshake ACK/Error replies);
+/// user-data writes bypass it. 256 gives ample headroom for the control
+/// protocol burst while keeping memory bounded.
 pub(crate) const INBOX_CAPACITY: usize = 256;
 
 pub(crate) fn inbox_capacity() -> usize {
@@ -44,7 +55,7 @@ pub(crate) type SharedWriteHalf = Arc<TokioMutex<AsyncConnWriteHalf>>;
 /// the calling thread.
 ///
 /// `tx` is the writer inbox passed in by the caller; it has already been
-/// stored in `MuxState::ConnectionEntry::writer_tx` so the reader task
+/// stored in `ConnectionRegistry::ConnectionEntry::writer_tx` so the reader task
 /// (for protocol replies) and lifecycle tasks (keepalive, PORT_RESERVE)
 /// can push control frames through the same writer task.
 ///
@@ -52,10 +63,10 @@ pub(crate) type SharedWriteHalf = Arc<TokioMutex<AsyncConnWriteHalf>>;
 /// tasks. Either task's exit (read EOF, write error, …) cancels the child
 /// so the pair always tears down together. Cancelling the parent (e.g. on
 /// plugin shutdown) propagates here automatically.
-pub(crate) fn spawn_conn_actor(
+pub(crate) fn spawn_connection_tasks(
     stream: AsyncConnStream,
     conn_id: ConnectionId,
-    shared: Arc<MuxState>,
+    shared: Arc<ConnectionRegistry>,
     parent_cancel: CancellationToken,
     tx: mpsc::Sender<Vec<u8>>,
     rx: mpsc::Receiver<Vec<u8>>,
@@ -86,14 +97,14 @@ pub(crate) fn spawn_conn_actor(
     write_half
 }
 
-/// Read frames from the stream and hand them to `MuxState::dispatch`.
+/// Read frames from the stream and hand them to `ConnectionRegistry::dispatch`.
 ///
 /// Exits on read error, EOF, or cancellation. On exit, cancels the shared
 /// token so the writer task wakes and tears the connection entry down.
 async fn reader_task(
     mut read_half: AsyncConnReadHalf,
     conn_id: ConnectionId,
-    shared: Arc<MuxState>,
+    shared: Arc<ConnectionRegistry>,
     writer_tx: mpsc::Sender<Vec<u8>>,
     cancel: CancellationToken,
 ) {
@@ -103,7 +114,7 @@ async fn reader_task(
                 match result {
                     Ok(payload) => {
                         // dispatch routes the frame: control → writer_tx,
-                        // RTPS data → MuxState's crossbeam channels.
+                        // RTPS data → ConnectionRegistry's crossbeam channels.
                         shared.dispatch(conn_id, payload, &writer_tx).await;
                     }
                     Err(e) => {
@@ -160,9 +171,8 @@ async fn writer_task(
         }
     }
 
-    // Drain any frames the inbox already holds before sending FIN — e.g. the
-    // idle-timeout Error pushed by `prune_idle_connections` immediately
-    // before cancel, which would otherwise be lost to the `select!` race.
+    // Drain any frames the inbox already holds before sending FIN, so a frame
+    // enqueued just before cancel is not lost to the `select!` race.
     let mut wh = write_half.lock().await;
     while let Ok(frame) = rx.try_recv() {
         if write_framed_message(&mut *wh, &frame).await.is_err() {

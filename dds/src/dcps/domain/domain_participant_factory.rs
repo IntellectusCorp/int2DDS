@@ -53,15 +53,27 @@ use crate::{
         env::{get_default_qos_profile, get_qos_profile_paths, init_from_env, DEFAULT_DOMAIN_ID},
         instance_handle::InstanceHandle,
     },
-    config::json::QosProvider,
+    config::{
+        json::{QosProvider, ResolvedDataReader, ResolvedDataWriter, ResolvedTopic},
+        xml::XmlTypeRegistry,
+    },
     core::{
         error::{DdsError, DdsResult},
         types::DomainId,
     },
     infrastructure::{qos_kind::QosKind, qos_policy::Qos, status::StatusMask},
-    publication::qos::{DataWriterQos, PublisherQos},
-    subscription::qos::{DataReaderQos, SubscriberQos},
-    topic::qos::TopicQos,
+    publication::{
+        data_writer::DataWriter,
+        publisher::Publisher,
+        qos::{DataWriterQos, PublisherQos},
+    },
+    subscription::{
+        data_reader::DataReader,
+        qos::{DataReaderQos, SubscriberQos},
+        subscriber::Subscriber,
+    },
+    topic::{qos::TopicQos, Topic},
+    xtypes::{DynamicData, DynamicTypeSupport},
 };
 
 use super::{
@@ -77,6 +89,7 @@ pub struct DomainParticipantFactory {
     qos: Mutex<DomainParticipantFactoryQos>,
     default_participant_qos: Mutex<Option<DomainParticipantQos>>,
     qos_provider: Mutex<QosProvider>,
+    type_registry: Mutex<XmlTypeRegistry>,
 }
 
 impl DomainParticipantFactory {
@@ -432,11 +445,134 @@ impl DomainParticipantFactory {
     /// # Errors
     /// Returns an error if any file cannot be read or parsed.
     pub fn load_profiles<P: AsRef<Path>>(&self, paths: &[P]) -> DdsResult<()> {
-        let mut provider = self.qos_provider.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        {
+            let mut provider =
+                self.qos_provider.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            for path in paths {
+                provider.load_file(path.as_ref())?;
+            }
+        }
+        // XML files may also carry `<types>` for the dynamic-topic path; the type
+        // parser ignores the qos/domain sections so loading the same file is safe.
+        let mut registry = self.type_registry.lock().map_err(|e| DdsError::Error(e.to_string()))?;
         for path in paths {
-            provider.load_file(path.as_ref())?;
+            let path = path.as_ref();
+            if path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("xml"))
+            {
+                registry.load_file(path)?;
+            }
         }
         Ok(())
+    }
+
+    /// Resolves a topic declaration path (`DomainLibrary::Domain::Topic`) loaded from
+    /// a `<domain_library>` into its topic name, registered type, and topic QoS.
+    pub fn resolve_topic(&self, path: &str) -> DdsResult<ResolvedTopic> {
+        let provider = self.qos_provider.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        provider
+            .resolve_topic(path)
+            .ok_or_else(|| DdsError::Error(format!("Topic declaration not found: {}", path)))
+    }
+
+    /// Builds a [`DynamicTypeSupport`] for a type defined in a loaded `<types>` section.
+    pub fn get_dynamic_type_support(&self, type_name: &str) -> DdsResult<DynamicTypeSupport> {
+        let registry = self.type_registry.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        registry.get(type_name)
+    }
+
+    /// Resolves a datawriter declaration path
+    /// (`ParticipantLibrary::Participant::Publisher::Writer`) into its topic and QoS.
+    pub fn resolve_datawriter(&self, path: &str) -> DdsResult<ResolvedDataWriter> {
+        let provider = self.qos_provider.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        provider
+            .resolve_datawriter(path)
+            .ok_or_else(|| DdsError::Error(format!("DataWriter declaration not found: {}", path)))
+    }
+
+    /// Resolves a datareader declaration path
+    /// (`ParticipantLibrary::Participant::Subscriber::Reader`) into its topic and QoS.
+    pub fn resolve_datareader(&self, path: &str) -> DdsResult<ResolvedDataReader> {
+        let provider = self.qos_provider.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        provider
+            .resolve_datareader(path)
+            .ok_or_else(|| DdsError::Error(format!("DataReader declaration not found: {}", path)))
+    }
+
+    /// Creates an entire participant tree (participant + publishers/subscribers +
+    /// datawriters/datareaders) from a `<domain_participant_library>` declaration at
+    /// `path` (`ParticipantLibrary::Participant`). Endpoints carry `DynamicData`; the
+    /// topic each follows comes from its `topic_ref` in the XML.
+    pub fn create_participant_from_config(&self, path: &str) -> DdsResult<ConfiguredParticipant> {
+        let resolved = {
+            let provider = self.qos_provider.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            provider.resolve_participant(path).ok_or_else(|| {
+                DdsError::Error(format!("Participant declaration not found: {}", path))
+            })?
+        };
+
+        let participant = self.create_participant(
+            resolved.domain_id,
+            resolved.participant_qos,
+            None,
+            StatusMask::default(),
+        )?;
+
+        let mut topics: HashMap<String, Topic> = HashMap::new();
+        let mut publishers = Vec::new();
+        let mut subscribers = Vec::new();
+        let mut datawriters = HashMap::new();
+        let mut datareaders = HashMap::new();
+
+        for pubd in resolved.publishers {
+            let publisher = participant.create_publisher(pubd.qos, None, StatusMask::default())?;
+            for endpoint in pubd.writers {
+                let support =
+                    Arc::new(self.get_dynamic_type_support(&endpoint.spec.topic.type_ref)?);
+                let topic =
+                    get_or_create_topic(&participant, &mut topics, &endpoint.spec.topic, &support)?;
+                let writer = publisher.create_datawriter_dynamic(
+                    &topic,
+                    support,
+                    endpoint.spec.qos,
+                    None,
+                    StatusMask::default(),
+                )?;
+                datawriters.insert(format!("{}::{}", pubd.name, endpoint.name), writer);
+            }
+            publishers.push(publisher);
+        }
+
+        for subd in resolved.subscribers {
+            let subscriber =
+                participant.create_subscriber(subd.qos, None, StatusMask::default())?;
+            for endpoint in subd.readers {
+                let support =
+                    Arc::new(self.get_dynamic_type_support(&endpoint.spec.topic.type_ref)?);
+                let topic =
+                    get_or_create_topic(&participant, &mut topics, &endpoint.spec.topic, &support)?;
+                let reader = subscriber.create_datareader_dynamic(
+                    &topic,
+                    support,
+                    endpoint.spec.qos,
+                    None,
+                    StatusMask::default(),
+                )?;
+                datareaders.insert(format!("{}::{}", subd.name, endpoint.name), reader);
+            }
+            subscribers.push(subscriber);
+        }
+
+        Ok(ConfiguredParticipant {
+            participant,
+            datawriters,
+            datareaders,
+            _topics: topics.into_values().collect(),
+            _publishers: publishers,
+            _subscribers: subscribers,
+        })
     }
 
     /// Creates a new `DomainParticipant` using QoS settings from a loaded profile.
@@ -572,6 +708,51 @@ impl DomainParticipantFactory {
         provider
             .get_datareader_qos(&resolved)
             .ok_or_else(|| DdsError::Error(format!("QoS profile not found: {}", resolved)))
+    }
+}
+
+// Reuses an already-created topic by name, or creates it as a dynamic topic.
+fn get_or_create_topic(
+    participant: &DomainParticipant,
+    topics: &mut HashMap<String, Topic>,
+    topic: &ResolvedTopic,
+    support: &Arc<DynamicTypeSupport>,
+) -> DdsResult<Topic> {
+    if let Some(existing) = topics.get(&topic.topic_name) {
+        return Ok(existing.clone());
+    }
+    let created = participant.create_topic_dynamic(
+        &topic.topic_name,
+        support.clone(),
+        topic.topic_qos.clone(),
+        None,
+        StatusMask::default(),
+    )?;
+    topics.insert(topic.topic_name.clone(), created.clone());
+    Ok(created)
+}
+
+/// Entities created by [`DomainParticipantFactory::create_participant_from_config`].
+/// Datawriters/readers are addressable by their XML name (`"publisher::writer"` /
+/// `"subscriber::reader"`); topics/publishers/subscribers are held to keep them alive.
+pub struct ConfiguredParticipant {
+    pub participant: DomainParticipant,
+    datawriters: HashMap<String, DataWriter<DynamicData>>,
+    datareaders: HashMap<String, DataReader<DynamicData>>,
+    _topics: Vec<Topic>,
+    _publishers: Vec<Publisher>,
+    _subscribers: Vec<Subscriber>,
+}
+
+impl ConfiguredParticipant {
+    /// Returns the datawriter declared as `"<publisher>::<writer>"`.
+    pub fn datawriter(&self, name: &str) -> Option<DataWriter<DynamicData>> {
+        self.datawriters.get(name).cloned()
+    }
+
+    /// Returns the datareader declared as `"<subscriber>::<reader>"`.
+    pub fn datareader(&self, name: &str) -> Option<DataReader<DynamicData>> {
+        self.datareaders.get(name).cloned()
     }
 }
 
