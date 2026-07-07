@@ -21,7 +21,7 @@ use std::{
     collections::HashMap,
     fmt::Debug,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         Arc, Mutex, RwLock, Weak,
     },
 };
@@ -87,6 +87,8 @@ pub struct Publisher {
     orphaned_writers: Arc<Mutex<Vec<Arc<dyn DataWriterInternal<Qos = DataWriterQos>>>>>,
     default_datawriter_qos: Arc<Mutex<Option<DataWriterQos>>>,
     participant: Option<Weak<DomainParticipant>>,
+    // Nesting depth of begin/end_coherent_changes; the set is open while non-zero.
+    coherent_depth: Arc<AtomicU32>,
 }
 
 impl Debug for Publisher {
@@ -188,6 +190,7 @@ impl Publisher {
             orphaned_writers: Arc::new(Mutex::new(Vec::new())),
             default_datawriter_qos: Arc::new(Mutex::new(None)),
             participant: Some(Arc::downgrade(participant)),
+            coherent_depth: Arc::new(AtomicU32::new(0)),
         };
         let publisher_arc = Arc::new(publisher.clone());
         let weak_ref = Arc::downgrade(&publisher_arc);
@@ -844,7 +847,6 @@ impl Publisher {
         Err(DdsError::Unsupported)
     }
 
-    // TODO
     pub fn begin_coherent_changes(&self) -> DdsResult<()> {
         /*
             This operation requests the application to begin a 'coherent set' of modifications using DataWriter objects attached to the Publisher.
@@ -864,17 +866,28 @@ impl Publisher {
             Without delivering both values together, readers might misinterpret them as indicating an aircraft on a collision course.
         */
         self.is_deleted()?;
-        Err(DdsError::Unsupported)
+        // Nested calls only deepen the current set; a new set starts at depth 0 -> 1.
+        self.coherent_depth.fetch_add(1, Ordering::AcqRel);
+        Ok(())
     }
 
-    // TODO
     pub fn end_coherent_changes(&self) -> DdsResult<()> {
         /*
             This operation terminates the 'coherent set' initiated by begin_coherent_changes.
             If called without a matching begin_coherent_changes call, this operation returns PRECONDITION_NOT_MET error.
         */
         self.is_deleted()?;
-        Err(DdsError::Unsupported)
+
+        // Refuse to decrement below zero: no matching begin_coherent_changes.
+        if self
+            .coherent_depth
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |depth| depth.checked_sub(1))
+            .is_err()
+        {
+            return Err(DdsError::PreconditionNotMet);
+        }
+
+        Ok(())
     }
 
     pub fn delete_contained_entities(&self) -> DdsResult<()> {
