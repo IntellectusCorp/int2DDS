@@ -164,7 +164,10 @@ impl MessageCreator {
         data_header_flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::DATA);
         match cache_change.kind() {
             ChangeKind::Alive | ChangeKind::AliveFiltered => {
-                data_header_flag.add_flag(SubmessageFlagType::DataFlag, SubmessageId::DATA);
+                // Payload-less Alive changes (coherent set end markers) carry no DataFlag.
+                if !cache_change.data_value().is_empty() {
+                    data_header_flag.add_flag(SubmessageFlagType::DataFlag, SubmessageId::DATA);
+                }
             }
             ChangeKind::NotAliveDisposed
             | ChangeKind::NotAliveUnregistered

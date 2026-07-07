@@ -75,7 +75,7 @@ use crate::{
             types::{ChangeKind, SerializedData},
         },
         entities::{
-            history::cache_change::CacheChange,
+            history::cache_change::{CacheChange, PresentationInfo},
             writer::{StatefulWriter, Writer as RtpsWriter},
         },
         logic::wlp_logic::WlpLogic,
@@ -130,6 +130,7 @@ pub(crate) trait DataWriterInternal: DataWriterBase {
     fn delete(&self);
     fn is_deleted(&self) -> DdsResult<()>;
     fn is_builtin(&self) -> bool;
+    fn end_coherent_set(&self) -> DdsResult<()>;
 }
 
 pub struct DataWriter<Foo> {
@@ -168,6 +169,8 @@ pub struct DataWriter<Foo> {
     _phantom: PhantomData<fn() -> Foo>,
     datawriter_cache: Arc<Mutex<DataWriterHistoryCache<Foo>>>,
     wlp_logic: Option<WlpLogic>,
+    // First sequence number of this writer's open coherent set; None outside a set.
+    current_coherent_start: Arc<Mutex<Option<SequenceNumber>>>,
 }
 
 impl<Foo> Debug for DataWriter<Foo> {
@@ -237,6 +240,7 @@ impl<Foo: 'static + Clone> Clone for DataWriter<Foo> {
             _phantom: self._phantom,
             datawriter_cache: self.datawriter_cache.clone(),
             wlp_logic: self.wlp_logic.clone(),
+            current_coherent_start: self.current_coherent_start.clone(),
         }
     }
 }
@@ -500,6 +504,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 type_support.is_compute_key_provided(),
             ))),
             wlp_logic,
+            current_coherent_start: Arc::new(Mutex::new(None)),
         };
         let writer_arc = Arc::new(writer.clone());
         let weak_ref = Arc::downgrade(&writer_arc);
@@ -980,6 +985,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             seq_num,
             Some(timestamp.into()),
         );
+        self.configure_coherent_set(&mut loan.change, seq_num)?;
         unsafe {
             loan.change.data_mut().set_len(actual_size);
         }
@@ -1311,6 +1317,34 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         }
     }
 
+    // True while the owning publisher has an open coherent set.
+    fn publisher_in_coherent_changes(&self) -> bool {
+        self.publisher
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .is_some_and(|publisher| publisher.in_coherent_changes())
+    }
+
+    // Stamp PID_COHERENT_SET on the change while the publisher's coherent set is open,
+    // recording this writer's first member seq as the set id. No-op outside a set.
+    fn configure_coherent_set(
+        &self,
+        change: &mut CacheChange,
+        seq_num: SequenceNumber,
+    ) -> DdsResult<()> {
+        if !self.publisher_in_coherent_changes() {
+            return Ok(());
+        }
+        let mut start =
+            self.current_coherent_start.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        let set_start = *start.get_or_insert(seq_num);
+        change.set_presentation_info(PresentationInfo {
+            coherent_set: Some(set_start),
+            ..Default::default()
+        });
+        Ok(())
+    }
+
     /// Pool-based add_change skeleton: acquire from pool → reset → fill buffer → add to history.
     /// Avoids per-write heap allocation by reusing CacheChange and its internal buffer.
     /// `fill` writes the payload into the reused buffer (already cleared by reset).
@@ -1335,6 +1369,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
 
         // 3. Reset metadata + fill the reused buffer
         change.reset(kind, rtps_writer.guid(), handle, seq_num, source_timestamp);
+        self.configure_coherent_set(&mut change, seq_num)?;
         fill(change.data_mut())?;
         change.apply_fragmentation(rtps_writer.data_max_size_serialized() as usize);
 
@@ -2410,6 +2445,41 @@ impl<Foo: 'static + Clone> DataWriterInternal for DataWriter<Foo> {
 
     fn is_builtin(&self) -> bool {
         self.is_builtin
+    }
+
+    // Close this writer's open coherent set by sending an end marker: a payload-less
+    // Data whose PID_COHERENT_SET is SEQUENCENUMBER_UNKNOWN. No-op when no set is open.
+    fn end_coherent_set(&self) -> DdsResult<()> {
+        let started =
+            self.current_coherent_start.lock().map_err(|e| DdsError::Error(e.to_string()))?.take();
+        if started.is_none() {
+            return Ok(());
+        }
+
+        // Send a payload-less Data with PID_COHERENT_SET = SEQUENCENUMBER_UNKNOWN to mark the end of the coherent set.
+        let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
+        let rtps_writer = self.get_rtps_writer()?;
+        let mut change = {
+            let mut cache =
+                self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            cache.acquire_change()
+        };
+        let seq_num = rtps_writer.allocate_sequence_number();
+        change.reset(
+            ChangeKind::Alive,
+            rtps_writer.guid(),
+            InstanceHandle::NIL,
+            seq_num,
+            Some(timestamp.into()),
+        );
+        change.set_presentation_info(PresentationInfo {
+            coherent_set: Some(SequenceNumber::UNKNOWN),
+            ..Default::default()
+        });
+
+        let mut cache = self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        cache.add_change_with_cleanup(Arc::new(change), false)?;
+        Ok(())
     }
 }
 
