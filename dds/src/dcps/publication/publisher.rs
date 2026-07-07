@@ -878,16 +878,41 @@ impl Publisher {
         */
         self.is_deleted()?;
 
-        // Refuse to decrement below zero: no matching begin_coherent_changes.
-        if self
+        // fetch_update returns the pre-decrement depth; checked_sub refuses to go below zero.
+        match self
             .coherent_depth
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |depth| depth.checked_sub(1))
-            .is_err()
         {
-            return Err(DdsError::PreconditionNotMet);
+            // Depth was 0: no matching begin_coherent_changes.
+            Err(_) => Err(DdsError::PreconditionNotMet),
+            // Depth 1 -> 0: outermost end closes the set, writers send their end markers.
+            Ok(1) => self.end_writer_coherent_sets(),
+            // Depth 2+ -> 1+: nested end, the set stays open.
+            Ok(_) => Ok(()),
         }
+    }
 
-        Ok(())
+    // Ask every attached writer to close its open coherent set; returns the first error.
+    fn end_writer_coherent_sets(&self) -> DdsResult<()> {
+        let writers_by_topic_name =
+            self.writers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        let mut result = Ok(());
+        for weak_writers in writers_by_topic_name.values() {
+            for weak_writer in weak_writers.iter() {
+                if let Some(writer) = weak_writer.upgrade() {
+                    let end_result = writer.end_coherent_set();
+                    if result.is_ok() {
+                        result = end_result;
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    // True while a coherent set is open (begin called without matching end).
+    pub(crate) fn in_coherent_changes(&self) -> bool {
+        self.coherent_depth.load(Ordering::Acquire) > 0
     }
 
     pub fn delete_contained_entities(&self) -> DdsResult<()> {
