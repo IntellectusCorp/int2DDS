@@ -4,7 +4,7 @@
 //! a connection without caring whether it is plaintext or TLS-encrypted: the
 //! Plain/Tls branch is resolved once here, and every downstream task just uses
 //! the `AsyncRead` / `AsyncWrite` impls. `into_split` yields owned read/write
-//! halves so the conn_actor's reader and writer tasks can each own one end, and
+//! halves so the reader and writer tasks can each own one end, and
 //! the write half forwards vectored writes (`writev`) used by the framing path.
 
 use std::net::SocketAddr;
@@ -30,12 +30,13 @@ impl AsyncConnStream {
         }
     }
 
-    /// Set TCP_NODELAY on the underlying TCP socket.
-    pub(crate) fn set_nodelay(&self, on: bool) -> io::Result<()> {
+    /// Local socket address of this connection — the concrete endpoint the OS
+    /// chose for the route to the peer.
+    pub(crate) fn local_addr(&self) -> io::Result<SocketAddr> {
         match self {
-            Self::Plain(t) => t.set_nodelay(on),
-            Self::Tls(TlsStream::Server(s)) => s.get_ref().0.set_nodelay(on),
-            Self::Tls(TlsStream::Client(s)) => s.get_ref().0.set_nodelay(on),
+            Self::Plain(t) => t.local_addr(),
+            Self::Tls(TlsStream::Server(s)) => s.get_ref().0.local_addr(),
+            Self::Tls(TlsStream::Client(s)) => s.get_ref().0.local_addr(),
         }
     }
 

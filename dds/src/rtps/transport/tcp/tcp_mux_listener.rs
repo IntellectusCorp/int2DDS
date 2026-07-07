@@ -1,61 +1,42 @@
 //! Inbound side of the TCP mux transport.
 //!
-//! `TcpMuxListener` owns the listener-side tasks (accept loop, idle prune) and
-//! exposes the shared `MuxState` via `shared()`.
-//!
-//! The accept loop spawns a short-lived `handshake_and_register_task` per
-//! connection so a slow TLS handshake does not stall new accepts; each
-//! connection then gets its own conn_actor pair via `spawn_conn_actor`.
+//! `TcpMuxListener` owns the listener-side accept loop and exposes the shared
+//! `ConnectionRegistry` via `shared()`.
 
+use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::{io, time::Duration};
 
 use log::{debug, error, info, warn};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
-use crate::rtps::transport::tcp::conn_actor::{inbox_capacity, spawn_conn_actor};
+use crate::rtps::transport::tcp::connection_tasks::{inbox_capacity, spawn_connection_tasks};
 use crate::rtps::transport::tcp::stream::wrap_plain;
 use crate::rtps::transport::tcp::tls::{accept_tls_async, TlsConfig};
 use crate::rtps::{
     common::guid::GuidPrefix,
     transport::{
         plugin::IncomingMessage,
-        tcp::mux_state::{MuxState, TcpSocketTuning},
+        tcp::connection_registry::{apply_socket_tuning, ConnectionRegistry, TcpSocketTuning},
     },
 };
 
-/// How often the prune ticker scans for idle connections. Independent of the
-/// idle timeout itself — small enough that a freshly-timed-out connection
-/// gets cleaned up within ~500 ms.
-const PRUNE_CHECK_INTERVAL: Duration = Duration::from_millis(500);
-
 /// TCP multiplexed listener — owns the listener-side tasks and the shared
-/// `MuxState`.
+/// `ConnectionRegistry`.
 ///
 /// Dropping or calling `shutdown()` cancels all tasks; cancellation
-/// propagates into every conn_actor pair via child tokens.
+/// propagates into every reader/writer task pair via child tokens.
 pub(crate) struct TcpMuxListener {
     port: u16,
-    pub(crate) shared: Arc<MuxState>,
+    pub(crate) shared: Arc<ConnectionRegistry>,
     cancel: CancellationToken,
     task_handles: Vec<JoinHandle<()>>,
 }
 
 impl TcpMuxListener {
-    /// Bind the listen socket and spawn all listener-side tasks on the
-    /// current tokio runtime: accept loop, idle prune.
-    ///
-    /// Must be called from within a tokio runtime context — the spawn calls
-    /// require `Handle::current()` to be valid. From sync code, wrap the call
-    /// in `runtime.block_on(async { ... })` or use `runtime.handle().enter()`.
-    ///
-    /// `port = 0` requests an OS-assigned ephemeral port; the actual port is
-    /// captured into `port()` for advertising back to peers.
     pub(crate) fn bind_and_spawn(
         port: u16,
         domain_id: u32,
@@ -64,13 +45,12 @@ impl TcpMuxListener {
         discovery_tx: crossbeam_channel::Sender<IncomingMessage>,
         user_data_tx: crossbeam_channel::Sender<IncomingMessage>,
         tls_config: Option<Arc<TlsConfig>>,
-        idle_timeout: Duration,
         tuning: TcpSocketTuning,
     ) -> io::Result<Self> {
         let std_listener = bind_listener(port)?;
         let actual_port = std_listener.local_addr()?.port();
 
-        let shared = Arc::new(MuxState::new(
+        let shared = Arc::new(ConnectionRegistry::new(
             domain_id,
             participant_id,
             local_guid_prefix,
@@ -80,16 +60,11 @@ impl TcpMuxListener {
         ));
         let cancel = CancellationToken::new();
 
-        let mut handles = Vec::with_capacity(2);
+        let mut handles = Vec::with_capacity(1);
         handles.push(tokio::spawn(accept_loop_task(
             std_listener,
             shared.clone(),
             tls_config,
-            cancel.clone(),
-        )));
-        handles.push(tokio::spawn(prune_interval_task(
-            shared.clone(),
-            idle_timeout,
             cancel.clone(),
         )));
 
@@ -106,7 +81,7 @@ impl TcpMuxListener {
     /// Shared mux state — connection map, peer groupings, dispatch logic.
     /// The sender uses this to look up writer channels for outbound frames;
     /// external consumers use it for metrics.
-    pub(crate) fn shared(&self) -> &Arc<MuxState> {
+    pub(crate) fn shared(&self) -> &Arc<ConnectionRegistry> {
         &self.shared
     }
 
@@ -131,13 +106,12 @@ impl Drop for TcpMuxListener {
 /// Sync bind. Returns a `std::net::TcpListener` configured for async use
 /// (`set_nonblocking(true)`). Conversion to `tokio::net::TcpListener` is
 /// deferred to the spawned accept task so this function can be called
-/// outside a runtime context (e.g. straight from the plugin constructor).
+/// outside a runtime context.
 fn bind_listener(port: u16) -> io::Result<std::net::TcpListener> {
     let addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
     let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)?;
     // SO_REUSEADDR semantics differ by OS. On Unix it only relaxes rebinding a
-    // port left in TIME_WAIT — two live listeners on the same port still
-    // conflict — so we keep it for clean restarts. On Windows it would instead
+    // port left in TIME_WAIT. On Windows it would instead
     // let a second listener share/hijack the same port, silently defeating the
     // per-participant bind-collision detection; leaving it off there preserves
     // the EADDRINUSE failure we rely on.
@@ -158,7 +132,7 @@ fn bind_listener(port: u16) -> io::Result<std::net::TcpListener> {
 /// handshake does not stall new accepts.
 async fn accept_loop_task(
     std_listener: std::net::TcpListener,
-    shared: Arc<MuxState>,
+    shared: Arc<ConnectionRegistry>,
     tls_config: Option<Arc<TlsConfig>>,
     cancel: CancellationToken,
 ) {
@@ -177,15 +151,8 @@ async fn accept_loop_task(
                     Ok((tcp, addr)) => {
                         debug!("Accepted from {:?}", addr);
 
-                        // Optional socket buffer overrides (per-participant config).
-                        if let Some(sz) = shared.tuning.so_rcvbuf {
-                            let _ = socket2::SockRef::from(&tcp).set_recv_buffer_size(sz);
-                        }
-                        if let Some(sz) = shared.tuning.so_sndbuf {
-                            let _ = socket2::SockRef::from(&tcp).set_send_buffer_size(sz);
-                        }
+                        apply_socket_tuning(&tcp, &shared.tuning);
 
-                        // Spawn off — do NOT await handshake in the accept loop.
                         let shared = shared.clone();
                         let tls = tls_config.clone();
                         let parent_cancel = cancel.clone();
@@ -207,17 +174,15 @@ async fn accept_loop_task(
 }
 
 /// Short-lived per-accept task: completes the optional TLS handshake,
-/// registers the connection in `MuxState`, then spawns the conn_actor pair.
+/// registers the connection in `ConnectionRegistry`, then spawns the reader/writer task pair.
 ///
-/// Registration happens **before** spawning the conn_actor — this guarantees
-/// the reader task finds its `ConnectionEntry` in `MuxState.connections` when
-/// the first inbound frame arrives. Reversing the order opens a race window
-/// where the first frame's dispatch lookup returns `None` and the connection
-/// gets stuck in `AwaitingFirstMessage` forever.
+/// Registration happens **before** spawning the tasks — this guarantees
+/// the reader task finds its `ConnectionEntry` in `ConnectionRegistry.connections` when
+/// the first inbound frame arrives.
 async fn handshake_and_register_task(
     tcp: TcpStream,
     addr: SocketAddr,
-    shared: Arc<MuxState>,
+    shared: Arc<ConnectionRegistry>,
     tls_config: Option<Arc<TlsConfig>>,
     parent_cancel: CancellationToken,
 ) {
@@ -239,9 +204,7 @@ async fn handshake_and_register_task(
         None => wrap_plain(tcp),
     };
 
-    let _ = stream.set_nodelay(shared.tuning.nodelay);
-
-    // Channel created here, NOT inside spawn_conn_actor — so we can register
+    // Channel created here, NOT inside spawn_connection_tasks — so we can register
     // the entry (with tx) before the reader task starts polling.
     let (tx, rx) = mpsc::channel::<Vec<u8>>(inbox_capacity());
     let conn_cancel = parent_cancel.child_token();
@@ -252,27 +215,7 @@ async fn handshake_and_register_task(
     // acks via the writer_tx inbox. The user-data send path never targets
     // an inbound connection, so the returned `SharedWriteHalf` is dropped
     // here — only the writer_task uses it.
-    let _ = spawn_conn_actor(stream, conn_id, shared.clone(), conn_cancel, tx, rx);
-}
-
-/// Periodic ticker: cancel connections whose `last_activity` has exceeded
-/// `timeout`. Wakes every `PRUNE_CHECK_INTERVAL` and delegates to
-/// `MuxState::prune_idle_connections`.
-async fn prune_interval_task(shared: Arc<MuxState>, timeout: Duration, cancel: CancellationToken) {
-    let mut ticker = tokio::time::interval(PRUNE_CHECK_INTERVAL);
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-    loop {
-        tokio::select! {
-            _ = ticker.tick() => {
-                let n = shared.prune_idle_connections(timeout);
-                if n > 0 {
-                    debug!("pruned {} idle connections", n);
-                }
-            }
-            _ = cancel.cancelled() => break,
-        }
-    }
+    let _ = spawn_connection_tasks(stream, conn_id, shared.clone(), conn_cancel, tx, rx);
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -280,14 +223,15 @@ async fn prune_interval_task(shared: Arc<MuxState>, timeout: Duration, cancel: C
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rtps::transport::tcp::connection_registry::ConnectionState;
     use crate::rtps::transport::tcp::framing::write_framed_message;
-    use crate::rtps::transport::tcp::mux_state::ConnectionState;
     use crate::rtps::transport::tcp::protocol::{
-        ControlMsg, ERR_CODE_IDLE_TIMEOUT, MSG_ERROR, MSG_PEER_HELLO_ACK, OP_IDLE_TIMEOUT,
+        encode_locator, ControlMsg, ERR_CODE_MISSING_LOCATOR, MSG_ERROR, MSG_PEER_HELLO,
+        MSG_PEER_HELLO_ACK,
     };
     use crossbeam_channel::bounded;
     use socket2::{Domain, SockAddr, Socket, Type};
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::oneshot;
 
@@ -304,8 +248,7 @@ mod tests {
         (d_tx, d_rx, u_tx, u_rx)
     }
 
-    /// Helper: standard listener with no TLS, generous idle timeout so tests
-    /// can ignore the prune ticker unless they explicitly exercise it.
+    /// Helper: standard listener with no TLS.
     fn make_listener() -> TcpMuxListener {
         let (d_tx, _d_rx, u_tx, _u_rx) = make_channels();
         TcpMuxListener::bind_and_spawn(
@@ -316,7 +259,6 @@ mod tests {
             d_tx,
             u_tx,
             None,
-            Duration::from_secs(60),
             TcpSocketTuning::default(),
         )
         .expect("bind_and_spawn")
@@ -384,7 +326,7 @@ mod tests {
     // ── accept + register ────────────────────────────────────────────────────
 
     /// Connecting to the bound port causes `accept_loop_task` to accept and
-    /// `handshake_and_register_task` to register the entry in `MuxState`.
+    /// `handshake_and_register_task` to register the entry in `ConnectionRegistry`.
     #[tokio::test(flavor = "multi_thread")]
     async fn accept_registers_inbound_connection() {
         let listener = make_listener();
@@ -405,131 +347,6 @@ mod tests {
         let _ = client.await;
     }
 
-    // ── idle prune ───────────────────────────────────────────────────────────
-
-    /// A connection whose `last_activity` exceeds the idle timeout is removed
-    /// by the prune ticker.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn prune_removes_idle_connection() {
-        let (d_tx, _, u_tx, _) = make_channels();
-
-        // Very short idle timeout so the test does not have to wait long.
-        let listener = TcpMuxListener::bind_and_spawn(
-            0,
-            0,
-            0,
-            [0u8; 12],
-            d_tx,
-            u_tx,
-            None,
-            Duration::from_millis(50), // idle timeout
-            TcpSocketTuning::default(),
-        )
-        .expect("bind_and_spawn");
-        let port = listener.port();
-
-        let client = tokio::spawn(async move {
-            let _stream = TcpStream::connect(("127.0.0.1", port)).await.expect("client connect");
-            tokio::time::sleep(Duration::from_secs(2)).await;
-        });
-
-        // Wait for the connection to register first.
-        let deadline = Instant::now() + Duration::from_secs(2);
-        assert!(
-            wait_until(deadline, || listener.shared().connection_count() == 1).await,
-            "connection was not registered",
-        );
-
-        // Idle (50ms) + at least one prune cycle (500ms) + slack.
-        let deadline = Instant::now() + Duration::from_secs(3);
-        assert!(
-            wait_until(deadline, || listener.shared().connection_count() == 0).await,
-            "idle connection was not pruned within deadline",
-        );
-
-        listener.shutdown().await;
-        let _ = client.await;
-    }
-
-    /// A fresh connection (last_activity recent) survives multiple prune
-    /// ticks unchanged — counterpart to `prune_removes_idle_connection`.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn prune_keeps_fresh_connections() {
-        // Default fixture uses 60s idle timeout, so fresh connections are safe.
-        let listener = make_listener();
-        let port = listener.port();
-
-        let client = tokio::spawn(async move {
-            let _stream = TcpStream::connect(("127.0.0.1", port)).await.expect("client connect");
-            tokio::time::sleep(Duration::from_secs(2)).await;
-        });
-
-        let shared = listener.shared().clone();
-        let deadline = Instant::now() + Duration::from_secs(2);
-        assert!(
-            wait_until(deadline, || shared.connection_count() == 1).await,
-            "connection was not registered",
-        );
-
-        // Cover ~3 prune cycles (500 ms each).
-        tokio::time::sleep(Duration::from_millis(1600)).await;
-        assert_eq!(shared.connection_count(), 1, "fresh connection got pruned");
-
-        listener.shutdown().await;
-        let _ = client.await;
-    }
-
-    /// Pruning an idle connection pushes an `ERROR(IDLE_TIMEOUT)` control
-    /// frame to the peer before tearing the connection down.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn prune_emits_idle_timeout_error_to_peer() {
-        let (d_tx, _, u_tx, _) = make_channels();
-        let listener = TcpMuxListener::bind_and_spawn(
-            0,
-            0,
-            0,
-            [0u8; 12],
-            d_tx,
-            u_tx,
-            None,
-            Duration::from_millis(50),
-            TcpSocketTuning::default(),
-        )
-        .expect("bind_and_spawn");
-        let port = listener.port();
-
-        // Client connects and waits for the listener to send ERROR(IDLE_TIMEOUT).
-        let client = tokio::spawn(async move {
-            let mut stream = TcpStream::connect(("127.0.0.1", port)).await.expect("client connect");
-
-            let mut len_buf = [0u8; 4];
-            tokio::time::timeout(Duration::from_secs(3), stream.read_exact(&mut len_buf))
-                .await
-                .expect("read length timed out")
-                .expect("read length");
-            let len = u32::from_be_bytes(len_buf) as usize;
-
-            let mut data = vec![0u8; len];
-            tokio::time::timeout(Duration::from_secs(1), stream.read_exact(&mut data))
-                .await
-                .expect("read payload timed out")
-                .expect("read payload");
-            data
-        });
-
-        let received = client.await.expect("client task");
-
-        // Frame on the wire: [4B length][4B "INT2"][payload].
-        assert_eq!(&received[..4], b"INT2", "frame magic mismatch");
-        let payload = &received[4..];
-        assert_eq!(payload[0], MSG_ERROR);
-        assert_eq!(payload[1], OP_IDLE_TIMEOUT);
-        let code = u16::from_be_bytes([payload[2], payload[3]]);
-        assert_eq!(code, ERR_CODE_IDLE_TIMEOUT);
-
-        listener.shutdown().await;
-    }
-
     // ── handshake state machine ──────────────────────────────────────────────
 
     /// Sending PEER_HELLO advances the connection state to `Control` and
@@ -547,7 +364,9 @@ mod tests {
         let client = tokio::spawn(async move {
             let mut stream = TcpStream::connect(("127.0.0.1", port)).await.expect("client connect");
 
-            let hello = ControlMsg::PeerHello { locator: [0u8; 16] };
+            let hello = ControlMsg::PeerHello {
+                locator: encode_locator(Ipv4Addr::new(127, 0, 0, 1), 40000),
+            };
             write_framed_message(&mut stream, &hello.to_bytes()).await.expect("write PEER_HELLO");
 
             let mut len_buf = [0u8; 4];
@@ -576,10 +395,41 @@ mod tests {
         listener.shutdown().await;
     }
 
+    /// A PEER_HELLO with a zero (missing) locator is rejected with an ERROR
+    /// carrying `ERR_CODE_MISSING_LOCATOR` — a peer must advertise its locator.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_hello_without_locator_is_rejected() {
+        let listener = make_listener();
+        let port = listener.port();
+
+        let client = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).await.expect("client connect");
+            let hello = ControlMsg::PeerHello { locator: [0u8; 16] };
+            write_framed_message(&mut stream, &hello.to_bytes()).await.expect("write PEER_HELLO");
+
+            let mut len_buf = [0u8; 4];
+            stream.read_exact(&mut len_buf).await.expect("read length");
+            let len = u32::from_be_bytes(len_buf) as usize;
+            let mut data = vec![0u8; len];
+            stream.read_exact(&mut data).await.expect("read payload");
+            data
+        });
+
+        let received = client.await.expect("client task");
+        // Frame: [4B "INT2"][MSG_ERROR][operation][2B code]...
+        assert_eq!(&received[..4], b"INT2");
+        assert_eq!(received[4], MSG_ERROR, "expected an ERROR response");
+        assert_eq!(received[5], MSG_PEER_HELLO, "operation should be PEER_HELLO");
+        let code = u16::from_be_bytes([received[6], received[7]]);
+        assert_eq!(code, ERR_CODE_MISSING_LOCATOR);
+
+        listener.shutdown().await;
+    }
+
     // ── connection cleanup on RST / FIN ──────────────────────────────────────
 
     /// A client that resets the connection (`linger=0` + drop) causes the
-    /// conn_actor reader to detect the RST and remove the connection entry.
+    /// reader task to detect the RST and remove the connection entry.
     #[tokio::test(flavor = "multi_thread")]
     async fn rst_close_cleans_up_connection_and_token() {
         let listener = make_listener();
@@ -602,7 +452,7 @@ mod tests {
         listener.shutdown().await;
     }
 
-    /// A client that issues a graceful FIN causes the conn_actor reader to
+    /// A client that issues a graceful FIN causes the reader task to
     /// detect EOF and remove the connection entry.
     #[tokio::test(flavor = "multi_thread")]
     async fn fin_close_cleans_up_connection_and_token() {
