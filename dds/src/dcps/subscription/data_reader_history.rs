@@ -368,6 +368,11 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
         Ok(())
     }
 
+    // True when the owning reader's PRESENTATION requests TOPIC-scope coherent access.
+    fn topic_coherent_access(&self) -> bool {
+        self.data_reader.upgrade().is_some_and(|reader| reader.is_subscriber_topic_coherent())
+    }
+
     // Removes the given CacheChange from its instance bucket.
     fn remove_change(&mut self, a_change: Arc<CacheChange>) -> DdsResult<()> {
         let mut map = self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
@@ -987,11 +992,12 @@ fn deliver_held_sample<Foo: 'static + Clone + Debug>(
     match rtps_reader.reader_cache().lock() {
         // Re-deliver without the filter (already decided) so it stores and notifies.
         Ok(mut reader_cache) => match reader_cache.add_change((*change).clone(), false) {
-            Ok(Some(delivered)) => {
+            Ok(delivered) => {
                 drop(reader_cache);
-                rtps_reader.on_change(delivered);
+                for change in delivered {
+                    rtps_reader.on_change(change);
+                }
             }
-            Ok(None) => {}
             Err(e) => debug!("[TimeBasedFilter] Failed to deliver held sample: {:?}", e),
         },
         Err(e) => debug!("[TimeBasedFilter] Failed to lock reader cache: {:?}", e),
