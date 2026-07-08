@@ -90,18 +90,7 @@ namespace Int2Dds.Tests
             return null!;
         }
 
-        private static string XtypesDir()
-        {
-            var dir = new DirectoryInfo(AppContext.BaseDirectory);
-            while (dir != null)
-            {
-                var candidate = Path.Combine(dir.FullName, "dds", "examples", "xtypes");
-                if (Directory.Exists(candidate))
-                    return candidate;
-                dir = dir.Parent;
-            }
-            throw new DirectoryNotFoundException("could not locate dds/examples/xtypes");
-        }
+        private static string XtypesDir() => AppContext.BaseDirectory;
 
         [Fact]
         public void XmlFlatRoundTrip()
