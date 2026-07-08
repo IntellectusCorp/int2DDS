@@ -43,7 +43,8 @@ fn second_tcp_participant_on_busy_port_errors_without_panicking() {
         "second TCP participant must fail on the in-use listen port instead of binding it"
     );
 
-    drop(first);
+    first.delete_contained_entities().unwrap();
+    factory.delete_participant(first).unwrap();
 }
 
 #[test]
@@ -59,6 +60,8 @@ fn distinct_ports_let_two_tcp_participants_coexist() {
         .create_participant(domain, tcp_qos(17412), None, StatusMask::default())
         .expect("participant B binds 17412 (distinct port, no collision)");
 
-    drop(a);
-    drop(b);
+    a.delete_contained_entities().unwrap();
+    factory.delete_participant(a).unwrap();
+    b.delete_contained_entities().unwrap();
+    factory.delete_participant(b).unwrap();
 }

@@ -43,6 +43,8 @@ fn match_alive() {
     let reader = s.create_reader(rqos);
 
     wait_for_liveliness_changed_state(&reader, 1, 0, StdDuration::from_secs(1)).unwrap();
+
+    s.teardown();
 }
 
 #[test]
@@ -57,6 +59,8 @@ fn unmatch_alive() {
     // Delete on writer side; SEDP dispose travels to the reader's participant.
     s.publisher.delete_datawriter(writer).unwrap();
     wait_for_liveliness_changed_state(&reader, 0, 0, StdDuration::from_secs(1)).unwrap();
+
+    s.teardown();
 }
 
 #[test]
@@ -87,6 +91,8 @@ fn unmatch_propagation_to_reader() {
     wait_for_subscription_matched_count(&reader, 0, StdDuration::from_secs(3)).unwrap();
     wait_for_liveliness_changed_state(&reader, 0, 0, StdDuration::from_secs(3)).unwrap();
     wait_for_no_writers_sample(&reader, StdDuration::from_secs(3)).unwrap();
+
+    s.teardown();
 }
 
 #[test]
@@ -112,4 +118,8 @@ fn unmatch_via_delete_participant() {
         .unwrap();
 
     wait_for_liveliness_changed_state(&reader, 0, 0, StdDuration::from_secs(5)).unwrap();
+
+    let reader_participant = s.reader_participant.unwrap();
+    reader_participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(reader_participant).unwrap();
 }
