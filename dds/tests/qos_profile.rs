@@ -197,6 +197,9 @@ fn test_create_publisher_with_profile() {
     let publisher = publisher.unwrap();
     let qos = publisher.get_qos().unwrap();
     assert_eq!(qos.partition.name, vec!["partition1".to_string()]);
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -222,6 +225,9 @@ fn test_create_subscriber_with_profile() {
     let subscriber = subscriber.unwrap();
     let qos = subscriber.get_qos().unwrap();
     assert_eq!(qos.partition.name, vec!["partition1".to_string()]);
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -249,6 +255,9 @@ fn test_create_topic_with_profile() {
     let topic = topic.unwrap();
     let qos = topic.get_qos().unwrap();
     assert_eq!(qos.reliability.kind, ReliabilityQosPolicyKind::Reliable);
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -289,6 +298,9 @@ fn test_create_datawriter_with_profile() {
     let qos = writer.get_qos().unwrap();
     assert_eq!(qos.reliability.kind, ReliabilityQosPolicyKind::Reliable);
     assert!(matches!(qos.history.kind, HistoryQosPolicyKind::KeepLast(10)));
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -330,6 +342,9 @@ fn test_create_datareader_with_profile() {
     let qos = reader.get_qos().unwrap();
     assert_eq!(qos.reliability.kind, ReliabilityQosPolicyKind::Reliable);
     assert!(matches!(qos.history.kind, HistoryQosPolicyKind::KeepLast(10)));
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]

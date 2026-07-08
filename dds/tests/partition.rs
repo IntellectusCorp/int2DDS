@@ -73,6 +73,9 @@ fn test_partition_a_subscriber_success() {
         .unwrap();
 
     assert!(!samples.is_empty());
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -120,6 +123,9 @@ fn test_partition_abc_subscriber_success() {
         .unwrap();
 
     assert!(!samples.is_empty());
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -165,6 +171,9 @@ fn test_partition_asterisk_subscriber_success() {
         .unwrap();
 
     assert!(!samples.is_empty());
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -195,4 +204,7 @@ fn test_partition_d_subscriber_fail() {
         Duration::from_seconds(1)
     )
     .is_err());
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
