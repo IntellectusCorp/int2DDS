@@ -127,6 +127,9 @@ fn test_time_based_filter_delivers_first_and_last() {
         values
     );
     assert!(values.len() < 4, "filter must drop intermediate samples, got {:?}", values);
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 // After the separation window elapses, the next write passes immediately.
@@ -190,6 +193,9 @@ fn test_time_based_filter_passes_after_separation() {
         "both spaced writes must pass, got {:?}",
         values
     );
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 // The filter is per instance: the first sample of each distinct key passes without affecting
@@ -254,4 +260,7 @@ fn test_time_based_filter_per_instance() {
         "each instance's first sample must pass independently, got {:?}",
         values
     );
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }

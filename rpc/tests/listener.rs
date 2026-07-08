@@ -95,6 +95,11 @@ fn simple_replier_listener_auto_reply() {
     let data = reply.data().unwrap();
     assert_eq!(data.data.result, 30);
     assert_eq!(data.header.related_request_id, req_id);
+
+    drop(requester);
+    drop(replier);
+    participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
 }
 
 struct AsyncRequestHandler {
@@ -147,6 +152,11 @@ fn replier_listener_manual_take_and_reply() {
     let reply = requester.receive_reply(Duration::from_secs(3)).unwrap();
     let data = reply.data().unwrap();
     assert_eq!(data.data.result, 42); // 6 * 7
+
+    drop(requester);
+    drop(replier);
+    participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
 }
 
 struct ReplyCollector {
@@ -204,6 +214,12 @@ fn simple_requester_listener_auto_take() {
 
     let results = collector.collected.lock().unwrap();
     assert_eq!(*results, vec![7]);
+    drop(results);
+
+    drop(requester);
+    drop(replier);
+    participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
 }
 
 struct ReplyNotifier {
@@ -262,6 +278,12 @@ fn requester_listener_manual_take() {
 
     let results = notifier.collected.lock().unwrap();
     assert_eq!(*results, vec![300]);
+    drop(results);
+
+    drop(requester);
+    drop(replier);
+    participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
 }
 
 /// Removing a listener by passing None should stop callbacks.
@@ -316,6 +338,11 @@ fn remove_listener() {
     requester.send_request(&AddRequest { a: 3, b: 4 }).unwrap();
     std::thread::sleep(Duration::from_millis(200));
     assert_eq!(call_count.load(Ordering::SeqCst), 1, "callback should not fire after removal");
+
+    drop(requester);
+    drop(replier);
+    participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
 }
 
 /// SimpleReplierListener returning None skips the reply.
@@ -363,4 +390,9 @@ fn simple_replier_listener_skip_reply() {
     let reply = requester.receive_reply(Duration::from_secs(3)).unwrap();
     let data = reply.data().unwrap();
     assert_eq!(data.data.result, 9); // 4 + 5
+
+    drop(requester);
+    drop(replier);
+    participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
 }
