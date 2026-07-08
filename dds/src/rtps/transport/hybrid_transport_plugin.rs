@@ -267,6 +267,13 @@ impl TransportPlugin for HybridTransportPlugin {
         self.tcp_plugin.tcp_listener_port()
     }
 
+    fn disconnect_peer(&self, locators: &[Locator]) {
+        // Only TCP holds per-peer connections; UDP is connectionless. Forward to
+        // the embedded TCP plugin so a DDS-layer unmatch releases the peer's TCP
+        // resources promptly instead of lingering until OS keepalive.
+        self.tcp_plugin.disconnect_peer(locators);
+    }
+
     fn participant_id(&self) -> u32 {
         self.participant_id
     }

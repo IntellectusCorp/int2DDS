@@ -79,7 +79,6 @@ pub enum RtpsErrorCode {
 
     // Transport send error
     NotSent = 700,
-    PeerDisconnected = 701,
 
     // For unexpected error
     Unknown = 999,
@@ -134,7 +133,6 @@ impl RtpsErrorCode {
 
             // Transport send error
             700 => Some(RtpsErrorCode::NotSent),
-            701 => Some(RtpsErrorCode::PeerDisconnected),
 
             999 => Some(RtpsErrorCode::Unknown),
 
@@ -173,7 +171,6 @@ impl RtpsErrorCode {
             RtpsErrorCode::DdsError => "DDS error",
             RtpsErrorCode::ArcUpgradeError => "Failed to upgrade Weak reference to Arc",
             RtpsErrorCode::NotSent => "Message not sent",
-            RtpsErrorCode::PeerDisconnected => "Remote peer connection permanently lost",
             RtpsErrorCode::Unknown => "Unknown",
         }
     }

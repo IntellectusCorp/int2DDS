@@ -3,7 +3,7 @@
 //! Wraps a connected `TcpStream` in a `rustls` session and yields an
 //! `AsyncConnStream::Tls`: `accept_tls_async` drives the server side of the
 //! handshake, `connect_tls_async` the client side (validating the server
-//! against the SNI name). The resulting stream feeds the same conn_actor
+//! against the SNI name). The resulting stream feeds the same reader/writer tasks
 //! read/write path as a plaintext connection.
 
 use std::io;
