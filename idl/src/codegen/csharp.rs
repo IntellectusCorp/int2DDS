@@ -667,7 +667,7 @@ impl<'a> CsGen<'a> {
     fn type_to_csharp(ty: &ResolvedType) -> String {
         match ty {
             ResolvedType::Bool => "bool".to_string(),
-            ResolvedType::U8 => "byte".to_string(),
+            ResolvedType::U8 | ResolvedType::UInt8 => "byte".to_string(),
             ResolvedType::I8 => "sbyte".to_string(),
             ResolvedType::I16 => "short".to_string(),
             ResolvedType::U16 => "ushort".to_string(),
@@ -730,7 +730,7 @@ impl<'a> CsGen<'a> {
     fn default_value(&self, ty: &ResolvedType) -> String {
         match ty {
             ResolvedType::Bool => "false".to_string(),
-            ResolvedType::U8 | ResolvedType::I8 => "0".to_string(),
+            ResolvedType::U8 | ResolvedType::UInt8 | ResolvedType::I8 => "0".to_string(),
             ResolvedType::I16 | ResolvedType::U16 => "0".to_string(),
             ResolvedType::I32 | ResolvedType::U32 => "0".to_string(),
             ResolvedType::I64 | ResolvedType::U64 => "0".to_string(),
@@ -825,7 +825,9 @@ impl<'a> CsGen<'a> {
     fn emit_write_field(&mut self, ty: &ResolvedType, accessor: &str) {
         match ty {
             ResolvedType::Bool => self.line(&format!("w.WriteBool({});", accessor)),
-            ResolvedType::U8 => self.line(&format!("w.WriteU8({});", accessor)),
+            ResolvedType::U8 | ResolvedType::UInt8 => {
+                self.line(&format!("w.WriteU8({});", accessor))
+            }
             ResolvedType::I8 => self.line(&format!("w.WriteI8({});", accessor)),
             ResolvedType::I16 => self.line(&format!("w.WriteI16({});", accessor)),
             ResolvedType::U16 => self.line(&format!("w.WriteU16({});", accessor)),
@@ -1084,7 +1086,7 @@ impl<'a> CsGen<'a> {
             ResolvedType::Bool => {
                 self.line(&format!("{}.{} = r.ReadBool();", obj, name));
             }
-            ResolvedType::U8 => {
+            ResolvedType::U8 | ResolvedType::UInt8 => {
                 self.line(&format!("{}.{} = r.ReadU8();", obj, name));
             }
             ResolvedType::I8 => {
@@ -1216,7 +1218,7 @@ impl<'a> CsGen<'a> {
             ResolvedType::Bool => {
                 self.line(&format!("var {} = r.ReadBool();", var_name));
             }
-            ResolvedType::U8 => {
+            ResolvedType::U8 | ResolvedType::UInt8 => {
                 self.line(&format!("var {} = r.ReadU8();", var_name));
             }
             ResolvedType::I8 => {
@@ -1368,7 +1370,9 @@ impl<'a> CsGen<'a> {
     fn emit_write_key_field(&mut self, ty: &ResolvedType, accessor: &str) {
         match ty {
             ResolvedType::Bool => self.line(&format!("w.WriteBool({});", accessor)),
-            ResolvedType::U8 => self.line(&format!("w.WriteU8({});", accessor)),
+            ResolvedType::U8 | ResolvedType::UInt8 => {
+                self.line(&format!("w.WriteU8({});", accessor))
+            }
             ResolvedType::I8 => self.line(&format!("w.WriteI8({});", accessor)),
             ResolvedType::I16 => self.line(&format!("w.WriteI16({});", accessor)),
             ResolvedType::U16 => self.line(&format!("w.WriteU16({});", accessor)),

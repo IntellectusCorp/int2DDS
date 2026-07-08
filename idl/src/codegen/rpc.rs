@@ -1374,6 +1374,7 @@ impl<'a> RpcGen<'a> {
             ty,
             ResolvedType::Bool
                 | ResolvedType::U8
+                | ResolvedType::UInt8
                 | ResolvedType::I8
                 | ResolvedType::I16
                 | ResolvedType::U16
@@ -1391,7 +1392,7 @@ impl<'a> RpcGen<'a> {
     fn type_to_rust(ty: &ResolvedType) -> String {
         match ty {
             ResolvedType::Bool => "bool".to_string(),
-            ResolvedType::U8 => "u8".to_string(),
+            ResolvedType::U8 | ResolvedType::UInt8 => "u8".to_string(),
             ResolvedType::I8 => "i8".to_string(),
             ResolvedType::I16 => "i16".to_string(),
             ResolvedType::U16 => "u16".to_string(),
