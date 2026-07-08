@@ -55,3 +55,18 @@ jobs:
           INT2DDS_UDP_SOCKET_BUFFER: 5242880
           RUSTFLAGS: ${{ runner.os == 'Windows' && '-C linker=lld-link' || '' }}
         run: cargo test --doc
+
+  # Reports the plain "cargo-test" status required by the develop ruleset;
+  # fails unless every matrix job succeeded.
+  cargo-test-gate:
+    name: cargo-test
+    needs: cargo-test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check matrix results
+        run: |
+          if [ "${{ needs.cargo-test.result }}" != "success" ]; then
+            echo "cargo-test matrix result: ${{ needs.cargo-test.result }}"
+            exit 1
+          fi
