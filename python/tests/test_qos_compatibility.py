@@ -36,7 +36,7 @@ def next_domain() -> int:
     return _domain_counter
 
 
-def test_compatibility(
+def check_compatibility(
     test_name: str,
     w_qos: DataWriterQos,
     r_qos: DataReaderQos,
@@ -136,28 +136,28 @@ def run_all_tests():
     print(f"  Reliability RxO Tests")
     print(f"{'='*60}")
 
-    test_compatibility(
+    check_compatibility(
         "reliability_reliable_reliable",
         DataWriterQos(reliability=Reliability("RELIABLE")),
         DataReaderQos(reliability=Reliability("RELIABLE")),
         expect_match=True, results=results,
         w_label="RELIABLE", r_label="RELIABLE",
     )
-    test_compatibility(
+    check_compatibility(
         "reliability_reliable_besteffort",
         DataWriterQos(reliability=Reliability("RELIABLE")),
         DataReaderQos(reliability=Reliability("BEST_EFFORT")),
         expect_match=True, results=results,
         w_label="RELIABLE", r_label="BEST_EFFORT",
     )
-    test_compatibility(
+    check_compatibility(
         "reliability_besteffort_besteffort",
         DataWriterQos(reliability=Reliability("BEST_EFFORT")),
         DataReaderQos(reliability=Reliability("BEST_EFFORT")),
         expect_match=True, results=results,
         w_label="BEST_EFFORT", r_label="BEST_EFFORT",
     )
-    test_compatibility(
+    check_compatibility(
         "reliability_besteffort_reliable",
         DataWriterQos(reliability=Reliability("BEST_EFFORT")),
         DataReaderQos(reliability=Reliability("RELIABLE")),
@@ -173,28 +173,28 @@ def run_all_tests():
     print(f"  Durability RxO Tests")
     print(f"{'='*60}")
 
-    test_compatibility(
+    check_compatibility(
         "durability_tl_tl",
         DataWriterQos(durability=Durability("TRANSIENT_LOCAL")),
         DataReaderQos(durability=Durability("TRANSIENT_LOCAL")),
         expect_match=True, results=results,
         w_label="TRANSIENT_LOCAL", r_label="TRANSIENT_LOCAL",
     )
-    test_compatibility(
+    check_compatibility(
         "durability_tl_volatile",
         DataWriterQos(durability=Durability("TRANSIENT_LOCAL")),
         DataReaderQos(durability=Durability("VOLATILE")),
         expect_match=True, results=results,
         w_label="TRANSIENT_LOCAL", r_label="VOLATILE",
     )
-    test_compatibility(
+    check_compatibility(
         "durability_volatile_volatile",
         DataWriterQos(durability=Durability("VOLATILE")),
         DataReaderQos(durability=Durability("VOLATILE")),
         expect_match=True, results=results,
         w_label="VOLATILE", r_label="VOLATILE",
     )
-    test_compatibility(
+    check_compatibility(
         "durability_volatile_tl",
         DataWriterQos(durability=Durability("VOLATILE")),
         DataReaderQos(durability=Durability("TRANSIENT_LOCAL")),
@@ -209,28 +209,28 @@ def run_all_tests():
     print(f"  Ownership RxO Tests")
     print(f"{'='*60}")
 
-    test_compatibility(
+    check_compatibility(
         "ownership_shared_shared",
         DataWriterQos(ownership=Ownership("SHARED")),
         DataReaderQos(ownership=Ownership("SHARED")),
         expect_match=True, results=results,
         w_label="SHARED", r_label="SHARED",
     )
-    test_compatibility(
+    check_compatibility(
         "ownership_exclusive_exclusive",
         DataWriterQos(ownership=Ownership("EXCLUSIVE")),
         DataReaderQos(ownership=Ownership("EXCLUSIVE")),
         expect_match=True, results=results,
         w_label="EXCLUSIVE", r_label="EXCLUSIVE",
     )
-    test_compatibility(
+    check_compatibility(
         "ownership_shared_exclusive",
         DataWriterQos(ownership=Ownership("SHARED")),
         DataReaderQos(ownership=Ownership("EXCLUSIVE")),
         expect_match=False, results=results,
         w_label="SHARED", r_label="EXCLUSIVE",
     )
-    test_compatibility(
+    check_compatibility(
         "ownership_exclusive_shared",
         DataWriterQos(ownership=Ownership("EXCLUSIVE")),
         DataReaderQos(ownership=Ownership("SHARED")),
@@ -246,28 +246,28 @@ def run_all_tests():
     print(f"  Deadline RxO Tests")
     print(f"{'='*60}")
 
-    test_compatibility(
+    check_compatibility(
         "deadline_500_1000",
         DataWriterQos(deadline=Deadline(period=0.5)),
         DataReaderQos(deadline=Deadline(period=1.0)),
         expect_match=True, results=results,
         w_label="500ms", r_label="1000ms",
     )
-    test_compatibility(
+    check_compatibility(
         "deadline_500_500",
         DataWriterQos(deadline=Deadline(period=0.5)),
         DataReaderQos(deadline=Deadline(period=0.5)),
         expect_match=True, results=results,
         w_label="500ms", r_label="500ms",
     )
-    test_compatibility(
+    check_compatibility(
         "deadline_1000_1000",
         DataWriterQos(deadline=Deadline(period=1.0)),
         DataReaderQos(deadline=Deadline(period=1.0)),
         expect_match=True, results=results,
         w_label="1000ms", r_label="1000ms",
     )
-    test_compatibility(
+    check_compatibility(
         "deadline_1000_500",
         DataWriterQos(deadline=Deadline(period=1.0)),
         DataReaderQos(deadline=Deadline(period=0.5)),
@@ -294,7 +294,7 @@ def run_all_tests():
             r_idx = liveliness_kinds.index(r_kind)
             expect = w_idx >= r_idx
 
-            test_compatibility(
+            check_compatibility(
                 f"liveliness_{w_kind.lower()}_to_{r_kind.lower()}",
                 DataWriterQos(liveliness=Liveliness(w_kind, lease_duration=5.0)),
                 DataReaderQos(liveliness=Liveliness(r_kind, lease_duration=5.0)),
@@ -309,28 +309,28 @@ def run_all_tests():
     print(f"  DestinationOrder RxO Tests")
     print(f"{'='*60}")
 
-    test_compatibility(
+    check_compatibility(
         "destorder_reception_reception",
         DataWriterQos(destination_order=DestinationOrder("BY_RECEPTION")),
         DataReaderQos(destination_order=DestinationOrder("BY_RECEPTION")),
         expect_match=True, results=results,
         w_label="BY_RECEPTION", r_label="BY_RECEPTION",
     )
-    test_compatibility(
+    check_compatibility(
         "destorder_source_source",
         DataWriterQos(destination_order=DestinationOrder("BY_SOURCE")),
         DataReaderQos(destination_order=DestinationOrder("BY_SOURCE")),
         expect_match=True, results=results,
         w_label="BY_SOURCE", r_label="BY_SOURCE",
     )
-    test_compatibility(
+    check_compatibility(
         "destorder_reception_source",
         DataWriterQos(destination_order=DestinationOrder("BY_RECEPTION")),
         DataReaderQos(destination_order=DestinationOrder("BY_SOURCE")),
         expect_match=False, results=results,
         w_label="BY_RECEPTION", r_label="BY_SOURCE",
     )
-    test_compatibility(
+    check_compatibility(
         "destorder_source_reception",
         DataWriterQos(destination_order=DestinationOrder("BY_SOURCE")),
         DataReaderQos(destination_order=DestinationOrder("BY_RECEPTION")),
