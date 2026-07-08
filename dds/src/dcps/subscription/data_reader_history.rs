@@ -1095,7 +1095,9 @@ mod tests {
         ))
     }
 
-    fn create_with_key_datareader(data_reader_qos: DataReaderQos) -> DataReader<ShapeType> {
+    fn create_with_key_datareader(
+        data_reader_qos: DataReaderQos,
+    ) -> (DomainParticipant, DataReader<ShapeType>) {
         let domain_participant_factory = DomainParticipantFactory::get_instance();
         let domain_participant = domain_participant_factory
             .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
@@ -1119,7 +1121,7 @@ mod tests {
             .create_datareader::<ShapeType>(&topic, data_reader_qos, None, StatusMask::default())
             .unwrap();
 
-        reader
+        (domain_participant, reader)
     }
 
     // Same as create_with_key_datareader but with an explicit SubscriberQos and its own
@@ -1345,7 +1347,9 @@ mod tests {
         DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
-    fn create_no_key_datareader(data_reader_qos: DataReaderQos) -> DataReader<HelloWorldType> {
+    fn create_no_key_datareader(
+        data_reader_qos: DataReaderQos,
+    ) -> (DomainParticipant, DataReader<HelloWorldType>) {
         let domain_participant_factory = DomainParticipantFactory::get_instance();
         let domain_participant = domain_participant_factory
             .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
@@ -1374,7 +1378,7 @@ mod tests {
             )
             .unwrap();
 
-        reader
+        (domain_participant, reader)
     }
 
     // Reclaiming an instance drops all three per-instance resources: the cache index entry,
@@ -1383,7 +1387,7 @@ mod tests {
     fn remove_all_instance_resources_clears_index_sample_info_and_filter() {
         let mut qos = DataReaderQos::default();
         qos.time_based_filter.minimum_separation = Duration::from_millis(500);
-        let reader = create_with_key_datareader(qos);
+        let (participant, reader) = create_with_key_datareader(qos);
         let handle = InstanceHandle::new([7; 16]);
 
         // Populate all three via the filtered add path: cache index, SampleInfo state, and
@@ -1404,6 +1408,9 @@ mod tests {
         assert!(!cache_arc.lock().unwrap().contains_instance(handle));
         assert!(!reader.get_instance_infos().unwrap().contains_key(&handle));
         assert!(!cache_arc.lock().unwrap().time_based_filter.tracks_instance(handle));
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -1424,7 +1431,7 @@ mod tests {
             ..Default::default()
         };
 
-        let data_reader = create_with_key_datareader(reader_qos);
+        let (participant, data_reader) = create_with_key_datareader(reader_qos);
         let datareader_cache = data_reader.get_datareader_cache().unwrap();
         let mut datareader_cache = datareader_cache.lock().unwrap();
 
@@ -1448,6 +1455,10 @@ mod tests {
             datareader_cache.get_changes().iter().map(|c| c.sequence_number().to_i64()).collect();
         // Instance A (handle [1;16]) block first, then instance B; within a block, arrival order.
         assert_eq!(seqs, vec![2, 4, 1, 3]);
+
+        drop(datareader_cache);
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -1458,7 +1469,7 @@ mod tests {
         reader_qos.history = HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true };
         reader_qos.destination_order.kind = DestinationOrderQosPolicyKind::BySourceTimestamp;
 
-        let data_reader = create_with_key_datareader(reader_qos);
+        let (participant, data_reader) = create_with_key_datareader(reader_qos);
         let datareader_cache = data_reader.get_datareader_cache().unwrap();
         let mut datareader_cache = datareader_cache.lock().unwrap();
 
@@ -1481,6 +1492,10 @@ mod tests {
             datareader_cache.get_changes().iter().map(|c| c.sequence_number().to_i64()).collect();
         // Ordered by source timestamp ascending: seq2 (100) ahead of seq1 (200).
         assert_eq!(seqs, vec![2, 1]);
+
+        drop(datareader_cache);
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -1489,7 +1504,7 @@ mod tests {
         // before inserting, so the stored history ends up in reception order — the property the
         // BY_RECEPTION tail push relies on. Drives the real add_change path; if stamping is
         // removed or ordered after the insert, reception_timestamp is unset/out of order here.
-        let data_reader = create_with_key_datareader(DataReaderQos {
+        let (participant, data_reader) = create_with_key_datareader(DataReaderQos {
             history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
             ..Default::default()
         });
@@ -1517,6 +1532,11 @@ mod tests {
         let mut expected = stamps.clone();
         expected.sort();
         assert_eq!(stamps, expected, "stored order must follow reception_timestamp");
+
+        drop(datareader_cache);
+        drop(rtps_reader);
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -1528,7 +1548,7 @@ mod tests {
         reader_qos.history = HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true };
         reader_qos.destination_order.kind = DestinationOrderQosPolicyKind::BySourceTimestamp;
 
-        let data_reader = create_with_key_datareader(reader_qos);
+        let (participant, data_reader) = create_with_key_datareader(reader_qos);
         let datareader_cache = data_reader.get_datareader_cache().unwrap();
         let mut datareader_cache = datareader_cache.lock().unwrap();
 
@@ -1555,6 +1575,10 @@ mod tests {
             .map(|c| c.sequence_number().to_i64())
             .collect();
         assert_eq!(merged, vec![1, 2, 3, 4]);
+
+        drop(datareader_cache);
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     mod history_qos {
@@ -1574,13 +1598,17 @@ mod tests {
                 },
                 ..Default::default()
             };
-            let data_reader = create_with_key_datareader(reader_qos);
+            let (participant, data_reader) = create_with_key_datareader(reader_qos);
             let datareader_cache = data_reader.get_datareader_cache().unwrap();
             let datareader_cache = datareader_cache.lock().unwrap();
 
             assert_eq!(datareader_cache.get_max_samples(), 50);
             assert_eq!(datareader_cache.get_max_instances(), 5);
             assert_eq!(datareader_cache.get_max_samples_per_instance(), 10);
+
+            drop(datareader_cache);
+            participant.delete_contained_entities().unwrap();
+            DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
         }
 
         #[test]
@@ -1594,13 +1622,17 @@ mod tests {
                 },
                 ..Default::default()
             };
-            let data_reader = create_with_key_datareader(reader_qos);
+            let (participant, data_reader) = create_with_key_datareader(reader_qos);
             let datareader_cache = data_reader.get_datareader_cache().unwrap();
             let datareader_cache = datareader_cache.lock().unwrap();
 
             assert_eq!(datareader_cache.get_max_samples(), 20);
             assert_eq!(datareader_cache.get_max_instances(), 4);
             assert_eq!(datareader_cache.get_max_samples_per_instance(), 5);
+
+            drop(datareader_cache);
+            participant.delete_contained_entities().unwrap();
+            DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
         }
 
         #[test]
@@ -1609,13 +1641,17 @@ mod tests {
                 history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepLast(5), strict: true },
                 ..Default::default()
             };
-            let data_reader = create_with_key_datareader(reader_qos);
+            let (participant, data_reader) = create_with_key_datareader(reader_qos);
             let datareader_cache = data_reader.get_datareader_cache().unwrap();
             let datareader_cache = datareader_cache.lock().unwrap();
 
             assert_eq!(datareader_cache.get_max_samples(), 2147483647);
             assert_eq!(datareader_cache.get_max_instances(), 2147483647);
             assert_eq!(datareader_cache.get_max_samples_per_instance(), 5);
+
+            drop(datareader_cache);
+            participant.delete_contained_entities().unwrap();
+            DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
         }
 
         #[test]
@@ -1629,13 +1665,17 @@ mod tests {
                 },
                 ..Default::default()
             };
-            let data_reader = create_with_key_datareader(reader_qos);
+            let (participant, data_reader) = create_with_key_datareader(reader_qos);
             let datareader_cache = data_reader.get_datareader_cache().unwrap();
             let datareader_cache = datareader_cache.lock().unwrap();
 
             assert_eq!(datareader_cache.get_max_samples(), 20);
             assert_eq!(datareader_cache.get_max_instances(), 4);
             assert_eq!(datareader_cache.get_max_samples_per_instance(), 10);
+
+            drop(datareader_cache);
+            participant.delete_contained_entities().unwrap();
+            DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
         }
     }
 
@@ -1653,13 +1693,17 @@ mod tests {
                 },
                 ..Default::default()
             };
-            let data_reader = create_no_key_datareader(reader_qos);
+            let (participant, data_reader) = create_no_key_datareader(reader_qos);
             let datareader_cache = data_reader.get_datareader_cache().unwrap();
             let datareader_cache = datareader_cache.lock().unwrap();
 
             assert_eq!(datareader_cache.get_max_samples(), 10);
             assert_eq!(datareader_cache.get_max_instances(), 1);
             assert_eq!(datareader_cache.get_max_samples_per_instance(), 10);
+
+            drop(datareader_cache);
+            participant.delete_contained_entities().unwrap();
+            DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
         }
 
         #[test]
@@ -1679,7 +1723,7 @@ mod tests {
                 ..Default::default()
             }; // now max_samples is 3
 
-            let data_reader = create_no_key_datareader(reader_qos);
+            let (participant, data_reader) = create_no_key_datareader(reader_qos);
             let datareader_cache = data_reader.get_datareader_cache().unwrap();
             let mut datareader_cache = datareader_cache.lock().unwrap();
 
@@ -1704,6 +1748,10 @@ mod tests {
             assert!(changes.get(0).unwrap().sequence_number().to_i64() == 2);
             assert!(changes.get(1).unwrap().sequence_number().to_i64() == 3);
             assert!(changes.get(2).unwrap().sequence_number().to_i64() == 4);
+
+            drop(datareader_cache);
+            participant.delete_contained_entities().unwrap();
+            DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
         }
 
         #[test]
@@ -1723,7 +1771,7 @@ mod tests {
                 ..Default::default()
             }; // now max_samples is 3
 
-            let data_reader = create_no_key_datareader(reader_qos);
+            let (participant, data_reader) = create_no_key_datareader(reader_qos);
             let datareader_cache = data_reader.get_datareader_cache().unwrap();
             let mut datareader_cache = datareader_cache.lock().unwrap();
 
@@ -1742,6 +1790,10 @@ mod tests {
             let result = datareader_cache
                 .add_change_with_cleanup(create_change_no_key(4, InstanceHandle::NIL), false);
             assert!(matches!(result, Err(DdsError::OutOfResources)));
+
+            drop(datareader_cache);
+            participant.delete_contained_entities().unwrap();
+            DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
         }
 
         #[test]
@@ -1761,7 +1813,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let data_reader = create_with_key_datareader(reader_qos);
+            let (participant, data_reader) = create_with_key_datareader(reader_qos);
             let datareader_cache = data_reader.get_datareader_cache().unwrap();
             let mut datareader_cache = datareader_cache.lock().unwrap();
 
@@ -1787,6 +1839,10 @@ mod tests {
             // The oldest change (seq=1) should be removed, leaving only seq=2,3
             assert_eq!(changes.get(0).unwrap().sequence_number().to_i64(), 2);
             assert_eq!(changes.get(1).unwrap().sequence_number().to_i64(), 3);
+
+            drop(datareader_cache);
+            participant.delete_contained_entities().unwrap();
+            DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
         }
 
         #[test]
@@ -1806,7 +1862,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let data_reader = create_with_key_datareader(reader_qos);
+            let (participant, data_reader) = create_with_key_datareader(reader_qos);
             let datareader_cache = data_reader.get_datareader_cache().unwrap();
             let mut datareader_cache = datareader_cache.lock().unwrap();
 
@@ -1824,6 +1880,10 @@ mod tests {
             let result = datareader_cache
                 .add_change_with_cleanup(create_change_with_key(3, instance_a), false);
             assert!(matches!(result, Err(DdsError::OutOfResources)));
+
+            drop(datareader_cache);
+            participant.delete_contained_entities().unwrap();
+            DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
         }
 
         #[test]
@@ -1842,7 +1902,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let data_reader = create_with_key_datareader(reader_qos);
+            let (participant, data_reader) = create_with_key_datareader(reader_qos);
             let datareader_cache = data_reader.get_datareader_cache().unwrap();
             let mut datareader_cache = datareader_cache.lock().unwrap();
 
@@ -1931,6 +1991,10 @@ mod tests {
 
             let changes = datareader_cache.get_changes();
             assert_eq!(changes.len(), 2);
+
+            drop(datareader_cache);
+            participant.delete_contained_entities().unwrap();
+            DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
         }
 
         #[test]
@@ -1949,7 +2013,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let data_reader = create_with_key_datareader(reader_qos);
+            let (participant, data_reader) = create_with_key_datareader(reader_qos);
             let datareader_cache = data_reader.get_datareader_cache().unwrap();
             let mut datareader_cache = datareader_cache.lock().unwrap();
 
@@ -1978,6 +2042,10 @@ mod tests {
             assert_eq!(changes.get(0).unwrap().sequence_number().to_i64(), 2);
             assert_eq!(changes.get(1).unwrap().sequence_number().to_i64(), 3);
             assert_eq!(changes.get(2).unwrap().sequence_number().to_i64(), 4);
+
+            drop(datareader_cache);
+            participant.delete_contained_entities().unwrap();
+            DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
         }
 
         #[test]
@@ -1996,7 +2064,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let data_reader = create_with_key_datareader(reader_qos);
+            let (participant, data_reader) = create_with_key_datareader(reader_qos);
             let datareader_cache = data_reader.get_datareader_cache().unwrap();
             let mut datareader_cache = datareader_cache.lock().unwrap();
 
@@ -2018,6 +2086,10 @@ mod tests {
             let result = datareader_cache
                 .add_change_with_cleanup(create_change_with_key(4, instance_b), false);
             assert!(matches!(result, Err(DdsError::OutOfResources)));
+
+            drop(datareader_cache);
+            participant.delete_contained_entities().unwrap();
+            DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
         }
     }
 
@@ -2031,7 +2103,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let data_reader = create_with_key_datareader(reader_qos);
+            let (participant, data_reader) = create_with_key_datareader(reader_qos);
             let datareader_cache = data_reader.get_datareader_cache().unwrap();
             let mut datareader_cache = datareader_cache.lock().unwrap();
 
@@ -2086,6 +2158,10 @@ mod tests {
 
             assert!(is_owner_a);
             assert!(is_owner_b);
+
+            drop(datareader_cache);
+            participant.delete_contained_entities().unwrap();
+            DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
         }
 
         #[test]
@@ -2098,7 +2174,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let data_reader = create_with_key_datareader(reader_qos);
+            let (participant, data_reader) = create_with_key_datareader(reader_qos);
             let datareader_cache = data_reader.get_datareader_cache().unwrap();
             let mut datareader_cache = datareader_cache.lock().unwrap();
 
@@ -2154,6 +2230,10 @@ mod tests {
 
             assert!(is_owner_a);
             assert!(is_owner_b);
+
+            drop(datareader_cache);
+            participant.delete_contained_entities().unwrap();
+            DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
         }
 
         #[test]
@@ -2163,7 +2243,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let data_reader = create_with_key_datareader(reader_qos);
+            let (participant, data_reader) = create_with_key_datareader(reader_qos);
             let datareader_cache = data_reader.get_datareader_cache().unwrap();
             let mut datareader_cache = datareader_cache.lock().unwrap();
 
@@ -2226,6 +2306,10 @@ mod tests {
                 .is_writer_owner_of_instance(change_a.writer_guid(), change_a.instance_handle())
                 .unwrap();
             assert!(!is_owner_a);
+
+            drop(datareader_cache);
+            participant.delete_contained_entities().unwrap();
+            DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
         }
 
         #[test]
@@ -2235,7 +2319,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let data_reader = create_no_key_datareader(reader_qos);
+            let (participant, data_reader) = create_no_key_datareader(reader_qos);
             let datareader_cache = data_reader.get_datareader_cache().unwrap();
             let mut datareader_cache = datareader_cache.lock().unwrap();
 
@@ -2301,6 +2385,10 @@ mod tests {
                 .is_writer_owner_of_instance(change_a.writer_guid(), change_a.instance_handle())
                 .unwrap();
             assert!(!is_owner_a);
+
+            drop(datareader_cache);
+            participant.delete_contained_entities().unwrap();
+            DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
         }
 
         #[test]
@@ -2310,7 +2398,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let data_reader = create_no_key_datareader(reader_qos);
+            let (participant, data_reader) = create_no_key_datareader(reader_qos);
             let datareader_cache = data_reader.get_datareader_cache().unwrap();
             let mut datareader_cache = datareader_cache.lock().unwrap();
 
@@ -2376,6 +2464,10 @@ mod tests {
 
             let res = datareader_cache.add_change_with_cleanup(Arc::new(change_a_2), false);
             assert!(matches!(res, Err(DdsError::IllegalOperation)));
+
+            drop(datareader_cache);
+            participant.delete_contained_entities().unwrap();
+            DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
         }
 
         #[test]
@@ -2385,7 +2477,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let data_reader = create_no_key_datareader(reader_qos);
+            let (participant, data_reader) = create_no_key_datareader(reader_qos);
             let datareader_cache = data_reader.get_datareader_cache().unwrap();
             let mut datareader_cache = datareader_cache.lock().unwrap();
 
@@ -2451,6 +2543,10 @@ mod tests {
 
             let res = datareader_cache.add_change_with_cleanup(Arc::new(change_a_2), false);
             assert!(matches!(res, Err(DdsError::IllegalOperation)));
+
+            drop(datareader_cache);
+            participant.delete_contained_entities().unwrap();
+            DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
         }
 
         #[test]
@@ -2460,7 +2556,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let data_reader = create_with_key_datareader(reader_qos);
+            let (participant, data_reader) = create_with_key_datareader(reader_qos);
             let datareader_cache = data_reader.get_datareader_cache().unwrap();
             let mut datareader_cache = datareader_cache.lock().unwrap();
 
@@ -2511,6 +2607,10 @@ mod tests {
             let instance_info = data_reader.get_instance_infos().unwrap();
             let info = instance_info.get(&instance_handle).unwrap();
             assert_eq!(info.instance_state, InstanceStateKind::NOT_ALIVE_DISPOSED_INSTANCE_STATE);
+
+            drop(datareader_cache);
+            participant.delete_contained_entities().unwrap();
+            DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
         }
 
         #[test]
@@ -2520,7 +2620,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let data_reader = create_with_key_datareader(reader_qos);
+            let (participant, data_reader) = create_with_key_datareader(reader_qos);
             let datareader_cache = data_reader.get_datareader_cache().unwrap();
             let mut datareader_cache = datareader_cache.lock().unwrap();
 
@@ -2595,6 +2695,10 @@ mod tests {
             let instance_info = data_reader.get_instance_infos().unwrap();
             let info = instance_info.get(&instance_handle).unwrap();
             assert_eq!(info.instance_state, InstanceStateKind::ALIVE_INSTANCE_STATE);
+
+            drop(datareader_cache);
+            participant.delete_contained_entities().unwrap();
+            DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
         }
 
         #[test]
@@ -2604,7 +2708,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let data_reader = create_with_key_datareader(reader_qos);
+            let (participant, data_reader) = create_with_key_datareader(reader_qos);
             let datareader_cache = data_reader.get_datareader_cache().unwrap();
             let mut datareader_cache = datareader_cache.lock().unwrap();
 
@@ -2675,6 +2779,10 @@ mod tests {
             let instance_info = data_reader.get_instance_infos().unwrap();
             let info = instance_info.get(&instance_handle).unwrap();
             assert_eq!(info.instance_state, InstanceStateKind::ALIVE_INSTANCE_STATE);
+
+            drop(datareader_cache);
+            participant.delete_contained_entities().unwrap();
+            DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
         }
 
         #[test]
@@ -2684,7 +2792,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let data_reader = create_with_key_datareader(reader_qos);
+            let (participant, data_reader) = create_with_key_datareader(reader_qos);
             let datareader_cache = data_reader.get_datareader_cache().unwrap();
             let mut datareader_cache = datareader_cache.lock().unwrap();
 
@@ -2762,6 +2870,10 @@ mod tests {
             let instance_info = data_reader.get_instance_infos().unwrap();
             let info = instance_info.get(&instance_handle).unwrap();
             assert_eq!(info.instance_state, InstanceStateKind::NOT_ALIVE_DISPOSED_INSTANCE_STATE);
+
+            drop(datareader_cache);
+            participant.delete_contained_entities().unwrap();
+            DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
         }
 
         #[test]
@@ -2771,7 +2883,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let data_reader = create_with_key_datareader(reader_qos);
+            let (participant, data_reader) = create_with_key_datareader(reader_qos);
             let datareader_cache = data_reader.get_datareader_cache().unwrap();
             let mut datareader_cache = datareader_cache.lock().unwrap();
 
@@ -2849,6 +2961,10 @@ mod tests {
             let instance_info = data_reader.get_instance_infos().unwrap();
             let info = instance_info.get(&instance_handle).unwrap();
             assert_eq!(info.instance_state, InstanceStateKind::ALIVE_INSTANCE_STATE);
+
+            drop(datareader_cache);
+            participant.delete_contained_entities().unwrap();
+            DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
         }
 
         #[test]
@@ -2858,7 +2974,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let data_reader = create_with_key_datareader(reader_qos);
+            let (participant, data_reader) = create_with_key_datareader(reader_qos);
             let datareader_cache = data_reader.get_datareader_cache().unwrap();
             let mut datareader_cache = datareader_cache.lock().unwrap();
 
@@ -2939,6 +3055,10 @@ mod tests {
             let instance_info = data_reader.get_instance_infos().unwrap();
             let info = instance_info.get(&instance_handle).unwrap();
             assert_eq!(info.instance_state, InstanceStateKind::ALIVE_INSTANCE_STATE);
+
+            drop(datareader_cache);
+            participant.delete_contained_entities().unwrap();
+            DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
         }
 
         #[test]
@@ -2948,7 +3068,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let data_reader = create_with_key_datareader(reader_qos);
+            let (participant, data_reader) = create_with_key_datareader(reader_qos);
             let datareader_cache = data_reader.get_datareader_cache().unwrap();
             let mut datareader_cache = datareader_cache.lock().unwrap();
 
@@ -3043,6 +3163,10 @@ mod tests {
             let instance_info = data_reader.get_instance_infos().unwrap();
             let info = instance_info.get(&instance_handle).unwrap();
             assert_eq!(info.instance_state, InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE);
+
+            drop(datareader_cache);
+            participant.delete_contained_entities().unwrap();
+            DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
         }
 
         #[test]
@@ -3052,7 +3176,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let data_reader = create_with_key_datareader(reader_qos);
+            let (participant, data_reader) = create_with_key_datareader(reader_qos);
             let datareader_cache = data_reader.get_datareader_cache().unwrap();
             let mut datareader_cache = datareader_cache.lock().unwrap();
 
@@ -3114,11 +3238,15 @@ mod tests {
                 instance_info.get(&instance_b).unwrap().instance_state,
                 InstanceStateKind::ALIVE_INSTANCE_STATE
             );
+
+            drop(datareader_cache);
+            participant.delete_contained_entities().unwrap();
+            DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
         }
 
         #[test]
         fn test_dispose_twice_keeps_both_samples_in_cache() {
-            let data_reader = create_with_key_datareader(DataReaderQos {
+            let (participant, data_reader) = create_with_key_datareader(DataReaderQos {
                 history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
                 ..Default::default()
             });
@@ -3175,6 +3303,10 @@ mod tests {
                 })
                 .count();
             assert_eq!(disposed_in_cache, 2);
+
+            drop(cache);
+            participant.delete_contained_entities().unwrap();
+            DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
         }
     }
 }

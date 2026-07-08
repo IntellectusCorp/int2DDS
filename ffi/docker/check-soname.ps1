@@ -7,9 +7,9 @@
     WSL / binutils needed) from every libint2dds_ffi.so.<ver> produced by
     build-ffi-linux.ps1 under ffi/dist, and prints the soname per architecture.
 
-    The soname is embedded by ffi/build.rs as libint2dds_ffi.so.<major.minor>,
+    The soname is embedded by ffi/build.rs as libint2dds_ffi.so.<major>,
     derived from the workspace version in the repo-root Cargo.toml. For version
-    0.0.1 the expected soname is therefore "libint2dds_ffi.so.0.0".
+    0.0.1 the expected soname is therefore "libint2dds_ffi.so.0".
 
     Handles both 64-bit (x86_64, aarch64) and 32-bit (armhf) ELF objects.
 
@@ -110,7 +110,7 @@ if (-not (Test-Path $DistRoot)) {
 }
 
 # Real artifacts are libint2dds_ffi.so.<major>.<minor>.<patch> (the .so and
-# .so.<major.minor> entries are symlinks). Match the three-segment version form.
+# .so.<major> entries are symlinks). Match the three-segment version form.
 $files = Get-ChildItem $DistRoot -Recurse -File |
     Where-Object { $_.Name -match '^libint2dds_ffi\.so\.\d+\.\d+\.\d+$' }
 
@@ -130,7 +130,7 @@ $rows = foreach ($f in $files) {
 
 $rows | Format-Table -AutoSize
 
-if ($rows | Where-Object { $_.SONAME -notmatch '^libint2dds_ffi\.so\.\d+\.\d+$' }) {
+if ($rows | Where-Object { $_.SONAME -notmatch '^libint2dds_ffi\.so\.\d+$' }) {
     Write-Host "WARNING: one or more artifacts have a missing/unexpected SONAME." -ForegroundColor Red
     exit 1
 }

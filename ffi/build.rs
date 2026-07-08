@@ -106,20 +106,24 @@ Int2DdsRet int2dds_dynamic_value_as_f64  (const struct Int2DdsDynamicValue *valu
     // cdylibs, so consumers would otherwise record an unversioned dependency on
     // "libint2dds_ffi.so". We inject the soname via the linker.
     //
-    // Version source: Cargo sets CARGO_PKG_VERSION_{MAJOR,MINOR} in the build
-    // environment from this crate's `version` field in Cargo.toml. We track
-    // major.minor (not the full version) because pre-1.0 the ABI can break on
-    // minor bumps, so the soname must change whenever minor changes.
+    // Version source: Cargo sets CARGO_PKG_VERSION_MAJOR in the build environment
+    // from this crate's `version` field in Cargo.toml. We track the MAJOR only
+    // (libint2dds_ffi.so.<major>), the standard ELF convention where the soname
+    // encodes the ABI-compatibility boundary and changes only on a major bump (a
+    // deliberate ABI break).
+    //
+    // TRADE-OFF: pre-1.0 (0.x) a minor bump can also break ABI, but the soname
+    // will NOT change, so linked consumers built against an older 0.x must be
+    // rebuilt across such a break. Post-1.0 this matches normal expectations.
     //
     // Gated to Linux/ELF: the MSVC (COFF) linker rejects -Wl,-soname, and the
     // concept does not exist on Windows/macOS.
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os == "linux" {
         let major = env::var("CARGO_PKG_VERSION_MAJOR").unwrap();
-        let minor = env::var("CARGO_PKG_VERSION_MINOR").unwrap();
         // cdylib output name = package name with '-' -> '_': libint2dds_ffi.so
         let lib_name = package_name.replace('-', "_");
-        println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,lib{}.so.{}.{}", lib_name, major, minor);
+        println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,lib{}.so.{}", lib_name, major);
     }
 
     // macOS: the SONAME analog is the dylib install name plus compat/current

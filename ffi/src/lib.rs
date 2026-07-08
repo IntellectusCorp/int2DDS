@@ -50,6 +50,7 @@
 pub mod error;
 
 pub mod condition;
+pub mod config;
 pub mod context;
 pub mod data;
 pub mod discovery;

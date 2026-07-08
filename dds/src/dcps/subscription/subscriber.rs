@@ -411,6 +411,26 @@ impl Subscriber {
         self.create_datareader::<Foo>(topic_description, qos, listener, mask)
     }
 
+    /// Creates a `DataReader` from a `<domain_participant_library>` declaration at `path`
+    /// (`ParticipantLibrary::Participant::Subscriber::Reader`). The topic (name, type, QoS)
+    /// it follows and the reader QoS all come from the XML; only the Rust type `Foo` is in code.
+    pub fn create_datareader_from_config<Foo: DdsType>(
+        &self,
+        path: &str,
+        listener: Option<Arc<dyn DataReaderListener<Foo = Foo>>>,
+        mask: StatusMask,
+    ) -> DdsResult<DataReader<Foo>> {
+        let resolved = DomainParticipantFactory::get_instance().resolve_datareader(path)?;
+        let topic = self.get_participant()?.create_topic::<Foo>(
+            &resolved.topic.topic_name,
+            &resolved.topic.type_name,
+            resolved.topic.topic_qos,
+            None,
+            mask,
+        )?;
+        self.create_datareader::<Foo>(&topic, resolved.qos, listener, mask)
+    }
+
     /// Creates a `DataReader` for `DynamicData` using a `DynamicTypeSupport`.
     ///
     /// This method is used when the data type is not known at compile time.
@@ -1037,7 +1057,9 @@ impl Subscriber {
         if let Some(weak_ref) = self.participant.as_ref() {
             // Attempt to upgrade Weak<T> to Arc<T>
             if let Some(participant_arc) = weak_ref.upgrade() {
-                return Ok((*participant_arc).clone());
+                let mut participant = (*participant_arc).clone();
+                participant.self_ref = Some(participant_arc);
+                return Ok(participant);
             }
         }
 
@@ -1490,5 +1512,8 @@ mod tests {
         subscriber.delete_contained_entities().unwrap();
 
         assert!(subscriber.get_data_readers().unwrap().is_empty());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 }
