@@ -848,6 +848,12 @@ pub const PROP_TRANSPORT: &str = "int2dds.transport";
 /// `INT2DDS_INITIAL_PEERS` env var when absent.
 pub const PROP_INITIAL_PEERS: &str = "int2dds.initial_peers";
 
+/// Whether to dial peers discovered at runtime that are NOT in `initial_peers`.
+/// `false` (default): only dial `initial_peers` (or every advertised locator when
+/// `initial_peers` is empty).
+/// `true`: also dial runtime-discovered peers.
+pub const PROP_ACCEPT_UNDEFINED_PEERS: &str = "int2dds.accept_undefined_peers";
+
 /// ---------TCP QoS ----------
 /// TCP listen (server bind) port. When absent, defaults to the domain port
 /// formula `PB + DG * domain_id`.
