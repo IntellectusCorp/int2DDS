@@ -260,14 +260,18 @@ pub unsafe extern "C" fn int2dds_create_topic_with_type_info(
     let type_identifier = ti.build_type_identifier();
     let type_object = ti.build_type_object();
 
-    // Create RawTypeSupport with type info for discovery
-    let type_support = Arc::new(RawTypeSupport::with_type_info(
+    // Create RawTypeSupport with type info for discovery. Also register key fields derived
+    // from the type_info so keyed types created this way still compute instance keys
+    // (matching the create_topic_with_field_descriptors path).
+    let mut raw_type_support = RawTypeSupport::with_type_info(
         dds_type_name.clone(),
         ti.extensibility,
         ti.has_key_field(),
         type_identifier,
         type_object,
-    ));
+    );
+    raw_type_support.set_key_fields(ti.key_field_infos());
+    let type_support = Arc::new(raw_type_support);
 
     // Register the RawTypeSupport with the participant
     ffi_try!(participant_ref
