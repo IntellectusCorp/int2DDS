@@ -190,6 +190,9 @@ fn test_ownership_revoked_when_deadline_missed() {
 
     // Now weaker writer's data should be received because owner changed
     assert!(!samples.is_empty());
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -310,6 +313,9 @@ fn test_ownership_revoked_when_liveliness_lost() {
     // Weaker writer's data should be received because stronger writer lost liveliness
     assert!(!samples.is_empty());
     assert_eq!(samples[0].data().unwrap().value, 3);
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -436,6 +442,9 @@ fn test_ownership_revoked_when_deadline_missed_no_key() {
 
     // Now weaker writer's data should be received because owner changed
     assert!(!samples.is_empty());
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -553,4 +562,7 @@ fn test_ownership_revoked_when_liveliness_lost_no_key() {
     // Weaker writer's data should be received because stronger writer lost liveliness
     assert!(!samples.is_empty());
     assert_eq!(samples[0].data().unwrap().value, 3);
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
