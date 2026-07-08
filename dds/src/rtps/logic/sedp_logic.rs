@@ -568,7 +568,7 @@ impl SedpLogic {
                     return Ok(());
                 }
             } else {
-                error!("Inline qos STATUS_INFO not parsed in SubscriptionBuiltinTopicData");
+                debug!("ALIVE SubscriptionBuiltinTopicData, no STATUS_INFO parameter found");
             }
         }
 
@@ -979,7 +979,7 @@ impl SedpLogic {
                     return Ok(());
                 }
             } else {
-                error!("Inline qos STATUS_INFO not parsed in PublicationBuiltinTopicData");
+                debug!("ALIVE SubscriptionBuiltinTopicData, no STATUS_INFO parameter found");
             }
         }
 
@@ -1388,7 +1388,6 @@ impl SedpLogic {
         };
 
         let mut is_sent = false;
-        let mut peer_disconnected = false;
         let mut matched_any = false;
 
         let participant_guid = {
@@ -1398,7 +1397,7 @@ impl SedpLogic {
 
         match writer.reader_proxies().lock() {
             Ok(reader_proxies) => {
-                'outer: for reader_proxy in reader_proxies.iter() {
+                for reader_proxy in reader_proxies.iter() {
                     if reader_proxy.remote_reader_guid().prefix() != *guid_prefix {
                         continue;
                     }
@@ -1432,16 +1431,6 @@ impl SedpLogic {
                                         is_sent = true;
                                     }
                                     Err(e) => {
-                                        let disconnected = matches!(
-                                            e.kind(),
-                                            std::io::ErrorKind::BrokenPipe
-                                                | std::io::ErrorKind::ConnectionReset
-                                                | std::io::ErrorKind::ConnectionRefused
-                                        );
-                                        if disconnected {
-                                            peer_disconnected = true;
-                                            break 'outer;
-                                        }
                                         warn!("Failed to send SEDP heartbeat: {:?}", e);
                                     }
                                 }
@@ -1462,12 +1451,7 @@ impl SedpLogic {
             }
         }
 
-        if peer_disconnected {
-            let peer_guid = Guid::new(*guid_prefix, EntityId::PARTICIPANT);
-            let _ = participant.unmatch_with_remote_participant(&peer_guid);
-        }
-
-        // In case not peer_disconnected & timer had not been removed after remote participant was unmatched
+        // No matched readers remain: remove the scheduled SEDP timer.
         if !matched_any {
             if let Ok(handler) = self.timer_handler.lock() {
                 handler.remove_timer(TimerId::SedpScheduledMessage {
@@ -1767,15 +1751,8 @@ impl SedpLogic {
             return Ok(false);
         };
         for locator in remote_participant_data.metatraffic_unicast_locator_list() {
-            match self.send_to_single_locator(buffer, locator.clone(), message_type) {
-                Ok(()) => (),
-                Err(e) if e.code == RtpsErrorCode::PeerDisconnected => {
-                    let _ = participant.unmatch_with_remote_participant(
-                        &remote_participant_data.participant_guid(),
-                    );
-                    return Ok(false);
-                }
-                Err(_) => (),
+            if let Err(e) = self.send_to_single_locator(buffer, locator.clone(), message_type) {
+                debug!("[{}] send to {:?} skipped: {}", message_type, locator, e);
             }
         }
         Ok(true)
@@ -1793,23 +1770,14 @@ impl SedpLogic {
             .lock()
             .map_err(|_| RtpsError::new(RtpsErrorCode::LockError, None))?;
 
-        let mut disconnected_participants: Vec<Guid> = Vec::new();
         for remote_participant_data in remote_participant_datas_guard.iter() {
             for locator in remote_participant_data.metatraffic_unicast_locator_list() {
-                match self.send_to_single_locator(buffer, locator.clone(), message_type) {
-                    Ok(()) => (),
-                    Err(e) if e.code == RtpsErrorCode::PeerDisconnected => {
-                        disconnected_participants.push(remote_participant_data.participant_guid());
-                        break;
-                    }
-                    Err(_) => (),
+                if let Err(e) = self.send_to_single_locator(buffer, locator.clone(), message_type) {
+                    debug!("[{}] fan-out to {:?} skipped: {}", message_type, locator, e);
                 }
             }
         }
         drop(remote_participant_datas_guard);
-        for guid in disconnected_participants {
-            let _ = participant.unmatch_with_remote_participant(&guid);
-        }
 
         Ok(())
     }
@@ -1821,14 +1789,8 @@ impl SedpLogic {
         message_type: &str,
     ) -> RtpsResult<()> {
         self.transport.send(buffer, &SendTarget::SEDPDiscovery(&locator)).map_err(|e| {
-            let code = match e.kind() {
-                std::io::ErrorKind::BrokenPipe
-                | std::io::ErrorKind::ConnectionReset
-                | std::io::ErrorKind::ConnectionRefused => RtpsErrorCode::PeerDisconnected,
-                _ => RtpsErrorCode::NotSent,
-            };
             RtpsError::new(
-                code,
+                RtpsErrorCode::NotSent,
                 format!("[{}] SEDP Logic: Failed to send message: {}", message_type, e),
             )
         })?;

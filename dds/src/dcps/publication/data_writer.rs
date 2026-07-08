@@ -2571,6 +2571,9 @@ mod tests {
             initial_writers_count + 1,
             "Writer should be moved to orphaned_writers"
         );
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -2648,6 +2651,9 @@ mod tests {
             final_writers_count, initial_writers_count,
             "No writers should be added to orphaned_writers when properly deleted"
         );
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -2682,16 +2688,22 @@ mod tests {
             let rtps_writer = writer.get_rtps_writer();
             assert!(rtps_writer.is_ok());
         }
-        let mut dcps_bridge = domain_participant.get_dcps_bridge().unwrap();
-        let dcps_bridge = dcps_bridge.as_mut().unwrap();
-        dcps_bridge
-            .delete_rtps_writer(
-                "TestTopic".to_string(),
-                writer.get_instance_handle().unwrap().to_guid().entity_id(),
-            )
-            .unwrap();
+        {
+            let mut dcps_bridge = domain_participant.get_dcps_bridge().unwrap();
+            let dcps_bridge = dcps_bridge.as_mut().unwrap();
+            dcps_bridge
+                .delete_rtps_writer(
+                    "TestTopic".to_string(),
+                    writer.get_instance_handle().unwrap().to_guid().entity_id(),
+                )
+                .unwrap();
+        }
         let rtps_writer = writer.get_rtps_writer();
         assert!(rtps_writer.is_err());
+
+        drop(writer);
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     // Listener for DeadlineQos testing
@@ -2782,6 +2794,9 @@ mod tests {
             "At least one deadline miss should be detected, got {}",
             miss_count
         );
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -2831,6 +2846,9 @@ mod tests {
         writer.unregister_instance(&data, handle2).unwrap();
 
         println!("All operations completed without error with infinite deadline");
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -2903,6 +2921,9 @@ mod tests {
             count_after_dispose - count_before_dispose <= 1,
             "Deadline miss should not occur after dispose"
         );
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -2964,6 +2985,9 @@ mod tests {
             "At least 3 deadline misses expected (one per instance), got {}",
             miss_count
         );
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -3027,6 +3051,9 @@ mod tests {
             deadline_miss_count.load(Ordering::SeqCst) >= 1,
             "Deadline miss should occur after stopping writes"
         );
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -3094,6 +3121,9 @@ mod tests {
             count_before_delete, count_after_delete,
             "Deadline miss should not occur after delete (shutdown)"
         );
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     // ========================================================================
@@ -3190,7 +3220,7 @@ mod tests {
 
     #[test]
     fn test_mask_offered_incompatible_qos() {
-        let (_participant, publisher, topic) = setup_mask_test();
+        let (participant, publisher, topic) = setup_mask_test();
 
         let listener = Arc::new(MaskTestListener::new());
         let writer = publisher
@@ -3211,11 +3241,14 @@ mod tests {
                 .load(Ordering::SeqCst),
             "on_offered_incompatible_qos should be called when mask contains OFFERED_INCOMPATIBLE_QOS"
         );
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_mask_publication_matched() {
-        let (_participant, publisher, topic) = setup_mask_test();
+        let (participant, publisher, topic) = setup_mask_test();
 
         let listener = Arc::new(MaskTestListener::new());
         let writer = publisher
@@ -3240,11 +3273,14 @@ mod tests {
             listener.publication_matched_called.load(Ordering::SeqCst),
             "on_publication_matched should be called when mask contains PUBLICATION_MATCHED"
         );
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_mask_liveliness_lost() {
-        let (_participant, publisher, topic) = setup_mask_test();
+        let (participant, publisher, topic) = setup_mask_test();
 
         let listener = Arc::new(MaskTestListener::new());
         let writer = publisher
@@ -3262,11 +3298,14 @@ mod tests {
             listener.liveliness_lost_called.load(Ordering::SeqCst),
             "on_liveliness_lost should be called when mask contains LIVELINESS_LOST"
         );
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_mask_offered_deadline_missed() {
-        let (_participant, publisher, topic) = setup_mask_test();
+        let (participant, publisher, topic) = setup_mask_test();
 
         let listener = Arc::new(MaskTestListener::new());
         let writer = publisher
@@ -3287,6 +3326,9 @@ mod tests {
                 .load(Ordering::SeqCst),
             "on_offered_deadline_missed should be called when mask contains OFFERED_DEADLINE_MISSED"
         );
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     // Builds a writer with KeepLast(depth) and returns it plus a way to read the pool size.
