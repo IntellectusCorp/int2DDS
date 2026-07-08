@@ -187,7 +187,7 @@ impl TransportPlugin for HybridTransportPlugin {
     fn send(&self, data: &[u8], target: &SendTarget) -> io::Result<()> {
         match target {
             SendTarget::SPDPDiscovery { initial_peers } => {
-                // Def-C: SPDP is UDP only — multicast plus unicast to the
+                // SPDP is UDP only — multicast plus unicast to the
                 // configured initial_peers. SEDP/liveliness/user data ride TCP.
                 let _ = self.udp_sender.send_multicast(self.domain_id, data);
                 for peer_addr in *initial_peers {
@@ -230,13 +230,13 @@ impl TransportPlugin for HybridTransportPlugin {
     }
 
     fn advertised_metatraffic_unicast_locators(&self) -> Vec<Locator> {
-        // Def-C: unicast metatraffic (SEDP, liveliness) rides TCP. UDP carries
+        // unicast metatraffic (SEDP, liveliness) rides TCP. UDP carries
         // only multicast SPDP, so no UDP unicast locator is advertised.
         self.tcp_plugin.advertised_metatraffic_unicast_locators()
     }
 
     fn advertised_default_unicast_locators(&self) -> Vec<Locator> {
-        // Def-C: user data rides TCP.
+        // user data rides TCP.
         self.tcp_plugin.advertised_default_unicast_locators()
     }
 
