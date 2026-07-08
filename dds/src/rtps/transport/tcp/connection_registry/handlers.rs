@@ -1,16 +1,12 @@
-//! Inbound-frame dispatch — the connection state machine over `MuxState`.
+//! Inbound-frame dispatch — the connection state machine over `ConnectionRegistry`.
 //!
-//! These `impl MuxState` methods consume frames read by
-//! `conn_actor::reader_task` and advance each connection through its state:
-//! handshake (PEER_HELLO / PORT_BIND), control traffic (PORT_RESERVE /
-//! KEEPALIVE), and RTPS data forwarding into the DDS layer. They live in a
-//! child module so the state definition and storage stay in the parent while
-//! the transition logic is isolated here; a child module can still reach the
-//! parent type's private fields.
+//! These `impl ConnectionRegistry` methods consume frames read by
+//! `connection_tasks::reader_task` and advance each connection through its state:
+//! handshake (PEER_HELLO / PORT_BIND), control traffic (PORT_RESERVE),
+//! and RTPS data forwarding into the DDS layer.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::Ordering;
-use std::time::Instant;
 
 use log::{debug, warn};
 use tokio::sync::mpsc;
@@ -20,21 +16,22 @@ use crate::rtps::transport::plugin::IncomingMessage;
 use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::tcp::framing::{classify_frame, TcpFrameKind};
 use crate::rtps::transport::tcp::protocol::{
-    generate_cookie, ControlMsg, ERR_CODE_IDLE_TIMEOUT, ERR_CODE_INVALID_COOKIE,
-    ERR_CODE_INVALID_PORT, MSG_PORT_BIND, MSG_PORT_RESERVE, OP_IDLE_TIMEOUT,
+    decode_locator, generate_cookie, ControlMsg, ERR_CODE_INVALID_COOKIE, ERR_CODE_INVALID_PORT,
+    ERR_CODE_MISSING_LOCATOR, MSG_PEER_HELLO, MSG_PORT_BIND, MSG_PORT_RESERVE,
 };
 
 use super::{
-    addr_to_guid, send_control, ConnectionId, ConnectionState, MuxState, PeerConnectionGroup,
+    addr_to_guid, send_control, ConnectionId, ConnectionRegistry, ConnectionState,
+    PeerConnectionGroup,
 };
 
-impl MuxState {
-    // ── dispatch — entry point from conn_actor::reader_task ──────────────────
+impl ConnectionRegistry {
+    // ── dispatch — entry point from connection_tasks::reader_task ──────────────────
 
     /// Route one inbound frame based on the connection's current state.
     ///
-    /// Called from `reader_task` for every frame read off the wire. Updates
-    /// last_activity, then delegates to the per-state handler. Handlers may
+    /// Called from `reader_task` for every frame read off the wire. Reads the
+    /// connection's state, then delegates to the per-state handler. Handlers may
     /// push response frames into `writer_tx` (control acks, errors) or push
     /// RTPS data into the crossbeam channels (active state).
     #[allow(clippy::unused_async)]
@@ -44,12 +41,9 @@ impl MuxState {
         payload: Vec<u8>,
         writer_tx: &mpsc::Sender<Vec<u8>>,
     ) {
-        let state = match self.connections.get_mut(&conn_id) {
-            Some(mut entry) => {
-                entry.last_activity = Instant::now();
-                entry.state
-            }
-            None => return, // entry already removed — race with prune/close
+        let state = match self.connections.get(&conn_id) {
+            Some(entry) => entry.state,
+            None => return, // entry already removed — race with close
         };
 
         match state {
@@ -61,9 +55,6 @@ impl MuxState {
             }
             ConnectionState::Active => {
                 self.handle_active_frame(conn_id, payload);
-            }
-            ConnectionState::Closing => {
-                // Drop frames on closing connections — actor will exit shortly.
             }
         }
     }
@@ -92,24 +83,52 @@ impl MuxState {
         };
 
         match msg {
-            ControlMsg::PeerHello { locator: _ } => {
+            ControlMsg::PeerHello { locator } => {
+                // A peer must advertise its listener locator so we can identify it
+                // (and group its inbound connection with its outbound ones). A
+                // missing/zero locator is a contract violation — reject it.
+                let (adv_ip, adv_port) = decode_locator(&locator);
+                if adv_port == 0 || adv_ip.is_unspecified() {
+                    warn!(
+                        "TcpMuxListener [{}]: PEER_HELLO without a locator on conn {} — rejecting",
+                        TransportErrorCode::TcpHandshakeHelloFailed,
+                        conn_id
+                    );
+                    send_control(
+                        writer_tx,
+                        &ControlMsg::Error {
+                            operation: MSG_PEER_HELLO,
+                            code: ERR_CODE_MISSING_LOCATOR,
+                            message: "PEER_HELLO missing advertised locator".to_string(),
+                        },
+                    );
+                    if let Some(entry) = self.connections.get(&conn_id) {
+                        entry.cancel.cancel();
+                    }
+                    return;
+                }
+
                 send_control(writer_tx, &ControlMsg::PeerHelloAck);
 
                 if let Some(mut conn) = self.connections.get_mut(&conn_id) {
                     conn.state = ConnectionState::Control;
                 }
 
-                // Register in peer group (synthetic guid from remote address).
-                let remote_addr = self.connections.get(&conn_id).map(|c| c.remote_addr);
-                if let Some(addr) = remote_addr {
-                    let synthetic_guid = addr_to_guid(addr);
-                    let mut pc = self.peer_connections.lock().expect("peer_connections lock");
-                    let group = pc.entry(synthetic_guid).or_insert_with(PeerConnectionGroup::new);
-                    group.control_conn = Some(conn_id);
+                // Group this inbound connection under the peer's advertised
+                // listener address, matching its outbound connections.
+                let addr = SocketAddr::new(IpAddr::V4(adv_ip), adv_port);
 
-                    if let Some(mut conn) = self.connections.get_mut(&conn_id) {
-                        conn.remote_guid_prefix = Some(synthetic_guid);
-                    }
+                // The peer reached us, so it is up: clear any outbound reconnect
+                // backoff for its address so our next dial is not delayed.
+                self.clear_backoff(addr);
+
+                let synthetic_guid = addr_to_guid(addr);
+                let mut pc = self.peer_connections.lock().expect("peer_connections lock");
+                let group = pc.entry(synthetic_guid).or_insert_with(PeerConnectionGroup::new);
+                group.control_conn = Some(conn_id);
+
+                if let Some(mut conn) = self.connections.get_mut(&conn_id) {
+                    conn.remote_guid_prefix = Some(synthetic_guid);
                 }
 
                 debug!("TcpMuxListener: PEER_HELLO ok (conn={})", conn_id);
@@ -199,55 +218,7 @@ impl MuxState {
                 );
             }
 
-            ControlMsg::Keepalive => {
-                send_control(writer_tx, &ControlMsg::KeepaliveAck);
-            }
-
-            // Outbound responses on this (control) connection. `dispatch` has
-            // already refreshed `last_activity`; here we wake the connect_task
-            // awaiting the answer via the single-slot oneshot mailbox.
-            //
-            // KEEPALIVE_ACK is handled separately so it does NOT consume the
-            // pending_ack slot — otherwise a periodic keepalive ack could steal
-            // the cookie destined for a pending PORT_RESERVE.
-            ControlMsg::KeepaliveAck => {
-                // Just record the arrival time. The sender's
-                // keepalive_interval_task compares this with
-                // `last_keepalive_sent_at` on each tick to decide whether
-                // the round-trip met `keepalive_timeout`; the counter
-                // reset / increment decision lives there, not here.
-                if let Some(entry) = self.connections.get(&conn_id) {
-                    *entry.last_keepalive_ack_at.lock().expect("last_keepalive_ack_at lock") =
-                        Some(Instant::now());
-                }
-            }
-
             ControlMsg::Error { operation, code, message } => {
-                // Peer (server) signalled this control connection is being
-                // torn down for idle timeout. Invalidate immediately so the
-                // next send_to spawns a fresh PEER_HELLO instead of pushing
-                // PORT_RESERVE down a dying socket and waiting out the
-                // handshake timeout.
-                if operation == OP_IDLE_TIMEOUT && code == ERR_CODE_IDLE_TIMEOUT {
-                    debug!(
-                        "TcpMuxListener: peer signalled idle timeout on conn {} — tearing down",
-                        conn_id
-                    );
-                    // Surface to any in-flight PORT_RESERVE waiter (fail fast).
-                    // No stray-warn — this Error is unsolicited by design.
-                    let _ = self.route_response_to_waiter(
-                        conn_id,
-                        ControlMsg::Error { operation, code, message },
-                    );
-                    // Cancel the actor pair. The sender's outbound cache is
-                    // evicted on the next send_to (try_send → Closed branch)
-                    // or by orphan_prune.
-                    if let Some(entry) = self.connections.get(&conn_id) {
-                        entry.cancel.cancel();
-                    }
-                    return;
-                }
-
                 let response = ControlMsg::Error { operation, code, message };
                 let kind = response.type_name();
                 if !self.route_response_to_waiter(conn_id, response) {

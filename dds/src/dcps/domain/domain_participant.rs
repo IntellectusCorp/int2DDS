@@ -1671,6 +1671,49 @@ impl DomainParticipant {
         self.create_topic::<Foo>(topic_name, type_name, qos, listener, mask)
     }
 
+    /// Creates a `Topic` from a `<domain_library>` declaration loaded via
+    /// [`DomainParticipantFactory::load_profiles`]. The topic name, registered type
+    /// name, and topic QoS are taken from the XML at `path` (`DomainLibrary::Domain::Topic`);
+    /// the Rust type `Foo` must match the declared type.
+    pub fn create_topic_from_domain<Foo>(
+        &self,
+        path: &str,
+        listener: Option<Arc<dyn TopicListener>>,
+        mask: StatusMask,
+    ) -> DdsResult<Topic>
+    where
+        Foo: DdsType,
+    {
+        let resolved = DomainParticipantFactory::get_instance().resolve_topic(path)?;
+        self.create_topic::<Foo>(
+            &resolved.topic_name,
+            &resolved.type_name,
+            resolved.topic_qos,
+            listener,
+            mask,
+        )
+    }
+
+    /// Like [`create_topic_from_domain`](Self::create_topic_from_domain) but resolves the
+    /// type from the `<types>` section into a `DynamicData` topic (no Rust type required).
+    pub fn create_topic_from_domain_dynamic(
+        &self,
+        path: &str,
+        listener: Option<Arc<dyn TopicListener>>,
+        mask: StatusMask,
+    ) -> DdsResult<Topic> {
+        let factory = DomainParticipantFactory::get_instance();
+        let resolved = factory.resolve_topic(path)?;
+        let type_support = factory.get_dynamic_type_support(&resolved.type_ref)?;
+        self.create_topic_dynamic(
+            &resolved.topic_name,
+            Arc::new(type_support),
+            resolved.topic_qos,
+            listener,
+            mask,
+        )
+    }
+
     /// Creates a builtin topic for internal use.
     ///
     /// Builtin topics are used for discovery protocol (DCPSParticipant, DCPSPublication,

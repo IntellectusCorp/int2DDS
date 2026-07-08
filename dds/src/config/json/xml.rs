@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use roxmltree::{Document, Node};
 use serde_json::{Map, Number, Value};
 
+use crate::config::types::domain_library::DomainLibrary;
+use crate::config::types::participant_library::ParticipantLibrary;
 use crate::config::types::qos_profile::QosLibrary;
 use crate::dcps::core::error::{DdsError, DdsResult};
 
@@ -51,11 +53,59 @@ pub(crate) fn parse_qos_libraries(xml: &str) -> DdsResult<Vec<QosLibrary>> {
         .collect()
 }
 
+/// Parses `<domain_library>` definitions from a `<dds>` root; returns an empty list
+/// when none are present (other roots are ignored so a QoS-only file still loads).
+pub(crate) fn parse_domain_libraries(xml: &str) -> DdsResult<Vec<DomainLibrary>> {
+    parse_named_sections(xml, "domain_library", "domain")
+}
+
+/// Parses `<domain_participant_library>` definitions; same root rules as above.
+pub(crate) fn parse_participant_libraries(xml: &str) -> DdsResult<Vec<ParticipantLibrary>> {
+    parse_named_sections(xml, "domain_participant_library", "participant")
+}
+
+// Collects top-level `<section>` elements under `<dds>` (or a standalone section
+// root) and deserializes each via the shared XML→JSON conversion.
+fn parse_named_sections<T: serde::de::DeserializeOwned>(
+    xml: &str,
+    section: &str,
+    label: &str,
+) -> DdsResult<Vec<T>> {
+    let doc = Document::parse(xml)
+        .map_err(|e| DdsError::Error(format!("XML {label}: parse error: {e}")))?;
+    let root = doc.root_element();
+    let nodes: Vec<Node> = match root.tag_name().name() {
+        "dds" => root
+            .children()
+            .filter(Node::is_element)
+            .filter(|n| n.tag_name().name() == section)
+            .collect(),
+        name if name == section => vec![root],
+        _ => Vec::new(),
+    };
+
+    nodes
+        .into_iter()
+        .map(|node| {
+            serde_json::from_value(element_to_value(node))
+                .map_err(|e| DdsError::Error(format!("XML {label}: invalid {section}: {e}")))
+        })
+        .collect()
+}
+
+// RTI repeats container elements; map each to its plural model field name.
 fn rename_key(tag: &str) -> &str {
-    if tag == "qos_profile" {
-        "qos_profiles"
-    } else {
-        tag
+    match tag {
+        "qos_profile" => "qos_profiles",
+        "domain" => "domains",
+        "register_type" => "register_types",
+        "topic" => "topics",
+        "domain_participant" => "domain_participants",
+        "publisher" => "publishers",
+        "subscriber" => "subscribers",
+        "data_writer" => "data_writers",
+        "data_reader" => "data_readers",
+        other => other,
     }
 }
 
@@ -112,7 +162,16 @@ fn is_array(parent_tag: &str, key: &str, count: usize, any_named: bool) -> bool 
         return true;
     }
     match key {
-        "qos_profiles" | "element" => true,
+        "qos_profiles"
+        | "element"
+        | "domains"
+        | "register_types"
+        | "topics"
+        | "domain_participants"
+        | "publishers"
+        | "subscribers"
+        | "data_writers"
+        | "data_readers" => true,
         "value" => matches!(parent_tag, "data_representation" | "property"),
         k if ENTITY_QOS_KEYS.contains(&k) => any_named,
         _ => false,
@@ -231,5 +290,67 @@ mod tests {
         </dds>"#;
         let qos = provider(xml).get_datawriter_qos("L::P").unwrap();
         assert_eq!(qos.reliability.kind, ReliabilityQosPolicyKind::Reliable);
+    }
+
+    #[test]
+    fn domain_library_resolves_topic_with_inherited_qos() {
+        // A single <domain>/<register_type>/<topic> must still parse as arrays, and the
+        // topic's `base_name` must inherit QoS from the referenced qos_library profile.
+        let xml = r#"<dds>
+            <qos_library name="QL"><qos_profile name="P">
+                <topic_qos><reliability><kind>RELIABLE_RELIABILITY_QOS</kind></reliability></topic_qos>
+            </qos_profile></qos_library>
+            <domain_library name="DL">
+                <domain name="D0" domain_id="0">
+                    <register_type name="HelloWorldType" type_ref="HelloWorldType"/>
+                    <topic name="hello_world_topic" register_type_ref="HelloWorldType">
+                        <topic_qos base_name="QL::P"/>
+                    </topic>
+                </domain>
+            </domain_library>
+        </dds>"#;
+        let resolved = provider(xml).resolve_topic("DL::D0::hello_world_topic").unwrap();
+        assert_eq!(resolved.topic_name, "hello_world_topic");
+        assert_eq!(resolved.type_name, "HelloWorldType");
+        assert_eq!(resolved.type_ref, "HelloWorldType");
+        assert_eq!(resolved.topic_qos.reliability.kind, ReliabilityQosPolicyKind::Reliable);
+    }
+
+    #[test]
+    fn participant_library_resolves_tree_and_writer() {
+        let xml = r#"<dds>
+            <qos_library name="QL"><qos_profile name="P">
+                <datawriter_qos><reliability><kind>RELIABLE_RELIABILITY_QOS</kind></reliability></datawriter_qos>
+            </qos_profile></qos_library>
+            <domain_library name="DL">
+                <domain name="D0" domain_id="7">
+                    <register_type name="HelloWorldType" type_ref="HelloWorldType"/>
+                    <topic name="hello_world_topic" register_type_ref="HelloWorldType"/>
+                </domain>
+            </domain_library>
+            <domain_participant_library name="PL">
+                <domain_participant name="PubApp" domain_ref="DL::D0">
+                    <publisher name="pub">
+                        <data_writer name="writer" topic_ref="hello_world_topic">
+                            <datawriter_qos base_name="QL::P"/>
+                        </data_writer>
+                    </publisher>
+                </domain_participant>
+            </domain_participant_library>
+        </dds>"#;
+        let p = provider(xml);
+
+        // The writer's topic comes from its topic_ref, its QoS from base_name inheritance.
+        let writer = p.resolve_datawriter("PL::PubApp::pub::writer").unwrap();
+        assert_eq!(writer.topic.topic_name, "hello_world_topic");
+        assert_eq!(writer.topic.type_name, "HelloWorldType");
+        assert_eq!(writer.qos.reliability.kind, ReliabilityQosPolicyKind::Reliable);
+
+        // The whole tree resolves, with domain_id parsed from the string attribute.
+        let tree = p.resolve_participant("PL::PubApp").unwrap();
+        assert_eq!(tree.domain_id, 7);
+        assert_eq!(tree.publishers.len(), 1);
+        assert_eq!(tree.publishers[0].writers.len(), 1);
+        assert_eq!(tree.publishers[0].writers[0].name, "writer");
     }
 }

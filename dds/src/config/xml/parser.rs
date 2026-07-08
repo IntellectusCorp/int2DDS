@@ -48,8 +48,14 @@ const BITFIELD_ATTRS: &[&str] = &["name", "bit_bound", "bitBound", "type"];
 const CONST_ATTRS: &[&str] = &["name", "type", "value"];
 const FORWARD_DCL_ATTRS: &[&str] = &["name", "kind", "type"];
 const INCLUDE_ATTRS: &[&str] = &["file"];
-const SKIPPED_DDS_SECTIONS: &[&str] =
-    &["qos_library", "domain_library", "profiles", "log", "library_settings"];
+const SKIPPED_DDS_SECTIONS: &[&str] = &[
+    "qos_library",
+    "domain_library",
+    "domain_participant_library",
+    "profiles",
+    "log",
+    "library_settings",
+];
 
 type ConstTable = std::collections::HashMap<String, ConstValue>;
 
