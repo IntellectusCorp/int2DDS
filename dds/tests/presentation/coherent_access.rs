@@ -96,4 +96,7 @@ fn coherent_set_is_withheld_until_end_coherent_changes() {
     let mut values: Vec<i16> = samples.iter().map(|s| s.data().unwrap().value).collect();
     values.sort_unstable();
     assert_eq!(values, vec![10, 20, 30]);
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
