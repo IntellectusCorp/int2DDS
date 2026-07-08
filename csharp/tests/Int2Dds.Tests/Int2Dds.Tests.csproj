@@ -53,4 +53,8 @@
     <ProjectReference Include="..\..\src\Int2Dds\Int2Dds.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Update="sensor_data.xml" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

@@ -12,11 +12,15 @@ use int2dds::{
         instance_handle::InstanceHandle,
         log::{LogLevel, LogType},
     },
+    core::time::Duration as DdsDuration,
     domain::{domain_participant_factory::DomainParticipantFactory, qos::PARTICIPANT_QOS_DEFAULT},
-    infrastructure::status::StatusMask,
+    infrastructure::{
+        qos_policy::{ReliabilityQosPolicy, ReliabilityQosPolicyKind},
+        status::StatusMask,
+    },
     publication::{
         data_writer_listener::DataWriterListener,
-        qos::{DATAWRITER_QOS_DEFAULT, PUBLISHER_QOS_DEFAULT},
+        qos::{DataWriterQos, PUBLISHER_QOS_DEFAULT},
     },
     topic::{qos::TOPIC_QOS_DEFAULT, type_support::DdsType},
 };
@@ -25,10 +29,11 @@ use log::info;
 const TOPIC_NAME: &str = "hello_world_topic";
 const PUBLISH_INTERVAL: StdDuration = StdDuration::from_millis(1000);
 
-/// The domain id is the only CLI option; everything else is fixed.
+/// Reliability is selectable on the CLI; the remaining QoS comes from the
+/// spec default. Richer profiles live in the int2DDS-examples repository.
 #[derive(Parser, Debug)]
 #[command(
-    about = "Hello World DDS Publisher (QoS via profile or spec default)",
+    about = "Hello World DDS Publisher (best-effort by default, --reliable for reliable)",
     disable_help_flag = true
 )]
 struct Args {
@@ -39,11 +44,15 @@ struct Args {
     /// Domain ID
     #[arg(short = 'd', long, default_value_t = 0)]
     domain: i32,
+
+    /// Use RELIABLE reliability (default is BEST_EFFORT)
+    #[arg(long, default_value_t = false)]
+    reliable: bool,
 }
 
+// HelloWorld type generated from idl/input/HelloWorld.idl by int2dds-idl.
 #[derive(DdsType)]
-#[dds_type(crate_path = "int2dds", extensibility = "final")]
-struct HelloWorldType {
+struct HelloWorld {
     index: u32,
     message: String,
 }
@@ -51,7 +60,7 @@ struct HelloWorldType {
 struct PubListener;
 
 impl DataWriterListener for PubListener {
-    type Foo = HelloWorldType;
+    type Foo = HelloWorld;
     fn on_publication_matched(
         &self,
         _writer: &int2dds::publication::data_writer::DataWriter<Self::Foo>,
@@ -77,7 +86,13 @@ fn main() {
     set_log_type(LogType::Console);
     set_console_log_level(LogLevel::Info);
 
-    let domain_id = Args::parse().domain;
+    let args = Args::parse();
+    let domain_id = args.domain;
+    let reliability_kind = if args.reliable {
+        ReliabilityQosPolicyKind::Reliable
+    } else {
+        ReliabilityQosPolicyKind::BestEffort
+    };
     let shutdown = Shutdown::install();
     let factory = DomainParticipantFactory::get_instance();
 
@@ -85,9 +100,9 @@ fn main() {
         .create_participant(domain_id, PARTICIPANT_QOS_DEFAULT, None, StatusMask::default())
         .unwrap();
     let topic = participant
-        .create_topic::<HelloWorldType>(
+        .create_topic::<HelloWorld>(
             TOPIC_NAME,
-            "HelloWorldType",
+            "HelloWorld",
             TOPIC_QOS_DEFAULT,
             None,
             StatusMask::default(),
@@ -95,10 +110,17 @@ fn main() {
         .unwrap();
     let publisher =
         participant.create_publisher(PUBLISHER_QOS_DEFAULT, None, StatusMask::default()).unwrap();
+    let writer_qos = DataWriterQos {
+        reliability: ReliabilityQosPolicy {
+            kind: reliability_kind,
+            max_blocking_time: DdsDuration { sec: 0, nanosec: 100_000_000 },
+        },
+        ..Default::default()
+    };
     let writer = publisher
-        .create_datawriter::<HelloWorldType>(
+        .create_datawriter::<HelloWorld>(
             &topic,
-            DATAWRITER_QOS_DEFAULT,
+            writer_qos,
             Some(Arc::new(PubListener)),
             StatusMask::default(),
         )
@@ -130,7 +152,7 @@ fn main() {
 
     let mut index = 1;
     while !shutdown.is_stopped() {
-        let data = HelloWorldType {
+        let data = HelloWorld {
             index,
             message: format!("[{:?}]HelloWorld_d{}", hostname::get().unwrap(), domain_id),
         };

@@ -11,8 +11,7 @@ use int2dds_ffi::error::*;
 use int2dds_ffi::xml::*;
 
 fn xml_path(name: &str) -> CString {
-    let p: PathBuf =
-        [env!("CARGO_MANIFEST_DIR"), "..", "dds", "examples", "xtypes", name].iter().collect();
+    let p: PathBuf = [env!("CARGO_MANIFEST_DIR"), "tests", name].iter().collect();
     assert!(p.exists(), "missing example XML: {}", p.display());
     CString::new(p.to_str().unwrap()).unwrap()
 }
