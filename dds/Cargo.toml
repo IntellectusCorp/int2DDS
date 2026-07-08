@@ -91,23 +91,6 @@ path = "examples/hello_world/hello_world_pub.rs"
 name = "hello_world_sub"
 path = "examples/hello_world/hello_world_sub.rs"
 
-[[example]]
-name = "dynamic_type_publisher"
-path = "examples/xtypes/dynamic_type_publisher.rs"
-
-[[example]]
-name = "dynamic_type_subscriber"
-path = "examples/xtypes/dynamic_type_subscriber.rs"
-
-[[example]]
-name = "xml_type_publisher"
-path = "examples/xtypes/xml_type_publisher.rs"
-
-[[example]]
-name = "route_gateway"
-path = "examples/route_gateway/route_gateway.rs"
-required-features = []
-
 [dev-dependencies]
 husky-rs = "0.1.5"
 criterion = { version = "0.7.0", features = ["html_reports"] }

@@ -22,7 +22,9 @@ use std::os::raw::c_char;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use int2dds::domain::domain_participant_factory::{ConfiguredParticipant, DomainParticipantFactory};
+use int2dds::domain::domain_participant_factory::{
+    ConfiguredParticipant, DomainParticipantFactory,
+};
 
 use crate::dynamic::{
     Int2DdsDynamicDataReader, Int2DdsDynamicDataWriter, Int2DdsDynamicTypeSupport,
