@@ -263,7 +263,7 @@ The C# build does **not** auto-copy the native FFI dll. Copy it next to the exec
 
 ```bash
 # Windows; adjust the TFM (net8.0, net6.0, …) as needed
-cp target/release/int2dds_ffi.dll csharp/examples/HelloWorldPublisher/bin/Release/net8.0/
+cp target/release/int2dds_ffi.dll csharp/examples/HelloWorldPub/bin/Release/net8.0/
 ```
 
 > Run from an ASCII path — the FFI loader currently fails silently on paths containing non-ASCII characters (e.g. Korean).
@@ -310,19 +310,21 @@ cargo run --release --example hello_world_pub -- --domain 0
 cargo run --release --example hello_world_sub -- --domain 0
 
 # C# (requires int2dds_ffi.dll copied next to the exe; see step 3)
-dotnet run -c Release --project csharp/examples/HelloWorldPublisher -f net8.0
-dotnet run -c Release --project csharp/examples/HelloWorldSubscriber -f net8.0
+dotnet run -c Release --project csharp/examples/HelloWorldPub -f net8.0
+dotnet run -c Release --project csharp/examples/HelloWorldSub -f net8.0
 
 # Python
-python python/examples/hello_world_publisher.py
-python python/examples/hello_world_subscriber.py
+python python/examples/hello_world_pub.py
+python python/examples/hello_world_sub.py
 ```
+
+> These are the minimal per-language hello_world smoke examples that ship in the core repo.
 
 ## Documentation
 
 - **API Documentation**: Run `cargo doc --open --no-deps` to generate and view API docs
 - **Contributing**: See [CONTRIBUTING.md](https://github.com/IntellectusCorp/int2DDS/blob/main/CONTRIBUTING.md) for contribution guidelines
-- **Examples**: Check the [dds/examples/](https://github.com/IntellectusCorp/int2DDS/tree/main/dds/examples) directory for comprehensive examples
+- **Examples**: The core repo ships a minimal per-language hello_world; the comprehensive, topic-organized examples live in the separate [int2DDS-examples](https://github.com/IntellectusCorp/int2DDS-examples) repository
 
 ## Environment Variables
 
@@ -367,7 +369,7 @@ int2DDS/
 │   │   ├── dcps/     # DCPS layer (entities, QoS, topics)
 │   │   ├── rtps/     # RTPS protocol layer
 │   │   └── common/   # Shared utilities
-│   ├── examples/     # Example programs
+│   ├── examples/     # Minimal hello_world examples
 │   ├── tests/        # Integration tests
 │   └── benches/      # Performance benchmarks
 ├── derive/           # DdsType derive macro
