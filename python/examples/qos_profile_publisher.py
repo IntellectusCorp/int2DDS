@@ -2,7 +2,7 @@
 """
 QoS Profile Publisher Example (Python)
 
-Loads QoS settings from an XML profile file (RTI/OMG <qos_library> syntax) and
+Loads QoS settings from an XML profile file (OMG <qos_library> syntax) and
 publishes HelloWorld samples with the profile applied. int2dds auto-loads the
 profiles named by the DDS_QOS_PROFILE environment variable when the participant
 factory is first created; the profile marked is_default_profile="true" is then

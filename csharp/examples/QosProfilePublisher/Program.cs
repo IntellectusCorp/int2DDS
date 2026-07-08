@@ -6,7 +6,7 @@ using Int2Dds.Core;
 
 namespace QosProfilePublisher
 {
-    // Loads QoS settings from an XML profile file (RTI/OMG <qos_library> syntax) and
+    // Loads QoS settings from an XML profile file and
     // publishes HelloWorld samples with the named profile applied. int2dds auto-loads
     // the profiles named by the DDS_QOS_PROFILE environment variable when the participant
     // factory is first created; the CreateWithProfile APIs then pick a profile by path.

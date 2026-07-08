@@ -1,7 +1,7 @@
 /**
  * int2dds FFI QoS Profile Publisher Example
  *
- * Loads QoS settings from an XML profile file (RTI/OMG <qos_library> syntax)
+ * Loads QoS settings from an XML profile file (OMG <qos_library> syntax)
  * and creates the entities with the named profile. The profile is loaded by the
  * factory from the DDS_QOS_PROFILE environment variable; this example sets that
  * variable to the bundled qos_profiles.xml before the factory is created (so a
