@@ -267,7 +267,7 @@ impl<'a> PyGen<'a> {
         match ty {
             ResolvedType::Bool => "read_bool",
             ResolvedType::I8 => "read_i8",
-            ResolvedType::U8 => "read_u8",
+            ResolvedType::U8 | ResolvedType::UInt8 => "read_u8",
             ResolvedType::I16 => "read_i16",
             ResolvedType::U16 => "read_u16",
             ResolvedType::I32 => "read_i32",
@@ -282,7 +282,7 @@ impl<'a> PyGen<'a> {
         match ty {
             ResolvedType::Bool => "write_bool",
             ResolvedType::I8 => "write_i8",
-            ResolvedType::U8 => "write_u8",
+            ResolvedType::U8 | ResolvedType::UInt8 => "write_u8",
             ResolvedType::I16 => "write_i16",
             ResolvedType::U16 => "write_u16",
             ResolvedType::I32 => "write_i32",
@@ -593,7 +593,7 @@ impl<'a> PyGen<'a> {
     fn type_to_python(ty: &ResolvedType) -> String {
         match ty {
             ResolvedType::Bool => "bool".to_string(),
-            ResolvedType::U8 | ResolvedType::I8 => "int".to_string(),
+            ResolvedType::U8 | ResolvedType::UInt8 | ResolvedType::I8 => "int".to_string(),
             ResolvedType::I16 | ResolvedType::U16 => "int".to_string(),
             ResolvedType::I32 | ResolvedType::U32 => "int".to_string(),
             ResolvedType::I64 | ResolvedType::U64 => "int".to_string(),
@@ -620,7 +620,7 @@ impl<'a> PyGen<'a> {
     fn default_value(&self, ty: &ResolvedType) -> String {
         match ty {
             ResolvedType::Bool => "False".to_string(),
-            ResolvedType::U8 | ResolvedType::I8 => "0".to_string(),
+            ResolvedType::U8 | ResolvedType::UInt8 | ResolvedType::I8 => "0".to_string(),
             ResolvedType::I16 | ResolvedType::U16 => "0".to_string(),
             ResolvedType::I32 | ResolvedType::U32 => "0".to_string(),
             ResolvedType::I64 | ResolvedType::U64 => "0".to_string(),
@@ -818,7 +818,9 @@ impl<'a> PyGen<'a> {
     fn emit_write_field(&mut self, ty: &ResolvedType, accessor: &str) {
         match ty {
             ResolvedType::Bool => self.line(&format!("w.write_bool({})", accessor)),
-            ResolvedType::U8 => self.line(&format!("w.write_u8({})", accessor)),
+            ResolvedType::U8 | ResolvedType::UInt8 => {
+                self.line(&format!("w.write_u8({})", accessor))
+            }
             ResolvedType::I8 => self.line(&format!("w.write_i8({})", accessor)),
             ResolvedType::I16 => self.line(&format!("w.write_i16({})", accessor)),
             ResolvedType::U16 => self.line(&format!("w.write_u16({})", accessor)),
@@ -1089,7 +1091,7 @@ impl<'a> PyGen<'a> {
     fn emit_read_field(&mut self, ty: &ResolvedType, name: &str) {
         match ty {
             ResolvedType::Bool => self.line(&format!("{} = r.read_bool()", name)),
-            ResolvedType::U8 => self.line(&format!("{} = r.read_u8()", name)),
+            ResolvedType::U8 | ResolvedType::UInt8 => self.line(&format!("{} = r.read_u8()", name)),
             ResolvedType::I8 => self.line(&format!("{} = r.read_i8()", name)),
             ResolvedType::I16 => self.line(&format!("{} = r.read_i16()", name)),
             ResolvedType::U16 => self.line(&format!("{} = r.read_u16()", name)),
@@ -1184,7 +1186,9 @@ impl<'a> PyGen<'a> {
     fn emit_write_key_field(&mut self, ty: &ResolvedType, accessor: &str) {
         match ty {
             ResolvedType::Bool => self.line(&format!("w.write_bool({})", accessor)),
-            ResolvedType::U8 => self.line(&format!("w.write_u8({})", accessor)),
+            ResolvedType::U8 | ResolvedType::UInt8 => {
+                self.line(&format!("w.write_u8({})", accessor))
+            }
             ResolvedType::I8 => self.line(&format!("w.write_i8({})", accessor)),
             ResolvedType::I16 => self.line(&format!("w.write_i16({})", accessor)),
             ResolvedType::U16 => self.line(&format!("w.write_u16({})", accessor)),
