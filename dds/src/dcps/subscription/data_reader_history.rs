@@ -1015,7 +1015,10 @@ mod tests {
     use crate::rtps::entities::history::cache_change::PresentationInfo;
     use crate::{
         core::time::Duration,
-        domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
+        domain::{
+            domain_participant::DomainParticipant,
+            domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos,
+        },
         infrastructure::status::StatusMask,
         rtps::common::{
             entity_id::EntityId, entity_kind::EntityKind, guid::Guid, sequence::SequenceNumber,
@@ -1119,14 +1122,20 @@ mod tests {
         reader
     }
 
-    // Same as create_with_key_datareader but with an explicit SubscriberQos.
+    // Same as create_with_key_datareader but with an explicit SubscriberQos and its own
+    // participant on a unique domain, returned for the test's teardown.
     fn create_with_key_datareader_in_subscriber(
         subscriber_qos: SubscriberQos,
         data_reader_qos: DataReaderQos,
-    ) -> DataReader<ShapeType> {
+    ) -> (DomainParticipant, DataReader<ShapeType>) {
         let domain_participant_factory = DomainParticipantFactory::get_instance();
         let domain_participant = domain_participant_factory
-            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
             .unwrap();
 
         let topic = domain_participant
@@ -1143,9 +1152,11 @@ mod tests {
             .create_subscriber(subscriber_qos, None, StatusMask::default())
             .unwrap();
 
-        subscriber
+        let reader = subscriber
             .create_datareader::<ShapeType>(&topic, data_reader_qos, None, StatusMask::default())
-            .unwrap()
+            .unwrap();
+
+        (domain_participant, reader)
     }
 
     fn topic_coherent_subscriber_qos() -> SubscriberQos {
@@ -1190,7 +1201,7 @@ mod tests {
     fn coherent_set_commits_all_members_on_end_marker() {
         // Members are buffered (nothing available) until the end marker commits them all
         // at once; the marker itself is never stored.
-        let data_reader = create_with_key_datareader_in_subscriber(
+        let (participant, data_reader) = create_with_key_datareader_in_subscriber(
             topic_coherent_subscriber_qos(),
             DataReaderQos {
                 history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
@@ -1223,12 +1234,16 @@ mod tests {
             .map(|c| c.sequence_number().to_i64())
             .collect();
         assert_eq!(stored, vec![1, 2, 3], "marker must not be stored");
+
+        drop(rtps_reader);
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     #[test]
     fn coherent_set_with_middle_gap_is_discarded() {
         // Member 2 never arrives: the end marker finds the hole and drops the whole set.
-        let data_reader = create_with_key_datareader_in_subscriber(
+        let (participant, data_reader) = create_with_key_datareader_in_subscriber(
             topic_coherent_subscriber_qos(),
             DataReaderQos {
                 history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
@@ -1251,12 +1266,16 @@ mod tests {
 
         let datareader_cache = data_reader.get_datareader_cache().unwrap();
         assert!(datareader_cache.lock().unwrap().get_changes().is_empty());
+
+        drop(rtps_reader);
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     #[test]
     fn coherent_set_with_lost_tail_is_discarded() {
         // Members are contiguous but the marker seq shows the last member was lost.
-        let data_reader = create_with_key_datareader_in_subscriber(
+        let (participant, data_reader) = create_with_key_datareader_in_subscriber(
             topic_coherent_subscriber_qos(),
             DataReaderQos {
                 history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
@@ -1280,16 +1299,23 @@ mod tests {
 
         let datareader_cache = data_reader.get_datareader_cache().unwrap();
         assert!(datareader_cache.lock().unwrap().get_changes().is_empty());
+
+        drop(rtps_reader);
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     #[test]
     fn non_coherent_reader_stores_members_and_drops_marker() {
         // Without TOPIC+coherent presentation, members flow through immediately and the
         // end marker is never stored.
-        let data_reader = create_with_key_datareader(DataReaderQos {
-            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
-            ..Default::default()
-        });
+        let (participant, data_reader) = create_with_key_datareader_in_subscriber(
+            SubscriberQos::default(),
+            DataReaderQos {
+                history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+                ..Default::default()
+            },
+        );
         let rtps_reader = data_reader.get_rtps_reader().unwrap();
         let handle = InstanceHandle::new([1; 16]);
 
@@ -1313,6 +1339,10 @@ mod tests {
             .map(|c| c.sequence_number().to_i64())
             .collect();
         assert_eq!(stored, vec![1]);
+
+        drop(rtps_reader);
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     fn create_no_key_datareader(data_reader_qos: DataReaderQos) -> DataReader<HelloWorldType> {
