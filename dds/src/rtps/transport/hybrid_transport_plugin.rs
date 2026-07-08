@@ -94,13 +94,18 @@ impl HybridTransportPlugin {
         // Pass the final participant_id so TCP's identity matches UDP's. The TCP
         // listen port comes from the per-participant TcpConfig (bind_port
         // property, else the domain formula).
+        // Hybrid discovers peers over UDP multicast, so the embedded TCP plugin
+        // must dial any discovered peer's TCP locators — force accept-undefined-
+        // peers regardless of the configured value.
+        let mut tcp_config = hybrid_config.tcp;
+        tcp_config.accept_undefined_peers = true;
         let tcp_plugin = TcpTransportPlugin::new(
             domain_id,
             participant_id,
             bind_ip,
             working_ips.clone(),
             guid_prefix,
-            hybrid_config.tcp,
+            tcp_config,
         )?;
 
         // Create merged discovery unicast channel: UDP listener + TCP discovery rx
