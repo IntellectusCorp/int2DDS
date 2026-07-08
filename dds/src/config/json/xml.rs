@@ -93,7 +93,6 @@ fn parse_named_sections<T: serde::de::DeserializeOwned>(
         .collect()
 }
 
-// RTI repeats container elements; map each to its plural model field name.
 fn rename_key(tag: &str) -> &str {
     match tag {
         "qos_profile" => "qos_profiles",
