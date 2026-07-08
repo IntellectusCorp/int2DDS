@@ -11,29 +11,71 @@
 
 #include "int2dds_cdr.h"
 
+typedef struct HelloWorld HelloWorld;
+
 /* ========================================================================
  * Type: HelloWorld
  * Extensibility: APPENDABLE
  * ======================================================================== */
 
-typedef struct HelloWorld {
+struct HelloWorld {
     uint32_t index;
     char message[257];
-} HelloWorld;
+};
+
+static inline void HelloWorld_serialize_fields(
+    Int2DdsCdrWriter *_w,
+    const HelloWorld *val)
+{
+    Int2DdsCdrWriter w = *_w;
+    size_t dh = 0;
+    if (w.xcdr2) {
+        int2dds_cdr_write_dheader_begin(&w, &dh);
+    }
+    int2dds_cdr_write_u32(&w, val->index);
+    int2dds_cdr_write_string(&w, val->message);
+    if (w.xcdr2) {
+        int2dds_cdr_write_dheader_finalize(&w, dh);
+    }
+    *_w = w;
+}
+
+static inline void HelloWorld_deserialize_fields(
+    Int2DdsCdrReader *_r,
+    HelloWorld *val_out)
+{
+    Int2DdsCdrReader r = *_r;
+    uint32_t obj_size = 0;
+    size_t start_pos = 0;
+    if (r.xcdr2) {
+        int2dds_cdr_read_dheader(&r, &obj_size, &start_pos);
+    }
+    int2dds_cdr_read_u32(&r, &val_out->index);
+    int2dds_cdr_read_string_copy(&r, val_out->message, 257, NULL);
+    if (r.xcdr2) {
+        int2dds_cdr_read_dheader_end(&r, obj_size, start_pos);
+    }
+    *_r = r;
+}
 
 static inline size_t HelloWorld_serialize_cdr(
     const HelloWorld *val,
     uint8_t *buf,
-    size_t capacity)
+    size_t capacity,
+    bool xcdr2)
 {
     Int2DdsCdrWriter w;
-    int2dds_cdr_writer_init(&w, buf, capacity, true, true);
+    int2dds_cdr_writer_init(&w, buf, capacity, true, xcdr2);
     int2dds_cdr_write_encapsulation(&w, INT2DDS_CDR_APPENDABLE);
     size_t dh = 0;
-    int2dds_cdr_write_dheader_begin(&w, &dh);
+    if (xcdr2) {
+        int2dds_cdr_write_dheader_begin(&w, &dh);
+    }
     int2dds_cdr_write_u32(&w, val->index);
     int2dds_cdr_write_string(&w, val->message);
-    int2dds_cdr_write_dheader_finalize(&w, dh);
+    if (xcdr2) {
+        int2dds_cdr_write_dheader_finalize(&w, dh);
+    }
     return w.error == INT2DDS_CDR_OK ? int2dds_cdr_writer_size(&w) : 0;
 }
 
@@ -47,10 +89,14 @@ static inline bool HelloWorld_deserialize_cdr(
         return false;
     uint32_t obj_size = 0;
     size_t start_pos = 0;
-    int2dds_cdr_read_dheader(&r, &obj_size, &start_pos);
+    if (r.xcdr2) {
+        int2dds_cdr_read_dheader(&r, &obj_size, &start_pos);
+    }
     int2dds_cdr_read_u32(&r, &val_out->index);
     int2dds_cdr_read_string_copy(&r, val_out->message, 257, NULL);
-    int2dds_cdr_read_dheader_end(&r, obj_size, start_pos);
+    if (r.xcdr2) {
+        int2dds_cdr_read_dheader_end(&r, obj_size, start_pos);
+    }
     return int2dds_cdr_reader_error(&r) == INT2DDS_CDR_OK;
 }
 
@@ -61,6 +107,14 @@ static inline size_t HelloWorld_serialize_key(
 {
     (void)val; (void)buf; (void)capacity;
     return 0;
+}
+
+static inline Int2DdsTypeInfo* HelloWorld_type_info(void) {
+    Int2DdsTypeInfo *ti;
+    int2dds_type_info_create("HelloWorld", 1, &ti);
+    int2dds_type_info_add_field(ti, "index", INT2DDS_FIELD_UINT32, 0);
+    int2dds_type_info_add_field(ti, "message", INT2DDS_FIELD_STRING, 0);
+    return ti;
 }
 
 #endif /* HELLO_WORLD_IDL_H */
