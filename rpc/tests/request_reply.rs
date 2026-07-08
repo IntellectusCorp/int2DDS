@@ -78,6 +78,11 @@ fn send_request_and_receive_reply() {
     assert_eq!(received_reply.data.result, 7);
     assert_eq!(received_reply.header.related_request_id, req_id);
     assert_eq!(received_reply.header.remote_ex, RemoteExceptionCode::Ok);
+
+    drop(requester);
+    drop(replier);
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -120,6 +125,11 @@ fn take_reply_by_request_id() {
     let reply = requester.take_reply(&id1).unwrap().expect("reply for id1");
     let data = reply.data().unwrap();
     assert_eq!(data.data.result, 3);
+
+    drop(requester);
+    drop(replier);
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -157,6 +167,11 @@ fn take_request_non_blocking() {
     let data = sample.data().unwrap();
     assert_eq!(data.data.a, 5);
     assert_eq!(data.data.b, 6);
+
+    drop(requester);
+    drop(replier);
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -190,6 +205,12 @@ fn take_requests_batch() {
 
     let samples = replier.take_requests(10).unwrap();
     assert_eq!(samples.len(), 3);
+
+    drop(samples);
+    drop(requester);
+    drop(replier);
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -230,6 +251,12 @@ fn take_replies_batch() {
     std::thread::sleep(Duration::from_millis(100));
     let replies = requester.take_replies(10).unwrap();
     assert_eq!(replies.len(), 2);
+
+    drop(replies);
+    drop(requester);
+    drop(replier);
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -281,6 +308,13 @@ fn take_replies_for_request() {
         assert_eq!(data.data.result, 8);
         assert_eq!(data.header.related_request_id, req_id);
     }
+
+    drop(replies);
+    drop(requester);
+    drop(replier1);
+    drop(replier2);
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -303,6 +337,10 @@ fn bind_and_unbind_instance() {
 
     requester.unbind().unwrap();
     assert!(requester.get_bound_instance_name().is_none());
+
+    drop(requester);
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -348,6 +386,11 @@ fn send_request_async_with_correlation() {
     let reply2 = future2.get_timeout(Duration::from_secs(3)).unwrap();
     let data2 = reply2.data().unwrap();
     assert_eq!(data2.data.result, 300);
+
+    drop(requester);
+    drop(replier);
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -377,6 +420,11 @@ fn future_get_timeout_expires() {
     let result = future.get_timeout(Duration::from_millis(200));
     assert!(result.is_err());
     assert!(matches!(result.unwrap_err(), DdsRpcError::Timeout | DdsRpcError::Dds(_)));
+
+    drop(requester);
+    drop(_replier);
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -415,4 +463,9 @@ fn close_requester_and_replier() {
     assert!(replier.is_closed());
     assert!(replier.get_request_datareader().is_err());
     assert!(replier.get_reply_datawriter().is_err());
+
+    drop(requester);
+    drop(replier);
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }

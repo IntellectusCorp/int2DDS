@@ -1382,5 +1382,8 @@ mod tests {
         publisher.delete_contained_entities().unwrap();
 
         assert!(publisher.get_data_writers().unwrap().is_empty());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 }

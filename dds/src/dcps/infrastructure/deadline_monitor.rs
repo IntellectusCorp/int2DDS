@@ -216,70 +216,73 @@ impl DeadlineMonitor {
                 }
 
                 // Check deadline
-                if let Ok(mut trackers_guard) = trackers.lock() {
-                    let now = Time::now();
-                    let num_tracked = trackers_guard.len();
+                // Callbacks run after releasing the trackers lock.
+                let missed_instances: Vec<InstanceHandle> =
+                    if let Ok(mut trackers_guard) = trackers.lock() {
+                        let now = Time::now();
+                        let num_tracked = trackers_guard.len();
 
-                    if num_tracked > 0 {
-                        trace!(
-                            "[DeadlineMonitor Thread] Performing deadline check for {} instances",
-                            num_tracked
-                        );
-                    }
-
-                    for (handle, last_update) in trackers_guard.iter_mut() {
-                        let elapsed = now - *last_update;
-
-                        if elapsed > period {
-                            warn!(
-                                "[DeadlineMonitor Thread] DEADLINE MISSED! Instance: {:?}, elapsed: {:?}, period: {:?}, last_update: {:?}, now: {:?}",
-                                handle, elapsed, period, *last_update, now
-                            );
-
-                            let (status, info): (StatusKind, Arc<dyn StatusInfo>) = if is_writer {
-                                (
-                                    StatusKind::OFFERED_DEADLINE_MISSED,
-                                    Arc::new(OfferedDeadlineMissedStatus {
-                                        total_count: 0,
-                                        total_count_change: 0,
-                                        last_instance_handle: *handle,
-                                    }),
-                                )
-                            } else {
-                                (
-                                    StatusKind::REQUESTED_DEADLINE_MISSED,
-                                    Arc::new(RequestedDeadlineMissedStatus {
-                                        total_count: 0,
-                                        total_count_change: 0,
-                                        last_instance_handle: *handle,
-                                    }),
-                                )
-                            };
-
-                            debug!(
-                                "[DeadlineMonitor Thread] Invoking callback for {} status, instance: {}",
-                                if is_writer { "OFFERED_DEADLINE_MISSED" } else { "REQUESTED_DEADLINE_MISSED" },
-                                handle
-                            );
-
-                            callback.as_ref()(status, Some(info));
-
-                            // Update time for next check
-                            *last_update = now;
-
-                            debug!(
-                                "[DeadlineMonitor Thread] Instance {:?} last_update reset to {:?} for next deadline check",
-                                handle, now
-                            );
-                        } else {
+                        if num_tracked > 0 {
                             trace!(
-                                "[DeadlineMonitor Thread] Instance {:?} OK - elapsed: {:?}, remaining: {:?}",
-                                handle, elapsed, period - elapsed
+                                "[DeadlineMonitor Thread] Performing deadline check for {} instances",
+                                num_tracked
                             );
                         }
-                    }
-                } else {
-                    warn!("[DeadlineMonitor Thread] Failed to acquire lock for deadline check");
+
+                        trackers_guard
+                            .iter_mut()
+                            .filter_map(|(handle, last_update)| {
+                                let elapsed = now - *last_update;
+                                if elapsed > period {
+                                    warn!(
+                                        "[DeadlineMonitor Thread] DEADLINE MISSED! Instance: {:?}, elapsed: {:?}, period: {:?}",
+                                        handle, elapsed, period
+                                    );
+                                    // Update time for next check
+                                    *last_update = now;
+                                    Some(*handle)
+                                } else {
+                                    trace!(
+                                        "[DeadlineMonitor Thread] Instance {:?} OK - elapsed: {:?}, remaining: {:?}",
+                                        handle, elapsed, period - elapsed
+                                    );
+                                    None
+                                }
+                            })
+                            .collect()
+                    } else {
+                        warn!("[DeadlineMonitor Thread] Failed to acquire lock for deadline check");
+                        Vec::new()
+                    };
+
+                for handle in missed_instances {
+                    let (status, info): (StatusKind, Arc<dyn StatusInfo>) = if is_writer {
+                        (
+                            StatusKind::OFFERED_DEADLINE_MISSED,
+                            Arc::new(OfferedDeadlineMissedStatus {
+                                total_count: 0,
+                                total_count_change: 0,
+                                last_instance_handle: handle,
+                            }),
+                        )
+                    } else {
+                        (
+                            StatusKind::REQUESTED_DEADLINE_MISSED,
+                            Arc::new(RequestedDeadlineMissedStatus {
+                                total_count: 0,
+                                total_count_change: 0,
+                                last_instance_handle: handle,
+                            }),
+                        )
+                    };
+
+                    debug!(
+                        "[DeadlineMonitor Thread] Invoking callback for {} status, instance: {}",
+                        if is_writer { "OFFERED_DEADLINE_MISSED" } else { "REQUESTED_DEADLINE_MISSED" },
+                        handle
+                    );
+
+                    callback.as_ref()(status, Some(info));
                 }
             }
 
