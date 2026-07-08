@@ -55,7 +55,8 @@ pub enum TransportType {
     UDP,
     /// TCP transport
     TCP,
-    /// Hybrid transport (both UDP and TCP simultaneously)
+    /// Hybrid transport: UDP multicast SPDP discovery (plus optional UDP
+    /// unicast to `initial_peers`); SEDP, liveliness, and user data all over TCP.
     Hybrid,
     /// Shared Memory transport
     SHM,

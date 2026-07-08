@@ -187,13 +187,12 @@ impl TransportPlugin for HybridTransportPlugin {
     fn send(&self, data: &[u8], target: &SendTarget) -> io::Result<()> {
         match target {
             SendTarget::SPDPDiscovery { initial_peers } => {
+                // Def-C: SPDP is UDP only — multicast plus unicast to the
+                // configured initial_peers. SEDP/liveliness/user data ride TCP.
                 let _ = self.udp_sender.send_multicast(self.domain_id, data);
-                // initial_peers fan-out: Hybrid reaches them over both UDP and
-                // TCP so peers reachable on either transport get the SPDP.
                 for peer_addr in *initial_peers {
                     let _ = self.udp_sender.send(peer_addr, data);
                 }
-                let _ = self.tcp_plugin.send(data, target);
                 Ok(())
             }
             SendTarget::SEDPDiscovery(locator) => {
@@ -231,22 +230,14 @@ impl TransportPlugin for HybridTransportPlugin {
     }
 
     fn advertised_metatraffic_unicast_locators(&self) -> Vec<Locator> {
-        let udp_port =
-            PortManager::get_discovery_traffic_unicast_port(self.domain_id, self.participant_id)
-                as u32;
-        let mut locators = self.udp_locators(udp_port);
-        // Hybrid advertises both UDP and TCP endpoints so peers on either
-        // transport can reach us.
-        locators.extend(self.tcp_plugin.advertised_metatraffic_unicast_locators());
-        locators
+        // Def-C: unicast metatraffic (SEDP, liveliness) rides TCP. UDP carries
+        // only multicast SPDP, so no UDP unicast locator is advertised.
+        self.tcp_plugin.advertised_metatraffic_unicast_locators()
     }
 
     fn advertised_default_unicast_locators(&self) -> Vec<Locator> {
-        let udp_port =
-            PortManager::get_user_traffic_unicast_port(self.domain_id, self.participant_id) as u32;
-        let mut locators = self.udp_locators(udp_port);
-        locators.extend(self.tcp_plugin.advertised_default_unicast_locators());
-        locators
+        // Def-C: user data rides TCP.
+        self.tcp_plugin.advertised_default_unicast_locators()
     }
 
     fn take_discovery_multicast_source(&self) -> Option<MessageSource> {
