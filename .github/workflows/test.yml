@@ -39,9 +39,19 @@ jobs:
           shared-key: cargo-develop
           save-if: false
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Run all tests
         shell: bash
         env:
           INT2DDS_UDP_SOCKET_BUFFER: 5242880
           RUSTFLAGS: ${{ runner.os == 'Windows' && '-C linker=lld-link' || '' }}
-        run: cargo test -- --test-threads=1
+        run: cargo nextest run --retries 3 --test-threads=1
+
+      - name: Run doctests
+        shell: bash
+        env:
+          INT2DDS_UDP_SOCKET_BUFFER: 5242880
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C linker=lld-link' || '' }}
+        run: cargo test --doc
