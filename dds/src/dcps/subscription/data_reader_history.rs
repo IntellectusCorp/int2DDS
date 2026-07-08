@@ -1008,7 +1008,11 @@ fn deliver_held_sample<Foo: 'static + Clone + Debug>(
 mod tests {
     use super::*;
     use crate::dcps::topic::type_support::DdsType;
-    use crate::infrastructure::qos_policy::{OwnershipQosPolicy, ReliabilityQosPolicyKind};
+    use crate::infrastructure::qos_policy::{
+        OwnershipQosPolicy, PresentationQosAccessScopeKind, PresentationQosPolicy,
+        ReliabilityQosPolicyKind,
+    };
+    use crate::rtps::entities::history::cache_change::PresentationInfo;
     use crate::{
         core::time::Duration,
         domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
@@ -1113,6 +1117,202 @@ mod tests {
             .unwrap();
 
         reader
+    }
+
+    // Same as create_with_key_datareader but with an explicit SubscriberQos.
+    fn create_with_key_datareader_in_subscriber(
+        subscriber_qos: SubscriberQos,
+        data_reader_qos: DataReaderQos,
+    ) -> DataReader<ShapeType> {
+        let domain_participant_factory = DomainParticipantFactory::get_instance();
+        let domain_participant = domain_participant_factory
+            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
+            .unwrap();
+
+        let topic = domain_participant
+            .create_topic::<ShapeType>(
+                "TestTopic",
+                "ShapeType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let subscriber = domain_participant
+            .create_subscriber(subscriber_qos, None, StatusMask::default())
+            .unwrap();
+
+        subscriber
+            .create_datareader::<ShapeType>(&topic, data_reader_qos, None, StatusMask::default())
+            .unwrap()
+    }
+
+    fn topic_coherent_subscriber_qos() -> SubscriberQos {
+        SubscriberQos {
+            presentation: PresentationQosPolicy {
+                access_scope: PresentationQosAccessScopeKind::Topic,
+                coherent_access: true,
+                ordered_access: false,
+            },
+            ..Default::default()
+        }
+    }
+
+    // Keyed coherent-set member: create_change_with_key_src plus PID_COHERENT_SET.
+    fn create_coherent_member(seq: i64, handle: InstanceHandle, set_id: i64) -> CacheChange {
+        let mut change = create_change_with_key_src(seq, handle, RtpsTime::now());
+        change.set_presentation_info(PresentationInfo {
+            coherent_set: Some(SequenceNumber::from_i64(set_id)),
+            ..Default::default()
+        });
+        change
+    }
+
+    // Coherent set end marker: payload-less Data with PID_COHERENT_SET = UNKNOWN.
+    fn create_coherent_end_marker(seq: i64) -> CacheChange {
+        let mut change = CacheChange::new(
+            ChangeKind::Alive,
+            Guid::new([1; 12], EntityId::new([0, 0, 1], EntityKind::USER_DEFINED_WRITER_WITH_KEY)),
+            InstanceHandle::default(),
+            SequenceNumber::from_i64(seq),
+            Vec::new(),
+            Some(RtpsTime::now()),
+        );
+        change.set_presentation_info(PresentationInfo {
+            coherent_set: Some(SequenceNumber::UNKNOWN),
+            ..Default::default()
+        });
+        change
+    }
+
+    #[test]
+    fn coherent_set_commits_all_members_on_end_marker() {
+        // Members are buffered (nothing available) until the end marker commits them all
+        // at once; the marker itself is never stored.
+        let data_reader = create_with_key_datareader_in_subscriber(
+            topic_coherent_subscriber_qos(),
+            DataReaderQos {
+                history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+                ..Default::default()
+            },
+        );
+        let rtps_reader = data_reader.get_rtps_reader().unwrap();
+        let handle = InstanceHandle::new([1; 16]);
+
+        {
+            let reader_cache = rtps_reader.reader_cache();
+            let mut reader_cache = reader_cache.lock().unwrap();
+            for seq in 1..=3 {
+                let available =
+                    reader_cache.add_change(create_coherent_member(seq, handle, 1), false).unwrap();
+                assert!(available.is_empty(), "member {} must be buffered, not stored", seq);
+            }
+
+            let committed = reader_cache.add_change(create_coherent_end_marker(4), false).unwrap();
+            let seqs: Vec<i64> = committed.iter().map(|c| c.sequence_number().to_i64()).collect();
+            assert_eq!(seqs, vec![1, 2, 3]);
+        }
+
+        let datareader_cache = data_reader.get_datareader_cache().unwrap();
+        let stored: Vec<i64> = datareader_cache
+            .lock()
+            .unwrap()
+            .get_changes()
+            .iter()
+            .map(|c| c.sequence_number().to_i64())
+            .collect();
+        assert_eq!(stored, vec![1, 2, 3], "marker must not be stored");
+    }
+
+    #[test]
+    fn coherent_set_with_middle_gap_is_discarded() {
+        // Member 2 never arrives: the end marker finds the hole and drops the whole set.
+        let data_reader = create_with_key_datareader_in_subscriber(
+            topic_coherent_subscriber_qos(),
+            DataReaderQos {
+                history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+                ..Default::default()
+            },
+        );
+        let rtps_reader = data_reader.get_rtps_reader().unwrap();
+        let handle = InstanceHandle::new([1; 16]);
+
+        {
+            let reader_cache = rtps_reader.reader_cache();
+            let mut reader_cache = reader_cache.lock().unwrap();
+            for seq in [1, 3] {
+                reader_cache.add_change(create_coherent_member(seq, handle, 1), false).unwrap();
+            }
+
+            let committed = reader_cache.add_change(create_coherent_end_marker(4), false).unwrap();
+            assert!(committed.is_empty(), "incomplete set must be discarded");
+        }
+
+        let datareader_cache = data_reader.get_datareader_cache().unwrap();
+        assert!(datareader_cache.lock().unwrap().get_changes().is_empty());
+    }
+
+    #[test]
+    fn coherent_set_with_lost_tail_is_discarded() {
+        // Members are contiguous but the marker seq shows the last member was lost.
+        let data_reader = create_with_key_datareader_in_subscriber(
+            topic_coherent_subscriber_qos(),
+            DataReaderQos {
+                history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+                ..Default::default()
+            },
+        );
+        let rtps_reader = data_reader.get_rtps_reader().unwrap();
+        let handle = InstanceHandle::new([1; 16]);
+
+        {
+            let reader_cache = rtps_reader.reader_cache();
+            let mut reader_cache = reader_cache.lock().unwrap();
+            for seq in [1, 2] {
+                reader_cache.add_change(create_coherent_member(seq, handle, 1), false).unwrap();
+            }
+
+            // Marker at seq 4 implies member 3 existed but never arrived.
+            let committed = reader_cache.add_change(create_coherent_end_marker(4), false).unwrap();
+            assert!(committed.is_empty(), "set with lost tail must be discarded");
+        }
+
+        let datareader_cache = data_reader.get_datareader_cache().unwrap();
+        assert!(datareader_cache.lock().unwrap().get_changes().is_empty());
+    }
+
+    #[test]
+    fn non_coherent_reader_stores_members_and_drops_marker() {
+        // Without TOPIC+coherent presentation, members flow through immediately and the
+        // end marker is never stored.
+        let data_reader = create_with_key_datareader(DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            ..Default::default()
+        });
+        let rtps_reader = data_reader.get_rtps_reader().unwrap();
+        let handle = InstanceHandle::new([1; 16]);
+
+        {
+            let reader_cache = rtps_reader.reader_cache();
+            let mut reader_cache = reader_cache.lock().unwrap();
+            let available =
+                reader_cache.add_change(create_coherent_member(1, handle, 1), false).unwrap();
+            assert_eq!(available.len(), 1, "member must be stored immediately");
+
+            let available = reader_cache.add_change(create_coherent_end_marker(2), false).unwrap();
+            assert!(available.is_empty(), "marker must be dropped");
+        }
+
+        let datareader_cache = data_reader.get_datareader_cache().unwrap();
+        let stored: Vec<i64> = datareader_cache
+            .lock()
+            .unwrap()
+            .get_changes()
+            .iter()
+            .map(|c| c.sequence_number().to_i64())
+            .collect();
+        assert_eq!(stored, vec![1]);
     }
 
     fn create_no_key_datareader(data_reader_qos: DataReaderQos) -> DataReader<HelloWorldType> {

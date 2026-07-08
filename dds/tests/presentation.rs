@@ -4,3 +4,6 @@ mod common;
 
 #[path = "presentation/ordered_access.rs"]
 mod ordered_access;
+
+#[path = "presentation/coherent_access.rs"]
+mod coherent_access;
