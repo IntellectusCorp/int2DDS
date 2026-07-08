@@ -57,9 +57,9 @@ pub(crate) trait HistoryCache {
         Ok(())
     }
 
-    // True when the owning reader requests TOPIC-scope coherent access.
+    // True when the owning reader requests coherent access
     // Default: false. Only DataReaderHistoryCache overrides this.
-    fn topic_coherent_access(&self) -> bool {
+    fn is_coherent_access(&self) -> bool {
         false
     }
 

@@ -368,9 +368,9 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
         Ok(())
     }
 
-    // True when the owning reader's PRESENTATION requests TOPIC-scope coherent access.
-    fn topic_coherent_access(&self) -> bool {
-        self.data_reader.upgrade().is_some_and(|reader| reader.is_subscriber_topic_coherent())
+    // True when the owning reader's PRESENTATION requests coherent access (INSTANCE or TOPIC scope).
+    fn is_coherent_access(&self) -> bool {
+        self.data_reader.upgrade().is_some_and(|reader| reader.is_subscriber_coherent())
     }
 
     // Removes the given CacheChange from its instance bucket.
@@ -1172,6 +1172,17 @@ mod tests {
         }
     }
 
+    fn instance_coherent_subscriber_qos() -> SubscriberQos {
+        SubscriberQos {
+            presentation: PresentationQosPolicy {
+                access_scope: PresentationQosAccessScopeKind::Instance,
+                coherent_access: true,
+                ordered_access: false,
+            },
+            ..Default::default()
+        }
+    }
+
     // Keyed coherent-set member: create_change_with_key_src plus PID_COHERENT_SET.
     fn create_coherent_member(seq: i64, handle: InstanceHandle, set_id: i64) -> CacheChange {
         let mut change = create_change_with_key_src(seq, handle, RtpsTime::now());
@@ -1236,6 +1247,39 @@ mod tests {
             .map(|c| c.sequence_number().to_i64())
             .collect();
         assert_eq!(stored, vec![1, 2, 3], "marker must not be stored");
+
+        drop(rtps_reader);
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn instance_scope_coherent_set_commits_all_members_on_end_marker() {
+        // INSTANCE scope buffers set members per writer just like TOPIC scope: nothing is
+        // available until the end marker commits them all at once.
+        let (participant, data_reader) = create_with_key_datareader_in_subscriber(
+            instance_coherent_subscriber_qos(),
+            DataReaderQos {
+                history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+                ..Default::default()
+            },
+        );
+        let rtps_reader = data_reader.get_rtps_reader().unwrap();
+        let handle = InstanceHandle::new([1; 16]);
+
+        {
+            let reader_cache = rtps_reader.reader_cache();
+            let mut reader_cache = reader_cache.lock().unwrap();
+            for seq in 1..=3 {
+                let available =
+                    reader_cache.add_change(create_coherent_member(seq, handle, 1), false).unwrap();
+                assert!(available.is_empty(), "member {} must be buffered, not stored", seq);
+            }
+
+            let committed = reader_cache.add_change(create_coherent_end_marker(4), false).unwrap();
+            let seqs: Vec<i64> = committed.iter().map(|c| c.sequence_number().to_i64()).collect();
+            assert_eq!(seqs, vec![1, 2, 3]);
+        }
 
         drop(rtps_reader);
         participant.delete_contained_entities().unwrap();

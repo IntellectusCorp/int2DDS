@@ -1596,13 +1596,10 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
             .unwrap_or(false)
     }
 
-    pub(crate) fn is_subscriber_topic_coherent(&self) -> bool {
+    pub(crate) fn is_subscriber_coherent(&self) -> bool {
         self.get_subscriber()
             .and_then(|s| s.get_qos())
-            .map(|q| {
-                q.presentation.coherent_access
-                    && q.presentation.access_scope == PresentationQosAccessScopeKind::Topic
-            })
+            .map(|q| q.presentation.coherent_access)
             .unwrap_or(false)
     }
 
