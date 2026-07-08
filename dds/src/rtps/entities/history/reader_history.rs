@@ -179,9 +179,9 @@ impl ReaderHistoryCache {
         // Members committed by an implicit set close below ride along in the result.
         let mut available = Vec::new();
 
-        // A TOPIC+coherent reader holds set members back until their set closes; any other
+        // A coherent reader holds set members back until their set closes; any other
         // arrival from a writer with an open set ends that set implicitly.
-        if self.topic_coherent_access() {
+        if self.is_coherent_access() {
             match coherent_set {
                 Some(set_id) => {
                     // A member of a different set closes the previous set first.
@@ -351,12 +351,12 @@ impl ReaderHistoryCache {
         Ok(committed)
     }
 
-    // True when the attached DCPS reader requests TOPIC-scope coherent access.
-    fn topic_coherent_access(&self) -> bool {
+    // True when the attached DCPS reader requests coherent access (INSTANCE or TOPIC scope).
+    fn is_coherent_access(&self) -> bool {
         let Some(cache) = self.datareader_cache.as_ref().and_then(|weak| weak.upgrade()) else {
             return false;
         };
-        cache.lock().map(|guard| guard.topic_coherent_access()).unwrap_or(false)
+        cache.lock().map(|guard| guard.is_coherent_access()).unwrap_or(false)
     }
 
     // Drop the writer's open coherent set (connectivity change: incomplete sets are discarded).
