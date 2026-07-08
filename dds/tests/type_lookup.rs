@@ -214,6 +214,11 @@ fn consumer_fetches_type_object_via_type_lookup() {
         built,
         "consumer must fetch the FlatProbe TypeObject via TypeLookup and build its topic"
     );
+
+    producer.delete_contained_entities().unwrap();
+    factory.delete_participant(producer).unwrap();
+    consumer.delete_contained_entities().unwrap();
+    factory.delete_participant((*consumer).clone()).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -307,6 +312,11 @@ fn consumer_resolves_nested_member_via_type_lookup() {
         "nested 'leaf' member must resolve to a TypeRef over the wire, got {:?}",
         leaf.member_type
     );
+
+    producer.delete_contained_entities().unwrap();
+    factory.delete_participant(producer).unwrap();
+    consumer.delete_contained_entities().unwrap();
+    factory.delete_participant(consumer).unwrap();
 }
 
 #[test]
@@ -378,4 +388,9 @@ fn consumer_resolves_sequence_member_via_type_lookup() {
         ),
         other => panic!("'leaves' member must be a Sequence, got {:?}", other),
     }
+
+    producer.delete_contained_entities().unwrap();
+    factory.delete_participant(producer).unwrap();
+    consumer.delete_contained_entities().unwrap();
+    factory.delete_participant(consumer).unwrap();
 }

@@ -132,6 +132,9 @@ fn test_reader_deadline_qos_basic() {
     // Deadline miss occurs
     let miss_count = deadline_miss_count.load(Ordering::SeqCst);
     assert!(miss_count >= 1, "At least one deadline miss should be detected, got {}", miss_count);
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -217,6 +220,9 @@ fn test_reader_deadline_qos_on_dispose() {
 
     // After dispose, deadline miss should not occur anymore (or very rarely)
     assert!(count_after - count_before <= 1, "Deadline miss should stop after dispose");
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -299,6 +305,9 @@ fn test_reader_deadline_qos_multiple_instances() {
         "At least 3 deadline misses expected (one per instance), got {}",
         miss_count
     );
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -378,4 +387,7 @@ fn test_reader_deadline_qos_basic_no_key() {
     // Deadline miss occurs
     let miss_count = deadline_miss_count.load(Ordering::SeqCst);
     assert!(miss_count >= 1, "At least one deadline miss should be detected, got {}", miss_count);
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }

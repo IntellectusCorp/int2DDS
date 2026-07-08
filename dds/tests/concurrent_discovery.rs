@@ -148,4 +148,12 @@ fn auto_relay_discovers_all_topics_after_sedp_settles() {
     for name in &topic_names {
         assert!(active.contains(name), "expected topic '{name}' to be relayed, got {active:?}");
     }
+
+    publisher_participant.delete_contained_entities().unwrap();
+    factory.delete_participant(publisher_participant).unwrap();
+    drop(auto);
+    local_node.delete_contained_entities().unwrap();
+    factory.delete_participant((*local_node).clone()).unwrap();
+    remote_node.delete_contained_entities().unwrap();
+    factory.delete_participant((*remote_node).clone()).unwrap();
 }
