@@ -1,4 +1,4 @@
-//! RTI/OMG-style `<qos_library>` XML loading.
+//! OMG-style `<qos_library>` XML loading.
 //!
 //! Converts the XML to a [`serde_json::Value`] and reuses the JSON [`QosLibrary`]
 //! deserialization, so path resolution, `base_name` inheritance and DCPS conversion
@@ -51,7 +51,6 @@ pub(crate) fn parse_qos_libraries(xml: &str) -> DdsResult<Vec<QosLibrary>> {
         .collect()
 }
 
-// RTI repeats `<qos_profile>`; the model field is `qos_profiles`.
 fn rename_key(tag: &str) -> &str {
     if tag == "qos_profile" {
         "qos_profiles"

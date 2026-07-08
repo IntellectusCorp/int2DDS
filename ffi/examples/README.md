@@ -148,7 +148,7 @@ full TTL configuration reference.
 **QoS Profile (XML)**
 
 `qos_profile_publisher` and `qos_profile_subscriber` load QoS settings from an
-XML profile (RTI/OMG `<qos_library>` syntax, `qos_profile/qos_profiles.xml`).
+XML profile (OMG `<qos_library>` syntax, `qos_profile/qos_profiles.xml`).
 The factory auto-loads the profiles named by the `DDS_QOS_PROFILE` environment
 variable; entities created with default QoS pick up the profile marked
 `is_default_profile="true"`. Each example sets `DDS_QOS_PROFILE` to the bundled

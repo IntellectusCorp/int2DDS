@@ -3,7 +3,7 @@
 QoS Profile Subscriber Example (Python)
 
 Companion to qos_profile_publisher.py. Loads QoS settings from an XML profile
-file (RTI/OMG <qos_library> syntax) via the DDS_QOS_PROFILE environment variable
+file (OMG <qos_library> syntax) via the DDS_QOS_PROFILE environment variable
 and subscribes to HelloWorld samples with the profile applied. The profile
 marked is_default_profile="true" is applied to every entity created with
 default QoS.

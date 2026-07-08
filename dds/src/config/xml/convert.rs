@@ -418,7 +418,7 @@ fn struct_to_type_object(s: &XmlStruct) -> DdsResult<CompleteTypeObject> {
 }
 
 // SMALL/LARGE split at bound 255; unbounded (bound 0) collections use the SMALL form,
-// matching the derive output and RTI/Fast (XTypes 7.3.4.5).
+// matching the derive output (XTypes 7.3.4.5).
 fn member_type_id(ty: &XmlMemberType) -> TypeIdentifier {
     match ty {
         XmlMemberType::Primitive(id) => id.clone(),

@@ -3761,7 +3761,7 @@ impl HasTypeObject for String {
 impl<T: HasTypeObject> HasTypeObject for Vec<T> {
     fn type_identifier() -> TypeIdentifier {
         let element = T::type_identifier();
-        // Unbounded sequence: bound 0 fits the SMALL form, matching RTI/Fast (XTypes 7.3.4.5).
+        // Unbounded sequence: bound 0 fits the SMALL form, matching the spec (XTypes 7.3.4.5).
         TypeIdentifier::PlainSequenceSmall {
             header: PlainCollectionHeader {
                 equiv_kind: plain_collection_equiv_kind(&element),

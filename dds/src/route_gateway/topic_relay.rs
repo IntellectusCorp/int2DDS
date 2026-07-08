@@ -53,8 +53,7 @@ pub fn default_relay_writer_qos() -> DataWriterQos {
 ///
 /// Each side of the relay is an independent DDS endpoint and takes its own
 /// QoS; SEDP matching with local pub/sub happens per side. Reader-side and
-/// writer-side QoS can differ freely (this mirrors the RTI Routing Service
-/// `<input>` / `<output>` model).
+/// writer-side QoS can differ freely.
 #[derive(Debug, Clone)]
 pub struct TopicRelayQos {
     pub local_reader: DataReaderQos,

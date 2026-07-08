@@ -7,7 +7,7 @@ using Int2Dds.Exceptions;
 namespace QosProfileSubscriber
 {
     // Companion to QosProfilePublisher. Loads QoS settings from an XML profile file
-    // (RTI/OMG <qos_library> syntax) via the DDS_QOS_PROFILE environment variable and
+    // via the DDS_QOS_PROFILE environment variable and
     // subscribes to HelloWorld samples with the named profile applied.
     //
     // This example points DDS_QOS_PROFILE at the shared qos_profiles.xml (the same file
