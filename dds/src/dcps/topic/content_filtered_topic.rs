@@ -310,6 +310,9 @@ mod tests {
             &Arc::new(domain_participant.clone()),
         );
         assert!(result.is_ok());
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -371,6 +374,9 @@ mod tests {
         if let Err(e) = result {
             assert!(e.to_string().contains("Expected parameter"));
         }
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -423,6 +429,9 @@ mod tests {
             "300".to_string(),
         ]);
         assert!(result.is_ok()); // This should be valid - extra parameters are allowed
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -467,6 +476,9 @@ mod tests {
             &Arc::new(domain_participant.clone()),
         );
         assert!(result.is_err());
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -522,5 +534,8 @@ mod tests {
             &Arc::new(domain_participant.clone()),
         );
         assert!(result.is_err());
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 }
