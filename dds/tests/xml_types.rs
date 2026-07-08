@@ -406,7 +406,7 @@ fn xml_inheritance_pubsub_loopback() {
     );
     let support = Arc::new(registry.get("Dog").unwrap());
 
-    let (writer, reader, _guard) = dynamic_loopback("DogTopic", &support);
+    let (writer, reader, guard) = dynamic_loopback("DogTopic", &support);
 
     let mut data = support.create_data();
     // 'legs' is an inherited (flattened) parent member; 'name' is the child member.
@@ -417,6 +417,9 @@ fn xml_inheritance_pubsub_loopback() {
     let received = take_one(&reader);
     assert_eq!(received.get::<i32>("legs").unwrap(), 4);
     assert_eq!(received.get::<String>("name").unwrap(), "rex");
+
+    guard._participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(guard._participant).unwrap();
 }
 
 #[test]
@@ -515,7 +518,7 @@ fn xml_bitmask_bitset_pubsub_loopback() {
     );
     let support = Arc::new(registry.get("Record").unwrap());
 
-    let (writer, reader, _guard) = dynamic_loopback("RecordTopic", &support);
+    let (writer, reader, guard) = dynamic_loopback("RecordTopic", &support);
 
     let mut data = support.create_data();
     data.set("id", 7i32).unwrap();
@@ -535,6 +538,9 @@ fn xml_bitmask_bitset_pubsub_loopback() {
         DynamicValue::Bitset(bits) => assert_eq!(*bits, (10u64 << 4) | 3),
         other => panic!("expected bitset, got {other:?}"),
     }
+
+    guard._participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(guard._participant).unwrap();
 }
 
 #[test]
@@ -559,7 +565,7 @@ fn xml_union_pubsub_loopback() {
     );
     let support = Arc::new(registry.get("Event").unwrap());
 
-    let (writer, reader, _guard) = dynamic_loopback("EventTopic", &support);
+    let (writer, reader, guard) = dynamic_loopback("EventTopic", &support);
 
     let mut data = support.create_data();
     data.set("seq", 1i32).unwrap();
@@ -582,6 +588,9 @@ fn xml_union_pubsub_loopback() {
         }
         other => panic!("expected union, got {other:?}"),
     }
+
+    guard._participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(guard._participant).unwrap();
 }
 
 #[test]
@@ -899,6 +908,11 @@ fn run_cross_participant_nested(disable_inline: bool) {
         "nested 'origin' member must resolve to a TypeRef over the wire, got {:?}",
         origin.member_type
     );
+
+    producer.delete_contained_entities().unwrap();
+    factory.delete_participant(producer).unwrap();
+    consumer.delete_contained_entities().unwrap();
+    factory.delete_participant(consumer).unwrap();
 }
 
 #[test]
@@ -1133,7 +1147,7 @@ fn xml_dynamic_pubsub_loopback() {
     );
     let support = Arc::new(registry.get("SensorData").unwrap());
 
-    let (writer, reader, _guard) = dynamic_loopback("SensorTopic", &support);
+    let (writer, reader, guard) = dynamic_loopback("SensorTopic", &support);
 
     let mut data = support.create_data();
     data.set("sensor_id", 7i32).unwrap();
@@ -1148,6 +1162,9 @@ fn xml_dynamic_pubsub_loopback() {
     assert_eq!(sensor_id, 7);
     assert_eq!(temperature, 21.5);
     assert!(active);
+
+    guard._participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(guard._participant).unwrap();
 }
 
 #[test]
@@ -1163,7 +1180,7 @@ fn xml_collections_pubsub_loopback() {
     );
     let support = Arc::new(registry.get("LogRecord").unwrap());
 
-    let (writer, reader, _guard) = dynamic_loopback("LogTopic", &support);
+    let (writer, reader, guard) = dynamic_loopback("LogTopic", &support);
 
     let mut data = support.create_data();
     data.set("name", "logger-1").unwrap();
@@ -1192,6 +1209,9 @@ fn xml_collections_pubsub_loopback() {
     assert_eq!(values, [10, -20, 30]);
     assert_eq!(tags, ["a", "bb"]);
     assert_eq!(array_samples, [1.5, -2.5, 0.0]);
+
+    guard._participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(guard._participant).unwrap();
 }
 
 #[test]
@@ -1204,7 +1224,7 @@ fn xml_map_pubsub_loopback() {
     );
     let support = Arc::new(registry.get("MapRecord").unwrap());
 
-    let (writer, reader, _guard) = dynamic_loopback("MapTopic", &support);
+    let (writer, reader, guard) = dynamic_loopback("MapTopic", &support);
 
     let mut lookup = HashMap::new();
     lookup.insert(1i32, "one".to_string());
@@ -1230,6 +1250,9 @@ fn xml_map_pubsub_loopback() {
         }
         other => panic!("expected map, got {other:?}"),
     }
+
+    guard._participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(guard._participant).unwrap();
 }
 
 #[test]
@@ -1238,7 +1261,7 @@ fn xml_nested_enum_pubsub_loopback() {
     let support = Arc::new(registry.get("Holder").unwrap());
     let point_support = registry.get("Point").unwrap();
 
-    let (writer, reader, _guard) = dynamic_loopback("HolderTopic", &support);
+    let (writer, reader, guard) = dynamic_loopback("HolderTopic", &support);
 
     let mut origin = point_support.create_data();
     origin.set("x", 3i32).unwrap();
@@ -1278,4 +1301,7 @@ fn xml_nested_enum_pubsub_loopback() {
         }
         other => panic!("expected sequence, got {other:?}"),
     }
+
+    guard._participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(guard._participant).unwrap();
 }

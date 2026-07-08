@@ -380,6 +380,9 @@ pub(crate) mod tests {
 
         // assert_eq!(found_topic.get_instance_handle(), Err(DdsError::AlreadyDeleted));
         assert_eq!(topic.get_instance_handle(), Err(DdsError::AlreadyDeleted));
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -446,6 +449,9 @@ pub(crate) mod tests {
         log::info!("Status Info: {:?}", topic.get_inconsistent_topic_status().unwrap());
         // Error may occur if the timing of data arrival doesn't match
         assert_eq!(topic.get_inconsistent_topic_status().unwrap().total_count_change(), 0);
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -507,6 +513,9 @@ pub(crate) mod tests {
             .unwrap();
 
         std::thread::sleep(std::time::Duration::from_secs(10));
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     /// Writer(WITH_KEY) on dp1 vs Reader(NO_KEY) on dp2
@@ -570,6 +579,11 @@ pub(crate) mod tests {
             "Expected InconsistentTopicStatus total_count >= 1, got {}",
             status.total_count
         );
+
+        dp1.delete_contained_entities().unwrap();
+        dpf.delete_participant(dp1).unwrap();
+        dp2.delete_contained_entities().unwrap();
+        dpf.delete_participant(dp2).unwrap();
     }
 
     /// Writer(NO_KEY) on dp1 vs Reader(WITH_KEY) on dp2
@@ -633,6 +647,11 @@ pub(crate) mod tests {
             "Expected InconsistentTopicStatus total_count >= 1, got {}",
             status.total_count
         );
+
+        dp1.delete_contained_entities().unwrap();
+        dpf.delete_participant(dp1).unwrap();
+        dp2.delete_contained_entities().unwrap();
+        dpf.delete_participant(dp2).unwrap();
     }
 
     /// Writer(WITH_KEY) + Reader(WITH_KEY): same participant + remote participant
@@ -706,6 +725,11 @@ pub(crate) mod tests {
             "Expected no InconsistentTopicStatus, got total_count={}",
             status.total_count
         );
+
+        dp1.delete_contained_entities().unwrap();
+        dpf.delete_participant(dp1).unwrap();
+        dp2.delete_contained_entities().unwrap();
+        dpf.delete_participant(dp2).unwrap();
     }
 
     /// Writer(NO_KEY) + Reader(NO_KEY): same participant + remote participant
@@ -779,5 +803,10 @@ pub(crate) mod tests {
             "Expected no InconsistentTopicStatus, got total_count={}",
             status.total_count
         );
+
+        dp1.delete_contained_entities().unwrap();
+        dpf.delete_participant(dp1).unwrap();
+        dp2.delete_contained_entities().unwrap();
+        dpf.delete_participant(dp2).unwrap();
     }
 }
