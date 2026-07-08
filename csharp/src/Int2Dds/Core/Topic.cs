@@ -51,23 +51,55 @@ namespace Int2Dds.Core
 
             try
             {
-                unsafe
-                {
-                    var topicNameBytes = Encoding.UTF8.GetBytes(topicName + '\0');
-                    var typeNameBytes = Encoding.UTF8.GetBytes(_typeName + '\0');
+                // If the generator emitted flat-type advertisement metadata, build a conformant
+                // TypeObject and advertise it during discovery (matching the Rust derive so
+                // strict XTypes peers can structurally match). Otherwise fall back to the
+                // name-based keyed path.
+                var adFieldsInfo = typeof(T).GetField(
+                    "DdsTypeInfoFields", BindingFlags.Public | BindingFlags.Static);
+                var adFields = adFieldsInfo?.GetValue(null) as DdsTypeInfoField[];
 
-                    fixed (byte* pTopicName = topicNameBytes)
-                    fixed (byte* pTypeName = typeNameBytes)
+                if (adFields != null && adFields.Length > 0)
+                {
+                    IntPtr typeInfo = BuildTypeInfo(_typeName, extensibility, adFields);
+                    try
                     {
-                        ReturnCodeHelper.CheckReturn(
-                            NativeMethods.int2dds_create_topic_keyed(
-                                participant.Handle,
-                                pTopicName,
-                                pTypeName,
-                                (int)extensibility,
-                                hasKey,
-                                qosHandle,
-                                out _handle));
+                        unsafe
+                        {
+                            var topicNameBytes = Encoding.UTF8.GetBytes(topicName + '\0');
+                            fixed (byte* pTopicName = topicNameBytes)
+                            {
+                                ReturnCodeHelper.CheckReturn(
+                                    NativeMethods.int2dds_create_topic_with_type_info(
+                                        participant.Handle, pTopicName, typeInfo, qosHandle, out _handle));
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        NativeMethods.int2dds_type_info_destroy(typeInfo);
+                    }
+                }
+                else
+                {
+                    unsafe
+                    {
+                        var topicNameBytes = Encoding.UTF8.GetBytes(topicName + '\0');
+                        var typeNameBytes = Encoding.UTF8.GetBytes(_typeName + '\0');
+
+                        fixed (byte* pTopicName = topicNameBytes)
+                        fixed (byte* pTypeName = typeNameBytes)
+                        {
+                            ReturnCodeHelper.CheckReturn(
+                                NativeMethods.int2dds_create_topic_keyed(
+                                    participant.Handle,
+                                    pTopicName,
+                                    pTypeName,
+                                    extensibility,
+                                    hasKey,
+                                    qosHandle,
+                                    out _handle));
+                        }
                     }
                 }
             }
@@ -111,6 +143,63 @@ namespace Int2Dds.Core
                             out _handle));
                 }
             }
+        }
+
+        /// <summary>
+        /// Builds a native Int2DdsTypeInfo from generator-emitted flat-type field descriptors
+        /// so a conformant TypeObject can be advertised during discovery. The returned handle
+        /// is owned by the caller and must be freed with int2dds_type_info_destroy.
+        /// </summary>
+        private static unsafe IntPtr BuildTypeInfo(string typeName, int extensibility, DdsTypeInfoField[] fields)
+        {
+            var nameBytes = Encoding.UTF8.GetBytes(typeName + '\0');
+            IntPtr ti;
+            fixed (byte* pName = nameBytes)
+            {
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_type_info_create(pName, extensibility, out ti));
+            }
+
+            try
+            {
+                foreach (var f in fields)
+                {
+                    var fieldBytes = Encoding.UTF8.GetBytes(f.Name + '\0');
+                    fixed (byte* pField = fieldBytes)
+                    {
+                        int rc;
+                        switch (f.Op)
+                        {
+                            case "field":
+                                rc = NativeMethods.int2dds_type_info_add_field(ti, pField, f.TypeConst, f.Flags);
+                                break;
+                            case "string":
+                                rc = NativeMethods.int2dds_type_info_add_string_field(ti, pField, f.Size, f.Flags);
+                                break;
+                            case "wstring":
+                                rc = NativeMethods.int2dds_type_info_add_wstring_field(ti, pField, f.Size, f.Flags);
+                                break;
+                            case "seq":
+                                rc = NativeMethods.int2dds_type_info_add_sequence_field(ti, pField, f.TypeConst, f.Size, f.Flags);
+                                break;
+                            case "arr":
+                                rc = NativeMethods.int2dds_type_info_add_array_field(ti, pField, f.TypeConst, f.Size, f.Flags);
+                                break;
+                            default:
+                                rc = 0;
+                                break;
+                        }
+                        ReturnCodeHelper.CheckReturn(rc);
+                    }
+                }
+            }
+            catch
+            {
+                NativeMethods.int2dds_type_info_destroy(ti);
+                throw;
+            }
+
+            return ti;
         }
 
         /// <summary>

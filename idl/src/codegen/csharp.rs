@@ -550,6 +550,118 @@ impl<'a> CsGen<'a> {
         all
     }
 
+    /// Emit `DdsTypeInfoFields` for flat structs (all members are primitives, strings, or
+    /// sequences/arrays of primitives). The runtime reads it to advertise a TypeObject.
+    fn emit_type_info_metadata(&mut self, members: &[ResolvedMember]) {
+        if !members.iter().all(|m| Self::is_flat_advertisable(&m.resolved_type)) {
+            return;
+        }
+        self.line(
+            "public static readonly DdsTypeInfoField[] DdsTypeInfoFields = new DdsTypeInfoField[]",
+        );
+        self.line("{");
+        self.indent += 1;
+        for m in members {
+            self.line(&Self::type_info_field_spec(m));
+        }
+        self.indent -= 1;
+        self.line("};");
+        self.line("");
+    }
+
+    /// FFI INT2DDS_FIELD_* constant for a scalar/string/char type; None for composite types.
+    fn field_constant(ty: &ResolvedType) -> Option<i32> {
+        Some(match ty {
+            ResolvedType::Bool => 0,
+            ResolvedType::U8 => 1,   // BYTE (octet)
+            ResolvedType::Char => 2, // CHAR8
+            ResolvedType::I8 => 3,
+            ResolvedType::I16 => 4,
+            ResolvedType::I32 => 5,
+            ResolvedType::I64 => 6,
+            ResolvedType::UInt8 => 7, // UINT8
+            ResolvedType::U16 => 8,
+            ResolvedType::U32 => 9,
+            ResolvedType::U64 => 10,
+            ResolvedType::F32 => 11,
+            ResolvedType::F64 => 12,
+            ResolvedType::String { .. } => 13,
+            ResolvedType::WChar => 14, // CHAR16
+            ResolvedType::WString { .. } => 15,
+            _ => return None,
+        })
+    }
+
+    /// A member is advertisable byte-correctly when it is a primitive/string, or a
+    /// sequence/array whose element is a primitive/string. Named types and maps are excluded.
+    fn is_flat_advertisable(ty: &ResolvedType) -> bool {
+        match ty {
+            ResolvedType::Sequence { element, .. } | ResolvedType::Array { element, .. } => {
+                Self::field_constant(element).is_some()
+            }
+            other => Self::field_constant(other).is_some(),
+        }
+    }
+
+    /// Member flag bitmask (KEY=1, OPTIONAL=2, MUST_UNDERSTAND=4, EXTERNAL=8). The FFI adds
+    /// must-understand for @key automatically, so KEY alone is sufficient for keys.
+    fn member_flags(m: &ResolvedMember) -> i32 {
+        let mut f = 0;
+        if m.is_key {
+            f |= 1;
+        }
+        if m.is_optional {
+            f |= 2;
+        }
+        if m.must_understand {
+            f |= 4;
+        }
+        if m.is_external {
+            f |= 8;
+        }
+        f
+    }
+
+    /// One `new DdsTypeInfoField(op, name, type_const, size, flags)` initializer for a member.
+    fn type_info_field_spec(m: &ResolvedMember) -> String {
+        let flags = Self::member_flags(m);
+        match &m.resolved_type {
+            ResolvedType::String { bound } => format!(
+                "new DdsTypeInfoField(\"string\", \"{}\", 0, {}u, {}),",
+                m.name,
+                bound.unwrap_or(0),
+                flags
+            ),
+            ResolvedType::WString { bound } => format!(
+                "new DdsTypeInfoField(\"wstring\", \"{}\", 0, {}u, {}),",
+                m.name,
+                bound.unwrap_or(0),
+                flags
+            ),
+            ResolvedType::Sequence { element, bound } => {
+                let ec = Self::field_constant(element).unwrap_or(0);
+                format!(
+                    "new DdsTypeInfoField(\"seq\", \"{}\", {}, {}u, {}),",
+                    m.name,
+                    ec,
+                    bound.unwrap_or(0),
+                    flags
+                )
+            }
+            ResolvedType::Array { element, size } => {
+                let ec = Self::field_constant(element).unwrap_or(0);
+                format!(
+                    "new DdsTypeInfoField(\"arr\", \"{}\", {}, {}u, {}),",
+                    m.name, ec, size, flags
+                )
+            }
+            other => {
+                let c = Self::field_constant(other).unwrap_or(0);
+                format!("new DdsTypeInfoField(\"field\", \"{}\", {}, 0u, {}),", m.name, c, flags)
+            }
+        }
+    }
+
     fn emit_struct(&mut self, s: &ResolvedStruct) {
         let class_name = naming::to_pascal_case(&s.name);
         let ext_name = match s.extensibility {
@@ -591,6 +703,11 @@ impl<'a> CsGen<'a> {
             if has_key { "true" } else { "false" }
         ));
         self.line("");
+
+        // XTypes TypeObject advertisement metadata (flat types only). The runtime reflects
+        // this and advertises a conformant TypeObject during discovery (matching the Rust
+        // derive). Nested/named types are omitted and fall back to name-based matching.
+        self.emit_type_info_metadata(&all_members);
 
         // Properties (all members including inherited)
         for m in &all_members {
@@ -1441,6 +1558,57 @@ mod tests {
     use super::*;
     use crate::parser::parse_idl;
     use crate::resolver::resolve;
+
+    #[test]
+    fn test_type_info_metadata_for_flat_struct() {
+        let defs = parse_idl(
+            r#"
+            @appendable
+            struct ShapeType {
+                @key string<128> color;
+                long x;
+                sequence<uint8> payload;
+                octet raw;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "ShapeType.idl", &CSharpOptions::default());
+
+        assert!(
+            code.contains("public static readonly DdsTypeInfoField[] DdsTypeInfoFields"),
+            "{}",
+            code
+        );
+        // @key string<128> -> ("string", name, 0, bound=128, KEY=1)
+        assert!(
+            code.contains(r#"new DdsTypeInfoField("string", "color", 0, 128u, 1),"#),
+            "{}",
+            code
+        );
+        // long -> INT2DDS_FIELD_INT32 = 5
+        assert!(code.contains(r#"new DdsTypeInfoField("field", "x", 5, 0u, 0),"#), "{}", code);
+        // sequence<uint8> -> ("seq", name, INT2DDS_FIELD_UINT8 = 7, bound=0, 0)
+        assert!(code.contains(r#"new DdsTypeInfoField("seq", "payload", 7, 0u, 0),"#), "{}", code);
+        // octet -> INT2DDS_FIELD_BYTE = 1 (distinct from uint8's 7)
+        assert!(code.contains(r#"new DdsTypeInfoField("field", "raw", 1, 0u, 0),"#), "{}", code);
+    }
+
+    #[test]
+    fn test_type_info_metadata_omitted_for_named_members() {
+        let defs = parse_idl(
+            r#"
+            enum Color { RED, GREEN };
+            struct Widget { Color c; long x; };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Widget.idl", &CSharpOptions::default());
+        // Widget has a named (enum) member -> not flat -> advertisement metadata omitted.
+        assert!(!code.contains("DdsTypeInfoFields"), "{}", code);
+    }
 
     #[test]
     fn test_keyword_escaping_struct_properties() {
