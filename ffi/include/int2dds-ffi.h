@@ -249,6 +249,13 @@ typedef struct Int2DdsCondition Int2DdsCondition;
 typedef struct Int2DdsConditionSeq Int2DdsConditionSeq;
 
 /**
+ * Opaque handle wrapping a [`ConfiguredParticipant`] — the whole tree built by
+ * [`int2dds_create_participant_from_config`]. Destroy with
+ * [`int2dds_configured_participant_destroy`].
+ */
+typedef struct Int2DdsConfiguredParticipant Int2DdsConfiguredParticipant;
+
+/**
  * Opaque handle to a ContentFilteredTopic
  */
 typedef struct Int2DdsContentFilteredTopic Int2DdsContentFilteredTopic;
@@ -826,6 +833,92 @@ Int2DdsRet int2dds_guard_condition_get_trigger_value(const struct Int2DdsGuardCo
  * - The condition should be detached from any WaitSets first
  */
 Int2DdsRet int2dds_guard_condition_delete(struct Int2DdsGuardCondition *condition);
+
+/**
+ * Load QoS profiles (and, for XML files, the `<types>` section) from one or
+ * more files into the factory singleton. Profiles loaded here can then be used
+ * with the `*_with_profile` creators and with
+ * [`int2dds_create_participant_from_config`]; types can be fetched with
+ * [`int2dds_get_dynamic_type_support`].
+ *
+ * # Safety
+ * - `paths` must point to `count` valid, null-terminated UTF-8 C strings
+ * - each element of `paths` must be non-null
+ */
+Int2DdsRet int2dds_load_profiles(const struct Int2DdsParticipantFactory *_factory,
+                                 const char *const *paths,
+                                 uintptr_t count);
+
+/**
+ * Build a dynamic type support for a type declared in a `<types>` section that
+ * was loaded via [`int2dds_load_profiles`]. Destroy the result with
+ * `int2dds_dynamic_type_support_destroy`.
+ *
+ * # Safety
+ * - `type_name` must be a valid, null-terminated UTF-8 C string
+ * - `out` must be a valid pointer to a null pointer
+ */
+Int2DdsRet int2dds_get_dynamic_type_support(const struct Int2DdsParticipantFactory *_factory,
+                                            const char *type_name,
+                                            struct Int2DdsDynamicTypeSupport **out);
+
+/**
+ * Build an entire participant tree from a `<domain_participant_library>`
+ * declaration at `path` (`ParticipantLibrary::Participant`, e.g.
+ * `"PL::PubApp"`). The XML must have been loaded via
+ * [`int2dds_load_profiles`]. Endpoints carry `DynamicData` and are fetched by
+ * their XML name with the accessors below. Destroy with
+ * [`int2dds_configured_participant_destroy`].
+ *
+ * # Safety
+ * - `path` must be a valid, null-terminated UTF-8 C string
+ * - `out` must be a valid pointer to a null pointer
+ */
+Int2DdsRet int2dds_create_participant_from_config(const struct Int2DdsParticipantFactory *_factory,
+                                                  const char *path,
+                                                  struct Int2DdsConfiguredParticipant **out);
+
+/**
+ * Get the datawriter declared as `"<publisher>::<writer>"` from a configured
+ * tree. Returns `INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND` when no such writer
+ * exists. The returned handle must be freed with `int2dds_dynamic_writer_destroy`.
+ *
+ * # Safety
+ * - `configured` must be a handle from `int2dds_create_participant_from_config`
+ * - `name` must be a valid, null-terminated UTF-8 C string
+ * - `out` must be a valid pointer to a null pointer
+ */
+Int2DdsRet int2dds_configured_participant_get_datawriter(const struct Int2DdsConfiguredParticipant *configured,
+                                                         const char *name,
+                                                         struct Int2DdsDynamicDataWriter **out);
+
+/**
+ * Get the datareader declared as `"<subscriber>::<reader>"` from a configured
+ * tree. Returns `INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND` when no such reader
+ * exists. The returned handle must be freed with `int2dds_dynamic_reader_destroy`.
+ *
+ * # Safety
+ * - `configured` must be a handle from `int2dds_create_participant_from_config`
+ * - `name` must be a valid, null-terminated UTF-8 C string
+ * - `out` must be a valid pointer to a null pointer
+ */
+Int2DdsRet int2dds_configured_participant_get_datareader(const struct Int2DdsConfiguredParticipant *configured,
+                                                         const char *name,
+                                                         struct Int2DdsDynamicDataReader **out);
+
+/**
+ * Destroy a configured-participant handle and fully tear down its tree. Safe to
+ * call with null. This drops the tree's owned publishers/subscribers/topics,
+ * then deletes the participant's contained entities and removes the participant
+ * from the factory (equivalent to `delete_contained_entities` +
+ * `delete_participant`). Destroy any datawriter/datareader handles obtained via
+ * the accessors above BEFORE calling this.
+ *
+ * # Safety
+ * - `configured` must be null or a handle from
+ *   `int2dds_create_participant_from_config`, not used after this call
+ */
+void int2dds_configured_participant_destroy(struct Int2DdsConfiguredParticipant *configured);
 
 /**
  * Get the DomainParticipantFactory singleton instance
