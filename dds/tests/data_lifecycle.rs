@@ -83,6 +83,9 @@ fn test_autodispose_unregistered_instances_true() {
         .unwrap();
 
     assert!(samples.len() == 2);
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -146,6 +149,9 @@ fn test_autodispose_unregistered_instances_false() {
         .unwrap();
 
     assert!(samples.len() == 2);
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -226,6 +232,9 @@ fn test_autopurge_dispose_samples() {
 
     assert!(samples.is_err());
     assert_eq!(samples.err().unwrap(), DdsError::NoData);
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -315,6 +324,9 @@ fn test_autopurge_nowriter_samples() {
 
     assert!(samples.is_err());
     assert_eq!(samples.err().unwrap(), DdsError::NoData);
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -423,4 +435,7 @@ fn test_synthetic_invalid_data_on_no_writers() {
     );
     assert!(again.is_err());
     assert_eq!(again.err().unwrap(), DdsError::NoData);
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }

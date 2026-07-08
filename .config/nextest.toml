@@ -1,0 +1,3 @@
+# Terminate tests running longer than 300s and report them as TIMEOUT.
+[profile.default]
+slow-timeout = { period = "300s", terminate-after = 1 }
