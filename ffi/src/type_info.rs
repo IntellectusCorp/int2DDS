@@ -145,6 +145,36 @@ impl Int2DdsTypeInfo {
         self.fields.iter().any(|f| f.is_key())
     }
 
+    /// Derive key-field descriptors (index + scalar type) for the keyed fields, so a topic
+    /// created from this type_info still extracts instance keys (compute_key) like the
+    /// field-descriptor path. Non-scalar keys are skipped (extraction supports scalars).
+    pub(crate) fn key_field_infos(&self) -> Vec<crate::raw_type_support::KeyFieldInfo> {
+        use crate::raw_type_support::{KeyFieldInfo, KeyFieldType};
+        let mut out = Vec::new();
+        for (index, field) in self.fields.iter().enumerate() {
+            if !field.is_key() {
+                continue;
+            }
+            let field_type = match &field.type_id {
+                TypeIdentifier::String8
+                | TypeIdentifier::String8Small { .. }
+                | TypeIdentifier::String8Large { .. } => KeyFieldType::String,
+                TypeIdentifier::Int32 => KeyFieldType::Int32,
+                TypeIdentifier::Uint32 => KeyFieldType::UInt32,
+                TypeIdentifier::Int16 => KeyFieldType::Int16,
+                TypeIdentifier::Uint16 => KeyFieldType::UInt16,
+                TypeIdentifier::Int64 => KeyFieldType::Int64,
+                TypeIdentifier::Uint64 => KeyFieldType::UInt64,
+                TypeIdentifier::Int8 => KeyFieldType::Int8,
+                TypeIdentifier::Uint8 | TypeIdentifier::Byte => KeyFieldType::UInt8,
+                TypeIdentifier::Boolean => KeyFieldType::Bool,
+                _ => continue,
+            };
+            out.push(KeyFieldInfo { field_index: index, field_type });
+        }
+        out
+    }
+
     /// Build TypeIdentifier (CompleteTypeId hash) from the collected fields.
     pub(crate) fn build_type_identifier(&self) -> TypeIdentifier {
         let type_obj = self.build_type_object();
