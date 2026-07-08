@@ -218,6 +218,9 @@ mod tests {
         assert!(params.subscriber.is_none());
         assert!(params.publisher_qos.is_none());
         assert!(params.subscriber_qos.is_none());
+
+        params.participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(params.participant).unwrap();
     }
 
     #[test]
@@ -230,6 +233,9 @@ mod tests {
         assert_eq!(params.service_name.as_deref(), Some("MySvc"));
         assert_eq!(params.request_topic_name.as_deref(), Some("ReqTopic"));
         assert_eq!(params.reply_topic_name.as_deref(), Some("RepTopic"));
+
+        params.participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(params.participant).unwrap();
     }
 
     #[test]
@@ -247,6 +253,9 @@ mod tests {
         assert!(params.datareader_qos.is_some());
         assert!(params.publisher_qos.is_some());
         assert!(params.subscriber_qos.is_some());
+
+        params.participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(params.participant).unwrap();
     }
 
     #[test]
@@ -263,6 +272,9 @@ mod tests {
         assert!(params.subscriber.is_none());
         assert!(params.publisher_qos.is_none());
         assert!(params.subscriber_qos.is_none());
+
+        params.participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(params.participant).unwrap();
     }
 
     #[test]
@@ -277,6 +289,9 @@ mod tests {
         assert_eq!(params.instance_name.as_deref(), Some("Instance1"));
         assert_eq!(params.request_topic_name.as_deref(), Some("ReqTopic"));
         assert_eq!(params.reply_topic_name.as_deref(), Some("RepTopic"));
+
+        params.participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(params.participant).unwrap();
     }
 
     #[test]
@@ -294,5 +309,8 @@ mod tests {
         assert!(params.datareader_qos.is_some());
         assert!(params.publisher_qos.is_some());
         assert!(params.subscriber_qos.is_some());
+
+        params.participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(params.participant).unwrap();
     }
 }

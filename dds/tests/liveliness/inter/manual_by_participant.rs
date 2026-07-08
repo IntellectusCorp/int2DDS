@@ -39,6 +39,8 @@ fn match_alive() {
 
     writer.write(&KeyedDataType::default(), InstanceHandle::NIL).unwrap();
     wait_for_liveliness_changed_state(&reader, 1, 0, StdDuration::from_secs(1)).unwrap();
+
+    s.teardown();
 }
 
 #[test]
@@ -52,6 +54,8 @@ fn lost() {
     wait_for_liveliness_changed_state(&reader, 1, 0, StdDuration::from_secs(1)).unwrap();
     wait_for_liveliness_changed_state(&reader, 0, 1, StdDuration::from_secs(LEASE as u64 + 3))
         .unwrap();
+
+    s.teardown();
 }
 
 #[test]
@@ -68,6 +72,8 @@ fn recovered() {
 
     writer.write(&KeyedDataType::default(), InstanceHandle::NIL).unwrap();
     wait_for_liveliness_changed_state(&reader, 1, 0, StdDuration::from_secs(3)).unwrap();
+
+    s.teardown();
 }
 
 #[test]
@@ -82,6 +88,8 @@ fn unmatch_alive() {
 
     s.publisher.delete_datawriter(writer).unwrap();
     wait_for_liveliness_changed_state(&reader, 0, 0, StdDuration::from_secs(1)).unwrap();
+
+    s.teardown();
 }
 
 #[test]
@@ -98,6 +106,8 @@ fn unmatch_not_alive() {
 
     s.publisher.delete_datawriter(writer).unwrap();
     wait_for_liveliness_changed_state(&reader, 0, 0, StdDuration::from_secs(1)).unwrap();
+
+    s.teardown();
 }
 
 #[test]
@@ -124,6 +134,8 @@ fn sibling_kept_alive() {
             "sibling B must never flip not_alive while A asserts"
         );
     }
+
+    s.teardown();
 }
 
 #[test]
@@ -143,6 +155,8 @@ fn assert_keeps_alive() {
     }
     let status = reader.get_liveliness_changed_status().unwrap();
     assert_eq!((status.alive_count(), status.not_alive_count()), (1, 0));
+
+    s.teardown();
 }
 
 #[test]
@@ -170,4 +184,8 @@ fn unmatch_via_delete_participant() {
         .unwrap();
 
     wait_for_liveliness_changed_state(&reader, 0, 0, StdDuration::from_secs(5)).unwrap();
+
+    let reader_participant = s.reader_participant.unwrap();
+    reader_participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(reader_participant).unwrap();
 }

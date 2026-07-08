@@ -3153,6 +3153,15 @@ mod domain_participant_tests {
         assert!(Arc::ptr_eq(&participant1.publishers, &participant1_clone.publishers));
         assert!(Arc::ptr_eq(&participant1.subscribers, &participant1_clone.subscribers));
         assert!(Arc::ptr_eq(&participant1.topics, &participant1_clone.topics));
+
+        participant1.delete_contained_entities().unwrap();
+        factory.delete_participant(participant1).unwrap();
+        participant2.delete_contained_entities().unwrap();
+        factory.delete_participant(participant2).unwrap();
+        participant3.delete_contained_entities().unwrap();
+        factory.delete_participant(participant3).unwrap();
+        participant4.delete_contained_entities().unwrap();
+        factory.delete_participant(participant4).unwrap();
     }
 
     #[test]
@@ -3173,6 +3182,9 @@ mod domain_participant_tests {
         // Add Publisher to participant
 
         assert!(participant == participant_clone);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -3235,6 +3247,9 @@ mod domain_participant_tests {
         let res_2 = writer
             .write(&HelloWorld { index: 0, message: "hello".to_string() }, InstanceHandle::NIL);
         assert!(res_2.is_ok());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -3292,6 +3307,9 @@ mod domain_participant_tests {
         let res_2 = writer
             .write(&HelloWorld { index: 0, message: "hello".to_string() }, InstanceHandle::NIL);
         assert!(res_2.is_ok());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     use crate::dcps::topic::type_support::DdsType;
@@ -3333,6 +3351,9 @@ mod domain_participant_tests {
                 panic!("Test failed: Could not find existing topic, error code: {:?}", code);
             }
         }
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -3356,6 +3377,9 @@ mod domain_participant_tests {
                 println!("Test passed: Timeout occurred appropriately with timeout 0");
             }
         }
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -3408,6 +3432,9 @@ mod domain_participant_tests {
 
         // Wait for creation thread to complete
         create_thread.join().expect("Failed to join delayed_topic_creator thread");
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -3445,6 +3472,9 @@ mod domain_participant_tests {
                 );
             }
         }
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -3476,6 +3506,9 @@ mod domain_participant_tests {
         } else {
             panic!("StatusCondition's entity is None");
         }
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -3517,6 +3550,9 @@ mod domain_participant_tests {
         } else {
             panic!("StatusCondition's entity is None");
         }
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -3544,6 +3580,9 @@ mod domain_participant_tests {
             pp_publisher.get_instance_handle().unwrap(),
             "Publisher returned from DomainParticipant differs from the Publisher."
         );
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -3993,6 +4032,9 @@ mod domain_participant_tests {
         // Topic deletion succeeds
         assert!(participant.delete_topic(topic).is_ok());
         assert!(participant.get_topic_strong_count("RefCountTestTopic").is_none());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -4069,6 +4111,9 @@ mod domain_participant_tests {
 
         // Deletion now succeeds
         assert!(participant.delete_topic(topic).is_ok());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -4096,6 +4141,11 @@ mod domain_participant_tests {
 
         // Attempt to delete non-existent topic
         assert!(matches!(participant.delete_topic(topic), Err(_)));
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+        other_participant.delete_contained_entities().unwrap();
+        factory.delete_participant(other_participant).unwrap();
     }
 
     #[test]
@@ -4164,6 +4214,8 @@ mod domain_participant_tests {
         assert!(subscriber.get_data_readers().is_err());
         assert!(participant.get_subscribers().unwrap().is_empty());
         assert!(participant.get_publishers().unwrap().is_empty());
+
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -4178,6 +4230,9 @@ mod domain_participant_tests {
         let instance_handle = participant.get_instance_handle().unwrap();
         println!("instance_handle: {}", instance_handle);
         assert_eq!(instance_handle.is_nil(), false);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -4260,6 +4315,9 @@ mod domain_participant_tests {
             .unwrap();
 
         println!("domain_participant guid: {:?}", domain_participant.guid());
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     impl DomainParticipant {
@@ -4302,6 +4360,9 @@ mod domain_participant_tests {
 
         // Check if type is unregistered
         assert!(!domain_participant.is_type_registered(type_name));
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -4343,6 +4404,9 @@ mod domain_participant_tests {
 
         // Should still be registered
         assert!(domain_participant.is_type_registered(type_name));
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     // ==================== Builtin Subscriber Tests (DDS 2.2.2.2.1.13) ====================

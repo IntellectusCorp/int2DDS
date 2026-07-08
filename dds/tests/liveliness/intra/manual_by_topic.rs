@@ -40,6 +40,8 @@ fn match_alive() {
 
     writer.write(&KeyedDataType::default(), InstanceHandle::NIL).unwrap();
     wait_for_liveliness_changed_state(&reader, 1, 0, StdDuration::from_secs(2)).unwrap();
+
+    s.teardown();
 }
 
 #[test]
@@ -53,6 +55,8 @@ fn lost() {
     wait_for_liveliness_changed_state(&reader, 1, 0, StdDuration::from_secs(2)).unwrap();
     wait_for_liveliness_changed_state(&reader, 0, 1, StdDuration::from_secs(LEASE as u64 + 2))
         .unwrap();
+
+    s.teardown();
 }
 
 #[test]
@@ -72,6 +76,8 @@ fn recovered() {
 
     writer.write(&KeyedDataType::default(), InstanceHandle::NIL).unwrap();
     wait_for_liveliness_changed_state(&reader, 1, 0, StdDuration::from_secs(2)).unwrap();
+
+    s.teardown();
 }
 
 #[test]
@@ -86,6 +92,8 @@ fn unmatch_alive() {
 
     s.publisher.delete_datawriter(writer).unwrap();
     wait_for_liveliness_changed_state(&reader, 0, 0, StdDuration::from_secs(2)).unwrap();
+
+    s.teardown();
 }
 
 #[test]
@@ -108,6 +116,8 @@ fn sibling_lost_independently() {
         std::thread::sleep(StdDuration::from_millis(300));
     }
     wait_for_liveliness_changed_state(&reader, 1, 1, StdDuration::from_secs(1)).unwrap();
+
+    s.teardown();
 }
 
 #[test]
@@ -124,6 +134,8 @@ fn unmatch_not_alive() {
 
     s.publisher.delete_datawriter(writer).unwrap();
     wait_for_liveliness_changed_state(&reader, 0, 0, StdDuration::from_secs(2)).unwrap();
+
+    s.teardown();
 }
 
 #[test]
@@ -143,4 +155,6 @@ fn assert_keeps_alive() {
     }
     let status = reader.get_liveliness_changed_status().unwrap();
     assert_eq!((status.alive_count(), status.not_alive_count()), (1, 0));
+
+    s.teardown();
 }
