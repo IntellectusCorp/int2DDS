@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 from int2dds._ffi import ffi, lib
+from int2dds.core.conditions import StatusCondition
 from int2dds.core.listeners import (
     DataWriterListener,
     _create_writer_listener_struct,
@@ -435,6 +436,12 @@ class DataWriter(Generic[T]):
             "last_policy_id": int(status.last_policy_id),
             "policies_count": status.policies_count,
         }
+
+    def get_statuscondition(self) -> StatusCondition:
+        """Get the StatusCondition associated with this DataWriter."""
+        cond_ptr = ffi.new("Int2DdsStatusCondition **")
+        check_ret(lib.int2dds_datawriter_get_statuscondition(self._handle, cond_ptr))
+        return StatusCondition(cond_ptr[0], owner=self)
 
     def close(self) -> None:
         """Delete the DataWriter."""

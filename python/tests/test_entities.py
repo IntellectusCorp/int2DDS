@@ -552,6 +552,33 @@ class TestMatchedStatus:
             # Initially no matched writers
             assert reader.matched_writers == 0
 
+    def test_writer_statuscondition_publication_matched(self, domain_id: int, topic_name: str):
+        """Wait on the writer's own StatusCondition for PUBLICATION_MATCHED."""
+        from int2dds import DdsTimeout
+        from int2dds.core.conditions import STATUS_PUBLICATION_MATCHED
+
+        with DomainParticipant(domain_id=domain_id) as dp:
+            topic = dp.create_topic(topic_name, TestMessage)
+            pub = dp.create_publisher()
+            sub = dp.create_subscriber()
+            writer = pub.create_datawriter(topic)
+            reader = sub.create_datareader(topic)
+
+            # Wait for discovery via the writer-side StatusCondition
+            status_cond = writer.get_statuscondition()
+            status_cond.set_enabled_statuses(STATUS_PUBLICATION_MATCHED)
+            waitset = WaitSet()
+            waitset.attach(status_cond)
+
+            deadline = 5.0
+            while writer.matched_readers == 0 and deadline > 0:
+                try:
+                    waitset.wait(timeout=1.0)
+                except DdsTimeout:
+                    pass
+                deadline -= 1.0
+            assert writer.matched_readers > 0, "Writer should match the reader"
+
 
 class TestQoS:
     """QoS delivery verification tests."""
