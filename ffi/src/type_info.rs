@@ -97,6 +97,18 @@ pub struct Int2DdsTypeInfo {
 }
 
 impl Int2DdsTypeInfo {
+    /// Assemble an empty builder from Rust (e.g. `create_topic_with_field_descriptors`),
+    /// without going through the C `int2dds_type_info_create` handle path.
+    pub(crate) fn new(type_name: String, extensibility: ExtensibilityKind) -> Self {
+        Self { type_name, extensibility, fields: Vec::new() }
+    }
+
+    /// Append a field whose `TypeIdentifier` is already resolved. `flags` uses the
+    /// `INT2DDS_MEMBER_*` bitmask (KEY/OPTIONAL/MUST_UNDERSTAND/EXTERNAL).
+    pub(crate) fn push_field(&mut self, name: String, type_id: TypeIdentifier, flags: i32) {
+        self.fields.push(FieldInfo { name, type_id, flags });
+    }
+
     /// Build a CompleteStructType from the collected fields.
     fn build_complete_struct_type(&self) -> CompleteStructType {
         let ext_kind = match self.extensibility {
@@ -296,11 +308,7 @@ pub unsafe extern "C" fn int2dds_type_info_create(
         _ => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
-    let ti = Box::new(Int2DdsTypeInfo {
-        type_name: name_str.to_string(),
-        extensibility: ext_kind,
-        fields: Vec::new(),
-    });
+    let ti = Box::new(Int2DdsTypeInfo::new(name_str.to_string(), ext_kind));
 
     *out = Box::into_raw(ti);
     INT2DDS_RET_OK
@@ -590,6 +598,46 @@ mod tests {
         assert_eq!(
             ti.build_type_identifier(),
             PrimitivesType::type_identifier(),
+            "TypeIdentifier hashes differ between FFI and derive paths"
+        );
+    }
+
+    /// An unbounded `String` field must hash identically between the FFI builder and the
+    /// derive macro. Exercises the `new` / `push_field` pub(crate) builders used by
+    /// `create_topic_with_field_descriptors`, and closes the String parity gap that the
+    /// primitives test did not cover.
+    #[test]
+    fn test_string_field_hash_matches_derive_macro() {
+        use int2dds::xtypes::HasTypeObject;
+        use int2dds_derive::DdsType;
+
+        #[derive(DdsType)]
+        #[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+        struct StringFieldType {
+            #[dds(key)]
+            id: i32,
+            name: String,
+            count: u32,
+        }
+
+        let mut ti =
+            Int2DdsTypeInfo::new("StringFieldType".to_string(), ExtensibilityKind::Appendable);
+        ti.push_field("id".to_string(), TypeIdentifier::Int32, INT2DDS_MEMBER_KEY);
+        ti.push_field("name".to_string(), TypeIdentifier::String8, 0);
+        ti.push_field("count".to_string(), TypeIdentifier::Uint32, 0);
+
+        let ffi_serialized = match ti.build_type_object() {
+            TypeObject::Complete(c) => c.serialize(),
+            _ => panic!("Expected Complete"),
+        };
+        assert_eq!(
+            ffi_serialized,
+            StringFieldType::complete_type_object().serialize(),
+            "Serialized CompleteTypeObject bytes differ between FFI and derive paths"
+        );
+        assert_eq!(
+            ti.build_type_identifier(),
+            StringFieldType::type_identifier(),
             "TypeIdentifier hashes differ between FFI and derive paths"
         );
     }
