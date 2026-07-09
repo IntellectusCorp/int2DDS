@@ -15,6 +15,7 @@ use crate::{
             guid::Guid,
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
             sequence::SequenceNumber,
+            types::ChangeKind,
         },
         entities::history::{
             cache_change::CacheChange, cache_change_pool::CacheChangePool,
@@ -170,9 +171,14 @@ impl ReaderHistoryCache {
         let coherent_set = a_change.presentation_info().coherent_set;
         let writer_guid = a_change.writer_guid();
 
-        // End marker: protocol metadata, not data. It closes the writer's open set and is
-        // never stored, regardless of this reader's presentation QoS.
-        if coherent_set == Some(SequenceNumber::UNKNOWN) {
+        // End marker: a payload-less Data closes the writer's open set and is never stored,
+        // regardless of this reader's presentation QoS. Accepts both an explicit
+        // PID_COHERENT_SET=UNKNOWN and a payload-less Data carrying no coherent set id.
+        let is_end_marker = coherent_set == Some(SequenceNumber::UNKNOWN)
+            || (coherent_set.is_none()
+                && a_change.kind() == ChangeKind::Alive
+                && a_change.data_value().is_empty());
+        if is_end_marker {
             return self.close_coherent_set(writer_guid, Some(a_change.sequence_number()));
         }
 

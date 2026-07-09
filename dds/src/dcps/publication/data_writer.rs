@@ -2447,8 +2447,8 @@ impl<Foo: 'static + Clone> DataWriterInternal for DataWriter<Foo> {
         self.is_builtin
     }
 
-    // Close this writer's open coherent set by sending an end marker: a payload-less
-    // Data whose PID_COHERENT_SET is SEQUENCENUMBER_UNKNOWN. No-op when no set is open.
+    // Close this writer's open coherent set by sending a payload-less end marker that
+    // carries no coherent set id. No-op when no set is open.
     fn end_coherent_set(&self) -> DdsResult<()> {
         let started =
             self.current_coherent_start.lock().map_err(|e| DdsError::Error(e.to_string()))?.take();
@@ -2456,7 +2456,7 @@ impl<Foo: 'static + Clone> DataWriterInternal for DataWriter<Foo> {
             return Ok(());
         }
 
-        // Send a payload-less Data with PID_COHERENT_SET = SEQUENCENUMBER_UNKNOWN to mark the end of the coherent set.
+        // A payload-less Data carrying no coherent set id marks the end of the coherent set.
         let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
         let rtps_writer = self.get_rtps_writer()?;
         let mut change = {
@@ -2472,10 +2472,6 @@ impl<Foo: 'static + Clone> DataWriterInternal for DataWriter<Foo> {
             seq_num,
             Some(timestamp.into()),
         );
-        change.set_presentation_info(PresentationInfo {
-            coherent_set: Some(SequenceNumber::UNKNOWN),
-            ..Default::default()
-        });
 
         let mut cache = self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
         cache.add_change_with_cleanup(Arc::new(change), false)?;
