@@ -63,7 +63,7 @@ pub fn chunk_dependencies(
     let start = index * MAX_DEPENDENCIES_PER_REPLY;
     let end = (start + MAX_DEPENDENCIES_PER_REPLY).min(all.len());
     let dependent_typeids = all.get(start..end).map(<[_]>::to_vec).unwrap_or_default();
-    let next = if start + MAX_DEPENDENCIES_PER_REPLY > all.len() {
+    let next = if start + MAX_DEPENDENCIES_PER_REPLY >= all.len() {
         Vec::new()
     } else {
         continuation_point_for(index + 1)
@@ -97,6 +97,11 @@ fn read_nonprimitive_seq_count(d: &mut Xcdr2Deserializer) -> Result<usize, CdrEr
 fn write_type_ids(s: &mut Xcdr2Serializer, type_ids: &[TypeIdentifier]) -> Result<(), CdrError> {
     write_nonprimitive_seq(s, type_ids.len(), |s| {
         for type_id in type_ids {
+            debug_assert!(
+                type_id.is_typelookup_boundary_safe(),
+                "non-hash-id TypeIdentifier at TypeLookup boundary: {:?}",
+                type_id
+            );
             type_id.serialize_into(s.buffer_mut());
         }
         Ok(())
@@ -337,6 +342,11 @@ impl GetTypesOut {
         s.write_member_with_lc(hashid("types"), false, LcHint::Dheader, |s| {
             write_nonprimitive_seq(s, self.types.len(), |s| {
                 for (type_id, type_object) in &self.types {
+                    debug_assert!(
+                        type_id.is_typelookup_boundary_safe(),
+                        "non-hash-id TypeIdentifier at TypeLookup boundary: {:?}",
+                        type_id
+                    );
                     type_id.serialize_into(s.buffer_mut());
                     s.align(4);
                     s.buffer_mut().extend_from_slice(&serialize_type_object(type_object));
@@ -348,6 +358,13 @@ impl GetTypesOut {
         s.write_member_with_lc(hashid("complete_to_minimal"), false, LcHint::Dheader, |s| {
             write_nonprimitive_seq(s, self.complete_to_minimal.len(), |s| {
                 for (complete, minimal) in &self.complete_to_minimal {
+                    debug_assert!(
+                        complete.is_typelookup_boundary_safe()
+                            && minimal.is_typelookup_boundary_safe(),
+                        "non-hash-id TypeIdentifier at TypeLookup boundary: {:?} -> {:?}",
+                        complete,
+                        minimal
+                    );
                     complete.serialize_into(s.buffer_mut());
                     minimal.serialize_into(s.buffer_mut());
                 }
@@ -637,6 +654,16 @@ mod tests {
     }
 
     #[test]
+    fn chunk_dependencies_exact_page_needs_no_empty_continuation() {
+        // Exactly MAX per reply must fit in one page with no trailing empty page.
+        let all: Vec<_> =
+            (0..MAX_DEPENDENCIES_PER_REPLY as u16).map(|i| dep(&i.to_le_bytes())).collect();
+        let out = chunk_dependencies(all.clone(), &[]);
+        assert_eq!(out.dependent_typeids, all);
+        assert!(out.continuation_point.is_empty(), "no extra continuation page at exact boundary");
+    }
+
+    #[test]
     fn request_get_type_dependencies_roundtrip() {
         let request = TypeLookupRequest {
             header: RequestHeader {
@@ -650,6 +677,27 @@ mod tests {
         };
         let bytes = request.serialize();
         assert_eq!(TypeLookupRequest::deserialize(&bytes).unwrap(), request);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "TypeLookup boundary")]
+    fn get_types_request_rejects_bare_collection_id() {
+        use crate::xtypes::type_object::{CollectionElementFlag, PlainCollectionHeader};
+        let map = TypeIdentifier::PlainMapSmall {
+            header: PlainCollectionHeader::default(),
+            bound: 0,
+            key_flags: CollectionElementFlag(0),
+            key_identifier: Box::new(TypeIdentifier::CompleteTypeId(EquivalenceHash::new([1; 14]))),
+            element_identifier: Box::new(TypeIdentifier::CompleteTypeId(EquivalenceHash::new(
+                [2; 14],
+            ))),
+        };
+        let request = TypeLookupRequest {
+            header: RequestHeader { request_id: sample_identity(), instance_name: String::new() },
+            data: TypeLookupCall::GetTypes(GetTypesIn { type_ids: vec![map] }),
+        };
+        let _ = request.serialize();
     }
 
     #[test]

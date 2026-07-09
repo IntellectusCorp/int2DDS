@@ -330,6 +330,15 @@ impl TypeIdentifier {
         matches!(self, TypeIdentifier::CompleteTypeId(_) | TypeIdentifier::MinimalTypeId(_))
     }
 
+    pub(crate) fn is_typelookup_boundary_safe(&self) -> bool {
+        matches!(
+            self,
+            TypeIdentifier::CompleteTypeId(_)
+                | TypeIdentifier::MinimalTypeId(_)
+                | TypeIdentifier::None
+        )
+    }
+
     /// Get the equivalence hash if this is a complex type.
     pub fn equivalence_hash(&self) -> Option<&EquivalenceHash> {
         match self {
@@ -416,7 +425,8 @@ impl TypeIdentifier {
                 element_identifier.serialize_into(buffer);
             }
 
-            // Maps
+            // Maps. Spec field order (XTypes 1.3 PlainMapSTypeDefn): header, bound,
+            // element_identifier, key_flags, key_identifier. Encoding stays packed.
             TypeIdentifier::PlainMapSmall {
                 header,
                 bound,
@@ -426,9 +436,9 @@ impl TypeIdentifier {
             } => {
                 header.serialize_into(buffer);
                 buffer.push(*bound);
+                element_identifier.serialize_into(buffer);
                 key_flags.serialize_into(buffer);
                 key_identifier.serialize_into(buffer);
-                element_identifier.serialize_into(buffer);
             }
             TypeIdentifier::PlainMapLarge {
                 header,
@@ -439,9 +449,9 @@ impl TypeIdentifier {
             } => {
                 header.serialize_into(buffer);
                 buffer.extend_from_slice(&bound.to_le_bytes());
+                element_identifier.serialize_into(buffer);
                 key_flags.serialize_into(buffer);
                 key_identifier.serialize_into(buffer);
-                element_identifier.serialize_into(buffer);
             }
 
             // Complex types
@@ -630,9 +640,10 @@ impl TypeIdentifier {
                 ))
             }
 
-            // Maps
+            // Maps. Spec field order: header, bound, element_identifier, key_flags,
+            // key_identifier (mirrors serialize_into above).
             type_kind::TI_PLAIN_MAP_SMALL => {
-                if rest.len() < 4 {
+                if rest.len() < 3 {
                     return Err("Insufficient data for PlainMapSmall".to_string());
                 }
                 let header = PlainCollectionHeader {
@@ -640,9 +651,13 @@ impl TypeIdentifier {
                     element_flags: CollectionElementFlag(rest[1]),
                 };
                 let bound = rest[2];
-                let key_flags = CollectionElementFlag(rest[3]);
-                let (key_id, key_len) = TypeIdentifier::deserialize(&rest[4..])?;
-                let (element_id, elem_len) = TypeIdentifier::deserialize(&rest[4 + key_len..])?;
+                let (element_id, elem_len) = TypeIdentifier::deserialize(&rest[3..])?;
+                let kf_off = 3 + elem_len;
+                if rest.len() <= kf_off {
+                    return Err("Insufficient data for PlainMapSmall key_flags".to_string());
+                }
+                let key_flags = CollectionElementFlag(rest[kf_off]);
+                let (key_id, key_len) = TypeIdentifier::deserialize(&rest[kf_off + 1..])?;
                 Ok((
                     TypeIdentifier::PlainMapSmall {
                         header,
@@ -651,11 +666,11 @@ impl TypeIdentifier {
                         key_identifier: Box::new(key_id),
                         element_identifier: Box::new(element_id),
                     },
-                    1 + 4 + key_len + elem_len,
+                    1 + 3 + elem_len + 1 + key_len,
                 ))
             }
             type_kind::TI_PLAIN_MAP_LARGE => {
-                if rest.len() < 7 {
+                if rest.len() < 6 {
                     return Err("Insufficient data for PlainMapLarge".to_string());
                 }
                 let header = PlainCollectionHeader {
@@ -663,9 +678,13 @@ impl TypeIdentifier {
                     element_flags: CollectionElementFlag(rest[1]),
                 };
                 let bound = u32::from_le_bytes([rest[2], rest[3], rest[4], rest[5]]);
-                let key_flags = CollectionElementFlag(rest[6]);
-                let (key_id, key_len) = TypeIdentifier::deserialize(&rest[7..])?;
-                let (element_id, elem_len) = TypeIdentifier::deserialize(&rest[7 + key_len..])?;
+                let (element_id, elem_len) = TypeIdentifier::deserialize(&rest[6..])?;
+                let kf_off = 6 + elem_len;
+                if rest.len() <= kf_off {
+                    return Err("Insufficient data for PlainMapLarge key_flags".to_string());
+                }
+                let key_flags = CollectionElementFlag(rest[kf_off]);
+                let (key_id, key_len) = TypeIdentifier::deserialize(&rest[kf_off + 1..])?;
                 Ok((
                     TypeIdentifier::PlainMapLarge {
                         header,
@@ -674,7 +693,7 @@ impl TypeIdentifier {
                         key_identifier: Box::new(key_id),
                         element_identifier: Box::new(element_id),
                     },
-                    1 + 7 + key_len + elem_len,
+                    1 + 6 + elem_len + 1 + key_len,
                 ))
             }
 
@@ -3011,6 +3030,11 @@ impl TypeIdentifierWithSize {
     }
 
     pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+        debug_assert!(
+            self.type_id.is_typelookup_boundary_safe(),
+            "non-hash-id TypeIdentifier at TypeLookup boundary: {:?}",
+            self.type_id
+        );
         self.type_id.serialize_into(buffer);
         buffer.extend_from_slice(&self.typeobject_serialized_size.to_le_bytes());
     }
@@ -3028,6 +3052,11 @@ impl TypeIdentifierWithSize {
 
     /// Write as an APPENDABLE (DELIMIT_CDR2) struct: DHEADER + type_id union + u32 size.
     pub(crate) fn write_xcdr2(&self, s: &mut Xcdr2Serializer) -> Result<(), CdrError> {
+        debug_assert!(
+            self.type_id.is_typelookup_boundary_safe(),
+            "non-hash-id TypeIdentifier at TypeLookup boundary: {:?}",
+            self.type_id
+        );
         let pos = s.begin_struct()?;
         s.buffer_mut().extend_from_slice(&self.type_id.serialize());
         s.serialize_u32(self.typeobject_serialized_size)?;
@@ -3155,10 +3184,15 @@ impl TypeInformation {
     }
 
     pub fn from_type_identifier(type_id: TypeIdentifier) -> Self {
-        let tws = TypeIdentifierWithSize::new(type_id.clone(), 0);
-        Self {
-            minimal: TypeIdentifierWithDependencies::new(TypeIdentifierWithSize::new(type_id, 0)),
-            complete: TypeIdentifierWithDependencies::new(tws),
+        let with = |id: TypeIdentifier| {
+            TypeIdentifierWithDependencies::new(TypeIdentifierWithSize::new(id, 0))
+        };
+        let empty = || with(TypeIdentifier::None);
+
+        match &type_id {
+            TypeIdentifier::MinimalTypeId(_) => Self { minimal: with(type_id), complete: empty() },
+            TypeIdentifier::CompleteTypeId(_) => Self { minimal: empty(), complete: with(type_id) },
+            _ => Self { minimal: empty(), complete: empty() },
         }
     }
 
@@ -4135,6 +4169,49 @@ impl XcdrDeserialize for TypeInformation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_map_small_packed_order_element_before_key() {
+        let key = EquivalenceHash::new([0xAA; 14]);
+        let element = EquivalenceHash::new([0xBB; 14]);
+        let map = TypeIdentifier::PlainMapSmall {
+            header: PlainCollectionHeader::default(),
+            bound: 0,
+            key_flags: CollectionElementFlag(0),
+            key_identifier: Box::new(TypeIdentifier::CompleteTypeId(key)),
+            element_identifier: Box::new(TypeIdentifier::CompleteTypeId(element)),
+        };
+        let bytes = map.serialize();
+        // Packed codec round-trips.
+        let (back, consumed) = TypeIdentifier::deserialize(&bytes).unwrap();
+        assert_eq!(back, map);
+        assert_eq!(consumed, bytes.len());
+        // Spec field order (PlainMapSTypeDefn): element_identifier precedes key_identifier.
+        let elem_pos = bytes.windows(14).position(|w| w == [0xBB; 14]).unwrap();
+        let key_pos = bytes.windows(14).position(|w| w == [0xAA; 14]).unwrap();
+        assert!(elem_pos < key_pos, "element_identifier must serialize before key_identifier");
+    }
+
+    #[test]
+    fn from_type_identifier_degrades_bare_collection_to_empty_slots() {
+        // A non-hash top-level id (e.g. a bare map) must not be packed onto the
+        // wire via TypeInformation; both slots degrade to None so no malformed
+        // TypeIdentifier reaches 0x0075, even in release builds.
+        let map = TypeIdentifier::PlainMapSmall {
+            header: PlainCollectionHeader::default(),
+            bound: 0,
+            key_flags: CollectionElementFlag(0),
+            key_identifier: Box::new(TypeIdentifier::CompleteTypeId(EquivalenceHash::new(
+                [0xAA; 14],
+            ))),
+            element_identifier: Box::new(TypeIdentifier::CompleteTypeId(EquivalenceHash::new(
+                [0xBB; 14],
+            ))),
+        };
+        let ti = TypeInformation::from_type_identifier(map);
+        assert_eq!(ti.minimal.typeid_with_size.type_id, TypeIdentifier::None);
+        assert_eq!(ti.complete.typeid_with_size.type_id, TypeIdentifier::None);
+    }
 
     #[test]
     fn type_information_from_closure_carries_sizes_and_deps() {
