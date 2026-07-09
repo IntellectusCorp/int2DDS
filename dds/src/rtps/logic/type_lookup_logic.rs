@@ -145,6 +145,22 @@ impl SedpLogic {
                     for (type_id, type_object) in &types {
                         registry.register_type_object_with_id(type_id, type_object.clone());
                     }
+
+                    let batch_hashes: Vec<_> =
+                        types.iter().filter_map(|(id, _)| id.equivalence_hash().copied()).collect();
+                    loop {
+                        let mut progressed = false;
+                        for h in &batch_hashes {
+                            if registry.minimal_hash_of(h).is_none()
+                                && registry.try_derive_minimal(h)
+                            {
+                                progressed = true;
+                            }
+                        }
+                        if !progressed {
+                            break;
+                        }
+                    }
                     // Preserve any COMPLETE->MINIMAL correspondences the replier sent
                     // (e.g. COMPLETE served for a MINIMAL request); ours take precedence.
                     for (complete, minimal) in &complete_to_minimal {
@@ -219,6 +235,7 @@ impl SedpLogic {
     /// COMPLETE for a `CompleteTypeId`; spec §7.6.3 allows serving MINIMAL directly).
     fn serve_get_types(&self, type_ids: &[TypeIdentifier]) -> GetTypesOut {
         let mut types: Vec<(TypeIdentifier, TypeObject)> = Vec::new();
+        let mut complete_to_minimal: Vec<(TypeIdentifier, TypeIdentifier)> = Vec::new();
         if let Ok(participant) = self.get_upgraded_participant() {
             if let Ok(registry) = participant.type_registry().read() {
                 let mut served = std::collections::HashSet::new();
@@ -261,13 +278,21 @@ impl SedpLogic {
                             }
                         }
                         if let Some(obj) = registry.resolve_type_object(&served_id) {
+                            if let TypeIdentifier::CompleteTypeId(ch) = &served_id {
+                                if let Some(mh) = registry.minimal_hash_of(ch) {
+                                    complete_to_minimal.push((
+                                        served_id.clone(),
+                                        TypeIdentifier::MinimalTypeId(mh),
+                                    ));
+                                }
+                            }
                             types.push((served_id, obj));
                         }
                     }
                 }
             }
         }
-        GetTypesOut { types, complete_to_minimal: Vec::new() }
+        GetTypesOut { types, complete_to_minimal }
     }
 
     fn serve_get_type_dependencies(

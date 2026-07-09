@@ -560,6 +560,11 @@ fn collect_from_identifier(id: &TypeIdentifier, out: &mut Vec<EquivalenceHash>) 
         | TypeIdentifier::PlainArrayLarge { element_identifier, .. } => {
             collect_from_identifier(element_identifier, out);
         }
+        TypeIdentifier::PlainMapSmall { key_identifier, element_identifier, .. }
+        | TypeIdentifier::PlainMapLarge { key_identifier, element_identifier, .. } => {
+            collect_from_identifier(key_identifier, out);
+            collect_from_identifier(element_identifier, out);
+        }
         _ => {}
     }
 }
@@ -838,6 +843,26 @@ mod tests {
             },
             _ => panic!("expected struct"),
         }
+    }
+
+    #[test]
+    fn referenced_hashes_collects_map_key_and_value() {
+        let key_hash = EquivalenceHash::compute(b"map_key");
+        let val_hash = EquivalenceHash::compute(b"map_val");
+        let map = TypeIdentifier::PlainMapSmall {
+            header: PlainCollectionHeader {
+                equiv_kind: EquivalenceKind::Both,
+                element_flags: CollectionElementFlag(0),
+            },
+            bound: 8,
+            key_flags: CollectionElementFlag(0),
+            key_identifier: Box::new(TypeIdentifier::CompleteTypeId(key_hash)),
+            element_identifier: Box::new(TypeIdentifier::CompleteTypeId(val_hash)),
+        };
+        let outer = struct_with_member("OuterMap", map);
+        let deps = referenced_hashes(&outer);
+        assert!(deps.contains(&key_hash), "map key type must be a dependency");
+        assert!(deps.contains(&val_hash), "map value type must be a dependency");
     }
 
     #[test]
