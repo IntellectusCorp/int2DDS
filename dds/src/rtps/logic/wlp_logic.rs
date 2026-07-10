@@ -576,9 +576,6 @@ impl WlpLogic {
             for remote_data in remote_datas_guard.iter() {
                 if remote_data.participant_guid().prefix() == remote_prefix {
                     for locator in remote_data.metatraffic_unicast_locator_list() {
-                        if !locator.is_udp() {
-                            continue;
-                        }
                         let _ = self.transport.send(&buffer, &SendTarget::SEDPDiscovery(locator));
                     }
                     break;
@@ -688,9 +685,6 @@ impl WlpLogic {
             }
 
             for locator in reader_proxy.unicast_locator_list() {
-                if !locator.is_udp() {
-                    continue;
-                }
                 if let Err(e) =
                     self.transport.send(&send_buffer, &SendTarget::SEDPDiscovery(&locator))
                 {
@@ -721,9 +715,6 @@ impl WlpLogic {
                 for remote_participant_data in remote_participant_datas.iter() {
                     if remote_participant_data.participant_guid().prefix() == remote_guid.prefix() {
                         for locator in remote_participant_data.metatraffic_unicast_locator_list() {
-                            if !locator.is_udp() {
-                                continue;
-                            }
                             let _ =
                                 self.transport.send(buffer, &SendTarget::SEDPDiscovery(&locator));
                             debug!(
@@ -1646,9 +1637,6 @@ impl UnicastMessageProcessor for WlpLogic {
                 }
 
                 for locator in reader_proxy.unicast_locator_list() {
-                    if !locator.is_udp() {
-                        continue;
-                    }
                     if let Err(e) =
                         self.transport.send(&send_buffer, &SendTarget::SEDPDiscovery(&locator))
                     {

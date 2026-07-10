@@ -333,7 +333,6 @@ int2DDS supports various environment variables for configuration:
 ### Basic Environment Variables
 
 - `INT2DDS_TRANSPORT`: Transport protocol (udp, tcp, hybrid, shm)
-- `INT2DDS_DISCOVERY_MODE`: Discovery mode (udp, tcp, hybrid)
 - `INT2DDS_LOG_TYPE`: Log output type (console, file, all, none)
 - `INT2DDS_CONSOLE_LOG_LEVEL`: Console log level (error, warn, info, debug, trace)
 - `INT2DDS_FILE_LOG_LEVEL`: File log level (error, warn, info, debug, trace)

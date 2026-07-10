@@ -23,7 +23,6 @@ pub fn init_from_env() {
 
     // INT2DDS_ environment variables:
     // - INT2DDS_TRANSPORT: Set transport protocol type (udp, tcp) - Default: udp
-    // - INT2DDS_DISCOVERY_MODE: Set discovery mode (udp, tcp, hybrid) - Default: udp
 
     // - INT2DDS_LOG_TYPE: Set log output type (console, file, all, none) - Default: none
     // - INT2DDS_CONSOLE_LOG_LEVEL: Set console log level (trace, debug, info, warn, error) - Default: info
@@ -211,80 +210,6 @@ pub fn set_udp_socket_buffer_size(size: usize) {
 pub fn set_shm_buffer_size(size: usize) {
     log::info!("Environment variable set: INT2DDS_SHM_BUFFER_SIZE = {}", size);
     unsafe { std::env::set_var("INT2DDS_SHM_BUFFER_SIZE", size.to_string()) };
-}
-
-/// Discovery mode for DDS participant discovery protocol
-///
-/// Determines how participants discover each other in the network.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DiscoveryMode {
-    /// UDP-only discovery (legacy mode)
-    /// - Discovery: UDP multicast
-    /// - User Data: UDP
-    Udp,
-
-    /// TCP-only discovery (requires initial peers)
-    /// - Discovery: TCP unicast (requires INT2DDS_INITIAL_PEERS)
-    /// - User Data: TCP
-    Tcp,
-
-    /// Hybrid mode (default, recommended)
-    /// - Discovery: UDP multicast (automatic discovery)
-    /// - User Data: TCP (reliability)
-    Hybrid,
-}
-
-impl DiscoveryMode {
-    /// Convert string to DiscoveryMode
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "udp" => Some(DiscoveryMode::Udp),
-            "tcp" => Some(DiscoveryMode::Tcp),
-            "hybrid" => Some(DiscoveryMode::Hybrid),
-            _ => None,
-        }
-    }
-
-    /// Convert DiscoveryMode to string
-    pub fn to_string(&self) -> &str {
-        match self {
-            DiscoveryMode::Udp => "udp",
-            DiscoveryMode::Tcp => "tcp",
-            DiscoveryMode::Hybrid => "hybrid",
-        }
-    }
-}
-
-/// Get the discovery mode from environment variable
-///
-/// Reads INT2DDS_DISCOVERY_MODE environment variable.
-/// Valid values: "udp", "tcp", "hybrid" (case-insensitive)
-/// Default: udp
-///
-/// # Examples
-///
-/// ```no_run
-/// use int2dds::common::env::{get_discovery_mode, DiscoveryMode};
-///
-/// let mode = get_discovery_mode();
-/// match mode {
-///     DiscoveryMode::Udp => println!("UDP-only discovery"),
-///     DiscoveryMode::Tcp => println!("TCP-only discovery"),
-///     DiscoveryMode::Hybrid => println!("Hybrid discovery (UDP + TCP)"),
-/// }
-/// ```
-pub fn get_discovery_mode() -> DiscoveryMode {
-    std::env::var("INT2DDS_DISCOVERY_MODE")
-        .ok()
-        .and_then(|val| DiscoveryMode::from_str(&val))
-        .unwrap_or(DiscoveryMode::Udp)
-}
-
-/// Set the discovery mode via environment variable
-pub fn set_discovery_mode(mode: DiscoveryMode) {
-    log::info!("Environment variable set: INT2DDS_DISCOVERY_MODE = {}", mode.to_string());
-    unsafe { std::env::set_var("INT2DDS_DISCOVERY_MODE", mode.to_string()) };
 }
 
 /// Get initial peers from environment variable for SPDP unicast discovery.
