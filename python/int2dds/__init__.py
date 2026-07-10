@@ -36,7 +36,7 @@ try:
         UserData,
         WriterDataLifecycle,
     )
-    from int2dds.core.conditions import GuardCondition, StatusCondition, WaitSet
+    from int2dds.core.conditions import Condition, GuardCondition, StatusCondition, WaitSet
     from int2dds.core.async_support import AsyncDataReader, AsyncWaitSet, async_wait
     from int2dds.core.listeners import (
         DataReaderListener,
