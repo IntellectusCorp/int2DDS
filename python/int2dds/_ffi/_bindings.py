@@ -241,6 +241,68 @@ ffi.cdef("""
         Int2DdsDataWriter **writer_out
     );
     Int2DdsRet int2dds_delete_datawriter(Int2DdsDataWriter *writer);
+
+    /* Creation from a named QoS profile ("Library::Profile") */
+    Int2DdsRet int2dds_create_publisher_with_profile(
+        const Int2DdsParticipant *participant,
+        const char *qos_path,
+        Int2DdsPublisher **publisher_out
+    );
+    Int2DdsRet int2dds_create_subscriber_with_profile(
+        const Int2DdsParticipant *participant,
+        const char *qos_path,
+        Int2DdsSubscriber **subscriber_out
+    );
+    Int2DdsRet int2dds_create_topic_with_profile(
+        const Int2DdsParticipant *participant,
+        const char *topic_name,
+        const char *dds_type_name,
+        int32_t extensibility,
+        bool has_key,
+        const char *qos_path,
+        Int2DdsTopic **topic_out
+    );
+    Int2DdsRet int2dds_create_datawriter_with_profile(
+        const Int2DdsPublisher *publisher,
+        const Int2DdsTopic *topic,
+        const char *qos_path,
+        Int2DdsDataWriter **writer_out
+    );
+    Int2DdsRet int2dds_create_datareader_with_profile(
+        const Int2DdsSubscriber *subscriber,
+        const Int2DdsTopic *topic,
+        const char *qos_path,
+        Int2DdsDataReader **reader_out
+    );
+
+    /* Effective QoS query */
+    Int2DdsRet int2dds_datawriter_get_qos(
+        const Int2DdsDataWriter *writer,
+        Int2DdsDataWriterQos **qos_out
+    );
+    Int2DdsRet int2dds_datareader_get_qos(
+        const Int2DdsDataReader *reader,
+        Int2DdsDataReaderQos **qos_out
+    );
+    Int2DdsRet int2dds_datawriter_qos_get_reliability(
+        const Int2DdsDataWriterQos *qos, int32_t *kind_out, int64_t *max_blocking_time_ns_out
+    );
+    Int2DdsRet int2dds_datawriter_qos_get_durability(
+        const Int2DdsDataWriterQos *qos, int32_t *kind_out
+    );
+    Int2DdsRet int2dds_datawriter_qos_get_history(
+        const Int2DdsDataWriterQos *qos, int32_t *kind_out, int32_t *depth_out
+    );
+    Int2DdsRet int2dds_datareader_qos_get_reliability(
+        const Int2DdsDataReaderQos *qos, int32_t *kind_out, int64_t *max_blocking_time_ns_out
+    );
+    Int2DdsRet int2dds_datareader_qos_get_durability(
+        const Int2DdsDataReaderQos *qos, int32_t *kind_out
+    );
+    Int2DdsRet int2dds_datareader_qos_get_history(
+        const Int2DdsDataReaderQos *qos, int32_t *kind_out, int32_t *depth_out
+    );
+
     Int2DdsRet int2dds_get_publication_matched_status(
         const Int2DdsDataWriter *writer,
         int32_t *total_count_out,

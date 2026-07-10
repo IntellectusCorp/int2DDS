@@ -34,12 +34,16 @@ class Publisher:
 
     __slots__ = ("_handle", "_participant", "_closed")
 
-    def __init__(self, participant: DomainParticipant, qos: "PublisherQos | None" = None) -> None:
+    def __init__(self, participant: DomainParticipant, qos: "PublisherQos | None" = None,
+                 profile: str | None = None) -> None:
         self._participant = participant
         self._closed = False
 
         publisher_ptr = ffi.new("Int2DdsPublisher **")
-        if qos is not None and qos.partition is not None and qos.partition.names:
+        if profile is not None:
+            check_ret(lib.int2dds_create_publisher_with_profile(
+                participant._handle, profile.encode(), publisher_ptr))
+        elif qos is not None and qos.partition is not None and qos.partition.names:
             qos_handle_ptr = ffi.new("Int2DdsPublisherQos **")
             check_ret(lib.int2dds_publisher_qos_create_default(qos_handle_ptr))
             qos_handle = qos_handle_ptr[0]
@@ -74,6 +78,10 @@ class Publisher:
             A new DataWriter instance
         """
         return DataWriter(self, topic, qos, listener, status_mask)
+
+    def create_datawriter_with_profile(self, topic: Topic[T], profile: str) -> DataWriter[T]:
+        """Create a DataWriter whose QoS comes from the named XML profile."""
+        return DataWriter(self, topic, profile=profile)
 
     def create_datawriter_dynamic(self, topic, support):
         """Create a DataWriter for a runtime XML/dynamic-typed topic."""
@@ -127,6 +135,7 @@ class DataWriter(Generic[T]):
         qos: DataWriterQos | None = None,
         listener: DataWriterListener | None = None,
         status_mask: int | None = None,
+        profile: str | None = None,
     ) -> None:
         self._publisher = publisher
         self._topic = topic
@@ -208,7 +217,13 @@ class DataWriter(Generic[T]):
 
         writer_ptr = ffi.new("Int2DdsDataWriter **")
 
-        if listener is not None:
+        if profile is not None:
+            check_ret(
+                lib.int2dds_create_datawriter_with_profile(
+                    publisher._handle, topic._handle, profile.encode(), writer_ptr
+                )
+            )
+        elif listener is not None:
             mask = status_mask if status_mask is not None else STATUS_MASK_ALL
             c_listener, ctx_id = _create_writer_listener_struct(listener, self)
             check_ret(
@@ -236,6 +251,37 @@ class DataWriter(Generic[T]):
     def topic(self) -> Topic[T]:
         """Get the topic this writer publishes to."""
         return self._topic
+
+    def get_qos(self) -> "DataWriterQos":
+        """Return the effective QoS (reliability, durability, history) in force."""
+        from int2dds.core.qos import (
+            DataWriterQos, Reliability, Durability, History,
+            ReliabilityKind, DurabilityKind, HistoryKind,
+        )
+
+        qos_ptr = ffi.new("Int2DdsDataWriterQos **")
+        check_ret(lib.int2dds_datawriter_get_qos(self._handle, qos_ptr))
+        handle = qos_ptr[0]
+        try:
+            rel_kind = ffi.new("int32_t *")
+            max_block = ffi.new("int64_t *")
+            check_ret(lib.int2dds_datawriter_qos_get_reliability(handle, rel_kind, max_block))
+            dur_kind = ffi.new("int32_t *")
+            check_ret(lib.int2dds_datawriter_qos_get_durability(handle, dur_kind))
+            hist_kind = ffi.new("int32_t *")
+            depth = ffi.new("int32_t *")
+            check_ret(lib.int2dds_datawriter_qos_get_history(handle, hist_kind, depth))
+        finally:
+            lib.int2dds_datawriter_qos_destroy(handle)
+
+        return DataWriterQos(
+            reliability=Reliability(
+                kind=ReliabilityKind(rel_kind[0]).name,
+                max_blocking_time=max_block[0] / 1_000_000_000,
+            ),
+            durability=Durability(kind=DurabilityKind(dur_kind[0]).name),
+            history=History(kind=HistoryKind(hist_kind[0]).name, depth=depth[0]),
+        )
 
     def write(self, sample: T) -> None:
         """
