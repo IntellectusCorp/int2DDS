@@ -13,11 +13,11 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use crate::dcps::infrastructure::qos_policy::{
-    PropertyQosPolicy, PROP_INITIAL_PEERS, PROP_MULTICAST_TTL, PROP_TCP_ASYNC_WORKERS,
-    PROP_TCP_BIND_PORT, PROP_TCP_BIND_TIMEOUT_MS, PROP_TCP_CONNECT_TIMEOUT_MS,
-    PROP_TCP_KEEPALIVE_INTERVAL_MS, PROP_TCP_KEEPALIVE_MAX_MISSES, PROP_TCP_KEEPALIVE_TIMEOUT_MS,
-    PROP_TCP_NODELAY, PROP_TCP_PUBLIC_ADDRESS, PROP_TCP_SO_RCVBUF, PROP_TCP_SO_SNDBUF,
-    PROP_TCP_UNACKED_TIMEOUT_MS, PROP_TRANSPORT,
+    PropertyQosPolicy, PROP_ACCEPT_UNDEFINED_PEERS, PROP_INITIAL_PEERS, PROP_MULTICAST_TTL,
+    PROP_TCP_ASYNC_WORKERS, PROP_TCP_BIND_PORT, PROP_TCP_BIND_TIMEOUT_MS,
+    PROP_TCP_CONNECT_TIMEOUT_MS, PROP_TCP_KEEPALIVE_INTERVAL_MS, PROP_TCP_KEEPALIVE_MAX_MISSES,
+    PROP_TCP_KEEPALIVE_TIMEOUT_MS, PROP_TCP_NODELAY, PROP_TCP_PUBLIC_ADDRESS, PROP_TCP_SO_RCVBUF,
+    PROP_TCP_SO_SNDBUF, PROP_TCP_UNACKED_TIMEOUT_MS, PROP_TRANSPORT,
 };
 use crate::rtps::transport::TransportType;
 
@@ -74,6 +74,8 @@ pub(crate) struct TcpConfig {
     pub public_address: Option<SocketAddr>,
     /// SPDP dial gate. Property first, then the `INT2DDS_INITIAL_PEERS` env var.
     pub initial_peers: Vec<SocketAddr>,
+    /// Dial runtime-discovered peers not in `initial_peers`
+    pub accept_undefined_peers: bool,
     pub nodelay: bool,
     pub connect_timeout: Duration,
     pub bind_timeout: Duration,
@@ -104,6 +106,8 @@ impl TransportConfig for TcpConfig {
                 .find_property(PROP_INITIAL_PEERS)
                 .map(crate::common::env::parse_initial_peers)
                 .unwrap_or_else(crate::common::env::get_initial_peers),
+            accept_undefined_peers: prop_parse::<bool>(property, PROP_ACCEPT_UNDEFINED_PEERS)
+                .unwrap_or(false),
             nodelay: prop_parse::<bool>(property, PROP_TCP_NODELAY).unwrap_or(true),
             connect_timeout: ms(PROP_TCP_CONNECT_TIMEOUT_MS, 5_000),
             bind_timeout: ms(PROP_TCP_BIND_TIMEOUT_MS, 5_000),
