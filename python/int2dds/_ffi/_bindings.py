@@ -932,6 +932,8 @@ ffi.cdef("""
     /* TypeInfo builder */
     Int2DdsRet int2dds_type_info_create(const char *type_name, int32_t extensibility, Int2DdsTypeInfo **out);
     Int2DdsRet int2dds_type_info_add_field(Int2DdsTypeInfo *type_info, const char *field_name, int32_t field_type, int32_t flags);
+    Int2DdsRet int2dds_type_info_add_string_field(Int2DdsTypeInfo *type_info, const char *field_name, uint32_t bound, int32_t flags);
+    Int2DdsRet int2dds_type_info_add_wstring_field(Int2DdsTypeInfo *type_info, const char *field_name, uint32_t bound, int32_t flags);
     Int2DdsRet int2dds_type_info_add_sequence_field(Int2DdsTypeInfo *type_info, const char *field_name, int32_t element_type, uint32_t bound, int32_t flags);
     Int2DdsRet int2dds_type_info_add_array_field(Int2DdsTypeInfo *type_info, const char *field_name, int32_t element_type, uint32_t array_size, int32_t flags);
     Int2DdsRet int2dds_type_info_add_named_type_field(Int2DdsTypeInfo *type_info, const char *field_name, const char *type_hash_name, int32_t flags);

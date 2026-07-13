@@ -1,12 +1,15 @@
 use std::collections::HashSet;
 
 use crate::dcps::core::error::{DdsError, DdsResult};
+use std::collections::HashMap;
+
 use crate::xtypes::{
-    AppliedBuiltinMemberAnnotations, AppliedBuiltinTypeAnnotations, CollectionElementFlag,
-    CompleteBitfield, CompleteBitflag, CompleteBitmaskType, CompleteBitsetType,
-    CompleteEnumeratedLiteral, CompleteEnumeratedType, CompleteStructMember, CompleteStructType,
-    CompleteTypeObject, CompleteUnionMember, CompleteUnionType, EnumeratedLiteralFlag,
-    EquivalenceHash, MemberFlag, PlainCollectionHeader, TryConstructKind, TypeFlag, TypeIdentifier,
+    recompute_collection_kind, AppliedBuiltinMemberAnnotations, AppliedBuiltinTypeAnnotations,
+    CollectionElementFlag, CompleteBitfield, CompleteBitflag, CompleteBitmaskType,
+    CompleteBitsetType, CompleteEnumeratedLiteral, CompleteEnumeratedType, CompleteStructMember,
+    CompleteStructType, CompleteTypeObject, CompleteUnionMember, CompleteUnionType,
+    EnumeratedLiteralFlag, EquivalenceHash, MemberFlag, PlainCollectionHeader, TryConstructKind,
+    TypeFlag, TypeIdentifier,
 };
 
 use super::ast::{
@@ -130,9 +133,159 @@ pub(crate) fn enum_literal_values(e: &XmlEnum) -> DdsResult<Vec<i32>> {
     Ok(values)
 }
 
-// Same name-based id convention as derive's collect_nested_type_objects.
+// Same name-based id convention as derive's collect_nested_type_objects. Used as a
+// pre-rewrite placeholder: `resolve_content_ids` later swaps these for content ids.
 pub(crate) fn name_based_type_id(name: &str) -> TypeIdentifier {
     TypeIdentifier::MinimalTypeId(EquivalenceHash::compute(name.as_bytes()))
+}
+
+/// Every name-based (`MinimalTypeId`) hash a complete object references — struct
+/// members and base type, union discriminator and members, alias body — recursing
+/// into plain collection element/key ids.
+pub(crate) fn referenced_name_hashes(obj: &CompleteTypeObject) -> Vec<EquivalenceHash> {
+    let mut out = Vec::new();
+    let mut push = |id: &TypeIdentifier| collect_id_hashes(id, &mut out);
+    match obj {
+        CompleteTypeObject::Struct(s) => {
+            if let Some(b) = &s.header.base_type {
+                push(b);
+            }
+            for m in &s.member_seq {
+                push(&m.common.member_type_id);
+            }
+        }
+        CompleteTypeObject::Union(u) => {
+            push(&u.discriminator.type_id);
+            for m in &u.member_seq {
+                push(&m.common.member_type_id);
+            }
+        }
+        CompleteTypeObject::Alias(a) => push(&a.body.related_type),
+        CompleteTypeObject::Enum(_)
+        | CompleteTypeObject::Bitmask(_)
+        | CompleteTypeObject::Bitset(_) => {}
+    }
+    out
+}
+
+fn collect_id_hashes(id: &TypeIdentifier, out: &mut Vec<EquivalenceHash>) {
+    if let Some(h) = id.equivalence_hash() {
+        out.push(*h);
+        return;
+    }
+    match id {
+        TypeIdentifier::PlainSequenceSmall { element_identifier, .. }
+        | TypeIdentifier::PlainSequenceLarge { element_identifier, .. }
+        | TypeIdentifier::PlainArraySmall { element_identifier, .. }
+        | TypeIdentifier::PlainArrayLarge { element_identifier, .. } => {
+            collect_id_hashes(element_identifier, out)
+        }
+        TypeIdentifier::PlainMapSmall { key_identifier, element_identifier, .. }
+        | TypeIdentifier::PlainMapLarge { key_identifier, element_identifier, .. } => {
+            collect_id_hashes(key_identifier, out);
+            collect_id_hashes(element_identifier, out);
+        }
+        _ => {}
+    }
+}
+
+/// Rewrite the placeholder name-based ids of `obj` to content ids via `resolver`
+/// (name-hash -> content `TypeIdentifier`), and recompute every plain-collection
+/// header's `equiv_kind` from its rewritten element/key. Ids absent from `resolver`
+/// (an unbroken cycle) are left as name-based `MinimalTypeId` placeholders.
+pub(crate) fn resolve_content_ids(
+    obj: &mut CompleteTypeObject,
+    resolver: &HashMap<EquivalenceHash, TypeIdentifier>,
+) {
+    match obj {
+        CompleteTypeObject::Struct(s) => {
+            if let Some(b) = &mut s.header.base_type {
+                *b = rewrite_id(b, resolver);
+            }
+            for m in &mut s.member_seq {
+                m.common.member_type_id = rewrite_id(&m.common.member_type_id, resolver);
+            }
+        }
+        CompleteTypeObject::Union(u) => {
+            u.discriminator.type_id = rewrite_id(&u.discriminator.type_id, resolver);
+            for m in &mut u.member_seq {
+                m.common.member_type_id = rewrite_id(&m.common.member_type_id, resolver);
+            }
+        }
+        CompleteTypeObject::Alias(a) => {
+            a.body.related_type = rewrite_id(&a.body.related_type, resolver);
+        }
+        CompleteTypeObject::Enum(_)
+        | CompleteTypeObject::Bitmask(_)
+        | CompleteTypeObject::Bitset(_) => {}
+    }
+}
+
+fn rewrite_id(
+    id: &TypeIdentifier,
+    resolver: &HashMap<EquivalenceHash, TypeIdentifier>,
+) -> TypeIdentifier {
+    if let Some(h) = id.equivalence_hash() {
+        return resolver.get(h).cloned().unwrap_or_else(|| id.clone());
+    }
+    let rebuilt = match id {
+        TypeIdentifier::PlainSequenceSmall { header, bound, element_identifier } => {
+            TypeIdentifier::PlainSequenceSmall {
+                header: header.clone(),
+                bound: *bound,
+                element_identifier: Box::new(rewrite_id(element_identifier, resolver)),
+            }
+        }
+        TypeIdentifier::PlainSequenceLarge { header, bound, element_identifier } => {
+            TypeIdentifier::PlainSequenceLarge {
+                header: header.clone(),
+                bound: *bound,
+                element_identifier: Box::new(rewrite_id(element_identifier, resolver)),
+            }
+        }
+        TypeIdentifier::PlainArraySmall { header, array_bound_seq, element_identifier } => {
+            TypeIdentifier::PlainArraySmall {
+                header: header.clone(),
+                array_bound_seq: array_bound_seq.clone(),
+                element_identifier: Box::new(rewrite_id(element_identifier, resolver)),
+            }
+        }
+        TypeIdentifier::PlainArrayLarge { header, array_bound_seq, element_identifier } => {
+            TypeIdentifier::PlainArrayLarge {
+                header: header.clone(),
+                array_bound_seq: array_bound_seq.clone(),
+                element_identifier: Box::new(rewrite_id(element_identifier, resolver)),
+            }
+        }
+        TypeIdentifier::PlainMapSmall {
+            header,
+            bound,
+            key_flags,
+            key_identifier,
+            element_identifier,
+        } => TypeIdentifier::PlainMapSmall {
+            header: header.clone(),
+            bound: *bound,
+            key_flags: *key_flags,
+            key_identifier: Box::new(rewrite_id(key_identifier, resolver)),
+            element_identifier: Box::new(rewrite_id(element_identifier, resolver)),
+        },
+        TypeIdentifier::PlainMapLarge {
+            header,
+            bound,
+            key_flags,
+            key_identifier,
+            element_identifier,
+        } => TypeIdentifier::PlainMapLarge {
+            header: header.clone(),
+            bound: *bound,
+            key_flags: *key_flags,
+            key_identifier: Box::new(rewrite_id(key_identifier, resolver)),
+            element_identifier: Box::new(rewrite_id(element_identifier, resolver)),
+        },
+        _ => return id.clone(),
+    };
+    recompute_collection_kind(rebuilt)
 }
 
 fn enum_to_type_object(e: &XmlEnum) -> DdsResult<CompleteTypeObject> {
@@ -241,7 +394,8 @@ fn struct_to_type_object(s: &XmlStruct) -> DdsResult<CompleteTypeObject> {
                 m.try_construct,
                 m.external,
                 m.optional,
-                m.must_understand,
+                // XTypes 7.2.2.4.4.4.7: key members are implicitly must-understand.
+                m.must_understand || m.key,
                 m.key,
                 false,
             ),
@@ -263,7 +417,8 @@ fn struct_to_type_object(s: &XmlStruct) -> DdsResult<CompleteTypeObject> {
     Ok(CompleteTypeObject::Struct(struct_type))
 }
 
-// Small/large split at bound 255; unbounded sequences and arrays use Large to byte-match derive.
+// SMALL/LARGE split at bound 255; unbounded (bound 0) collections use the SMALL form,
+// matching the derive output (XTypes 7.3.4.5).
 fn member_type_id(ty: &XmlMemberType) -> TypeIdentifier {
     match ty {
         XmlMemberType::Primitive(id) => id.clone(),
@@ -280,7 +435,7 @@ fn member_type_id(ty: &XmlMemberType) -> TypeIdentifier {
         XmlMemberType::Sequence { element, bound } => {
             let element_identifier = Box::new(member_type_id(element));
             match bound {
-                None => TypeIdentifier::PlainSequenceLarge {
+                None => TypeIdentifier::PlainSequenceSmall {
                     header: PlainCollectionHeader::default(),
                     bound: 0,
                     element_identifier,
@@ -299,11 +454,23 @@ fn member_type_id(ty: &XmlMemberType) -> TypeIdentifier {
                 },
             }
         }
-        XmlMemberType::Array { element, dims } => TypeIdentifier::PlainArrayLarge {
-            header: PlainCollectionHeader::default(),
-            array_bound_seq: dims.clone(),
-            element_identifier: Box::new(member_type_id(element)),
-        },
+        XmlMemberType::Array { element, dims } => {
+            let element_identifier = Box::new(member_type_id(element));
+            let header = PlainCollectionHeader::default();
+            if dims.iter().all(|d| *d <= 255) {
+                TypeIdentifier::PlainArraySmall {
+                    header,
+                    array_bound_seq: dims.iter().map(|d| *d as u8).collect(),
+                    element_identifier,
+                }
+            } else {
+                TypeIdentifier::PlainArrayLarge {
+                    header,
+                    array_bound_seq: dims.clone(),
+                    element_identifier,
+                }
+            }
+        }
         XmlMemberType::Map { key, value, bound } => {
             let key_identifier = Box::new(member_type_id(key));
             let element_identifier = Box::new(member_type_id(value));
@@ -473,7 +640,7 @@ mod tests {
         assert_eq!(id(3), &TypeIdentifier::String16Small { bound: 16 });
         assert_eq!(
             id(4),
-            &TypeIdentifier::PlainSequenceLarge {
+            &TypeIdentifier::PlainSequenceSmall {
                 header: PlainCollectionHeader::default(),
                 bound: 0,
                 element_identifier: Box::new(TypeIdentifier::Int32),
@@ -497,7 +664,7 @@ mod tests {
         );
         assert_eq!(
             id(7),
-            &TypeIdentifier::PlainArrayLarge {
+            &TypeIdentifier::PlainArraySmall {
                 header: PlainCollectionHeader::default(),
                 array_bound_seq: vec![2, 3],
                 element_identifier: Box::new(TypeIdentifier::Float64),
@@ -505,7 +672,7 @@ mod tests {
         );
         assert_eq!(
             id(8),
-            &TypeIdentifier::PlainSequenceLarge {
+            &TypeIdentifier::PlainSequenceSmall {
                 header: PlainCollectionHeader::default(),
                 bound: 0,
                 element_identifier: Box::new(TypeIdentifier::String8),
@@ -570,7 +737,7 @@ mod tests {
         assert_eq!(s.member_seq[0].common.member_type_id, name_based_type_id("Point"));
         assert_eq!(
             s.member_seq[1].common.member_type_id,
-            TypeIdentifier::PlainSequenceLarge {
+            TypeIdentifier::PlainSequenceSmall {
                 header: PlainCollectionHeader::default(),
                 bound: 0,
                 element_identifier: Box::new(name_based_type_id("Point")),
@@ -632,7 +799,7 @@ mod tests {
         let s = as_struct(&obj);
         assert_eq!(
             &s.member_seq[0].common.member_type_id,
-            &TypeIdentifier::PlainArrayLarge {
+            &TypeIdentifier::PlainArraySmall {
                 header: PlainCollectionHeader::default(),
                 array_bound_seq: vec![2],
                 element_identifier: Box::new(TypeIdentifier::PlainSequenceSmall {

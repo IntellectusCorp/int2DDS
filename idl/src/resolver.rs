@@ -491,7 +491,7 @@ impl Resolver {
                 // OMG IDL 4.2 integer type aliases
                 match name.as_str() {
                     "int8" => return Ok(ResolvedType::I8),
-                    "uint8" => return Ok(ResolvedType::U8),
+                    "uint8" => return Ok(ResolvedType::UInt8),
                     "int16" => return Ok(ResolvedType::I16),
                     "uint16" => return Ok(ResolvedType::U16),
                     "int32" => return Ok(ResolvedType::I32),

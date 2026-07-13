@@ -133,7 +133,7 @@ impl PlCdrSerializer {
 
         // Align to 4-byte boundary between parameters (RTPS 2.5, Section 9.6.2.2.2):
         // parameterLength MUST include the trailing padding (i.e. be a multiple of 4). A strict
-        // remote parser (Fast-DDS/Connext) advances by parameterLength, so an unpadded length on a
+        // remote parser advances by parameterLength, so an unpadded length on a
         // variable-size parameter (USER_DATA/TOPIC_DATA/etc.) misaligns and corrupts later params.
         let padding =
             (PARAMETER_ALIGNMENT - (param_data.len() % PARAMETER_ALIGNMENT)) % PARAMETER_ALIGNMENT;
@@ -1042,9 +1042,11 @@ impl super::ParsedBuiltinTopicData {
             }
         }
 
-        // TypeInformation (DDS-XTypes)
+        // TypeInformation (DDS-XTypes): prefer the enriched (sizes + deps) form when present.
         if let Some(type_id) = &self.type_identifier {
-            let type_info = crate::xtypes::TypeInformation::from_type_identifier(type_id.clone());
+            let type_info = self.type_information.clone().unwrap_or_else(|| {
+                crate::xtypes::TypeInformation::from_type_identifier(type_id.clone())
+            });
             parameters.push(PlCdrParameter {
                 id: ParameterId::PidTypeInformation,
                 value: ParameterValue::TypeInformation(type_info),
@@ -1060,14 +1062,6 @@ impl super::ParsedBuiltinTopicData {
             parameters.push(PlCdrParameter {
                 id: ParameterId::PidTypeConsistencyEnforcement,
                 value: ParameterValue::TypeConsistencyEnforcement(*tce),
-            });
-        }
-
-        // TypeObject (DDS-XTypes)
-        if let Some(type_obj) = &self.type_object {
-            parameters.push(PlCdrParameter {
-                id: ParameterId::PidTypeObject,
-                value: ParameterValue::TypeObject(type_obj.clone()),
             });
         }
 

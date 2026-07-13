@@ -52,6 +52,9 @@ pub(crate) struct TcpTransportPlugin {
     /// Public endpoint advertised in SPDP for WAN/NAT traversal (per participant).
     public_address: Option<SocketAddr>,
 
+    /// Dial peers discovered at runtime that are not in `initial_peers`
+    accept_undefined_peers: bool,
+
     /// runtime isolating tcp tasks. Dropped last (after listener
     /// and sender) so tasks can drain on shutdown.
     runtime: Arc<tokio::runtime::Runtime>,
@@ -215,6 +218,7 @@ impl TcpTransportPlugin {
             listener_port,
             initial_peers,
             public_address: tcp_config.public_address,
+            accept_undefined_peers: tcp_config.accept_undefined_peers,
             runtime,
             sender,
             mux_listener: Mutex::new(Some(mux_listener)),
@@ -260,12 +264,13 @@ impl TcpTransportPlugin {
             .collect()
     }
 
-    /// Whether an outbound dial to `addr` is permitted under the initial-peers
-    /// policy. With initial peers configured, only those addresses are dialed
-    /// (so unreachable advertised locators are never attempted); with none
-    /// configured, every advertised locator is allowed as a fallback.
+    /// Whether an outbound dial to `addr` is permitted. Restricted to
+    /// `initial_peers` unless `accept_undefined_peers` is set
+    /// or `initial_peers` is empty (dial-all fallback).
     fn should_dial(&self, addr: &SocketAddr) -> bool {
-        self.initial_peers.is_empty() || self.initial_peers.contains(addr)
+        self.accept_undefined_peers
+            || self.initial_peers.is_empty()
+            || self.initial_peers.contains(addr)
     }
 }
 
