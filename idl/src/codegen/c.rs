@@ -522,7 +522,7 @@ impl<'a> CGen<'a> {
     fn type_to_c_declaration(&self, ty: &ResolvedType, name: &str) -> String {
         match ty {
             ResolvedType::Bool => format!("bool {}", name),
-            ResolvedType::U8 => format!("uint8_t {}", name),
+            ResolvedType::U8 | ResolvedType::UInt8 => format!("uint8_t {}", name),
             ResolvedType::I8 => format!("int8_t {}", name),
             ResolvedType::I16 => format!("int16_t {}", name),
             ResolvedType::U16 => format!("uint16_t {}", name),
@@ -595,7 +595,7 @@ impl<'a> CGen<'a> {
     fn type_to_c_base(&self, ty: &ResolvedType) -> String {
         match ty {
             ResolvedType::Bool => "bool".to_string(),
-            ResolvedType::U8 => "uint8_t".to_string(),
+            ResolvedType::U8 | ResolvedType::UInt8 => "uint8_t".to_string(),
             ResolvedType::I8 => "int8_t".to_string(),
             ResolvedType::I16 => "int16_t".to_string(),
             ResolvedType::U16 => "uint16_t".to_string(),
@@ -804,7 +804,7 @@ impl<'a> CGen<'a> {
             ResolvedType::Bool => {
                 self.raw(&format!("{}int2dds_cdr_write_bool(&w, {});\n", indent, accessor));
             }
-            ResolvedType::U8 => {
+            ResolvedType::U8 | ResolvedType::UInt8 => {
                 self.raw(&format!("{}int2dds_cdr_write_u8(&w, {});\n", indent, accessor));
             }
             ResolvedType::I8 => {
@@ -1045,7 +1045,7 @@ impl<'a> CGen<'a> {
             ResolvedType::Bool => {
                 self.raw(&format!("{}int2dds_cdr_read_bool(&r, &{});\n", indent, accessor));
             }
-            ResolvedType::U8 => {
+            ResolvedType::U8 | ResolvedType::UInt8 => {
                 self.raw(&format!("{}int2dds_cdr_read_u8(&r, &{});\n", indent, accessor));
             }
             ResolvedType::I8 => {
@@ -1373,6 +1373,7 @@ impl<'a> CGen<'a> {
         match ty {
             ResolvedType::Bool => Some("INT2DDS_FIELD_BOOL"),
             ResolvedType::U8 => Some("INT2DDS_FIELD_BYTE"),
+            ResolvedType::UInt8 => Some("INT2DDS_FIELD_UINT8"),
             ResolvedType::Char => Some("INT2DDS_FIELD_CHAR8"),
             ResolvedType::WChar => Some("INT2DDS_FIELD_CHAR16"),
             ResolvedType::I8 => Some("INT2DDS_FIELD_INT8"),
@@ -1393,7 +1394,7 @@ impl<'a> CGen<'a> {
     fn rust_type_quote_str(ty: &ResolvedType) -> String {
         match ty {
             ResolvedType::Bool => "bool".to_string(),
-            ResolvedType::U8 => "u8".to_string(),
+            ResolvedType::U8 | ResolvedType::UInt8 => "u8".to_string(),
             ResolvedType::I8 => "i8".to_string(),
             ResolvedType::I16 => "i16".to_string(),
             ResolvedType::U16 => "u16".to_string(),
@@ -1471,7 +1472,7 @@ impl<'a> CGen<'a> {
         let flags = Self::member_flags_literal(m);
 
         match ty {
-            ResolvedType::Sequence { element, .. }
+            ResolvedType::Sequence { element, bound }
                 if matches!(
                     element.as_ref(),
                     ResolvedType::Struct(_) | ResolvedType::Enum(_) | ResolvedType::Bitmask(_)
@@ -1479,8 +1480,8 @@ impl<'a> CGen<'a> {
             {
                 let elem_name = Self::rust_type_quote_str(element);
                 self.raw(&format!(
-                    "    int2dds_type_info_add_sequence_of_named_field(ti, \"{}\", \"{}\", 0, {});\n",
-                    name, elem_name, flags
+                    "    int2dds_type_info_add_sequence_of_named_field(ti, \"{}\", \"{}\", {}, {});\n",
+                    name, elem_name, bound.unwrap_or(0), flags
                 ));
                 return;
             }
@@ -1510,11 +1511,14 @@ impl<'a> CGen<'a> {
         }
 
         match ty {
-            ResolvedType::Sequence { element, .. } => {
+            ResolvedType::Sequence { element, bound } => {
                 if let Some(elem_const) = Self::resolved_type_to_field_constant(element) {
                     self.raw(&format!(
-                        "    int2dds_type_info_add_sequence_field(ti, \"{}\", {}, 0, {});\n",
-                        name, elem_const, flags
+                        "    int2dds_type_info_add_sequence_field(ti, \"{}\", {}, {}, {});\n",
+                        name,
+                        elem_const,
+                        bound.unwrap_or(0),
+                        flags
                     ));
                 }
             }
@@ -1525,6 +1529,22 @@ impl<'a> CGen<'a> {
                         name, elem_const, size, flags
                     ));
                 }
+            }
+            ResolvedType::String { bound } => {
+                self.raw(&format!(
+                    "    int2dds_type_info_add_string_field(ti, \"{}\", {}, {});\n",
+                    name,
+                    bound.unwrap_or(0),
+                    flags
+                ));
+            }
+            ResolvedType::WString { bound } => {
+                self.raw(&format!(
+                    "    int2dds_type_info_add_wstring_field(ti, \"{}\", {}, {});\n",
+                    name,
+                    bound.unwrap_or(0),
+                    flags
+                ));
             }
             _ => {
                 if let Some(field_const) = Self::resolved_type_to_field_constant(ty) {

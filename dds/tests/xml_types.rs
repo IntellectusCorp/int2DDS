@@ -33,8 +33,8 @@ use int2dds::{
     topic::qos::TopicQos,
     xtypes::{
         CompleteStructMember, CompleteStructType, CompleteTypeObject, DynamicData, DynamicTypeKind,
-        DynamicTypeSupport, DynamicValue, EquivalenceHash, ExtensibilityKind, HasTypeObject,
-        MemberFlag, TryConstructKind, TypeFlag, TypeIdentifier,
+        DynamicTypeSupport, DynamicValue, ExtensibilityKind, HasTypeObject, MemberFlag,
+        TryConstructKind, TypeFlag, TypeIdentifier, TypeObject,
     },
 };
 
@@ -754,16 +754,16 @@ fn relative_module_references_resolve() {
              </module>
            </types>"#,
     );
+
+    let content_id = |name: &str| {
+        TypeIdentifier::CompleteTypeId(
+            TypeObject::Complete(registry.get_type_object(name).unwrap().clone()).compute_hash(),
+        )
+    };
     let holder = registry.get_type_object("geo::inner::Holder").unwrap();
     let CompleteTypeObject::Struct(s) = holder else { panic!("expected struct") };
-    assert_eq!(
-        s.member_seq[0].common.member_type_id,
-        TypeIdentifier::MinimalTypeId(EquivalenceHash::compute("geo::Point".as_bytes()))
-    );
-    assert_eq!(
-        s.member_seq[1].common.member_type_id,
-        TypeIdentifier::MinimalTypeId(EquivalenceHash::compute("Mode".as_bytes()))
-    );
+    assert_eq!(s.member_seq[0].common.member_type_id, content_id("geo::Point"));
+    assert_eq!(s.member_seq[1].common.member_type_id, content_id("Mode"));
     registry.get("geo::inner::Holder").unwrap();
 }
 
@@ -828,22 +828,12 @@ fn temp_xml_dir(tag: &str) -> std::path::PathBuf {
 
 #[test]
 fn xml_nested_type_via_type_lookup_cross_participant() {
-    // TypeLookup-only: inline TypeObject disabled, so the consumer pulls the whole closure via TypeLookup.
-    run_cross_participant_nested(true);
-    // Hybrid: inline carries only the top-level Holder; the consumer backfills the nested Point via TypeLookup.
-    run_cross_participant_nested(false);
+    // SEDP advertises TypeInformation only; the consumer pulls the whole nested closure via TypeLookup.
+    run_cross_participant_nested();
 }
 
-fn run_cross_participant_nested(disable_inline: bool) {
+fn run_cross_participant_nested() {
     // Consumer has no type definition; it obtains the nested 'origin' (Point) over the wire.
-    unsafe {
-        if disable_inline {
-            std::env::set_var("INT2DDS_DISABLE_INLINE_TYPE_OBJECT", "1");
-        } else {
-            std::env::remove_var("INT2DDS_DISABLE_INLINE_TYPE_OBJECT");
-        }
-    }
-
     let domain_id = next_domain_id();
     let factory = DomainParticipantFactory::get_instance();
 

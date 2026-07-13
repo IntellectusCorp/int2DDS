@@ -438,6 +438,19 @@ impl<'a> RustGen<'a> {
             dds_attrs.push("char".to_string());
         }
 
+        // IDL `uint8` maps to Rust u8 (same storage as `octet`), but the derive macro must
+        // register it as UINT8 (not BYTE) via the #[dds(uint8)] hint so the TypeObject kind
+        // matches strict XTypes peers — octet and uint8 are NOT assignable.
+        let is_uint8_field = matches!(&m.resolved_type, ResolvedType::UInt8)
+            || matches!(
+                &m.resolved_type,
+                ResolvedType::Array { element, .. } | ResolvedType::Sequence { element, .. }
+                    if matches!(**element, ResolvedType::UInt8)
+            );
+        if is_uint8_field {
+            dds_attrs.push("uint8".to_string());
+        }
+
         if !dds_attrs.is_empty() {
             self.line(&format!("#[dds({})]", dds_attrs.join(", ")));
         }
@@ -458,7 +471,7 @@ impl<'a> RustGen<'a> {
     fn type_to_rust(&self, ty: &ResolvedType) -> String {
         match ty {
             ResolvedType::Bool => "bool".to_string(),
-            ResolvedType::U8 => "u8".to_string(),
+            ResolvedType::U8 | ResolvedType::UInt8 => "u8".to_string(),
             ResolvedType::I8 => "i8".to_string(),
             ResolvedType::I16 => "i16".to_string(),
             ResolvedType::U16 => "u16".to_string(),
