@@ -1829,3 +1829,15 @@ class TestErrorHandling:
             writer.close()
             pub.close()
             topic.close()
+
+    def test_create_subscriber_missing_profile_includes_reason(self, domain_id: int):
+        """DdsError raised for a missing QoS profile should carry the FFI reason."""
+        from int2dds.exceptions import DdsError
+
+        participant = DomainParticipant(domain_id=domain_id)
+        try:
+            with pytest.raises(DdsError) as excinfo:
+                participant.create_subscriber_with_profile("NoSuchLib::NoSuchProfile")
+            assert "QoS profile not found" in str(excinfo.value)
+        finally:
+            participant.close()
