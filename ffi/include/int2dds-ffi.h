@@ -8,6 +8,14 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#if defined(__GNUC__) || defined(__clang__)
+#define INT2DDS_DEPRECATED(msg) __attribute__((deprecated(msg)))
+#elif defined(_MSC_VER)
+#define INT2DDS_DEPRECATED(msg) __declspec(deprecated(msg))
+#else
+#define INT2DDS_DEPRECATED(msg)
+#endif
+
 /**
  * Value-kind discriminators returned by `int2dds_dynamic_value_kind`.
  */
@@ -4059,7 +4067,9 @@ Int2DdsRet int2dds_waitset_new(struct Int2DdsWaitSet **waitset_out);
  * - INT2DDS_RET_TIMEOUT if the timeout expired
  * - INT2DDS_RET_ERROR for other errors
  */
-Int2DdsRet int2dds_waitset_wait(const struct Int2DdsWaitSet *waitset, int64_t timeout_ms);
+INT2DDS_DEPRECATED("discards triggered conditions; use int2dds_waitset_wait_ex (ms) or int2dds_waitset_wait_ex_ns (ns)")
+Int2DdsRet int2dds_waitset_wait(const struct Int2DdsWaitSet *waitset,
+                                int64_t timeout_ms);
 
 /**
  * Wait for conditions to be triggered, with nanosecond timeout resolution.
@@ -4072,7 +4082,9 @@ Int2DdsRet int2dds_waitset_wait(const struct Int2DdsWaitSet *waitset, int64_t ti
  * - `waitset` must be a valid waitset
  * - `timeout_ns` is the timeout in nanoseconds, or -1 for infinite
  */
-Int2DdsRet int2dds_waitset_wait_ns(const struct Int2DdsWaitSet *waitset, int64_t timeout_ns);
+INT2DDS_DEPRECATED("discards triggered conditions; use int2dds_waitset_wait_ex_ns (ns) or int2dds_waitset_wait_ex (ms)")
+Int2DdsRet int2dds_waitset_wait_ns(const struct Int2DdsWaitSet *waitset,
+                                   int64_t timeout_ns);
 
 /**
  * Wait for conditions to be triggered and return the triggered conditions
@@ -4091,6 +4103,28 @@ Int2DdsRet int2dds_waitset_wait_ns(const struct Int2DdsWaitSet *waitset, int64_t
 Int2DdsRet int2dds_waitset_wait_ex(const struct Int2DdsWaitSet *waitset,
                                    int64_t timeout_ms,
                                    struct Int2DdsConditionSeq **conditions_out);
+
+/**
+ * Wait for conditions to be triggered and return them, with nanosecond timeout resolution.
+ *
+ * Combines `int2dds_waitset_wait_ex` (returns triggered conditions) with
+ * nanosecond timeout precision, so no capability is lost when migrating off the
+ * deprecated `int2dds_waitset_wait` / `int2dds_waitset_wait_ns` entry points.
+ *
+ * # Safety
+ * - `waitset` must be a valid waitset
+ * - `timeout_ns` is the timeout in nanoseconds, or -1 for infinite
+ * - `conditions_out` must be a valid pointer to a null pointer
+ * - The returned condition sequence must be freed with `int2dds_condition_seq_delete`
+ *
+ * Returns:
+ * - INT2DDS_RET_OK if conditions were triggered
+ * - INT2DDS_RET_TIMEOUT if the timeout expired
+ * - INT2DDS_RET_ERROR for other errors
+ */
+Int2DdsRet int2dds_waitset_wait_ex_ns(const struct Int2DdsWaitSet *waitset,
+                                      int64_t timeout_ns,
+                                      struct Int2DdsConditionSeq **conditions_out);
 
 /**
  * Get the number of conditions in a condition sequence
