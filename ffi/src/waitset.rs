@@ -86,6 +86,9 @@ pub unsafe extern "C" fn int2dds_waitset_wait(
 /// # Safety
 /// - `waitset` must be a valid waitset
 /// - `timeout_ns` is the timeout in nanoseconds, or -1 for infinite
+#[deprecated(
+    note = "unused orphan; use int2dds_waitset_wait_ex (returns conditions) or int2dds_waitset_wait"
+)]
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_waitset_wait_ns(
     waitset: *const Int2DdsWaitSet,
