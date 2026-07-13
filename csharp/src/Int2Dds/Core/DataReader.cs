@@ -38,7 +38,7 @@ namespace Int2Dds.Core
 
         private readonly IntPtr _handle;
         private readonly Topic<T> _topic;
-        private readonly byte[] _buffer;
+        private byte[] _buffer;
         private IntPtr _listenerContextHandle;
         private bool _disposed;
 
@@ -529,25 +529,40 @@ namespace Int2Dds.Core
             return result;
         }
 
+        private void GrowBuffer(int required)
+        {
+            var old = _buffer;
+            _buffer = ArrayPool<byte>.Shared.Rent(required);
+            ArrayPool<byte>.Shared.Return(old);
+        }
+
         private Sample<T>? TakeOneSample()
         {
             unsafe
             {
-                fixed (byte* pBuffer = _buffer)
+                while (true)
                 {
-                    var ret = NativeMethods.int2dds_take_serialized(
-                        _handle, pBuffer, (UIntPtr)_buffer.Length, out var actualSize, out var validData);
-
-                    if (ret == ReturnCode.NoData)
-                        return null;
-                    ReturnCodeHelper.CheckReturn(ret);
-
-                    if (validData)
+                    fixed (byte* pBuffer = _buffer)
                     {
-                        var data = s_deserializer(CopyBuffer((int)actualSize));
-                        return new Sample<T>(data, true);
+                        var ret = NativeMethods.int2dds_take_serialized(
+                            _handle, pBuffer, (UIntPtr)_buffer.Length, out var actualSize, out var validData);
+
+                        if (ret == ReturnCode.BufferTooSmall)
+                        {
+                            GrowBuffer((int)actualSize);
+                            continue;
+                        }
+                        if (ret == ReturnCode.NoData)
+                            return null;
+                        ReturnCodeHelper.CheckReturn(ret);
+
+                        if (validData)
+                        {
+                            var data = s_deserializer(CopyBuffer((int)actualSize));
+                            return new Sample<T>(data, true);
+                        }
+                        return new Sample<T>(default, false);
                     }
-                    return new Sample<T>(default, false);
                 }
             }
         }
@@ -556,21 +571,29 @@ namespace Int2Dds.Core
         {
             unsafe
             {
-                fixed (byte* pBuffer = _buffer)
+                while (true)
                 {
-                    var ret = NativeMethods.int2dds_read_serialized(
-                        _handle, pBuffer, (UIntPtr)_buffer.Length, out var actualSize, out var validData);
-
-                    if (ret == ReturnCode.NoData)
-                        return null;
-                    ReturnCodeHelper.CheckReturn(ret);
-
-                    if (validData)
+                    fixed (byte* pBuffer = _buffer)
                     {
-                        var data = s_deserializer(CopyBuffer((int)actualSize));
-                        return new Sample<T>(data, true);
+                        var ret = NativeMethods.int2dds_read_serialized(
+                            _handle, pBuffer, (UIntPtr)_buffer.Length, out var actualSize, out var validData);
+
+                        if (ret == ReturnCode.BufferTooSmall)
+                        {
+                            GrowBuffer((int)actualSize);
+                            continue;
+                        }
+                        if (ret == ReturnCode.NoData)
+                            return null;
+                        ReturnCodeHelper.CheckReturn(ret);
+
+                        if (validData)
+                        {
+                            var data = s_deserializer(CopyBuffer((int)actualSize));
+                            return new Sample<T>(data, true);
+                        }
+                        return new Sample<T>(default, false);
                     }
-                    return new Sample<T>(default, false);
                 }
             }
         }
@@ -579,23 +602,31 @@ namespace Int2Dds.Core
         {
             unsafe
             {
-                fixed (byte* pBuffer = _buffer)
+                while (true)
                 {
-                    NativeSampleInfo nativeInfo;
-                    var ret = NativeMethods.int2dds_take_serialized_w_info(
-                        _handle, pBuffer, (UIntPtr)_buffer.Length, out var actualSize, &nativeInfo);
-
-                    if (ret == ReturnCode.NoData)
-                        return null;
-                    ReturnCodeHelper.CheckReturn(ret);
-
-                    var info = ConvertSampleInfo(ref nativeInfo);
-                    if (nativeInfo.ValidData)
+                    fixed (byte* pBuffer = _buffer)
                     {
-                        var data = s_deserializer(CopyBuffer((int)actualSize));
-                        return (new Sample<T>(data, true), info);
+                        NativeSampleInfo nativeInfo;
+                        var ret = NativeMethods.int2dds_take_serialized_w_info(
+                            _handle, pBuffer, (UIntPtr)_buffer.Length, out var actualSize, &nativeInfo);
+
+                        if (ret == ReturnCode.BufferTooSmall)
+                        {
+                            GrowBuffer((int)actualSize);
+                            continue;
+                        }
+                        if (ret == ReturnCode.NoData)
+                            return null;
+                        ReturnCodeHelper.CheckReturn(ret);
+
+                        var info = ConvertSampleInfo(ref nativeInfo);
+                        if (nativeInfo.ValidData)
+                        {
+                            var data = s_deserializer(CopyBuffer((int)actualSize));
+                            return (new Sample<T>(data, true), info);
+                        }
+                        return (new Sample<T>(default, false), info);
                     }
-                    return (new Sample<T>(default, false), info);
                 }
             }
         }
@@ -604,23 +635,31 @@ namespace Int2Dds.Core
         {
             unsafe
             {
-                fixed (byte* pBuffer = _buffer)
+                while (true)
                 {
-                    NativeSampleInfo nativeInfo;
-                    var ret = NativeMethods.int2dds_read_serialized_w_info(
-                        _handle, pBuffer, (UIntPtr)_buffer.Length, out var actualSize, &nativeInfo);
-
-                    if (ret == ReturnCode.NoData)
-                        return null;
-                    ReturnCodeHelper.CheckReturn(ret);
-
-                    var info = ConvertSampleInfo(ref nativeInfo);
-                    if (nativeInfo.ValidData)
+                    fixed (byte* pBuffer = _buffer)
                     {
-                        var data = s_deserializer(CopyBuffer((int)actualSize));
-                        return (new Sample<T>(data, true), info);
+                        NativeSampleInfo nativeInfo;
+                        var ret = NativeMethods.int2dds_read_serialized_w_info(
+                            _handle, pBuffer, (UIntPtr)_buffer.Length, out var actualSize, &nativeInfo);
+
+                        if (ret == ReturnCode.BufferTooSmall)
+                        {
+                            GrowBuffer((int)actualSize);
+                            continue;
+                        }
+                        if (ret == ReturnCode.NoData)
+                            return null;
+                        ReturnCodeHelper.CheckReturn(ret);
+
+                        var info = ConvertSampleInfo(ref nativeInfo);
+                        if (nativeInfo.ValidData)
+                        {
+                            var data = s_deserializer(CopyBuffer((int)actualSize));
+                            return (new Sample<T>(data, true), info);
+                        }
+                        return (new Sample<T>(default, false), info);
                     }
-                    return (new Sample<T>(default, false), info);
                 }
             }
         }
