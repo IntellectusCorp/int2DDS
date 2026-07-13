@@ -3485,7 +3485,7 @@ Int2DdsRet int2dds_subscriber_delete_contained_entities(const struct Int2DdsSubs
  * Take pre-serialized data from a DataReader, bypassing TypeSupport deserialization.
  *
  * Copies the raw CDR bytes (including encapsulation header) into the caller's buffer.
- * The sample is removed from the cache.
+ * The sample is removed from the cache only when it fits the caller's buffer.
  *
  * # Parameters
  * - `reader`: A valid datareader
@@ -3497,7 +3497,8 @@ Int2DdsRet int2dds_subscriber_delete_contained_entities(const struct Int2DdsSubs
  * # Returns
  * - INT2DDS_RET_OK on success
  * - INT2DDS_RET_NO_DATA if no samples available
- * - INT2DDS_RET_ERROR if buffer is too small (actual_size_out will contain the required size)
+ * - INT2DDS_RET_BUFFER_TOO_SMALL if the buffer is too small; the sample is preserved and
+ *   actual_size_out contains the required size, so a retry with a larger buffer succeeds
  *
  * # Safety
  * - `reader` must be a valid datareader
