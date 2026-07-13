@@ -175,7 +175,7 @@ class ReaderDataLifecycle:
 
 @dataclass
 class DataRepresentation:
-    kind: Literal["XCDR1", "XCDR2"] = "XCDR2"
+    kind: Literal["XCDR1", "XCDR2"] = "XCDR1"
 
     @property
     def _kind_int(self) -> int:

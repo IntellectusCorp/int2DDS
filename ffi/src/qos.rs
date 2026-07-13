@@ -602,7 +602,7 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_get_data_representation(
     check_null!(kind_out);
     let q = &*qos;
     *kind_out = q.inner.data_representation.value.first().map_or(
-        INT2DDS_QOS_DATA_REPR_XCDR2,
+        INT2DDS_QOS_DATA_REPR_XCDR1,
         |v| match v {
             DataRepresentationId::XcdrDataRepresentation => INT2DDS_QOS_DATA_REPR_XCDR1,
             DataRepresentationId::Xcdr2DataRepresentation => INT2DDS_QOS_DATA_REPR_XCDR2,
@@ -1983,6 +1983,41 @@ pub unsafe extern "C" fn int2dds_subscriber_qos_destroy(
 mod tests {
     use super::*;
     use std::ptr;
+
+    #[test]
+    fn writer_qos_default_data_representation_is_xcdr1() {
+        unsafe {
+            let mut qos: *mut Int2DdsDataWriterQos = ptr::null_mut();
+            assert_eq!(int2dds_datawriter_qos_create_default(&mut qos as *mut _), INT2DDS_RET_OK);
+            assert!(!qos.is_null());
+
+            let mut kind = -1;
+            assert_eq!(
+                int2dds_datawriter_qos_get_data_representation(qos, &mut kind),
+                INT2DDS_RET_OK
+            );
+            assert_eq!(kind, INT2DDS_QOS_DATA_REPR_XCDR1);
+
+            int2dds_datawriter_qos_destroy(qos);
+        }
+    }
+
+    #[test]
+    fn writer_qos_empty_data_representation_reports_xcdr1() {
+        let qos = Int2DdsDataWriterQos {
+            inner: DataWriterQos {
+                data_representation: DataRepresentationQosPolicy { value: Vec::new() },
+                ..DataWriterQos::default()
+            },
+        };
+
+        let mut kind = -1;
+        assert_eq!(
+            unsafe { int2dds_datawriter_qos_get_data_representation(&qos, &mut kind) },
+            INT2DDS_RET_OK
+        );
+        assert_eq!(kind, INT2DDS_QOS_DATA_REPR_XCDR1);
+    }
 
     #[test]
     fn test_qos_create_destroy() {
