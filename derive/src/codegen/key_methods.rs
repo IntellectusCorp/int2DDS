@@ -257,8 +257,7 @@ fn generate_key_impls_from_fields(
         quote! {
             match self.serialize_key(data) {
                 Ok(cdr_data) => {
-                    let hash = ::md5::compute(&cdr_data);
-                    #crate_path::common::instance_handle::InstanceHandle::new(hash.0)
+                    #crate_path::common::instance_handle::InstanceHandle::from_key_cdr_hashed(&cdr_data)
                 }
 
                 Err(e) => {
@@ -272,16 +271,7 @@ fn generate_key_impls_from_fields(
         quote! {
             match self.serialize_key(data) {
                 Ok(cdr_data) => {
-                    let mut result = [0u8; 16];
-
-                    if cdr_data.len() <= 16 {
-                        result[..cdr_data.len()].copy_from_slice(&cdr_data);
-                    } else {
-                        let hash = ::md5::compute(&cdr_data);
-                        result = hash.0;
-                    }
-
-                    #crate_path::common::instance_handle::InstanceHandle::new(result)
+                    #crate_path::common::instance_handle::InstanceHandle::from_key_cdr(&cdr_data)
                 }
                 Err(e) => {
                     log::error!("Warning: Key serialization failed for type {}: {:?}. Using NIL instance handle.",
