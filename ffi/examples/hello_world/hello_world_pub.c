@@ -137,7 +137,9 @@ int main(int argc, char* argv[]) {
     int32_t total_count = 0;
     int32_t current_count = 0;
     do {
-        ret = int2dds_waitset_wait(waitset, -1);
+        struct Int2DdsConditionSeq *triggered = NULL;
+        ret = int2dds_waitset_wait_ex(waitset, -1, &triggered);
+        int2dds_condition_seq_delete(triggered);
         if (ret != INT2DDS_RET_OK) {
             fprintf(stderr, "WaitSet wait failed: %d\n", ret);
             goto cleanup;
