@@ -648,6 +648,8 @@ pub unsafe extern "C" fn int2dds_delete_datawriter(writer: *mut Int2DdsDataWrite
     let writer_box = Box::from_raw(writer);
     let writer_obj = writer_box.inner;
 
+    let _ = writer_obj.set_listener(None, StatusMask::default());
+
     // Get the publisher to delete the writer
     let publisher = match writer_obj.get_publisher() {
         Ok(p) => p,
