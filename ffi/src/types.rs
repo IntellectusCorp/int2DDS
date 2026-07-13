@@ -13,7 +13,7 @@
 //! All handle types implement Send and Sync, making them safe to use
 //! across threads in both Rust and C code.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use int2dds::{
     domain::domain_participant::DomainParticipant,
@@ -56,13 +56,13 @@ pub struct Int2DdsSubscriber {
 /// Opaque handle to a DataWriter
 pub struct Int2DdsDataWriter {
     pub(crate) inner: DataWriter<Int2DdsData>,
-    pub(crate) listener: Option<Arc<FfiDataWriterListener>>,
+    pub(crate) listener: RwLock<Option<Arc<FfiDataWriterListener>>>,
 }
 
 /// Opaque handle to a DataReader
 pub struct Int2DdsDataReader {
     pub(crate) inner: DataReader<Int2DdsData>,
-    pub(crate) listener: Option<Arc<FfiDataReaderListener>>,
+    pub(crate) listener: RwLock<Option<Arc<FfiDataReaderListener>>>,
 }
 
 /// Opaque handle to a Topic

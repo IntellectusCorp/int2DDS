@@ -13,7 +13,7 @@
 //! directly via `int2dds_write_serialized`.
 
 use std::ffi::CStr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use int2dds::{
     common::instance_handle::InstanceHandle,
@@ -338,9 +338,9 @@ pub unsafe extern "C" fn int2dds_create_datawriter(
         StatusMask::default()
     ));
 
-    let writer_handle = Box::new(Int2DdsDataWriter { inner: writer, listener: None });
+    let writer_handle = Arc::new(Int2DdsDataWriter { inner: writer, listener: RwLock::new(None) });
 
-    *writer_out = Box::into_raw(writer_handle);
+    *writer_out = Arc::into_raw(writer_handle) as *mut Int2DdsDataWriter;
 
     INT2DDS_RET_OK
 }
@@ -388,13 +388,12 @@ pub unsafe extern "C" fn int2dds_create_datawriter_with_listener(
     ));
 
     // Create writer_handle with the actual writer
-    let mut writer_handle = Box::new(Int2DdsDataWriter { inner: writer, listener: None });
+    let writer_handle = Arc::new(Int2DdsDataWriter { inner: writer, listener: RwLock::new(None) });
 
     // If listener is provided, set it now
     if !listener.is_null() {
-        let writer_ptr = &mut *writer_handle as *mut Int2DdsDataWriter;
-        let ffi_listener = FfiDataWriterListener::new(*listener, writer_ptr);
-        let listener_arc = Arc::new(ffi_listener);
+        let weak = Arc::downgrade(&writer_handle);
+        let listener_arc = Arc::new(FfiDataWriterListener::new(*listener, weak));
 
         // Set the listener on the writer
         let listener_clone = listener_arc.clone()
@@ -407,7 +406,7 @@ pub unsafe extern "C" fn int2dds_create_datawriter_with_listener(
             .inner
             .set_listener(Some(listener_clone), StatusMask::from_bits_truncate(mask)));
 
-        writer_handle.listener = Some(listener_arc.clone());
+        *writer_handle.listener.write().unwrap() = Some(listener_arc.clone());
 
         // Check if matching already occurred before the listener was set.
         // This handles the race condition where SEDP matching completes between
@@ -428,7 +427,7 @@ pub unsafe extern "C" fn int2dds_create_datawriter_with_listener(
         }
     }
 
-    *writer_out = Box::into_raw(writer_handle);
+    *writer_out = Arc::into_raw(writer_handle) as *mut Int2DdsDataWriter;
 
     INT2DDS_RET_OK
 }
@@ -468,9 +467,9 @@ pub unsafe extern "C" fn int2dds_create_datawriter_with_profile(
         StatusMask::default()
     ));
 
-    let writer_handle = Box::new(Int2DdsDataWriter { inner: writer, listener: None });
+    let writer_handle = Arc::new(Int2DdsDataWriter { inner: writer, listener: RwLock::new(None) });
 
-    *writer_out = Box::into_raw(writer_handle);
+    *writer_out = Arc::into_raw(writer_handle) as *mut Int2DdsDataWriter;
 
     INT2DDS_RET_OK
 }
@@ -517,13 +516,12 @@ pub unsafe extern "C" fn int2dds_create_datawriter_with_profile_and_listener(
     ));
 
     // Create writer_handle with the actual writer
-    let mut writer_handle = Box::new(Int2DdsDataWriter { inner: writer, listener: None });
+    let writer_handle = Arc::new(Int2DdsDataWriter { inner: writer, listener: RwLock::new(None) });
 
     // If listener is provided, set it now
     if !listener.is_null() {
-        let writer_ptr = &mut *writer_handle as *mut Int2DdsDataWriter;
-        let ffi_listener = FfiDataWriterListener::new(*listener, writer_ptr);
-        let listener_arc = Arc::new(ffi_listener);
+        let weak = Arc::downgrade(&writer_handle);
+        let listener_arc = Arc::new(FfiDataWriterListener::new(*listener, weak));
 
         // Set the listener on the writer
         let listener_clone = listener_arc.clone()
@@ -536,7 +534,7 @@ pub unsafe extern "C" fn int2dds_create_datawriter_with_profile_and_listener(
             .inner
             .set_listener(Some(listener_clone), StatusMask::from_bits_truncate(mask)));
 
-        writer_handle.listener = Some(listener_arc.clone());
+        *writer_handle.listener.write().unwrap() = Some(listener_arc.clone());
 
         // Check if matching already occurred before the listener was set.
         if mask & crate::status_condition::INT2DDS_STATUS_PUBLICATION_MATCHED != 0 {
@@ -555,7 +553,7 @@ pub unsafe extern "C" fn int2dds_create_datawriter_with_profile_and_listener(
         }
     }
 
-    *writer_out = Box::into_raw(writer_handle);
+    *writer_out = Arc::into_raw(writer_handle) as *mut Int2DdsDataWriter;
 
     INT2DDS_RET_OK
 }
@@ -575,18 +573,18 @@ pub unsafe extern "C" fn int2dds_datawriter_set_listener(
 ) -> Int2DdsRet {
     check_null!(writer);
 
-    let writer_ref = &mut *writer;
+    // No early return is allowed between from_raw and into_raw below, or the
+    // caller's strong reference would be dropped and later delete double-frees.
+    let writer_arc = Arc::from_raw(writer as *const Int2DdsDataWriter);
 
-    // Create new listener wrapper if provided
     let listener_arc = if !listener.is_null() {
-        let ffi_listener = FfiDataWriterListener::new(*listener, writer);
-        Some(Arc::new(ffi_listener))
+        let weak = Arc::downgrade(&writer_arc);
+        Some(Arc::new(FfiDataWriterListener::new(*listener, weak)))
     } else {
         None
     };
 
-    // Set listener on the inner writer
-    let result = writer_ref.inner.set_listener(
+    let result = writer_arc.inner.set_listener(
         listener_arc.clone().map(|l| {
             l as Arc<
                 dyn int2dds::publication::data_writer_listener::DataWriterListener<
@@ -597,8 +595,9 @@ pub unsafe extern "C" fn int2dds_datawriter_set_listener(
         StatusMask::from_bits_truncate(mask),
     );
 
-    // Update the stored listener
-    writer_ref.listener = listener_arc;
+    *writer_arc.listener.write().unwrap() = listener_arc;
+
+    let _ = Arc::into_raw(writer_arc);
 
     match result {
         Ok(()) => INT2DDS_RET_OK,
@@ -623,7 +622,7 @@ pub unsafe extern "C" fn int2dds_datawriter_get_listener(
     let writer_ref = &*writer;
 
     // Return the stored listener callbacks
-    if let Some(listener_arc) = &writer_ref.listener {
+    if let Some(listener_arc) = writer_ref.listener.read().unwrap().as_ref() {
         // Copy the callbacks struct
         *listener_out = listener_arc.callbacks;
         INT2DDS_RET_OK
@@ -645,12 +644,13 @@ pub unsafe extern "C" fn int2dds_delete_datawriter(writer: *mut Int2DdsDataWrite
         return INT2DDS_RET_NULL_POINTER;
     }
 
-    let writer_box = Box::from_raw(writer);
-    let writer_obj = writer_box.inner;
+    // Reclaim the caller's strong reference; the writer is freed only once this
+    // Arc and any callback that upgraded its Weak are dropped.
+    let writer_arc = Arc::from_raw(writer as *const Int2DdsDataWriter);
+    let writer_obj = writer_arc.inner.clone();
 
     let _ = writer_obj.set_listener(None, StatusMask::default());
 
-    // Get the publisher to delete the writer
     let publisher = match writer_obj.get_publisher() {
         Ok(p) => p,
         Err(e) => return dds_error_to_code(&e),
