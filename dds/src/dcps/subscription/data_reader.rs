@@ -2638,6 +2638,22 @@ impl<Foo: DdsType> DataReader<Foo> {
         self.bounded_single_serialized(sample_states, view_states, instance_states, true, max_bytes)
     }
 
+    pub fn read_serialized_bounded(
+        &self,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+        max_bytes: usize,
+    ) -> DdsResult<BoundedSerialized> {
+        self.bounded_single_serialized(
+            sample_states,
+            view_states,
+            instance_states,
+            false,
+            max_bytes,
+        )
+    }
+
     fn read_or_take_serialized(
         &self,
         max_samples: i32,
