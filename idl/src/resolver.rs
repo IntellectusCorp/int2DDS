@@ -830,6 +830,20 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_default_extensibility_is_appendable() {
+        let defs = parse_idl(
+            r#"
+            struct NoExtSpecified {
+                unsigned long index;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        assert_eq!(model.structs[0].extensibility, ExtensibilityKind::Appendable);
+    }
+
+    #[test]
     fn test_resolve_enum_values() {
         let defs = parse_idl("enum Color { RED, GREEN = 5, BLUE };").unwrap();
         let model = resolve(defs).unwrap();
