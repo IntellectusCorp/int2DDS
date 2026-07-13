@@ -1688,6 +1688,15 @@ Int2DdsRet int2dds_dynamic_value_as_string(const struct Int2DdsDynamicValue *val
                                            uintptr_t *out_len);
 
 /**
+ * Format any value as a human-readable string into `buf`, regardless of kind
+ * (mirrors the core `Display`). Handy for generic printing of a discovered type.
+ */
+Int2DdsRet int2dds_dynamic_value_to_string(const struct Int2DdsDynamicValue *value,
+                                           char *buf,
+                                           uintptr_t buf_len,
+                                           uintptr_t *out_len);
+
+/**
  * Read an enum value's literal name into `buf` and its numeric value into
  * `out_value`.
  */

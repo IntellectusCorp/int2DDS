@@ -1134,6 +1134,7 @@ ffi.cdef("""
     Int2DdsRet int2dds_dynamic_value_as_f64(const Int2DdsDynamicValue *value, double *out);
     Int2DdsRet int2dds_dynamic_value_as_char8(const Int2DdsDynamicValue *value, uint8_t *out);
     Int2DdsRet int2dds_dynamic_value_as_string(const Int2DdsDynamicValue *value, char *buf, uintptr_t buf_len, uintptr_t *out_len);
+    Int2DdsRet int2dds_dynamic_value_to_string(const Int2DdsDynamicValue *value, char *buf, uintptr_t buf_len, uintptr_t *out_len);
     Int2DdsRet int2dds_dynamic_value_as_enum(const Int2DdsDynamicValue *value, char *buf, uintptr_t buf_len, uintptr_t *out_len, int32_t *out_value);
     Int2DdsRet int2dds_dynamic_value_as_bitmask(const Int2DdsDynamicValue *value, uint64_t *out);
     Int2DdsRet int2dds_dynamic_value_as_bitset(const Int2DdsDynamicValue *value, uint64_t *out);
