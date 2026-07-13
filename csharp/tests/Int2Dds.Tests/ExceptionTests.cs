@@ -1,4 +1,5 @@
 using System;
+using Int2Dds.Core;
 using Int2Dds.Exceptions;
 using Int2Dds.Interop;
 using Xunit;
@@ -29,12 +30,6 @@ namespace Int2Dds.Tests
         public void CheckReturn_Unsupported_ThrowsDdsUnsupportedException()
         {
             Assert.Throws<DdsUnsupportedException>(() => ReturnCodeHelper.CheckReturn(ReturnCode.Unsupported));
-        }
-
-        [Fact]
-        public void CheckReturn_BadAlloc_ThrowsDdsBadAllocException()
-        {
-            Assert.Throws<DdsBadAllocException>(() => ReturnCodeHelper.CheckReturn(ReturnCode.BadAlloc));
         }
 
         [Fact]
@@ -120,6 +115,17 @@ namespace Int2Dds.Tests
         public void CheckReturnOrNoData_Error_Throws()
         {
             Assert.Throws<DdsErrorException>(() => ReturnCodeHelper.CheckReturnOrNoData(ReturnCode.Error));
+        }
+
+        [Fact]
+        public void CreateSubscriberWithMissingProfile_IncludesReasonInMessage()
+        {
+            using var dp = new DomainParticipant(90);
+
+            var ex = Assert.Throws<DdsErrorException>(() =>
+                dp.CreateSubscriberWithProfile("NoSuchLib::NoSuchProfile"));
+
+            Assert.Contains("QoS profile not found", ex.Message);
         }
 
         [Fact]

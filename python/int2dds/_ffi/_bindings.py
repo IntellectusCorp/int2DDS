@@ -54,7 +54,6 @@ ffi.cdef("""
     #define INT2DDS_RET_ERROR 1
     #define INT2DDS_RET_TIMEOUT 2
     #define INT2DDS_RET_UNSUPPORTED 3
-    #define INT2DDS_RET_BAD_ALLOC 10
     #define INT2DDS_RET_INVALID_ARGUMENT 11
     #define INT2DDS_RET_ALREADY_DELETED 20
     #define INT2DDS_RET_NOT_ENABLED 21
@@ -65,6 +64,7 @@ ffi.cdef("""
     #define INT2DDS_RET_ILLEGAL_OPERATION 26
     #define INT2DDS_RET_NO_DATA 27
     #define INT2DDS_RET_NULL_POINTER 100
+    #define INT2DDS_RET_BUFFER_TOO_SMALL 101
 
     /* Opaque types */
     typedef struct Int2DdsParticipantFactory Int2DdsParticipantFactory;
@@ -88,6 +88,9 @@ ffi.cdef("""
     typedef struct Int2DdsSubscriberQos Int2DdsSubscriberQos;
 
     typedef int32_t Int2DdsRet;
+
+    /* Last FFI error message (per-call-thread, TLS-backed) */
+    int int2dds_last_error_message(char *buf, int buf_len);
 
     /* DomainParticipantFactory */
     Int2DdsRet int2dds_domain_participant_factory_get_instance(

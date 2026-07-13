@@ -757,8 +757,6 @@ typedef struct Int2DdsRequestedIncompatibleTypeStatus {
 
 #define INT2DDS_RET_UNSUPPORTED 3
 
-#define INT2DDS_RET_BAD_ALLOC 10
-
 #define INT2DDS_RET_INVALID_ARGUMENT 11
 
 #define INT2DDS_RET_ALREADY_DELETED 20
@@ -1780,6 +1778,19 @@ Int2DdsRet int2dds_env_set_multicast_ttl(uint8_t ttl);
  * `ttl_out` and `has_value_out` must be valid, writable pointers.
  */
 Int2DdsRet int2dds_env_get_multicast_ttl(uint8_t *ttl_out, bool *has_value_out);
+
+/**
+ * Copy the calling thread's last error message (UTF-8, NUL-terminated) into `buf`.
+ * Returns the full message byte length, excluding the NUL.
+ *
+ * `buf` null or `buf_len <= 0`: query mode, writes nothing, returns the length.
+ * Message longer than `buf_len - 1`: truncated at a UTF-8 boundary, still
+ * returns the full (pre-truncation) length. No message: writes "" and returns 0.
+ *
+ * # Safety
+ * `buf` must be null or point to at least `buf_len` writable bytes.
+ */
+int32_t int2dds_last_error_message(char *buf, int32_t buf_len);
 
 /**
  * Create a DomainParticipant
