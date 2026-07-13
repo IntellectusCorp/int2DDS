@@ -22,6 +22,7 @@ namespace Int2Dds.Interop
         public const int IllegalOperation = 26;
         public const int NoData = 27;
         public const int NullPointer = 100;
+        public const int BufferTooSmall = 101;
     }
 
     /// <summary>

@@ -15,7 +15,11 @@ from int2dds.core.listeners import (
     _remove_listener,
     STATUS_MASK_ALL,
 )
-from int2dds.exceptions import INT2DDS_RET_NO_DATA, check_ret
+from int2dds.exceptions import (
+    INT2DDS_RET_BUFFER_TOO_SMALL,
+    INT2DDS_RET_NO_DATA,
+    check_ret,
+)
 
 if TYPE_CHECKING:
     from int2dds.core.participant import DomainParticipant
@@ -267,46 +271,39 @@ class DataReader(Generic[T]):
         """Get the topic this reader subscribes to."""
         return self._topic
 
-    def _take_one(self) -> Sample[T] | None:
-        """Take a single sample from the reader."""
+    def _grow_buffer(self, required: int) -> None:
+        self._buffer_size = required
+        self._buffer = ffi.new(f"uint8_t[{required}]")
+
+    def _take_or_read_one(self, native_fn) -> Sample[T] | None:
         actual_size = ffi.new("size_t *")
         valid_data = ffi.new("bool *")
 
-        ret = lib.int2dds_take_serialized(
-            self._handle, self._buffer, self._buffer_size, actual_size, valid_data
-        )
+        while True:
+            ret = native_fn(
+                self._handle, self._buffer, self._buffer_size, actual_size, valid_data
+            )
 
-        if ret == INT2DDS_RET_NO_DATA:
-            return None
-        check_ret(ret)
+            if ret == INT2DDS_RET_BUFFER_TOO_SMALL:
+                self._grow_buffer(actual_size[0])
+                continue
+            if ret == INT2DDS_RET_NO_DATA:
+                return None
+            check_ret(ret)
 
-        if valid_data[0]:
-            # Deserialize the data
-            data_bytes = ffi.buffer(self._buffer, actual_size[0])[:]
-            data = self._topic.type_class._deserialize_cdr(data_bytes)
-            return Sample(data=data, valid_data=True)
-        else:
+            if valid_data[0]:
+                data_bytes = ffi.buffer(self._buffer, actual_size[0])[:]
+                data = self._topic.type_class._deserialize_cdr(data_bytes)
+                return Sample(data=data, valid_data=True)
             return Sample(data=None, valid_data=False)
+
+    def _take_one(self) -> Sample[T] | None:
+        """Take a single sample from the reader."""
+        return self._take_or_read_one(lib.int2dds_take_serialized)
 
     def _read_one(self) -> Sample[T] | None:
         """Read a single sample without removing it from the cache."""
-        actual_size = ffi.new("size_t *")
-        valid_data = ffi.new("bool *")
-
-        ret = lib.int2dds_read_serialized(
-            self._handle, self._buffer, self._buffer_size, actual_size, valid_data
-        )
-
-        if ret == INT2DDS_RET_NO_DATA:
-            return None
-        check_ret(ret)
-
-        if valid_data[0]:
-            data_bytes = ffi.buffer(self._buffer, actual_size[0])[:]
-            data = self._topic.type_class._deserialize_cdr(data_bytes)
-            return Sample(data=data, valid_data=True)
-        else:
-            return Sample(data=None, valid_data=False)
+        return self._take_or_read_one(lib.int2dds_read_serialized)
 
     def take(self) -> list[Sample[T]]:
         """

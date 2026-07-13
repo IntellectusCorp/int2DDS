@@ -100,6 +100,11 @@ use crate::{
     utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
 };
 
+pub enum BoundedSerialized {
+    Fit(Bytes, SampleInfo),
+    TooSmall { required: usize },
+}
+
 static SERIALIZED_TAKE_PROFILE_COUNT: AtomicU64 = AtomicU64::new(0);
 static SERIALIZED_TAKE_PROFILE_PRECHECK_US: AtomicU64 = AtomicU64::new(0);
 static SERIALIZED_TAKE_PROFILE_GET_CHANGES_US: AtomicU64 = AtomicU64::new(0);
@@ -2566,14 +2571,71 @@ impl<Foo: DdsType> DataReader<Foo> {
 
     /// Take a single pre-serialized sample without copying shared receive payloads.
     pub fn take_next_serialized_bytes(&self) -> DdsResult<(Bytes, SampleInfo)> {
-        let results = self.read_or_take_serialized_bytes(
+        let (results, _) = self.read_or_take_serialized_bytes(
             1,
             &[SampleStateKind::NOT_READ_SAMPLE_STATE],
             &[ViewStateKind::ANY_VIEW_STATE],
             &[InstanceStateKind::ANY_INSTANCE_STATE],
             true,
+            None,
         )?;
         results.into_iter().next().ok_or(DdsError::NoData)
+    }
+
+    fn bounded_single_serialized(
+        &self,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+        take: bool,
+        max_bytes: usize,
+    ) -> DdsResult<BoundedSerialized> {
+        let (results, too_small) = self.read_or_take_serialized_bytes(
+            1,
+            sample_states,
+            view_states,
+            instance_states,
+            take,
+            Some(max_bytes),
+        )?;
+        if let Some(required) = too_small {
+            return Ok(BoundedSerialized::TooSmall { required });
+        }
+        results
+            .into_iter()
+            .next()
+            .map(|(data, info)| BoundedSerialized::Fit(data, info))
+            .ok_or(DdsError::NoData)
+    }
+
+    pub fn take_next_serialized_bounded(&self, max_bytes: usize) -> DdsResult<BoundedSerialized> {
+        self.bounded_single_serialized(
+            &[SampleStateKind::NOT_READ_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::ANY_INSTANCE_STATE],
+            true,
+            max_bytes,
+        )
+    }
+
+    pub fn read_next_serialized_bounded(&self, max_bytes: usize) -> DdsResult<BoundedSerialized> {
+        self.bounded_single_serialized(
+            &[SampleStateKind::NOT_READ_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::ANY_INSTANCE_STATE],
+            false,
+            max_bytes,
+        )
+    }
+
+    pub fn take_serialized_bounded(
+        &self,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+        max_bytes: usize,
+    ) -> DdsResult<BoundedSerialized> {
+        self.bounded_single_serialized(sample_states, view_states, instance_states, true, max_bytes)
     }
 
     fn read_or_take_serialized(
@@ -2590,8 +2652,9 @@ impl<Foo: DdsType> DataReader<Foo> {
             view_states,
             instance_states,
             take,
+            None,
         )
-        .map(|results| {
+        .map(|(results, _)| {
             results.into_iter().map(|(data, info)| (Arc::from(data.as_ref()), info)).collect()
         })
     }
@@ -2603,7 +2666,8 @@ impl<Foo: DdsType> DataReader<Foo> {
         view_states: &[ViewStateKind],
         instance_states: &[InstanceStateKind],
         take: bool,
-    ) -> DdsResult<Vec<(Bytes, SampleInfo)>> {
+        max_bytes: Option<usize>,
+    ) -> DdsResult<(Vec<(Bytes, SampleInfo)>, Option<usize>)> {
         let profile = serialized_take_profile_enabled();
         let total_t0 = Instant::now();
         let precheck_t0 = Instant::now();
@@ -2695,6 +2759,12 @@ impl<Foo: DdsType> DataReader<Foo> {
                 loop_data_bytes_us += elapsed_us(data_bytes_t0, Instant::now());
             }
 
+            if let Some(cap) = max_bytes {
+                if has_valid_data && serialized_data.len() > cap {
+                    return Ok((Vec::new(), Some(serialized_data.len())));
+                }
+            }
+
             let sample_info_t0 = Instant::now();
             let sample_info = SampleInfo {
                 sample_state,
@@ -2782,7 +2852,7 @@ impl<Foo: DdsType> DataReader<Foo> {
                     elapsed_us(total_t0, Instant::now()),
                 );
             }
-            Ok(result)
+            Ok((result, None))
         }
     }
 
