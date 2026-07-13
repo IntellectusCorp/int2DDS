@@ -128,7 +128,7 @@ impl SedpLogic {
     ) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
         match reply.data {
-            TypeLookupReturn::GetTypes(GetTypesOut { types }) => {
+            TypeLookupReturn::GetTypes(GetTypesOut { types, complete_to_minimal }) => {
                 let related = &reply.header.related_request_id;
                 let pending =
                     self.type_lookup_pending.lock().ok().and_then(|mut map| map.remove(related));
@@ -144,6 +144,31 @@ impl SedpLogic {
                 if let Ok(mut registry) = participant.type_registry().write() {
                     for (type_id, type_object) in &types {
                         registry.register_type_object_with_id(type_id, type_object.clone());
+                    }
+
+                    let batch_hashes: Vec<_> =
+                        types.iter().filter_map(|(id, _)| id.equivalence_hash().copied()).collect();
+                    loop {
+                        let mut progressed = false;
+                        for h in &batch_hashes {
+                            if registry.minimal_hash_of(h).is_none()
+                                && registry.try_derive_minimal(h)
+                            {
+                                progressed = true;
+                            }
+                        }
+                        if !progressed {
+                            break;
+                        }
+                    }
+                    // Preserve any COMPLETE->MINIMAL correspondences the replier sent
+                    // (e.g. COMPLETE served for a MINIMAL request); ours take precedence.
+                    for (complete, minimal) in &complete_to_minimal {
+                        if let (Some(c), Some(m)) =
+                            (complete.equivalence_hash(), minimal.equivalence_hash())
+                        {
+                            registry.note_complete_to_minimal(*c, *m);
+                        }
                     }
                     for (type_id, _) in &types {
                         if let Some(hash) = type_id.equivalence_hash() {
@@ -161,6 +186,7 @@ impl SedpLogic {
                 if !still_missing.is_empty() {
                     let _ = self.request_get_types(prefix, still_missing);
                 }
+                self.re_match_resolved_types(prefix);
                 Ok(())
             }
             TypeLookupReturn::GetTypeDependencies(GetTypeDependenciesOut {
@@ -204,24 +230,69 @@ impl SedpLogic {
         }
     }
 
-    /// Replier helper: resolve each requested id to its complete closure.
+    /// Replier helper: resolve each requested id to its closure, served in the
+    /// equivalence kind the request asked for (MINIMAL for a `MinimalTypeId`,
+    /// COMPLETE for a `CompleteTypeId`; spec §7.6.3 allows serving MINIMAL directly).
     fn serve_get_types(&self, type_ids: &[TypeIdentifier]) -> GetTypesOut {
         let mut types: Vec<(TypeIdentifier, TypeObject)> = Vec::new();
+        let mut complete_to_minimal: Vec<(TypeIdentifier, TypeIdentifier)> = Vec::new();
         if let Ok(participant) = self.get_upgraded_participant() {
             if let Ok(registry) = participant.type_registry().read() {
+                let mut served = std::collections::HashSet::new();
                 for type_id in type_ids {
-                    if let Some(hash) = type_id.equivalence_hash() {
-                        for (h, obj) in registry.complete_closure(hash) {
-                            types.push((
-                                TypeIdentifier::CompleteTypeId(h),
-                                TypeObject::Complete(obj),
-                            ));
+                    let want_minimal = matches!(type_id, TypeIdentifier::MinimalTypeId(_));
+                    let hash = match type_id.equivalence_hash() {
+                        Some(h) => *h,
+                        None => continue,
+                    };
+                    // A minimal-only registry (no complete mapping): serve it directly.
+                    if want_minimal && registry.complete_hash_of(&hash).is_none() {
+                        if registry.lookup_complete(&hash).is_none() {
+                            if let Some(obj) = registry.resolve_type_object(type_id) {
+                                if served.insert(hash) {
+                                    types.push((type_id.clone(), obj));
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                    let complete_root = if want_minimal {
+                        registry.complete_hash_of(&hash).unwrap_or(hash)
+                    } else {
+                        hash
+                    };
+                    let mut closure = vec![complete_root];
+                    closure.extend(registry.transitive_dependency_hashes(&[complete_root]));
+                    for ch in closure {
+                        let served_id = if want_minimal {
+                            match registry.minimal_hash_of(&ch) {
+                                Some(mh) => TypeIdentifier::MinimalTypeId(mh),
+                                None => continue,
+                            }
+                        } else {
+                            TypeIdentifier::CompleteTypeId(ch)
+                        };
+                        if let Some(k) = served_id.equivalence_hash().copied() {
+                            if !served.insert(k) {
+                                continue;
+                            }
+                        }
+                        if let Some(obj) = registry.resolve_type_object(&served_id) {
+                            if let TypeIdentifier::CompleteTypeId(ch) = &served_id {
+                                if let Some(mh) = registry.minimal_hash_of(ch) {
+                                    complete_to_minimal.push((
+                                        served_id.clone(),
+                                        TypeIdentifier::MinimalTypeId(mh),
+                                    ));
+                                }
+                            }
+                            types.push((served_id, obj));
                         }
                     }
                 }
             }
         }
-        GetTypesOut { types }
+        GetTypesOut { types, complete_to_minimal }
     }
 
     fn serve_get_type_dependencies(
@@ -232,17 +303,45 @@ impl SedpLogic {
         let mut dependent_typeids: Vec<TypeIdentifierWithSize> = Vec::new();
         if let Ok(participant) = self.get_upgraded_participant() {
             if let Ok(registry) = participant.type_registry().read() {
+                let want_minimal = type_ids
+                    .first()
+                    .map_or(false, |id| matches!(id, TypeIdentifier::MinimalTypeId(_)));
                 let roots: Vec<_> =
-                    type_ids.iter().filter_map(|id| id.equivalence_hash().copied()).collect();
+                    type_ids
+                        .iter()
+                        .filter_map(|id| id.equivalence_hash().copied())
+                        .map(|h| {
+                            if want_minimal {
+                                registry.complete_hash_of(&h).unwrap_or(h)
+                            } else {
+                                h
+                            }
+                        })
+                        .collect();
                 for dep in registry.transitive_dependency_hashes(&roots) {
-                    let size = registry
-                        .lookup_complete(&dep)
-                        .map(|o| TypeObject::Complete(o.clone()).serialize().len() as u32)
-                        .unwrap_or(0);
-                    dependent_typeids.push(TypeIdentifierWithSize::new(
-                        TypeIdentifier::CompleteTypeId(dep),
-                        size,
-                    ));
+                    // Reply in the request's EK space; size is the spec byte length of
+                    // the object actually addressed.
+                    let (dep_id, obj) = if want_minimal {
+                        match registry
+                            .minimal_hash_of(&dep)
+                            .and_then(|mh| registry.lookup_minimal(&mh).map(|m| (mh, m.clone())))
+                        {
+                            Some((mh, m)) => {
+                                (TypeIdentifier::MinimalTypeId(mh), TypeObject::Minimal(m))
+                            }
+                            None => continue,
+                        }
+                    } else {
+                        match registry.lookup_complete(&dep) {
+                            Some(c) => (
+                                TypeIdentifier::CompleteTypeId(dep),
+                                TypeObject::Complete(c.clone()),
+                            ),
+                            None => continue,
+                        }
+                    };
+                    let size = crate::xtypes::serialize_type_object(&obj).len() as u32;
+                    dependent_typeids.push(TypeIdentifierWithSize::new(dep_id, size));
                 }
             }
         }

@@ -1,4 +1,4 @@
-//! RTI/OMG-style `<qos_library>` XML loading.
+//! OMG-style `<qos_library>` XML loading.
 //!
 //! Converts the XML to a [`serde_json::Value`] and reuses the JSON [`QosLibrary`]
 //! deserialization, so path resolution, `base_name` inheritance and DCPS conversion
@@ -93,7 +93,6 @@ fn parse_named_sections<T: serde::de::DeserializeOwned>(
         .collect()
 }
 
-// RTI repeats container elements; map each to its plural model field name.
 fn rename_key(tag: &str) -> &str {
     match tag {
         "qos_profile" => "qos_profiles",

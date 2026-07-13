@@ -21,8 +21,7 @@ pip install -e .
 ### Building the FFI Library
 
 ```bash
-cd ../ffi
-cargo build --release
+cargo build --package int2dds-ffi
 ```
 
 Set the library path:
@@ -34,6 +33,23 @@ export INT2DDS_FFI_PATH=/path/to/libint2dds_ffi.so
 # Windows
 set INT2DDS_FFI_PATH=C:\path\to\int2dds_ffi.dll
 ```
+
+## Running the examples
+
+Bundled runnable pub/sub examples live in `examples/`. Start the subscriber
+first, then the publisher:
+
+```bash
+python examples/hello_world_sub.py
+python examples/hello_world_pub.py
+
+# custom domain + reliable QoS
+python examples/hello_world_sub.py --domain 10 --reliable
+python examples/hello_world_pub.py --domain 10 --reliable
+```
+
+Both accept `-d`/`--domain <id>` (default 0) and `--reliable` (default
+BEST_EFFORT).
 
 ## Quick Start
 
@@ -81,7 +97,7 @@ from int2dds import DomainParticipant, WaitSet
 # Create participant
 with DomainParticipant(domain_id=0) as dp:
     # Create topic
-    topic = dp.create_topic("HelloWorldTopic", HelloWorld)
+    topic = dp.create_topic("hello_world_topic", HelloWorld)
 
     # Create publisher and writer
     pub = dp.create_publisher()
@@ -105,7 +121,7 @@ with DomainParticipant(domain_id=0) as dp:
 from int2dds import DomainParticipant, WaitSet, DdsTimeout
 
 with DomainParticipant(domain_id=0) as dp:
-    topic = dp.create_topic("HelloWorldTopic", HelloWorld)
+    topic = dp.create_topic("hello_world_topic", HelloWorld)
 
     sub = dp.create_subscriber()
     reader = sub.create_datareader(topic)
@@ -131,6 +147,10 @@ Generate Python code from IDL:
 ```bash
 int2dds-idl --python hello_world.py HelloWorld.idl
 ```
+
+> The bundled `examples/hello_world_type.py` is generated this way from
+> `idl/input/HelloWorld.idl` (`int2dds-idl --python examples/hello_world_type.py
+> idl/input/HelloWorld.idl`); do not edit it by hand.
 
 Example IDL file:
 
@@ -171,7 +191,7 @@ other DDS vendor XML dialects both parse through the registry.
 from int2dds import DomainParticipant
 from int2dds.types import XmlTypeRegistry
 
-reg = XmlTypeRegistry.from_file("dds/examples/xtypes/sensor_data.xml")
+reg = XmlTypeRegistry.from_file("sensor_data.xml")
 support = reg.get_type_support("SensorData")
 
 with DomainParticipant(domain_id=0) as dp:
@@ -207,7 +227,7 @@ print(got.len(), got.element(0).as_i32())
 print(sample.get_value("mode").as_enum())   # -> ("ON", 1)
 ```
 
-See `examples/xml_dynamic_publisher.py` and `examples/xml_dynamic_subscriber.py`
+See the `xtypes` examples in [int2DDS-examples](https://github.com/IntellectusCorp/int2DDS-examples)
 for a runnable pub/sub pair.
 
 ## Environment Configuration
