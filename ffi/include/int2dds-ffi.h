@@ -989,32 +989,6 @@ Int2DdsRet int2dds_datareader_get_matched_publications(const struct Int2DdsDataR
                                                        uintptr_t *count_out);
 
 /**
- * Get the number of discovered publications currently known to a participant.
- */
-Int2DdsRet int2dds_participant_get_discovered_publication_count(const struct Int2DdsParticipant *participant,
-                                                                uintptr_t *count_out);
-
-/**
- * Get discovered publication data by stable snapshot index.
- */
-Int2DdsRet int2dds_participant_get_discovered_publication_data_by_index(const struct Int2DdsParticipant *participant,
-                                                                        uintptr_t index,
-                                                                        struct Int2DdsPublicationBuiltinTopicData **data_out);
-
-/**
- * Get the number of discovered subscriptions currently known to a participant.
- */
-Int2DdsRet int2dds_participant_get_discovered_subscription_count(const struct Int2DdsParticipant *participant,
-                                                                 uintptr_t *count_out);
-
-/**
- * Get discovered subscription data by stable snapshot index.
- */
-Int2DdsRet int2dds_participant_get_discovered_subscription_data_by_index(const struct Int2DdsParticipant *participant,
-                                                                         uintptr_t index,
-                                                                         struct Int2DdsSubscriptionBuiltinTopicData **data_out);
-
-/**
  * Collect a snapshot of discovered publications via the builtin DCPSPublication reader.
  */
 Int2DdsRet int2dds_take_discovered_publications_snapshot(const struct Int2DdsParticipant *participant,
