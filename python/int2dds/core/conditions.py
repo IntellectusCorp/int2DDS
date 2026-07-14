@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from int2dds._ffi import ffi, lib
+from int2dds._ffi import CData, ffi, lib
 from int2dds.exceptions import INT2DDS_RET_TIMEOUT, DdsTimeout, check_ret
 
 if TYPE_CHECKING:
@@ -102,7 +102,7 @@ class StatusCondition:
 
     __slots__ = ("_handle", "_closed", "_owner")
 
-    def __init__(self, handle: ffi.CData, owner: object) -> None:
+    def __init__(self, handle: CData, owner: object) -> None:
         self._handle = handle
         self._owner = owner  # Keep reference to prevent premature deletion
         self._closed = False
@@ -163,7 +163,7 @@ class Condition:
 
     __slots__ = ("_handle", "_closed")
 
-    def __init__(self, handle: ffi.CData) -> None:
+    def __init__(self, handle: CData) -> None:
         self._handle = handle
         self._closed = False
 

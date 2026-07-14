@@ -29,7 +29,7 @@ Typical use (mirrors ``hello_world_xml_dyn_pub.rs``)::
 
 from __future__ import annotations
 
-from int2dds._ffi import ffi, lib
+from int2dds._ffi import CData, ffi, lib
 from int2dds.core.participant import _get_factory
 from int2dds.exceptions import check_ret
 from int2dds.types.dynamic import (
@@ -79,7 +79,7 @@ class ConfiguredParticipant:
     ``"<subscriber>::<reader>"``). Closing this object tears the tree down.
     """
 
-    def __init__(self, handle: ffi.CData) -> None:
+    def __init__(self, handle: CData) -> None:
         self._handle = handle
 
     def datawriter(self, name: str) -> DynamicDataWriter:

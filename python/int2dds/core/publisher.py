@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Generic, TypeVar
 
-from int2dds._ffi import ffi, lib
+from int2dds._ffi import CData, ffi, lib
 from int2dds.core.listeners import (
     DataWriterListener,
     _create_writer_listener_struct,
@@ -130,7 +130,7 @@ class DataWriter(Generic[T]):
         self._publisher = publisher
         self._topic = topic
         self._closed = False
-        self._qos_handle: ffi.CData | None = None
+        self._qos_handle: CData | None = None
         self._listener_ctx_id: int | None = None
 
         # Create QoS if provided

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Protocol, runtime_checkable
 from weakref import WeakValueDictionary
 
-from int2dds._ffi import ffi, lib
+from int2dds._ffi import CData, ffi, lib
 
 if TYPE_CHECKING:
     from int2dds.core.publisher import DataWriter
@@ -533,7 +533,7 @@ def _on_offered_incompatible_qos_cb(writer_ptr, status_ptr, user_context):
 
 def _create_writer_listener_struct(
     listener: DataWriterListener, writer: DataWriter
-) -> tuple[ffi.CData, int]:
+) -> tuple[CData, int]:
     """Create a C listener struct for a DataWriter."""
     ctx_id = _get_next_id()
     ctx_ptr = ffi.cast("void*", ctx_id)
@@ -553,7 +553,7 @@ def _create_writer_listener_struct(
 
 def _create_reader_listener_struct(
     listener: DataReaderListener, reader: DataReader
-) -> tuple[ffi.CData, int]:
+) -> tuple[CData, int]:
     """Create a C listener struct for a DataReader."""
     ctx_id = _get_next_id()
     ctx_ptr = ffi.cast("void*", ctx_id)
