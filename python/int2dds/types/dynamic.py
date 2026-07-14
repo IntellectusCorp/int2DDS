@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from int2dds._ffi import ffi, lib
+from int2dds._ffi import CData, ffi, lib
 from int2dds.exceptions import (
     INT2DDS_RET_INVALID_ARGUMENT,
     INT2DDS_RET_NO_DATA,
@@ -80,7 +80,7 @@ VALUE_KIND_OPTIONAL = 23
 VALUE_KIND_NULL = 24
 
 
-def _cstr(s: str) -> ffi.CData:
+def _cstr(s: str) -> CData:
     return ffi.new("char[]", s.encode())
 
 
@@ -166,7 +166,7 @@ class TypeInfoBuilder:
         check_ret(lib.int2dds_type_info_to_type_object(self._handle, out))
         return TypeObject(out[0])
 
-    def _take(self) -> ffi.CData:
+    def _take(self) -> CData:
         """Transfer ownership of the handle (consumed by create_topic_with_type_info)."""
         h = self._handle
         self._handle = None
@@ -187,11 +187,11 @@ class TypeInfoBuilder:
 class TypeObject:
     """A discovered TypeObject; supports struct member introspection."""
 
-    def __init__(self, handle: ffi.CData) -> None:
+    def __init__(self, handle: CData) -> None:
         self._handle = handle
 
     @property
-    def handle(self) -> ffi.CData:
+    def handle(self) -> CData:
         return self._handle
 
     @property
@@ -239,7 +239,7 @@ class TypeObject:
 class DynamicData:
     """A decoded sample; read fields by dotted/indexed path (e.g. "pos.x", "tags[2]")."""
 
-    def __init__(self, handle: ffi.CData) -> None:
+    def __init__(self, handle: CData) -> None:
         self._handle = handle
 
     def _get_scalar(self, fn, ctype: str, path: str):
@@ -434,11 +434,11 @@ class DynamicValue:
     is consumed on success and must not be reused.
     """
 
-    def __init__(self, handle: ffi.CData) -> None:
+    def __init__(self, handle: CData) -> None:
         self._handle = handle
 
     @property
-    def handle(self) -> ffi.CData:
+    def handle(self) -> CData:
         return self._handle
 
     @classmethod
@@ -697,11 +697,11 @@ class DynamicTypeSupport:
     """A type's runtime support object; creates writable DynamicData instances and
     backs dynamic topics/endpoints. Obtained from :class:`XmlTypeRegistry`."""
 
-    def __init__(self, handle: ffi.CData) -> None:
+    def __init__(self, handle: CData) -> None:
         self._handle = handle
 
     @property
-    def handle(self) -> ffi.CData:
+    def handle(self) -> CData:
         return self._handle
 
     def create_data(self) -> DynamicData:
@@ -724,11 +724,11 @@ class DynamicTypeSupport:
 class DynamicTopic:
     """A topic backed by a :class:`DynamicTypeSupport` (no compile-time type)."""
 
-    def __init__(self, handle: ffi.CData) -> None:
+    def __init__(self, handle: CData) -> None:
         self._handle = handle
 
     @property
-    def handle(self) -> ffi.CData:
+    def handle(self) -> CData:
         return self._handle
 
     def close(self) -> None:
@@ -746,7 +746,7 @@ class DynamicTopic:
 class DynamicDataWriter:
     """Publishes :class:`DynamicData` samples on a :class:`DynamicTopic`."""
 
-    def __init__(self, handle: ffi.CData) -> None:
+    def __init__(self, handle: CData) -> None:
         self._handle = handle
 
     def write(self, data: DynamicData) -> None:
@@ -772,7 +772,7 @@ class DynamicDataWriter:
 class DynamicDataReader:
     """Receives :class:`DynamicData` samples from a :class:`DynamicTopic`."""
 
-    def __init__(self, handle: ffi.CData) -> None:
+    def __init__(self, handle: CData) -> None:
         self._handle = handle
 
     def take(self) -> DynamicData | None:
