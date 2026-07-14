@@ -165,7 +165,7 @@ impl ReaderHistoryCache {
     /// members committed by a set close); a held or buffered sample yields no changes.
     pub(crate) fn add_change(
         &mut self,
-        mut a_change: CacheChange,
+        a_change: CacheChange,
         apply_filter: bool,
     ) -> RtpsResult<Vec<Arc<CacheChange>>> {
         let coherent_set = a_change.presentation_info().coherent_set;
@@ -179,11 +179,12 @@ impl ReaderHistoryCache {
                 && a_change.kind() == ChangeKind::Alive
                 && a_change.data_value().is_empty());
         if is_end_marker {
-            return self.close_coherent_set(writer_guid, Some(a_change.sequence_number()));
+            let members =
+                self.close_and_take_coherent_set(writer_guid, Some(a_change.sequence_number()));
+            return self.commit_changes_to_datareader_cache(
+                members.into_iter().map(|c| (c, false)).collect(),
+            );
         }
-
-        // Members committed by an implicit set close below ride along in the result.
-        let mut available = Vec::new();
 
         // A coherent reader holds set members back until their set closes; any other
         // arrival from a writer with an open set ends that set implicitly.
@@ -191,27 +192,50 @@ impl ReaderHistoryCache {
             match coherent_set {
                 Some(set_id) => {
                     // A member of a different set closes the previous set first.
-                    let committed = if self
+                    let members = if self
                         .coherent_pending
                         .get(&writer_guid)
                         .is_some_and(|pending| pending.set_id != set_id)
                     {
-                        self.close_coherent_set(writer_guid, None)?
+                        self.close_and_take_coherent_set(writer_guid, None)
                     } else {
                         Vec::new()
                     };
 
-                    // Buffer the member until its set closes
+                    // Hold this member back until its own set closes.
                     self.buffer_coherent_member(writer_guid, set_id, a_change);
-                    return Ok(committed);
+
+                    return self.commit_changes_to_datareader_cache(
+                        members.into_iter().map(|c| (c, false)).collect(),
+                    );
                 }
                 None => {
-                    // If no coherent set, any open set from this writer is implicitly closed
-                    if self.coherent_pending.contains_key(&writer_guid) {
-                        available = self.close_coherent_set(writer_guid, None)?;
-                    }
+                    // A non-coherent sample implicitly closes this writer's open set; commit
+                    // that set and this sample together so a take() sees all of it or none.
+                    let mut batch: Vec<(CacheChange, bool)> = self
+                        .close_and_take_coherent_set(writer_guid, None)
+                        .into_iter()
+                        .map(|c| (c, false))
+                        .collect();
+                    batch.push((a_change, apply_filter));
+                    return self.commit_changes_to_datareader_cache(batch);
                 }
             }
+        }
+
+        self.commit_changes_to_datareader_cache(vec![(a_change, apply_filter)])
+    }
+
+    // Insert a batch of changes into the DCPS and RTPS histories under a single DataReader
+    // cache lock, so a concurrent take() never observes a partially-committed coherent set.
+    // Each entry carries its own apply_filter; returns the changes actually stored.
+    fn commit_changes_to_datareader_cache(
+        &mut self,
+        changes: Vec<(CacheChange, bool)>,
+    ) -> RtpsResult<Vec<Arc<CacheChange>>> {
+        let mut available = Vec::new();
+        if changes.is_empty() {
+            return Ok(available);
         }
 
         if let Some(datareader_cache_weak) = &self.datareader_cache {
@@ -223,48 +247,54 @@ impl ReaderHistoryCache {
                     )
                 })?;
 
-                // Mutate the change before making it immutable
-                datareader_cache
-                    .add_info_to_cache_change(&mut a_change)
-                    .map_err(|e| RtpsError::new(RtpsErrorCode::DdsError, e.to_string()))?;
+                for (mut change, apply_filter) in changes {
+                    // Mutate the change before making it immutable
+                    datareader_cache
+                        .add_info_to_cache_change(&mut change)
+                        .map_err(|e| RtpsError::new(RtpsErrorCode::DdsError, e.to_string()))?;
 
-                // Wrap in Arc once — no deep copy
-                let shared = Arc::new(a_change);
+                    // Wrap in Arc once — no deep copy
+                    let shared = Arc::new(change);
 
-                // Insert into DataReaderHistoryCache (Arc::clone only)
-                let (removed, filtered) = datareader_cache
-                    .add_change_with_cleanup(Arc::clone(&shared), apply_filter)
-                    .map_err(|e| RtpsError::new(RtpsErrorCode::DdsError, e.to_string()))?;
+                    // Insert into DataReaderHistoryCache (Arc::clone only)
+                    let (removed, filtered) = datareader_cache
+                        .add_change_with_cleanup(Arc::clone(&shared), apply_filter)
+                        .map_err(|e| RtpsError::new(RtpsErrorCode::DdsError, e.to_string()))?;
 
-                // Held by TIME_BASED_FILTER: not stored in either history, no notification.
-                if filtered {
-                    return Ok(available);
+                    // Held by TIME_BASED_FILTER: not stored in either history, no notification.
+                    if filtered {
+                        continue;
+                    }
+
+                    // Insert into RTPS ReaderHistoryCache (Arc::clone only)
+                    self.changes.push(Arc::clone(&shared));
+
+                    if let Some(removed_change) = removed {
+                        self.remove_change(removed_change)?;
+                    }
+
+                    available.push(shared);
                 }
 
-                // Insert into RTPS ReaderHistoryCache (Arc::clone only)
-                self.changes.push(Arc::clone(&shared));
-
-                if let Some(removed_change) = removed {
-                    self.remove_change(removed_change)?;
-                }
-
-                available.push(shared);
                 return Ok(available);
             }
         }
 
-        // No DataReader cache connected (builtin endpoint without DDS entity or weak reference expired)
+        // No DataReader cache connected (builtin endpoint without DDS entity or expired weak ref)
         if self.is_builtin() {
-            // Built-in endpoint: Resource limits & History QoS not applied
-            // Therefore arbitrarily limit size
-            if self.changes.len() >= BUILTIN_ENDPOINT_HISTORYCACHE_CAPACITY {
-                let removed = self.changes.remove(0);
-                self.pool.try_release(removed);
+            for (change, _apply_filter) in changes {
+                // Built-in endpoint: Resource limits & History QoS not applied,
+                // therefore arbitrarily limit size.
+                if self.changes.len() >= BUILTIN_ENDPOINT_HISTORYCACHE_CAPACITY {
+                    let removed = self.changes.remove(0);
+                    self.pool.try_release(removed);
+                }
+
+                let shared = Arc::new(change);
+                self.changes.push(Arc::clone(&shared));
+                available.push(shared);
             }
 
-            let shared = Arc::new(a_change);
-            self.changes.push(Arc::clone(&shared));
-            available.push(shared);
             Ok(available)
         } else {
             // Non-builtin endpoint must have DataReader cache
@@ -299,17 +329,17 @@ impl ReaderHistoryCache {
         }
     }
 
-    // Close a writer's open coherent set: commit members through the normal add path when
-    // the set is contiguous from its start (and reaches the marker, when one is given),
-    // else discard them all. Returns the stored members for notification.
-    fn close_coherent_set(
+    // Close a writer's open coherent set and return its members ready for commit (coherent
+    // id cleared), or an empty Vec when the set is incomplete or none is open. The caller
+    // stores the returned members under one lock so the whole set is committed atomically.
+    fn close_and_take_coherent_set(
         &mut self,
         writer_guid: Guid,
         marker_seq: Option<SequenceNumber>,
-    ) -> RtpsResult<Vec<Arc<CacheChange>>> {
-        // Removing closes the set; members re-added below cannot be buffered again.
+    ) -> Vec<CacheChange> {
+        // Removing closes the set; its members will not be buffered again.
         let Some(pending) = self.coherent_pending.remove(&writer_guid) else {
-            return Ok(Vec::new());
+            return Vec::new();
         };
 
         // The set id is the first member's seq; a different head means the front was lost.
@@ -339,22 +369,20 @@ impl ReaderHistoryCache {
                 contiguous,
                 ends_at_marker
             );
-            return Ok(Vec::new());
+            return Vec::new();
         }
 
-        // Every stored member is returned so each one gets its own notification.
-        let mut committed = Vec::new();
-
-        for mut member in pending.changes {
-            // Clear the set marker so this add is not consumed as a boundary again;
-            // members also bypass TIME_BASED_FILTER so the set is stored atomically.
-            let mut info = member.presentation_info().clone();
-            info.coherent_set = None;
-            member.set_presentation_info(info);
-            committed.extend(self.add_change(member, false)?);
-        }
-
-        Ok(committed)
+        // Clear each member's coherent id so re-insertion is not taken as a set boundary.
+        pending
+            .changes
+            .into_iter()
+            .map(|mut member| {
+                let mut info = member.presentation_info().clone();
+                info.coherent_set = None;
+                member.set_presentation_info(info);
+                member
+            })
+            .collect()
     }
 
     // True when the attached DCPS reader requests coherent access (INSTANCE or TOPIC scope).
