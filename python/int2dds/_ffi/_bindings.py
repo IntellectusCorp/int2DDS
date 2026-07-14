@@ -284,6 +284,16 @@ ffi.cdef("""
         int32_t total_count_change;
     } Int2DdsSampleLostStatus;
 
+    typedef struct Int2DdsInconsistentTopicStatus {
+        int32_t total_count;
+        int32_t total_count_change;
+    } Int2DdsInconsistentTopicStatus;
+
+    Int2DdsRet int2dds_topic_get_inconsistent_topic_status(
+        const Int2DdsTopic *topic,
+        Int2DdsInconsistentTopicStatus *status_out
+    );
+
 
     /* Sample Rejected Status */
     typedef enum {

@@ -757,6 +757,20 @@ typedef struct Int2DdsRequestedIncompatibleTypeStatus {
   int32_t total_count_change;
 } Int2DdsRequestedIncompatibleTypeStatus;
 
+/**
+ * C-compatible inconsistent topic status
+ */
+typedef struct Int2DdsInconsistentTopicStatus {
+  /**
+   * Total cumulative count of inconsistent topics detected
+   */
+  int32_t total_count;
+  /**
+   * Change in total_count since last access
+   */
+  int32_t total_count_change;
+} Int2DdsInconsistentTopicStatus;
+
 #define INT2DDS_RET_OK 0
 
 #define INT2DDS_RET_ERROR 1
@@ -3871,6 +3885,20 @@ Int2DdsRet int2dds_topic_get_qos(const struct Int2DdsTopic *topic,
 Int2DdsRet int2dds_delete_topic(struct Int2DdsTopic *topic);
 
 /**
+ * Get the inconsistent topic status for a Topic
+ *
+ * Reports how many times a remote topic with the same name but an
+ * incompatible type was discovered. Reading the status resets its
+ * `total_count_change` and clears the INCONSISTENT_TOPIC status flag.
+ *
+ * # Safety
+ * - `topic` must be a valid topic
+ * - `status_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_topic_get_inconsistent_topic_status(const struct Int2DdsTopic *topic,
+                                                       struct Int2DdsInconsistentTopicStatus *status_out);
+
+/**
  * Get the name of a Topic
  *
  * # Safety
@@ -4103,21 +4131,6 @@ Int2DdsRet int2dds_waitset_wait(const struct Int2DdsWaitSet *waitset,
                                 int64_t timeout_ms);
 
 /**
- * Wait for conditions to be triggered, with nanosecond timeout resolution.
- *
- * Identical to `int2dds_waitset_wait` but the timeout is given in nanoseconds so
- * sub-millisecond waits are honored. Additive: the millisecond entry point is
- * unchanged.
- *
- * # Safety
- * - `waitset` must be a valid waitset
- * - `timeout_ns` is the timeout in nanoseconds, or -1 for infinite
- */
-INT2DDS_DEPRECATED("discards triggered conditions; use int2dds_waitset_wait_ex_ns (ns) or int2dds_waitset_wait_ex (ms)")
-Int2DdsRet int2dds_waitset_wait_ns(const struct Int2DdsWaitSet *waitset,
-                                   int64_t timeout_ns);
-
-/**
  * Wait for conditions to be triggered and return the triggered conditions
  *
  * # Safety
@@ -4140,7 +4153,7 @@ Int2DdsRet int2dds_waitset_wait_ex(const struct Int2DdsWaitSet *waitset,
  *
  * Combines `int2dds_waitset_wait_ex` (returns triggered conditions) with
  * nanosecond timeout precision, so no capability is lost when migrating off the
- * deprecated `int2dds_waitset_wait` / `int2dds_waitset_wait_ns` entry points.
+ * deprecated `int2dds_waitset_wait` entry point.
  *
  * # Safety
  * - `waitset` must be a valid waitset

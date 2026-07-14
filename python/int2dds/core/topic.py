@@ -268,6 +268,23 @@ class Topic(Generic[T]):
         """Get the Python type class."""
         return self._type_class
 
+    def get_inconsistent_topic_status(self) -> dict:
+        """Get the inconsistent topic status.
+
+        Reports how many times a remote topic with the same name but an
+        incompatible type was discovered. Reading the status resets its
+        ``total_count_change``.
+
+        Returns:
+            dict with total_count, total_count_change
+        """
+        status = ffi.new("Int2DdsInconsistentTopicStatus *")
+        check_ret(lib.int2dds_topic_get_inconsistent_topic_status(self._handle, status))
+        return {
+            "total_count": status.total_count,
+            "total_count_change": status.total_count_change,
+        }
+
     def close(self) -> None:
         """Delete the topic."""
         if not self._closed and self._handle is not None:

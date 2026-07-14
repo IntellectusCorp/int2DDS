@@ -23,6 +23,7 @@ use int2dds::{
 
 use crate::data::Int2DdsData;
 use crate::raw_type_support::RawTypeSupport;
+use crate::status::Int2DdsInconsistentTopicStatus;
 use crate::type_info::Int2DdsTypeInfo;
 
 use super::{error::*, qos::Int2DdsTopicQos, types::*};
@@ -413,6 +414,34 @@ pub unsafe extern "C" fn int2dds_delete_topic(topic: *mut Int2DdsTopic) -> Int2D
 
     match participant.delete_topic(topic_obj) {
         Ok(()) => INT2DDS_RET_OK,
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
+/// Get the inconsistent topic status for a Topic
+///
+/// Reports how many times a remote topic with the same name but an
+/// incompatible type was discovered. Reading the status resets its
+/// `total_count_change` and clears the INCONSISTENT_TOPIC status flag.
+///
+/// # Safety
+/// - `topic` must be a valid topic
+/// - `status_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_topic_get_inconsistent_topic_status(
+    topic: *const Int2DdsTopic,
+    status_out: *mut Int2DdsInconsistentTopicStatus,
+) -> Int2DdsRet {
+    check_null!(topic);
+    check_null!(status_out);
+
+    let topic_ref = &*topic;
+
+    match topic_ref.inner.get_inconsistent_topic_status() {
+        Ok(status) => {
+            *status_out = Int2DdsInconsistentTopicStatus::from(&status);
+            INT2DDS_RET_OK
+        }
         Err(e) => dds_error_to_code(&e),
     }
 }
