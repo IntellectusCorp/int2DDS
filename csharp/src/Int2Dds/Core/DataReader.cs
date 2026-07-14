@@ -390,6 +390,89 @@ namespace Int2Dds.Core
         }
 
         /// <summary>
+        /// Looks up the instance handle for a stored serialized key. The key must be in the
+        /// serialized form the reader stored for the instance — i.e. the bytes returned by
+        /// <see cref="GetKeyValue"/> (or a sample's instance handle on the raw-serialized
+        /// path), not a freshly serialized key. Returns <see cref="InstanceHandle.Nil"/> if
+        /// the instance is unknown.
+        /// </summary>
+        public InstanceHandle LookupInstance(byte[] key)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+
+            if (key == null || key.Length == 0)
+                return InstanceHandle.Nil;
+
+            var handleBytes = new byte[16];
+            unsafe
+            {
+                fixed (byte* pKey = key)
+                fixed (byte* pHandle = handleBytes)
+                {
+                    ReturnCodeHelper.CheckReturn(
+                        NativeMethods.int2dds_datareader_lookup_instance(
+                            _handle, pKey, (UIntPtr)key.Length, pHandle));
+                }
+            }
+
+            return new InstanceHandle(handleBytes);
+        }
+
+        /// <summary>
+        /// Gets the serialized key bytes stored for an instance handle. Round-trips with
+        /// <see cref="LookupInstance"/>; on the raw-serialized path the stored key is the
+        /// 16-byte instance handle itself.
+        /// </summary>
+        public byte[] GetKeyValue(InstanceHandle handle)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+
+            var handleBytes = handle.ToByteArray();
+            var keyBuffer = new byte[256];
+
+            unsafe
+            {
+                fixed (byte* pHandle = handleBytes)
+                {
+                    UIntPtr keySize;
+                    fixed (byte* pKey = keyBuffer)
+                    {
+                        var ret = NativeMethods.int2dds_datareader_get_key_value(
+                            _handle, pHandle, pKey, (UIntPtr)keyBuffer.Length, out keySize);
+
+                        if (ret == ReturnCode.Ok)
+                        {
+                            var result = new byte[(int)keySize];
+                            Array.Copy(keyBuffer, result, (int)keySize);
+                            return result;
+                        }
+
+                        // Buffer too small — retry with required size.
+                        if ((int)keySize > keyBuffer.Length)
+                        {
+                            keyBuffer = new byte[(int)keySize];
+                        }
+                        else
+                        {
+                            ReturnCodeHelper.CheckReturn(ret);
+                        }
+                    }
+
+                    fixed (byte* pKey = keyBuffer)
+                    {
+                        ReturnCodeHelper.CheckReturn(
+                            NativeMethods.int2dds_datareader_get_key_value(
+                                _handle, pHandle, pKey, (UIntPtr)keyBuffer.Length, out keySize));
+
+                        var result = new byte[(int)keySize];
+                        Array.Copy(keyBuffer, result, (int)keySize);
+                        return result;
+                    }
+                }
+            }
+        }
+
+        /// <summary>
         /// Gets the requested deadline missed status.
         /// </summary>
         public RequestedDeadlineMissedStatus GetRequestedDeadlineMissedStatus()

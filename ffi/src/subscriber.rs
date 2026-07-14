@@ -17,6 +17,7 @@ use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;
 use int2dds::{
+    common::instance_handle::InstanceHandle,
     core::time::Duration,
     infrastructure::status::StatusMask,
     subscription::{
@@ -762,6 +763,86 @@ pub unsafe extern "C" fn int2dds_datareader_get_guid(
 
     let reader_ref = &*reader;
     *guid_out = reader_ref.inner.guid().to_bytes();
+
+    INT2DDS_RET_OK
+}
+
+unsafe fn reader_handle_from_c(handle_ptr: *const [u8; 16]) -> InstanceHandle {
+    if handle_ptr.is_null() {
+        return InstanceHandle::NIL;
+    }
+    let value = *handle_ptr;
+    if value == [0u8; 16] {
+        InstanceHandle::NIL
+    } else {
+        InstanceHandle::new(value)
+    }
+}
+
+/// Look up an instance handle from raw serialized key bytes.
+///
+/// Mirrors `int2dds_datawriter_lookup_instance` for the read side. Matches on the
+/// serialized key bytes stored per instance; writes `InstanceHandle::NIL` (all zeros)
+/// to `handle_out` when the instance is not known to this reader.
+///
+/// # Safety
+/// - `reader` must be a valid datareader
+/// - `key` must point to at least `key_len` readable bytes
+/// - `handle_out` must be a valid pointer to a 16-byte buffer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_lookup_instance(
+    reader: *const Int2DdsDataReader,
+    key: *const u8,
+    key_len: usize,
+    handle_out: *mut [u8; 16],
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(key);
+    check_null!(handle_out);
+
+    let reader_ref = &*reader;
+    let key_bytes = std::slice::from_raw_parts(key, key_len);
+
+    let handle = ffi_try!(reader_ref.inner.lookup_instance_serialized(key_bytes));
+    *handle_out = *handle.value();
+
+    INT2DDS_RET_OK
+}
+
+/// Get the raw serialized key bytes for an instance handle.
+///
+/// Mirrors `int2dds_datawriter_get_key_value` for the read side. Round-trips with
+/// `int2dds_datareader_lookup_instance`.
+///
+/// # Safety
+/// - `reader` must be a valid datareader
+/// - `handle` must be a valid pointer to a 16-byte instance handle
+/// - `key_buf` must point to at least `key_capacity` writable bytes
+/// - `key_size_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_get_key_value(
+    reader: *const Int2DdsDataReader,
+    handle: *const [u8; 16],
+    key_buf: *mut u8,
+    key_capacity: usize,
+    key_size_out: *mut usize,
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(handle);
+    check_null!(key_buf);
+    check_null!(key_size_out);
+
+    let reader_ref = &*reader;
+    let instance_handle = reader_handle_from_c(handle);
+
+    let key_data = ffi_try!(reader_ref.inner.get_key_value_serialized(instance_handle));
+    *key_size_out = key_data.len();
+
+    if key_data.len() > key_capacity {
+        return INT2DDS_RET_ERROR;
+    }
+
+    std::ptr::copy_nonoverlapping(key_data.as_ptr(), key_buf, key_data.len());
 
     INT2DDS_RET_OK
 }
