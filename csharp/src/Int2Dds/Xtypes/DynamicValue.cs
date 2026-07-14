@@ -185,6 +185,14 @@ namespace Int2Dds.Xtypes
                 NativeMethods.int2dds_dynamic_value_as_string(h, buf, cap, out len));
         }
 
+        /// <summary>Format the value as a string regardless of kind (mirrors the core Display).</summary>
+        public unsafe override string ToString()
+        {
+            IntPtr h = _handle;
+            return NativeString.Read((byte* buf, UIntPtr cap, out UIntPtr len) =>
+                NativeMethods.int2dds_dynamic_value_to_string(h, buf, cap, out len));
+        }
+
         /// <summary>Read an enum value's literal name and numeric value.</summary>
         public unsafe (string Name, int Value) AsEnum()
         {

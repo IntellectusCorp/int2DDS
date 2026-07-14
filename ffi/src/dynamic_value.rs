@@ -432,6 +432,20 @@ pub unsafe extern "C" fn int2dds_dynamic_value_as_string(
     }
 }
 
+/// Format any value as a human-readable string into `buf`, regardless of kind
+/// (mirrors the core `Display`).
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_dynamic_value_to_string(
+    value: *const Int2DdsDynamicValue,
+    buf: *mut c_char,
+    buf_len: usize,
+    out_len: *mut usize,
+) -> Int2DdsRet {
+    check_null!(value);
+    let s = format!("{}", (*value).inner);
+    copy_str_to_c(&s, buf, buf_len, out_len)
+}
+
 /// Read an enum value's literal name into `buf` and its numeric value into
 /// `out_value`.
 #[no_mangle]

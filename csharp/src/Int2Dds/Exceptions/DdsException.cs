@@ -24,6 +24,9 @@ namespace Int2Dds.Exceptions
     public class DdsErrorException : DdsException
     {
         public DdsErrorException() : base("DDS operation failed.", ReturnCode.Error) { }
+
+        public DdsErrorException(string message)
+            : base(string.IsNullOrEmpty(message) ? "DDS operation failed." : message, ReturnCode.Error) { }
     }
 
     public class DdsTimeoutException : DdsException
@@ -34,11 +37,6 @@ namespace Int2Dds.Exceptions
     public class DdsUnsupportedException : DdsException
     {
         public DdsUnsupportedException() : base("DDS operation not supported.", ReturnCode.Unsupported) { }
-    }
-
-    public class DdsBadAllocException : DdsException
-    {
-        public DdsBadAllocException() : base("DDS memory allocation failed.", ReturnCode.BadAlloc) { }
     }
 
     public class DdsInvalidArgumentException : DdsException
@@ -91,6 +89,11 @@ namespace Int2Dds.Exceptions
         public DdsNullPointerException() : base("DDS null pointer.", ReturnCode.NullPointer) { }
     }
 
+    public class DdsBufferTooSmallException : DdsException
+    {
+        public DdsBufferTooSmallException() : base("DDS buffer too small.", ReturnCode.BufferTooSmall) { }
+    }
+
     /// <summary>
     /// Helper to check FFI return codes and throw the appropriate exception.
     /// </summary>
@@ -103,10 +106,9 @@ namespace Int2Dds.Exceptions
 
             throw ret switch
             {
-                ReturnCode.Error => new DdsErrorException(),
+                ReturnCode.Error => new DdsErrorException(Interop.NativeLastError.GetMessage()),
                 ReturnCode.Timeout => new DdsTimeoutException(),
                 ReturnCode.Unsupported => new DdsUnsupportedException(),
-                ReturnCode.BadAlloc => new DdsBadAllocException(),
                 ReturnCode.InvalidArgument => new DdsInvalidArgumentException(),
                 ReturnCode.AlreadyDeleted => new DdsAlreadyDeletedException(),
                 ReturnCode.NotEnabled => new DdsNotEnabledException(),
@@ -117,6 +119,7 @@ namespace Int2Dds.Exceptions
                 ReturnCode.IllegalOperation => new DdsIllegalOperationException(),
                 ReturnCode.NoData => new DdsNoDataException(),
                 ReturnCode.NullPointer => new DdsNullPointerException(),
+                ReturnCode.BufferTooSmall => new DdsBufferTooSmallException(),
                 _ => new DdsException($"DDS operation failed with unknown code {ret}.", ret),
             };
         }
