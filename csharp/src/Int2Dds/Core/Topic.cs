@@ -4,6 +4,7 @@ using System.Text;
 using Int2Dds.Cdr;
 using Int2Dds.Exceptions;
 using Int2Dds.Interop;
+using Int2Dds.Listeners;
 using Int2Dds.Qos;
 using Int2Dds.Types;
 
@@ -221,6 +222,24 @@ namespace Int2Dds.Core
         /// Gets the CLR type associated with this topic.
         /// </summary>
         public Type TypeClass => typeof(T);
+
+        /// <summary>
+        /// Gets the inconsistent topic status for this Topic. Reports how many times a
+        /// remote topic with the same name but an incompatible type was discovered.
+        /// Reading the status resets its <c>TotalCountChange</c>.
+        /// </summary>
+        public InconsistentTopicStatus GetInconsistentTopicStatus()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+
+            unsafe
+            {
+                NativeInconsistentTopicStatus native;
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_topic_get_inconsistent_topic_status(_handle, &native));
+                return new InconsistentTopicStatus(native.TotalCount, native.TotalCountChange);
+            }
+        }
 
         /// <summary>
         /// Sets new QoS policies on this Topic.

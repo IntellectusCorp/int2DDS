@@ -103,6 +103,19 @@ namespace Int2Dds.Listeners
         }
     }
 
+    /// <summary>Status when a topic with the same name but an incompatible type is discovered.</summary>
+    public class InconsistentTopicStatus
+    {
+        public int TotalCount { get; }
+        public int TotalCountChange { get; }
+
+        public InconsistentTopicStatus(int totalCount, int totalCountChange)
+        {
+            TotalCount = totalCount;
+            TotalCountChange = totalCountChange;
+        }
+    }
+
     /// <summary>Status when a sample is rejected by a DataReader.</summary>
     public class SampleRejectedStatus
     {

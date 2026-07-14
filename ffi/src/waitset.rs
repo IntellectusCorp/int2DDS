@@ -80,42 +80,6 @@ pub unsafe extern "C" fn int2dds_waitset_wait(
     }
 }
 
-/// Wait for conditions to be triggered, with nanosecond timeout resolution.
-///
-/// Identical to `int2dds_waitset_wait` but the timeout is given in nanoseconds so
-/// sub-millisecond waits are honored. Additive: the millisecond entry point is
-/// unchanged.
-///
-/// # Safety
-/// - `waitset` must be a valid waitset
-/// - `timeout_ns` is the timeout in nanoseconds, or -1 for infinite
-#[deprecated(
-    note = "discards triggered conditions; use int2dds_waitset_wait_ex_ns (ns) or int2dds_waitset_wait_ex (ms)"
-)]
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_waitset_wait_ns(
-    waitset: *const Int2DdsWaitSet,
-    timeout_ns: i64,
-) -> Int2DdsRet {
-    check_null!(waitset);
-
-    let waitset_ref = &*waitset;
-
-    let duration = if timeout_ns < 0 {
-        Duration::infinite()
-    } else {
-        Duration {
-            sec: (timeout_ns / 1_000_000_000) as i32,
-            nanosec: (timeout_ns % 1_000_000_000) as u32,
-        }
-    };
-
-    match waitset_ref.inner.wait(duration) {
-        Ok(_conditions) => INT2DDS_RET_OK,
-        Err(e) => dds_error_to_code(&e),
-    }
-}
-
 /// Wait for conditions to be triggered and return the triggered conditions
 ///
 /// # Safety
@@ -162,7 +126,7 @@ pub unsafe extern "C" fn int2dds_waitset_wait_ex(
 ///
 /// Combines `int2dds_waitset_wait_ex` (returns triggered conditions) with
 /// nanosecond timeout precision, so no capability is lost when migrating off the
-/// deprecated `int2dds_waitset_wait` / `int2dds_waitset_wait_ns` entry points.
+/// deprecated `int2dds_waitset_wait` entry point.
 ///
 /// # Safety
 /// - `waitset` must be a valid waitset

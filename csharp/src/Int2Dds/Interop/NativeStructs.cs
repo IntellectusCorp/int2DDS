@@ -111,6 +111,16 @@ namespace Int2Dds.Interop
     }
 
     /// <summary>
+    /// C-compatible inconsistent topic status.
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct NativeInconsistentTopicStatus
+    {
+        public int TotalCount;
+        public int TotalCountChange;
+    }
+
+    /// <summary>
     /// C-compatible sample rejected status.
     /// </summary>
     [StructLayout(LayoutKind.Sequential)]
