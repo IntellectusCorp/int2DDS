@@ -589,6 +589,22 @@ fn generate_unified_type_support_impl(
     let full_ts_type = &gc.full_ts_type;
     let full_type = &gc.full_type;
 
+    // Non-generic types add their own root entry inside `collect_nested_type_objects`
+    // (keyed by the content-based `type_identifier()`), so the closure body just calls
+    // it. Generic types have no `collect_nested` impl, so pre-add the root here.
+    let closure_root_impl = if gc.has_type_params {
+        quote! {
+            out.push((
+                <#full_type as #crate_path::xtypes::HasTypeObject>::type_identifier(),
+                #crate_path::xtypes::TypeObject::Complete(
+                    <#full_type as #crate_path::xtypes::HasTypeObject>::complete_type_object()
+                ),
+            ));
+        }
+    } else {
+        quote! {}
+    };
+
     let get_type_name_impl = if let Some(tn) = type_name_override {
         quote! {
             fn get_type_name(&self) -> &str {
@@ -660,12 +676,7 @@ fn generate_unified_type_support_impl(
 
             fn get_type_object_closure(&self) -> Vec<(#crate_path::xtypes::TypeIdentifier, #crate_path::xtypes::TypeObject)> {
                 let mut out = Vec::new();
-                out.push((
-                    <#full_type as #crate_path::xtypes::HasTypeObject>::type_identifier(),
-                    #crate_path::xtypes::TypeObject::Complete(
-                        <#full_type as #crate_path::xtypes::HasTypeObject>::complete_type_object()
-                    ),
-                ));
+                #closure_root_impl
                 <#full_type as #crate_path::xtypes::HasTypeObject>::collect_nested_type_objects(&mut out);
                 out
             }

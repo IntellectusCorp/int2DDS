@@ -2,8 +2,8 @@
 //!
 //! Provides `Int2DdsTypeInfo` for building DDS-XTypes TypeIdentifier and TypeObject
 //! from field descriptions. This enables the FFI layer to send type information
-//! during discovery (sent as PID_TYPE_INFORMATION 0x0075 + legacy 0x0069, and
-//! PID_TYPE_OBJECTV1 0x0072).
+//! during discovery (sent as PID_TYPE_INFORMATION 0x0075 + legacy 0x0069). The
+//! full TypeObject is served on demand via TypeLookup, not inlined into SEDP.
 //!
 //! ## Usage from C
 //!
@@ -18,9 +18,10 @@ use std::ffi::CStr;
 use int2dds::{
     serialize::cdr::ExtensibilityKind,
     xtypes::{
-        CommonStructMember, CompleteMemberDetail, CompleteStructMember, CompleteStructType,
-        CompleteTypeObject, EquivalenceHash, MemberFlag, PlainCollectionHeader, TryConstructKind,
-        TypeFlag, TypeIdentifier, TypeObject,
+        plain_collection_equiv_kind, CollectionElementFlag, CommonStructMember,
+        CompleteMemberDetail, CompleteStructMember, CompleteStructType, CompleteTypeObject,
+        EquivalenceHash, MemberFlag, PlainCollectionHeader, TryConstructKind, TypeFlag,
+        TypeIdentifier, TypeObject,
     },
 };
 
@@ -96,6 +97,18 @@ pub struct Int2DdsTypeInfo {
 }
 
 impl Int2DdsTypeInfo {
+    /// Assemble an empty builder from Rust (e.g. `create_topic_with_field_descriptors`),
+    /// without going through the C `int2dds_type_info_create` handle path.
+    pub(crate) fn new(type_name: String, extensibility: ExtensibilityKind) -> Self {
+        Self { type_name, extensibility, fields: Vec::new() }
+    }
+
+    /// Append a field whose `TypeIdentifier` is already resolved. `flags` uses the
+    /// `INT2DDS_MEMBER_*` bitmask (KEY/OPTIONAL/MUST_UNDERSTAND/EXTERNAL).
+    pub(crate) fn push_field(&mut self, name: String, type_id: TypeIdentifier, flags: i32) {
+        self.fields.push(FieldInfo { name, type_id, flags });
+    }
+
     /// Build a CompleteStructType from the collected fields.
     fn build_complete_struct_type(&self) -> CompleteStructType {
         let ext_kind = match self.extensibility {
@@ -111,7 +124,9 @@ impl Int2DdsTypeInfo {
                 TryConstructKind::Discard,
                 field.is_external(),
                 field.is_optional(),
-                field.is_must_understand(),
+                // @key members are implicitly must-understand (XTypes 7.2.2.4.4.4.7),
+                // matching the derive macro so FFI-built and derived TypeObjects hash alike.
+                field.is_must_understand() || field.is_key(),
                 field.is_key(),
                 false, // is_default
             );
@@ -140,6 +155,36 @@ impl Int2DdsTypeInfo {
     /// Check if any field is marked as a key field.
     pub(crate) fn has_key_field(&self) -> bool {
         self.fields.iter().any(|f| f.is_key())
+    }
+
+    /// Derive key-field descriptors (index + scalar type) for the keyed fields, so a topic
+    /// created from this type_info still extracts instance keys (compute_key) like the
+    /// field-descriptor path. Non-scalar keys are skipped (extraction supports scalars).
+    pub(crate) fn key_field_infos(&self) -> Vec<crate::raw_type_support::KeyFieldInfo> {
+        use crate::raw_type_support::{KeyFieldInfo, KeyFieldType};
+        let mut out = Vec::new();
+        for (index, field) in self.fields.iter().enumerate() {
+            if !field.is_key() {
+                continue;
+            }
+            let field_type = match &field.type_id {
+                TypeIdentifier::String8
+                | TypeIdentifier::String8Small { .. }
+                | TypeIdentifier::String8Large { .. } => KeyFieldType::String,
+                TypeIdentifier::Int32 => KeyFieldType::Int32,
+                TypeIdentifier::Uint32 => KeyFieldType::UInt32,
+                TypeIdentifier::Int16 => KeyFieldType::Int16,
+                TypeIdentifier::Uint16 => KeyFieldType::UInt16,
+                TypeIdentifier::Int64 => KeyFieldType::Int64,
+                TypeIdentifier::Uint64 => KeyFieldType::UInt64,
+                TypeIdentifier::Int8 => KeyFieldType::Int8,
+                TypeIdentifier::Uint8 | TypeIdentifier::Byte => KeyFieldType::UInt8,
+                TypeIdentifier::Boolean => KeyFieldType::Bool,
+                _ => continue,
+            };
+            out.push(KeyFieldInfo { field_index: index, field_type });
+        }
+        out
     }
 
     /// Build TypeIdentifier (CompleteTypeId hash) from the collected fields.
@@ -176,19 +221,72 @@ fn named_type_identifier(hash_name: &str) -> TypeIdentifier {
     TypeIdentifier::MinimalTypeId(EquivalenceHash::compute(hash_name.as_bytes()))
 }
 
-fn plain_sequence_id(element: TypeIdentifier, bound: u32) -> TypeIdentifier {
-    TypeIdentifier::PlainSequenceLarge {
-        header: PlainCollectionHeader::default(),
-        bound,
-        element_identifier: Box::new(element),
+/// Build the plain-collection header, deriving `equiv_kind` from the element exactly as
+/// the derive macro does (primitives -> Both, hashed composites -> Minimal/Complete).
+fn plain_collection_header(element: &TypeIdentifier) -> PlainCollectionHeader {
+    PlainCollectionHeader {
+        equiv_kind: plain_collection_equiv_kind(element),
+        element_flags: CollectionElementFlag::default(),
     }
 }
 
+/// Sequence id: SMALL when `bound <= 255` (unbounded == 0 -> SMALL), else LARGE.
+fn plain_sequence_id(element: TypeIdentifier, bound: u32) -> TypeIdentifier {
+    let header = plain_collection_header(&element);
+    if bound <= 255 {
+        TypeIdentifier::PlainSequenceSmall {
+            header,
+            bound: bound as u8,
+            element_identifier: Box::new(element),
+        }
+    } else {
+        TypeIdentifier::PlainSequenceLarge { header, bound, element_identifier: Box::new(element) }
+    }
+}
+
+/// Array id: SMALL when `array_size <= 255`, else LARGE.
 fn plain_array_id(element: TypeIdentifier, array_size: u32) -> TypeIdentifier {
-    TypeIdentifier::PlainArrayLarge {
-        header: PlainCollectionHeader::default(),
-        array_bound_seq: vec![array_size],
-        element_identifier: Box::new(element),
+    let header = plain_collection_header(&element);
+    if array_size <= 255 {
+        TypeIdentifier::PlainArraySmall {
+            header,
+            array_bound_seq: vec![array_size as u8],
+            element_identifier: Box::new(element),
+        }
+    } else {
+        TypeIdentifier::PlainArrayLarge {
+            header,
+            array_bound_seq: vec![array_size],
+            element_identifier: Box::new(element),
+        }
+    }
+}
+
+/// String id honoring an optional bound: `0` -> unbounded `String8`/`String16`;
+/// `<= 255` -> `*Small`; else `*Large`. Mirrors the derive macro's `string_identifier`.
+fn string_id(bound: u32, wide: bool) -> TypeIdentifier {
+    match bound {
+        0 => {
+            if wide {
+                TypeIdentifier::String16
+            } else {
+                TypeIdentifier::String8
+            }
+        }
+        b if b <= 255 => {
+            if wide {
+                TypeIdentifier::String16Small { bound: b as u8 }
+            } else {
+                TypeIdentifier::String8Small { bound: b as u8 }
+            }
+        }
+        b => {
+            if wide {
+                TypeIdentifier::String16Large { bound: b }
+            } else {
+                TypeIdentifier::String8Large { bound: b }
+            }
+        }
     }
 }
 
@@ -210,11 +308,7 @@ pub unsafe extern "C" fn int2dds_type_info_create(
         _ => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
-    let ti = Box::new(Int2DdsTypeInfo {
-        type_name: name_str.to_string(),
-        extensibility: ext_kind,
-        fields: Vec::new(),
-    });
+    let ti = Box::new(Int2DdsTypeInfo::new(name_str.to_string(), ext_kind));
 
     *out = Box::into_raw(ti);
     INT2DDS_RET_OK
@@ -243,6 +337,48 @@ pub unsafe extern "C" fn int2dds_type_info_add_field(
         None => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
+    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags });
+
+    INT2DDS_RET_OK
+}
+
+/// Add a (possibly bounded) narrow-string field. `bound == 0` means unbounded.
+///
+/// Prefer this over `int2dds_type_info_add_field(.., INT2DDS_FIELD_STRING, ..)` when the
+/// IDL declares `string<N>`, so the emitted TypeIdentifier carries the bound and matches
+/// strict XTypes peers byte-for-byte.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_type_info_add_string_field(
+    type_info: *mut Int2DdsTypeInfo,
+    field_name: *const std::os::raw::c_char,
+    bound: u32,
+    flags: i32,
+) -> Int2DdsRet {
+    check_null!(type_info);
+    check_null!(field_name);
+
+    let ti = &mut *type_info;
+    let name_str = cstr_arg!(field_name);
+    let type_id = string_id(bound, false);
+    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags });
+
+    INT2DDS_RET_OK
+}
+
+/// Add a (possibly bounded) wide-string (`wstring<N>`) field. `bound == 0` means unbounded.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_type_info_add_wstring_field(
+    type_info: *mut Int2DdsTypeInfo,
+    field_name: *const std::os::raw::c_char,
+    bound: u32,
+    flags: i32,
+) -> Int2DdsRet {
+    check_null!(type_info);
+    check_null!(field_name);
+
+    let ti = &mut *type_info;
+    let name_str = cstr_arg!(field_name);
+    let type_id = string_id(bound, true);
     ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags });
 
     INT2DDS_RET_OK
@@ -406,7 +542,23 @@ mod tests {
 
     #[test]
     fn test_primitives_type_hash_matches_derive_macro() {
-        // === Path 1: FFI type_info builder (same as C code) ===
+        use int2dds::xtypes::HasTypeObject;
+        use int2dds_derive::DdsType;
+
+        // The real derive-macro output is the source of truth. Comparing against an actual
+        // `#[derive(DdsType)]` struct (not a hand-rolled CompleteStructType) is what makes
+        // this test able to catch FFI-vs-derive divergence.
+        #[derive(DdsType)]
+        #[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+        struct PrimitivesType {
+            #[dds(key)]
+            id: i32,
+            bool_val: bool,
+            byte_val: u8,
+            short_val: u16,
+        }
+
+        // FFI type_info builder path (mirrors what the generated C emits).
         let mut ti = Int2DdsTypeInfo {
             type_name: "PrimitivesType".to_string(),
             extensibility: ExtensibilityKind::Appendable,
@@ -428,178 +580,124 @@ mod tests {
             flags: 0,
         });
         ti.fields.push(FieldInfo {
-            name: "char_val".to_string(),
-            type_id: TypeIdentifier::Char8,
+            name: "short_val".to_string(),
+            type_id: TypeIdentifier::Uint16,
             flags: 0,
         });
 
-        let ffi_type_id = ti.build_type_identifier();
-        let ffi_type_obj = ti.build_type_object();
-
-        // === Path 2: Derive macro simulation ===
-        let ext_kind = int2dds::xtypes::ExtensibilityKind::Appendable;
-        let type_flags = TypeFlag::new(ext_kind, false, false);
-        let mut struct_type =
-            CompleteStructType::new(type_flags, "PrimitivesType".to_string(), None);
-
-        // Field 0: id (i32, key)
-        struct_type.add_member(CompleteStructMember::new(
-            0,
-            MemberFlag::new(TryConstructKind::Discard, false, false, false, true, false),
-            TypeIdentifier::Int32,
-            "id".to_string(),
-        ));
-        // Field 1: bool_val (bool)
-        struct_type.add_member(CompleteStructMember::new(
-            1,
-            MemberFlag::new(TryConstructKind::Discard, false, false, false, false, false),
-            TypeIdentifier::Boolean,
-            "bool_val".to_string(),
-        ));
-        // Field 2: byte_val (u8)
-        struct_type.add_member(CompleteStructMember::new(
-            2,
-            MemberFlag::new(TryConstructKind::Discard, false, false, false, false, false),
-            TypeIdentifier::Byte,
-            "byte_val".to_string(),
-        ));
-        // Field 3: char_val (char)
-        struct_type.add_member(CompleteStructMember::new(
-            3,
-            MemberFlag::new(TryConstructKind::Discard, false, false, false, false, false),
-            TypeIdentifier::Char8,
-            "char_val".to_string(),
-        ));
-
-        let derive_complete = CompleteTypeObject::Struct(struct_type);
-        let derive_type_obj = TypeObject::Complete(derive_complete.clone());
-        let derive_hash = derive_type_obj.compute_hash();
-        let derive_type_id = TypeIdentifier::CompleteTypeId(derive_hash);
-
-        // === Compare ===
-        let ffi_serialized = match &ffi_type_obj {
+        let ffi_serialized = match ti.build_type_object() {
             TypeObject::Complete(c) => c.serialize(),
             _ => panic!("Expected Complete"),
         };
-        let derive_serialized = derive_complete.serialize();
-
-        println!("FFI serialized bytes ({} bytes): {:02x?}", ffi_serialized.len(), ffi_serialized);
-        println!(
-            "Derive serialized bytes ({} bytes): {:02x?}",
-            derive_serialized.len(),
-            derive_serialized
-        );
-        println!("FFI TypeIdentifier: {:?}", ffi_type_id);
-        println!("Derive TypeIdentifier: {:?}", derive_type_id);
+        let derive_serialized = PrimitivesType::complete_type_object().serialize();
 
         assert_eq!(
             ffi_serialized, derive_serialized,
             "Serialized CompleteTypeObject bytes differ between FFI and derive paths"
         );
         assert_eq!(
-            ffi_type_id, derive_type_id,
+            ti.build_type_identifier(),
+            PrimitivesType::type_identifier(),
             "TypeIdentifier hashes differ between FFI and derive paths"
         );
     }
 
-    /// Test that sequence fields produce the same hash as the derive macro path.
+    /// An unbounded `String` field must hash identically between the FFI builder and the
+    /// derive macro. Exercises the `new` / `push_field` pub(crate) builders used by
+    /// `create_topic_with_field_descriptors`, and closes the String parity gap that the
+    /// primitives test did not cover.
+    #[test]
+    fn test_string_field_hash_matches_derive_macro() {
+        use int2dds::xtypes::HasTypeObject;
+        use int2dds_derive::DdsType;
+
+        #[derive(DdsType)]
+        #[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+        struct StringFieldType {
+            #[dds(key)]
+            id: i32,
+            name: String,
+            count: u32,
+        }
+
+        let mut ti =
+            Int2DdsTypeInfo::new("StringFieldType".to_string(), ExtensibilityKind::Appendable);
+        ti.push_field("id".to_string(), TypeIdentifier::Int32, INT2DDS_MEMBER_KEY);
+        ti.push_field("name".to_string(), TypeIdentifier::String8, 0);
+        ti.push_field("count".to_string(), TypeIdentifier::Uint32, 0);
+
+        let ffi_serialized = match ti.build_type_object() {
+            TypeObject::Complete(c) => c.serialize(),
+            _ => panic!("Expected Complete"),
+        };
+        assert_eq!(
+            ffi_serialized,
+            StringFieldType::complete_type_object().serialize(),
+            "Serialized CompleteTypeObject bytes differ between FFI and derive paths"
+        );
+        assert_eq!(
+            ti.build_type_identifier(),
+            StringFieldType::type_identifier(),
+            "TypeIdentifier hashes differ between FFI and derive paths"
+        );
+    }
+
+    /// Sequence / array / bounded-sequence / uint8-element fields must produce the same
+    /// TypeIdentifier as the real derive macro. Pinned to `T::type_identifier()` so it
+    /// catches the SMALL/LARGE and equiv_kind divergences the old self-consistent test missed.
     #[test]
     fn test_sequence_type_hash_matches_derive_macro() {
-        // === Path 1: FFI type_info builder ===
+        use int2dds::xtypes::HasTypeObject;
+        use int2dds_derive::DdsType;
+
+        #[derive(DdsType)]
+        #[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+        struct TestSeqType {
+            #[dds(key)]
+            id: i32,
+            bool_seq: Vec<bool>,
+            #[dds(bound = 10)]
+            bounded_seq: Vec<i32>,
+            #[dds(uint8)]
+            payload: Vec<u8>,
+            bool_array: [bool; 4],
+        }
+
         let mut ti = Int2DdsTypeInfo {
             type_name: "TestSeqType".to_string(),
             extensibility: ExtensibilityKind::Appendable,
             fields: Vec::new(),
         };
-        // Primitive field
         ti.fields.push(FieldInfo {
             name: "id".to_string(),
             type_id: TypeIdentifier::Int32,
             flags: INT2DDS_MEMBER_KEY,
         });
-        // Unbounded sequence<bool>
         ti.fields.push(FieldInfo {
             name: "bool_seq".to_string(),
-            type_id: TypeIdentifier::PlainSequenceLarge {
-                header: PlainCollectionHeader::default(),
-                bound: 0,
-                element_identifier: Box::new(TypeIdentifier::Boolean),
-            },
+            type_id: plain_sequence_id(TypeIdentifier::Boolean, 0),
             flags: 0,
         });
-        // Bounded sequence<int32, 10>
         ti.fields.push(FieldInfo {
             name: "bounded_seq".to_string(),
-            type_id: TypeIdentifier::PlainSequenceLarge {
-                header: PlainCollectionHeader::default(),
-                bound: 10,
-                element_identifier: Box::new(TypeIdentifier::Int32),
-            },
+            type_id: plain_sequence_id(TypeIdentifier::Int32, 10),
             flags: 0,
         });
-        // Array bool[4]
+        ti.fields.push(FieldInfo {
+            name: "payload".to_string(),
+            type_id: plain_sequence_id(TypeIdentifier::Uint8, 0),
+            flags: 0,
+        });
         ti.fields.push(FieldInfo {
             name: "bool_array".to_string(),
-            type_id: TypeIdentifier::PlainArrayLarge {
-                header: PlainCollectionHeader::default(),
-                array_bound_seq: vec![4],
-                element_identifier: Box::new(TypeIdentifier::Boolean),
-            },
+            type_id: plain_array_id(TypeIdentifier::Boolean, 4),
             flags: 0,
         });
 
-        let ffi_type_id = ti.build_type_identifier();
-
-        // === Path 2: Derive macro simulation ===
-        let ext_kind = int2dds::xtypes::ExtensibilityKind::Appendable;
-        let type_flags = TypeFlag::new(ext_kind, false, false);
-        let mut struct_type = CompleteStructType::new(type_flags, "TestSeqType".to_string(), None);
-
-        struct_type.add_member(CompleteStructMember::new(
-            0,
-            MemberFlag::new(TryConstructKind::Discard, false, false, false, true, false),
-            TypeIdentifier::Int32,
-            "id".to_string(),
-        ));
-        struct_type.add_member(CompleteStructMember::new(
-            1,
-            MemberFlag::new(TryConstructKind::Discard, false, false, false, false, false),
-            TypeIdentifier::PlainSequenceLarge {
-                header: PlainCollectionHeader::default(),
-                bound: 0,
-                element_identifier: Box::new(TypeIdentifier::Boolean),
-            },
-            "bool_seq".to_string(),
-        ));
-        struct_type.add_member(CompleteStructMember::new(
-            2,
-            MemberFlag::new(TryConstructKind::Discard, false, false, false, false, false),
-            TypeIdentifier::PlainSequenceLarge {
-                header: PlainCollectionHeader::default(),
-                bound: 10,
-                element_identifier: Box::new(TypeIdentifier::Int32),
-            },
-            "bounded_seq".to_string(),
-        ));
-        struct_type.add_member(CompleteStructMember::new(
-            3,
-            MemberFlag::new(TryConstructKind::Discard, false, false, false, false, false),
-            TypeIdentifier::PlainArrayLarge {
-                header: PlainCollectionHeader::default(),
-                array_bound_seq: vec![4],
-                element_identifier: Box::new(TypeIdentifier::Boolean),
-            },
-            "bool_array".to_string(),
-        ));
-
-        let derive_complete = CompleteTypeObject::Struct(struct_type);
-        let derive_type_obj = TypeObject::Complete(derive_complete);
-        let derive_hash = derive_type_obj.compute_hash();
-        let derive_type_id = TypeIdentifier::CompleteTypeId(derive_hash);
-
         assert_eq!(
-            ffi_type_id, derive_type_id,
-            "TypeIdentifier hashes differ for sequence/array fields"
+            ti.build_type_identifier(),
+            TestSeqType::type_identifier(),
+            "TypeIdentifier hashes differ for sequence/array/bounded/uint8 fields"
         );
     }
 
@@ -656,14 +754,15 @@ mod tests {
             CompleteStructType::new(type_flags, "NamedCollType".to_string(), None);
         struct_type.add_member(CompleteStructMember::new(
             0,
-            MemberFlag::new(TryConstructKind::Discard, false, false, false, true, false),
+            // @key -> implicitly must-understand, matching the FFI builder and derive macro.
+            MemberFlag::new(TryConstructKind::Discard, false, false, true, true, false),
             TypeIdentifier::Int32,
             "id".to_string(),
         ));
         struct_type.add_member(CompleteStructMember::new(
             1,
             MemberFlag::new(TryConstructKind::Discard, false, false, false, false, false),
-            TypeIdentifier::PlainSequenceLarge {
+            TypeIdentifier::PlainSequenceSmall {
                 header: PlainCollectionHeader::default(),
                 bound: 0,
                 element_identifier: Box::new(leaf_element.clone()),
@@ -673,7 +772,7 @@ mod tests {
         struct_type.add_member(CompleteStructMember::new(
             2,
             MemberFlag::new(TryConstructKind::Discard, false, false, false, false, false),
-            TypeIdentifier::PlainArrayLarge {
+            TypeIdentifier::PlainArraySmall {
                 header: PlainCollectionHeader::default(),
                 array_bound_seq: vec![3],
                 element_identifier: Box::new(leaf_element),
