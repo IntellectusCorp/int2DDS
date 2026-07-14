@@ -15,6 +15,8 @@ readme = "../README.md"
 
 [features]
 default = []
+# Optional create_participant factory hook; off by default.
+factory-hook = []
 
 [dependencies]
 int2dds-derive = { path = "../derive" }
