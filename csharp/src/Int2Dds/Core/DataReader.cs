@@ -52,8 +52,8 @@ namespace Int2Dds.Core
             _buffer = ArrayPool<byte>.Shared.Rent(DefaultBufferSize);
 
             // Always create a QoS handle so that the native layer receives the
-            // correct DataRepresentation default (XCDR1) even when the caller
-            // does not supply an explicit QoS object.
+            // correct DataRepresentation default even when the caller does not
+            // supply an explicit QoS object.
             IntPtr qosHandle = IntPtr.Zero;
             ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_create_default(out qosHandle));
             try
@@ -61,10 +61,11 @@ namespace Int2Dds.Core
                 if (qos != null)
                     ApplyReaderQos(qosHandle, qos);
 
-                // Ensure SEDP advertises the same encoding that C# actually uses.
+                // Advertise the core default (single source of truth) rather than
+                // a hardcoded value, so reader/writer stay compatible if it changes.
                 if (qos?.DataRepresentation == null)
                     ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_set_data_representation(
-                        qosHandle, (int)Qos.DataRepresentationKind.Xcdr1));
+                        qosHandle, NativeMethods.int2dds_default_data_representation()));
             }
             catch
             {

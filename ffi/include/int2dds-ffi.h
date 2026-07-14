@@ -2545,6 +2545,16 @@ Int2DdsRet int2dds_datawriter_qos_get_data_representation(const struct Int2DdsDa
                                                           int32_t *kind_out);
 
 /**
+ * Returns the library's default data representation (`INT2DDS_QOS_DATA_REPR_*`)
+ * used when an application creates an endpoint without setting one explicitly.
+ *
+ * Single source of truth for language bindings: instead of hardcoding XCDR1,
+ * bindings should query this so a change to the Rust core default propagates
+ * automatically to what they serialize and advertise.
+ */
+int32_t int2dds_default_data_representation(void);
+
+/**
  * Get transport priority from DataWriter QoS handle
  */
 Int2DdsRet int2dds_datawriter_qos_get_transport_priority(const struct Int2DdsDataWriterQos *qos,

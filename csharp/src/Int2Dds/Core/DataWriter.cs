@@ -34,11 +34,17 @@ namespace Int2Dds.Core
             IDataWriterListener listener = null, uint statusMask = 0)
         {
             _topic = topic;
-            _xcdr2 = qos?.DataRepresentation?.Kind == Qos.DataRepresentationKind.Xcdr2;
+
+            // Effective representation = caller's choice, else the core default
+            // (single source of truth in the Rust core, not hardcoded here).
+            int effectiveRepr = qos?.DataRepresentation != null
+                ? (int)qos.DataRepresentation.Kind
+                : NativeMethods.int2dds_default_data_representation();
+            _xcdr2 = effectiveRepr == (int)Qos.DataRepresentationKind.Xcdr2;
 
             // Always create a QoS handle so that the native layer receives the
-            // correct DataRepresentation default (XCDR1) even when the caller
-            // does not supply an explicit QoS object.
+            // correct DataRepresentation default even when the caller does not
+            // supply an explicit QoS object.
             IntPtr qosHandle = IntPtr.Zero;
             ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_create_default(out qosHandle));
             try
@@ -49,7 +55,7 @@ namespace Int2Dds.Core
                 // Ensure SEDP advertises the same encoding that C# actually uses.
                 if (qos?.DataRepresentation == null)
                     ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_set_data_representation(
-                        qosHandle, (int)Qos.DataRepresentationKind.Xcdr1));
+                        qosHandle, effectiveRepr));
             }
             catch
             {

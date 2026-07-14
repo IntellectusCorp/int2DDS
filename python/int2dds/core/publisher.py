@@ -200,10 +200,14 @@ class DataWriter(Generic[T]):
                     self._qos_handle, qos.liveliness._kind_int, qos.liveliness._lease_duration_ns))
             qos_ptr = self._qos_handle
 
-        # Determine XCDR version from QoS data_representation
-        self._xcdr2 = (qos is not None
-                       and qos.data_representation is not None
-                       and qos.data_representation.kind == "XCDR2")
+        # Effective representation = caller's choice, else the core default
+        # (single source of truth in the Rust core, not hardcoded here).
+        if qos is not None and qos.data_representation is not None:
+            effective_repr = qos.data_representation._kind_int
+        else:
+            effective_repr = lib.int2dds_default_data_representation()
+        # INT2DDS_QOS_DATA_REPR_XCDR2 == 2
+        self._xcdr2 = (effective_repr == 2)
 
         writer_ptr = ffi.new("Int2DdsDataWriter **")
 

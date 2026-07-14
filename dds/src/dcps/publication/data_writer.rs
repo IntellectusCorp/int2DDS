@@ -542,13 +542,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         data_representation: &[DataRepresentationId],
         extensibility: crate::serialize::xcdr::ExtensibilityKind,
     ) -> DdsResult<SerializationFormat> {
-        let supported = if data_representation.is_empty() {
-            &[DataRepresentationId::XcdrDataRepresentation][..]
-        } else {
-            data_representation
-        };
-
-        for representation in supported {
+        for representation in data_representation {
             match representation {
                 DataRepresentationId::XcdrDataRepresentation => {
                     return Ok(SerializationFormat::Cdr);
@@ -798,7 +792,10 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         let format = {
             let qos = self.qos.load();
             let extensibility = self.type_support.get_extensibility_kind();
-            Self::resolve_serialization_format(&qos.data_representation.value, extensibility)?
+            Self::resolve_serialization_format(
+                qos.data_representation.effective_ids(),
+                extensibility,
+            )?
         };
 
         let key_info = if self.type_support.is_compute_key_provided() {
@@ -854,7 +851,10 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         let format = {
             let qos = self.qos.load();
             let extensibility = self.type_support.get_extensibility_kind();
-            Self::resolve_serialization_format(&qos.data_representation.value, extensibility)?
+            Self::resolve_serialization_format(
+                qos.data_representation.effective_ids(),
+                extensibility,
+            )?
         };
 
         let key_info = if self.type_support.is_compute_key_provided() {
@@ -1804,7 +1804,10 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         let format = {
             let qos = self.qos.load();
             let extensibility = self.type_support.get_extensibility_kind();
-            Self::resolve_serialization_format(&qos.data_representation.value, extensibility)?
+            Self::resolve_serialization_format(
+                qos.data_representation.effective_ids(),
+                extensibility,
+            )?
         };
         match format {
             SerializationFormat::Cdr => {
