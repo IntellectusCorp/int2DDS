@@ -414,6 +414,18 @@ class TestDomainParticipant:
         with DomainParticipant(domain_id=domain_id) as dp:
             assert dp.domain_id == domain_id
 
+    def test_participant_set_get_qos(self, domain_id: int):
+        from int2dds.core.qos import ParticipantQos, Property
+
+        with DomainParticipant(domain_id=domain_id) as dp:
+            prop = Property()
+            prop.add("vendor.us.int2.participant_qos", "live", True)
+            dp.set_qos(ParticipantQos(property=prop))
+
+            got = dp.get_qos()
+            entries = {name: value for name, value, _ in got.property.entries}
+            assert entries.get("vendor.us.int2.participant_qos") == "live"
+
     def test_create_publisher(self, domain_id: int):
         with DomainParticipant(domain_id=domain_id) as dp:
             pub = dp.create_publisher()

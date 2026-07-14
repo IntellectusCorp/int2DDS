@@ -122,6 +122,14 @@ ffi.cdef("""
     Int2DdsRet int2dds_participant_delete_contained_entities(
         const Int2DdsParticipant *participant
     );
+    Int2DdsRet int2dds_participant_set_qos(
+        const Int2DdsParticipant *participant,
+        const Int2DdsParticipantQos *qos
+    );
+    Int2DdsRet int2dds_participant_get_qos(
+        const Int2DdsParticipant *participant,
+        Int2DdsParticipantQos **qos_out
+    );
 
     /* Publisher */
     Int2DdsRet int2dds_create_publisher(
@@ -656,6 +664,12 @@ ffi.cdef("""
     Int2DdsRet int2dds_participant_qos_set_multicast_ttl(
         Int2DdsParticipantQos *qos,
         uint8_t ttl
+    );
+    Int2DdsRet int2dds_participant_qos_get_properties_with_prefix(
+        const Int2DdsParticipantQos *qos,
+        const char *prefix,
+        int32_t (*cb)(const char *name, const char *value, void *user_data),
+        void *user_data
     );
     Int2DdsRet int2dds_participant_qos_destroy(Int2DdsParticipantQos *qos);
 
