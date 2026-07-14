@@ -3404,6 +3404,41 @@ Int2DdsRet int2dds_datareader_get_guid(const struct Int2DdsDataReader *reader,
                                        uint8_t (*guid_out)[16]);
 
 /**
+ * Look up an instance handle from raw serialized key bytes.
+ *
+ * Mirrors `int2dds_datawriter_lookup_instance` for the read side. Matches on the
+ * serialized key bytes stored per instance; writes `InstanceHandle::NIL` (all zeros)
+ * to `handle_out` when the instance is not known to this reader.
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `key` must point to at least `key_len` readable bytes
+ * - `handle_out` must be a valid pointer to a 16-byte buffer
+ */
+Int2DdsRet int2dds_datareader_lookup_instance(const struct Int2DdsDataReader *reader,
+                                              const uint8_t *key,
+                                              uintptr_t key_len,
+                                              uint8_t (*handle_out)[16]);
+
+/**
+ * Get the raw serialized key bytes for an instance handle.
+ *
+ * Mirrors `int2dds_datawriter_get_key_value` for the read side. Round-trips with
+ * `int2dds_datareader_lookup_instance`.
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `handle` must be a valid pointer to a 16-byte instance handle
+ * - `key_buf` must point to at least `key_capacity` writable bytes
+ * - `key_size_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_datareader_get_key_value(const struct Int2DdsDataReader *reader,
+                                            const uint8_t (*handle)[16],
+                                            uint8_t *key_buf,
+                                            uintptr_t key_capacity,
+                                            uintptr_t *key_size_out);
+
+/**
  * Check whether a DataReader currently has any cached samples.
  *
  * This is a level-triggered readiness check over the local reader cache.

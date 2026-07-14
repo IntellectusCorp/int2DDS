@@ -17,7 +17,9 @@ from int2dds.core.listeners import (
 )
 from int2dds.exceptions import (
     INT2DDS_RET_BUFFER_TOO_SMALL,
+    INT2DDS_RET_ERROR,
     INT2DDS_RET_NO_DATA,
+    INT2DDS_RET_OK,
     check_ret,
 )
 
@@ -364,6 +366,60 @@ class DataReader(Generic[T]):
         """Get the current number of matched writers."""
         _, current = self.get_subscription_matched_status()
         return current
+
+    def lookup_instance(self, key: bytes) -> bytes:
+        """Look up the 16-byte InstanceHandle for a stored serialized key.
+
+        The key must be in the serialized form the reader stored for the instance,
+        i.e. the bytes returned by get_key_value() (or a sample's instance handle on
+        the raw-serialized path) — not a freshly serialized key.
+
+        Args:
+            key: Serialized key bytes as stored by the reader.
+
+        Returns:
+            16-byte InstanceHandle, or NIL (16 zero bytes) if the instance is unknown.
+        """
+        if not key:
+            return b"\x00" * 16
+
+        key_ptr = ffi.from_buffer(key)
+        handle_out = ffi.new("uint8_t[16]")
+        check_ret(
+            lib.int2dds_datareader_lookup_instance(self._handle, key_ptr, len(key), handle_out)
+        )
+        return bytes(ffi.buffer(handle_out))
+
+    def get_key_value(self, handle: bytes) -> bytes:
+        """Get the serialized key bytes stored for an instance handle.
+
+        Round-trips with lookup_instance(). On the raw-serialized path the stored
+        key is the 16-byte instance handle itself.
+
+        Args:
+            handle: 16-byte InstanceHandle.
+
+        Returns:
+            The serialized key bytes stored for the instance.
+        """
+        if len(handle) != 16:
+            raise ValueError("handle must be exactly 16 bytes")
+
+        handle_ptr = ffi.from_buffer(handle)
+        capacity = 64
+        while True:
+            key_buf = ffi.new(f"uint8_t[{capacity}]")
+            size_out = ffi.new("size_t *")
+            ret = lib.int2dds_datareader_get_key_value(
+                self._handle, handle_ptr, key_buf, capacity, size_out
+            )
+            if ret == INT2DDS_RET_OK:
+                return bytes(ffi.buffer(key_buf, size_out[0]))
+            if ret == INT2DDS_RET_ERROR and size_out[0] > capacity:
+                capacity = size_out[0]
+                continue
+            check_ret(ret)
+
     def get_liveliness_changed_status(self) -> dict:
         """Get liveliness changed status.
 

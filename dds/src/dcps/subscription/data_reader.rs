@@ -777,6 +777,31 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         }
     }
 
+    /// Get the raw serialized key bytes for a given instance handle.
+    ///
+    /// Serialized counterpart of [`get_key_value`](Self::get_key_value) for the FFI
+    /// raw-serialized path, mirroring the writer's `get_key_value_serialized`. For
+    /// native (derive) types this returns the CDR-serialized key; for raw FFI types
+    /// (which cannot deserialize/re-serialize a key) it returns the stored instance
+    /// handle bytes, which still round-trip through `lookup_instance_serialized`.
+    pub fn get_key_value_serialized(&self, handle: InstanceHandle) -> DdsResult<Arc<[u8]>> {
+        self.is_enabled()?;
+
+        if handle.is_nil() {
+            return Err(DdsError::BadParameter);
+        }
+
+        let instance_info = self.get_instance_infos()?;
+        if let Some(info) = instance_info.get(&handle) {
+            if info.key.is_empty() {
+                return Err(DdsError::Error("Unknown Key".to_string()));
+            }
+            Ok(info.key.clone())
+        } else {
+            Err(DdsError::BadParameter)
+        }
+    }
+
     /// Looks up the instance handle corresponding to a data instance.
     ///
     /// This operation takes an instance and returns the handle that can be used in subsequent
@@ -849,6 +874,32 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                 None => InstanceHandle::NIL, // Unregistered instance
             })
         }
+    }
+
+    /// Look up an instance handle from raw serialized key bytes.
+    ///
+    /// Serialized counterpart of [`lookup_instance`](Self::lookup_instance) for the FFI
+    /// raw-serialized path. The key derivation on the raw path depends on type metadata
+    /// (single-string vs multi-field keys) that is not recoverable from key bytes alone,
+    /// so this matches on the serialized key bytes actually stored per instance rather
+    /// than recomputing a handle. Returns `InstanceHandle::NIL` if the instance is not
+    /// known to this reader. Round-trips with `get_key_value_serialized`.
+    pub fn lookup_instance_serialized(&self, key: &[u8]) -> DdsResult<InstanceHandle> {
+        self.is_deleted()?;
+
+        if key.is_empty() {
+            return Ok(InstanceHandle::NIL);
+        }
+
+        let instances = self.instance_infos.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
+        for (handle, info) in instances.iter() {
+            if info.key.as_ref() == key {
+                return Ok(*handle);
+            }
+        }
+
+        Ok(InstanceHandle::NIL)
     }
 
     // For Entity

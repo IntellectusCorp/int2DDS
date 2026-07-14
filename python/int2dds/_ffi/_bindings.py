@@ -435,6 +435,19 @@ ffi.cdef("""
         Int2DdsRequestedIncompatibleQosStatus *status_out
     );
 
+    Int2DdsRet int2dds_datareader_lookup_instance(
+        const Int2DdsDataReader *reader,
+        const uint8_t *key,
+        size_t key_len,
+        uint8_t *handle_out
+    );
+    Int2DdsRet int2dds_datareader_get_key_value(
+        const Int2DdsDataReader *reader,
+        const uint8_t *handle,
+        uint8_t *key_buf,
+        size_t key_capacity,
+        size_t *key_size_out
+    );
     Int2DdsRet int2dds_take_serialized(
         const Int2DdsDataReader *reader,
         uint8_t *buffer,

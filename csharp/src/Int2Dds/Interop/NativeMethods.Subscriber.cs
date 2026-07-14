@@ -118,5 +118,11 @@ namespace Int2Dds.Interop
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static unsafe extern int int2dds_datareader_get_requested_incompatible_qos_status(IntPtr reader, NativeRequestedIncompatibleQosStatus* status_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datareader_lookup_instance(IntPtr reader, byte* key, UIntPtr key_len, byte* handle_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datareader_get_key_value(IntPtr reader, byte* handle, byte* key_buf, UIntPtr key_capacity, out UIntPtr key_size_out);
     }
 }
