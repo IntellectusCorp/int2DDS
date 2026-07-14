@@ -592,8 +592,10 @@ mod tests {
 
             // Wait with short timeout (should timeout)
             let timeout_ms = 100; // 100ms
-            let ret = int2dds_waitset_wait(waitset, timeout_ms);
+            let mut conditions: *mut Int2DdsConditionSeq = ptr::null_mut();
+            let ret = int2dds_waitset_wait_ex(waitset, timeout_ms, &mut conditions as *mut _);
             assert_eq!(ret, INT2DDS_RET_TIMEOUT);
+            assert!(conditions.is_null());
 
             int2dds_waitset_delete(waitset);
         }
