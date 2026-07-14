@@ -493,6 +493,7 @@ ffi.cdef("""
         Int2DdsDataWriterQos *qos,
         int32_t kind
     );
+    int32_t int2dds_default_data_representation(void);
     Int2DdsRet int2dds_datawriter_qos_set_deadline(
         Int2DdsDataWriterQos *qos,
         int64_t period_ns

@@ -23,6 +23,9 @@ namespace Int2Dds.Interop
         internal static extern int int2dds_datawriter_qos_set_data_representation(IntPtr qos, int kind);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_default_data_representation();
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_datawriter_qos_set_ownership(IntPtr qos, int kind);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]

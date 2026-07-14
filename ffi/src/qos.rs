@@ -612,6 +612,20 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_get_data_representation(
     INT2DDS_RET_OK
 }
 
+/// Returns the library's default data representation (`INT2DDS_QOS_DATA_REPR_*`)
+/// used when an application creates an endpoint without setting one explicitly.
+///
+/// Single source of truth for language bindings: instead of hardcoding XCDR1,
+/// bindings should query this so a change to the Rust core default propagates
+/// automatically to what they serialize and advertise.
+#[no_mangle]
+pub extern "C" fn int2dds_default_data_representation() -> i32 {
+    match DataRepresentationQosPolicy::default().value.first() {
+        Some(DataRepresentationId::Xcdr2DataRepresentation) => INT2DDS_QOS_DATA_REPR_XCDR2,
+        _ => INT2DDS_QOS_DATA_REPR_XCDR1,
+    }
+}
+
 /// Get transport priority from DataWriter QoS handle
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datawriter_qos_get_transport_priority(
@@ -2017,6 +2031,25 @@ mod tests {
             INT2DDS_RET_OK
         );
         assert_eq!(kind, INT2DDS_QOS_DATA_REPR_XCDR1);
+    }
+
+    // Drift guard: the exported default is XCDR1 (spec effective write default).
+    #[test]
+    fn default_data_representation_is_xcdr1() {
+        assert_eq!(int2dds_default_data_representation(), INT2DDS_QOS_DATA_REPR_XCDR1);
+    }
+
+    // Single-source invariant: the export is derived from the core
+    // `DataRepresentationQosPolicy::default()`, not an independent hardcode. If
+    // the core default changes, this stays green and the export tracks it — so
+    // bindings that read the export follow automatically.
+    #[test]
+    fn default_data_representation_tracks_core_default() {
+        let expected = match DataRepresentationQosPolicy::default().value.first() {
+            Some(DataRepresentationId::Xcdr2DataRepresentation) => INT2DDS_QOS_DATA_REPR_XCDR2,
+            _ => INT2DDS_QOS_DATA_REPR_XCDR1,
+        };
+        assert_eq!(int2dds_default_data_representation(), expected);
     }
 
     #[test]
