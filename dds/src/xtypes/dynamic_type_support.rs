@@ -330,20 +330,20 @@ impl DdsType for DynamicData {
 fn dynamic_value_to_parameter(value: &DynamicValue) -> DdsResult<Parameter> {
     match value {
         DynamicValue::Boolean(v) => Ok(Parameter::IntegerValue(if *v { 1 } else { 0 })),
-        DynamicValue::Int8(v) => Ok(Parameter::IntegerValue(*v as i32)),
-        DynamicValue::Int16(v) => Ok(Parameter::IntegerValue(*v as i32)),
-        DynamicValue::Int32(v) => Ok(Parameter::IntegerValue(*v)),
-        DynamicValue::Int64(v) => Ok(Parameter::IntegerValue(*v as i32)),
-        DynamicValue::Uint8(v) => Ok(Parameter::IntegerValue(*v as i32)),
-        DynamicValue::Uint16(v) => Ok(Parameter::IntegerValue(*v as i32)),
-        DynamicValue::Uint32(v) => Ok(Parameter::IntegerValue(*v as i32)),
-        DynamicValue::Uint64(v) => Ok(Parameter::IntegerValue(*v as i32)),
+        DynamicValue::Int8(v) => Ok(Parameter::IntegerValue(*v as i64)),
+        DynamicValue::Int16(v) => Ok(Parameter::IntegerValue(*v as i64)),
+        DynamicValue::Int32(v) => Ok(Parameter::IntegerValue(*v as i64)),
+        DynamicValue::Int64(v) => Ok(Parameter::IntegerValue(*v)),
+        DynamicValue::Uint8(v) => Ok(Parameter::IntegerValue(*v as i64)),
+        DynamicValue::Uint16(v) => Ok(Parameter::IntegerValue(*v as i64)),
+        DynamicValue::Uint32(v) => Ok(Parameter::IntegerValue(*v as i64)),
+        DynamicValue::Uint64(v) => Ok(Parameter::IntegerValue(*v as i64)),
         DynamicValue::Float32(v) => Ok(Parameter::FloatValue(*v as f64)),
         DynamicValue::Float64(v) => Ok(Parameter::FloatValue(*v)),
         DynamicValue::String(v) => Ok(Parameter::String(v.clone())),
         DynamicValue::WString(v) => Ok(Parameter::String(v.clone())),
         DynamicValue::Char8(v) => Ok(Parameter::CharValue(*v)),
-        DynamicValue::Byte(v) => Ok(Parameter::IntegerValue(*v as i32)),
+        DynamicValue::Byte(v) => Ok(Parameter::IntegerValue(*v as i64)),
         DynamicValue::Enum { name, value: _ } => {
             Ok(Parameter::EnumeratedValue { type_name: None, value: name.clone() })
         }

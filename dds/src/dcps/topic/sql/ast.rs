@@ -223,7 +223,7 @@ pub(crate) struct Range {
 
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub enum Parameter {
-    IntegerValue(i32),
+    IntegerValue(i64),
     CharValue(char),
     FloatValue(f64),
     String(String),
@@ -277,7 +277,7 @@ impl Parameter {
                     .ok_or(DdsError::Error(format!("Parameter at index {:?} not found", param)))?;
                 // TODO: Add EnumeratedValue support for enum type resolution
                 // Currently only supports basic types (int, float, char, string)
-                if let Ok(int_val) = val.parse::<i32>() {
+                if let Ok(int_val) = val.parse::<i64>() {
                     Ok(Parameter::IntegerValue(int_val))
                 } else if let Ok(float_val) = val.parse::<f64>() {
                     Ok(Parameter::FloatValue(float_val))

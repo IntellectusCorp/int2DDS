@@ -261,7 +261,7 @@ fn cdr_read_field(
             }
             let raw = [data[aligned], data[aligned + 1], data[aligned + 2], data[aligned + 3]];
             let val = if src_le { i32::from_le_bytes(raw) } else { i32::from_be_bytes(raw) };
-            Some((Parameter::IntegerValue(val), aligned + 4))
+            Some((Parameter::IntegerValue(val as i64), aligned + 4))
         }
         CdrFieldType::UInt32 => {
             let aligned = align_body(pos, base, 4);
@@ -270,7 +270,7 @@ fn cdr_read_field(
             }
             let raw = [data[aligned], data[aligned + 1], data[aligned + 2], data[aligned + 3]];
             let val = if src_le { u32::from_le_bytes(raw) } else { u32::from_be_bytes(raw) };
-            Some((Parameter::IntegerValue(val as i32), aligned + 4))
+            Some((Parameter::IntegerValue(val as i64), aligned + 4))
         }
         CdrFieldType::Int16 => {
             let aligned = align_body(pos, base, 2);
@@ -279,7 +279,7 @@ fn cdr_read_field(
             }
             let raw = [data[aligned], data[aligned + 1]];
             let val = if src_le { i16::from_le_bytes(raw) } else { i16::from_be_bytes(raw) };
-            Some((Parameter::IntegerValue(val as i32), aligned + 2))
+            Some((Parameter::IntegerValue(val as i64), aligned + 2))
         }
         CdrFieldType::UInt16 => {
             let aligned = align_body(pos, base, 2);
@@ -288,7 +288,7 @@ fn cdr_read_field(
             }
             let raw = [data[aligned], data[aligned + 1]];
             let val = if src_le { u16::from_le_bytes(raw) } else { u16::from_be_bytes(raw) };
-            Some((Parameter::IntegerValue(val as i32), aligned + 2))
+            Some((Parameter::IntegerValue(val as i64), aligned + 2))
         }
         CdrFieldType::Int64 => {
             let aligned = align_body(pos, base, 8);
@@ -306,7 +306,7 @@ fn cdr_read_field(
                 data[aligned + 7],
             ];
             let val = if src_le { i64::from_le_bytes(raw) } else { i64::from_be_bytes(raw) };
-            Some((Parameter::IntegerValue(val as i32), aligned + 8))
+            Some((Parameter::IntegerValue(val), aligned + 8))
         }
         CdrFieldType::UInt64 => {
             let aligned = align_body(pos, base, 8);
@@ -324,25 +324,25 @@ fn cdr_read_field(
                 data[aligned + 7],
             ];
             let val = if src_le { u64::from_le_bytes(raw) } else { u64::from_be_bytes(raw) };
-            Some((Parameter::IntegerValue(val as i32), aligned + 8))
+            Some((Parameter::IntegerValue(val as i64), aligned + 8))
         }
         CdrFieldType::Int8 => {
             if pos >= data.len() {
                 return None;
             }
-            Some((Parameter::IntegerValue(data[pos] as i8 as i32), pos + 1))
+            Some((Parameter::IntegerValue(data[pos] as i8 as i64), pos + 1))
         }
         CdrFieldType::UInt8 => {
             if pos >= data.len() {
                 return None;
             }
-            Some((Parameter::IntegerValue(data[pos] as i32), pos + 1))
+            Some((Parameter::IntegerValue(data[pos] as i64), pos + 1))
         }
         CdrFieldType::Bool => {
             if pos >= data.len() {
                 return None;
             }
-            Some((Parameter::IntegerValue(data[pos] as i32), pos + 1))
+            Some((Parameter::IntegerValue(data[pos] as i64), pos + 1))
         }
     }
 }

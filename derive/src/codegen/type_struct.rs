@@ -694,21 +694,21 @@ fn quote_field_to_parameter_conversion(
             use #crate_path::topic::sql::ast::Parameter;
 
             if let Some(v) = field_value.downcast_ref::<u8>() {
-                Ok(Parameter::IntegerValue(*v as i32))
+                Ok(Parameter::IntegerValue(*v as i64))
             } else if let Some(v) = field_value.downcast_ref::<u16>() {
-                Ok(Parameter::IntegerValue(*v as i32))
+                Ok(Parameter::IntegerValue(*v as i64))
             } else if let Some(v) = field_value.downcast_ref::<u32>() {
-                Ok(Parameter::IntegerValue(*v as i32))
+                Ok(Parameter::IntegerValue(*v as i64))
             } else if let Some(v) = field_value.downcast_ref::<u64>() {
-                Ok(Parameter::FloatValue(*v as f64))
+                Ok(Parameter::IntegerValue(*v as i64))
             } else if let Some(v) = field_value.downcast_ref::<i8>() {
-                Ok(Parameter::IntegerValue(*v as i32))
+                Ok(Parameter::IntegerValue(*v as i64))
             } else if let Some(v) = field_value.downcast_ref::<i16>() {
-                Ok(Parameter::IntegerValue(*v as i32))
+                Ok(Parameter::IntegerValue(*v as i64))
             } else if let Some(v) = field_value.downcast_ref::<i32>() {
-                Ok(Parameter::IntegerValue(*v))
+                Ok(Parameter::IntegerValue(*v as i64))
             } else if let Some(v) = field_value.downcast_ref::<i64>() {
-                Ok(Parameter::FloatValue(*v as f64))
+                Ok(Parameter::IntegerValue(*v))
             } else if let Some(v) = field_value.downcast_ref::<f32>() {
                 Ok(Parameter::FloatValue(*v as f64))
             } else if let Some(v) = field_value.downcast_ref::<f64>() {
