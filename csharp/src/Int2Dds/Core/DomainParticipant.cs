@@ -128,44 +128,51 @@ namespace Int2Dds.Core
 
             try
             {
-                if (qos.UserData != null && qos.UserData.Data != null && qos.UserData.Data.Length > 0)
-                {
-                    unsafe
-                    {
-                        fixed (byte* p = qos.UserData.Data)
-                        {
-                            ReturnCodeHelper.CheckReturn(
-                                NativeMethods.int2dds_participant_qos_set_user_data(
-                                    handle, p, (UIntPtr)qos.UserData.Data.Length));
-                        }
-                    }
-                }
-
-                if (qos.Property != null)
-                {
-                    foreach (var entry in qos.Property.Entries)
-                    {
-                        var nameBytes = Encoding.UTF8.GetBytes(entry.Name + '\0');
-                        var valueBytes = Encoding.UTF8.GetBytes(entry.Value + '\0');
-                        unsafe
-                        {
-                            fixed (byte* n = nameBytes)
-                            fixed (byte* v = valueBytes)
-                            {
-                                ReturnCodeHelper.CheckReturn(
-                                    NativeMethods.int2dds_participant_qos_add_property(
-                                        handle, n, v, entry.Propagate));
-                            }
-                        }
-                    }
-                }
-
+                ApplyParticipantQos(handle, qos);
                 return handle;
             }
             catch
             {
                 NativeMethods.int2dds_participant_qos_destroy(handle);
                 throw;
+            }
+        }
+
+        // Apply the managed policies onto an existing native QoS handle. Property is
+        // additive (merged onto whatever the handle already holds), matching how the
+        // core resolves properties and preserving values the caller did not override.
+        private static void ApplyParticipantQos(IntPtr handle, ParticipantQos qos)
+        {
+            if (qos.UserData != null && qos.UserData.Data != null && qos.UserData.Data.Length > 0)
+            {
+                unsafe
+                {
+                    fixed (byte* p = qos.UserData.Data)
+                    {
+                        ReturnCodeHelper.CheckReturn(
+                            NativeMethods.int2dds_participant_qos_set_user_data(
+                                handle, p, (UIntPtr)qos.UserData.Data.Length));
+                    }
+                }
+            }
+
+            if (qos.Property != null)
+            {
+                foreach (var entry in qos.Property.Entries)
+                {
+                    var nameBytes = Encoding.UTF8.GetBytes(entry.Name + '\0');
+                    var valueBytes = Encoding.UTF8.GetBytes(entry.Value + '\0');
+                    unsafe
+                    {
+                        fixed (byte* n = nameBytes)
+                        fixed (byte* v = valueBytes)
+                        {
+                            ReturnCodeHelper.CheckReturn(
+                                NativeMethods.int2dds_participant_qos_add_property(
+                                    handle, n, v, entry.Propagate));
+                        }
+                    }
+                }
             }
         }
 
@@ -294,6 +301,68 @@ namespace Int2Dds.Core
                     return handles;
                 }
             }
+        }
+
+        /// <summary>
+        /// Gets the current QoS policies of this participant.
+        /// </summary>
+        public ParticipantQos GetQos()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+
+            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_participant_get_qos(_handle, out var qosHandle));
+            try
+            {
+                return ReadParticipantQos(qosHandle);
+            }
+            finally
+            {
+                NativeMethods.int2dds_participant_qos_destroy(qosHandle);
+            }
+        }
+
+        /// <summary>
+        /// Sets new QoS policies on this participant. The managed policies are merged
+        /// onto the participant's current QoS, so unspecified properties are preserved.
+        /// </summary>
+        public void SetQos(ParticipantQos qos)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            if (qos == null) throw new ArgumentNullException(nameof(qos));
+
+            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_participant_get_qos(_handle, out var qosHandle));
+            try
+            {
+                ApplyParticipantQos(qosHandle, qos);
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_participant_set_qos(_handle, qosHandle));
+            }
+            finally
+            {
+                NativeMethods.int2dds_participant_qos_destroy(qosHandle);
+            }
+        }
+
+        // Read the property collection back from a native handle. user_data has no
+        // native getter (consistent with DataWriter.GetQos) and is left unset.
+        private static ParticipantQos ReadParticipantQos(IntPtr handle)
+        {
+            var property = new Property();
+            NativeMethods.ParticipantPropertyCallback collect;
+            unsafe
+            {
+                collect = (namePtr, valuePtr, _) =>
+                {
+                    property.Add(NativeString.FromCStr(namePtr), NativeString.FromCStr(valuePtr));
+                    return 0;
+                };
+                var emptyPrefix = stackalloc byte[1];
+                emptyPrefix[0] = 0;
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_participant_qos_get_properties_with_prefix(
+                        handle, emptyPrefix, collect, IntPtr.Zero));
+            }
+            GC.KeepAlive(collect);
+            return new ParticipantQos { Property = property };
         }
 
         /// <summary>

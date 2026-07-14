@@ -27,5 +27,11 @@ namespace Int2Dds.Interop
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_participant_delete_contained_entities(IntPtr participant);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_participant_set_qos(IntPtr participant, IntPtr qos);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_participant_get_qos(IntPtr participant, out IntPtr qos_out);
     }
 }

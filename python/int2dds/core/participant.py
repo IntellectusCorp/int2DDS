@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, TypeVar
 
-from int2dds._ffi import ffi, lib
+from int2dds._ffi import CData, ffi, lib
 from int2dds.exceptions import check_ret
 
 if TYPE_CHECKING:
@@ -23,7 +23,7 @@ class _Factory:
     """Singleton wrapper for DomainParticipantFactory."""
 
     _instance: _Factory | None = None
-    _handle: ffi.CData | None = None
+    _handle: CData | None = None
 
     def __new__(cls) -> _Factory:
         if cls._instance is None:
@@ -37,7 +37,7 @@ class _Factory:
         self._handle = factory_ptr[0]
 
     @property
-    def handle(self) -> ffi.CData:
+    def handle(self) -> CData:
         if self._handle is None:
             self._initialize()
         return self._handle
@@ -48,16 +48,12 @@ def _get_factory() -> _Factory:
     return _Factory()
 
 
-def _build_participant_qos_handle(qos: ParticipantQos) -> ffi.CData:
-    """Translate a Python :class:`ParticipantQos` into a native QoS handle.
+def _apply_participant_qos(handle: CData, qos: ParticipantQos) -> None:
+    """Apply a Python :class:`ParticipantQos` onto an existing native handle.
 
-    Caller owns the returned handle and must destroy it with
-    ``lib.int2dds_participant_qos_destroy``.
+    Property entries are additive (merged onto whatever the handle already
+    holds), preserving values the caller did not override.
     """
-    qos_ptr = ffi.new("Int2DdsParticipantQos **")
-    check_ret(lib.int2dds_participant_qos_create_default(qos_ptr))
-    handle = qos_ptr[0]
-
     if qos.user_data is not None and qos.user_data.data:
         data_ptr = ffi.from_buffer(qos.user_data.data)
         check_ret(lib.int2dds_participant_qos_set_user_data(
@@ -68,6 +64,17 @@ def _build_participant_qos_handle(qos: ParticipantQos) -> ffi.CData:
             check_ret(lib.int2dds_participant_qos_add_property(
                 handle, name.encode(), value.encode(), propagate))
 
+
+def _build_participant_qos_handle(qos: ParticipantQos) -> CData:
+    """Translate a Python :class:`ParticipantQos` into a native QoS handle.
+
+    Caller owns the returned handle and must destroy it with
+    ``lib.int2dds_participant_qos_destroy``.
+    """
+    qos_ptr = ffi.new("Int2DdsParticipantQos **")
+    check_ret(lib.int2dds_participant_qos_create_default(qos_ptr))
+    handle = qos_ptr[0]
+    _apply_participant_qos(handle, qos)
     return handle
 
 
@@ -124,7 +131,7 @@ class DomainParticipant:
         return self._domain_id
 
     @property
-    def handle(self) -> ffi.CData:
+    def handle(self) -> CData:
         """Native participant handle (for low-level/dynamic-type FFI calls)."""
         if self._handle is None:
             raise RuntimeError("participant is closed")
@@ -221,6 +228,48 @@ class DomainParticipant:
         Assert liveliness for MANUAL_BY_PARTICIPANT liveliness.
         """
         check_ret(lib.int2dds_participant_assert_liveliness(self._handle))
+
+    def get_qos(self) -> ParticipantQos:
+        """Get the current QoS of this participant.
+
+        Reports the PropertyQosPolicy entries currently in effect (including any
+        transport/discovery properties resolved at creation). user_data has no
+        native getter and is left unset.
+        """
+        from int2dds.core.qos import ParticipantQos, Property
+
+        qos_ptr = ffi.new("Int2DdsParticipantQos **")
+        check_ret(lib.int2dds_participant_get_qos(self._handle, qos_ptr))
+        handle = qos_ptr[0]
+        try:
+            prop = Property()
+
+            @ffi.callback("int32_t(const char *, const char *, void *)")
+            def _collect(name, value, _user_data):
+                prop.add(ffi.string(name).decode(), ffi.string(value).decode())
+                return 0
+
+            check_ret(lib.int2dds_participant_qos_get_properties_with_prefix(
+                handle, b"", _collect, ffi.NULL))
+            return ParticipantQos(property=prop)
+        finally:
+            lib.int2dds_participant_qos_destroy(handle)
+
+    def set_qos(self, qos: ParticipantQos) -> None:
+        """Set the QoS of this participant.
+
+        The given policies are merged onto the participant's current QoS, so
+        properties not present in ``qos`` are preserved. Setting a non-default
+        user_data raises, matching the core (UserDataQosPolicy is not mutable).
+        """
+        qos_ptr = ffi.new("Int2DdsParticipantQos **")
+        check_ret(lib.int2dds_participant_get_qos(self._handle, qos_ptr))
+        handle = qos_ptr[0]
+        try:
+            _apply_participant_qos(handle, qos)
+            check_ret(lib.int2dds_participant_set_qos(self._handle, handle))
+        finally:
+            lib.int2dds_participant_qos_destroy(handle)
 
     def delete_contained_entities(self) -> None:
         """

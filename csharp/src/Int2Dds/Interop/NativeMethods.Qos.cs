@@ -245,6 +245,13 @@ namespace Int2Dds.Interop
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_participant_qos_set_multicast_ttl(IntPtr qos, byte ttl);
 
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        internal unsafe delegate int ParticipantPropertyCallback(byte* name, byte* value, IntPtr userData);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_participant_qos_get_properties_with_prefix(
+            IntPtr qos, byte* prefix, ParticipantPropertyCallback cb, IntPtr userData);
+
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_participant_qos_destroy(IntPtr qos);
 

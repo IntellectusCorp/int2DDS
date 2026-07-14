@@ -1879,6 +1879,27 @@ Int2DdsRet int2dds_participant_get_domain_id(const struct Int2DdsParticipant *pa
                                              int32_t *domain_id_out);
 
 /**
+ * Set the QoS of a participant.
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `qos` must be a valid QoS created by `int2dds_participant_qos_create_default`
+ */
+Int2DdsRet int2dds_participant_set_qos(const struct Int2DdsParticipant *participant,
+                                       const struct Int2DdsParticipantQos *qos);
+
+/**
+ * Get the QoS of a participant.
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `qos_out` must be a valid pointer to a null pointer
+ * - The returned QoS must be freed with `int2dds_participant_qos_destroy`
+ */
+Int2DdsRet int2dds_participant_get_qos(const struct Int2DdsParticipant *participant,
+                                       struct Int2DdsParticipantQos **qos_out);
+
+/**
  * Delete all entities contained by a participant
  *
  * This operation deletes all Publisher, Subscriber, Topic, ContentFilteredTopic
