@@ -57,6 +57,7 @@ pub mod discovery;
 pub mod dynamic;
 pub mod dynamic_value;
 pub mod env;
+pub mod last_error;
 pub mod listener;
 pub mod participant;
 pub mod publisher;

@@ -54,7 +54,6 @@ ffi.cdef("""
     #define INT2DDS_RET_ERROR 1
     #define INT2DDS_RET_TIMEOUT 2
     #define INT2DDS_RET_UNSUPPORTED 3
-    #define INT2DDS_RET_BAD_ALLOC 10
     #define INT2DDS_RET_INVALID_ARGUMENT 11
     #define INT2DDS_RET_ALREADY_DELETED 20
     #define INT2DDS_RET_NOT_ENABLED 21
@@ -65,6 +64,7 @@ ffi.cdef("""
     #define INT2DDS_RET_ILLEGAL_OPERATION 26
     #define INT2DDS_RET_NO_DATA 27
     #define INT2DDS_RET_NULL_POINTER 100
+    #define INT2DDS_RET_BUFFER_TOO_SMALL 101
 
     /* Opaque types */
     typedef struct Int2DdsParticipantFactory Int2DdsParticipantFactory;
@@ -88,6 +88,9 @@ ffi.cdef("""
     typedef struct Int2DdsSubscriberQos Int2DdsSubscriberQos;
 
     typedef int32_t Int2DdsRet;
+
+    /* Last FFI error message (per-call-thread, TLS-backed) */
+    int int2dds_last_error_message(char *buf, int buf_len);
 
     /* DomainParticipantFactory */
     Int2DdsRet int2dds_domain_participant_factory_get_instance(
@@ -241,6 +244,68 @@ ffi.cdef("""
         Int2DdsDataWriter **writer_out
     );
     Int2DdsRet int2dds_delete_datawriter(Int2DdsDataWriter *writer);
+
+    /* Creation from a named QoS profile ("Library::Profile") */
+    Int2DdsRet int2dds_create_publisher_with_profile(
+        const Int2DdsParticipant *participant,
+        const char *qos_path,
+        Int2DdsPublisher **publisher_out
+    );
+    Int2DdsRet int2dds_create_subscriber_with_profile(
+        const Int2DdsParticipant *participant,
+        const char *qos_path,
+        Int2DdsSubscriber **subscriber_out
+    );
+    Int2DdsRet int2dds_create_topic_with_profile(
+        const Int2DdsParticipant *participant,
+        const char *topic_name,
+        const char *dds_type_name,
+        int32_t extensibility,
+        bool has_key,
+        const char *qos_path,
+        Int2DdsTopic **topic_out
+    );
+    Int2DdsRet int2dds_create_datawriter_with_profile(
+        const Int2DdsPublisher *publisher,
+        const Int2DdsTopic *topic,
+        const char *qos_path,
+        Int2DdsDataWriter **writer_out
+    );
+    Int2DdsRet int2dds_create_datareader_with_profile(
+        const Int2DdsSubscriber *subscriber,
+        const Int2DdsTopic *topic,
+        const char *qos_path,
+        Int2DdsDataReader **reader_out
+    );
+
+    /* Effective QoS query */
+    Int2DdsRet int2dds_datawriter_get_qos(
+        const Int2DdsDataWriter *writer,
+        Int2DdsDataWriterQos **qos_out
+    );
+    Int2DdsRet int2dds_datareader_get_qos(
+        const Int2DdsDataReader *reader,
+        Int2DdsDataReaderQos **qos_out
+    );
+    Int2DdsRet int2dds_datawriter_qos_get_reliability(
+        const Int2DdsDataWriterQos *qos, int32_t *kind_out, int64_t *max_blocking_time_ns_out
+    );
+    Int2DdsRet int2dds_datawriter_qos_get_durability(
+        const Int2DdsDataWriterQos *qos, int32_t *kind_out
+    );
+    Int2DdsRet int2dds_datawriter_qos_get_history(
+        const Int2DdsDataWriterQos *qos, int32_t *kind_out, int32_t *depth_out
+    );
+    Int2DdsRet int2dds_datareader_qos_get_reliability(
+        const Int2DdsDataReaderQos *qos, int32_t *kind_out, int64_t *max_blocking_time_ns_out
+    );
+    Int2DdsRet int2dds_datareader_qos_get_durability(
+        const Int2DdsDataReaderQos *qos, int32_t *kind_out
+    );
+    Int2DdsRet int2dds_datareader_qos_get_history(
+        const Int2DdsDataReaderQos *qos, int32_t *kind_out, int32_t *depth_out
+    );
+
     Int2DdsRet int2dds_get_publication_matched_status(
         const Int2DdsDataWriter *writer,
         int32_t *total_count_out,
@@ -1071,6 +1136,7 @@ ffi.cdef("""
     Int2DdsRet int2dds_dynamic_value_as_f64(const Int2DdsDynamicValue *value, double *out);
     Int2DdsRet int2dds_dynamic_value_as_char8(const Int2DdsDynamicValue *value, uint8_t *out);
     Int2DdsRet int2dds_dynamic_value_as_string(const Int2DdsDynamicValue *value, char *buf, uintptr_t buf_len, uintptr_t *out_len);
+    Int2DdsRet int2dds_dynamic_value_to_string(const Int2DdsDynamicValue *value, char *buf, uintptr_t buf_len, uintptr_t *out_len);
     Int2DdsRet int2dds_dynamic_value_as_enum(const Int2DdsDynamicValue *value, char *buf, uintptr_t buf_len, uintptr_t *out_len, int32_t *out_value);
     Int2DdsRet int2dds_dynamic_value_as_bitmask(const Int2DdsDynamicValue *value, uint64_t *out);
     Int2DdsRet int2dds_dynamic_value_as_bitset(const Int2DdsDynamicValue *value, uint64_t *out);
