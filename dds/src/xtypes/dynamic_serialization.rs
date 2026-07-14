@@ -1063,6 +1063,82 @@ fn deserialize_struct_cdr(
     Ok(DynamicData::with_values(dynamic_type.clone(), values))
 }
 
+/// Collect a struct's key members in canonical (member_id) order.
+///
+/// Returns an empty vec for non-struct or keyless types.
+fn key_members_ordered(dynamic_type: &DynamicType) -> Vec<&MemberDescriptor> {
+    match dynamic_type.as_struct() {
+        Some(struct_desc) => {
+            let mut members: Vec<&MemberDescriptor> =
+                struct_desc.members().iter().filter(|m| m.is_key).collect();
+            members.sort_by_key(|m| m.member_id);
+            members
+        }
+        None => Vec::new(),
+    }
+}
+
+/// True when the sole key member is a `String`. The derive path (`is_unbounded_string`
+/// in `key_methods.rs`) and the field-descriptor raw path (`CdrFieldType::String`) both
+/// MD5-hash such keys regardless of any `bound`, since neither observes the bound at
+/// this point. The dynamic path matches them so all keyed paths agree. `WString` keys
+/// are not hashed (they stay in the ≤16 raw rule), matching derive.
+fn is_single_string_key(members: &[&MemberDescriptor]) -> bool {
+    members.len() == 1
+        && matches!(resolved_kind(&members[0].member_type), DynamicTypeKind::String { .. })
+}
+
+/// Serialize the key members of `data` as canonical RTPS KeyHash CDR:
+/// big-endian, member_id order, no encapsulation header — byte-identical to the
+/// derive-generated `serialize_key`.
+///
+/// Returns `(key_cdr, single_unbounded_string)`; the bool selects the
+/// InstanceHandle rule at the call site (`from_key_cdr_hashed` vs `from_key_cdr`).
+pub fn serialize_key_cdr(data: &DynamicData) -> DdsResult<(Vec<u8>, bool)> {
+    let members = key_members_ordered(data.dynamic_type());
+    if members.is_empty() {
+        return Ok((Vec::new(), false));
+    }
+    let single_unbounded_string = is_single_string_key(&members);
+
+    // Write the header so the serializer's alignment math (which assumes a 4-byte
+    // encapsulation prefix) yields correct CDR alignment, then strip it.
+    let mut serializer = CdrSerializer::with_capacity(false, 64);
+    serializer.write_encapsulation_header().map_err(cdr_error)?;
+    let mut nested = serialize_struct_cdr;
+    for member in &members {
+        let value = member_value_or_default(data, member).ok_or_else(|| {
+            DdsError::Error(format!("Missing key member value for '{}'", member.name))
+        })?;
+        serialize_value_cdr(&mut serializer, &value, &member.member_type, &mut nested)?;
+    }
+
+    let mut bytes = serializer.into_bytes();
+    bytes.drain(..4);
+    if single_unbounded_string {
+        while bytes.len() > 1 && bytes[bytes.len() - 1] == 0 && bytes[bytes.len() - 2] == 0 {
+            bytes.pop();
+        }
+    }
+    Ok((bytes, single_unbounded_string))
+}
+
+/// Deserialize a canonical headerless big-endian key CDR (as produced by
+/// [`serialize_key_cdr`]) back into a `DynamicData` holding only the key members.
+pub fn deserialize_key_cdr(
+    bytes: &[u8],
+    dynamic_type: &Arc<DynamicType>,
+) -> DdsResult<DynamicData> {
+    let members = key_members_ordered(dynamic_type);
+    let mut deserializer = CdrDeserializer::new_without_header(bytes, false);
+    let mut values = HashMap::new();
+    for member in &members {
+        let value = deserialize_value_cdr(&mut deserializer, &member.member_type)?;
+        values.insert(member.name.clone(), value);
+    }
+    Ok(DynamicData::with_values(dynamic_type.clone(), values))
+}
+
 fn serialize_xcdr(
     data: &DynamicData,
     extensibility: ExtensibilityKind,

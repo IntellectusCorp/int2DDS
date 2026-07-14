@@ -17,7 +17,9 @@ use crate::{
 };
 
 use super::dynamic_data::{DynamicData, DynamicValue};
-use super::dynamic_serialization::{deserialize_dynamic_data, serialize_dynamic_data};
+use super::dynamic_serialization::{
+    deserialize_dynamic_data, deserialize_key_cdr, serialize_dynamic_data, serialize_key_cdr,
+};
 use super::dynamic_type::DynamicType;
 
 /// TypeSupport implementation for DynamicData.
@@ -228,22 +230,9 @@ impl TypeSupport for DynamicTypeSupport {
             .downcast_ref::<DynamicData>()
             .ok_or_else(|| DdsError::Error("Expected DynamicData type".to_string()))?;
 
-        // Serialize only key fields
-        let key_members = self.dynamic_type.key_members();
-        if key_members.is_empty() {
-            return Ok(Arc::from(Vec::new().into_boxed_slice()));
-        }
-
-        // Create a new DynamicData with only key fields
-        let mut key_data = DynamicData::new(self.dynamic_type.clone());
-        for member in &key_members {
-            if let Some(value) = dynamic_data.get_value(&member.name) {
-                let _ = key_data.set_value(&member.name, value.clone());
-            }
-        }
-
-        // Serialize key data
-        serialize_dynamic_data(&key_data, &SerializationFormat::Cdr)
+        // Canonical RTPS KeyHash CDR: big-endian, member order, no encapsulation header.
+        let (key_cdr, _single) = serialize_key_cdr(dynamic_data)?;
+        Ok(Arc::from(key_cdr.into_boxed_slice()))
     }
 
     fn deserialize_key(&self, serialized_key: &[u8]) -> DdsResult<Box<dyn Any + Send + Sync>> {
@@ -251,8 +240,7 @@ impl TypeSupport for DynamicTypeSupport {
             return Ok(Box::new(DynamicData::new(self.dynamic_type.clone())));
         }
 
-        // Deserialize key data
-        let key_data = deserialize_dynamic_data(serialized_key, &self.dynamic_type)?;
+        let key_data = deserialize_key_cdr(serialized_key, &self.dynamic_type)?;
         Ok(Box::new(key_data))
     }
 
@@ -262,33 +250,16 @@ impl TypeSupport for DynamicTypeSupport {
             None => return InstanceHandle::NIL,
         };
 
-        let key_values = dynamic_data.get_key_values();
-        if key_values.is_empty() {
-            return InstanceHandle::NIL;
-        }
-
-        // Compute MD5 hash of key values
-        let mut hasher_data = Vec::new();
-        for (name, value) in key_values {
-            hasher_data.extend_from_slice(name.as_bytes());
-            hasher_data.push(0); // Separator
-                                 // Simple value serialization for hashing
-            match value {
-                DynamicValue::Int32(v) => hasher_data.extend_from_slice(&v.to_le_bytes()),
-                DynamicValue::Int64(v) => hasher_data.extend_from_slice(&v.to_le_bytes()),
-                DynamicValue::Uint32(v) => hasher_data.extend_from_slice(&v.to_le_bytes()),
-                DynamicValue::Uint64(v) => hasher_data.extend_from_slice(&v.to_le_bytes()),
-                DynamicValue::String(s) => hasher_data.extend_from_slice(s.as_bytes()),
-                _ => {}
+        match serialize_key_cdr(dynamic_data) {
+            Ok((key_cdr, single_unbounded_string)) if !key_cdr.is_empty() => {
+                if single_unbounded_string {
+                    InstanceHandle::from_key_cdr_hashed(&key_cdr)
+                } else {
+                    InstanceHandle::from_key_cdr(&key_cdr)
+                }
             }
+            _ => InstanceHandle::NIL,
         }
-
-        if hasher_data.is_empty() {
-            return InstanceHandle::NIL;
-        }
-
-        let hash = md5::compute(&hasher_data);
-        InstanceHandle::new(hash.0)
     }
 
     fn is_compute_key_provided(&self) -> bool {
