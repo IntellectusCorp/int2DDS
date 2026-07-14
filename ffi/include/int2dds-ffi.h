@@ -3992,6 +3992,26 @@ Int2DdsRet int2dds_type_info_add_field(struct Int2DdsTypeInfo *type_info,
                                        int32_t flags);
 
 /**
+ * Add a (possibly bounded) narrow-string field. `bound == 0` means unbounded.
+ *
+ * Prefer this over `int2dds_type_info_add_field(.., INT2DDS_FIELD_STRING, ..)` when the
+ * IDL declares `string<N>`, so the emitted TypeIdentifier carries the bound and matches
+ * strict XTypes peers byte-for-byte.
+ */
+Int2DdsRet int2dds_type_info_add_string_field(struct Int2DdsTypeInfo *type_info,
+                                              const char *field_name,
+                                              uint32_t bound,
+                                              int32_t flags);
+
+/**
+ * Add a (possibly bounded) wide-string (`wstring<N>`) field. `bound == 0` means unbounded.
+ */
+Int2DdsRet int2dds_type_info_add_wstring_field(struct Int2DdsTypeInfo *type_info,
+                                               const char *field_name,
+                                               uint32_t bound,
+                                               int32_t flags);
+
+/**
  * Add a sequence field to the type info builder.
  */
 Int2DdsRet int2dds_type_info_add_sequence_field(struct Int2DdsTypeInfo *type_info,

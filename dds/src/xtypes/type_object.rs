@@ -19,10 +19,6 @@
 // because primitive types need to implement HasTypeObject
 // but don't need full serialization support.
 
-// ============================================================================
-// Constants from DDS-XTYPES 1.3 Specification
-// ============================================================================
-
 /// TypeIdentifier discriminator values (Table 7.23)
 pub mod type_kind {
     // Primitive types
@@ -63,8 +59,9 @@ pub mod type_kind {
     pub const TI_STRONGLY_CONNECTED_COMPONENT: u8 = 0xB0;
 
     // TypeObject equivalence kinds
-    pub const EK_COMPLETE: u8 = 0xF1;
-    pub const EK_MINIMAL: u8 = 0xF2;
+    pub const EK_MINIMAL: u8 = 0xF1;
+    pub const EK_COMPLETE: u8 = 0xF2;
+    pub const EK_BOTH: u8 = 0xF3;
 }
 
 /// Member flags bit positions
@@ -88,13 +85,7 @@ pub mod type_flag {
     pub const IS_AUTOID_HASH: u16 = 1 << 3;
 }
 
-// ============================================================================
-// EquivalenceHash
-// ============================================================================
-
 /// 14-byte equivalence hash computed from serialized MinimalTypeObject.
-///
-/// The hash is computed as: `MD5(XCDR2_serialize(MinimalTypeObject))[0:14]`
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EquivalenceHash(pub [u8; 14]);
 
@@ -153,14 +144,7 @@ impl std::fmt::Display for EquivalenceHash {
     }
 }
 
-// ============================================================================
-// TypeIdentifier
-// ============================================================================
-
 /// TypeIdentifier - compact type reference.
-///
-/// For primitive types, this is just the discriminator byte.
-/// For complex types, this includes an EquivalenceHash.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeIdentifier {
     // Primitive types (no additional data)
@@ -346,6 +330,15 @@ impl TypeIdentifier {
         matches!(self, TypeIdentifier::CompleteTypeId(_) | TypeIdentifier::MinimalTypeId(_))
     }
 
+    pub(crate) fn is_typelookup_boundary_safe(&self) -> bool {
+        matches!(
+            self,
+            TypeIdentifier::CompleteTypeId(_)
+                | TypeIdentifier::MinimalTypeId(_)
+                | TypeIdentifier::None
+        )
+    }
+
     /// Get the equivalence hash if this is a complex type.
     pub fn equivalence_hash(&self) -> Option<&EquivalenceHash> {
         match self {
@@ -432,7 +425,8 @@ impl TypeIdentifier {
                 element_identifier.serialize_into(buffer);
             }
 
-            // Maps
+            // Maps. Spec field order (XTypes 1.3 PlainMapSTypeDefn): header, bound,
+            // element_identifier, key_flags, key_identifier. Encoding stays packed.
             TypeIdentifier::PlainMapSmall {
                 header,
                 bound,
@@ -442,9 +436,9 @@ impl TypeIdentifier {
             } => {
                 header.serialize_into(buffer);
                 buffer.push(*bound);
+                element_identifier.serialize_into(buffer);
                 key_flags.serialize_into(buffer);
                 key_identifier.serialize_into(buffer);
-                element_identifier.serialize_into(buffer);
             }
             TypeIdentifier::PlainMapLarge {
                 header,
@@ -455,9 +449,9 @@ impl TypeIdentifier {
             } => {
                 header.serialize_into(buffer);
                 buffer.extend_from_slice(&bound.to_le_bytes());
+                element_identifier.serialize_into(buffer);
                 key_flags.serialize_into(buffer);
                 key_identifier.serialize_into(buffer);
-                element_identifier.serialize_into(buffer);
             }
 
             // Complex types
@@ -646,9 +640,10 @@ impl TypeIdentifier {
                 ))
             }
 
-            // Maps
+            // Maps. Spec field order: header, bound, element_identifier, key_flags,
+            // key_identifier (mirrors serialize_into above).
             type_kind::TI_PLAIN_MAP_SMALL => {
-                if rest.len() < 4 {
+                if rest.len() < 3 {
                     return Err("Insufficient data for PlainMapSmall".to_string());
                 }
                 let header = PlainCollectionHeader {
@@ -656,9 +651,13 @@ impl TypeIdentifier {
                     element_flags: CollectionElementFlag(rest[1]),
                 };
                 let bound = rest[2];
-                let key_flags = CollectionElementFlag(rest[3]);
-                let (key_id, key_len) = TypeIdentifier::deserialize(&rest[4..])?;
-                let (element_id, elem_len) = TypeIdentifier::deserialize(&rest[4 + key_len..])?;
+                let (element_id, elem_len) = TypeIdentifier::deserialize(&rest[3..])?;
+                let kf_off = 3 + elem_len;
+                if rest.len() <= kf_off {
+                    return Err("Insufficient data for PlainMapSmall key_flags".to_string());
+                }
+                let key_flags = CollectionElementFlag(rest[kf_off]);
+                let (key_id, key_len) = TypeIdentifier::deserialize(&rest[kf_off + 1..])?;
                 Ok((
                     TypeIdentifier::PlainMapSmall {
                         header,
@@ -667,11 +666,11 @@ impl TypeIdentifier {
                         key_identifier: Box::new(key_id),
                         element_identifier: Box::new(element_id),
                     },
-                    1 + 4 + key_len + elem_len,
+                    1 + 3 + elem_len + 1 + key_len,
                 ))
             }
             type_kind::TI_PLAIN_MAP_LARGE => {
-                if rest.len() < 7 {
+                if rest.len() < 6 {
                     return Err("Insufficient data for PlainMapLarge".to_string());
                 }
                 let header = PlainCollectionHeader {
@@ -679,9 +678,13 @@ impl TypeIdentifier {
                     element_flags: CollectionElementFlag(rest[1]),
                 };
                 let bound = u32::from_le_bytes([rest[2], rest[3], rest[4], rest[5]]);
-                let key_flags = CollectionElementFlag(rest[6]);
-                let (key_id, key_len) = TypeIdentifier::deserialize(&rest[7..])?;
-                let (element_id, elem_len) = TypeIdentifier::deserialize(&rest[7 + key_len..])?;
+                let (element_id, elem_len) = TypeIdentifier::deserialize(&rest[6..])?;
+                let kf_off = 6 + elem_len;
+                if rest.len() <= kf_off {
+                    return Err("Insufficient data for PlainMapLarge key_flags".to_string());
+                }
+                let key_flags = CollectionElementFlag(rest[kf_off]);
+                let (key_id, key_len) = TypeIdentifier::deserialize(&rest[kf_off + 1..])?;
                 Ok((
                     TypeIdentifier::PlainMapLarge {
                         header,
@@ -690,7 +693,7 @@ impl TypeIdentifier {
                         key_identifier: Box::new(key_id),
                         element_identifier: Box::new(element_id),
                     },
-                    1 + 7 + key_len + elem_len,
+                    1 + 6 + elem_len + 1 + key_len,
                 ))
             }
 
@@ -698,10 +701,6 @@ impl TypeIdentifier {
         }
     }
 }
-
-// ============================================================================
-// Collection Headers and Flags
-// ============================================================================
 
 /// Collection element flags (for sequences, arrays, maps).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -748,16 +747,16 @@ impl PlainCollectionHeader {
 #[repr(u8)]
 pub enum EquivalenceKind {
     #[default]
-    Minimal = 0xF2,
-    Complete = 0xF1,
+    Minimal = 0xF1,
+    Complete = 0xF2,
     Both = 0xF3,
 }
 
 impl EquivalenceKind {
     pub fn from_u8(value: u8) -> Self {
         match value {
-            0xF1 => EquivalenceKind::Complete,
-            0xF2 => EquivalenceKind::Minimal,
+            0xF1 => EquivalenceKind::Minimal,
+            0xF2 => EquivalenceKind::Complete,
             0xF3 => EquivalenceKind::Both,
             _ => EquivalenceKind::Minimal, // Default fallback
         }
@@ -784,10 +783,6 @@ impl TryConstructKind {
         }
     }
 }
-
-// ============================================================================
-// Type Flags
-// ============================================================================
 
 /// Extensibility kind for types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -918,21 +913,12 @@ impl MemberFlag {
     }
 }
 
-// ============================================================================
-// Name Hash
-// ============================================================================
-
-/// Compute name hash from a string.
-/// Returns first 4 bytes of MD5(name) masked with 0x0FFFFFFF.
+/// Compute name hash from a string: first 4 bytes of MD5(name) as a
+/// big-endian u32 (spec NameHash, no mask).
 pub fn compute_name_hash(name: &str) -> u32 {
     let hash = ::md5::compute(name.as_bytes());
-    let bytes = [hash[0], hash[1], hash[2], hash[3]];
-    u32::from_be_bytes(bytes) & 0x0FFFFFFF
+    u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]])
 }
-
-// ============================================================================
-// Struct Member Types
-// ============================================================================
 
 /// Minimal struct member for hash computation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1475,10 +1461,6 @@ impl AppliedAnnotation {
     }
 }
 
-// ============================================================================
-// Struct Type Definitions
-// ============================================================================
-
 /// Minimal struct type for hash computation.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MinimalStructType {
@@ -1520,8 +1502,7 @@ impl MinimalStructType {
 
     /// Compute the equivalence hash for this type.
     pub fn compute_hash(&self) -> EquivalenceHash {
-        let serialized = self.serialize();
-        EquivalenceHash::compute(&serialized)
+        MinimalTypeObject::Struct(self.clone()).compute_hash()
     }
 
     pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
@@ -1873,10 +1854,6 @@ impl AppliedBuiltinTypeAnnotations {
     }
 }
 
-// ============================================================================
-// Enumerated Type Definitions
-// ============================================================================
-
 /// Minimal enumerated literal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MinimalEnumeratedLiteral {
@@ -2037,8 +2014,7 @@ impl MinimalEnumeratedType {
     }
 
     pub fn compute_hash(&self) -> EquivalenceHash {
-        let serialized = self.serialize();
-        EquivalenceHash::compute(&serialized)
+        MinimalTypeObject::Enum(self.clone()).compute_hash()
     }
 
     pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
@@ -2205,10 +2181,6 @@ impl CompleteEnumeratedHeader {
         Ok((CompleteEnumeratedHeader { common, detail }, pos))
     }
 }
-
-// ============================================================================
-// Union Type Definitions
-// ============================================================================
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommonUnionMember {
@@ -2413,7 +2385,7 @@ impl MinimalUnionType {
     }
 
     pub fn compute_hash(&self) -> EquivalenceHash {
-        EquivalenceHash::compute(&self.serialize())
+        MinimalTypeObject::Union(self.clone()).compute_hash()
     }
 
     pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
@@ -2514,10 +2486,6 @@ impl CompleteUnionType {
     }
 }
 
-// ============================================================================
-// Alias Type Definitions
-// ============================================================================
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommonAliasBody {
     pub related_flags: MemberFlag,
@@ -2569,7 +2537,7 @@ impl MinimalAliasType {
     }
 
     pub fn compute_hash(&self) -> EquivalenceHash {
-        EquivalenceHash::compute(&self.serialize())
+        MinimalTypeObject::Alias(self.clone()).compute_hash()
     }
 
     pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
@@ -2626,10 +2594,6 @@ impl CompleteAliasType {
         Ok((CompleteAliasType { alias_flags, header, body }, pos))
     }
 }
-
-// ============================================================================
-// Bitmask Type Definitions
-// ============================================================================
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommonBitflag {
@@ -2744,7 +2708,7 @@ impl MinimalBitmaskType {
     }
 
     pub fn compute_hash(&self) -> EquivalenceHash {
-        EquivalenceHash::compute(&self.serialize())
+        MinimalTypeObject::Bitmask(self.clone()).compute_hash()
     }
 
     pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
@@ -2834,10 +2798,6 @@ impl CompleteBitmaskType {
         Ok((CompleteBitmaskType { bitmask_flags, header, flag_seq }, pos))
     }
 }
-
-// ============================================================================
-// Bitset Type Definitions
-// ============================================================================
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommonBitfield {
@@ -2972,7 +2932,7 @@ impl MinimalBitsetType {
     }
 
     pub fn compute_hash(&self) -> EquivalenceHash {
-        EquivalenceHash::compute(&self.serialize())
+        MinimalTypeObject::Bitset(self.clone()).compute_hash()
     }
 
     pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
@@ -3058,10 +3018,6 @@ impl CompleteBitsetType {
     }
 }
 
-// ============================================================================
-// TypeInformation (DDS-XTypes 1.3 Section 7.6.3.3)
-// ============================================================================
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeIdentifierWithSize {
     pub type_id: TypeIdentifier,
@@ -3074,6 +3030,11 @@ impl TypeIdentifierWithSize {
     }
 
     pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+        debug_assert!(
+            self.type_id.is_typelookup_boundary_safe(),
+            "non-hash-id TypeIdentifier at TypeLookup boundary: {:?}",
+            self.type_id
+        );
         self.type_id.serialize_into(buffer);
         buffer.extend_from_slice(&self.typeobject_serialized_size.to_le_bytes());
     }
@@ -3090,7 +3051,12 @@ impl TypeIdentifierWithSize {
     }
 
     /// Write as an APPENDABLE (DELIMIT_CDR2) struct: DHEADER + type_id union + u32 size.
-    fn write_xcdr2(&self, s: &mut Xcdr2Serializer) -> Result<(), CdrError> {
+    pub(crate) fn write_xcdr2(&self, s: &mut Xcdr2Serializer) -> Result<(), CdrError> {
+        debug_assert!(
+            self.type_id.is_typelookup_boundary_safe(),
+            "non-hash-id TypeIdentifier at TypeLookup boundary: {:?}",
+            self.type_id
+        );
         let pos = s.begin_struct()?;
         s.buffer_mut().extend_from_slice(&self.type_id.serialize());
         s.serialize_u32(self.typeobject_serialized_size)?;
@@ -3098,7 +3064,7 @@ impl TypeIdentifierWithSize {
     }
 
     /// Read an APPENDABLE (DELIMIT_CDR2) TypeIdentifierWithSize.
-    fn read_xcdr2(d: &mut Xcdr2Deserializer) -> Result<Self, CdrError> {
+    pub(crate) fn read_xcdr2(d: &mut Xcdr2Deserializer) -> Result<Self, CdrError> {
         let (size, start) = d.begin_struct()?;
         let (type_id, consumed) = TypeIdentifier::deserialize(&d.get_data()[d.get_position()..])
             .map_err(|_| CdrError::DeserializationError("TypeIdentifier".to_string()))?;
@@ -3218,11 +3184,86 @@ impl TypeInformation {
     }
 
     pub fn from_type_identifier(type_id: TypeIdentifier) -> Self {
-        let tws = TypeIdentifierWithSize::new(type_id.clone(), 0);
-        Self {
-            minimal: TypeIdentifierWithDependencies::new(TypeIdentifierWithSize::new(type_id, 0)),
-            complete: TypeIdentifierWithDependencies::new(tws),
+        let with = |id: TypeIdentifier| {
+            TypeIdentifierWithDependencies::new(TypeIdentifierWithSize::new(id, 0))
+        };
+        let empty = || with(TypeIdentifier::None);
+
+        match &type_id {
+            TypeIdentifier::MinimalTypeId(_) => Self { minimal: with(type_id), complete: empty() },
+            TypeIdentifier::CompleteTypeId(_) => Self { minimal: empty(), complete: with(type_id) },
+            _ => Self { minimal: empty(), complete: empty() },
         }
+    }
+
+    /// Build enriched TypeInformation from a type's `(id, object)` closure: element 0
+    /// is the root, the rest are transitive dependencies. Each entry advertises the
+    /// serialized size of its TypeObject. Returns None for an empty closure.
+    pub fn from_closure(closure: &[(TypeIdentifier, TypeObject)]) -> Option<Self> {
+        use crate::xtypes::type_object_xcdr::{serialize_type_object, spec_hash};
+        let (root_id, root_obj) = closure.first()?;
+        let spec_size = |obj: &TypeObject| serialize_type_object(obj).len() as u32;
+        let min_size = |m: &MinimalTypeObject| {
+            serialize_type_object(&TypeObject::Minimal(m.clone())).len() as u32
+        };
+        let root_hash = spec_hash(root_obj);
+
+        // Derive the minimal equivalent of every Complete entry so each advertised
+        // complete id has a matching minimal id/size (spec §7.6.3.2.1).
+        let completes: Vec<(TypeIdentifier, CompleteTypeObject)> = closure
+            .iter()
+            .filter_map(|(id, obj)| match obj {
+                TypeObject::Complete(c) => Some((id.clone(), c.clone())),
+                _ => None,
+            })
+            .collect();
+        let min_map: std::collections::HashMap<
+            EquivalenceHash,
+            (EquivalenceHash, MinimalTypeObject),
+        > = crate::xtypes::type_registry::build_minimal_closure(&completes)
+            .into_iter()
+            .map(|(ck, mh, mo)| (ck, (mh, mo)))
+            .collect();
+        let minimal_of = |id: &TypeIdentifier| -> Option<TypeIdentifierWithSize> {
+            let (mh, mo) = min_map.get(id.equivalence_hash()?)?;
+            Some(TypeIdentifierWithSize::new(TypeIdentifier::MinimalTypeId(*mh), min_size(mo)))
+        };
+
+        // COMPLETE slot: root + deps as advertised, spec byte sizes. The closure may
+        // re-list the root under another id; the root is not its own dependency, so
+        // drop it and dedup the rest by content hash. Build minimal deps in lockstep.
+        let complete_root = TypeIdentifierWithSize::new(root_id.clone(), spec_size(root_obj));
+        let mut seen = std::collections::HashSet::new();
+        let mut complete_deps = Vec::new();
+        let mut minimal_deps = Vec::new();
+        for (id, obj) in &closure[1..] {
+            if spec_hash(obj) == root_hash {
+                continue;
+            }
+            if !id.equivalence_hash().map_or(true, |h| seen.insert(*h)) {
+                continue;
+            }
+            complete_deps.push(TypeIdentifierWithSize::new(id.clone(), spec_size(obj)));
+            if let Some(md) = minimal_of(id) {
+                minimal_deps.push(md);
+            }
+        }
+        let complete = TypeIdentifierWithDependencies {
+            typeid_with_size: complete_root,
+            dependent_typeids: complete_deps,
+        };
+
+        // MINIMAL slot: the derived minimal ids/sizes. If the root has no minimal
+        // (e.g. a non-Complete closure), fall back to the complete slot.
+        let minimal = match minimal_of(root_id) {
+            Some(minimal_root) => TypeIdentifierWithDependencies {
+                typeid_with_size: minimal_root,
+                dependent_typeids: minimal_deps,
+            },
+            None => complete.clone(),
+        };
+
+        Some(Self { minimal, complete })
     }
 
     pub fn minimal_type_id(&self) -> &TypeIdentifier {
@@ -3312,10 +3353,6 @@ impl TypeInformation {
     }
 }
 
-// ============================================================================
-// TypeObject - Top Level
-// ============================================================================
-
 /// Discriminator values for TypeObject kinds.
 pub mod type_object_kind {
     pub const TK_NONE: u8 = 0x00;
@@ -3378,8 +3415,7 @@ impl MinimalTypeObject {
     }
 
     pub fn compute_hash(&self) -> EquivalenceHash {
-        let serialized = self.serialize();
-        EquivalenceHash::compute(&serialized)
+        crate::xtypes::type_object_xcdr::spec_hash(&TypeObject::Minimal(self.clone()))
     }
 
     pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
@@ -3486,10 +3522,7 @@ pub enum TypeObject {
 
 impl TypeObject {
     pub fn compute_hash(&self) -> EquivalenceHash {
-        match self {
-            TypeObject::Complete(c) => EquivalenceHash::compute(&c.serialize()),
-            TypeObject::Minimal(m) => m.compute_hash(),
-        }
+        crate::xtypes::type_object_xcdr::spec_hash(self)
     }
 
     /// Serialize TypeObject to bytes.
@@ -3540,17 +3573,17 @@ impl TypeObject {
     }
 }
 
-// ============================================================================
-// HasTypeObject Trait
-// ============================================================================
-
 /// Trait for types that have TypeObject representation.
-///
-/// This trait provides type metadata for DDS-XTypes support.
-/// It is automatically implemented by the `#[derive(DdsType)]` macro.
 pub trait HasTypeObject {
     /// Get the TypeIdentifier for this type.
     fn type_identifier() -> TypeIdentifier;
+
+    /// Get the EK_MINIMAL content hash `TypeIdentifier` for this type.
+    fn minimal_type_identifier() -> TypeIdentifier {
+        TypeIdentifier::MinimalTypeId(
+            TypeObject::Minimal(Self::minimal_type_object()).compute_hash(),
+        )
+    }
 
     /// Get the MinimalTypeObject for this type.
     fn minimal_type_object() -> MinimalTypeObject;
@@ -3583,15 +3616,126 @@ pub mod nested_closure {
     }
 }
 
-// ============================================================================
-// Primitive Type Implementations
-// ============================================================================
+/// Autoref-specialization probe resolving a member/element `TypeIdentifier` per
+/// equivalence kind: for `T: HasTypeObject` it returns the content-based id, and
+/// for any other `T` it degrades to the name-based fallback the macro supplies.
+pub mod member_id {
+    use super::{HasTypeObject, TypeIdentifier};
+
+    pub struct Probe<T>(pub core::marker::PhantomData<T>);
+
+    /// Fallback for member types that do NOT implement `HasTypeObject`.
+    pub trait MemberIdFallback {
+        fn complete_member_id(&self, fallback: TypeIdentifier) -> TypeIdentifier {
+            fallback
+        }
+        fn minimal_member_id(&self, fallback: TypeIdentifier) -> TypeIdentifier {
+            fallback
+        }
+    }
+    impl<T> MemberIdFallback for Probe<T> {}
+
+    /// Preferred path for member types that implement `HasTypeObject`.
+    impl<T: HasTypeObject> Probe<T> {
+        pub fn complete_member_id(&self, _fallback: TypeIdentifier) -> TypeIdentifier {
+            T::type_identifier()
+        }
+        pub fn minimal_member_id(&self, _fallback: TypeIdentifier) -> TypeIdentifier {
+            T::minimal_type_identifier()
+        }
+    }
+}
+
+/// Thread-local reentrancy guard for content-hash id computation.
+pub mod recursion_guard {
+    use super::TypeIdentifier;
+    use std::cell::RefCell;
+    use std::collections::HashSet;
+
+    thread_local! {
+        static ACTIVE: RefCell<HashSet<&'static str>> = RefCell::new(HashSet::new());
+    }
+
+    pub fn with_type_id_guard<T: ?Sized>(
+        fallback: TypeIdentifier,
+        f: impl FnOnce() -> TypeIdentifier,
+    ) -> TypeIdentifier {
+        let key = core::any::type_name::<T>();
+        let entered = ACTIVE.with(|s| s.borrow_mut().insert(key));
+        if !entered {
+            log::warn!(
+                "xtypes recursion guard: cyclic type reference for {}; using name-based \
+                 fallback id (mutually-recursive types are unsupported)",
+                key
+            );
+            return fallback;
+        }
+        let out = f();
+        ACTIVE.with(|s| {
+            s.borrow_mut().remove(key);
+        });
+        out
+    }
+}
+
+/// Compute the `PlainCollectionHeader.equiv_kind` for a plain collection whose
+/// element id is `element`: `Both` when the element (transitively) is fully
+/// descriptive (primitives/strings/plain collections of the same), else the
+/// equivalence kind of the hash id it contains.
+pub fn plain_collection_equiv_kind(element: &TypeIdentifier) -> EquivalenceKind {
+    fn combine(a: EquivalenceKind, b: EquivalenceKind) -> EquivalenceKind {
+        match (a, b) {
+            (EquivalenceKind::Both, other) | (other, EquivalenceKind::Both) => other,
+            (x, _) => x,
+        }
+    }
+    fn kind_of(id: &TypeIdentifier) -> EquivalenceKind {
+        match id {
+            TypeIdentifier::MinimalTypeId(_) => EquivalenceKind::Minimal,
+            TypeIdentifier::CompleteTypeId(_) => EquivalenceKind::Complete,
+            TypeIdentifier::PlainSequenceSmall { element_identifier, .. }
+            | TypeIdentifier::PlainSequenceLarge { element_identifier, .. }
+            | TypeIdentifier::PlainArraySmall { element_identifier, .. }
+            | TypeIdentifier::PlainArrayLarge { element_identifier, .. } => {
+                kind_of(element_identifier)
+            }
+            TypeIdentifier::PlainMapSmall { key_identifier, element_identifier, .. }
+            | TypeIdentifier::PlainMapLarge { key_identifier, element_identifier, .. } => {
+                combine(kind_of(key_identifier), kind_of(element_identifier))
+            }
+            _ => EquivalenceKind::Both,
+        }
+    }
+    kind_of(element)
+}
+
+/// Return `id` with its plain-collection header `equiv_kind` recomputed from its
+/// (current) element/key via [`plain_collection_equiv_kind`]. Callers rewrite inner
+/// ids first, so applying this bottom-up keeps nested collection headers correct
+/// (e.g. `Vec<Vec<Inner>>`). Non-collection ids pass through unchanged.
+pub fn recompute_collection_kind(mut id: TypeIdentifier) -> TypeIdentifier {
+    let kind = plain_collection_equiv_kind(&id);
+    match &mut id {
+        TypeIdentifier::PlainSequenceSmall { header, .. }
+        | TypeIdentifier::PlainSequenceLarge { header, .. }
+        | TypeIdentifier::PlainArraySmall { header, .. }
+        | TypeIdentifier::PlainArrayLarge { header, .. }
+        | TypeIdentifier::PlainMapSmall { header, .. }
+        | TypeIdentifier::PlainMapLarge { header, .. } => header.equiv_kind = kind,
+        _ => {}
+    }
+    id
+}
 
 macro_rules! impl_primitive_has_type_object {
     ($($rust_type:ty => $identifier:ident, $name:literal),* $(,)?) => {
         $(
             impl HasTypeObject for $rust_type {
                 fn type_identifier() -> TypeIdentifier {
+                    TypeIdentifier::$identifier
+                }
+
+                fn minimal_type_identifier() -> TypeIdentifier {
                     TypeIdentifier::$identifier
                 }
 
@@ -3631,6 +3775,10 @@ impl HasTypeObject for String {
         TypeIdentifier::String8
     }
 
+    fn minimal_type_identifier() -> TypeIdentifier {
+        TypeIdentifier::String8
+    }
+
     fn minimal_type_object() -> MinimalTypeObject {
         MinimalTypeObject::Struct(MinimalStructType::default())
     }
@@ -3646,10 +3794,27 @@ impl HasTypeObject for String {
 
 impl<T: HasTypeObject> HasTypeObject for Vec<T> {
     fn type_identifier() -> TypeIdentifier {
-        TypeIdentifier::PlainSequenceLarge {
-            header: PlainCollectionHeader::default(),
-            bound: 0, // unbounded
-            element_identifier: Box::new(T::type_identifier()),
+        let element = T::type_identifier();
+        // Unbounded sequence: bound 0 fits the SMALL form, matching the spec (XTypes 7.3.4.5).
+        TypeIdentifier::PlainSequenceSmall {
+            header: PlainCollectionHeader {
+                equiv_kind: plain_collection_equiv_kind(&element),
+                element_flags: CollectionElementFlag::default(),
+            },
+            bound: 0,
+            element_identifier: Box::new(element),
+        }
+    }
+
+    fn minimal_type_identifier() -> TypeIdentifier {
+        let element = T::minimal_type_identifier();
+        TypeIdentifier::PlainSequenceSmall {
+            header: PlainCollectionHeader {
+                equiv_kind: plain_collection_equiv_kind(&element),
+                element_flags: CollectionElementFlag::default(),
+            },
+            bound: 0,
+            element_identifier: Box::new(element),
         }
     }
 
@@ -3675,6 +3840,10 @@ impl<T: HasTypeObject> HasTypeObject for Option<T> {
         T::type_identifier()
     }
 
+    fn minimal_type_identifier() -> TypeIdentifier {
+        T::minimal_type_identifier()
+    }
+
     fn minimal_type_object() -> MinimalTypeObject {
         T::minimal_type_object()
     }
@@ -3695,6 +3864,10 @@ impl<T: HasTypeObject> HasTypeObject for Option<T> {
 impl<T: HasTypeObject> HasTypeObject for Box<T> {
     fn type_identifier() -> TypeIdentifier {
         T::type_identifier()
+    }
+
+    fn minimal_type_identifier() -> TypeIdentifier {
+        T::minimal_type_identifier()
     }
 
     fn minimal_type_object() -> MinimalTypeObject {
@@ -3720,10 +3893,46 @@ macro_rules! impl_array_has_type_object {
         $(
             impl<T: HasTypeObject> HasTypeObject for [T; $n] {
                 fn type_identifier() -> TypeIdentifier {
-                    TypeIdentifier::PlainArrayLarge {
-                        header: PlainCollectionHeader::default(),
-                        array_bound_seq: vec![$n],
-                        element_identifier: Box::new(T::type_identifier()),
+                    let element = T::type_identifier();
+                    let header = PlainCollectionHeader {
+                        equiv_kind: plain_collection_equiv_kind(&element),
+                        element_flags: CollectionElementFlag::default(),
+                    };
+                    let n: usize = $n;
+                    if n <= 255 {
+                        TypeIdentifier::PlainArraySmall {
+                            header,
+                            array_bound_seq: vec![n as u8],
+                            element_identifier: Box::new(element),
+                        }
+                    } else {
+                        TypeIdentifier::PlainArrayLarge {
+                            header,
+                            array_bound_seq: vec![n as u32],
+                            element_identifier: Box::new(element),
+                        }
+                    }
+                }
+
+                fn minimal_type_identifier() -> TypeIdentifier {
+                    let element = T::minimal_type_identifier();
+                    let header = PlainCollectionHeader {
+                        equiv_kind: plain_collection_equiv_kind(&element),
+                        element_flags: CollectionElementFlag::default(),
+                    };
+                    let n: usize = $n;
+                    if n <= 255 {
+                        TypeIdentifier::PlainArraySmall {
+                            header,
+                            array_bound_seq: vec![n as u8],
+                            element_identifier: Box::new(element),
+                        }
+                    } else {
+                        TypeIdentifier::PlainArrayLarge {
+                            header,
+                            array_bound_seq: vec![n as u32],
+                            element_identifier: Box::new(element),
+                        }
                     }
                 }
 
@@ -3751,10 +3960,6 @@ impl_array_has_type_object! {
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
     20, 24, 32, 48, 64, 128, 256, 512, 1024
 }
-
-// ============================================================================
-// CDR/XCDR Serialization Traits for TypeIdentifier
-// ============================================================================
 
 use crate::serialize::cdr::{
     CdrDeserialize, CdrError, CdrResult, CdrSerialize, CdrSerializer, CdrSerializerCommon, LcHint,
@@ -3832,9 +4037,10 @@ impl CdrDeserialize for TypeObject {
 
 impl XcdrSerialize for TypeObject {
     fn serialize_xcdr(&self, serializer: &mut Xcdr2Serializer) -> XcdrResult<()> {
-        let bytes = self.serialize();
-        let len = bytes.len() as u32;
-        serializer.serialize_u32(len)?;
+        while serializer.position() % 4 != 0 {
+            serializer.buffer_mut().push(0);
+        }
+        let bytes = crate::xtypes::type_object_xcdr::serialize_type_object(self);
         serializer.buffer_mut().extend_from_slice(&bytes);
         Ok(())
     }
@@ -3842,11 +4048,13 @@ impl XcdrSerialize for TypeObject {
 
 impl XcdrDeserialize for TypeObject {
     fn deserialize_xcdr(deserializer: &mut Xcdr2Deserializer) -> XcdrResult<Self> {
-        let len = deserializer.deserialize_u32()? as usize;
-        let bytes = deserializer.deserialize_byte_array(len)?;
-        TypeObject::deserialize(&bytes)
-            .map(|(obj, _)| obj)
-            .map_err(|e| crate::serialize::cdr::XcdrError::DeserializationError(e))
+        // The (4-aligned) DHEADER frames the object: peek it, slice 4+dheader bytes.
+        let dheader = deserializer.deserialize_u32()? as usize;
+        let after = deserializer.position();
+        deserializer.skip(dheader)?;
+        let slice = &deserializer.get_data()[after - 4..after + dheader];
+        crate::xtypes::type_object_xcdr::deserialize_type_object(slice)
+            .map_err(crate::serialize::cdr::XcdrError::DeserializationError)
     }
 }
 
@@ -3958,13 +4166,114 @@ impl XcdrDeserialize for TypeInformation {
     }
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_map_small_packed_order_element_before_key() {
+        let key = EquivalenceHash::new([0xAA; 14]);
+        let element = EquivalenceHash::new([0xBB; 14]);
+        let map = TypeIdentifier::PlainMapSmall {
+            header: PlainCollectionHeader::default(),
+            bound: 0,
+            key_flags: CollectionElementFlag(0),
+            key_identifier: Box::new(TypeIdentifier::CompleteTypeId(key)),
+            element_identifier: Box::new(TypeIdentifier::CompleteTypeId(element)),
+        };
+        let bytes = map.serialize();
+        // Packed codec round-trips.
+        let (back, consumed) = TypeIdentifier::deserialize(&bytes).unwrap();
+        assert_eq!(back, map);
+        assert_eq!(consumed, bytes.len());
+        // Spec field order (PlainMapSTypeDefn): element_identifier precedes key_identifier.
+        let elem_pos = bytes.windows(14).position(|w| w == [0xBB; 14]).unwrap();
+        let key_pos = bytes.windows(14).position(|w| w == [0xAA; 14]).unwrap();
+        assert!(elem_pos < key_pos, "element_identifier must serialize before key_identifier");
+    }
+
+    #[test]
+    fn from_type_identifier_degrades_bare_collection_to_empty_slots() {
+        // A non-hash top-level id (e.g. a bare map) must not be packed onto the
+        // wire via TypeInformation; both slots degrade to None so no malformed
+        // TypeIdentifier reaches 0x0075, even in release builds.
+        let map = TypeIdentifier::PlainMapSmall {
+            header: PlainCollectionHeader::default(),
+            bound: 0,
+            key_flags: CollectionElementFlag(0),
+            key_identifier: Box::new(TypeIdentifier::CompleteTypeId(EquivalenceHash::new(
+                [0xAA; 14],
+            ))),
+            element_identifier: Box::new(TypeIdentifier::CompleteTypeId(EquivalenceHash::new(
+                [0xBB; 14],
+            ))),
+        };
+        let ti = TypeInformation::from_type_identifier(map);
+        assert_eq!(ti.minimal.typeid_with_size.type_id, TypeIdentifier::None);
+        assert_eq!(ti.complete.typeid_with_size.type_id, TypeIdentifier::None);
+    }
+
+    #[test]
+    fn type_information_from_closure_carries_sizes_and_deps() {
+        use crate::xtypes::type_object_xcdr::{serialize_type_object, spec_hash};
+        let mk = |name: &str| {
+            let s = CompleteStructType::new(
+                TypeFlag::new(ExtensibilityKind::Appendable, false, false),
+                name.to_string(),
+                None,
+            );
+            TypeObject::Complete(CompleteTypeObject::Struct(s))
+        };
+        let root_obj = mk("Root");
+        let dep_obj = mk("Dep");
+        let root_id = TypeIdentifier::CompleteTypeId(spec_hash(&root_obj));
+        let dep_id = TypeIdentifier::CompleteTypeId(spec_hash(&dep_obj));
+        let closure = vec![(root_id.clone(), root_obj.clone()), (dep_id.clone(), dep_obj.clone())];
+
+        let ti = TypeInformation::from_closure(&closure).expect("non-empty closure");
+        // COMPLETE slot: advertised complete ids, spec byte sizes.
+        assert_eq!(ti.complete.typeid_with_size.type_id, root_id);
+        assert_eq!(
+            ti.complete.typeid_with_size.typeobject_serialized_size,
+            serialize_type_object(&root_obj).len() as u32
+        );
+        assert_eq!(ti.complete.dependent_typeids.len(), 1);
+        assert_eq!(ti.complete.dependent_typeids[0].type_id, dep_id);
+        assert_eq!(
+            ti.complete.dependent_typeids[0].typeobject_serialized_size,
+            serialize_type_object(&dep_obj).len() as u32
+        );
+
+        // MINIMAL slot: must hold DIFFERENT (minimal) ids than the complete slot.
+        assert!(matches!(ti.minimal.typeid_with_size.type_id, TypeIdentifier::MinimalTypeId(_)));
+        assert_ne!(ti.minimal.typeid_with_size.type_id, ti.complete.typeid_with_size.type_id);
+        assert_eq!(ti.minimal.dependent_typeids.len(), 1);
+        assert!(matches!(
+            ti.minimal.dependent_typeids[0].type_id,
+            TypeIdentifier::MinimalTypeId(_)
+        ));
+        assert_ne!(ti.minimal.dependent_typeids[0].type_id, dep_id);
+
+        // Enriched deps survive the 0x0075 parameter round-trip.
+        let bytes = ti.serialize_for_parameter();
+        let parsed = TypeInformation::deserialize_for_parameter(&bytes).expect("parse");
+        assert_eq!(parsed.complete.dependent_typeids.len(), 1);
+        assert_eq!(parsed.complete.dependent_typeids[0].type_id, dep_id);
+        assert_eq!(parsed.minimal.typeid_with_size.type_id, ti.minimal.typeid_with_size.type_id);
+
+        assert!(TypeInformation::from_closure(&[]).is_none());
+
+        // The root re-listed under another id is not its own dependency.
+        let root_name_id = TypeIdentifier::CompleteTypeId(EquivalenceHash::compute(b"Root"));
+        let dup_closure = vec![
+            (root_id.clone(), root_obj.clone()),
+            (root_name_id, root_obj.clone()),
+            (dep_id.clone(), dep_obj),
+        ];
+        let ti = TypeInformation::from_closure(&dup_closure).expect("non-empty closure");
+        assert_eq!(ti.complete.dependent_typeids.len(), 1);
+        assert_eq!(ti.complete.dependent_typeids[0].type_id, dep_id);
+    }
 
     #[test]
     fn test_equivalence_hash_compute() {
@@ -3990,8 +4299,8 @@ mod tests {
         let hash3 = compute_name_hash("field2");
         assert_ne!(hash1, hash3);
 
-        // Verify mask is applied
-        assert_eq!(hash1 & 0xF0000000, 0);
+        // Spec reference vector: NameHash("color") = {0x70, 0xDD, 0xA5, 0xDF}
+        assert_eq!(compute_name_hash("color").to_be_bytes(), [0x70, 0xDD, 0xA5, 0xDF]);
     }
 
     #[test]
@@ -4061,11 +4370,11 @@ mod tests {
     #[test]
     fn test_sequence_type_identifier() {
         let vec_id = Vec::<i32>::type_identifier();
-        if let TypeIdentifier::PlainSequenceLarge { element_identifier, bound, .. } = vec_id {
+        if let TypeIdentifier::PlainSequenceSmall { element_identifier, bound, .. } = vec_id {
             assert_eq!(*element_identifier, TypeIdentifier::Int32);
-            assert_eq!(bound, 0); // unbounded
+            assert_eq!(bound, 0); // unbounded (bound 0 fits the SMALL form)
         } else {
-            panic!("Expected PlainSequenceLarge");
+            panic!("Expected PlainSequenceSmall");
         }
     }
 
@@ -4164,12 +4473,12 @@ mod tests {
     #[test]
     fn test_array_type_identifier() {
         let arr_id = <[i32; 10]>::type_identifier();
-        if let TypeIdentifier::PlainArrayLarge { array_bound_seq, element_identifier, .. } = arr_id
+        if let TypeIdentifier::PlainArraySmall { array_bound_seq, element_identifier, .. } = arr_id
         {
             assert_eq!(*element_identifier, TypeIdentifier::Int32);
-            assert_eq!(array_bound_seq, vec![10]);
+            assert_eq!(array_bound_seq, vec![10u8]);
         } else {
-            panic!("Expected PlainArrayLarge");
+            panic!("Expected PlainArraySmall");
         }
     }
 

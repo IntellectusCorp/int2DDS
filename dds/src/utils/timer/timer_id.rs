@@ -96,6 +96,11 @@ pub(crate) enum TimerId {
         reader_entity_id: EntityId,
         instance_handle: InstanceHandle,
     },
+
+    // SEDP: one-shot deferred endpoint match timeout while resolving a TypeObject
+    DeferredTypeMatch {
+        remote_guid: Guid,
+    },
 }
 
 impl fmt::Display for TimerId {
@@ -189,6 +194,9 @@ impl fmt::Display for TimerId {
             }
             TimerId::TimeBasedFilter { reader_entity_id, instance_handle } => {
                 write!(f, "tbf_{}_{}", Self::id_hex(reader_entity_id), instance_handle)
+            }
+            TimerId::DeferredTypeMatch { remote_guid } => {
+                write!(f, "deferred_type_match_{:x}", Self::guid_u128(remote_guid))
             }
         }
     }

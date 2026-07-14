@@ -14,7 +14,7 @@ use crate::{
         locator::Locator,
         parameters::{ParameterId, ParameterValue, PlCdrParameter},
     },
-    xtypes::{TypeIdentifier, TypeObject},
+    xtypes::{TypeIdentifier, TypeInformation, TypeObject},
 };
 
 use super::pl_cdr_deserialize::PlCdrParser;
@@ -73,6 +73,7 @@ pub struct ParsedBuiltinTopicData {
     // DDS-XTypes fields
     pub type_identifier: Option<TypeIdentifier>,
     pub type_object: Option<TypeObject>,
+    pub type_information: Option<TypeInformation>,
     pub type_consistency_enforcement: Option<TypeConsistencyEnforcementQosPolicy>,
 }
 
@@ -123,6 +124,7 @@ impl ParsedBuiltinTopicData {
             type_max_size_serialized: None,
             type_identifier: data.type_identifier().cloned(),
             type_object: data.type_object().cloned(),
+            type_information: data.type_information().cloned(),
             type_consistency_enforcement: None,
             history: None,
             resource_limits: None,
@@ -163,6 +165,7 @@ impl ParsedBuiltinTopicData {
             type_max_size_serialized: None,
             type_identifier: data.type_identifier().cloned(),
             type_object: data.type_object().cloned(),
+            type_information: data.type_information().cloned(),
             type_consistency_enforcement: Some(*data.type_consistency_enforcement()),
             history: None,
             resource_limits: None,
@@ -360,15 +363,14 @@ impl ParsedBuiltinTopicData {
             }
             ParameterId::PidTypeInformation => {
                 if let ParameterValue::TypeInformation(type_info) = parameter.value {
-                    let type_id = type_info.minimal.typeid_with_size.type_id;
-                    if type_id != TypeIdentifier::None {
-                        self.type_identifier = Some(type_id);
-                    } else {
-                        let complete_id = type_info.complete.typeid_with_size.type_id;
-                        if complete_id != TypeIdentifier::None {
-                            self.type_identifier = Some(complete_id);
-                        }
+                    let complete_id = &type_info.complete.typeid_with_size.type_id;
+                    if *complete_id != TypeIdentifier::None {
+                        self.type_identifier = Some(complete_id.clone());
+                    } else if type_info.minimal.typeid_with_size.type_id != TypeIdentifier::None {
+                        self.type_identifier =
+                            Some(type_info.minimal.typeid_with_size.type_id.clone());
                     }
+                    self.type_information = Some(type_info);
                 }
             }
             ParameterId::PidTypeIdV1 => {

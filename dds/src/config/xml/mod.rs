@@ -11,8 +11,13 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use log::warn;
+
 use crate::dcps::core::error::{DdsError, DdsResult};
-use crate::xtypes::{CompleteTypeObject, DynamicTypeSupport, TypeObject, TypeRegistry};
+use crate::xtypes::{
+    CompleteTypeObject, DynamicTypeSupport, EquivalenceHash, TypeIdentifier, TypeObject,
+    TypeRegistry,
+};
 
 use ast::{XmlCaseLabel, XmlMemberType, XmlStruct, XmlTypeDecl};
 
@@ -251,27 +256,111 @@ impl XmlTypeRegistry {
             check_struct_cycles(name, &structs, &mut Vec::new(), &mut done)?;
         }
 
+        let mut batch: Vec<(String, CompleteTypeObject)> = Vec::new();
         for decl in &decls {
             if matches!(decl, XmlTypeDecl::Typedef(_)) {
                 continue;
             }
-            let name = decl.name().to_string();
-            let complete = convert::to_complete_type_object(decl)?;
-            if let Some(existing) = self.get_type_object(&name) {
-                if existing.serialize() == complete.serialize() {
+            batch.push((decl.name().to_string(), convert::to_complete_type_object(decl)?));
+        }
+        self.register_batch(batch)
+    }
+
+    // Topologically orders `batch` by intra-batch name references and rewrites each
+    // type's placeholder ids to content ids (dependencies first, so their content
+    // hashes are already known) before registering it.
+    fn register_batch(&mut self, batch: Vec<(String, CompleteTypeObject)>) -> DdsResult<()> {
+        let n = batch.len();
+        let names: Vec<String> = batch.iter().map(|(nm, _)| nm.clone()).collect();
+        let objs: Vec<CompleteTypeObject> = batch.into_iter().map(|(_, c)| c).collect();
+
+        // Seed the name-hash -> content-id resolver with already-registered types.
+        let mut resolver: HashMap<EquivalenceHash, TypeIdentifier> = HashMap::new();
+        for name in &self.names {
+            if let Some(hash) = self.registry.lookup_by_name(name) {
+                resolver.insert(
+                    EquivalenceHash::compute(name.as_bytes()),
+                    TypeIdentifier::CompleteTypeId(*hash),
+                );
+            }
+        }
+
+        let index: HashMap<EquivalenceHash, usize> = names
+            .iter()
+            .enumerate()
+            .map(|(i, nm)| (EquivalenceHash::compute(nm.as_bytes()), i))
+            .collect();
+        let deps: Vec<Vec<usize>> = objs
+            .iter()
+            .map(|c| {
+                let mut d = Vec::new();
+                for h in convert::referenced_name_hashes(c) {
+                    if let Some(&j) = index.get(&h) {
+                        if !d.contains(&j) {
+                            d.push(j);
+                        }
+                    }
+                }
+                d
+            })
+            .collect();
+
+        let mut done = vec![false; n];
+        let mut remaining = n;
+        while remaining > 0 {
+            let mut progressed = false;
+            for i in 0..n {
+                if done[i] || !deps[i].iter().all(|&j| j == i || done[j]) {
                     continue;
                 }
-                return Err(DdsError::Error(format!(
-                    "XML types: type '{name}' redefined with different content"
-                )));
+                self.register_rewritten(&names[i], objs[i].clone(), &mut resolver)?;
+                done[i] = true;
+                remaining -= 1;
+                progressed = true;
             }
-            // Keyed by name hash, matching derive's nested member reference ids.
-            self.registry.register_type_object_with_id(
-                &convert::name_based_type_id(&name),
-                TypeObject::Complete(complete),
-            );
-            self.names.push(name);
+            if !progressed {
+                warn!(
+                    "XML types: reference cycle detected; leaving cyclic member ids name-based \
+                     (mutually-recursive types are unsupported)"
+                );
+                for i in 0..n {
+                    if !done[i] {
+                        self.register_rewritten(&names[i], objs[i].clone(), &mut resolver)?;
+                    }
+                }
+                break;
+            }
         }
+        Ok(())
+    }
+
+    // Rewrites one converted type's placeholder ids to content ids, records its own
+    // content id in `resolver`, and registers it (deriving its minimal equivalent).
+    fn register_rewritten(
+        &mut self,
+        name: &str,
+        mut obj: CompleteTypeObject,
+        resolver: &mut HashMap<EquivalenceHash, TypeIdentifier>,
+    ) -> DdsResult<()> {
+        convert::resolve_content_ids(&mut obj, resolver);
+        let content_hash = TypeObject::Complete(obj.clone()).compute_hash();
+        resolver.insert(
+            EquivalenceHash::compute(name.as_bytes()),
+            TypeIdentifier::CompleteTypeId(content_hash),
+        );
+        if let Some(existing) = self.registry.lookup_by_name(name).copied() {
+            if existing == content_hash {
+                return Ok(());
+            }
+            return Err(DdsError::Error(format!(
+                "XML types: type '{name}' redefined with different content"
+            )));
+        }
+        self.registry.register_type_object_with_id(
+            &TypeIdentifier::CompleteTypeId(content_hash),
+            TypeObject::Complete(obj),
+        );
+        self.names.push(name.to_string());
         Ok(())
     }
 

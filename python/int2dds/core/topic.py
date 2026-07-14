@@ -18,6 +18,40 @@ if TYPE_CHECKING:
 T = TypeVar("T", bound="DdsType")
 
 
+def _build_type_info(type_name: str, extensibility: Extensibility, fields: list):
+    """Build a native Int2DdsTypeInfo from generated ``_dds_type_info_fields`` metadata.
+
+    Each entry is ``(op, name, type_const, size, flags)`` where ``op`` selects the
+    ``int2dds_type_info_add_*`` call. The returned handle is owned by the caller and must be
+    freed with ``int2dds_type_info_destroy`` after ``create_topic_with_type_info``.
+    """
+    name_c = ffi.new("char[]", type_name.encode())
+    ti_ptr = ffi.new("Int2DdsTypeInfo **")
+    check_ret(lib.int2dds_type_info_create(name_c, int(extensibility), ti_ptr))
+    ti = ti_ptr[0]
+    try:
+        for op, field_name, type_const, size, flags in fields:
+            fname_c = ffi.new("char[]", field_name.encode())
+            if op == "field":
+                check_ret(lib.int2dds_type_info_add_field(ti, fname_c, type_const, flags))
+            elif op == "string":
+                check_ret(lib.int2dds_type_info_add_string_field(ti, fname_c, size, flags))
+            elif op == "wstring":
+                check_ret(lib.int2dds_type_info_add_wstring_field(ti, fname_c, size, flags))
+            elif op == "seq":
+                check_ret(
+                    lib.int2dds_type_info_add_sequence_field(ti, fname_c, type_const, size, flags)
+                )
+            elif op == "arr":
+                check_ret(
+                    lib.int2dds_type_info_add_array_field(ti, fname_c, type_const, size, flags)
+                )
+    except Exception:
+        lib.int2dds_type_info_destroy(ti)
+        raise
+    return ti
+
+
 class Topic(Generic[T]):
     """
     Topic - associates a name with a data type for publish/subscribe.
@@ -144,9 +178,24 @@ class Topic(Generic[T]):
                         key_field_types.append(_KEY_TYPE_MAP.get(field_type_str, 0))
                         break
 
+        # Prefer advertising a conformant TypeObject when the generator emitted flat-type
+        # metadata (_dds_type_info_fields) -- this matches the Rust derive so strict XTypes
+        # peers can structurally match. Otherwise fall back to the
+        # name-based field-descriptor / keyed paths below.
+        type_info_fields = getattr(type_class, "_dds_type_info_fields", None)
         # Check for full field descriptors (enables CFT reader-side filtering + compute_key)
         all_fields = getattr(type_class, "_all_fields", None)
-        if all_fields:
+        if type_info_fields:
+            ti = _build_type_info(self._type_name, extensibility, type_info_fields)
+            try:
+                check_ret(
+                    lib.int2dds_create_topic_with_type_info(
+                        participant._handle, topic_name_c, ti, qos_ptr, topic_ptr
+                    )
+                )
+            finally:
+                lib.int2dds_type_info_destroy(ti)
+        elif all_fields:
             import dataclasses
             dc_fields = dataclasses.fields(type_class)
 
