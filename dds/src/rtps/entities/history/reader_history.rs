@@ -15,7 +15,6 @@ use crate::{
             guid::Guid,
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
             sequence::SequenceNumber,
-            types::ChangeKind,
         },
         entities::history::{
             cache_change::CacheChange, cache_change_pool::CacheChangePool,
@@ -131,6 +130,12 @@ impl ReaderHistoryCache {
         self.pool.acquire()
     }
 
+    // Number of members buffered for a remote writer's currently open coherent set.
+    #[cfg(test)]
+    pub(crate) fn pending_coherent_len(&self, writer_guid: Guid) -> usize {
+        self.coherent_pending.get(&writer_guid).map_or(0, |set| set.changes.len())
+    }
+
     pub(crate) fn get_change(
         &self,
         seq_num: SequenceNumber,
@@ -174,11 +179,7 @@ impl ReaderHistoryCache {
         // End marker: a payload-less Data closes the writer's open set and is never stored,
         // regardless of this reader's presentation QoS. Accepts both an explicit
         // PID_COHERENT_SET=UNKNOWN and a payload-less Data carrying no coherent set id.
-        let is_end_marker = coherent_set == Some(SequenceNumber::UNKNOWN)
-            || (coherent_set.is_none()
-                && a_change.kind() == ChangeKind::Alive
-                && a_change.data_value().is_empty());
-        if is_end_marker {
+        if a_change.is_coherent_end_marker() {
             let members =
                 self.close_and_take_coherent_set(writer_guid, Some(a_change.sequence_number()));
             return self.commit_changes_to_datareader_cache(
