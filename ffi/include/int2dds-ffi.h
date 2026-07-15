@@ -1689,7 +1689,7 @@ Int2DdsRet int2dds_dynamic_value_as_string(const struct Int2DdsDynamicValue *val
 
 /**
  * Format any value as a human-readable string into `buf`, regardless of kind
- * (mirrors the core `Display`). Handy for generic printing of a discovered type.
+ * (mirrors the core `Display`).
  */
 Int2DdsRet int2dds_dynamic_value_to_string(const struct Int2DdsDynamicValue *value,
                                            char *buf,
