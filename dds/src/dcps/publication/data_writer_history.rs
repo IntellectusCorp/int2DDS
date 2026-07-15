@@ -833,14 +833,15 @@ mod tests {
         topic::qos::TopicQos,
     };
 
-    // Helper function to create a test CacheChange
+    // Helper function to create a test CacheChange.
+    // Payload is non-empty so the change is not classified as a coherent-set end marker.
     fn create_change(seq: i64, handle: InstanceHandle) -> Arc<CacheChange> {
         Arc::new(CacheChange::new(
             ChangeKind::Alive,
             Guid::UNKNOWN,
             handle,
             SequenceNumber::from_i64(seq),
-            vec![],
+            vec![1],
             None,
         ))
     }
