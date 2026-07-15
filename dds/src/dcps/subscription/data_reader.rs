@@ -3805,11 +3805,14 @@ pub(crate) mod tests {
     use crate::domain::domain_participant_factory::DomainParticipantFactory;
     use crate::domain::qos::DomainParticipantQos;
     use crate::infrastructure::qos_policy::{
-        HistoryQosPolicy, ReliabilityQosPolicy, ReliabilityQosPolicyKind,
+        DurabilityQosPolicy, DurabilityQosPolicyKind, HistoryQosPolicy,
+        PresentationQosAccessScopeKind, PresentationQosPolicy, ReliabilityQosPolicy,
+        ReliabilityQosPolicyKind,
     };
     use crate::infrastructure::wait_set::WaitSet;
     use crate::publication::data_writer_listener::DataWriterListener;
     use crate::publication::qos::{DataWriterQos, PublisherQos};
+    use crate::rtps::entities::reader::StatefulReader;
     use crate::subscription::data_reader_listener::DataReaderListener;
     use crate::subscription::qos::SubscriberQos;
     use crate::subscription::sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind};
@@ -6643,5 +6646,147 @@ pub(crate) mod tests {
 
         domain_participant.delete_contained_entities().unwrap();
         domain_participant_factory.delete_participant(domain_participant).unwrap();
+    }
+
+    #[test]
+    fn volatile_late_joiner_receives_gap_for_open_set_member() {
+        // A volatile reader that joins mid coherent set must never receive a DATA whose
+        // set start was GAPped. The writer GAPs those members instead, so on the reader
+        // side the open-set member (sn5) arrives as an irrelevant (GAP) change, not DATA,
+        // and nothing is buffered for the incomplete set.
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "volatile_coherent_gap",
+                "HelloWorldType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        // The publisher must offer the same coherent presentation as the subscriber requests,
+        // otherwise presentation QoS is incompatible and the endpoints never match.
+        let publisher_qos = PublisherQos {
+            presentation: PresentationQosPolicy {
+                access_scope: PresentationQosAccessScopeKind::Topic,
+                coherent_access: true,
+                ordered_access: false,
+            },
+            ..Default::default()
+        };
+        let publisher =
+            participant.create_publisher(publisher_qos, None, StatusMask::default()).unwrap();
+
+        let writer_qos = DataWriterQos {
+            durability: DurabilityQosPolicy { kind: DurabilityQosPolicyKind::Volatile },
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(&topic, writer_qos, None, StatusMask::default())
+            .unwrap();
+
+        // Open a coherent set and write sn1..4 before any reader has matched.
+        publisher.begin_coherent_changes().unwrap();
+        for index in 0..4 {
+            let data = HelloWorld { index, message: "member".to_string() };
+            writer.write(&data, InstanceHandle::NIL).unwrap();
+        }
+
+        // A coherent subscriber so the reader buffers set members when it does receive DATA.
+        let subscriber_qos = SubscriberQos {
+            presentation: PresentationQosPolicy {
+                access_scope: PresentationQosAccessScopeKind::Topic,
+                coherent_access: true,
+                ordered_access: false,
+            },
+            ..Default::default()
+        };
+        let subscriber =
+            participant.create_subscriber(subscriber_qos, None, StatusMask::default()).unwrap();
+        let reader_qos = DataReaderQos {
+            durability: DurabilityQosPolicy { kind: DurabilityQosPolicyKind::Volatile },
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let data_reader = subscriber
+            .create_datareader::<HelloWorld>(&topic, reader_qos, None, StatusMask::default())
+            .unwrap();
+
+        // Wait for the reader to late-join: its match horizon is fixed at sn4.
+        let wait_set = WaitSet::new();
+        let condition = writer.get_statuscondition().unwrap().clone();
+        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
+        wait_set.attach_condition(condition.clone()).unwrap();
+        wait_set
+            .wait(Duration::from_seconds(10))
+            .expect("timed out waiting for PUBLICATION_MATCHED");
+        wait_set.detach_condition(condition).unwrap();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
+        condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
+        wait_set.attach_condition(condition.clone()).unwrap();
+        wait_set
+            .wait(Duration::from_seconds(10))
+            .expect("timed out waiting for SUBSCRIPTION_MATCHED");
+        wait_set.detach_condition(condition).unwrap();
+
+        // Write one more member (sn5) while the set is still open.
+        let data = HelloWorld { index: 4, message: "member".to_string() };
+        writer.write(&data, InstanceHandle::NIL).unwrap();
+
+        let writer_guid = writer.guid();
+        let rtps_reader = data_reader.get_rtps_reader().unwrap();
+        let stateful_reader =
+            rtps_reader.as_any().downcast_ref::<StatefulReader>().expect("stateful reader");
+        let writer_proxies = stateful_reader.writer_proxies();
+        let reader_cache = rtps_reader.reader_cache();
+
+        // Poll until sn5 has been received on the reader side (as DATA or GAP).
+        let sn5 = SequenceNumber::from_i64(5);
+        let mut is_relevant = None;
+        for _ in 0..100 {
+            is_relevant = writer_proxies
+                .lock()
+                .unwrap()
+                .first()
+                .and_then(|wp| wp.received_change_is_relevant(sn5));
+            if is_relevant.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        // sn5 must arrive as an irrelevant (GAP) change, and no member of the incomplete
+        // set may be buffered on the reader.
+        assert_eq!(is_relevant, Some(false), "sn5 should be received via GAP, not DATA");
+        assert_eq!(
+            reader_cache.lock().unwrap().pending_coherent_len(writer_guid),
+            0,
+            "no member of the GAPped set should be buffered"
+        );
+
+        publisher.end_coherent_changes().unwrap();
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 }

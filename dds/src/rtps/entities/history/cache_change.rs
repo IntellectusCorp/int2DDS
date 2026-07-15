@@ -274,6 +274,15 @@ impl CacheChange {
         self.data_payload.as_slice()
     }
 
+    // A payload-less Alive Data carrying no coherent set id (or UNKNOWN) closes
+    // the writer's open coherent set.
+    pub(crate) fn is_coherent_end_marker(&self) -> bool {
+        let coherent_set = self.presentation_info.coherent_set;
+        (coherent_set.is_none() || coherent_set == Some(SequenceNumber::UNKNOWN))
+            && self.kind == ChangeKind::Alive
+            && self.data_value().is_empty()
+    }
+
     pub(crate) fn data_bytes(&self) -> Bytes {
         match &self.data_payload {
             // Shared payload: refcount bump, no allocation.

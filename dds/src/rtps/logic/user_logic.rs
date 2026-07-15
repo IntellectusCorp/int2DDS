@@ -197,6 +197,12 @@ impl UserLogic {
                     continue;
                 }
 
+                // Change in a coherent set whose first sequence number was GAPped: answer with GAP.
+                if reader_proxy.is_change_in_gapped_coherent_set(&a_change) {
+                    gap_list.push(*requested_change_sn);
+                    continue;
+                }
+
                 // TODO: Filter message according to Reader Proxy's request (time based filter, content filtered topic, etc)
                 // Send DATA message or GAP message depending on filter result
 
@@ -378,6 +384,24 @@ impl UserLogic {
 
                 // Send DATA message or GAP message depending on filter result
                 if let Some(a_change) = history_cache.get_change(a_change_seq_num) {
+                    // A change in a coherent set whose first sequence number was GAPped can never
+                    // complete on this reader; answer with GAP so no DATA references a gapped set start.
+                    if reader_proxy.is_change_in_gapped_coherent_set(&a_change) {
+                        if reader_proxy.is_reliable() {
+                            self.send_gap_for_range(
+                                participant.guid(),
+                                reader_proxy,
+                                writer.endpoint_id(),
+                                a_change_seq_num,
+                                a_change_seq_num,
+                            )?;
+                        }
+
+                        reader_proxy.extend_last_irrelevant_sn(a_change_seq_num);
+                        reader_proxy.set_highest_sent_change_sn(a_change_seq_num);
+                        continue;
+                    }
+
                     let first_sn = history_cache.get_seq_num_min().ok_or_else(|| {
                         RtpsError::new(
                             RtpsErrorCode::DataNotSet,
