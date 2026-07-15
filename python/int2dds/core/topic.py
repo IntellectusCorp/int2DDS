@@ -72,6 +72,7 @@ class Topic(Generic[T]):
         topic_name: str,
         type_class: type[T],
         qos: TopicQos | None = None,
+        profile: str | None = None,
     ) -> None:
         self._participant = participant
         self._name = topic_name
@@ -134,6 +135,22 @@ class Topic(Generic[T]):
             qos_ptr = qos_handle
 
         topic_ptr = ffi.new("Int2DdsTopic **")
+
+        # Create the topic from a named XML QoS profile when requested.
+        if profile is not None:
+            check_ret(
+                lib.int2dds_create_topic_with_profile(
+                    participant._handle,
+                    topic_name_c,
+                    type_name_c,
+                    int(extensibility),
+                    has_key,
+                    profile.encode(),
+                    topic_ptr,
+                )
+            )
+            self._handle = topic_ptr[0]
+            return
 
         # Extract key field metadata from type class for compute_key() support
         key_field_indices = []
