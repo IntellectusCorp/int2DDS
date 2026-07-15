@@ -191,6 +191,29 @@ class DomainParticipant:
 
         return Topic(self, topic_name, type_class, qos)
 
+    def create_publisher_with_profile(self, profile: str) -> Publisher:
+        """Create a Publisher whose QoS comes from the named XML profile."""
+        from int2dds.core.publisher import Publisher
+
+        return Publisher(self, profile=profile)
+
+    def create_subscriber_with_profile(self, profile: str) -> Subscriber:
+        """Create a Subscriber whose QoS comes from the named XML profile."""
+        from int2dds.core.subscriber import Subscriber
+
+        return Subscriber(self, profile=profile)
+
+    def create_topic_with_profile(
+        self,
+        topic_name: str,
+        type_class: type[T],
+        profile: str,
+    ) -> Topic[T]:
+        """Create a Topic whose QoS comes from the named XML profile."""
+        from int2dds.core.topic import Topic
+
+        return Topic(self, topic_name, type_class, profile=profile)
+
     def create_contentfilteredtopic(
         self,
         topic_name: str,

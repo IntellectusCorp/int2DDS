@@ -1,14 +1,6 @@
 //! # Error Handling
 //!
-//! Converts Rust DdsError types to C-compatible integer error codes.
-//!
-//! ## Error Code Categories
-//!
-//! - **0**: Success (INT2DDS_RET_OK)
-//! - **1-9**: General errors (ERROR, TIMEOUT, UNSUPPORTED)
-//! - **10-19**: Allocation/argument errors (BAD_ALLOC, INVALID_ARGUMENT)
-//! - **20-29**: DDS-specific errors (ALREADY_DELETED, NOT_ENABLED, etc.)
-//! - **100+**: FFI-specific errors (NULL_POINTER)
+//! Converts Rust `DdsError` values to C-compatible integer return codes.
 
 use int2dds::core::error::DdsError;
 
@@ -22,7 +14,6 @@ pub const INT2DDS_RET_OK: Int2DdsRet = 0;
 pub const INT2DDS_RET_ERROR: Int2DdsRet = 1;
 pub const INT2DDS_RET_TIMEOUT: Int2DdsRet = 2;
 pub const INT2DDS_RET_UNSUPPORTED: Int2DdsRet = 3;
-pub const INT2DDS_RET_BAD_ALLOC: Int2DdsRet = 10;
 pub const INT2DDS_RET_INVALID_ARGUMENT: Int2DdsRet = 11;
 
 // DDS-specific errors
@@ -35,27 +26,23 @@ pub const INT2DDS_RET_OUT_OF_RESOURCES: Int2DdsRet = 25;
 pub const INT2DDS_RET_ILLEGAL_OPERATION: Int2DdsRet = 26;
 pub const INT2DDS_RET_NO_DATA: Int2DdsRet = 27;
 
-// Null pointer errors
+// FFI-boundary errors
 pub const INT2DDS_RET_NULL_POINTER: Int2DdsRet = 100;
 pub const INT2DDS_RET_BUFFER_TOO_SMALL: Int2DdsRet = 101;
 
-// Dynamic xtypes errors (200..=299 reserved for the dynamic surface; see docs/superpowers/specs/2026-04-09-ffi-xtypes-parity-roadmap.md principle P2)
 pub const INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND: Int2DdsRet = 200;
 pub const INT2DDS_RET_DYNAMIC_TYPE_MISMATCH: Int2DdsRet = 201;
 pub const INT2DDS_RET_DYNAMIC_UNSUPPORTED_TYPE: Int2DdsRet = 202;
 pub const INT2DDS_RET_DYNAMIC_TIMEOUT: Int2DdsRet = 203;
 pub const INT2DDS_RET_DYNAMIC_DECODE_ERROR: Int2DdsRet = 204;
 
-/// Convert DdsResult to FFI return code
-pub fn to_ffi_result<T>(result: int2dds::core::error::DdsResult<T>) -> (Int2DdsRet, Option<T>) {
-    match result {
-        Ok(value) => (INT2DDS_RET_OK, Some(value)),
-        Err(e) => (dds_error_to_code(&e), None),
-    }
-}
-
 /// Convert DdsError to error code
 pub fn dds_error_to_code(error: &DdsError) -> Int2DdsRet {
+    // Only Error carries a reason; clear otherwise to avoid stale reads.
+    match error {
+        DdsError::Error(msg) => crate::last_error::set_last_error(msg),
+        _ => crate::last_error::clear_last_error(),
+    }
     match error {
         DdsError::Error(_) => INT2DDS_RET_ERROR,
         DdsError::Timeout => INT2DDS_RET_TIMEOUT,
@@ -77,6 +64,10 @@ pub fn dds_error_to_code(error: &DdsError) -> Int2DdsRet {
 macro_rules! check_null {
     ($ptr:expr) => {
         if $ptr.is_null() {
+            $crate::last_error::set_last_error(concat!(
+                "null pointer argument: ",
+                stringify!($ptr)
+            ));
             return $crate::error::INT2DDS_RET_NULL_POINTER;
         }
     };
@@ -90,5 +81,16 @@ macro_rules! ffi_try {
             Ok(val) => val,
             Err(e) => return $crate::error::dds_error_to_code(&e),
         }
+    };
+}
+
+/// Bail out of an FFI function with an error message (returns `INT2DDS_RET_ERROR`).
+/// Routes through `dds_error_to_code` so code/message mapping stays in one place.
+#[macro_export]
+macro_rules! ffi_bail {
+    ($msg:expr) => {
+        return $crate::error::dds_error_to_code(&::int2dds::core::error::DdsError::Error(
+            ($msg).into(),
+        ))
     };
 }
