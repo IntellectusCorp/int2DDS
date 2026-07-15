@@ -22,7 +22,7 @@ use crate::rtps::common::types::ChangeKind;
 use crate::rtps::common::types::DomainId;
 use crate::rtps::entities::endpoint::Endpoint;
 use crate::rtps::entities::entity::Entity;
-use crate::rtps::entities::history::cache_change::CacheChange;
+use crate::rtps::entities::history::cache_change::{CacheChange, PresentationInfo};
 use crate::rtps::entities::history::history_cache::HistoryCache;
 use crate::rtps::entities::history::writer_history::WriterHistoryCache;
 use crate::rtps::entities::reader::{
@@ -194,6 +194,12 @@ impl UserLogic {
             if let Some(a_change) = cache_guard.get_change(*requested_change_sn) {
                 // ACK may have been received in the meantime, so check first
                 if reader_proxy.max_acked_sn() >= *requested_change_sn {
+                    continue;
+                }
+
+                // Change in a coherent set whose first sequence number was GAPped: answer with GAP.
+                if reader_proxy.is_change_in_gapped_coherent_set(&a_change) {
+                    gap_list.push(*requested_change_sn);
                     continue;
                 }
 
@@ -378,6 +384,24 @@ impl UserLogic {
 
                 // Send DATA message or GAP message depending on filter result
                 if let Some(a_change) = history_cache.get_change(a_change_seq_num) {
+                    // A change in a coherent set whose first sequence number was GAPped can never
+                    // complete on this reader; answer with GAP so no DATA references a gapped set start.
+                    if reader_proxy.is_change_in_gapped_coherent_set(&a_change) {
+                        if reader_proxy.is_reliable() {
+                            self.send_gap_for_range(
+                                participant.guid(),
+                                reader_proxy,
+                                writer.endpoint_id(),
+                                a_change_seq_num,
+                                a_change_seq_num,
+                            )?;
+                        }
+
+                        reader_proxy.extend_last_irrelevant_sn(a_change_seq_num);
+                        reader_proxy.set_highest_sent_change_sn(a_change_seq_num);
+                        continue;
+                    }
+
                     let first_sn = history_cache.get_seq_num_min().ok_or_else(|| {
                         RtpsError::new(
                             RtpsErrorCode::DataNotSet,
@@ -1211,17 +1235,18 @@ impl UserLogic {
         Ok(())
     }
 
-    // Add a single change to the reader cache and notify the application. TIME_BASED_FILTER is
-    // applied inside the reader history cache: a held sample returns None and is delivered later
-    // by the cache's own timer, so it is not notified here.
+    // Add a change to the reader cache and notify every change it makes available:
+    // none when held (TIME_BASED_FILTER) or buffered, several when a coherent set closes.
     fn deliver_change(reader: &dyn Reader, change: CacheChange) {
         let reader_cache = reader.reader_cache();
-        let mut res: Option<RtpsResult<Option<Arc<CacheChange>>>> = None;
+        let mut res: Option<RtpsResult<Vec<Arc<CacheChange>>>> = None;
         if let Ok(mut cache_guard) = reader_cache.lock() {
             res = Some(cache_guard.add_change(change, true));
         }
-        if let Some(Ok(Some(change))) = res {
-            reader.on_change(change);
+        if let Some(Ok(changes)) = res {
+            for change in changes {
+                reader.on_change(change);
+            }
         }
     }
 }
@@ -1506,6 +1531,13 @@ impl UserLogic {
                 cache_change.set_kind(ChangeKind::AliveFiltered);
             }
         }
+
+        // Restore per-sample coherent/group presentation metadata.
+        cache_change.set_presentation_info(PresentationInfo {
+            coherent_set: inline_qos.get_coherent_set(),
+            group_seq_num: inline_qos.get_group_seq_num(),
+            group_coherent_set: inline_qos.get_group_coherent_set(),
+        });
 
         Ok(())
     }
