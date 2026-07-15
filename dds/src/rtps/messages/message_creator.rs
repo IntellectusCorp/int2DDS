@@ -35,6 +35,7 @@ use crate::rtps::{
         submessages::{data::Data, data_frag::DataFrag},
     },
 };
+use crate::serialize::pl_cdr::InlineQosParameters;
 
 pub(crate) struct MessageCreator {}
 
@@ -163,7 +164,10 @@ impl MessageCreator {
         data_header_flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::DATA);
         match cache_change.kind() {
             ChangeKind::Alive | ChangeKind::AliveFiltered => {
-                data_header_flag.add_flag(SubmessageFlagType::DataFlag, SubmessageId::DATA);
+                // Payload-less Alive changes (coherent set end markers) carry no DataFlag.
+                if !cache_change.data_value().is_empty() {
+                    data_header_flag.add_flag(SubmessageFlagType::DataFlag, SubmessageId::DATA);
+                }
             }
             ChangeKind::NotAliveDisposed
             | ChangeKind::NotAliveUnregistered
@@ -223,6 +227,18 @@ impl MessageCreator {
                     ));
                     debug!("Added ContentFilterInfo to inline QoS");
                 }
+            }
+
+            // Attach per-sample coherent/group presentation metadata.
+            let inline = cache_change.presentation_info();
+            if let Some(sn) = inline.coherent_set {
+                param_list.set_coherent_set(sn);
+            }
+            if let Some(sn) = inline.group_seq_num {
+                param_list.set_group_seq_num(sn);
+            }
+            if let Some(sn) = inline.group_coherent_set {
+                param_list.set_group_coherent_set(sn);
             }
 
             if !param_list.parameters().is_empty() {

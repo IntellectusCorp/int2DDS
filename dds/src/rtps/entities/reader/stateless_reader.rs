@@ -490,6 +490,11 @@ impl Reader for StatelessReader {
         writers.swap_remove(idx);
         drop(writers);
 
+        // Connectivity change: drop any open coherent set from the removed writer.
+        if let Ok(mut cache) = self.reader_cache.lock() {
+            cache.discard_coherent_pending(writer_guid);
+        }
+
         // Update subscription matched status
         self.update_subscription_matched_status(-1, InstanceHandle::from_guid(&writer_guid));
 
@@ -518,15 +523,29 @@ impl Reader for StatelessReader {
                 );
             }
         }
+        let removed_guids: Vec<Guid> = remote_writer_info
+            .iter()
+            .filter(|info| info.remote_writer_guid().prefix() == prefix)
+            .map(|info| info.remote_writer_guid())
+            .collect();
         let len_before = remote_writer_info.len();
         remote_writer_info.retain(|info| info.remote_writer_guid().prefix() != prefix);
         let removed = len_before - remote_writer_info.len();
+        let len_after = remote_writer_info.len();
+        drop(remote_writer_info);
+
+        // Connectivity change: drop any open coherent sets from the removed writers.
+        if let Ok(mut cache) = self.reader_cache.lock() {
+            for writer_guid in &removed_guids {
+                cache.discard_coherent_pending(*writer_guid);
+            }
+        }
 
         debug!(
             "Removed all unmatched remote writers from participant: {}",
             Guid::guid_prefix_to_string(&prefix)
         );
-        debug!("Current number of matched writer: {:?}", remote_writer_info.len());
+        debug!("Current number of matched writer: {:?}", len_after);
         Ok(removed)
     }
 }
