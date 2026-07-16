@@ -1578,7 +1578,7 @@ pub unsafe extern "C" fn int2dds_sample_seq_get_data(
     *actual_size_out = data.len();
 
     if data.len() > buffer_capacity {
-        return INT2DDS_RET_ERROR;
+        return INT2DDS_RET_BUFFER_TOO_SMALL;
     }
 
     std::ptr::copy_nonoverlapping(data.as_ptr(), buffer, data.len());

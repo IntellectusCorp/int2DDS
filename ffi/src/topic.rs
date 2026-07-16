@@ -467,12 +467,12 @@ pub unsafe extern "C" fn int2dds_topic_get_name(
     let name = topic_ref.inner.get_name();
     let name_cstr = match CString::new(name) {
         Ok(s) => s,
-        Err(_) => return INT2DDS_RET_ERROR,
+        Err(_) => ffi_bail!("topic name contains interior NUL byte"),
     };
 
     let name_bytes = name_cstr.as_bytes_with_nul();
     if name_bytes.len() > name_size {
-        return INT2DDS_RET_ERROR;
+        return INT2DDS_RET_BUFFER_TOO_SMALL;
     }
 
     std::ptr::copy_nonoverlapping(name_bytes.as_ptr() as *const c_char, name_out, name_bytes.len());
@@ -501,12 +501,12 @@ pub unsafe extern "C" fn int2dds_topic_get_type_name(
 
     let type_name_cstr = match CString::new(type_name.as_str()) {
         Ok(s) => s,
-        Err(_) => return INT2DDS_RET_ERROR,
+        Err(_) => ffi_bail!("topic type name contains interior NUL byte"),
     };
 
     let type_name_bytes = type_name_cstr.as_bytes_with_nul();
     if type_name_bytes.len() > type_name_size {
-        return INT2DDS_RET_ERROR;
+        return INT2DDS_RET_BUFFER_TOO_SMALL;
     }
 
     std::ptr::copy_nonoverlapping(
