@@ -55,7 +55,7 @@ class CdrWriter:
         self,
         extensibility: Extensibility = Extensibility.APPENDABLE,
         little_endian: bool = True,
-        xcdr2: bool = True,
+        xcdr2: bool = False,
     ) -> None:
         """
         Initialize a CDR writer.
@@ -350,9 +350,16 @@ class CdrKeyWriter:
         self._buf = bytearray()
 
     def _align(self, alignment: int) -> None:
-        """Align to boundary (max 4 for XCDR2)."""
-        actual = min(alignment, 4)
-        padding = (actual - (len(self._buf) % actual)) % actual
+        """Align relative to the start of the key body (post-header offset 0).
+
+        The canonical KeyHash CDR (matching the Rust derive `serialize_key`) is
+        big-endian CDR whose alignment is relative to the first byte after the
+        stripped encapsulation header, so 8-byte fields (i64/u64/f64) align to 8
+        from the buffer start. No cap: XCDR2's 4-byte cap does not apply here.
+        """
+        if alignment <= 1:
+            return
+        padding = (alignment - (len(self._buf) % alignment)) % alignment
         if padding > 0:
             self._buf.extend(b"\x00" * padding)
 
@@ -382,11 +389,11 @@ class CdrKeyWriter:
         self._buf.extend(struct.pack(">i", val))
 
     def write_u64(self, val: int) -> None:
-        self._align(4)
+        self._align(8)
         self._buf.extend(struct.pack(">Q", val))
 
     def write_i64(self, val: int) -> None:
-        self._align(4)
+        self._align(8)
         self._buf.extend(struct.pack(">q", val))
 
     def write_f32(self, val: float) -> None:
@@ -394,7 +401,7 @@ class CdrKeyWriter:
         self._buf.extend(struct.pack(">f", val))
 
     def write_f64(self, val: float) -> None:
-        self._align(4)
+        self._align(8)
         self._buf.extend(struct.pack(">d", val))
 
     def write_string(self, val: str) -> None:
