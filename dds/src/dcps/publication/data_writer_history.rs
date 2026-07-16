@@ -154,23 +154,23 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
         self.max_samples_per_instance
     }
 
-    fn sample_count(&self) -> usize {
-        self.changes.len()
+    fn sample_count(&self) -> DdsResult<usize> {
+        Ok(self.changes.len())
     }
 
-    fn instance_count(&self) -> usize {
-        self.instance_map.lock().map(|m| m.len()).unwrap_or(0)
+    fn instance_count(&self) -> DdsResult<usize> {
+        let map = self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        Ok(map.len())
     }
 
-    fn contains_instance(&self, instance_handle: InstanceHandle) -> bool {
-        self.instance_map.lock().map(|m| m.contains_key(&instance_handle)).unwrap_or(false)
+    fn contains_instance(&self, instance_handle: InstanceHandle) -> DdsResult<bool> {
+        let map = self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        Ok(map.contains_key(&instance_handle))
     }
 
-    fn sample_count_of_instance(&self, instance_handle: InstanceHandle) -> usize {
-        self.instance_map
-            .lock()
-            .map(|m| m.get(&instance_handle).map_or(0, |v| v.len()))
-            .unwrap_or(0)
+    fn sample_count_of_instance(&self, instance_handle: InstanceHandle) -> DdsResult<usize> {
+        let map = self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        Ok(map.get(&instance_handle).map_or(0, |v| v.len()))
     }
 
     // Returns the map of lifespan timers keyed by writer GUID.
@@ -315,7 +315,7 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
             return Ok(Some(removed));
         }
 
-        if self.is_max_samples_exceeded() {
+        if self.is_max_samples_exceeded()? {
             let removed = self.try_remove_oldest_change_of_all()?;
             return Ok(Some(removed));
         }
