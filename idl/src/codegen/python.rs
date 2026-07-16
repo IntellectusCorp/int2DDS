@@ -62,6 +62,7 @@ impl<'a> PyGen<'a> {
         self.line(&format!("from {}.cdr import CdrReader, CdrWriter, Extensibility", module_name));
         self.line(&format!("from {}.cdr.writer import CdrKeyWriter", module_name));
         self.line("");
+        self.emit_cross_file_imports();
         self.line("");
 
         self.emit_constants();
@@ -114,6 +115,19 @@ impl<'a> PyGen<'a> {
             self.line(&format!("{} = {}", variant_name, v.value));
         }
         self.indent -= 1;
+        // XTypes TypeObject descriptor for enum-typed members: (bit_bound, literals) where each
+        // literal is (canonical_name, value, is_default). Attached AFTER the class body because
+        // any assignment inside an IntEnum body becomes an enum member. The canonical name is
+        // PascalCase to match the derive macro's variant name (the TypeObject literal name), NOT
+        // the Python SCREAMING_SNAKE member name. IDL enums are i32 -> bit_bound 32, no @default.
+        let literals: Vec<String> = e
+            .variants
+            .iter()
+            .map(|v| format!("(\"{}\", {}, False)", naming::to_pascal_case(&v.name), v.value))
+            .collect();
+        self.line("");
+        self.line(&format!("{}._dds_type_name = \"{}\"", e.name, e.qualified_name));
+        self.line(&format!("{}._dds_enum_info = (32, ({},))", e.name, literals.join(", ")));
     }
 
     // ---- Bitmask ----
@@ -174,7 +188,7 @@ impl<'a> PyGen<'a> {
         self.line("");
 
         // _serialize_cdr (with encap header)
-        self.line("def _serialize_cdr(self, xcdr2: bool = True) -> bytes:");
+        self.line("def _serialize_cdr(self, xcdr2: bool = False) -> bytes:");
         self.indent += 1;
         self.line("\"\"\"Serialize to CDR bytes with encapsulation header.\"\"\"");
         self.line("w = CdrWriter(extensibility=self._extensibility, xcdr2=xcdr2)");
@@ -351,7 +365,7 @@ impl<'a> PyGen<'a> {
         self.line("");
 
         // _serialize_cdr (with encap header)
-        self.line("def _serialize_cdr(self, xcdr2: bool = True) -> bytes:");
+        self.line("def _serialize_cdr(self, xcdr2: bool = False) -> bytes:");
         self.indent += 1;
         self.line("\"\"\"Serialize to CDR bytes with encapsulation header.\"\"\"");
         self.line("w = CdrWriter(extensibility=self._extensibility, xcdr2=xcdr2)");
@@ -546,10 +560,10 @@ impl<'a> PyGen<'a> {
         ));
         self.line("");
 
-        // XTypes TypeObject advertisement metadata (flat types only): the runtime builds an
-        // Int2DdsTypeInfo from this and advertises a conformant TypeObject during discovery,
-        // matching the Rust derive. Nested/named types are omitted and fall back to name-based
-        // matching, because the FFI builder references them by name-hash, not content-hash.
+        // XTypes TypeObject advertisement metadata: the runtime builds an Int2DdsTypeInfo from
+        // this and advertises a conformant TypeObject during discovery, matching the Rust derive.
+        // Nested structs are referenced by content-hash (via int2dds_type_info_add_nested_field)
+        // so composite keys resolve. Enums/maps/unions still fall back to name-based matching.
         self.emit_type_info_metadata(&all_members);
 
         // Fields (including inherited from base structs)
@@ -583,10 +597,12 @@ impl<'a> PyGen<'a> {
         self.indent -= 1;
     }
 
-    /// Emit `_dds_type_info_fields` for flat structs (all members are primitives, strings, or
-    /// sequences/arrays of primitives). The runtime reads this to advertise a TypeObject.
+    /// Emit `_dds_type_info_fields` for advertisable structs (all members are primitives,
+    /// strings, sequences/arrays of primitives, or nested structs that are themselves
+    /// recursively advertisable). The runtime reads this to advertise a TypeObject.
     fn emit_type_info_metadata(&mut self, members: &[ResolvedMember]) {
-        if !members.iter().all(|m| Self::is_flat_advertisable(&m.resolved_type)) {
+        let mut visited = std::collections::HashSet::new();
+        if !members.iter().all(|m| self.member_advertisable(m, &mut visited)) {
             return;
         }
         self.line("_dds_type_info_fields: ClassVar[list] = [");
@@ -622,15 +638,75 @@ impl<'a> PyGen<'a> {
         })
     }
 
-    /// A member is advertisable byte-correctly when it is a primitive/string, or a
-    /// sequence/array whose element is a primitive/string. Named types and maps are excluded.
-    fn is_flat_advertisable(ty: &ResolvedType) -> bool {
+    /// A member is advertisable byte-correctly when its type is a primitive/string, an enum or
+    /// bitmask, a (non-@external) nested struct that is itself recursively advertisable, or a
+    /// sequence/array whose element is one of those (single-level). Maps, unions, and nested
+    /// collections are excluded (they fall back to the name-based keyed path).
+    fn member_advertisable(
+        &self,
+        m: &ResolvedMember,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        // @external only guards direct struct members (Box) against type cycles.
+        if m.is_external && matches!(m.resolved_type, ResolvedType::Struct(_)) {
+            return false;
+        }
+        self.type_advertisable(&m.resolved_type, visited)
+    }
+
+    /// Recursively decide advertisability of a member/element type.
+    fn type_advertisable(
+        &self,
+        ty: &ResolvedType,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> bool {
         match ty {
+            ResolvedType::Struct(name) => self.struct_advertisable(name, visited),
+            ResolvedType::Enum(_) => true,
             ResolvedType::Sequence { element, .. } | ResolvedType::Array { element, .. } => {
-                Self::field_constant(element).is_some()
+                // Single-level only: element is a leaf named type or primitive/string, not
+                // another collection (nested-collection ids aren't emitted yet).
+                match element.as_ref() {
+                    ResolvedType::Struct(name) => self.struct_advertisable(name, visited),
+                    ResolvedType::Enum(_) => true,
+                    other => Self::field_constant(other).is_some(),
+                }
             }
+            // Bitmask/Map/Union keys fall back to the name-based keyed path (deferred).
             other => Self::field_constant(other).is_some(),
         }
+    }
+
+    /// The simple generated class name for an advertisable named element (Struct/Enum), else
+    /// None. Used both to gate collection elements and to emit the nested-reference spec.
+    fn element_class_name(ty: &ResolvedType) -> Option<String> {
+        match ty {
+            ResolvedType::Struct(name) | ResolvedType::Enum(name) => {
+                Some(name.rsplit("::").next().unwrap_or(name).to_string())
+            }
+            _ => None,
+        }
+    }
+
+    /// A named struct is advertisable when it exists in the model and all of its members are
+    /// recursively advertisable. `visited` guards against @external-induced type cycles.
+    fn struct_advertisable(
+        &self,
+        name: &str,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        let simple = name.rsplit("::").next().unwrap_or(name);
+        if !visited.insert(simple.to_string()) {
+            return false;
+        }
+        let ok = match self.find_struct(simple).cloned() {
+            Some(s) => {
+                self.collect_all_members(&s).iter().all(|m| self.member_advertisable(m, visited))
+            }
+            None => false,
+        };
+        visited.remove(simple);
+        ok
     }
 
     /// Member flag bitmask (KEY=1, OPTIONAL=2, MUST_UNDERSTAND=4, EXTERNAL=8). The FFI adds
@@ -664,12 +740,32 @@ impl<'a> PyGen<'a> {
                 format!("(\"wstring\", \"{}\", 0, {}, {}),", m.name, bound.unwrap_or(0), flags)
             }
             ResolvedType::Sequence { element, bound } => {
-                let ec = Self::field_constant(element).unwrap_or(0);
-                format!("(\"seq\", \"{}\", {}, {}, {}),", m.name, ec, bound.unwrap_or(0), flags)
+                if let Some(cls) = Self::element_class_name(element) {
+                    format!(
+                        "(\"seq_nested\", \"{}\", {}, {}, {}),",
+                        m.name,
+                        cls,
+                        bound.unwrap_or(0),
+                        flags
+                    )
+                } else {
+                    let ec = Self::field_constant(element).unwrap_or(0);
+                    format!("(\"seq\", \"{}\", {}, {}, {}),", m.name, ec, bound.unwrap_or(0), flags)
+                }
             }
             ResolvedType::Array { element, size } => {
-                let ec = Self::field_constant(element).unwrap_or(0);
-                format!("(\"arr\", \"{}\", {}, {}, {}),", m.name, ec, size, flags)
+                if let Some(cls) = Self::element_class_name(element) {
+                    format!("(\"arr_nested\", \"{}\", {}, {}, {}),", m.name, cls, size, flags)
+                } else {
+                    let ec = Self::field_constant(element).unwrap_or(0);
+                    format!("(\"arr\", \"{}\", {}, {}, {}),", m.name, ec, size, flags)
+                }
+            }
+            ResolvedType::Struct(name) | ResolvedType::Enum(name) => {
+                // Reference the generated class object (struct/enum) so the runtime recursively
+                // builds its nested type_info by content-hash.
+                let cls = name.rsplit("::").next().unwrap_or(name);
+                format!("(\"nested\", \"{}\", {}, 0, {}),", m.name, cls, flags)
             }
             other => {
                 let c = Self::field_constant(other).unwrap_or(0);
@@ -707,14 +803,16 @@ impl<'a> PyGen<'a> {
             ResolvedType::Array { element, .. } => {
                 format!("list[{}]", Self::type_to_python(element))
             }
-            ResolvedType::Struct(name) => format!("\"{}\"", name),
-            ResolvedType::Enum(name) => name.clone(),
+            ResolvedType::Struct(name) => {
+                format!("\"{}\"", name.rsplit("::").next().unwrap_or(name))
+            }
+            ResolvedType::Enum(name) => name.rsplit("::").next().unwrap_or(name).to_string(),
             ResolvedType::WChar => "str".to_string(),
             ResolvedType::WString { .. } => "str".to_string(),
             ResolvedType::Map { key, value, .. } => {
                 format!("dict[{}, {}]", Self::type_to_python(key), Self::type_to_python(value))
             }
-            ResolvedType::Bitmask(name) => name.clone(),
+            ResolvedType::Bitmask(name) => name.rsplit("::").next().unwrap_or(name).to_string(),
         }
     }
 
@@ -733,20 +831,26 @@ impl<'a> PyGen<'a> {
                 let elem_default = self.default_value(element);
                 format!("field(default_factory=lambda: [{}] * {})", elem_default, size)
             }
-            ResolvedType::Struct(name) => format!("field(default_factory=lambda: {}())", name),
+            ResolvedType::Struct(name) => {
+                let cls = name.rsplit("::").next().unwrap_or(name);
+                format!("field(default_factory=lambda: {}())", cls)
+            }
             ResolvedType::Enum(name) => {
+                let cls = name.rsplit("::").next().unwrap_or(name);
                 // Use first variant as default
-                if let Some(e) = self.model.enums.iter().find(|e| &e.name == name) {
+                if let Some(e) = self.find_enum(name) {
                     if let Some(v) = e.variants.first() {
-                        return format!("{}.{}", name, naming::to_screaming_snake(&v.name));
+                        return format!("{}.{}", cls, naming::to_screaming_snake(&v.name));
                     }
                 }
-                format!("{}(0)", name)
+                format!("{}(0)", cls)
             }
             ResolvedType::WChar => "\"\"".to_string(),
             ResolvedType::WString { .. } => "\"\"".to_string(),
             ResolvedType::Map { .. } => "field(default_factory=dict)".to_string(),
-            ResolvedType::Bitmask(name) => format!("{}(0)", name),
+            ResolvedType::Bitmask(name) => {
+                format!("{}(0)", name.rsplit("::").next().unwrap_or(name))
+            }
         }
     }
 
@@ -754,7 +858,7 @@ impl<'a> PyGen<'a> {
 
     fn emit_serialize_cdr(&mut self, s: &ResolvedStruct) {
         let members = self.collect_all_members(s);
-        self.line("def _serialize_cdr(self, xcdr2: bool = True) -> bytes:");
+        self.line("def _serialize_cdr(self, xcdr2: bool = False) -> bytes:");
         self.indent += 1;
         self.line("\"\"\"Serialize to CDR bytes with encapsulation header.\"\"\"");
         self.line("w = CdrWriter(extensibility=self._extensibility, xcdr2=xcdr2)");
@@ -876,13 +980,88 @@ impl<'a> PyGen<'a> {
     fn collect_all_members(&self, s: &ResolvedStruct) -> Vec<ResolvedMember> {
         let mut all = Vec::new();
         if let Some(ref base_name) = s.base_type {
-            let simple = base_name.rsplit("::").next().unwrap_or(base_name);
-            if let Some(base) = self.model.structs.iter().find(|st| st.name == simple) {
+            if let Some(base) = self.find_struct(base_name) {
                 all.extend(self.collect_all_members(base));
             }
         }
         all.extend(s.members.clone());
         all
+    }
+
+    /// Emit `from <module> import <Leaf>` for every `#include`d type this file
+    /// references. Same-file types resolve by their in-module class; imported
+    /// ones must be pulled in explicitly since each file is a flat module.
+    fn emit_cross_file_imports(&mut self) {
+        if self.model.imported.modules.is_empty() {
+            return;
+        }
+        let mut refs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for s in &self.model.structs {
+            if let Some(base) = &s.base_type {
+                refs.insert(base.clone());
+            }
+            for m in &s.members {
+                Self::collect_referenced_types(&m.resolved_type, &mut refs);
+            }
+        }
+        for u in &self.model.unions {
+            for c in &u.cases {
+                Self::collect_referenced_types(&c.member.resolved_type, &mut refs);
+            }
+            if let Some(dc) = &u.default_case {
+                Self::collect_referenced_types(&dc.resolved_type, &mut refs);
+            }
+        }
+
+        // (module, leaf) pairs, deduped and sorted for stable output.
+        let mut imports: std::collections::BTreeSet<(String, String)> =
+            std::collections::BTreeSet::new();
+        for name in &refs {
+            let leaf = name.rsplit("::").next().unwrap_or(name);
+            // Skip types emitted in this same file.
+            if self.is_locally_defined(leaf) {
+                continue;
+            }
+            if let Some(module) = self
+                .model
+                .imported
+                .modules
+                .get(name)
+                .or_else(|| self.model.imported.modules.get(leaf))
+            {
+                imports.insert((module.clone(), leaf.to_string()));
+            }
+        }
+        for (module, leaf) in imports {
+            self.line(&format!("from {} import {}", module, leaf));
+        }
+    }
+
+    /// Collect struct/enum/bitmask type names referenced by `ty` (recursing
+    /// through sequences, arrays, and maps) into `refs`.
+    fn collect_referenced_types(ty: &ResolvedType, refs: &mut std::collections::BTreeSet<String>) {
+        match ty {
+            ResolvedType::Struct(name) | ResolvedType::Enum(name) | ResolvedType::Bitmask(name) => {
+                refs.insert(name.clone());
+            }
+            ResolvedType::Sequence { element, .. } | ResolvedType::Array { element, .. } => {
+                Self::collect_referenced_types(element, refs);
+            }
+            ResolvedType::Map { key, value, .. } => {
+                Self::collect_referenced_types(key, refs);
+                Self::collect_referenced_types(value, refs);
+            }
+            _ => {}
+        }
+    }
+
+    /// True if a type with this leaf name is emitted in the current file.
+    fn is_locally_defined(&self, leaf: &str) -> bool {
+        self.model.structs.iter().any(|s| s.name == leaf)
+            || self.model.enums.iter().any(|e| e.name == leaf)
+            || self.model.bitmasks.iter().any(|b| b.name == leaf)
+            || self.model.bitsets.iter().any(|b| b.name == leaf)
+            || self.model.unions.iter().any(|u| u.name == leaf)
     }
 
     fn is_non_primitive_element(element: &ResolvedType) -> bool {
@@ -902,7 +1081,27 @@ impl<'a> PyGen<'a> {
 
     fn find_bitmask(&self, name: &str) -> Option<&ResolvedBitmask> {
         let simple = name.rsplit("::").next().unwrap_or(name);
-        self.model.bitmasks.iter().find(|b| b.name == simple)
+        self.model
+            .bitmasks
+            .iter()
+            .chain(self.model.imported.bitmasks.iter())
+            .find(|b| b.name == simple)
+    }
+
+    /// Locate a struct by leaf name in this file or in an `#include`d file.
+    fn find_struct(&self, name: &str) -> Option<&ResolvedStruct> {
+        let simple = name.rsplit("::").next().unwrap_or(name);
+        self.model
+            .structs
+            .iter()
+            .chain(self.model.imported.structs.iter())
+            .find(|s| s.name == simple)
+    }
+
+    /// Locate an enum by leaf name in this file or in an `#include`d file.
+    fn find_enum(&self, name: &str) -> Option<&ResolvedEnum> {
+        let simple = name.rsplit("::").next().unwrap_or(name);
+        self.model.enums.iter().chain(self.model.imported.enums.iter()).find(|e| e.name == simple)
     }
 
     /// Returns (write_method, read_method) for a bitmask based on bit_bound.
@@ -1205,11 +1404,13 @@ impl<'a> PyGen<'a> {
             ResolvedType::Char => self.line(&format!("{} = r.read_char()", name)),
             ResolvedType::String { .. } => self.line(&format!("{} = r.read_string()", name)),
             ResolvedType::Enum(enum_name) => {
-                self.line(&format!("{} = {}(r.read_enum())", name, enum_name));
+                let cls = enum_name.rsplit("::").next().unwrap_or(enum_name);
+                self.line(&format!("{} = {}(r.read_enum())", name, cls));
             }
             ResolvedType::Struct(struct_name) => {
                 // Nested struct: read inline from the existing reader
-                self.line(&format!("{} = {}._deserialize_cdr_inline(r)", name, struct_name));
+                let cls = struct_name.rsplit("::").next().unwrap_or(struct_name);
+                self.line(&format!("{} = {}._deserialize_cdr_inline(r)", name, cls));
             }
             ResolvedType::Sequence { element, .. } => {
                 self.line(&format!("_{}_count = r.read_seq_header()", name));
@@ -1256,7 +1457,8 @@ impl<'a> PyGen<'a> {
             }
             ResolvedType::Bitmask(bitmask_name) => {
                 let (_, read_fn) = self.bitmask_methods(bitmask_name);
-                self.line(&format!("{} = {}(r.{}())", name, bitmask_name, read_fn));
+                let cls = bitmask_name.rsplit("::").next().unwrap_or(bitmask_name);
+                self.line(&format!("{} = {}(r.{}())", name, cls, read_fn));
             }
         }
     }
@@ -1276,7 +1478,7 @@ impl<'a> PyGen<'a> {
             self.line("w = CdrKeyWriter()");
             for m in key_fields {
                 let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
-                self.emit_write_key_field(&m.resolved_type, &format!("self.{}", field_name));
+                self.emit_write_key_field(&m.resolved_type, &format!("self.{}", field_name), 0);
             }
             self.line("return w.to_bytes()");
         }
@@ -1284,7 +1486,7 @@ impl<'a> PyGen<'a> {
         self.indent -= 1;
     }
 
-    fn emit_write_key_field(&mut self, ty: &ResolvedType, accessor: &str) {
+    fn emit_write_key_field(&mut self, ty: &ResolvedType, accessor: &str, depth: usize) {
         match ty {
             ResolvedType::Bool => self.line(&format!("w.write_bool({})", accessor)),
             ResolvedType::U8 | ResolvedType::UInt8 => {
@@ -1308,9 +1510,52 @@ impl<'a> PyGen<'a> {
                 let (write_fn, _) = self.bitmask_methods(bitmask_name);
                 self.line(&format!("w.{}(int({}))", write_fn, accessor));
             }
-            _ => {
-                // Complex types (Struct, Sequence, Array, Map) in keys are not common
-                self.line(&format!("# TODO: Complex key field {}", accessor));
+            // A Final/Appendable nested struct key member contributes all of
+            // its fields inline (matching the Rust dynamic `serialize_struct_cdr`
+            // used by the key path), recursively and in declaration order. A
+            // Mutable nested struct instead serializes as PL_CDR with member
+            // headers, which the flat key writer cannot express; mark it
+            // unsupported rather than emit silently-wrong inline bytes.
+            ResolvedType::Struct(name) => match self.find_struct(name).cloned() {
+                Some(nested) if nested.extensibility == ExtensibilityKind::Mutable => {
+                    self.line(&format!(
+                        "# Unsupported: mutable nested struct key field {}",
+                        accessor
+                    ));
+                }
+                Some(nested) => {
+                    for m in self.collect_all_members(&nested) {
+                        let fname = naming::escape_keyword(&m.name, naming::TargetLang::Python);
+                        let inner = format!("{}.{}", accessor, fname);
+                        self.emit_write_key_field(&m.resolved_type, &inner, depth);
+                    }
+                }
+                None => {
+                    self.line(&format!(
+                        "# Unsupported: unresolved nested struct key field {}",
+                        accessor
+                    ));
+                }
+            },
+            // Sequence: u32 length prefix, then each element inline.
+            ResolvedType::Sequence { element, .. } => {
+                let var = format!("_ke{}", depth);
+                self.line(&format!("w.write_u32(len({}))", accessor));
+                self.line(&format!("for {} in {}:", var, accessor));
+                self.indent += 1;
+                self.emit_write_key_field(element, &var, depth + 1);
+                self.indent -= 1;
+            }
+            // Array: fixed length, elements inline with no length prefix.
+            ResolvedType::Array { element, .. } => {
+                let var = format!("_ke{}", depth);
+                self.line(&format!("for {} in {}:", var, accessor));
+                self.indent += 1;
+                self.emit_write_key_field(element, &var, depth + 1);
+                self.indent -= 1;
+            }
+            ResolvedType::Map { .. } => {
+                self.line(&format!("# Unsupported: map key field {}", accessor));
             }
         }
     }
@@ -1335,6 +1580,30 @@ mod tests {
     use super::*;
     use crate::parser::parse_idl;
     use crate::resolver::resolve;
+
+    /// The no-arg convenience `_serialize_cdr()` must default to XCDR1 (spec effective
+    /// write default), mirroring the core `int2dds_default_data_representation()`.
+    #[test]
+    fn test_serialize_cdr_convenience_defaults_to_xcdr1() {
+        let defs = parse_idl(
+            r#"
+            @appendable
+            struct ShapeType {
+                @key long id;
+                long value;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "ShapeType.idl", &PythonOptions::new());
+        assert!(
+            code.contains("def _serialize_cdr(self, xcdr2: bool = False) -> bytes:"),
+            "no-arg _serialize_cdr must default to XCDR1 (False): {}",
+            code
+        );
+        assert!(!code.contains("xcdr2: bool = True"), "no XCDR2-default convenience: {}", code);
+    }
 
     #[test]
     fn test_keyword_escaping_struct_fields() {
@@ -1392,19 +1661,141 @@ mod tests {
     }
 
     #[test]
-    fn test_type_info_metadata_omitted_for_named_members() {
+    fn test_type_info_metadata_omitted_for_unsupported_members() {
         let defs = parse_idl(
             r#"
-            enum Color { RED, GREEN };
-            struct Widget { Color c; long x; };
+            struct Widget { map<long, long> m; long x; };
             "#,
         )
         .unwrap();
         let model = resolve(defs).unwrap();
         let code = generate(&model, "Widget.idl", &PythonOptions::new());
-        // Widget has a named (enum) member -> not flat -> advertisement metadata is omitted
-        // so it falls back to name-based matching (the FFI would name-hash the nested type).
+        // Widget has a map member -> not advertisable -> advertisement metadata is omitted
+        // so it falls back to name-based matching.
         assert!(!code.contains("_dds_type_info_fields"), "{}", code);
+    }
+
+    #[test]
+    fn test_type_info_metadata_for_enum_member() {
+        let defs = parse_idl(
+            r#"
+            enum Color { RED, GREEN, BLUE };
+            struct Widget { @key Color c; long x; };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Widget.idl", &PythonOptions::new());
+        // Enum member is now advertisable: referenced as a nested class, with the enum's own
+        // descriptor emitted (canonical PascalCase literal names, bit_bound 32).
+        assert!(code.contains(r#"("nested", "c", Color, 0, 1),"#), "{}", code);
+        assert!(
+            code.contains(r#"Color._dds_enum_info = (32, (("Red", 0, False), ("Green", 1, False), ("Blue", 2, False),))"#),
+            "{}",
+            code
+        );
+    }
+
+    #[test]
+    fn test_type_info_metadata_for_collection_of_nested() {
+        let defs = parse_idl(
+            r#"
+            @final struct Point { long x; long y; };
+            struct Widget {
+                sequence<Point> path;
+                Point grid[3];
+                long x;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Widget.idl", &PythonOptions::new());
+        assert!(code.contains(r#"("seq_nested", "path", Point, 0, 0),"#), "{}", code);
+        assert!(code.contains(r#"("arr_nested", "grid", Point, 3, 0),"#), "{}", code);
+    }
+
+    #[test]
+    fn test_type_info_metadata_for_nested_struct_key() {
+        let defs = parse_idl(
+            r#"
+            @final
+            struct NestedKey {
+                long a;
+                long b;
+            };
+            @final
+            struct Composite {
+                @key NestedKey loc;
+                long value;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Composite.idl", &PythonOptions::new());
+
+        // The nested @key member references the nested generated class directly (KEY flag=1).
+        assert!(code.contains(r#"("nested", "loc", NestedKey, 0, 1),"#), "{}", code);
+        assert!(code.contains(r#"("field", "value", 5, 0, 0),"#), "{}", code);
+        // The nested struct still emits its own flat metadata (recursion source of truth).
+        assert!(code.contains(r#"("field", "a", 5, 0, 0),"#), "{}", code);
+        assert!(code.contains(r#"("field", "b", 5, 0, 0),"#), "{}", code);
+    }
+
+    #[test]
+    fn test_serialize_key_recurses_into_nested_and_collections() {
+        let defs = parse_idl(
+            r#"
+            @final
+            struct Point { long x; long y; };
+            @final
+            struct NestedKeyed { @key Point p; long payload; };
+            @final
+            struct ArrKeyed { @key Point grid[2]; long payload; };
+            @final
+            struct SeqKeyed { @key sequence<Point> items; long payload; };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Keys.idl", &PythonOptions::new());
+
+        // Nested struct key serializes each field inline.
+        assert!(code.contains("w.write_i32(self.p.x)"), "{}", code);
+        assert!(code.contains("w.write_i32(self.p.y)"), "{}", code);
+        // Array key: no length prefix, iterate elements inline.
+        assert!(code.contains("for _ke0 in self.grid:"), "{}", code);
+        // Sequence key: u32 length prefix then elements.
+        assert!(code.contains("w.write_u32(len(self.items))"), "{}", code);
+        assert!(code.contains("for _ke0 in self.items:"), "{}", code);
+        // No stale TODO catch-all remains.
+        assert!(!code.contains("# TODO: Complex key field"), "{}", code);
+    }
+
+    #[test]
+    fn test_serialize_key_guards_mutable_nested_struct() {
+        // A Mutable nested struct serializes as PL_CDR (member headers), which the
+        // flat key writer cannot express: the generator must mark it unsupported
+        // rather than emit silently-wrong inline writes.
+        let defs = parse_idl(
+            r#"
+            @mutable
+            struct MutInner { long x; long y; };
+            @final
+            struct MutKeyed { @key MutInner inner; long payload; };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "MutKeyed.idl", &PythonOptions::new());
+
+        assert!(
+            code.contains("# Unsupported: mutable nested struct key field self.inner"),
+            "{}",
+            code
+        );
+        assert!(!code.contains("w.write_i32(self.inner.x)"), "{}", code);
     }
 
     #[test]

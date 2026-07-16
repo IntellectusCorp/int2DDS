@@ -34,7 +34,7 @@ class ShapeType:
     shapesize: int = 20
     additional_payload_size: bytes = b""
 
-    def _serialize_cdr(self, xcdr2: bool = True) -> bytes:
+    def _serialize_cdr(self, xcdr2: bool = False) -> bytes:
         w = CdrWriter(extensibility=self._extensibility, xcdr2=xcdr2)
         if xcdr2:
             with w.dheader():

@@ -102,7 +102,7 @@ class CdrReader:
         cls,
         data: bytes | bytearray | memoryview,
         little_endian: bool = True,
-        xcdr2: bool = True,
+        xcdr2: bool = False,
     ) -> CdrReader:
         """
         Create a reader without encapsulation header.

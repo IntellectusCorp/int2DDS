@@ -354,6 +354,13 @@ typedef struct Int2DdsPublisher Int2DdsPublisher;
 typedef struct Int2DdsPublisherQos Int2DdsPublisherQos;
 
 /**
+ * Opaque handle to a ReadCondition or QueryCondition.
+ * `inner` is used by WaitSet (trait object); `kind` provides concrete access
+ * for the filtered read/take path and query-parameter mutation.
+ */
+typedef struct Int2DdsReadCondition Int2DdsReadCondition;
+
+/**
  * Opaque sequence of (serialized data, SampleInfo) pairs for batch read/take
  */
 typedef struct Int2DdsSampleSeq Int2DdsSampleSeq;
@@ -959,6 +966,61 @@ Int2DdsRet int2dds_domain_participant_factory_get_instance(struct Int2DdsPartici
  * - `factory` must not be used after this call
  */
 Int2DdsRet int2dds_domain_participant_factory_finalize(struct Int2DdsParticipantFactory *factory);
+
+/**
+ * Look up an existing participant on `domain_id`.
+ *
+ * On success `*participant_out` receives a NEW handle aliasing the existing
+ * core participant (freed independently with `int2dds_delete_participant`). If
+ * no participant exists on that domain, returns `INT2DDS_RET_OK` with
+ * `*participant_out` set to null.
+ *
+ * # Safety
+ * - `participant_out` must be a valid pointer to a null pointer
+ */
+Int2DdsRet int2dds_domain_participant_factory_lookup_participant(const struct Int2DdsParticipantFactory *_factory,
+                                                                 int32_t domain_id,
+                                                                 struct Int2DdsParticipant **participant_out);
+
+/**
+ * Set the factory's `autoenable_created_entities` policy (the only member of
+ * DomainParticipantFactoryQos).
+ *
+ * # Safety
+ * - none beyond a valid process; the factory handle is ignored (singleton).
+ */
+Int2DdsRet int2dds_domain_participant_factory_set_qos(const struct Int2DdsParticipantFactory *_factory,
+                                                      bool autoenable_created_entities);
+
+/**
+ * Get the factory's `autoenable_created_entities` policy.
+ *
+ * # Safety
+ * - `autoenable_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_domain_participant_factory_get_qos(const struct Int2DdsParticipantFactory *_factory,
+                                                      bool *autoenable_out);
+
+/**
+ * Set the factory's default participant QoS (used when a participant is created
+ * with default QoS). Pass a QoS handle, or null to reset to the built-in
+ * default.
+ *
+ * # Safety
+ * - `qos`, if non-null, must be a valid participant QoS handle
+ */
+Int2DdsRet int2dds_domain_participant_factory_set_default_participant_qos(const struct Int2DdsParticipantFactory *_factory,
+                                                                          const struct Int2DdsParticipantQos *qos);
+
+/**
+ * Get the factory's default participant QoS. On success `*qos_out` receives a
+ * new handle the caller frees with `int2dds_participant_qos_destroy`.
+ *
+ * # Safety
+ * - `qos_out` must be a valid pointer to a null pointer
+ */
+Int2DdsRet int2dds_domain_participant_factory_get_default_participant_qos(const struct Int2DdsParticipantFactory *_factory,
+                                                                          struct Int2DdsParticipantQos **qos_out);
 
 /**
  * Get discovered participant instance handles.
@@ -1900,6 +1962,50 @@ Int2DdsRet int2dds_participant_get_qos(const struct Int2DdsParticipant *particip
 Int2DdsRet int2dds_participant_delete_contained_entities(const struct Int2DdsParticipant *participant);
 
 /**
+ * Get the participant's current wall-clock time.
+ *
+ * `sec` is a Unix timestamp (seconds since the epoch); `nanosec` is the
+ * sub-second remainder.
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `sec_out` and `nanosec_out` must be valid pointers
+ */
+Int2DdsRet int2dds_participant_get_current_time(const struct Int2DdsParticipant *participant,
+                                                int32_t *sec_out,
+                                                uint32_t *nanosec_out);
+
+/**
+ * Test whether an entity (Publisher/Subscriber/Topic and their children) with
+ * the given 16-byte instance handle belongs to this participant.
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `handle` must point to a 16-byte instance handle
+ * - `result_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_participant_contains_entity(const struct Int2DdsParticipant *participant,
+                                               const uint8_t (*handle)[16],
+                                               bool *result_out);
+
+/**
+ * Find an existing local Topic by name, blocking up to `timeout_ms` for it to
+ * appear (a negative value blocks indefinitely — avoid it if the topic may
+ * never exist). `dds_type_name` labels the returned handle for the raw path and
+ * must match the caller's expected type.
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `topic_name` and `dds_type_name` must be valid null-terminated C strings
+ * - `topic_out` must be a valid pointer to a null pointer
+ */
+Int2DdsRet int2dds_participant_find_topic(const struct Int2DdsParticipant *participant,
+                                          const char *topic_name,
+                                          const char *dds_type_name,
+                                          int32_t timeout_ms,
+                                          struct Int2DdsTopic **topic_out);
+
+/**
  * Create a Publisher
  *
  * # Safety
@@ -1962,6 +2068,16 @@ Int2DdsRet int2dds_publisher_set_qos(const struct Int2DdsPublisher *publisher,
  */
 Int2DdsRet int2dds_publisher_get_qos(const struct Int2DdsPublisher *publisher,
                                      struct Int2DdsPublisherQos **qos_out);
+
+/**
+ * Get the 16-byte instance handle of a Publisher.
+ *
+ * # Safety
+ * - `publisher` must be a valid publisher
+ * - `handle_out` must point to a 16-byte buffer
+ */
+Int2DdsRet int2dds_publisher_get_instance_handle(const struct Int2DdsPublisher *publisher,
+                                                 uint8_t (*handle_out)[16]);
 
 /**
  * Set QoS on a DataWriter
@@ -2564,6 +2680,17 @@ Int2DdsRet int2dds_datawriter_qos_get_data_representation(const struct Int2DdsDa
 int32_t int2dds_default_data_representation(void);
 
 /**
+ * Returns the library's default type extensibility (`0` = Final, `1` = Appendable,
+ * `2` = Mutable) applied when a type does not declare one explicitly.
+ *
+ * Single source of truth for language bindings: instead of hardcoding Appendable,
+ * bindings should query this so a change to the Rust core default (the
+ * `ExtensibilityKind` enum default) propagates automatically to how they frame
+ * serialized samples (DHEADER presence) and advertise types.
+ */
+int32_t int2dds_default_extensibility(void);
+
+/**
  * Get transport priority from DataWriter QoS handle
  */
 Int2DdsRet int2dds_datawriter_qos_get_transport_priority(const struct Int2DdsDataWriterQos *qos,
@@ -3085,6 +3212,104 @@ Int2DdsRet int2dds_subscriber_qos_set_partition(struct Int2DdsSubscriberQos *qos
 Int2DdsRet int2dds_subscriber_qos_destroy(struct Int2DdsSubscriberQos *qos);
 
 /**
+ * Create a ReadCondition on a DataReader.
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `condition_out` must be a valid pointer to a null pointer
+ * - The returned condition must be freed with `int2dds_readcondition_delete`
+ */
+Int2DdsRet int2dds_datareader_create_readcondition(const struct Int2DdsDataReader *reader,
+                                                   uint32_t sample_state_mask,
+                                                   uint32_t view_state_mask,
+                                                   uint32_t instance_state_mask,
+                                                   struct Int2DdsReadCondition **condition_out);
+
+/**
+ * Create a QueryCondition on a DataReader.
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `query_expression` must be a valid null-terminated C string
+ * - `query_parameters` must be a valid array of `query_parameters_count`
+ *   null-terminated C strings, or null if the count is 0
+ * - `condition_out` must be a valid pointer to a null pointer
+ * - The returned condition must be freed with `int2dds_readcondition_delete`
+ */
+Int2DdsRet int2dds_datareader_create_querycondition(const struct Int2DdsDataReader *reader,
+                                                    uint32_t sample_state_mask,
+                                                    uint32_t view_state_mask,
+                                                    uint32_t instance_state_mask,
+                                                    const char *query_expression,
+                                                    const char *const *query_parameters,
+                                                    uintptr_t query_parameters_count,
+                                                    struct Int2DdsReadCondition **condition_out);
+
+/**
+ * Get the trigger value of a Read/QueryCondition.
+ *
+ * # Safety
+ * - `condition` must be a valid read condition
+ * - `value_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_readcondition_get_trigger_value(const struct Int2DdsReadCondition *condition,
+                                                   bool *value_out);
+
+/**
+ * Replace the parameters of a QueryCondition's SQL expression.
+ *
+ * Returns `INT2DDS_RET_INVALID_ARGUMENT` if the condition is a ReadCondition
+ * (no query expression) or the parameter count does not match the expression.
+ *
+ * # Safety
+ * - `condition` must be a valid read condition
+ * - `query_parameters` must be a valid array of `query_parameters_count`
+ *   null-terminated C strings, or null if the count is 0
+ */
+Int2DdsRet int2dds_querycondition_set_query_parameters(const struct Int2DdsReadCondition *condition,
+                                                       const char *const *query_parameters,
+                                                       uintptr_t query_parameters_count);
+
+/**
+ * Delete a Read/QueryCondition.
+ *
+ * # Safety
+ * - `condition` must be a valid read condition
+ * - `condition` must not be used after this call
+ * - The condition should be detached from any WaitSets first
+ */
+Int2DdsRet int2dds_readcondition_delete(struct Int2DdsReadCondition *condition);
+
+/**
+ * Take samples matching a Read/QueryCondition, returned as serialized bytes.
+ *
+ * For a ReadCondition the condition's state masks are applied directly on the
+ * serialized cache. For a QueryCondition the SQL content filter is additionally
+ * evaluated (requires field descriptors on the topic; see the module note).
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `condition` must be a valid read condition created from `reader`
+ * - `seq_out` must be a valid pointer to a null pointer
+ * - The returned sequence must be freed with `int2dds_sample_seq_delete`
+ */
+Int2DdsRet int2dds_datareader_take_w_readcondition(const struct Int2DdsDataReader *reader,
+                                                   const struct Int2DdsReadCondition *condition,
+                                                   int32_t max_samples,
+                                                   struct Int2DdsSampleSeq **seq_out);
+
+/**
+ * Read samples matching a Read/QueryCondition (samples remain in the cache).
+ *
+ * # Safety
+ * - Same as `int2dds_datareader_take_w_readcondition`
+ */
+Int2DdsRet int2dds_datareader_read_w_readcondition(const struct Int2DdsDataReader *reader,
+                                                   const struct Int2DdsReadCondition *condition,
+                                                   int32_t max_samples,
+                                                   struct Int2DdsSampleSeq **seq_out);
+
+/**
  * Get the StatusCondition from a DataReader
  *
  * # Safety
@@ -3107,6 +3332,50 @@ Int2DdsRet int2dds_datawriter_get_statuscondition(const struct Int2DdsDataWriter
                                                   struct Int2DdsStatusCondition **condition_out);
 
 /**
+ * Get the StatusCondition from a DomainParticipant
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `condition_out` must be a valid pointer to a null pointer
+ * - The returned condition must be freed with `int2dds_statuscondition_delete`
+ */
+Int2DdsRet int2dds_participant_get_statuscondition(const struct Int2DdsParticipant *participant,
+                                                   struct Int2DdsStatusCondition **condition_out);
+
+/**
+ * Get the StatusCondition from a Publisher
+ *
+ * # Safety
+ * - `publisher` must be a valid publisher
+ * - `condition_out` must be a valid pointer to a null pointer
+ * - The returned condition must be freed with `int2dds_statuscondition_delete`
+ */
+Int2DdsRet int2dds_publisher_get_statuscondition(const struct Int2DdsPublisher *publisher,
+                                                 struct Int2DdsStatusCondition **condition_out);
+
+/**
+ * Get the StatusCondition from a Subscriber
+ *
+ * # Safety
+ * - `subscriber` must be a valid subscriber
+ * - `condition_out` must be a valid pointer to a null pointer
+ * - The returned condition must be freed with `int2dds_statuscondition_delete`
+ */
+Int2DdsRet int2dds_subscriber_get_statuscondition(const struct Int2DdsSubscriber *subscriber,
+                                                  struct Int2DdsStatusCondition **condition_out);
+
+/**
+ * Get the StatusCondition from a Topic
+ *
+ * # Safety
+ * - `topic` must be a valid topic
+ * - `condition_out` must be a valid pointer to a null pointer
+ * - The returned condition must be freed with `int2dds_statuscondition_delete`
+ */
+Int2DdsRet int2dds_topic_get_statuscondition(const struct Int2DdsTopic *topic,
+                                             struct Int2DdsStatusCondition **condition_out);
+
+/**
  * Get the current status change bitmask from a DataReader.
  *
  * # Safety
@@ -3125,6 +3394,45 @@ Int2DdsRet int2dds_datareader_get_status_changes(const struct Int2DdsDataReader 
  */
 Int2DdsRet int2dds_datawriter_get_status_changes(const struct Int2DdsDataWriter *writer,
                                                  uint32_t *mask_out);
+
+/**
+ * Get the current status change bitmask from a DomainParticipant.
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `mask_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_participant_get_status_changes(const struct Int2DdsParticipant *participant,
+                                                  uint32_t *mask_out);
+
+/**
+ * Get the current status change bitmask from a Publisher.
+ *
+ * # Safety
+ * - `publisher` must be a valid publisher
+ * - `mask_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_publisher_get_status_changes(const struct Int2DdsPublisher *publisher,
+                                                uint32_t *mask_out);
+
+/**
+ * Get the current status change bitmask from a Subscriber.
+ *
+ * # Safety
+ * - `subscriber` must be a valid subscriber
+ * - `mask_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_subscriber_get_status_changes(const struct Int2DdsSubscriber *subscriber,
+                                                 uint32_t *mask_out);
+
+/**
+ * Get the current status change bitmask from a Topic.
+ *
+ * # Safety
+ * - `topic` must be a valid topic
+ * - `mask_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_topic_get_status_changes(const struct Int2DdsTopic *topic, uint32_t *mask_out);
 
 /**
  * Set the enabled statuses for a StatusCondition
@@ -3663,6 +3971,43 @@ Int2DdsRet int2dds_read_serialized_batch(const struct Int2DdsDataReader *reader,
                                          struct Int2DdsSampleSeq **seq_out);
 
 /**
+ * Take pre-serialized samples belonging to a single instance, as a batch.
+ *
+ * `handle` is a 16-byte instance handle (e.g. from `int2dds_datareader_lookup_instance`
+ * or a prior sample's info). A nil handle returns `INT2DDS_RET_BAD_PARAMETER`; an
+ * unknown handle returns no samples. The mask arguments are bitmasks of the
+ * SampleState/ViewState/InstanceState kinds (use 0xFFFF for "any").
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `handle` must point to a 16-byte instance handle
+ * - `seq_out` must be a valid pointer to a null pointer
+ * - The returned sequence must be freed with `int2dds_sample_seq_delete`
+ */
+Int2DdsRet int2dds_take_instance_serialized_batch(const struct Int2DdsDataReader *reader,
+                                                  const uint8_t (*handle)[16],
+                                                  int32_t max_samples,
+                                                  uint32_t sample_state_mask,
+                                                  uint32_t view_state_mask,
+                                                  uint32_t instance_state_mask,
+                                                  struct Int2DdsSampleSeq **seq_out);
+
+/**
+ * Read pre-serialized samples belonging to a single instance, as a batch
+ * (samples remain in the cache).
+ *
+ * # Safety
+ * - Same as `int2dds_take_instance_serialized_batch`
+ */
+Int2DdsRet int2dds_read_instance_serialized_batch(const struct Int2DdsDataReader *reader,
+                                                  const uint8_t (*handle)[16],
+                                                  int32_t max_samples,
+                                                  uint32_t sample_state_mask,
+                                                  uint32_t view_state_mask,
+                                                  uint32_t instance_state_mask,
+                                                  struct Int2DdsSampleSeq **seq_out);
+
+/**
  * Get the number of samples in a sequence
  */
 uintptr_t int2dds_sample_seq_length(const struct Int2DdsSampleSeq *seq);
@@ -4041,6 +4386,39 @@ Int2DdsRet int2dds_type_info_create(const char *type_name,
                                     struct Int2DdsTypeInfo **out);
 
 /**
+ * Create an enum type info builder. `bit_bound` is the discriminant bit width (IDL enums
+ * are i32 -> 32). Populate literals with `int2dds_type_info_add_enum_literal`, then pass
+ * the builder to `int2dds_type_info_add_nested_field` (or a collection-of-nested variant)
+ * on the parent so an enum-typed member resolves and computes native-Rust keys.
+ */
+Int2DdsRet int2dds_type_info_create_enum(const char *type_name,
+                                         uint16_t bit_bound,
+                                         struct Int2DdsTypeInfo **out);
+
+/**
+ * Append a literal to an enum builder. `is_default` marks the `@default` literal (0/1);
+ * no-op on a non-enum builder.
+ */
+Int2DdsRet int2dds_type_info_add_enum_literal(struct Int2DdsTypeInfo *type_info,
+                                              const char *literal_name,
+                                              int32_t value,
+                                              int32_t is_default);
+
+/**
+ * Create a bitmask type info builder. `bit_bound` is the flag storage bit width (default 32).
+ */
+Int2DdsRet int2dds_type_info_create_bitmask(const char *type_name,
+                                            uint16_t bit_bound,
+                                            struct Int2DdsTypeInfo **out);
+
+/**
+ * Append a flag to a bitmask builder. `position` is the bit index; no-op on a non-bitmask.
+ */
+Int2DdsRet int2dds_type_info_add_bitmask_flag(struct Int2DdsTypeInfo *type_info,
+                                              const char *flag_name,
+                                              uint16_t position);
+
+/**
  * Add a primitive-typed field to the type info builder.
  */
 Int2DdsRet int2dds_type_info_add_field(struct Int2DdsTypeInfo *type_info,
@@ -4093,6 +4471,43 @@ Int2DdsRet int2dds_type_info_add_named_type_field(struct Int2DdsTypeInfo *type_i
                                                   const char *field_name,
                                                   const char *type_hash_name,
                                                   int32_t flags);
+
+/**
+ * Add a nested struct-typed field, supplying the nested type's own builder.
+ *
+ * Unlike `int2dds_type_info_add_named_type_field` (which emits a name-hash
+ * `MinimalTypeId` reference), this references the nested type by its content-hash
+ * `CompleteTypeId` — matching the derive macro byte-for-byte — and captures the nested
+ * `TypeObject` so composite (nested-struct) key members resolve and compute native-Rust
+ * InstanceHandles. `nested_type_info` is borrowed, not consumed: the caller still owns
+ * it and must destroy it.
+ */
+Int2DdsRet int2dds_type_info_add_nested_field(struct Int2DdsTypeInfo *type_info,
+                                              const char *field_name,
+                                              const struct Int2DdsTypeInfo *nested_type_info,
+                                              int32_t flags);
+
+/**
+ * Add a `sequence<Nested>` field whose element is a nested struct/enum/bitmask, supplying
+ * the element's own builder. References the element by content-hash `CompleteTypeId`
+ * (matching the derive macro) so sequence-of-nested key members resolve and compute
+ * native-Rust InstanceHandles. `element_type_info` is borrowed, not consumed.
+ */
+Int2DdsRet int2dds_type_info_add_sequence_of_nested_field(struct Int2DdsTypeInfo *type_info,
+                                                          const char *field_name,
+                                                          const struct Int2DdsTypeInfo *element_type_info,
+                                                          uint32_t bound,
+                                                          int32_t flags);
+
+/**
+ * Add a `Nested[N]` fixed-array field whose element is a nested struct/enum/bitmask,
+ * supplying the element's own builder. `element_type_info` is borrowed, not consumed.
+ */
+Int2DdsRet int2dds_type_info_add_array_of_nested_field(struct Int2DdsTypeInfo *type_info,
+                                                       const char *field_name,
+                                                       const struct Int2DdsTypeInfo *element_type_info,
+                                                       uint32_t array_size,
+                                                       int32_t flags);
 
 Int2DdsRet int2dds_type_info_add_sequence_of_named_field(struct Int2DdsTypeInfo *type_info,
                                                          const char *field_name,
@@ -4272,6 +4687,26 @@ Int2DdsRet int2dds_waitset_attach_condition(const struct Int2DdsWaitSet *waitset
  */
 Int2DdsRet int2dds_waitset_detach_condition(const struct Int2DdsWaitSet *waitset,
                                             const struct Int2DdsStatusCondition *condition);
+
+/**
+ * Attach a Read/QueryCondition to the WaitSet
+ *
+ * # Safety
+ * - `waitset` must be a valid waitset
+ * - `condition` must be a valid read condition
+ */
+Int2DdsRet int2dds_waitset_attach_readcondition(const struct Int2DdsWaitSet *waitset,
+                                                const struct Int2DdsReadCondition *condition);
+
+/**
+ * Detach a Read/QueryCondition from the WaitSet
+ *
+ * # Safety
+ * - `waitset` must be a valid waitset
+ * - `condition` must be a valid read condition that was previously attached
+ */
+Int2DdsRet int2dds_waitset_detach_readcondition(const struct Int2DdsWaitSet *waitset,
+                                                const struct Int2DdsReadCondition *condition);
 
 /**
  * Attach a DataReader's status condition to the WaitSet

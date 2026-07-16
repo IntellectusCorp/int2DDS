@@ -24,7 +24,7 @@ class HelloWorld:
     index: int = 0
     message: str = ""
 
-    def _serialize_cdr(self, xcdr2: bool = True) -> bytes:
+    def _serialize_cdr(self, xcdr2: bool = False) -> bytes:
         """Serialize to CDR bytes with encapsulation header."""
         w = CdrWriter(extensibility=self._extensibility, xcdr2=xcdr2)
         if w._xcdr2:

@@ -94,7 +94,7 @@ namespace Int2Dds.Cdr
         /// <summary>
         /// Create a reader from raw data (no encapsulation header).
         /// </summary>
-        public static CdrReader FromRaw(ReadOnlySpan<byte> data, bool littleEndian = true, bool xcdr2 = true)
+        public static CdrReader FromRaw(ReadOnlySpan<byte> data, bool littleEndian = true, bool xcdr2 = false)
         {
             return new CdrReader(data.ToArray(), littleEndian, xcdr2);
         }
