@@ -33,5 +33,14 @@ namespace Int2Dds.Interop
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_participant_get_qos(IntPtr participant, out IntPtr qos_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_participant_get_current_time(IntPtr participant, out int sec_out, out uint nanosec_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_participant_contains_entity(IntPtr participant, byte* handle, [MarshalAs(UnmanagedType.U1)] out bool result_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_participant_find_topic(IntPtr participant, byte* topic_name, byte* dds_type_name, int timeout_ms, out IntPtr topic_out);
     }
 }

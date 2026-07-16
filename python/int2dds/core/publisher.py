@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 from int2dds._ffi import CData, ffi, lib
+from int2dds.core.conditions import StatusCondition
 from int2dds.core.listeners import (
     DataWriterListener,
     _create_writer_listener_struct,
@@ -83,6 +84,44 @@ class Publisher:
     def delete_contained_entities(self) -> None:
         """Delete all DataWriters created by this publisher."""
         check_ret(lib.int2dds_publisher_delete_contained_entities(self._handle))
+
+    def get_instance_handle(self) -> bytes:
+        """Get this publisher's 16-byte instance handle."""
+        buf = ffi.new("uint8_t[16]")
+        check_ret(lib.int2dds_publisher_get_instance_handle(
+            self._handle, ffi.cast("uint8_t(*)[16]", buf)))
+        return bytes(ffi.buffer(buf, 16))
+
+    def get_statuscondition(self) -> StatusCondition:
+        """Get the StatusCondition associated with this publisher."""
+        cond_ptr = ffi.new("Int2DdsStatusCondition **")
+        check_ret(lib.int2dds_publisher_get_statuscondition(self._handle, cond_ptr))
+        return StatusCondition(cond_ptr[0], owner=self)
+
+    def get_status_changes(self) -> int:
+        """Get the current status change bitmask of this publisher."""
+        mask_out = ffi.new("uint32_t *")
+        check_ret(lib.int2dds_publisher_get_status_changes(self._handle, mask_out))
+        return mask_out[0]
+
+    def set_qos(self, qos: "PublisherQos") -> None:
+        """Set this publisher's QoS.
+
+        The current QoS is used as the merge base, then the ``partition`` policy
+        from ``qos`` (the only mutable PublisherQos policy) is applied on top.
+        """
+        qos_ptr = ffi.new("Int2DdsPublisherQos **")
+        check_ret(lib.int2dds_publisher_get_qos(self._handle, qos_ptr))
+        handle = qos_ptr[0]
+        try:
+            if qos is not None and qos.partition is not None and qos.partition.names:
+                c_strings = [ffi.new("char[]", n.encode()) for n in qos.partition.names]
+                c_array = ffi.new("char*[]", c_strings)
+                check_ret(lib.int2dds_publisher_qos_set_partition(
+                    handle, c_array, len(qos.partition.names)))
+            check_ret(lib.int2dds_publisher_set_qos(self._handle, handle))
+        finally:
+            lib.int2dds_publisher_qos_destroy(handle)
 
     def close(self) -> None:
         """Delete the publisher."""
@@ -392,6 +431,18 @@ class DataWriter(Generic[T]):
         check_ret(lib.int2dds_get_publication_matched_status(self._handle, total_out, current_out))
         return total_out[0], current_out[0]
 
+    def get_statuscondition(self) -> StatusCondition:
+        """Get the StatusCondition associated with this DataWriter."""
+        cond_ptr = ffi.new("Int2DdsStatusCondition **")
+        check_ret(lib.int2dds_datawriter_get_statuscondition(self._handle, cond_ptr))
+        return StatusCondition(cond_ptr[0], owner=self)
+
+    def get_status_changes(self) -> int:
+        """Get the current status change bitmask of this DataWriter."""
+        mask_out = ffi.new("uint32_t *")
+        check_ret(lib.int2dds_datawriter_get_status_changes(self._handle, mask_out))
+        return mask_out[0]
+
     @property
     def matched_readers(self) -> int:
         """Get the current number of matched readers."""
@@ -439,6 +490,46 @@ class DataWriter(Generic[T]):
             "last_policy_id": int(status.last_policy_id),
             "policies_count": status.policies_count,
         }
+
+    def get_offered_incompatible_type_status(self) -> dict:
+        """Get offered incompatible type status.
+
+        Returns:
+            dict with total_count, total_count_change
+        """
+        status = ffi.new("Int2DdsOfferedIncompatibleTypeStatus *")
+        check_ret(lib.int2dds_datawriter_get_offered_incompatible_type_status(self._handle, status))
+        return {
+            "total_count": status.total_count,
+            "total_count_change": status.total_count_change,
+        }
+
+    def get_guid(self) -> bytes:
+        """Get this DataWriter's 16-byte GUID."""
+        buf = ffi.new("uint8_t[16]")
+        check_ret(lib.int2dds_datawriter_get_guid(self._handle, ffi.cast("uint8_t(*)[16]", buf)))
+        return bytes(ffi.buffer(buf, 16))
+
+    def write_serialized_staged(self, data: bytes, key: bytes = b"") -> None:
+        """Write pre-serialized CDR bytes via the zero-copy staging path.
+
+        Reserves a native buffer, copies ``data`` in, then commits (or aborts on
+        error). ``key`` is the serialized key for keyed types.
+        """
+        data_out = ffi.new("uint8_t **")
+        cap_out = ffi.new("size_t *")
+        loan_out = ffi.new("Int2DdsSerializedWriteLoan **")
+        check_ret(lib.int2dds_prepare_serialized_write(
+            self._handle, len(data), data_out, cap_out, loan_out))
+        loan = loan_out[0]
+        try:
+            ffi.memmove(data_out[0], data, len(data))
+            key_ptr = ffi.from_buffer(key) if key else ffi.NULL
+            check_ret(lib.int2dds_commit_serialized_write(
+                self._handle, loan, len(data), key_ptr, len(key)))
+        except BaseException:
+            lib.int2dds_abort_serialized_write(loan)
+            raise
 
     def close(self) -> None:
         """Delete the DataWriter."""
