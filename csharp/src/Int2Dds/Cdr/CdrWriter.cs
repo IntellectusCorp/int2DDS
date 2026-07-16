@@ -96,6 +96,16 @@ namespace Int2Dds.Cdr
             _headerSize = 4;
         }
 
+        // ---- Guards ---------------------------------------------------------
+
+        private void RequireXcdr2(string what)
+        {
+            if (!_xcdr2)
+                throw new InvalidOperationException(
+                    $"{what} is XCDR2-only; this writer is XCDR1. XCDR1 mutable types " +
+                    "use PL_CDR (PID member headers), not EMHEADER.");
+        }
+
         // ---- Alignment ------------------------------------------------------
 
         private void Align(int alignment)
@@ -335,6 +345,7 @@ namespace Int2Dds.Cdr
         /// </summary>
         public void WriteEmheader(uint memberId, uint dataLength, bool mustUnderstand)
         {
+            RequireXcdr2("EMHEADER");
             if (memberId > 0x0FFFFFFFu)
                 throw new ArgumentOutOfRangeException(nameof(memberId), $"EMHEADER member_id exceeds 28 bits: 0x{memberId:X}");
             uint muBit = mustUnderstand ? 0x80000000u : 0;
@@ -349,6 +360,7 @@ namespace Int2Dds.Cdr
         /// </summary>
         public int EmheaderBegin(uint memberId, bool mustUnderstand)
         {
+            RequireXcdr2("EMHEADER");
             if (memberId > 0x0FFFFFFFu)
                 throw new ArgumentOutOfRangeException(nameof(memberId), $"EMHEADER member_id exceeds 28 bits: 0x{memberId:X}");
             uint muBit = mustUnderstand ? 0x80000000u : 0;
@@ -377,6 +389,7 @@ namespace Int2Dds.Cdr
         /// </summary>
         public void WriteSentinel()
         {
+            RequireXcdr2("Sentinel");
             WriteU32(MemberIdSentinel);
         }
 
