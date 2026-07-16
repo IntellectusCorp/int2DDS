@@ -63,7 +63,7 @@ class CdrWriter:
         Args:
             extensibility: Type extensibility (FINAL, APPENDABLE, MUTABLE)
             little_endian: Use little-endian byte order (default True)
-            xcdr2: Use XCDR2 encoding (default True)
+            xcdr2: Use XCDR2 encoding (default False; effective write default is XCDR1)
         """
         self._buf = bytearray()
         self._le = little_endian
