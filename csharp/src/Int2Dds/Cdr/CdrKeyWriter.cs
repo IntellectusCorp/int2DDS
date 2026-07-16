@@ -43,15 +43,18 @@ namespace Int2Dds.Cdr
             _buffer = newBuffer;
         }
 
-        // ---- Alignment (XCDR2: max 4, headerSize=0, big-endian) -------------
+        // ---- Alignment (XCDR1 KeyHash, big-endian) --------------------------
 
         private void Align(int alignment)
         {
             if (alignment <= 1) return;
 
-            int actual = Math.Min(alignment, 4); // XCDR2 caps at 4
-            int aligned = (_pos + actual - 1) & ~(actual - 1);
-            int padding = aligned - _pos;
+            // Canonical KeyHash CDR (matching the Rust derive serialize_key) is
+            // big-endian CDR whose alignment is relative to the first byte after
+            // the stripped encapsulation header, so 8-byte fields (long/ulong/
+            // double) align to 8 from the buffer start. No cap: XCDR2's 4-byte
+            // cap does not apply here.
+            int padding = (alignment - (_pos % alignment)) % alignment;
 
             if (padding == 0) return;
             EnsureCapacity(padding);
