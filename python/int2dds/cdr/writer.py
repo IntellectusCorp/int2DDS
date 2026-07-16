@@ -90,6 +90,14 @@ class CdrWriter:
         self._buf.extend(struct.pack(">HH", encap_id, 0))
         self._header_size = 4
 
+    def _require_xcdr2(self, what: str) -> None:
+        """Guard XCDR2-only constructs against misuse on an XCDR1 writer."""
+        if not self._xcdr2:
+            raise ValueError(
+                f"{what} is XCDR2-only; this writer is XCDR1. XCDR1 mutable "
+                "types use PL_CDR (PID member headers), not EMHEADER."
+            )
+
     def _align(self, alignment: int) -> None:
         """Align the write position to the given boundary."""
         if alignment <= 1:
@@ -276,6 +284,7 @@ class CdrWriter:
             data_length: Length of the field data
             must_understand: Whether the field must be understood
         """
+        self._require_xcdr2("EMHEADER")
         if member_id > 0x0FFFFFFF:
             raise ValueError(f"EMHEADER member_id exceeds 28 bits: 0x{member_id:X}")
         mu_bit = 0x80000000 if must_understand else 0
@@ -305,6 +314,7 @@ class CdrWriter:
         Returns:
             Token to pass to write_emheader_finalize()
         """
+        self._require_xcdr2("EMHEADER")
         if member_id > 0x0FFFFFFF:
             raise ValueError(f"EMHEADER member_id exceeds 28 bits: 0x{member_id:X}")
         mu_bit = 0x80000000 if must_understand else 0
@@ -322,6 +332,7 @@ class CdrWriter:
 
     def write_sentinel(self) -> None:
         """Write a sentinel marker (end of mutable struct fields)."""
+        self._require_xcdr2("Sentinel")
         self.write_u32(MEMBER_ID_SENTINEL)
 
     # -------------------------------------------------------------------------
