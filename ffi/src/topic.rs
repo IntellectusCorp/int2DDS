@@ -396,26 +396,30 @@ pub unsafe extern "C" fn int2dds_delete_topic(topic: *mut Int2DdsTopic) -> Int2D
         return INT2DDS_RET_NULL_POINTER;
     }
 
-    let topic_ref = &*topic;
-    if Arc::strong_count(&topic_ref.inner) != 1 {
+    let topic_box = Box::from_raw(topic);
+    if Arc::strong_count(&topic_box.inner) != 1 {
+        let _ = Box::into_raw(topic_box);
         return INT2DDS_RET_PRECONDITION_NOT_MET;
     }
 
-    let Int2DdsTopic { inner: topic_arc, type_name: _tn } = *Box::from_raw(topic);
-
-    let topic_obj = match Arc::try_unwrap(topic_arc) {
-        Ok(t) => t,
-        Err(_arc) => return INT2DDS_RET_PRECONDITION_NOT_MET,
-    };
+    let topic_obj = (*topic_box.inner).clone();
 
     let participant = match topic_obj.get_participant() {
         Ok(p) => p,
-        Err(e) => return dds_error_to_code(&e),
+        Err(e) => {
+            let _ = Box::into_raw(topic_box);
+            return dds_error_to_code(&e);
+        }
     };
 
+    // On failure the topic is not deleted; restore the caller's handle
+    // (into_raw) instead of leaving it freed. The Box drops (frees) only on success.
     match participant.delete_topic(topic_obj) {
         Ok(()) => INT2DDS_RET_OK,
-        Err(e) => dds_error_to_code(&e),
+        Err(e) => {
+            let _ = Box::into_raw(topic_box);
+            dds_error_to_code(&e)
+        }
     }
 }
 

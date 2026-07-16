@@ -295,29 +295,30 @@ pub unsafe extern "C" fn int2dds_delete_publisher(publisher: *mut Int2DdsPublish
         return INT2DDS_RET_NULL_POINTER;
     }
 
-    let publisher_ref = &*publisher;
-    if Arc::strong_count(&publisher_ref.inner) != 1 {
+    let publisher_box = Box::from_raw(publisher);
+    if Arc::strong_count(&publisher_box.inner) != 1 {
+        let _ = Box::into_raw(publisher_box);
         return INT2DDS_RET_PRECONDITION_NOT_MET;
     }
 
-    // Destructure Box to move Arc out
-    let Int2DdsPublisher { inner: publisher_arc } = *Box::from_raw(publisher);
+    let publisher_obj = (*publisher_box.inner).clone();
 
-    // Try to unwrap Arc without cloning (succeeds if this is the only reference)
-    let publisher_obj = match Arc::try_unwrap(publisher_arc) {
-        Ok(p) => p,
-        Err(_arc) => return INT2DDS_RET_PRECONDITION_NOT_MET,
-    };
-
-    // Get the participant to delete the publisher
     let participant = match publisher_obj.get_participant() {
         Ok(p) => p,
-        Err(e) => return dds_error_to_code(&e),
+        Err(e) => {
+            let _ = Box::into_raw(publisher_box);
+            return dds_error_to_code(&e);
+        }
     };
 
+    // On failure the publisher is not deleted; restore the caller's handle
+    // (into_raw) instead of leaving it freed. The Box drops (frees) only on success.
     match participant.delete_publisher(publisher_obj) {
         Ok(()) => INT2DDS_RET_OK,
-        Err(e) => dds_error_to_code(&e),
+        Err(e) => {
+            let _ = Box::into_raw(publisher_box);
+            dds_error_to_code(&e)
+        }
     }
 }
 
@@ -673,12 +674,20 @@ pub unsafe extern "C" fn int2dds_delete_datawriter(writer: *mut Int2DdsDataWrite
 
     let publisher = match writer_obj.get_publisher() {
         Ok(p) => p,
-        Err(e) => return dds_error_to_code(&e),
+        Err(e) => {
+            let _ = Arc::into_raw(writer_arc);
+            return dds_error_to_code(&e);
+        }
     };
 
+    // On failure the writer is not deleted; hand the caller's strong reference
+    // back (into_raw) so the handle stays valid instead of being freed.
     match publisher.delete_datawriter(writer_obj) {
         Ok(()) => INT2DDS_RET_OK,
-        Err(e) => dds_error_to_code(&e),
+        Err(e) => {
+            let _ = Arc::into_raw(writer_arc);
+            dds_error_to_code(&e)
+        }
     }
 }
 
