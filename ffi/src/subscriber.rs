@@ -223,29 +223,30 @@ pub unsafe extern "C" fn int2dds_delete_subscriber(
         return INT2DDS_RET_NULL_POINTER;
     }
 
-    let subscriber_ref = &*subscriber;
-    if Arc::strong_count(&subscriber_ref.inner) != 1 {
+    let subscriber_box = Box::from_raw(subscriber);
+    if Arc::strong_count(&subscriber_box.inner) != 1 {
+        let _ = Box::into_raw(subscriber_box);
         return INT2DDS_RET_PRECONDITION_NOT_MET;
     }
 
-    // Destructure Box to move Arc out
-    let Int2DdsSubscriber { inner: subscriber_arc } = *Box::from_raw(subscriber);
+    let subscriber_obj = (*subscriber_box.inner).clone();
 
-    // Try to unwrap Arc without cloning (succeeds if this is the only reference)
-    let subscriber_obj = match Arc::try_unwrap(subscriber_arc) {
-        Ok(s) => s,
-        Err(_arc) => return INT2DDS_RET_PRECONDITION_NOT_MET,
-    };
-
-    // Get the participant to delete the subscriber
     let participant = match subscriber_obj.get_participant() {
         Ok(p) => p,
-        Err(e) => return dds_error_to_code(&e),
+        Err(e) => {
+            let _ = Box::into_raw(subscriber_box);
+            return dds_error_to_code(&e);
+        }
     };
 
+    // On failure the subscriber is not deleted; restore the caller's handle
+    // (into_raw) instead of leaving it freed. The Box drops (frees) only on success.
     match participant.delete_subscriber(subscriber_obj) {
         Ok(()) => INT2DDS_RET_OK,
-        Err(e) => dds_error_to_code(&e),
+        Err(e) => {
+            let _ = Box::into_raw(subscriber_box);
+            dds_error_to_code(&e)
+        }
     }
 }
 
@@ -893,12 +894,20 @@ pub unsafe extern "C" fn int2dds_delete_datareader(reader: *mut Int2DdsDataReade
 
     let subscriber = match reader_obj.get_subscriber() {
         Ok(s) => s,
-        Err(e) => return dds_error_to_code(&e),
+        Err(e) => {
+            let _ = Arc::into_raw(reader_arc);
+            return dds_error_to_code(&e);
+        }
     };
 
+    // On failure the reader is not deleted; hand the caller's strong reference
+    // back (into_raw) so the handle stays valid instead of being freed.
     match subscriber.delete_datareader(reader_obj) {
         Ok(()) => INT2DDS_RET_OK,
-        Err(e) => dds_error_to_code(&e),
+        Err(e) => {
+            let _ = Arc::into_raw(reader_arc);
+            dds_error_to_code(&e)
+        }
     }
 }
 

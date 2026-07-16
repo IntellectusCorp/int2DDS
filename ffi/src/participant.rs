@@ -191,9 +191,14 @@ pub unsafe extern "C" fn int2dds_delete_participant(
 
     let factory = DomainParticipantFactory::get_instance();
 
+    // On failure the participant is not deleted; restore the caller's handle
+    // (into_raw) instead of leaving it freed. The Box drops (frees) only on success.
     match factory.delete_participant(participant_inner) {
         Ok(()) => INT2DDS_RET_OK,
-        Err(e) => dds_error_to_code(&e),
+        Err(e) => {
+            let _ = Box::into_raw(participant_box);
+            dds_error_to_code(&e)
+        }
     }
 }
 
