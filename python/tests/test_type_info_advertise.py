@@ -44,7 +44,7 @@ class AdShape:
     shapesize: int = 30
     payload: list = field(default_factory=list)
 
-    def _serialize_cdr(self, xcdr2: bool = True) -> bytes:
+    def _serialize_cdr(self, xcdr2: bool = False) -> bytes:
         w = CdrWriter(extensibility=self._extensibility, xcdr2=xcdr2)
         with w.dheader():
             w.write_string(self.color)

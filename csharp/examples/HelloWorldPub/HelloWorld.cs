@@ -19,7 +19,7 @@ namespace HelloWorldPub
 
         public HelloWorld() { }
 
-        public byte[] SerializeCdr() => SerializeCdr(true);
+        public byte[] SerializeCdr() => SerializeCdr(false);
 
         public byte[] SerializeCdr(bool xcdr2)
         {

@@ -626,6 +626,18 @@ pub extern "C" fn int2dds_default_data_representation() -> i32 {
     }
 }
 
+/// Returns the library's default type extensibility (`0` = Final, `1` = Appendable,
+/// `2` = Mutable) applied when a type does not declare one explicitly.
+///
+/// Single source of truth for language bindings: instead of hardcoding Appendable,
+/// bindings should query this so a change to the Rust core default (the
+/// `ExtensibilityKind` enum default) propagates automatically to how they frame
+/// serialized samples (DHEADER presence) and advertise types.
+#[no_mangle]
+pub extern "C" fn int2dds_default_extensibility() -> i32 {
+    int2dds::xtypes::ExtensibilityKind::default() as i32
+}
+
 /// Get transport priority from DataWriter QoS handle
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datawriter_qos_get_transport_priority(
@@ -2050,6 +2062,24 @@ mod tests {
             _ => INT2DDS_QOS_DATA_REPR_XCDR1,
         };
         assert_eq!(int2dds_default_data_representation(), expected);
+    }
+
+    // Drift guard: the exported default extensibility is Appendable (1), the
+    // XTypes spec default applied when a type declares none.
+    #[test]
+    fn default_extensibility_is_appendable() {
+        assert_eq!(int2dds_default_extensibility(), 1);
+    }
+
+    // Single-source invariant: the export is derived from the core
+    // `ExtensibilityKind` enum default, not an independent hardcode. If the core
+    // default changes, this tracks it — so bindings that read the export follow.
+    #[test]
+    fn default_extensibility_tracks_core_default() {
+        assert_eq!(
+            int2dds_default_extensibility(),
+            int2dds::xtypes::ExtensibilityKind::default() as i32
+        );
     }
 
     #[test]

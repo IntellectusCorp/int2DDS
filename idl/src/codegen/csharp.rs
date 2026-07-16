@@ -36,6 +36,13 @@ fn cs_ident(name: &str) -> String {
     naming::escape_keyword(&naming::to_pascal_case(name), naming::TargetLang::CSharp)
 }
 
+/// PascalCase a struct/enum/bitmask type reference by its leaf name. A cross-file
+/// reference may be written qualified (`dep::msg::Header`); every generated type
+/// shares one namespace, so C# resolves the leaf directly and the scope is dropped.
+fn cs_type_ref(name: &str) -> String {
+    naming::to_pascal_case(name.rsplit("::").next().unwrap_or(name))
+}
+
 /// Render a constant value as a C# literal (float constants need an `f` suffix).
 fn cs_const_value(value: &ConstValue, ty: &ResolvedType) -> String {
     match value {
@@ -192,7 +199,7 @@ impl<'a> CsGen<'a> {
         self.line("");
 
         // SerializeCdr
-        self.line("public byte[] SerializeCdr() => SerializeCdr(true);");
+        self.line("public byte[] SerializeCdr() => SerializeCdr(false);");
         self.line("");
         self.line("public byte[] SerializeCdr(bool xcdr2)");
         self.line("{");
@@ -405,7 +412,7 @@ impl<'a> CsGen<'a> {
         self.line("");
 
         // SerializeCdr
-        self.line("public byte[] SerializeCdr() => SerializeCdr(true);");
+        self.line("public byte[] SerializeCdr() => SerializeCdr(false);");
         self.line("");
         self.line("public byte[] SerializeCdr(bool xcdr2)");
         self.line("{");
@@ -542,7 +549,7 @@ impl<'a> CsGen<'a> {
     fn collect_all_members(&self, s: &ResolvedStruct) -> Vec<ResolvedMember> {
         let mut all = Vec::new();
         if let Some(ref base_name) = s.base_type {
-            if let Some(base) = self.model.structs.iter().find(|st| &st.name == base_name) {
+            if let Some(base) = self.find_struct(base_name) {
                 all.extend(self.collect_all_members(base));
             }
         }
@@ -550,10 +557,12 @@ impl<'a> CsGen<'a> {
         all
     }
 
-    /// Emit `DdsTypeInfoFields` for flat structs (all members are primitives, strings, or
-    /// sequences/arrays of primitives). The runtime reads it to advertise a TypeObject.
+    /// Emit `DdsTypeInfoFields` for advertisable structs (all members are primitives, strings,
+    /// sequences/arrays of primitives, or nested structs that are themselves recursively
+    /// advertisable). The runtime reads it to advertise a TypeObject.
     fn emit_type_info_metadata(&mut self, members: &[ResolvedMember]) {
-        if !members.iter().all(|m| Self::is_flat_advertisable(&m.resolved_type)) {
+        let mut visited = std::collections::HashSet::new();
+        if !members.iter().all(|m| self.member_advertisable(m, &mut visited)) {
             return;
         }
         self.line(
@@ -592,15 +601,72 @@ impl<'a> CsGen<'a> {
         })
     }
 
-    /// A member is advertisable byte-correctly when it is a primitive/string, or a
-    /// sequence/array whose element is a primitive/string. Named types and maps are excluded.
-    fn is_flat_advertisable(ty: &ResolvedType) -> bool {
+    /// A member is advertisable byte-correctly when its type is a primitive/string, an enum, a
+    /// (non-@external) nested struct that is itself recursively advertisable, or a sequence/array
+    /// whose element is one of those (single-level). Bitmask, map, union, and nested collections
+    /// are excluded (they fall back to the name-based keyed path).
+    fn member_advertisable(
+        &self,
+        m: &ResolvedMember,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        if m.is_external && matches!(m.resolved_type, ResolvedType::Struct(_)) {
+            return false;
+        }
+        self.type_advertisable(&m.resolved_type, visited)
+    }
+
+    /// Recursively decide advertisability of a member/element type.
+    fn type_advertisable(
+        &self,
+        ty: &ResolvedType,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> bool {
         match ty {
+            ResolvedType::Struct(name) => self.struct_advertisable(name, visited),
+            ResolvedType::Enum(_) => true,
             ResolvedType::Sequence { element, .. } | ResolvedType::Array { element, .. } => {
-                Self::field_constant(element).is_some()
+                match element.as_ref() {
+                    ResolvedType::Struct(name) => self.struct_advertisable(name, visited),
+                    ResolvedType::Enum(_) => true,
+                    other => Self::field_constant(other).is_some(),
+                }
             }
             other => Self::field_constant(other).is_some(),
         }
+    }
+
+    /// The generated CLR class name (PascalCase) for an advertisable named element
+    /// (Struct/Enum), else None. Used to gate collection elements and emit nested refs.
+    fn element_class_name(ty: &ResolvedType) -> Option<String> {
+        match ty {
+            ResolvedType::Struct(name) | ResolvedType::Enum(name) => {
+                let simple = name.rsplit("::").next().unwrap_or(name);
+                Some(naming::to_pascal_case(simple))
+            }
+            _ => None,
+        }
+    }
+
+    /// A named struct is advertisable when it exists in the model and all of its members are
+    /// recursively advertisable. `visited` guards against @external-induced type cycles.
+    fn struct_advertisable(
+        &self,
+        name: &str,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        let simple = name.rsplit("::").next().unwrap_or(name);
+        if !visited.insert(simple.to_string()) {
+            return false;
+        }
+        let ok = match self.find_struct(simple).cloned() {
+            Some(s) => {
+                self.collect_all_members(&s).iter().all(|m| self.member_advertisable(m, visited))
+            }
+            None => false,
+        };
+        visited.remove(simple);
+        ok
     }
 
     /// Member flag bitmask (KEY=1, OPTIONAL=2, MUST_UNDERSTAND=4, EXTERNAL=8). The FFI adds
@@ -639,20 +705,46 @@ impl<'a> CsGen<'a> {
                 flags
             ),
             ResolvedType::Sequence { element, bound } => {
-                let ec = Self::field_constant(element).unwrap_or(0);
-                format!(
-                    "new DdsTypeInfoField(\"seq\", \"{}\", {}, {}u, {}),",
-                    m.name,
-                    ec,
-                    bound.unwrap_or(0),
-                    flags
-                )
+                if let Some(cls) = Self::element_class_name(element) {
+                    format!(
+                        "new DdsTypeInfoField(\"seq_nested\", \"{}\", typeof({}), {}u, {}),",
+                        m.name,
+                        cls,
+                        bound.unwrap_or(0),
+                        flags
+                    )
+                } else {
+                    let ec = Self::field_constant(element).unwrap_or(0);
+                    format!(
+                        "new DdsTypeInfoField(\"seq\", \"{}\", {}, {}u, {}),",
+                        m.name,
+                        ec,
+                        bound.unwrap_or(0),
+                        flags
+                    )
+                }
             }
             ResolvedType::Array { element, size } => {
-                let ec = Self::field_constant(element).unwrap_or(0);
+                if let Some(cls) = Self::element_class_name(element) {
+                    format!(
+                        "new DdsTypeInfoField(\"arr_nested\", \"{}\", typeof({}), {}u, {}),",
+                        m.name, cls, size, flags
+                    )
+                } else {
+                    let ec = Self::field_constant(element).unwrap_or(0);
+                    format!(
+                        "new DdsTypeInfoField(\"arr\", \"{}\", {}, {}u, {}),",
+                        m.name, ec, size, flags
+                    )
+                }
+            }
+            ResolvedType::Struct(name) | ResolvedType::Enum(name) => {
+                // Mirror the field-type rendering (type_to_csharp) so typeof(...) names the
+                // exact generated class (struct or enum) that declares this member.
+                let cls = cs_type_ref(name);
                 format!(
-                    "new DdsTypeInfoField(\"arr\", \"{}\", {}, {}u, {}),",
-                    m.name, ec, size, flags
+                    "new DdsTypeInfoField(\"nested\", \"{}\", typeof({}), {}),",
+                    m.name, cls, flags
                 )
             }
             other => {
@@ -811,9 +903,9 @@ impl<'a> CsGen<'a> {
                     Self::type_to_csharp(value)
                 )
             }
-            ResolvedType::Struct(name) => naming::to_pascal_case(name),
-            ResolvedType::Enum(name) => naming::to_pascal_case(name),
-            ResolvedType::Bitmask(name) => naming::to_pascal_case(name),
+            ResolvedType::Struct(name) => cs_type_ref(name),
+            ResolvedType::Enum(name) => cs_type_ref(name),
+            ResolvedType::Bitmask(name) => cs_type_ref(name),
         }
     }
 
@@ -871,12 +963,12 @@ impl<'a> CsGen<'a> {
                 )
             }
             ResolvedType::Struct(name) => {
-                format!("new {}()", naming::to_pascal_case(name))
+                format!("new {}()", cs_type_ref(name))
             }
             ResolvedType::Enum(name) => {
                 // Use 0 cast to enum type
-                let cs_name = naming::to_pascal_case(name);
-                if let Some(e) = self.model.enums.iter().find(|e| &e.name == name) {
+                let cs_name = cs_type_ref(name);
+                if let Some(e) = self.find_enum(name) {
                     if let Some(v) = e.variants.first() {
                         return format!("{}.{}", cs_name, cs_ident(&v.name));
                     }
@@ -884,7 +976,7 @@ impl<'a> CsGen<'a> {
                 format!("({})0", cs_name)
             }
             ResolvedType::Bitmask(name) => {
-                format!("({})0", naming::to_pascal_case(name))
+                format!("({})0", cs_type_ref(name))
             }
         }
     }
@@ -892,8 +984,8 @@ impl<'a> CsGen<'a> {
     // ---- Serialization ----
 
     fn emit_serialize_cdr(&mut self, s: &ResolvedStruct) {
-        // SerializeCdr() - default uses XCDR2
-        self.line("public byte[] SerializeCdr() => SerializeCdr(true);");
+        // SerializeCdr() - default uses XCDR1 (spec effective write default)
+        self.line("public byte[] SerializeCdr() => SerializeCdr(false);");
         self.line("");
 
         // SerializeCdr(bool xcdr2) - actual implementation
@@ -1246,17 +1338,17 @@ impl<'a> CsGen<'a> {
                 self.line(&format!("{}.{} = r.ReadWString();", obj, name));
             }
             ResolvedType::Enum(enum_name) => {
-                let cs_name = naming::to_pascal_case(enum_name);
+                let cs_name = cs_type_ref(enum_name);
                 self.line(&format!("{}.{} = ({})r.ReadEnum();", obj, name, cs_name));
             }
             ResolvedType::Bitmask(bitmask_name) => {
-                let cs_name = naming::to_pascal_case(bitmask_name);
+                let cs_name = cs_type_ref(bitmask_name);
                 let bit_bound = self.find_bitmask(bitmask_name).map(|b| b.bit_bound).unwrap_or(32);
                 let (_, _, read_method, _) = Self::bitmask_backing_info(bit_bound);
                 self.line(&format!("{}.{} = ({})r.{}();", obj, name, cs_name, read_method));
             }
             ResolvedType::Struct(struct_name) => {
-                let cs_name = naming::to_pascal_case(struct_name);
+                let cs_name = cs_type_ref(struct_name);
                 self.line(&format!("{}.{} = {}.DeserializeCdrInline(r);", obj, name, cs_name));
             }
             ResolvedType::Sequence { element, .. } => {
@@ -1366,17 +1458,17 @@ impl<'a> CsGen<'a> {
                 self.line(&format!("var {} = r.ReadWString();", var_name));
             }
             ResolvedType::Enum(enum_name) => {
-                let cs_name = naming::to_pascal_case(enum_name);
+                let cs_name = cs_type_ref(enum_name);
                 self.line(&format!("var {} = ({})r.ReadEnum();", var_name, cs_name));
             }
             ResolvedType::Bitmask(bitmask_name) => {
-                let cs_name = naming::to_pascal_case(bitmask_name);
+                let cs_name = cs_type_ref(bitmask_name);
                 let bit_bound = self.find_bitmask(bitmask_name).map(|b| b.bit_bound).unwrap_or(32);
                 let (_, _, read_method, _) = Self::bitmask_backing_info(bit_bound);
                 self.line(&format!("var {} = ({})r.{}();", var_name, cs_name, read_method));
             }
             ResolvedType::Struct(struct_name) => {
-                let cs_name = naming::to_pascal_case(struct_name);
+                let cs_name = cs_type_ref(struct_name);
                 self.line(&format!("var {} = {}.DeserializeCdrInline(r);", var_name, cs_name));
             }
             ResolvedType::Sequence { element, .. } => {
@@ -1452,7 +1544,7 @@ impl<'a> CsGen<'a> {
             self.line("var w = new CdrKeyWriter();");
             for m in key_fields {
                 let accessor = cs_ident(&m.name);
-                self.emit_write_key_field(&m.resolved_type, &accessor);
+                self.emit_write_key_field(&m.resolved_type, &accessor, 0);
             }
             self.line("return w.ToBytes();");
             self.indent -= 1;
@@ -1460,7 +1552,7 @@ impl<'a> CsGen<'a> {
         }
     }
 
-    fn emit_write_key_field(&mut self, ty: &ResolvedType, accessor: &str) {
+    fn emit_write_key_field(&mut self, ty: &ResolvedType, accessor: &str, depth: usize) {
         match ty {
             ResolvedType::Bool => self.line(&format!("w.WriteBool({});", accessor)),
             ResolvedType::U8 | ResolvedType::UInt8 => {
@@ -1495,18 +1587,82 @@ impl<'a> CsGen<'a> {
                 let (cs_type, write_method, _, _) = Self::bitmask_backing_info(bit_bound);
                 self.line(&format!("w.{}(({}){}); ", write_method, cs_type, accessor));
             }
-            ResolvedType::Struct(_)
-            | ResolvedType::Sequence { .. }
-            | ResolvedType::Array { .. }
-            | ResolvedType::Map { .. } => {
-                // Complex types in keys are not common
-                self.line(&format!("// TODO: Complex key field {}", accessor));
+            // A Final/Appendable nested struct key member contributes all of
+            // its fields inline (matching the Rust dynamic `serialize_struct_cdr`
+            // used by the key path), recursively and in declaration order. A
+            // Mutable nested struct instead serializes as PL_CDR with member
+            // headers, which the flat key writer cannot express; mark it
+            // unsupported rather than emit silently-wrong inline bytes.
+            ResolvedType::Struct(name) => match self.find_struct(name).cloned() {
+                Some(nested) if nested.extensibility == ExtensibilityKind::Mutable => {
+                    self.line(&format!(
+                        "// Unsupported: mutable nested struct key field {}",
+                        accessor
+                    ));
+                }
+                Some(nested) => {
+                    for m in self.collect_all_members(&nested) {
+                        let inner = format!("{}.{}", accessor, cs_ident(&m.name));
+                        self.emit_write_key_field(&m.resolved_type, &inner, depth);
+                    }
+                }
+                None => {
+                    self.line(&format!(
+                        "// Unsupported: unresolved nested struct key field {}",
+                        accessor
+                    ));
+                }
+            },
+            // Sequence: u32 length prefix, then each element inline.
+            ResolvedType::Sequence { element, .. } => {
+                let var = format!("_ke{}", depth);
+                self.line(&format!("w.WriteU32((uint){}.Count);", accessor));
+                self.line(&format!("foreach (var {} in {})", var, accessor));
+                self.line("{");
+                self.indent += 1;
+                self.emit_write_key_field(element, &var, depth + 1);
+                self.indent -= 1;
+                self.line("}");
+            }
+            // Array: fixed length, elements inline with no length prefix.
+            ResolvedType::Array { element, .. } => {
+                let var = format!("_ke{}", depth);
+                self.line(&format!("foreach (var {} in {})", var, accessor));
+                self.line("{");
+                self.indent += 1;
+                self.emit_write_key_field(element, &var, depth + 1);
+                self.indent -= 1;
+                self.line("}");
+            }
+            ResolvedType::Map { .. } => {
+                self.line(&format!("// Unsupported: map key field {}", accessor));
             }
         }
     }
 
     fn find_bitmask(&self, name: &str) -> Option<&ResolvedBitmask> {
-        self.model.bitmasks.iter().find(|b| b.name == name)
+        let simple = name.rsplit("::").next().unwrap_or(name);
+        self.model
+            .bitmasks
+            .iter()
+            .chain(self.model.imported.bitmasks.iter())
+            .find(|b| b.name == simple)
+    }
+
+    /// Locate a struct by leaf name in this file or in an `#include`d file.
+    fn find_struct(&self, name: &str) -> Option<&ResolvedStruct> {
+        let simple = name.rsplit("::").next().unwrap_or(name);
+        self.model
+            .structs
+            .iter()
+            .chain(self.model.imported.structs.iter())
+            .find(|s| s.name == simple)
+    }
+
+    /// Locate an enum by leaf name in this file or in an `#include`d file.
+    fn find_enum(&self, name: &str) -> Option<&ResolvedEnum> {
+        let simple = name.rsplit("::").next().unwrap_or(name);
+        self.model.enums.iter().chain(self.model.imported.enums.iter()).find(|e| e.name == simple)
     }
 
     // ---- Helpers ----
@@ -1572,18 +1728,166 @@ mod tests {
     }
 
     #[test]
-    fn test_type_info_metadata_omitted_for_named_members() {
+    fn test_type_info_metadata_for_nested_struct_key() {
         let defs = parse_idl(
             r#"
-            enum Color { RED, GREEN };
-            struct Widget { Color c; long x; };
+            @final
+            struct NestedKey {
+                long a;
+                long b;
+            };
+            @final
+            struct Composite {
+                @key NestedKey loc;
+                long value;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Composite.idl", &CSharpOptions::default());
+
+        // Composite advertises: the nested @key member references the nested CLR type.
+        assert!(
+            code.contains(r#"new DdsTypeInfoField("nested", "loc", typeof(NestedKey), 1),"#),
+            "{}",
+            code
+        );
+        assert!(code.contains(r#"new DdsTypeInfoField("field", "value", 5, 0u, 0),"#), "{}", code);
+        // The nested struct still emits its own flat metadata (recursion source of truth).
+        assert!(code.contains(r#"new DdsTypeInfoField("field", "a", 5, 0u, 0),"#), "{}", code);
+        assert!(code.contains(r#"new DdsTypeInfoField("field", "b", 5, 0u, 0),"#), "{}", code);
+    }
+
+    #[test]
+    fn test_serialize_key_recurses_into_nested_and_collections() {
+        let defs = parse_idl(
+            r#"
+            @final
+            struct Point { long x; long y; };
+            @final
+            struct NestedKeyed { @key Point p; long payload; };
+            @final
+            struct ArrKeyed { @key Point grid[2]; long payload; };
+            @final
+            struct SeqKeyed { @key sequence<Point> items; long payload; };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Keys.idl", &CSharpOptions::default());
+
+        // Nested struct key serializes each field inline.
+        assert!(code.contains("w.WriteI32(P.X);"), "{}", code);
+        assert!(code.contains("w.WriteI32(P.Y);"), "{}", code);
+        // Array key: no length prefix, iterate elements inline.
+        assert!(code.contains("foreach (var _ke0 in Grid)"), "{}", code);
+        // Sequence key: u32 length prefix then elements.
+        assert!(code.contains("w.WriteU32((uint)Items.Count);"), "{}", code);
+        assert!(code.contains("foreach (var _ke0 in Items)"), "{}", code);
+        // No stale TODO catch-all remains.
+        assert!(!code.contains("// TODO: Complex key field"), "{}", code);
+    }
+
+    #[test]
+    fn test_serialize_key_guards_mutable_nested_struct() {
+        // A Mutable nested struct serializes as PL_CDR (member headers), which the
+        // flat key writer cannot express: the generator must mark it unsupported
+        // rather than emit silently-wrong inline writes.
+        let defs = parse_idl(
+            r#"
+            @mutable
+            struct MutInner { long x; long y; };
+            @final
+            struct MutKeyed { @key MutInner inner; long payload; };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "MutKeyed.idl", &CSharpOptions::default());
+
+        assert!(code.contains("// Unsupported: mutable nested struct key field Inner"), "{}", code);
+        assert!(!code.contains("w.WriteI32(Inner.X);"), "{}", code);
+    }
+
+    /// The no-arg convenience `SerializeCdr()` must default to XCDR1 (spec effective
+    /// write default), mirroring the core `int2dds_default_data_representation()`. The
+    /// explicit `SerializeCdr(bool xcdr2)` overload stays for the QoS-driven write path.
+    #[test]
+    fn test_serialize_cdr_convenience_defaults_to_xcdr1() {
+        let defs = parse_idl(
+            r#"
+            @appendable
+            struct ShapeType {
+                @key long id;
+                long value;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "ShapeType.idl", &CSharpOptions::default());
+        assert!(
+            code.contains("public byte[] SerializeCdr() => SerializeCdr(false);"),
+            "no-arg SerializeCdr() must default to XCDR1 (false): {}",
+            code
+        );
+        assert!(!code.contains("SerializeCdr(true)"), "no XCDR2-default convenience: {}", code);
+        assert!(
+            code.contains("public byte[] SerializeCdr(bool xcdr2)"),
+            "explicit xcdr2 overload must stay for QoS-driven writes: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn test_type_info_metadata_omitted_for_unsupported_members() {
+        let defs = parse_idl(
+            r#"
+            struct Widget { map<long, long> m; long x; };
             "#,
         )
         .unwrap();
         let model = resolve(defs).unwrap();
         let code = generate(&model, "Widget.idl", &CSharpOptions::default());
-        // Widget has a named (enum) member -> not flat -> advertisement metadata omitted.
+        // Widget has a map member -> not advertisable -> advertisement metadata omitted.
         assert!(!code.contains("DdsTypeInfoFields"), "{}", code);
+    }
+
+    #[test]
+    fn test_type_info_metadata_for_enum_and_collection_members() {
+        let defs = parse_idl(
+            r#"
+            enum Color { RED, GREEN, BLUE };
+            @final struct Point { long x; long y; };
+            struct Widget {
+                @key Color c;
+                sequence<Point> path;
+                Point grid[3];
+                long x;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Widget.idl", &CSharpOptions::default());
+        // Enum member -> nested typeof reference (built by reflection at runtime).
+        assert!(
+            code.contains(r#"new DdsTypeInfoField("nested", "c", typeof(Color), 1),"#),
+            "{}",
+            code
+        );
+        // sequence<Point> / Point[3] -> collection-of-nested with element typeof + size.
+        assert!(
+            code.contains(r#"new DdsTypeInfoField("seq_nested", "path", typeof(Point), 0u, 0),"#),
+            "{}",
+            code
+        );
+        assert!(
+            code.contains(r#"new DdsTypeInfoField("arr_nested", "grid", typeof(Point), 3u, 0),"#),
+            "{}",
+            code
+        );
     }
 
     #[test]

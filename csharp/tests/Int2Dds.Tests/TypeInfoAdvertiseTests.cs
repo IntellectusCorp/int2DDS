@@ -29,7 +29,7 @@ namespace Int2Dds.Tests
 
         public AdShape() { }
 
-        public byte[] SerializeCdr() => SerializeCdr(true);
+        public byte[] SerializeCdr() => SerializeCdr(false);
 
         public byte[] SerializeCdr(bool xcdr2)
         {
