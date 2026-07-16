@@ -248,6 +248,19 @@ impl ReaderHistoryCache {
                     )
                 })?;
 
+                // A coherent set that cannot be stored in full is dropped whole, never partially:
+                // a member lost to History/ResourceLimits would make the set incomplete.
+                // len > 1 limits this to real sets; a lone sample keeps the normal evict/reject path.
+                if datareader_cache.is_coherent_access() && changes.len() > 1 {
+                    let mut len_per_instance: HashMap<InstanceHandle, usize> = HashMap::new();
+                    for (change, _) in &changes {
+                        *len_per_instance.entry(change.instance_handle()).or_insert(0) += 1;
+                    }
+                    if !datareader_cache.ensure_capacity_dry(&len_per_instance) {
+                        return Ok(available);
+                    }
+                }
+
                 for (mut change, apply_filter) in changes {
                     // Mutate the change before making it immutable
                     datareader_cache

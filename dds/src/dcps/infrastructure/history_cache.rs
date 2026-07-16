@@ -97,6 +97,12 @@ pub(crate) trait HistoryCache {
                 >= self.get_max_samples_per_instance())
     }
 
+    // Dry run of ensure_capacity for a batch given its per-instance sample counts. Non-mutating;
+    // default true for caches that never add changes as an atomic batch.
+    fn ensure_capacity_dry(&self, _len_per_instance: &HashMap<InstanceHandle, usize>) -> bool {
+        true
+    }
+
     // Insert keeping source/reception-timestamp order. Used when lifespan qos is enabled.
     fn insert_change_sorted(&mut self, change: Arc<CacheChange>);
 
