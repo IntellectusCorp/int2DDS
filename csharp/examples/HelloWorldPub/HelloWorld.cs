@@ -14,6 +14,12 @@ namespace HelloWorldPub
         public static Extensibility TypeExtensibility => Extensibility.Appendable;
         public static bool HasKey => false;
 
+        public static readonly DdsTypeInfoField[] DdsTypeInfoFields = new DdsTypeInfoField[]
+        {
+            new DdsTypeInfoField("field", "index", 9, 0u, 0),
+            new DdsTypeInfoField("string", "message", 0, 0u, 0),
+        };
+
         public uint Index { get; set; }
         public string Message { get; set; } = "";
 

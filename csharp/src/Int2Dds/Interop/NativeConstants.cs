@@ -11,7 +11,6 @@ namespace Int2Dds.Interop
         public const int Error = 1;
         public const int Timeout = 2;
         public const int Unsupported = 3;
-        public const int BadAlloc = 10;
         public const int InvalidArgument = 11;
         public const int AlreadyDeleted = 20;
         public const int NotEnabled = 21;

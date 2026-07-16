@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <signal.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -22,7 +23,16 @@
 #include "int2dds-ffi.h"
 #include "hello_world.h"
 
+/* Run until Ctrl-C, then clean up gracefully (matches the Rust example). */
+static volatile sig_atomic_t g_stop = 0;
+static void handle_sigint(int sig) {
+    (void)sig;
+    g_stop = 1;
+}
+
 int main(int argc, char* argv[]) {
+    signal(SIGINT, handle_sigint);
+
     Int2DdsRet ret;
     Int2DdsParticipantFactory* factory = NULL;
     Int2DdsParticipant* participant = NULL;
@@ -133,7 +143,7 @@ int main(int argc, char* argv[]) {
         goto cleanup;
     }
 
-    /* Loop until a subscriber actually matches; the wait may also return on unmatch */
+    /* Loop until a subscriber actually matches; the finite timeout keeps Ctrl-C responsive */
     int32_t total_count = 0;
     int32_t current_count = 0;
     do {
@@ -142,6 +152,9 @@ int main(int argc, char* argv[]) {
         int2dds_condition_seq_delete(triggered);
         if (ret != INT2DDS_RET_OK) {
             fprintf(stderr, "WaitSet wait failed: %d\n", ret);
+            goto cleanup;
+        }
+        if (g_stop) {
             goto cleanup;
         }
 
@@ -160,7 +173,7 @@ int main(int argc, char* argv[]) {
     uint8_t buf[4096];
     uint32_t i = 0;
 
-    while (1) {
+    while (!g_stop) {
         i++;
 
         /* Fill struct directly */

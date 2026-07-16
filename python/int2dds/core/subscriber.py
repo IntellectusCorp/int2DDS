@@ -65,12 +65,16 @@ class Subscriber:
 
     __slots__ = ("_handle", "_participant", "_closed")
 
-    def __init__(self, participant: DomainParticipant, qos: "SubscriberQos | None" = None) -> None:
+    def __init__(self, participant: DomainParticipant, qos: "SubscriberQos | None" = None,
+                 profile: str | None = None) -> None:
         self._participant = participant
         self._closed = False
 
         subscriber_ptr = ffi.new("Int2DdsSubscriber **")
-        if qos is not None and qos.partition is not None and qos.partition.names:
+        if profile is not None:
+            check_ret(lib.int2dds_create_subscriber_with_profile(
+                participant._handle, profile.encode(), subscriber_ptr))
+        elif qos is not None and qos.partition is not None and qos.partition.names:
             qos_handle_ptr = ffi.new("Int2DdsSubscriberQos **")
             check_ret(lib.int2dds_subscriber_qos_create_default(qos_handle_ptr))
             qos_handle = qos_handle_ptr[0]
@@ -105,6 +109,12 @@ class Subscriber:
             A new DataReader instance
         """
         return DataReader(self, topic, qos, listener, status_mask)
+
+    def create_datareader_with_profile(
+        self, topic: Topic[T] | ContentFilteredTopic[T], profile: str
+    ) -> DataReader[T]:
+        """Create a DataReader whose QoS comes from the named XML profile."""
+        return DataReader(self, topic, profile=profile)
 
     def create_datareader_dynamic(self, topic, support):
         """Create a DataReader for a runtime XML/dynamic-typed topic."""
@@ -175,6 +185,7 @@ class DataReader(Generic[T]):
         qos: DataReaderQos | None = None,
         listener: DataReaderListener | None = None,
         status_mask: int | None = None,
+        profile: str | None = None,
     ) -> None:
         self._subscriber = subscriber
         self._topic = topic
@@ -250,7 +261,13 @@ class DataReader(Generic[T]):
         from int2dds.core.topic import ContentFilteredTopic
         is_cft = isinstance(topic, ContentFilteredTopic)
 
-        if listener is not None:
+        if profile is not None:
+            check_ret(
+                lib.int2dds_create_datareader_with_profile(
+                    subscriber._handle, topic._handle, profile.encode(), reader_ptr
+                )
+            )
+        elif listener is not None:
             mask = status_mask if status_mask is not None else STATUS_MASK_ALL
             c_listener, ctx_id = _create_reader_listener_struct(listener, self)
             if is_cft:
@@ -675,6 +692,37 @@ class DataReader(Generic[T]):
                 capacity = size_out[0]
                 continue
             check_ret(ret)
+
+    def get_qos(self) -> "DataReaderQos":
+        """Return the effective QoS (reliability, durability, history) in force."""
+        from int2dds.core.qos import (
+            DataReaderQos, Reliability, Durability, History,
+            ReliabilityKind, DurabilityKind, HistoryKind,
+        )
+
+        qos_ptr = ffi.new("Int2DdsDataReaderQos **")
+        check_ret(lib.int2dds_datareader_get_qos(self._handle, qos_ptr))
+        handle = qos_ptr[0]
+        try:
+            rel_kind = ffi.new("int32_t *")
+            max_block = ffi.new("int64_t *")
+            check_ret(lib.int2dds_datareader_qos_get_reliability(handle, rel_kind, max_block))
+            dur_kind = ffi.new("int32_t *")
+            check_ret(lib.int2dds_datareader_qos_get_durability(handle, dur_kind))
+            hist_kind = ffi.new("int32_t *")
+            depth = ffi.new("int32_t *")
+            check_ret(lib.int2dds_datareader_qos_get_history(handle, hist_kind, depth))
+        finally:
+            lib.int2dds_datareader_qos_destroy(handle)
+
+        return DataReaderQos(
+            reliability=Reliability(
+                kind=ReliabilityKind(rel_kind[0]).name,
+                max_blocking_time=max_block[0] / 1_000_000_000,
+            ),
+            durability=Durability(kind=DurabilityKind(dur_kind[0]).name),
+            history=History(kind=HistoryKind(hist_kind[0]).name, depth=depth[0]),
+        )
 
     def get_liveliness_changed_status(self) -> dict:
         """Get liveliness changed status.

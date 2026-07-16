@@ -3,12 +3,17 @@
 
 use std::time::Instant;
 
+use log::debug;
+
 use crate::{
     common::builtin::topic::subscription_builtin_topic_data::SubscriptionBuiltinTopicData,
     rtps::{
         builtin::data::content_filtered_topic::FilterSignature,
         common::{entity_id::EntityId, guid::Guid, locator::Locator, sequence::SequenceNumber},
-        entities::history::{history_cache::HistoryCache, writer_history::WriterHistoryCache},
+        entities::history::{
+            cache_change::CacheChange, history_cache::HistoryCache,
+            writer_history::WriterHistoryCache,
+        },
     },
 };
 
@@ -242,6 +247,31 @@ impl ReaderProxy {
         self.last_irrelevant_sn
     }
 
+    pub(crate) fn extend_last_irrelevant_sn(&mut self, sn: SequenceNumber) {
+        if sn > self.last_irrelevant_sn {
+            debug!("Extending last_irrelevant_sn from {} to {}", self.last_irrelevant_sn, sn);
+            self.last_irrelevant_sn = sn;
+        }
+    }
+
+    // Whether this change belongs to a coherent set whose first sequence number falls
+    // inside this reader's GAP range, so the change must be GAPped instead of sent as DATA.
+    pub(crate) fn is_change_in_gapped_coherent_set(&self, change: &CacheChange) -> bool {
+        // Set member: carries its set's first sequence number inline.
+        if let Some(set_start) = change.presentation_info().coherent_set {
+            return set_start != SequenceNumber::UNKNOWN && set_start <= self.last_irrelevant_sn;
+        }
+
+        // Set end marker: it has no set start of its own. Its members were suppressed one by
+        // one while advancing the irrelevant horizon, so the marker closes the GAPped run when
+        // it directly follows that horizon.
+        if change.is_coherent_end_marker() {
+            return change.sequence_number() == self.last_irrelevant_sn + 1;
+        }
+
+        false
+    }
+
     /// Generate ContentFilterInfo for this ReaderProxy
     /// Returns None if no content filter signatures are set
     pub(crate) fn generate_content_filter_info(
@@ -263,5 +293,125 @@ impl ReaderProxy {
 
             ContentFilterInfo { filter_result, filter_signatures: signatures.clone() }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::instance_handle::InstanceHandle;
+    use crate::rtps::common::entity_kind::EntityKind;
+    use crate::rtps::common::types::ChangeKind;
+    use crate::rtps::entities::history::cache_change::{CacheChange, PresentationInfo};
+
+    fn create_reader_proxy(last_irrelevant_sn: i64) -> ReaderProxy {
+        ReaderProxy::new(
+            Guid::new([0; 12], EntityId::new([0, 0, 0], EntityKind::USER_DEFINED_READER_WITH_KEY)),
+            EntityId::UNKNOWN,
+            Vec::new(),
+            Vec::new(),
+            SequenceNumber::new(0, 0),
+            SequenceNumber::new(0, 0),
+            false,
+            true,
+            SubscriptionBuiltinTopicData::default(),
+            SequenceNumber::from_i64(last_irrelevant_sn),
+        )
+    }
+
+    fn writer_guid() -> Guid {
+        Guid::new([1; 12], EntityId::new([0, 0, 1], EntityKind::USER_DEFINED_WRITER_WITH_KEY))
+    }
+
+    // Coherent set member: a Data carrying its set's first sequence number as PID_COHERENT_SET.
+    fn create_member(seq: i64, set_start: i64) -> CacheChange {
+        let mut change = CacheChange::new(
+            ChangeKind::Alive,
+            writer_guid(),
+            InstanceHandle::default(),
+            SequenceNumber::from_i64(seq),
+            vec![1],
+            None,
+        );
+        change.set_presentation_info(PresentationInfo {
+            coherent_set: Some(SequenceNumber::from_i64(set_start)),
+            ..Default::default()
+        });
+        change
+    }
+
+    // Coherent set end marker: a payload-less Alive Data without a coherent set id.
+    fn create_end_marker(seq: i64) -> CacheChange {
+        CacheChange::new(
+            ChangeKind::Alive,
+            writer_guid(),
+            InstanceHandle::default(),
+            SequenceNumber::from_i64(seq),
+            Vec::new(),
+            None,
+        )
+    }
+
+    #[test]
+    fn member_with_set_start_at_or_below_horizon_is_gapped() {
+        let change = create_member(5, 1);
+        let proxy = create_reader_proxy(4);
+
+        assert!(proxy.is_change_in_gapped_coherent_set(&change));
+    }
+
+    #[test]
+    fn member_with_set_start_above_horizon_is_not_gapped() {
+        let change = create_member(14, 14);
+        let proxy = create_reader_proxy(13);
+
+        assert!(!proxy.is_change_in_gapped_coherent_set(&change));
+    }
+
+    #[test]
+    fn non_coherent_change_is_not_gapped() {
+        let mut change = CacheChange::new(
+            ChangeKind::Alive,
+            writer_guid(),
+            InstanceHandle::default(),
+            SequenceNumber::from_i64(5),
+            vec![1],
+            None,
+        );
+        change.set_presentation_info(PresentationInfo::default());
+        let proxy = create_reader_proxy(4);
+
+        assert!(!proxy.is_change_in_gapped_coherent_set(&change));
+    }
+
+    #[test]
+    fn end_marker_directly_following_horizon_is_gapped() {
+        // Members 5..12 were suppressed and advanced the horizon to 12; the marker at 13
+        // directly follows it and closes the GAPped run.
+        let marker = create_end_marker(13);
+        let proxy = create_reader_proxy(12);
+
+        assert!(proxy.is_change_in_gapped_coherent_set(&marker));
+    }
+
+    #[test]
+    fn end_marker_not_following_horizon_is_not_gapped() {
+        // Relevant DATA was sent after the GAPped run, so the marker no longer directly
+        // follows the horizon and must be delivered.
+        let marker = create_end_marker(20);
+        let proxy = create_reader_proxy(13);
+
+        assert!(!proxy.is_change_in_gapped_coherent_set(&marker));
+    }
+
+    #[test]
+    fn extend_last_irrelevant_sn_never_moves_backwards() {
+        let mut proxy = create_reader_proxy(4);
+
+        proxy.extend_last_irrelevant_sn(SequenceNumber::from_i64(7));
+        assert_eq!(proxy.last_irrelevant_sn().to_i64(), 7);
+
+        proxy.extend_last_irrelevant_sn(SequenceNumber::from_i64(5));
+        assert_eq!(proxy.last_irrelevant_sn().to_i64(), 7);
     }
 }

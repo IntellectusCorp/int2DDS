@@ -21,6 +21,11 @@ class HelloWorld:
     _extensibility: ClassVar[Extensibility] = Extensibility.APPENDABLE
     _has_key: ClassVar[bool] = False
 
+    _dds_type_info_fields: ClassVar[list] = [
+        ("field", "index", 9, 0, 0),
+        ("string", "message", 0, 0, 0),
+    ]
+
     index: int = 0
     message: str = ""
 
