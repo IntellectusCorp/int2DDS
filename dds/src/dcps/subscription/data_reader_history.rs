@@ -450,6 +450,47 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
         Ok(None)
     }
 
+    // Dry run of ensure_capacity for a batch given its per-instance sample counts: whether all
+    // fit without any being dropped. Non-mutating, so the caller can reject the batch as a unit.
+    fn ensure_capacity_dry(&self, len_per_instance: &HashMap<InstanceHandle, usize>) -> bool {
+        // Per instance: with auto-remove, eviction frees older samples so only the batch's own
+        // members compete for depth; otherwise the batch must fit alongside what is already stored.
+        for (handle, len_of_cache_changes) in len_per_instance {
+            if handle.is_nil() {
+                continue; // NO_KEY instances are bounded by max_samples below.
+            }
+
+            let expected_after_len = if self.can_auto_remove {
+                *len_of_cache_changes
+            } else {
+                self.sample_count_of_instance(*handle) + len_of_cache_changes
+            };
+
+            if expected_after_len > self.max_samples_per_instance as usize {
+                return false;
+            }
+        }
+
+        // New instances the batch introduces must fit alongside the existing ones.
+        let new_instance_count =
+            len_per_instance.keys().filter(|h| !h.is_nil() && !self.contains_instance(**h)).count();
+
+        if self.instance_count() + new_instance_count > self.max_instances as usize {
+            return false;
+        }
+
+        // Total samples: with auto-remove only the batch competes; otherwise it adds to the total.
+        let batch_total_len: usize = len_per_instance.values().sum();
+
+        let expected_total_after_len = if self.can_auto_remove {
+            batch_total_len
+        } else {
+            self.sample_count() + batch_total_len
+        };
+
+        expected_total_after_len <= self.max_samples as usize
+    }
+
     // Removes the oldest change across all instances (DESTINATION_ORDER).
     fn try_remove_oldest_change_of_all(&mut self) -> DdsResult<Arc<CacheChange>> {
         let kind = self.destination_order_kind;
