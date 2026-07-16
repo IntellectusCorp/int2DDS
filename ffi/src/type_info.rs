@@ -1647,6 +1647,7 @@ mod tests {
     /// bitmask TypeObject (bit_bound, flag positions/names). Proves the polymorphic builder's
     /// bitmask arm so bitmask-typed members resolve via the same content-hash machinery.
     #[test]
+    #[allow(non_upper_case_globals)] // derive emits per-flag consts named after the variants
     fn test_type_info_bitmask_type_object_matches_derive() {
         use int2dds::xtypes::HasTypeObject;
         use int2dds_derive::DdsType;
