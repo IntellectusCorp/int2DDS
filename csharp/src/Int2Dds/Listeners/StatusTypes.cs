@@ -160,4 +160,30 @@ namespace Int2Dds.Listeners
             LastPolicyId = lastPolicyId;
         }
     }
+
+    /// <summary>Status when a DataReader detects a remote DataWriter with an incompatible type.</summary>
+    public class RequestedIncompatibleTypeStatus
+    {
+        public int TotalCount { get; }
+        public int TotalCountChange { get; }
+
+        public RequestedIncompatibleTypeStatus(int totalCount, int totalCountChange)
+        {
+            TotalCount = totalCount;
+            TotalCountChange = totalCountChange;
+        }
+    }
+
+    /// <summary>Status when a DataWriter detects a remote DataReader with an incompatible type.</summary>
+    public class OfferedIncompatibleTypeStatus
+    {
+        public int TotalCount { get; }
+        public int TotalCountChange { get; }
+
+        public OfferedIncompatibleTypeStatus(int totalCount, int totalCountChange)
+        {
+            TotalCount = totalCount;
+            TotalCountChange = totalCountChange;
+        }
+    }
 }

@@ -1435,6 +1435,112 @@ pub unsafe extern "C" fn int2dds_read_serialized_batch(
     INT2DDS_RET_OK
 }
 
+/// Take pre-serialized samples belonging to a single instance, as a batch.
+///
+/// `handle` is a 16-byte instance handle (e.g. from `int2dds_datareader_lookup_instance`
+/// or a prior sample's info). A nil handle returns `INT2DDS_RET_BAD_PARAMETER`; an
+/// unknown handle returns no samples. The mask arguments are bitmasks of the
+/// SampleState/ViewState/InstanceState kinds (use 0xFFFF for "any").
+///
+/// # Safety
+/// - `reader` must be a valid datareader
+/// - `handle` must point to a 16-byte instance handle
+/// - `seq_out` must be a valid pointer to a null pointer
+/// - The returned sequence must be freed with `int2dds_sample_seq_delete`
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_take_instance_serialized_batch(
+    reader: *const Int2DdsDataReader,
+    handle: *const [u8; 16],
+    max_samples: i32,
+    sample_state_mask: u32,
+    view_state_mask: u32,
+    instance_state_mask: u32,
+    seq_out: *mut *mut Int2DdsSampleSeq,
+) -> Int2DdsRet {
+    read_or_take_instance_serialized_batch(
+        reader,
+        handle,
+        max_samples,
+        sample_state_mask,
+        view_state_mask,
+        instance_state_mask,
+        seq_out,
+        true,
+    )
+}
+
+/// Read pre-serialized samples belonging to a single instance, as a batch
+/// (samples remain in the cache).
+///
+/// # Safety
+/// - Same as `int2dds_take_instance_serialized_batch`
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_read_instance_serialized_batch(
+    reader: *const Int2DdsDataReader,
+    handle: *const [u8; 16],
+    max_samples: i32,
+    sample_state_mask: u32,
+    view_state_mask: u32,
+    instance_state_mask: u32,
+    seq_out: *mut *mut Int2DdsSampleSeq,
+) -> Int2DdsRet {
+    read_or_take_instance_serialized_batch(
+        reader,
+        handle,
+        max_samples,
+        sample_state_mask,
+        view_state_mask,
+        instance_state_mask,
+        seq_out,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn read_or_take_instance_serialized_batch(
+    reader: *const Int2DdsDataReader,
+    handle: *const [u8; 16],
+    max_samples: i32,
+    sample_state_mask: u32,
+    view_state_mask: u32,
+    instance_state_mask: u32,
+    seq_out: *mut *mut Int2DdsSampleSeq,
+    take: bool,
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(handle);
+    check_null!(seq_out);
+
+    let reader_ref = &*reader;
+    let instance_handle = InstanceHandle::new(*handle);
+    let ss = [SampleStateKind::from_bits_truncate(sample_state_mask)];
+    let vs = [ViewStateKind::from_bits_truncate(view_state_mask)];
+    let is = [InstanceStateKind::from_bits_truncate(instance_state_mask)];
+
+    let result = if take {
+        reader_ref.inner.take_instance_serialized(max_samples, instance_handle, &ss, &vs, &is)
+    } else {
+        reader_ref.inner.read_instance_serialized(max_samples, instance_handle, &ss, &vs, &is)
+    };
+
+    match result {
+        Ok(samples) => {
+            let empty = samples.is_empty();
+            *seq_out = Box::into_raw(Box::new(Int2DdsSampleSeq { samples }));
+            if empty {
+                INT2DDS_RET_NO_DATA
+            } else {
+                INT2DDS_RET_OK
+            }
+        }
+        Err(int2dds::dcps::core::error::DdsError::NoData) => {
+            *seq_out = Box::into_raw(Box::new(Int2DdsSampleSeq { samples: Vec::new() }));
+            INT2DDS_RET_NO_DATA
+        }
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
 /// Get the number of samples in a sequence
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_sample_seq_length(seq: *const Int2DdsSampleSeq) -> usize {

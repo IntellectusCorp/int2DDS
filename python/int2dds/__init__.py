@@ -36,7 +36,20 @@ try:
         UserData,
         WriterDataLifecycle,
     )
-    from int2dds.core.conditions import Condition, GuardCondition, StatusCondition, WaitSet
+    from int2dds.core.conditions import (
+        ANY_INSTANCE_STATE,
+        ANY_SAMPLE_STATE,
+        ANY_VIEW_STATE,
+        NEW_VIEW_STATE,
+        NOT_READ_SAMPLE_STATE,
+        READ_SAMPLE_STATE,
+        Condition,
+        GuardCondition,
+        QueryCondition,
+        ReadCondition,
+        StatusCondition,
+        WaitSet,
+    )
     from int2dds.core.async_support import AsyncDataReader, AsyncWaitSet, async_wait
     from int2dds.core.listeners import (
         DataReaderListener,
@@ -94,6 +107,14 @@ __all__ = [
     "Condition",
     "StatusCondition",
     "GuardCondition",
+    "ReadCondition",
+    "QueryCondition",
+    "READ_SAMPLE_STATE",
+    "NOT_READ_SAMPLE_STATE",
+    "ANY_SAMPLE_STATE",
+    "NEW_VIEW_STATE",
+    "ANY_VIEW_STATE",
+    "ANY_INSTANCE_STATE",
     # Async support
     "AsyncWaitSet",
     "AsyncDataReader",

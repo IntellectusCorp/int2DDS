@@ -433,6 +433,64 @@ namespace Int2Dds.Core
             }
         }
 
+        /// <summary>Gets the offered incompatible type status.</summary>
+        public OfferedIncompatibleTypeStatus GetOfferedIncompatibleTypeStatus()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            unsafe
+            {
+                NativeOfferedIncompatibleTypeStatus native;
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_datawriter_get_offered_incompatible_type_status(_handle, &native));
+                return new OfferedIncompatibleTypeStatus(native.TotalCount, native.TotalCountChange);
+            }
+        }
+
+        /// <summary>Gets this DataWriter's 16-byte GUID.</summary>
+        public unsafe byte[] GetGuid()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            var guid = new byte[16];
+            fixed (byte* p = guid)
+            {
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_get_guid(_handle, p));
+            }
+            return guid;
+        }
+
+        /// <summary>
+        /// Writes pre-serialized CDR bytes through the zero-copy staging path
+        /// (prepare a native buffer, copy into it, then commit). Aborts the loan
+        /// on failure.
+        /// </summary>
+        public unsafe void WriteSerializedStaged(byte[] data, byte[] key = null)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            if (data == null) throw new ArgumentNullException(nameof(data));
+
+            byte* buffer;
+            UIntPtr capacity;
+            IntPtr loan;
+            ReturnCodeHelper.CheckReturn(
+                NativeMethods.int2dds_prepare_serialized_write(_handle, (UIntPtr)data.Length, out buffer, out capacity, out loan));
+            try
+            {
+                System.Runtime.InteropServices.Marshal.Copy(data, 0, (IntPtr)buffer, data.Length);
+                fixed (byte* pKey = key)
+                {
+                    ReturnCodeHelper.CheckReturn(
+                        NativeMethods.int2dds_commit_serialized_write(
+                            _handle, loan, (UIntPtr)data.Length,
+                            pKey, key != null ? (UIntPtr)key.Length : UIntPtr.Zero));
+                }
+            }
+            catch
+            {
+                NativeMethods.int2dds_abort_serialized_write(loan);
+                throw;
+            }
+        }
+
         /// <summary>
         /// Gets the current QoS policies of this DataWriter.
         /// </summary>
@@ -519,6 +577,17 @@ namespace Int2Dds.Core
             ReturnCodeHelper.CheckReturn(
                 NativeMethods.int2dds_datawriter_get_statuscondition(_handle, out var conditionHandle));
             return new StatusCondition(conditionHandle);
+        }
+
+        /// <summary>
+        /// Gets the current status change bitmask of this DataWriter.
+        /// </summary>
+        public uint GetStatusChanges()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            ReturnCodeHelper.CheckReturn(
+                NativeMethods.int2dds_datawriter_get_status_changes(_handle, out var mask));
+            return mask;
         }
 
         private static void ApplyWriterQos(IntPtr qosHandle, DataWriterQos qos)

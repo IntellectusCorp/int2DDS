@@ -16,6 +16,7 @@
 use std::{ffi::CStr, sync::Arc};
 
 use int2dds::{
+    common::instance_handle::InstanceHandle, core::time::Duration,
     domain::domain_participant_factory::DomainParticipantFactory,
     infrastructure::status::StatusMask,
 };
@@ -299,6 +300,105 @@ pub unsafe extern "C" fn int2dds_participant_delete_contained_entities(
         Ok(()) => INT2DDS_RET_OK,
         Err(e) => dds_error_to_code(&e),
     }
+}
+
+/// Get the participant's current wall-clock time.
+///
+/// `sec` is a Unix timestamp (seconds since the epoch); `nanosec` is the
+/// sub-second remainder.
+///
+/// # Safety
+/// - `participant` must be a valid participant
+/// - `sec_out` and `nanosec_out` must be valid pointers
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_participant_get_current_time(
+    participant: *const Int2DdsParticipant,
+    sec_out: *mut i32,
+    nanosec_out: *mut u32,
+) -> Int2DdsRet {
+    check_null!(participant);
+    check_null!(sec_out);
+    check_null!(nanosec_out);
+
+    match (*participant).inner.get_current_time() {
+        Ok(time) => {
+            *sec_out = time.sec;
+            *nanosec_out = time.nanosec;
+            INT2DDS_RET_OK
+        }
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
+/// Test whether an entity (Publisher/Subscriber/Topic and their children) with
+/// the given 16-byte instance handle belongs to this participant.
+///
+/// # Safety
+/// - `participant` must be a valid participant
+/// - `handle` must point to a 16-byte instance handle
+/// - `result_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_participant_contains_entity(
+    participant: *const Int2DdsParticipant,
+    handle: *const [u8; 16],
+    result_out: *mut bool,
+) -> Int2DdsRet {
+    check_null!(participant);
+    check_null!(handle);
+    check_null!(result_out);
+
+    let instance_handle = InstanceHandle::new(*handle);
+    match (*participant).inner.contains_entity(instance_handle) {
+        Ok(contained) => {
+            *result_out = contained;
+            INT2DDS_RET_OK
+        }
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
+/// Find an existing local Topic by name, blocking up to `timeout_ms` for it to
+/// appear (a negative value blocks indefinitely — avoid it if the topic may
+/// never exist). `dds_type_name` labels the returned handle for the raw path and
+/// must match the caller's expected type.
+///
+/// # Safety
+/// - `participant` must be a valid participant
+/// - `topic_name` and `dds_type_name` must be valid null-terminated C strings
+/// - `topic_out` must be a valid pointer to a null pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_participant_find_topic(
+    participant: *const Int2DdsParticipant,
+    topic_name: *const std::os::raw::c_char,
+    dds_type_name: *const std::os::raw::c_char,
+    timeout_ms: i32,
+    topic_out: *mut *mut Int2DdsTopic,
+) -> Int2DdsRet {
+    check_null!(participant);
+    check_null!(topic_name);
+    check_null!(dds_type_name);
+    check_null!(topic_out);
+
+    let topic_name_str = match CStr::from_ptr(topic_name).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+    let dds_type_name_str = match CStr::from_ptr(dds_type_name).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    let timeout = if timeout_ms < 0 {
+        Duration { sec: 0x7fff_ffff, nanosec: 0x7fff_ffff }
+    } else {
+        Duration { sec: timeout_ms / 1000, nanosec: ((timeout_ms % 1000) as u32) * 1_000_000 }
+    };
+
+    let topic = ffi_try!((*participant).inner.find_topic(topic_name_str, timeout));
+    let topic_handle =
+        Box::new(Int2DdsTopic { inner: Arc::new(topic), type_name: dds_type_name_str.to_string() });
+    *topic_out = Box::into_raw(topic_handle);
+    INT2DDS_RET_OK
 }
 
 #[cfg(test)]

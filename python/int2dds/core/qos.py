@@ -238,9 +238,13 @@ class Property:
     as a convenience.
     """
     entries: list[tuple[str, str, bool]] = field(default_factory=list)
+    binary_entries: list[tuple[str, bytes, bool]] = field(default_factory=list)
 
     def add(self, name: str, value: str, propagate: bool = True) -> None:
         self.entries.append((name, value, propagate))
+
+    def add_binary(self, name: str, data: bytes, propagate: bool = True) -> None:
+        self.binary_entries.append((name, bytes(data), propagate))
 
     def set_multicast_ttl(self, ttl: int) -> None:
         if not 0 <= ttl <= 255:

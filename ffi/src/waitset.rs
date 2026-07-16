@@ -369,6 +369,50 @@ pub unsafe extern "C" fn int2dds_waitset_detach_condition(
     }
 }
 
+/// Attach a Read/QueryCondition to the WaitSet
+///
+/// # Safety
+/// - `waitset` must be a valid waitset
+/// - `condition` must be a valid read condition
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_waitset_attach_readcondition(
+    waitset: *const Int2DdsWaitSet,
+    condition: *const Int2DdsReadCondition,
+) -> Int2DdsRet {
+    check_null!(waitset);
+    check_null!(condition);
+
+    let waitset_ref = &*waitset;
+    let condition_ref = &*condition;
+
+    match waitset_ref.inner.attach_condition(condition_ref.inner.clone()) {
+        Ok(()) => INT2DDS_RET_OK,
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
+/// Detach a Read/QueryCondition from the WaitSet
+///
+/// # Safety
+/// - `waitset` must be a valid waitset
+/// - `condition` must be a valid read condition that was previously attached
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_waitset_detach_readcondition(
+    waitset: *const Int2DdsWaitSet,
+    condition: *const Int2DdsReadCondition,
+) -> Int2DdsRet {
+    check_null!(waitset);
+    check_null!(condition);
+
+    let waitset_ref = &*waitset;
+    let condition_ref = &*condition;
+
+    match waitset_ref.inner.detach_condition(condition_ref.inner.clone()) {
+        Ok(()) => INT2DDS_RET_OK,
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
 /// Attach a DataReader's status condition to the WaitSet
 ///
 /// This allows waiting for data to arrive on a DataReader.

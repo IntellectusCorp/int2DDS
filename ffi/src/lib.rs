@@ -62,6 +62,7 @@ pub mod participant;
 pub mod publisher;
 pub mod qos;
 pub mod raw_type_support;
+pub mod read_condition;
 pub mod status;
 pub mod status_condition;
 pub mod subscriber;

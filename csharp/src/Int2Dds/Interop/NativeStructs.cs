@@ -121,6 +121,26 @@ namespace Int2Dds.Interop
     }
 
     /// <summary>
+    /// C-compatible requested incompatible type status.
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct NativeRequestedIncompatibleTypeStatus
+    {
+        public int TotalCount;
+        public int TotalCountChange;
+    }
+
+    /// <summary>
+    /// C-compatible offered incompatible type status.
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct NativeOfferedIncompatibleTypeStatus
+    {
+        public int TotalCount;
+        public int TotalCountChange;
+    }
+
+    /// <summary>
     /// C-compatible sample rejected status.
     /// </summary>
     [StructLayout(LayoutKind.Sequential)]

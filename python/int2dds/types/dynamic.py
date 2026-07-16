@@ -224,6 +224,57 @@ class TypeObject:
         check_ret(lib.int2dds_type_object_find_member(self._handle, _cstr(name), out))
         return out[0]
 
+    def _read_sample_scalar(self, fn, ctype: str, data: bytes, field: str):
+        buf = ffi.from_buffer(data)
+        out = ffi.new(ctype)
+        check_ret(fn(ffi.cast("const uint8_t*", buf), len(data), self._handle, _cstr(field), out))
+        return out[0]
+
+    def read_bool(self, data: bytes, field: str) -> bool:
+        return bool(self._read_sample_scalar(lib.int2dds_dynamic_sample_get_bool, "bool *", data, field))
+
+    def read_i8(self, data: bytes, field: str) -> int:
+        return self._read_sample_scalar(lib.int2dds_dynamic_sample_get_i8, "int8_t *", data, field)
+
+    def read_u8(self, data: bytes, field: str) -> int:
+        return self._read_sample_scalar(lib.int2dds_dynamic_sample_get_u8, "uint8_t *", data, field)
+
+    def read_byte(self, data: bytes, field: str) -> int:
+        return self._read_sample_scalar(lib.int2dds_dynamic_sample_get_byte, "uint8_t *", data, field)
+
+    def read_char8(self, data: bytes, field: str) -> int:
+        return self._read_sample_scalar(lib.int2dds_dynamic_sample_get_char8, "uint8_t *", data, field)
+
+    def read_i16(self, data: bytes, field: str) -> int:
+        return self._read_sample_scalar(lib.int2dds_dynamic_sample_get_i16, "int16_t *", data, field)
+
+    def read_u16(self, data: bytes, field: str) -> int:
+        return self._read_sample_scalar(lib.int2dds_dynamic_sample_get_u16, "uint16_t *", data, field)
+
+    def read_i32(self, data: bytes, field: str) -> int:
+        return self._read_sample_scalar(lib.int2dds_dynamic_sample_get_i32, "int32_t *", data, field)
+
+    def read_u32(self, data: bytes, field: str) -> int:
+        return self._read_sample_scalar(lib.int2dds_dynamic_sample_get_u32, "uint32_t *", data, field)
+
+    def read_i64(self, data: bytes, field: str) -> int:
+        return self._read_sample_scalar(lib.int2dds_dynamic_sample_get_i64, "int64_t *", data, field)
+
+    def read_u64(self, data: bytes, field: str) -> int:
+        return self._read_sample_scalar(lib.int2dds_dynamic_sample_get_u64, "uint64_t *", data, field)
+
+    def read_f32(self, data: bytes, field: str) -> float:
+        return self._read_sample_scalar(lib.int2dds_dynamic_sample_get_f32, "float *", data, field)
+
+    def read_f64(self, data: bytes, field: str) -> float:
+        return self._read_sample_scalar(lib.int2dds_dynamic_sample_get_f64, "double *", data, field)
+
+    def read_string(self, data: bytes, field: str) -> str:
+        buf = ffi.from_buffer(data)
+        return _read_string(
+            lib.int2dds_dynamic_sample_get_string,
+            ffi.cast("const uint8_t*", buf), len(data), self._handle, _cstr(field))
+
     def close(self) -> None:
         if getattr(self, "_handle", None) is not None:
             lib.int2dds_type_object_destroy(self._handle)

@@ -8,7 +8,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 from int2dds._ffi import CData, ffi, lib
-from int2dds.core.conditions import StatusCondition
+from int2dds.core.conditions import (
+    ANY_INSTANCE_STATE,
+    ANY_SAMPLE_STATE,
+    ANY_VIEW_STATE,
+    QueryCondition,
+    ReadCondition,
+    StatusCondition,
+)
 from int2dds.core.listeners import (
     DataReaderListener,
     _create_reader_listener_struct,
@@ -40,10 +47,13 @@ class Sample(Generic[T]):
     Attributes:
         data: The deserialized data (None if not valid_data)
         valid_data: True if this is a valid data sample (not dispose/unregister)
+        instance_handle: The 16-byte instance handle, when available (the
+            SampleSeq-based read/take paths populate it; ``None`` otherwise).
     """
 
     data: T | None
     valid_data: bool
+    instance_handle: bytes | None = None
 
 
 class Subscriber:
@@ -105,6 +115,18 @@ class Subscriber:
     def delete_contained_entities(self) -> None:
         """Delete all DataReaders created by this subscriber."""
         check_ret(lib.int2dds_subscriber_delete_contained_entities(self._handle))
+
+    def get_statuscondition(self) -> StatusCondition:
+        """Get the StatusCondition associated with this subscriber."""
+        cond_ptr = ffi.new("Int2DdsStatusCondition **")
+        check_ret(lib.int2dds_subscriber_get_statuscondition(self._handle, cond_ptr))
+        return StatusCondition(cond_ptr[0], owner=self)
+
+    def get_status_changes(self) -> int:
+        """Get the current status change bitmask of this subscriber."""
+        mask_out = ffi.new("uint32_t *")
+        check_ret(lib.int2dds_subscriber_get_status_changes(self._handle, mask_out))
+        return mask_out[0]
 
     def close(self) -> None:
         """Delete the subscriber."""
@@ -347,6 +369,240 @@ class DataReader(Generic[T]):
         """
         return self._take_one()
 
+    def create_read_condition(
+        self,
+        sample_states: int = ANY_SAMPLE_STATE,
+        view_states: int = ANY_VIEW_STATE,
+        instance_states: int = ANY_INSTANCE_STATE,
+    ) -> ReadCondition:
+        """Create a ReadCondition filtering by sample/view/instance state masks.
+
+        Attach the returned condition to a WaitSet, and pass it to
+        take_w_condition()/read_w_condition() to read the matching samples.
+        """
+        cond_ptr = ffi.new("Int2DdsReadCondition **")
+        check_ret(
+            lib.int2dds_datareader_create_readcondition(
+                self._handle, sample_states, view_states, instance_states, cond_ptr
+            )
+        )
+        return ReadCondition(cond_ptr[0], owner=self)
+
+    def create_query_condition(
+        self,
+        query_expression: str,
+        query_parameters: list[str] | None = None,
+        sample_states: int = ANY_SAMPLE_STATE,
+        view_states: int = ANY_VIEW_STATE,
+        instance_states: int = ANY_INSTANCE_STATE,
+    ) -> QueryCondition:
+        """Create a QueryCondition: state masks plus a SQL-92 content filter.
+
+        Content filtering requires the topic to carry field descriptors (as with
+        ContentFilteredTopic).
+        """
+        params = query_parameters or []
+        count = len(params)
+        encoded = [ffi.new("char[]", p.encode("utf-8")) for p in params]
+        arr = ffi.new("char *const[]", encoded) if count else ffi.NULL
+        expr = ffi.new("char[]", query_expression.encode("utf-8"))
+        cond_ptr = ffi.new("Int2DdsReadCondition **")
+        check_ret(
+            lib.int2dds_datareader_create_querycondition(
+                self._handle,
+                sample_states,
+                view_states,
+                instance_states,
+                expr,
+                arr,
+                count,
+                cond_ptr,
+            )
+        )
+        return QueryCondition(cond_ptr[0], owner=self)
+
+    def take_w_condition(
+        self, condition: ReadCondition, max_samples: int = -1
+    ) -> list[Sample[T]]:
+        """Take samples matching a Read/QueryCondition (removed from the cache)."""
+        return self._read_or_take_w_condition(
+            condition, max_samples, lib.int2dds_datareader_take_w_readcondition
+        )
+
+    def read_w_condition(
+        self, condition: ReadCondition, max_samples: int = -1
+    ) -> list[Sample[T]]:
+        """Read samples matching a Read/QueryCondition (left in the cache)."""
+        return self._read_or_take_w_condition(
+            condition, max_samples, lib.int2dds_datareader_read_w_readcondition
+        )
+
+    def _read_or_take_w_condition(
+        self, condition: ReadCondition, max_samples: int, native_fn
+    ) -> list[Sample[T]]:
+        seq_ptr = ffi.new("Int2DdsSampleSeq **")
+        ret = native_fn(self._handle, condition._handle, max_samples, seq_ptr)
+        if ret == INT2DDS_RET_NO_DATA:
+            if seq_ptr[0] != ffi.NULL:
+                lib.int2dds_sample_seq_delete(seq_ptr[0])
+            return []
+        check_ret(ret)
+
+        seq = seq_ptr[0]
+        try:
+            count = lib.int2dds_sample_seq_length(seq)
+            info = ffi.new("Int2DdsSampleInfo *")
+            actual_size = ffi.new("size_t *")
+            samples: list[Sample[T]] = []
+            for i in range(count):
+                check_ret(lib.int2dds_sample_seq_get_info(seq, i, info))
+                handle = bytes(ffi.buffer(info.instance_handle, 16))
+                if not info.valid_data:
+                    samples.append(Sample(data=None, valid_data=False, instance_handle=handle))
+                    continue
+                # Copy the serialized bytes, growing the shared buffer if needed.
+                while True:
+                    ret = lib.int2dds_sample_seq_get_data(
+                        seq, i, self._buffer, self._buffer_size, actual_size
+                    )
+                    if ret == INT2DDS_RET_OK:
+                        break
+                    if actual_size[0] > self._buffer_size:
+                        self._grow_buffer(actual_size[0])
+                        continue
+                    check_ret(ret)
+                data_bytes = ffi.buffer(self._buffer, actual_size[0])[:]
+                data = self._topic.type_class._deserialize_cdr(data_bytes)
+                samples.append(Sample(data=data, valid_data=True, instance_handle=handle))
+            return samples
+        finally:
+            lib.int2dds_sample_seq_delete(seq)
+
+    def take_instance_serialized(
+        self,
+        handle: bytes,
+        max_samples: int = -1,
+        sample_states: int = 0xFFFF,
+        view_states: int = 0xFFFF,
+        instance_states: int = 0xFFFF,
+    ) -> list[Sample[T]]:
+        """Take samples belonging to a single instance (raw serialized path).
+
+        ``handle`` is a 16-byte instance handle (from :meth:`lookup_instance` or a
+        sample's info). A nil handle raises; an unknown handle returns ``[]``.
+        """
+        return self._read_or_take_instance_serialized(
+            handle, max_samples, sample_states, view_states, instance_states,
+            lib.int2dds_take_instance_serialized_batch)
+
+    def read_instance_serialized(
+        self,
+        handle: bytes,
+        max_samples: int = -1,
+        sample_states: int = 0xFFFF,
+        view_states: int = 0xFFFF,
+        instance_states: int = 0xFFFF,
+    ) -> list[Sample[T]]:
+        """Read samples belonging to a single instance (samples stay in cache)."""
+        return self._read_or_take_instance_serialized(
+            handle, max_samples, sample_states, view_states, instance_states,
+            lib.int2dds_read_instance_serialized_batch)
+
+    def _read_or_take_instance_serialized(
+        self, handle: bytes, max_samples: int,
+        sample_states: int, view_states: int, instance_states: int, native_fn,
+    ) -> list[Sample[T]]:
+        if len(handle) != 16:
+            raise ValueError("instance handle must be 16 bytes")
+        handle_c = ffi.new("uint8_t[16]", list(handle))
+        handle_ref = ffi.cast("const uint8_t(*)[16]", handle_c)
+        seq_ptr = ffi.new("Int2DdsSampleSeq **")
+        ret = native_fn(
+            self._handle, handle_ref, max_samples,
+            sample_states, view_states, instance_states, seq_ptr)
+        if ret == INT2DDS_RET_NO_DATA:
+            if seq_ptr[0] != ffi.NULL:
+                lib.int2dds_sample_seq_delete(seq_ptr[0])
+            return []
+        check_ret(ret)
+
+        seq = seq_ptr[0]
+        try:
+            count = lib.int2dds_sample_seq_length(seq)
+            info = ffi.new("Int2DdsSampleInfo *")
+            actual_size = ffi.new("size_t *")
+            samples: list[Sample[T]] = []
+            for i in range(count):
+                check_ret(lib.int2dds_sample_seq_get_info(seq, i, info))
+                handle = bytes(ffi.buffer(info.instance_handle, 16))
+                if not info.valid_data:
+                    samples.append(Sample(data=None, valid_data=False, instance_handle=handle))
+                    continue
+                while True:
+                    ret = lib.int2dds_sample_seq_get_data(
+                        seq, i, self._buffer, self._buffer_size, actual_size)
+                    if ret == INT2DDS_RET_OK:
+                        break
+                    if actual_size[0] > self._buffer_size:
+                        self._grow_buffer(actual_size[0])
+                        continue
+                    check_ret(ret)
+                data_bytes = ffi.buffer(self._buffer, actual_size[0])[:]
+                data = self._topic.type_class._deserialize_cdr(data_bytes)
+                samples.append(Sample(data=data, valid_data=True, instance_handle=handle))
+            return samples
+        finally:
+            lib.int2dds_sample_seq_delete(seq)
+
+    def take_serialized(self, max_samples: int = -1) -> list[Sample[T]]:
+        """Take all available samples in one batch (raw serialized path)."""
+        return self._read_or_take_serialized_batch(
+            max_samples, lib.int2dds_take_serialized_batch)
+
+    def read_serialized(self, max_samples: int = -1) -> list[Sample[T]]:
+        """Read all available samples in one batch (samples stay in cache)."""
+        return self._read_or_take_serialized_batch(
+            max_samples, lib.int2dds_read_serialized_batch)
+
+    def _read_or_take_serialized_batch(
+        self, max_samples: int, native_fn
+    ) -> list[Sample[T]]:
+        seq_ptr = ffi.new("Int2DdsSampleSeq **")
+        ret = native_fn(self._handle, max_samples, seq_ptr)
+        if ret == INT2DDS_RET_NO_DATA:
+            if seq_ptr[0] != ffi.NULL:
+                lib.int2dds_sample_seq_delete(seq_ptr[0])
+            return []
+        check_ret(ret)
+
+        seq = seq_ptr[0]
+        try:
+            count = lib.int2dds_sample_seq_length(seq)
+            info = ffi.new("Int2DdsSampleInfo *")
+            actual_size = ffi.new("size_t *")
+            samples: list[Sample[T]] = []
+            for i in range(count):
+                check_ret(lib.int2dds_sample_seq_get_info(seq, i, info))
+                handle = bytes(ffi.buffer(info.instance_handle, 16))
+                if not info.valid_data:
+                    samples.append(Sample(data=None, valid_data=False, instance_handle=handle))
+                    continue
+                while True:
+                    ret = lib.int2dds_sample_seq_get_data(
+                        seq, i, self._buffer, self._buffer_size, actual_size)
+                    if ret == INT2DDS_RET_OK:
+                        break
+                    if actual_size[0] > self._buffer_size:
+                        self._grow_buffer(actual_size[0])
+                        continue
+                    check_ret(ret)
+                data_bytes = ffi.buffer(self._buffer, actual_size[0])[:]
+                data = self._topic.type_class._deserialize_cdr(data_bytes)
+                samples.append(Sample(data=data, valid_data=True, instance_handle=handle))
+            return samples
+        finally:
+            lib.int2dds_sample_seq_delete(seq)
+
     def get_subscription_matched_status(self) -> tuple[int, int]:
         """
         Get the subscription matched status.
@@ -494,11 +750,65 @@ class DataReader(Generic[T]):
             "policies_count": status.policies_count,
         }
 
+    def get_requested_incompatible_type_status(self) -> dict:
+        """Get requested incompatible type status.
+
+        Returns:
+            dict with total_count, total_count_change
+        """
+        status = ffi.new("Int2DdsRequestedIncompatibleTypeStatus *")
+        check_ret(lib.int2dds_datareader_get_requested_incompatible_type_status(self._handle, status))
+        return {
+            "total_count": status.total_count,
+            "total_count_change": status.total_count_change,
+        }
+
+    def get_guid(self) -> bytes:
+        """Get this DataReader's 16-byte GUID."""
+        buf = ffi.new("uint8_t[16]")
+        check_ret(lib.int2dds_datareader_get_guid(self._handle, ffi.cast("uint8_t(*)[16]", buf)))
+        return bytes(ffi.buffer(buf, 16))
+
+    def has_data(self) -> bool:
+        """Return whether unread samples are available in the cache."""
+        out = ffi.new("bool *")
+        check_ret(lib.int2dds_datareader_has_data(self._handle, out))
+        return out[0]
+
+    def take_next_serialized_loaned(self) -> bytes | None:
+        """Take one sample as raw CDR bytes via the zero-copy loan path.
+
+        Returns the CDR bytes (copied out before the loan is returned), or None
+        if no data is available.
+        """
+        data_out = ffi.new("const uint8_t **")
+        size_out = ffi.new("size_t *")
+        valid_out = ffi.new("bool *")
+        loan_out = ffi.new("Int2DdsSerializedLoan **")
+        ret = lib.int2dds_take_serialized_loaned(
+            self._handle, data_out, size_out, valid_out, loan_out)
+        if ret == INT2DDS_RET_NO_DATA:
+            return None
+        check_ret(ret)
+        try:
+            if not valid_out[0] or loan_out[0] == ffi.NULL:
+                return b""
+            return bytes(ffi.buffer(data_out[0], size_out[0]))
+        finally:
+            if loan_out[0] != ffi.NULL:
+                lib.int2dds_return_serialized_loan(loan_out[0])
+
     def get_statuscondition(self) -> StatusCondition:
         """Get the StatusCondition associated with this DataReader."""
         cond_ptr = ffi.new("Int2DdsStatusCondition **")
         check_ret(lib.int2dds_datareader_get_statuscondition(self._handle, cond_ptr))
         return StatusCondition(cond_ptr[0], owner=self)
+
+    def get_status_changes(self) -> int:
+        """Get the current status change bitmask of this DataReader."""
+        mask_out = ffi.new("uint32_t *")
+        check_ret(lib.int2dds_datareader_get_status_changes(self._handle, mask_out))
+        return mask_out[0]
 
     def set_listener(
         self,
