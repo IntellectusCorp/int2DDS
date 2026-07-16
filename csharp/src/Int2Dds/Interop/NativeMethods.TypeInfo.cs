@@ -27,6 +27,21 @@ namespace Int2Dds.Interop
         internal static unsafe extern int int2dds_type_info_add_named_type_field(IntPtr type_info, byte* field_name, byte* type_hash_name, int is_key);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_type_info_add_nested_field(IntPtr type_info, byte* field_name, IntPtr nested_type_info, int flags);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_type_info_add_sequence_of_nested_field(IntPtr type_info, byte* field_name, IntPtr element_type_info, uint bound, int flags);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_type_info_add_array_of_nested_field(IntPtr type_info, byte* field_name, IntPtr element_type_info, uint array_size, int flags);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_type_info_create_enum(byte* type_name, ushort bit_bound, out IntPtr out_type_info);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_type_info_add_enum_literal(IntPtr type_info, byte* literal_name, int value, int is_default);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static unsafe extern int int2dds_type_info_add_sequence_of_named_field(IntPtr type_info, byte* field_name, byte* element_hash_name, uint bound, int flags);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]

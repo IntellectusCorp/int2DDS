@@ -320,12 +320,13 @@ pub unsafe extern "C" fn int2dds_create_topic_with_type_info(
     // Create RawTypeSupport with type info for discovery. Also register key fields derived
     // from the type_info so keyed types created this way still compute instance keys
     // (matching the create_topic_with_field_descriptors path).
-    let mut raw_type_support = RawTypeSupport::with_type_info(
+    let mut raw_type_support = RawTypeSupport::with_type_info_and_deps(
         dds_type_name.clone(),
         ti.extensibility,
         ti.has_key_field(),
         type_identifier,
         type_object,
+        ti.dependency_closure(),
     );
     raw_type_support.set_key_fields(ti.key_field_infos());
 

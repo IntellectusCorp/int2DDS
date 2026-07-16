@@ -64,12 +64,21 @@ pub fn resolve(definitions: Vec<Definition>) -> Result<IdlModel, ResolveError> {
 pub fn resolve_scoped(root: &[Definition], all: Vec<Definition>) -> Result<IdlModel, ResolveError> {
     let keep = declared_qualified_names(root)?;
     let mut model = resolve(all)?;
+    // Capture the #included (non-root) type defs before dropping them from the
+    // emitted vecs so codegen can still recurse into nested-struct key fields and
+    // resolve enum/bitmask defaults that live in another file.
+    model.imported.structs =
+        model.structs.iter().filter(|s| !keep.contains(&s.qualified_name)).cloned().collect();
+    model.imported.enums =
+        model.enums.iter().filter(|e| !keep.contains(&e.qualified_name)).cloned().collect();
+    model.imported.bitmasks =
+        model.bitmasks.iter().filter(|b| !keep.contains(&b.qualified_name)).cloned().collect();
     model.retain_qualified(&keep);
     Ok(model)
 }
 
 /// Qualified names of every emittable definition declared in `defs`.
-fn declared_qualified_names(defs: &[Definition]) -> Result<HashSet<String>, ResolveError> {
+pub fn declared_qualified_names(defs: &[Definition]) -> Result<HashSet<String>, ResolveError> {
     let mut r = Resolver::new();
     r.collect_definitions(defs, "")?;
     let mut keep = HashSet::new();
@@ -248,6 +257,7 @@ impl Resolver {
             interfaces,
             exceptions,
             constants,
+            imported: ImportedTypes::default(),
         })
     }
 
@@ -1038,6 +1048,36 @@ mod tests {
         // Only the root constant survives.
         assert_eq!(model.constants.len(), 1);
         assert_eq!(model.constants[0].qualified_name, "app::msg::APP_OK");
+    }
+
+    #[test]
+    fn test_resolve_scoped_captures_imported_defs() {
+        // Included defs are dropped from the emitted vecs but retained in
+        // `imported` so codegen can recurse into cross-file nested key fields.
+        let included = parse_idl(
+            "module dep { module msg {
+                @final struct Header { uint32 stamp; uint32 seq; };
+                enum Mode { A, B };
+            }; };",
+        )
+        .unwrap();
+        let root = parse_idl(
+            "module app { module msg {
+                struct Msg { dep::msg::Header header; dep::msg::Mode mode; };
+            }; };",
+        )
+        .unwrap();
+        let mut all = included.clone();
+        all.extend(root.clone());
+
+        let model = resolve_scoped(&root, all).unwrap();
+
+        assert_eq!(model.structs.len(), 1);
+        assert!(model.imported.structs.iter().any(|s| s.name == "Header"));
+        assert!(model.imported.enums.iter().any(|e| e.name == "Mode"));
+        // The imported Header keeps its members so key recursion can inline them.
+        let header = model.imported.structs.iter().find(|s| s.name == "Header").unwrap();
+        assert_eq!(header.members.len(), 2);
     }
 
     #[test]
