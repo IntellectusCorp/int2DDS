@@ -266,7 +266,10 @@ impl ReaderHistoryCache {
                     for (change, _) in &changes {
                         *len_per_instance.entry(change.instance_handle()).or_insert(0) += 1;
                     }
-                    if !datareader_cache.ensure_capacity_dry(&len_per_instance) {
+                    let fits = datareader_cache
+                        .ensure_capacity_dry(&len_per_instance)
+                        .map_err(|e| RtpsError::new(RtpsErrorCode::DdsError, e.to_string()))?;
+                    if !fits {
                         return Ok(available);
                     }
                 }
