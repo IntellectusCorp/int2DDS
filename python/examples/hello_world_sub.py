@@ -67,26 +67,13 @@ def main() -> None:
         # Switch to DATA_AVAILABLE only for data reception phase
         status_cond.set_enabled_statuses(STATUS_DATA_AVAILABLE)
 
-        # Receive samples
+        # Receive samples until Ctrl-C, then the participant context manager
+        # cleans up gracefully (matches the Rust example).
         print("Waiting for data...")
         samples_received = 0
-        timeout_count = 0
 
-        while timeout_count < 3:
-            # First, check for data that may have arrived already
-            for sample in reader.take():
-                if sample.valid_data:
-                    data = sample.data
-                    print(f"Received: index={data.index}, message='{data.message}'")
-                    samples_received += 1
-                else:
-                    print("Received dispose/unregister notification")
-                timeout_count = 0
-
-            try:
-                waitset.wait(timeout=2.0)
-
-                # Take all available samples
+        try:
+            while True:
                 for sample in reader.take():
                     if sample.valid_data:
                         data = sample.data
@@ -95,11 +82,12 @@ def main() -> None:
                     else:
                         print("Received dispose/unregister notification")
 
-                timeout_count = 0  # Reset on successful receive
-
-            except DdsTimeout:
-                timeout_count += 1
-                print(f"No data received (timeout {timeout_count}/3)")
+                try:
+                    waitset.wait(timeout=2.0)
+                except DdsTimeout:
+                    pass  # No data yet, keep waiting
+        except KeyboardInterrupt:
+            print("\nShutting down...")
 
         print(f"Done. Received {samples_received} samples.")
 
