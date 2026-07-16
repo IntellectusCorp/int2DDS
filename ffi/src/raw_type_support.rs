@@ -17,7 +17,9 @@ use int2dds::{
     serialize::BufferManager,
     topic::sql::ast::Parameter,
     topic::type_support::{FieldAccessor, SerializationFormat, TypeSupport},
-    xtypes::{TypeIdentifier, TypeObject},
+    xtypes::{
+        deserialize_dynamic_data, DynamicTypeSupport, TypeIdentifier, TypeObject, TypeRegistry,
+    },
 };
 
 use crate::data::{align_body, CdrFieldType};
@@ -56,6 +58,12 @@ pub struct RawTypeSupport {
     type_object: Option<TypeObject>,
     key_fields: Vec<KeyFieldInfo>,
     all_fields: Option<Arc<Vec<crate::data::CdrFieldDescriptor>>>,
+    /// Canonical key machinery derived from a full TypeObject. When present,
+    /// `compute_key` deserializes the sample into a `DynamicData` and delegates to
+    /// the shared Rust key path (`serialize_key_cdr`), matching native-Rust/derive
+    /// InstanceHandles for every key shape — including composite, float, and nested
+    /// members that the flat `CdrFieldType` key parser cannot express.
+    dynamic_key_support: Option<Arc<DynamicTypeSupport>>,
 }
 
 impl RawTypeSupport {
@@ -68,6 +76,7 @@ impl RawTypeSupport {
             type_object: None,
             key_fields: Vec::new(),
             all_fields: None,
+            dynamic_key_support: None,
         }
     }
 
@@ -84,6 +93,7 @@ impl RawTypeSupport {
             type_object: None,
             key_fields: Vec::new(),
             all_fields: None,
+            dynamic_key_support: None,
         }
     }
 
@@ -98,6 +108,50 @@ impl RawTypeSupport {
         type_identifier: TypeIdentifier,
         type_object: TypeObject,
     ) -> Self {
+        Self::with_type_info_and_deps(
+            type_name,
+            extensibility,
+            has_key,
+            type_identifier,
+            type_object,
+            Vec::new(),
+        )
+    }
+
+    /// Like [`with_type_info`](Self::with_type_info), but with a dependency closure of
+    /// nested `TypeObject`s so the canonical key machinery can resolve composite
+    /// (nested-struct) key members. Each dependency is registered under its own
+    /// content-hash `CompleteTypeId` — the same identifier the parent member references
+    /// and the derive macro emits — so `serialize_key_cdr` recurses into nested keys
+    /// exactly like native Rust. Falls back to the registry-less build (flat keys only)
+    /// when `dependencies` is empty.
+    pub fn with_type_info_and_deps(
+        type_name: String,
+        extensibility: ExtensibilityKind,
+        has_key: bool,
+        type_identifier: TypeIdentifier,
+        type_object: TypeObject,
+        dependencies: Vec<(TypeIdentifier, TypeObject)>,
+    ) -> Self {
+        // Build the canonical key machinery from the full TypeObject so keyed
+        // topics created via the type_info path (C# generated types, Python
+        // `_dds_type_info_fields`) compute the same InstanceHandle as native Rust.
+        // Falls back to the flat key parser if the DynamicType cannot be built.
+        let dynamic_key_support = if has_key {
+            if dependencies.is_empty() {
+                DynamicTypeSupport::from_type_object(type_object.clone()).ok().map(Arc::new)
+            } else {
+                let mut registry = TypeRegistry::new();
+                for (id, obj) in &dependencies {
+                    registry.register_type_object_with_id(id, obj.clone());
+                }
+                DynamicTypeSupport::from_type_object_with_registry(type_object.clone(), &registry)
+                    .ok()
+                    .map(Arc::new)
+            }
+        } else {
+            None
+        };
         Self {
             type_name,
             extensibility,
@@ -106,6 +160,7 @@ impl RawTypeSupport {
             type_object: Some(type_object),
             key_fields: Vec::new(),
             all_fields: None,
+            dynamic_key_support,
         }
     }
 
@@ -359,7 +414,9 @@ impl TypeSupport for RawTypeSupport {
     ) -> DdsResult<Box<dyn Any>> {
         // Store CDR bytes and field metadata when configured (Python binding).
         // Otherwise return empty Int2DdsData (existing behavior for C/C# bindings).
-        let need_bytes = !self.key_fields.is_empty() || self.all_fields.is_some();
+        let need_bytes = !self.key_fields.is_empty()
+            || self.all_fields.is_some()
+            || self.dynamic_key_support.is_some();
         Ok(Box::new(crate::data::Int2DdsData {
             cdr_bytes: if need_bytes { Some(data.to_vec()) } else { None },
             field_descriptors: self.all_fields.clone(),
@@ -376,11 +433,6 @@ impl TypeSupport for RawTypeSupport {
     }
 
     fn compute_key(&self, data: &dyn Any) -> InstanceHandle {
-        // No key fields configured — preserve existing behavior (C/C# bindings)
-        if self.key_fields.is_empty() {
-            return InstanceHandle::NIL;
-        }
-
         let int2dds_data = match data.downcast_ref::<crate::data::Int2DdsData>() {
             Some(d) => d,
             None => return InstanceHandle::NIL,
@@ -390,6 +442,26 @@ impl TypeSupport for RawTypeSupport {
             Some(b) => b,
             None => return InstanceHandle::NIL,
         };
+
+        // Preferred canonical path: when a full TypeObject is available, delegate to
+        // the shared Rust DynamicData key machinery. This matches native-Rust/derive
+        // InstanceHandles for every key shape (scalar, string, composite, float,
+        // nested) — the flat CdrFieldType parser below cannot express the latter.
+        // Runs before the key_fields guard so the type_info path (which may carry no
+        // flat key descriptors, e.g. composite keys) still resolves canonically.
+        if let Some(dts) = &self.dynamic_key_support {
+            if let Ok(dyn_data) = deserialize_dynamic_data(cdr_bytes, dts.dynamic_type()) {
+                let handle = dts.compute_key(&dyn_data);
+                if handle != InstanceHandle::NIL {
+                    return handle;
+                }
+            }
+        }
+
+        // No flat key fields configured — preserve existing behavior (C/C# bindings)
+        if self.key_fields.is_empty() {
+            return InstanceHandle::NIL;
+        }
 
         if self.all_fields.is_some() {
             return match self.read_key_cdr(cdr_bytes) {
