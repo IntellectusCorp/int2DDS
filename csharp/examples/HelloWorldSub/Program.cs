@@ -1,4 +1,5 @@
 using System;
+using System.Threading;
 using Int2Dds.Conditions;
 using Int2Dds.Core;
 using Int2Dds.Exceptions;
@@ -16,6 +17,10 @@ namespace HelloWorldSub
             int domainId = ParseDomain(args);
             Console.WriteLine("=== HelloWorld Subscriber (C#) ===");
             Console.WriteLine($"QoS: {(reliable ? "RELIABLE" : "BEST_EFFORT")}");
+
+            // Run until Ctrl-C, then clean up gracefully (matches the Rust example).
+            using var stop = new ManualResetEventSlim(false);
+            Console.CancelKeyPress += (_, e) => { e.Cancel = true; stop.Set(); };
 
             using var dp = new DomainParticipant(domainId: domainId, name: "CSharpSubscriber");
             Console.WriteLine($"Created participant on domain {dp.DomainId}");
@@ -42,10 +47,15 @@ namespace HelloWorldSub
             using var waitset = new WaitSet();
             waitset.Attach(statusCond);
 
-            while (reader.MatchedWriters == 0)
+            while (reader.MatchedWriters == 0 && !stop.IsSet)
             {
                 try { waitset.Wait(TimeSpan.FromSeconds(1)); }
                 catch (DdsTimeoutException) { /* timeout, retry */ }
+            }
+
+            if (stop.IsSet)
+            {
+                return;
             }
 
             Console.WriteLine($"Matched {reader.MatchedWriters} writer(s)");
@@ -53,14 +63,12 @@ namespace HelloWorldSub
             // Switch to DATA_AVAILABLE for data reception
             statusCond.EnabledStatuses = StatusMask.DataAvailable;
 
-            // Receive samples
+            // Receive samples until Ctrl-C
             Console.WriteLine("Waiting for data...");
             int samplesReceived = 0;
-            int timeoutCount = 0;
 
-            while (timeoutCount < 3)
+            while (!stop.IsSet)
             {
-                // Check for data that may have arrived already
                 foreach (var sample in reader.Take())
                 {
                     if (sample.ValidData && sample.Data != null)
@@ -72,33 +80,10 @@ namespace HelloWorldSub
                     {
                         Console.WriteLine("Received dispose/unregister notification");
                     }
-                    timeoutCount = 0;
                 }
 
-                try
-                {
-                    waitset.Wait(TimeSpan.FromSeconds(2));
-
-                    foreach (var sample in reader.Take())
-                    {
-                        if (sample.ValidData && sample.Data != null)
-                        {
-                            Console.WriteLine($"Received: index={sample.Data.Index}, message='{sample.Data.Message}'");
-                            samplesReceived++;
-                        }
-                        else
-                        {
-                            Console.WriteLine("Received dispose/unregister notification");
-                        }
-                    }
-
-                    timeoutCount = 0;
-                }
-                catch (DdsTimeoutException)
-                {
-                    timeoutCount++;
-                    Console.WriteLine($"No data received (timeout {timeoutCount}/3)");
-                }
+                try { waitset.Wait(TimeSpan.FromSeconds(2)); }
+                catch (DdsTimeoutException) { /* no data yet, keep waiting */ }
             }
 
             Console.WriteLine($"Done. Received {samplesReceived} samples.");

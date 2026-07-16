@@ -52,9 +52,9 @@ struct Args {
 
 // HelloWorld type generated from idl/input/HelloWorld.idl by int2dds-idl.
 #[derive(DdsType)]
-struct HelloWorld {
-    index: u32,
-    message: String,
+pub struct HelloWorld {
+    pub index: u32,
+    pub message: String,
 }
 
 struct PubListener;
