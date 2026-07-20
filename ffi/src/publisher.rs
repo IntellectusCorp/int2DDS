@@ -913,6 +913,19 @@ pub unsafe extern "C" fn int2dds_prepare_serialized_write(
     INT2DDS_RET_OK
 }
 
+/// Commit a staged serialized write.
+///
+/// # Ownership
+/// On success the loan is consumed and `loan` is freed — do not use or abort it.
+/// On failure the loan handle is left valid: the caller must release it with
+/// `int2dds_abort_serialized_write` (or discard it after a subsequent successful
+/// path). This makes the common binding idiom (`commit`; on error `abort`)
+/// memory-safe rather than a double-free.
+///
+/// # Safety
+/// - `writer` must be a valid datawriter
+/// - `loan` must be a valid loan from `int2dds_prepare_serialized_write` that has
+///   not already been committed or aborted
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_commit_serialized_write(
     writer: *const Int2DdsDataWriter,
@@ -928,7 +941,11 @@ pub unsafe extern "C" fn int2dds_commit_serialized_write(
     let mut loan_box = Box::from_raw(loan);
     let loan_inner = match loan_box.inner.take() {
         Some(loan_inner) => loan_inner,
-        None => ffi_bail!("serialized write loan already consumed"),
+        None => {
+            // Already consumed: keep the handle valid so a following abort frees it once.
+            let _ = Box::into_raw(loan_box);
+            ffi_bail!("serialized write loan already consumed");
+        }
     };
 
     let serialized_key = if key.is_null() || key_len == 0 {
@@ -939,7 +956,13 @@ pub unsafe extern "C" fn int2dds_commit_serialized_write(
 
     match writer_ref.inner.commit_serialized_write(loan_inner, actual_size, serialized_key) {
         Ok(()) => INT2DDS_RET_OK,
-        Err(e) => dds_error_to_code(&e),
+        Err(e) => {
+            // Write failed. The loan buffer was consumed by the core, so `inner` is
+            // already None; restore the handle so the caller's abort frees the (now
+            // empty) loan box exactly once instead of double-freeing it.
+            let _ = Box::into_raw(loan_box);
+            dds_error_to_code(&e)
+        }
     }
 }
 
