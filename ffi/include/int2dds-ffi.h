@@ -2346,6 +2346,21 @@ Int2DdsRet int2dds_prepare_serialized_write(const struct Int2DdsDataWriter *writ
                                             uintptr_t *capacity_out,
                                             struct Int2DdsSerializedWriteLoan **loan_out);
 
+/**
+ * Commit a staged serialized write.
+ *
+ * # Ownership
+ * On success the loan is consumed and `loan` is freed — do not use or abort it.
+ * On failure the loan handle is left valid: the caller must release it with
+ * `int2dds_abort_serialized_write` (or discard it after a subsequent successful
+ * path). This makes the common binding idiom (`commit`; on error `abort`)
+ * memory-safe rather than a double-free.
+ *
+ * # Safety
+ * - `writer` must be a valid datawriter
+ * - `loan` must be a valid loan from `int2dds_prepare_serialized_write` that has
+ *   not already been committed or aborted
+ */
 Int2DdsRet int2dds_commit_serialized_write(const struct Int2DdsDataWriter *writer,
                                            struct Int2DdsSerializedWriteLoan *loan,
                                            uintptr_t actual_size,
