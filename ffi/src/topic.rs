@@ -611,16 +611,24 @@ pub unsafe extern "C" fn int2dds_delete_contentfilteredtopic(
         return INT2DDS_RET_NULL_POINTER;
     }
 
-    let Int2DdsContentFilteredTopic { inner: cft_obj, type_name: _tn } = *Box::from_raw(cft);
+    let cft_box = Box::from_raw(cft);
 
-    let participant = match cft_obj.get_participant() {
+    let participant = match cft_box.inner.get_participant() {
         Ok(p) => p,
-        Err(e) => return dds_error_to_code(&e),
+        Err(e) => {
+            let _ = Box::into_raw(cft_box);
+            return dds_error_to_code(&e);
+        }
     };
 
-    match participant.delete_contentfilteredtopic(cft_obj) {
+    // On failure the CFT is not deleted (the core orphans it for retry); restore the
+    // caller's handle instead of leaving it freed. The Box drops (frees) only on success.
+    match participant.delete_contentfilteredtopic(cft_box.inner.clone()) {
         Ok(()) => INT2DDS_RET_OK,
-        Err(e) => dds_error_to_code(&e),
+        Err(e) => {
+            let _ = Box::into_raw(cft_box);
+            dds_error_to_code(&e)
+        }
     }
 }
 
