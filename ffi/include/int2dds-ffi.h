@@ -4370,10 +4370,11 @@ Int2DdsRet int2dds_contentfilteredtopic_set_enabled(struct Int2DdsContentFiltere
 /**
  * Create a Topic with key field metadata for compute_key() support.
  *
- * Same as int2dds_create_topic_keyed but additionally accepts key field
- * descriptors that enable instance handle computation from CDR data.
- * This is needed when the remote publisher does not include KEY_HASH
- * in inline QoS (e.g., CoreDX).
+ * Deprecated flat key-field path. Canonical instance keys require a full TypeObject
+ * (use int2dds_create_topic_with_type_info / int2dds_create_topic_with_field_descriptors);
+ * the flat CdrFieldType key parser has been removed. With field_count == 0 this behaves
+ * exactly like int2dds_create_topic_keyed; with field_count > 0 it returns
+ * INT2DDS_RET_UNSUPPORTED rather than silently computing NIL instance handles.
  *
  * # Safety
  * - Same as int2dds_create_topic_keyed
@@ -4385,8 +4386,8 @@ Int2DdsRet int2dds_create_topic_keyed_with_key_fields(const struct Int2DdsPartic
                                                       int32_t extensibility,
                                                       bool has_key,
                                                       const struct Int2DdsTopicQos *qos,
-                                                      const uint32_t *field_indices,
-                                                      const uint32_t *field_types,
+                                                      const uint32_t *_field_indices,
+                                                      const uint32_t *_field_types,
                                                       uintptr_t field_count,
                                                       struct Int2DdsTopic **topic_out);
 

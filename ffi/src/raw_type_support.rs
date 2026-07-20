@@ -13,38 +13,13 @@ use int2dds::{
     common::instance_handle::InstanceHandle,
     core::error::{DdsError, DdsResult},
     rtps::common::types::SerializedData,
-    serialize::cdr::{CdrSerialize, CdrSerializer, ExtensibilityKind},
-    serialize::BufferManager,
+    serialize::cdr::ExtensibilityKind,
     topic::sql::ast::Parameter,
     topic::type_support::{FieldAccessor, SerializationFormat, TypeSupport},
     xtypes::{
         deserialize_dynamic_data, DynamicTypeSupport, TypeIdentifier, TypeObject, TypeRegistry,
     },
 };
-
-use crate::data::{align_body, CdrFieldType};
-
-/// CDR field type for key extraction
-#[derive(Clone, Debug)]
-pub enum KeyFieldType {
-    String,
-    Int32,
-    UInt32,
-    Int16,
-    UInt16,
-    Int64,
-    UInt64,
-    Int8,
-    UInt8,
-    Bool,
-}
-
-/// Key field descriptor
-#[derive(Clone, Debug)]
-pub struct KeyFieldInfo {
-    pub field_index: usize,
-    pub field_type: KeyFieldType,
-}
 
 /// Lightweight TypeSupport for raw bytes FFI path.
 ///
@@ -56,13 +31,13 @@ pub struct RawTypeSupport {
     has_key: bool,
     type_identifier: Option<TypeIdentifier>,
     type_object: Option<TypeObject>,
-    key_fields: Vec<KeyFieldInfo>,
     all_fields: Option<Arc<Vec<crate::data::CdrFieldDescriptor>>>,
     /// Canonical key machinery derived from a full TypeObject. When present,
     /// `compute_key` deserializes the sample into a `DynamicData` and delegates to
     /// the shared Rust key path (`serialize_key_cdr`), matching native-Rust/derive
     /// InstanceHandles for every key shape — including composite, float, and nested
-    /// members that the flat `CdrFieldType` key parser cannot express.
+    /// members. It is the sole key path: a raw topic without a full TypeObject
+    /// yields a NIL InstanceHandle rather than a non-conformant approximation.
     dynamic_key_support: Option<Arc<DynamicTypeSupport>>,
 }
 
@@ -74,7 +49,6 @@ impl RawTypeSupport {
             has_key: false,
             type_identifier: None,
             type_object: None,
-            key_fields: Vec::new(),
             all_fields: None,
             dynamic_key_support: None,
         }
@@ -91,7 +65,6 @@ impl RawTypeSupport {
             has_key,
             type_identifier: None,
             type_object: None,
-            key_fields: Vec::new(),
             all_fields: None,
             dynamic_key_support: None,
         }
@@ -123,8 +96,7 @@ impl RawTypeSupport {
     /// (nested-struct) key members. Each dependency is registered under its own
     /// content-hash `CompleteTypeId` — the same identifier the parent member references
     /// and the derive macro emits — so `serialize_key_cdr` recurses into nested keys
-    /// exactly like native Rust. Falls back to the registry-less build (flat keys only)
-    /// when `dependencies` is empty.
+    /// exactly like native Rust.
     pub fn with_type_info_and_deps(
         type_name: String,
         extensibility: ExtensibilityKind,
@@ -136,7 +108,6 @@ impl RawTypeSupport {
         // Build the canonical key machinery from the full TypeObject so keyed
         // topics created via the type_info path (C# generated types, Python
         // `_dds_type_info_fields`) compute the same InstanceHandle as native Rust.
-        // Falls back to the flat key parser if the DynamicType cannot be built.
         let dynamic_key_support = if has_key {
             if dependencies.is_empty() {
                 DynamicTypeSupport::from_type_object(type_object.clone()).ok().map(Arc::new)
@@ -158,223 +129,14 @@ impl RawTypeSupport {
             has_key,
             type_identifier: Some(type_identifier),
             type_object: Some(type_object),
-            key_fields: Vec::new(),
             all_fields: None,
             dynamic_key_support,
         }
     }
 
-    /// Set key field metadata for compute_key() support.
-    /// Called from FFI when Python binding provides key field info.
-    pub fn set_key_fields(&mut self, fields: Vec<KeyFieldInfo>) {
-        self.key_fields = fields;
-    }
-
     /// Set all field descriptors for get_field_value() / has_field() support.
     pub fn set_all_fields(&mut self, fields: Vec<crate::data::CdrFieldDescriptor>) {
         self.all_fields = Some(Arc::new(fields));
-    }
-
-    /// Extract key bytes from CDR-serialized data using key field metadata.
-    /// Parses CDR fields sequentially, collecting only key field values.
-    fn extract_key_from_cdr(&self, cdr_bytes: &[u8]) -> Vec<u8> {
-        if cdr_bytes.len() < 4 {
-            return Vec::new();
-        }
-
-        // Skip 4-byte CDR encapsulation header
-        let encoding_id = u16::from_be_bytes([cdr_bytes[0], cdr_bytes[1]]);
-        let is_xcdr2 = matches!(encoding_id, 0x0006 | 0x0007 | 0x0008 | 0x0009 | 0x000A | 0x000B);
-        let mut pos = 4;
-
-        // Skip DHEADER (4 bytes) for Appendable/Mutable XCDR2
-        if is_xcdr2
-            && matches!(
-                self.extensibility,
-                ExtensibilityKind::Appendable | ExtensibilityKind::Mutable
-            )
-        {
-            if pos + 4 <= cdr_bytes.len() {
-                pos += 4;
-            }
-        }
-
-        let mut key_bytes = Vec::new();
-        let data = cdr_bytes;
-
-        // Parse fields sequentially, collecting key field values
-        for (idx, field_info) in self.key_fields.iter().enumerate() {
-            // Skip non-key fields up to this field index
-            // For now, we only support the first field being a key (common case: color)
-            // A full implementation would need all field types to skip correctly
-            if field_info.field_index == 0 && idx == 0 {
-                match &field_info.field_type {
-                    KeyFieldType::String => {
-                        if pos + 4 <= data.len() {
-                            let str_len = u32::from_le_bytes([
-                                data[pos],
-                                data[pos + 1],
-                                data[pos + 2],
-                                data[pos + 3],
-                            ]) as usize;
-                            pos += 4;
-                            if pos + str_len <= data.len() {
-                                // Include length + string bytes (with null terminator) for key hash
-                                key_bytes.extend_from_slice(&(str_len as u32).to_be_bytes());
-                                key_bytes.extend_from_slice(&data[pos..pos + str_len]);
-                            }
-                        }
-                    }
-                    KeyFieldType::Int32 | KeyFieldType::UInt32 => {
-                        if pos + 4 <= data.len() {
-                            key_bytes.extend_from_slice(&data[pos..pos + 4]);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        key_bytes
-    }
-
-    fn read_key_cdr(&self, cdr_bytes: &[u8]) -> Option<(Vec<u8>, bool)> {
-        let all_fields = self.all_fields.as_ref()?;
-        let key_count = all_fields.iter().filter(|f| f.is_key).count();
-        if key_count == 0 {
-            return None;
-        }
-        if cdr_bytes.len() < 4 {
-            return None;
-        }
-
-        let encoding_id = u16::from_be_bytes([cdr_bytes[0], cdr_bytes[1]]);
-        if matches!(self.extensibility, ExtensibilityKind::Mutable)
-            || matches!(encoding_id, 0x0002 | 0x0003 | 0x000A | 0x000B)
-        {
-            return None;
-        }
-        let src_le = (encoding_id & 1) == 1;
-        let is_xcdr2 = matches!(encoding_id, 0x0006..=0x000B);
-        let base: usize = 4;
-        let mut pos = base;
-        if is_xcdr2 && matches!(self.extensibility, ExtensibilityKind::Appendable) {
-            pos = pos.checked_add(4)?;
-        }
-
-        let mut serializer = CdrSerializer::with_capacity(false, 64);
-        serializer.write_encapsulation_header().ok()?;
-
-        let mut single_string_key = false;
-        for field in all_fields.iter() {
-            pos = key_read_field(
-                cdr_bytes,
-                pos,
-                base,
-                src_le,
-                &field.field_type,
-                field.is_key,
-                &mut serializer,
-            )?;
-            if field.is_key {
-                single_string_key =
-                    key_count == 1 && matches!(field.field_type, CdrFieldType::String);
-            }
-        }
-
-        let mut bytes = serializer.into_bytes();
-        if bytes.len() < 4 {
-            return None;
-        }
-        bytes.drain(..4);
-        Some((bytes, single_string_key))
-    }
-}
-
-fn key_read_field(
-    data: &[u8],
-    pos: usize,
-    base: usize,
-    src_le: bool,
-    field_type: &CdrFieldType,
-    is_key: bool,
-    out: &mut CdrSerializer,
-) -> Option<usize> {
-    match field_type {
-        CdrFieldType::Bool | CdrFieldType::Int8 | CdrFieldType::UInt8 => {
-            if pos >= data.len() {
-                return None;
-            }
-            if is_key {
-                CdrSerialize::serialize_cdr(&data[pos], out).ok()?;
-            }
-            Some(pos + 1)
-        }
-        CdrFieldType::Int16 | CdrFieldType::UInt16 => {
-            let a = align_body(pos, base, 2);
-            if a + 2 > data.len() {
-                return None;
-            }
-            if is_key {
-                let raw = [data[a], data[a + 1]];
-                let v = if src_le { u16::from_le_bytes(raw) } else { u16::from_be_bytes(raw) };
-                CdrSerialize::serialize_cdr(&v, out).ok()?;
-            }
-            Some(a + 2)
-        }
-        CdrFieldType::Int32 | CdrFieldType::UInt32 => {
-            let a = align_body(pos, base, 4);
-            if a + 4 > data.len() {
-                return None;
-            }
-            if is_key {
-                let raw = [data[a], data[a + 1], data[a + 2], data[a + 3]];
-                let v = if src_le { u32::from_le_bytes(raw) } else { u32::from_be_bytes(raw) };
-                CdrSerialize::serialize_cdr(&v, out).ok()?;
-            }
-            Some(a + 4)
-        }
-        CdrFieldType::Int64 | CdrFieldType::UInt64 => {
-            let a = align_body(pos, base, 8);
-            if a + 8 > data.len() {
-                return None;
-            }
-            if is_key {
-                let raw = [
-                    data[a],
-                    data[a + 1],
-                    data[a + 2],
-                    data[a + 3],
-                    data[a + 4],
-                    data[a + 5],
-                    data[a + 6],
-                    data[a + 7],
-                ];
-                let v = if src_le { u64::from_le_bytes(raw) } else { u64::from_be_bytes(raw) };
-                CdrSerialize::serialize_cdr(&v, out).ok()?;
-            }
-            Some(a + 8)
-        }
-        CdrFieldType::String => {
-            let a = align_body(pos, base, 4);
-            if a + 4 > data.len() {
-                return None;
-            }
-            let raw = [data[a], data[a + 1], data[a + 2], data[a + 3]];
-            let len =
-                if src_le { u32::from_le_bytes(raw) } else { u32::from_be_bytes(raw) } as usize;
-            let start = a + 4;
-            let end = start.checked_add(len)?;
-            if end > data.len() {
-                return None;
-            }
-            if is_key {
-                let content_len = if len > 0 && data[end - 1] == 0 { len - 1 } else { len };
-                let text = std::str::from_utf8(&data[start..start + content_len]).ok()?.to_string();
-                CdrSerialize::serialize_cdr(&text, out).ok()?;
-            }
-            Some(end)
-        }
     }
 }
 
@@ -414,9 +176,7 @@ impl TypeSupport for RawTypeSupport {
     ) -> DdsResult<Box<dyn Any>> {
         // Store CDR bytes and field metadata when configured (Python binding).
         // Otherwise return empty Int2DdsData (existing behavior for C/C# bindings).
-        let need_bytes = !self.key_fields.is_empty()
-            || self.all_fields.is_some()
-            || self.dynamic_key_support.is_some();
+        let need_bytes = self.all_fields.is_some() || self.dynamic_key_support.is_some();
         Ok(Box::new(crate::data::Int2DdsData {
             cdr_bytes: if need_bytes { Some(data.to_vec()) } else { None },
             field_descriptors: self.all_fields.clone(),
@@ -443,46 +203,18 @@ impl TypeSupport for RawTypeSupport {
             None => return InstanceHandle::NIL,
         };
 
-        // Preferred canonical path: when a full TypeObject is available, delegate to
-        // the shared Rust DynamicData key machinery. This matches native-Rust/derive
-        // InstanceHandles for every key shape (scalar, string, composite, float,
-        // nested) — the flat CdrFieldType parser below cannot express the latter.
-        // Runs before the key_fields guard so the type_info path (which may carry no
-        // flat key descriptors, e.g. composite keys) still resolves canonically.
+        // Raw FFI path key computation goes exclusively through the shared
+        // DynamicData key machinery — the spec-compliant RTPS KeyHash projection
+        // (§9.6.4.8) that native Rust/derive and the dynamic path also use. When no
+        // full TypeObject is available (name-only keyed topic) the handle is NIL
+        // rather than a non-conformant flat-parser approximation.
         if let Some(dts) = &self.dynamic_key_support {
             if let Ok(dyn_data) = deserialize_dynamic_data(cdr_bytes, dts.dynamic_type()) {
-                let handle = dts.compute_key(&dyn_data);
-                if handle != InstanceHandle::NIL {
-                    return handle;
-                }
+                return dts.compute_key(&dyn_data);
             }
         }
 
-        // No flat key fields configured — preserve existing behavior (C/C# bindings)
-        if self.key_fields.is_empty() {
-            return InstanceHandle::NIL;
-        }
-
-        if self.all_fields.is_some() {
-            return match self.read_key_cdr(cdr_bytes) {
-                Some((key_cdr, single_string_key)) if !key_cdr.is_empty() => {
-                    if single_string_key {
-                        InstanceHandle::from_key_cdr_hashed(&key_cdr)
-                    } else {
-                        InstanceHandle::from_key_cdr(&key_cdr)
-                    }
-                }
-                _ => InstanceHandle::NIL,
-            };
-        }
-
-        let key_bytes = self.extract_key_from_cdr(cdr_bytes);
-        if key_bytes.is_empty() {
-            return InstanceHandle::NIL;
-        }
-
-        let hash = md5::compute(&key_bytes);
-        InstanceHandle::new(hash.0)
+        InstanceHandle::NIL
     }
 
     fn is_compute_key_provided(&self) -> bool {

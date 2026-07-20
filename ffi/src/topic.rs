@@ -317,10 +317,9 @@ pub unsafe extern "C" fn int2dds_create_topic_with_type_info(
     let type_identifier = ti.build_type_identifier();
     let type_object = ti.build_type_object();
 
-    // Create RawTypeSupport with type info for discovery. Also register key fields derived
-    // from the type_info so keyed types created this way still compute instance keys
-    // (matching the create_topic_with_field_descriptors path).
-    let mut raw_type_support = RawTypeSupport::with_type_info_and_deps(
+    // Create RawTypeSupport with type info for discovery. Keyed types compute instance
+    // keys through the canonical DynamicData path built from the full TypeObject.
+    let raw_type_support = RawTypeSupport::with_type_info_and_deps(
         dds_type_name.clone(),
         ti.extensibility,
         ti.has_key_field(),
@@ -328,7 +327,6 @@ pub unsafe extern "C" fn int2dds_create_topic_with_type_info(
         type_object,
         ti.dependency_closure(),
     );
-    raw_type_support.set_key_fields(ti.key_field_infos());
 
     finalize_topic(
         participant_ref,
@@ -733,10 +731,11 @@ pub unsafe extern "C" fn int2dds_contentfilteredtopic_set_enabled(
 
 /// Create a Topic with key field metadata for compute_key() support.
 ///
-/// Same as int2dds_create_topic_keyed but additionally accepts key field
-/// descriptors that enable instance handle computation from CDR data.
-/// This is needed when the remote publisher does not include KEY_HASH
-/// in inline QoS (e.g., CoreDX).
+/// Deprecated flat key-field path. Canonical instance keys require a full TypeObject
+/// (use int2dds_create_topic_with_type_info / int2dds_create_topic_with_field_descriptors);
+/// the flat CdrFieldType key parser has been removed. With field_count == 0 this behaves
+/// exactly like int2dds_create_topic_keyed; with field_count > 0 it returns
+/// INT2DDS_RET_UNSUPPORTED rather than silently computing NIL instance handles.
 ///
 /// # Safety
 /// - Same as int2dds_create_topic_keyed
@@ -749,8 +748,8 @@ pub unsafe extern "C" fn int2dds_create_topic_keyed_with_key_fields(
     extensibility: i32,
     has_key: bool,
     qos: *const Int2DdsTopicQos,
-    field_indices: *const u32,
-    field_types: *const u32,
+    _field_indices: *const u32,
+    _field_types: *const u32,
     field_count: usize,
     topic_out: *mut *mut Int2DdsTopic,
 ) -> Int2DdsRet {
@@ -758,6 +757,13 @@ pub unsafe extern "C" fn int2dds_create_topic_keyed_with_key_fields(
     check_null!(topic_name);
     check_null!(dds_type_name);
     check_null!(topic_out);
+
+    // Fail loud rather than silently ignoring flat key fields: canonical keys require a
+    // full TypeObject (int2dds_create_topic_with_type_info / _with_field_descriptors), so
+    // a caller that supplies key fields here would otherwise get NIL instance handles.
+    if field_count > 0 {
+        return INT2DDS_RET_UNSUPPORTED;
+    }
 
     let participant_ref = &*participant;
 
@@ -778,33 +784,9 @@ pub unsafe extern "C" fn int2dds_create_topic_keyed_with_key_fields(
         _ => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
-    // Build key field metadata
-    use crate::raw_type_support::{KeyFieldInfo, KeyFieldType};
-    let mut key_fields = Vec::new();
-    if field_count > 0 && !field_indices.is_null() && !field_types.is_null() {
-        for i in 0..field_count {
-            let field_type = match *field_types.add(i) {
-                0 => KeyFieldType::String,
-                1 => KeyFieldType::Int32,
-                2 => KeyFieldType::UInt32,
-                3 => KeyFieldType::Int16,
-                4 => KeyFieldType::UInt16,
-                5 => KeyFieldType::Int64,
-                6 => KeyFieldType::UInt64,
-                7 => KeyFieldType::Int8,
-                8 => KeyFieldType::UInt8,
-                9 => KeyFieldType::Bool,
-                _ => return INT2DDS_RET_INVALID_ARGUMENT,
-            };
-            key_fields
-                .push(KeyFieldInfo { field_index: *field_indices.add(i) as usize, field_type });
-        }
-    }
-
-    // Create RawTypeSupport with key fields
-    let mut type_support =
+    // Name-only keyed topic (field_count == 0): equivalent to int2dds_create_topic_keyed.
+    let type_support =
         RawTypeSupport::new_with_key(dds_type_name_str.to_string(), ext_kind, has_key);
-    type_support.set_key_fields(key_fields);
 
     // Register the RawTypeSupport with the participant
     ffi_try!(participant_ref
@@ -929,7 +911,8 @@ pub unsafe extern "C" fn int2dds_create_topic_with_field_descriptors(
     }
 
     // Advertise TypeIdentifier/TypeObject (0x0075) like the derive macro, while keeping
-    // CDR field descriptors for ContentFilteredTopic and instance-key extraction.
+    // CDR field descriptors for ContentFilteredTopic. Instance keys are computed from the
+    // full TypeObject via the canonical DynamicData path.
     let mut type_support = RawTypeSupport::with_type_info(
         dds_type_name_str.to_string(),
         ext_kind,
@@ -937,7 +920,6 @@ pub unsafe extern "C" fn int2dds_create_topic_with_field_descriptors(
         ti.build_type_identifier(),
         ti.build_type_object(),
     );
-    type_support.set_key_fields(ti.key_field_infos());
     type_support.set_all_fields(all_fields);
 
     finalize_topic(
