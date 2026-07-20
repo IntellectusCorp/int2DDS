@@ -328,19 +328,34 @@ fn generate_key_holder_impl(
         fields.iter().filter(|f| !parse_field_attributes(f).non_serialized).collect()
     };
 
-    let (serialize_body, deserialize_body) = if is_keyed {
-        let serialize_calls = selected.iter().map(|field| {
-            let field_name = field.ident.as_ref().unwrap();
-            let field_type = &field.ty;
-            quote! {
-                {
-                    #[allow(unused_imports)]
-                    use #crate_path::serialize::KeyHolderFallback as _;
-                    let __kh = #crate_path::serialize::KeyHolderAccessor::<#field_type>(core::marker::PhantomData);
-                    __kh.kh_serialize(&self.#field_name, serializer)?;
-                }
+    // Both keyed and no-key aggregates serialize their `selected` members inline
+    // as FINAL (no DHEADER) via `KeyHolderAccessor`: a keyed struct projects only
+    // its @key members (member-id order), a no-key struct keeps all members. The
+    // FINAL inline form (never the type's own Appendable/Mutable framing) is what
+    // RTPS KeyHash requires and what the dynamic path's key holder produces.
+    let serialize_calls = selected.iter().map(|field| {
+        let field_name = field.ident.as_ref().unwrap();
+        let field_type = &field.ty;
+        quote! {
+            {
+                #[allow(unused_imports)]
+                use #crate_path::serialize::KeyHolderFallback as _;
+                let __kh = #crate_path::serialize::KeyHolderAccessor::<#field_type>(core::marker::PhantomData);
+                __kh.kh_serialize(&self.#field_name, serializer)?;
             }
-        });
+        }
+    });
+    let serialize_body = quote! {
+        #(#serialize_calls)*
+        Ok(())
+    };
+    // Keyed structs reconstruct only their @key members onto a Default base (they
+    // already require `Default`). A no-key aggregate used as a whole key member
+    // reads via its own XCDR deserialize: for the common FINAL whole-key types
+    // (Guid, Locator, ...) that is the same inline no-DHEADER form the FINAL
+    // serialize above produces, and it needs no `Default` (some builtin no-key
+    // types opt out of it and carry non-serialized members).
+    let deserialize_body = if is_keyed {
         let deserialize_assigns = selected.iter().map(|field| {
             let field_name = field.ident.as_ref().unwrap();
             let field_type = &field.ty;
@@ -353,26 +368,15 @@ fn generate_key_holder_impl(
                 }
             }
         });
-        (
-            quote! {
-                #(#serialize_calls)*
-                Ok(())
-            },
-            quote! {
-                let mut key_holder = <Self as Default>::default();
-                #(#deserialize_assigns)*
-                Ok(key_holder)
-            },
-        )
+        quote! {
+            let mut key_holder = <Self as Default>::default();
+            #(#deserialize_assigns)*
+            Ok(key_holder)
+        }
     } else {
-        (
-            quote! {
-                #crate_path::serialize::xcdr::XcdrSerialize::serialize_xcdr(self, serializer)
-            },
-            quote! {
-                #crate_path::serialize::xcdr::XcdrDeserialize::deserialize_xcdr(deserializer)
-            },
-        )
+        quote! {
+            #crate_path::serialize::xcdr::XcdrDeserialize::deserialize_xcdr(deserializer)
+        }
     };
 
     let max_size_accum =
@@ -415,6 +419,21 @@ fn generate_key_holder_field_max_size(
 
     if is_map_type(field_type) {
         return quote! { return None; };
+    }
+
+    // A fixed array `[T; N]` has a finite key-holder size (its `KeyHolder` impl
+    // sums N element holders); route it through the accessor rather than the
+    // sequence/unbounded `None` fallthrough below.
+    if matches!(field_type, syn::Type::Array(_)) {
+        return quote! {
+            {
+                #[allow(unused_imports)]
+                use #crate_path::serialize::KeyHolderFallback as _;
+                let __kh = #crate_path::serialize::KeyHolderAccessor::<#field_type>(core::marker::PhantomData);
+                pos = #crate_path::serialize::key_holder_align_up(pos, __kh.kh_align());
+                pos = pos.checked_add(__kh.kh_max_size()?)?;
+            }
+        };
     }
 
     match get_serialization_method(field_type) {

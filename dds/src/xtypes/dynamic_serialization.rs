@@ -1144,8 +1144,15 @@ fn serialize_key_holder_struct(
 ) -> DdsResult<()> {
     let members = key_members_ordered(data.dynamic_type());
     if members.is_empty() {
-        // Nested aggregated type with no @key members: keep all members.
-        return serialize_struct_xcdr(serializer, data);
+        // Nested aggregated type with no @key members: keep all members, but the
+        // key holder is FINAL (no DHEADER) regardless of the type's own
+        // extensibility, recursing each nested aggregate as its own FINAL holder.
+        let struct_desc = data
+            .dynamic_type()
+            .as_struct()
+            .ok_or_else(|| DdsError::Error("Expected struct type".to_string()))?;
+        let mut nested = serialize_key_holder_struct;
+        return serialize_members_xcdr2_inline(serializer, data, struct_desc, &mut nested);
     }
     let mut nested = serialize_key_holder_struct;
     for member in &members {
@@ -1165,7 +1172,25 @@ fn deserialize_key_holder_struct(
 ) -> DdsResult<DynamicData> {
     let members = key_members_ordered(dynamic_type);
     if members.is_empty() {
-        return deserialize_struct_xcdr(deserializer, dynamic_type);
+        // No @key members: read all members inline as FINAL (no DHEADER),
+        // mirroring the serialize side, recursing key-holder into nested members.
+        let struct_desc = dynamic_type
+            .as_struct()
+            .ok_or_else(|| DdsError::Error("Expected struct type".to_string()))?;
+        let mut values = HashMap::new();
+        for member in struct_desc.members() {
+            if member.is_optional {
+                let present = deserializer.deserialize_bool().map_err(cdr_error)?;
+                if present {
+                    let value = deserialize_key_holder_value(deserializer, &member.member_type)?;
+                    values.insert(member.name.clone(), value);
+                }
+            } else {
+                let value = deserialize_key_holder_value(deserializer, &member.member_type)?;
+                values.insert(member.name.clone(), value);
+            }
+        }
+        return Ok(DynamicData::with_values(dynamic_type.clone(), values));
     }
     let mut values = HashMap::new();
     for member in &members {
@@ -1185,6 +1210,16 @@ fn deserialize_key_holder_value(
             let nested = deserialize_key_holder_struct(deserializer, inner)?;
             return Ok(DynamicValue::Struct(Box::new(nested)));
         }
+    }
+    // A fixed array projects element-wise (FINAL, no framing), recursing into
+    // struct elements as their own key holders.
+    if let DynamicTypeKind::Array { element_type, dimensions } = kind {
+        let count = checked_array_len(dimensions)?;
+        let mut items = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            items.push(deserialize_key_holder_value(deserializer, element_type)?);
+        }
+        return Ok(DynamicValue::Array(items));
     }
     deserialize_value_xcdr2(deserializer, kind)
 }
@@ -1239,6 +1274,17 @@ fn type_kind_max_size(kind: &DynamicTypeKind) -> Option<(usize, usize)> {
                 accumulate_members_max_size(key_members.iter().map(|m| &m.member_type))?
             };
             Some((4, size))
+        }
+        // Fixed array of finite-size elements: `N` packed (max-align-4) elements.
+        DynamicTypeKind::Array { element_type, dimensions } => {
+            let (elem_align, elem_size) = type_kind_max_size(element_type)?;
+            let count: usize = dimensions.iter().map(|d| *d as usize).product();
+            if count == 0 {
+                return Some((elem_align, 0));
+            }
+            let stride = align_up(elem_size, elem_align);
+            let size = stride.checked_mul(count - 1)?.checked_add(elem_size)?;
+            Some((elem_align, size))
         }
         // Unbounded string/wstring, sequences, maps, and anything else with no
         // finite maximum serialized size => hash the actual bytes.

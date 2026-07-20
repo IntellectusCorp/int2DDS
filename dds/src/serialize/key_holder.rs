@@ -13,6 +13,7 @@
 use crate::serialize::cdr::{
     Xcdr2Deserializer, Xcdr2Serializer, XcdrDeserialize, XcdrResult, XcdrSerialize,
 };
+use crate::serialize::core::SerializationError;
 use crate::serialize::WString;
 
 /// Projection of a value into its RTPS KeyHash key-holder form.
@@ -189,6 +190,72 @@ impl KeyHolder for WString {
     #[inline]
     fn deserialize_key_holder(deserializer: &mut Xcdr2Deserializer) -> XcdrResult<Self> {
         XcdrDeserialize::deserialize_xcdr(deserializer)
+    }
+    #[inline]
+    fn key_holder_max_size() -> Option<usize> {
+        None
+    }
+}
+
+/// A fixed-size array `[T; N]` projects element-wise: each element is written as
+/// its own key holder (FINAL, no framing), so a `[Point; 2]` of two `i32` fields
+/// is the 16 contiguous bytes and stays raw. Its maximum size is the packed
+/// (max-align-4) sum of `N` element key holders.
+impl<T: KeyHolder, const N: usize> KeyHolder for [T; N] {
+    #[inline]
+    fn serialize_key_holder(&self, serializer: &mut Xcdr2Serializer) -> XcdrResult<()> {
+        for element in self {
+            element.serialize_key_holder(serializer)?;
+        }
+        Ok(())
+    }
+    #[inline]
+    fn deserialize_key_holder(deserializer: &mut Xcdr2Deserializer) -> XcdrResult<Self> {
+        let mut values = Vec::with_capacity(N);
+        for _ in 0..N {
+            values.push(T::deserialize_key_holder(deserializer)?);
+        }
+        values.try_into().map_err(|_| {
+            SerializationError::DeserializationError(
+                "array key holder element count mismatch".to_string(),
+            )
+        })
+    }
+    #[inline]
+    fn key_holder_max_size() -> Option<usize> {
+        let element = T::key_holder_max_size()?;
+        if N == 0 {
+            return Some(0);
+        }
+        let stride = align_up(element, T::key_holder_align());
+        stride.checked_mul(N - 1)?.checked_add(element)
+    }
+    #[inline]
+    fn key_holder_align() -> usize {
+        T::key_holder_align()
+    }
+}
+
+/// A sequence `Vec<T>` writes its `u32` length then each element as its own key
+/// holder (FINAL, no framing), matching the dynamic path's key-holder sequence
+/// form. It has no finite maximum size, so a sequence key always hashes (MD5).
+impl<T: KeyHolder> KeyHolder for Vec<T> {
+    #[inline]
+    fn serialize_key_holder(&self, serializer: &mut Xcdr2Serializer) -> XcdrResult<()> {
+        XcdrSerialize::serialize_xcdr(&(self.len() as u32), serializer)?;
+        for element in self {
+            element.serialize_key_holder(serializer)?;
+        }
+        Ok(())
+    }
+    #[inline]
+    fn deserialize_key_holder(deserializer: &mut Xcdr2Deserializer) -> XcdrResult<Self> {
+        let len = <u32 as XcdrDeserialize>::deserialize_xcdr(deserializer)? as usize;
+        let mut values = Vec::with_capacity(len);
+        for _ in 0..len {
+            values.push(T::deserialize_key_holder(deserializer)?);
+        }
+        Ok(values)
     }
     #[inline]
     fn key_holder_max_size() -> Option<usize> {
