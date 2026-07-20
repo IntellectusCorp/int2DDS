@@ -209,7 +209,7 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
         let lifespan_t0 = Instant::now();
         // Set lifespan timer if lifespan qos is configured
         let lifespan_duration = self.data_writer.upgrade().and_then(|data_writer| {
-            data_writer.get_qos().ok().and_then(|qos| {
+            data_writer.get_qos_arc().ok().and_then(|qos| {
                 if !qos.lifespan.duration.is_infinite() {
                     Some(qos.lifespan.duration)
                 } else {
