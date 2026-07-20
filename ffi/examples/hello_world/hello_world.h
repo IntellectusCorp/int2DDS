@@ -113,7 +113,7 @@ static inline Int2DdsTypeInfo* HelloWorld_type_info(void) {
     Int2DdsTypeInfo *ti;
     int2dds_type_info_create("HelloWorld", 1, &ti);
     int2dds_type_info_add_field(ti, "index", INT2DDS_FIELD_UINT32, 0);
-    int2dds_type_info_add_field(ti, "message", INT2DDS_FIELD_STRING, 0);
+    int2dds_type_info_add_string_field(ti, "message", 0, 0);
     return ti;
 }
 
