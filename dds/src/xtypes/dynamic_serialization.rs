@@ -1101,16 +1101,17 @@ pub fn serialize_key_cdr(data: &DynamicData) -> DdsResult<(Vec<u8>, bool)> {
     }
     let single_unbounded_string = is_single_string_key(&members);
 
-    // Write the header so the serializer's alignment math (which assumes a 4-byte
-    // encapsulation prefix) yields correct CDR alignment, then strip it.
-    let mut serializer = CdrSerializer::with_capacity(false, 64);
+    // Per RTPS KeyHash spec (DDSI-RTPS 9.6.4.8 step 4): PLAIN_CDR2 big-endian
+    // (max alignment 4), no encapsulation header, Final => no DHEADER. Write the
+    // 4-byte header so the alignment math is relative to it, then strip it.
+    let mut serializer = Xcdr2Serializer::with_capacity(false, ExtensibilityKind::Final, 64);
     serializer.write_encapsulation_header().map_err(cdr_error)?;
-    let mut nested = serialize_struct_cdr;
+    let mut nested = serialize_struct_xcdr;
     for member in &members {
         let value = member_value_or_default(data, member).ok_or_else(|| {
             DdsError::Error(format!("Missing key member value for '{}'", member.name))
         })?;
-        serialize_value_cdr(&mut serializer, &value, &member.member_type, &mut nested)?;
+        serialize_value_xcdr2(&mut serializer, &value, &member.member_type, &mut nested)?;
     }
 
     let mut bytes = serializer.into_bytes();
@@ -1130,10 +1131,10 @@ pub fn deserialize_key_cdr(
     dynamic_type: &Arc<DynamicType>,
 ) -> DdsResult<DynamicData> {
     let members = key_members_ordered(dynamic_type);
-    let mut deserializer = CdrDeserializer::new_without_header(bytes, false);
+    let mut deserializer = Xcdr2Deserializer::new_without_header(bytes, false);
     let mut values = HashMap::new();
     for member in &members {
-        let value = deserialize_value_cdr(&mut deserializer, &member.member_type)?;
+        let value = deserialize_value_xcdr2(&mut deserializer, &member.member_type)?;
         values.insert(member.name.clone(), value);
     }
     Ok(DynamicData::with_values(dynamic_type.clone(), values))
