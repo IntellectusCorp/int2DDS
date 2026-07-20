@@ -82,6 +82,7 @@ pub struct Int2DdsTopic {
 /// Opaque handle to a ContentFilteredTopic
 pub struct Int2DdsContentFilteredTopic {
     pub(crate) inner: ContentFilteredTopic,
+    #[allow(dead_code)]
     pub(crate) type_name: String,
 }
 
