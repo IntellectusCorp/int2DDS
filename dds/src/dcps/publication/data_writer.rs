@@ -297,11 +297,11 @@ impl<Foo: 'static + Clone> EnableChild for DataWriter<Foo> {
         let publisher = self.get_publisher()?;
         let participant = publisher.get_participant()?;
         let topic = self.get_topic()?;
-        let mut publication_builtin_topic_data = PublicationBuiltinTopicData::new(
-            &self.get_qos()?,
-            &publisher.get_qos()?,
-            &topic.get_qos()?,
-        );
+        let writer_qos = self.get_qos_arc()?;
+        let publisher_qos = publisher.get_qos_arc()?;
+        let topic_qos = topic.get_qos_arc()?;
+        let mut publication_builtin_topic_data =
+            PublicationBuiltinTopicData::new(&writer_qos, &publisher_qos, &topic_qos);
         publication_builtin_topic_data.set_topic_name(topic.get_name().to_string());
         publication_builtin_topic_data.set_type_name(topic.get_type_name().to_string());
         publication_builtin_topic_data.set_endpoint_guid(self.guid);
@@ -346,7 +346,7 @@ impl<Foo: 'static + Clone> EnableChild for DataWriter<Foo> {
 
         // A volatile, keep-all writer has no reason to keep samples acked by all readers,
         // so register a callback that removes them unless the user opted into strict mode
-        let qos = self.get_qos()?;
+        let qos = self.get_qos_arc()?;
         if qos.durability.kind == DurabilityQosPolicyKind::Volatile
             && qos.history.kind == HistoryQosPolicyKind::KeepAll
             && !qos.history.strict
@@ -369,8 +369,10 @@ impl<Foo: 'static + Clone> EnableChild for DataWriter<Foo> {
     fn update_rtps_entity(&self, qos: &Self::Qos) -> DdsResult<()> {
         let publisher = self.get_publisher()?;
         let topic = self.get_topic()?;
+        let publisher_qos = publisher.get_qos_arc()?;
+        let topic_qos = topic.get_qos_arc()?;
         let mut publication_builtin_topic_data =
-            PublicationBuiltinTopicData::new(qos, &publisher.get_qos()?, &topic.get_qos()?);
+            PublicationBuiltinTopicData::new(qos, &publisher_qos, &topic_qos);
         publication_builtin_topic_data.set_topic_name(topic.get_name().to_string());
         publication_builtin_topic_data.set_type_name(topic.get_type_name().to_string());
         publication_builtin_topic_data.set_endpoint_guid(self.guid);
@@ -530,7 +532,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 writer.self_ref.lock().map_err(|e| DdsError::Error(e.to_string()))?;
             *self_ref = Some(writer_arc);
         }
-        let period = writer.get_qos()?.deadline.period;
+        let period = writer.get_qos_arc()?.deadline.period;
         if !period.is_infinite()
             && (guid.entity_kind() == EntityKind::USER_DEFINED_WRITER_WITH_KEY
                 || guid.entity_kind() == EntityKind::USER_DEFINED_WRITER_NO_KEY)
@@ -1757,7 +1759,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
     }
 
     fn update_liveliness(&self) -> DdsResult<()> {
-        match self.get_qos()?.liveliness.kind {
+        match self.get_qos_arc()?.liveliness.kind {
             LivelinessQosPolicyKind::Automatic => Ok(()),
             LivelinessQosPolicyKind::ManualByParticipant => {
                 let wlp = self
@@ -1938,7 +1940,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         }
 
         let change_kind =
-            if self.get_qos()?.writer_data_lifecycle.autodispose_unregistered_instances {
+            if self.get_qos_arc()?.writer_data_lifecycle.autodispose_unregistered_instances {
                 ChangeKind::NotAliveDisposedUnregistered
             } else {
                 ChangeKind::NotAliveUnregistered
@@ -2194,7 +2196,7 @@ impl<Foo: 'static + Clone> DataWriterBase for DataWriter<Foo> {
         */
         self.is_enabled()?;
 
-        match self.get_qos()?.liveliness.kind {
+        match self.get_qos_arc()?.liveliness.kind {
             LivelinessQosPolicyKind::Automatic => Ok(()),
             LivelinessQosPolicyKind::ManualByParticipant => {
                 self.get_publisher()?.get_participant()?.assert_liveliness()
@@ -2399,7 +2401,7 @@ impl<Foo: 'static + Clone> DataWriterBase for DataWriter<Foo> {
         A TIMEOUT return value indicates that max_wait has elapsed but some data has not yet been acknowledged.
         */
         self.is_enabled()?;
-        let reliability = self.get_qos()?.reliability;
+        let reliability = self.get_qos_arc()?.reliability;
         if reliability.kind == ReliabilityQosPolicyKind::Reliable {
             let rtps_writer = self.get_rtps_writer()?;
             if rtps_writer.wait_for_all_acked(max_wait) {

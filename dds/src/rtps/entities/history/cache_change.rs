@@ -74,6 +74,16 @@ impl DataPayload {
             }
         }
     }
+
+    // Emptiness check that never materializes a chained payload. A single
+    // non-empty chunk is enough to answer without contiguous reassembly.
+    pub(crate) fn is_empty(&self) -> bool {
+        match self {
+            DataPayload::Owned(v) => v.is_empty(),
+            DataPayload::Shared(b) => b.is_empty(),
+            DataPayload::Chained { chunks, .. } => chunks.iter().all(|c| c.is_empty()),
+        }
+    }
 }
 
 // Concatenate chunks into a contiguous Bytes without zero-filling.
@@ -280,7 +290,7 @@ impl CacheChange {
         let coherent_set = self.presentation_info.coherent_set;
         (coherent_set.is_none() || coherent_set == Some(SequenceNumber::UNKNOWN))
             && self.kind == ChangeKind::Alive
-            && self.data_value().is_empty()
+            && self.data_payload.is_empty()
     }
 
     pub(crate) fn data_bytes(&self) -> Bytes {

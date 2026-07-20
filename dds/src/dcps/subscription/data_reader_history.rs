@@ -152,23 +152,24 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
         self.max_samples_per_instance
     }
 
-    fn sample_count(&self) -> usize {
-        self.instance_map.lock().map(|m| m.values().map(|b| b.len()).sum()).unwrap_or(0)
+    fn sample_count(&self) -> DdsResult<usize> {
+        let map = self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        Ok(map.values().map(|b| b.len()).sum())
     }
 
-    fn instance_count(&self) -> usize {
-        self.instance_map.lock().map(|m| m.len()).unwrap_or(0)
+    fn instance_count(&self) -> DdsResult<usize> {
+        let map = self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        Ok(map.len())
     }
 
-    fn contains_instance(&self, instance_handle: InstanceHandle) -> bool {
-        self.instance_map.lock().map(|m| m.contains_key(&instance_handle)).unwrap_or(false)
+    fn contains_instance(&self, instance_handle: InstanceHandle) -> DdsResult<bool> {
+        let map = self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        Ok(map.contains_key(&instance_handle))
     }
 
-    fn sample_count_of_instance(&self, instance_handle: InstanceHandle) -> usize {
-        self.instance_map
-            .lock()
-            .map(|m| m.get(&instance_handle).map_or(0, |v| v.len()))
-            .unwrap_or(0)
+    fn sample_count_of_instance(&self, instance_handle: InstanceHandle) -> DdsResult<usize> {
+        let map = self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        Ok(map.get(&instance_handle).map_or(0, |v| v.len()))
     }
 
     // Buckets are DESTINATION_ORDER sorted, not globally source-timestamp ordered. Each BY_SOURCE
@@ -431,7 +432,7 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
                     last_instance_handle: instance_handle,
                 });
                 return Err(DdsError::OutOfResources);
-            } else if self.is_max_samples_exceeded() {
+            } else if self.is_max_samples_exceeded()? {
                 if !self.can_auto_remove {
                     self.on_sample_rejected(SampleRejectedStatus {
                         total_count: 0,
@@ -448,6 +449,46 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
         }
 
         Ok(None)
+    }
+
+    // Dry run of ensure_capacity for a batch given its per-instance sample counts: whether all
+    // fit without any being dropped. Non-mutating, so the caller can reject the batch as a unit.
+    fn ensure_capacity_dry(
+        &self,
+        len_per_instance: &HashMap<InstanceHandle, usize>,
+    ) -> DdsResult<bool> {
+        let map = self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
+        // Per instance: with auto-remove, eviction frees older samples so only the batch's own
+        // members compete for depth; otherwise the batch must fit alongside what is already stored.
+        for (handle, len_of_cache_changes) in len_per_instance {
+            if handle.is_nil() {
+                continue; // NO_KEY instances are bounded by max_samples below.
+            }
+
+            let existing_len =
+                if self.can_auto_remove { 0 } else { map.get(handle).map_or(0, |v| v.len()) };
+
+            if existing_len + len_of_cache_changes > self.max_samples_per_instance as usize {
+                return Ok(false);
+            }
+        }
+
+        // New instances the batch introduces must fit alongside the existing ones.
+        let new_instance_count =
+            len_per_instance.keys().filter(|h| !h.is_nil() && !map.contains_key(*h)).count();
+
+        if map.len() + new_instance_count > self.max_instances as usize {
+            return Ok(false);
+        }
+
+        // Total samples: with auto-remove only the batch competes; otherwise it adds to the total.
+        let batch_total_len: usize = len_per_instance.values().sum();
+
+        let existing_total: usize =
+            if self.can_auto_remove { 0 } else { map.values().map(|v| v.len()).sum() };
+
+        Ok(existing_total + batch_total_len <= self.max_samples as usize)
     }
 
     // Removes the oldest change across all instances (DESTINATION_ORDER).
@@ -865,7 +906,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
     fn reader_min_separation(&self) -> Duration {
         self.data_reader
             .upgrade()
-            .and_then(|data_reader| data_reader.get_qos().ok())
+            .and_then(|data_reader| data_reader.get_qos_arc().ok())
             .map(|qos| qos.time_based_filter.minimum_separation)
             .unwrap_or_else(|| Duration::new(0, 0))
     }
@@ -1509,13 +1550,13 @@ mod tests {
             .add_change_with_cleanup(create_change_with_key(1, handle), true)
             .unwrap();
 
-        assert!(cache_arc.lock().unwrap().contains_instance(handle));
+        assert!(cache_arc.lock().unwrap().contains_instance(handle).unwrap());
         assert!(reader.get_instance_infos().unwrap().contains_key(&handle));
         assert!(cache_arc.lock().unwrap().time_based_filter.tracks_instance(handle));
 
         cache_arc.lock().unwrap().remove_all_instance_resources(handle);
 
-        assert!(!cache_arc.lock().unwrap().contains_instance(handle));
+        assert!(!cache_arc.lock().unwrap().contains_instance(handle).unwrap());
         assert!(!reader.get_instance_infos().unwrap().contains_key(&handle));
         assert!(!cache_arc.lock().unwrap().time_based_filter.tracks_instance(handle));
 
