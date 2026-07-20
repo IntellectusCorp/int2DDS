@@ -100,24 +100,21 @@ fn generate_key_impls_from_fields(
 
     let serialize_key_impl = quote! {
         fn serialize_key(&self, data: &dyn std::any::Any) -> #crate_path::dcps::core::error::DdsResult<#crate_path::rtps::common::types::SerializedData> {
-            use #crate_path::serialize::xcdr::{ExtensibilityKind, Xcdr2Serializer, XcdrSerialize};
-            use #crate_path::serialize::BufferManager;
+            use #crate_path::serialize::xcdr::{ExtensibilityKind, Xcdr2Serializer};
+            use #crate_path::serialize::{BufferManager, KeyHolder};
 
             if let Some(typed_data) = data.downcast_ref::<#full_type>() {
                 // Per RTPS KeyHash spec (DDSI-RTPS 9.6.4.8 step 4): PLAIN_CDR2 big-endian
-                // (max alignment 4, no member headers) of the key fields, no encapsulation
-                // header. Final extensibility => no DHEADER. We still write the 4-byte
-                // encapsulation header so the serializer's alignment math is relative to it,
-                // then strip it after.
+                // (max alignment 4, no member headers) of the KeyHolder projection (only
+                // @key members in member-id order, recursing into nested key holders), no
+                // encapsulation header. Final extensibility => no DHEADER. We still write
+                // the 4-byte encapsulation header so the serializer's alignment math is
+                // relative to it, then strip it after.
                 let mut serializer = Xcdr2Serializer::with_capacity(false, ExtensibilityKind::Final, 64);
                 serializer.write_encapsulation_header()
                     .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
-                #(
-                    XcdrSerialize::serialize_xcdr(&typed_data.#key_fields, &mut serializer)
-                        .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(
-                            format!("Failed to serialize field {}: {}", stringify!(#key_fields), e)
-                        ))?;
-                )*
+                KeyHolder::serialize_key_holder(typed_data, &mut serializer)
+                    .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
 
                 #bytes_post_process
             } else {
@@ -180,19 +177,15 @@ fn generate_key_impls_from_fields(
 
     let deserialize_key_impl = quote! {
         fn deserialize_key(&self, serialized_key: &[u8]) -> #crate_path::dcps::core::error::DdsResult<Box<dyn std::any::Any + Send + Sync>> {
-            use #crate_path::serialize::xcdr::{Xcdr2Deserializer, XcdrDeserialize};
+            use #crate_path::serialize::xcdr::Xcdr2Deserializer;
+            use #crate_path::serialize::KeyHolder;
 
             // Key bytes are PLAIN_CDR2 big-endian with no encapsulation header (RTPS
-            // KeyHash format), matching `serialize_key` above (max alignment 4).
+            // KeyHash format), matching `serialize_key` above: the KeyHolder projection
+            // (max alignment 4, only @key members in member-id order).
             let mut deserializer = Xcdr2Deserializer::new_without_header(serialized_key, false);
-            let mut key_holder = <#full_type as Default>::default();
-
-            #(
-                key_holder.#key_fields = <#key_types as XcdrDeserialize>::deserialize_xcdr(&mut deserializer)
-                    .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(
-                        format!("Failed to deserialize field {}: {}", stringify!(#key_fields), e)
-                    ))?;
-            )*
+            let key_holder = <#full_type as KeyHolder>::deserialize_key_holder(&mut deserializer)
+                .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
 
             Ok(Box::new(key_holder))
         }
@@ -256,31 +249,25 @@ fn generate_key_impls_from_fields(
 
     };
 
-    let compute_logic = if is_single_unbounded_string {
-        quote! {
-            match self.serialize_key(data) {
-                Ok(cdr_data) => {
-                    #crate_path::common::instance_handle::InstanceHandle::from_key_cdr_hashed(&cdr_data)
-                }
-
-                Err(e) => {
-                    log::error!("Warning: Key serialization failed for type {}: {:?}. Using NIL instance handle.",
-                        std::any::type_name::<#full_type>(), e);
-                    #crate_path::common::instance_handle::InstanceHandle::NIL
+    // Per RTPS KeyHash step 5: raw (zero-padded to 16) iff the KeyHolder's *maximum*
+    // serialized size is <= 16; otherwise MD5 of the actual stream. An unbounded key
+    // member (e.g. single unbounded string) has no finite maximum => always MD5.
+    let compute_logic = quote! {
+        match self.serialize_key(data) {
+            Ok(cdr_data) => {
+                match <#full_type as #crate_path::serialize::KeyHolder>::key_holder_max_size() {
+                    Some(max_size) if max_size <= 16 => {
+                        #crate_path::common::instance_handle::InstanceHandle::from_key_cdr(&cdr_data)
+                    }
+                    _ => {
+                        #crate_path::common::instance_handle::InstanceHandle::from_key_cdr_hashed(&cdr_data)
+                    }
                 }
             }
-        }
-    } else {
-        quote! {
-            match self.serialize_key(data) {
-                Ok(cdr_data) => {
-                    #crate_path::common::instance_handle::InstanceHandle::from_key_cdr(&cdr_data)
-                }
-                Err(e) => {
-                    log::error!("Warning: Key serialization failed for type {}: {:?}. Using NIL instance handle.",
-                        std::any::type_name::<#full_type>(), e);
-                    #crate_path::common::instance_handle::InstanceHandle::NIL
-                }
+            Err(e) => {
+                log::error!("Warning: Key serialization failed for type {}: {:?}. Using NIL instance handle.",
+                    std::any::type_name::<#full_type>(), e);
+                #crate_path::common::instance_handle::InstanceHandle::NIL
             }
         }
     };
