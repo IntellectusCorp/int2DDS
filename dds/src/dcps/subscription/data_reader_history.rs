@@ -906,7 +906,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
     fn reader_min_separation(&self) -> Duration {
         self.data_reader
             .upgrade()
-            .and_then(|data_reader| data_reader.get_qos().ok())
+            .and_then(|data_reader| data_reader.get_qos_arc().ok())
             .map(|qos| qos.time_based_filter.minimum_separation)
             .unwrap_or_else(|| Duration::new(0, 0))
     }
