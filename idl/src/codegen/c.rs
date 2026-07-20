@@ -1466,10 +1466,73 @@ impl<'a> CGen<'a> {
         }
     }
 
+    /// True when `name` resolves to a struct defined in this model (not an enum, bitmask,
+    /// bitset, union, or externally-declared type). Only such types have a generated
+    /// `{Name}_type_info()` builder to reference by content-hash.
+    fn is_model_struct(&self, name: &str) -> bool {
+        let simple = name.rsplit("::").next().unwrap_or(name);
+        self.model.structs.iter().any(|s| s.name == simple)
+    }
+
+    /// If `m` is (or is a sequence/array of) an in-model, non-@external nested struct,
+    /// emit its content-hash type_info field — build the nested `{Name}_type_info()`, add
+    /// it via the matching `*_nested_field` builder (content-hash CompleteTypeId, so the
+    /// runtime resolves the full definition and recurses into @key members, matching derive
+    /// and the C#/Python bindings), then destroy it — and return true. Otherwise return
+    /// false so the caller falls back to the name-hash / scalar paths.
+    fn try_emit_nested_ti(&mut self, m: &ResolvedMember, flags: &str) -> bool {
+        let name = &m.name;
+        let var = format!("_nti_{}", name);
+        let (nested_name, add_stmt) = match &m.resolved_type {
+            ResolvedType::Struct(sname) if !m.is_external && self.is_model_struct(sname) => (
+                sname,
+                format!(
+                    "int2dds_type_info_add_nested_field(ti, \"{}\", {}, {});",
+                    name, var, flags
+                ),
+            ),
+            ResolvedType::Sequence { element, bound } => match element.as_ref() {
+                ResolvedType::Struct(ename) if self.is_model_struct(ename) => (
+                    ename,
+                    format!(
+                        "int2dds_type_info_add_sequence_of_nested_field(ti, \"{}\", {}, {}, {});",
+                        name,
+                        var,
+                        bound.unwrap_or(0),
+                        flags
+                    ),
+                ),
+                _ => return false,
+            },
+            ResolvedType::Array { element, size } => match element.as_ref() {
+                ResolvedType::Struct(ename) if self.is_model_struct(ename) => (
+                    ename,
+                    format!(
+                        "int2dds_type_info_add_array_of_nested_field(ti, \"{}\", {}, {}, {});",
+                        name, var, size, flags
+                    ),
+                ),
+                _ => return false,
+            },
+            _ => return false,
+        };
+        let simple = nested_name.rsplit("::").next().unwrap_or(nested_name);
+        self.raw("    {\n");
+        self.raw(&format!("        Int2DdsTypeInfo *{} = {}_type_info();\n", var, simple));
+        self.raw(&format!("        {}\n", add_stmt));
+        self.raw(&format!("        int2dds_type_info_destroy({});\n", var));
+        self.raw("    }\n");
+        true
+    }
+
     fn emit_type_info_field(&mut self, m: &ResolvedMember) {
         let name = &m.name;
         let ty = &m.resolved_type;
         let flags = Self::member_flags_literal(m);
+
+        if self.try_emit_nested_ti(m, &flags) {
+            return;
+        }
 
         match ty {
             ResolvedType::Sequence { element, bound }
