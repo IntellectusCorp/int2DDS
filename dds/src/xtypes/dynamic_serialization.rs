@@ -1106,7 +1106,7 @@ pub fn serialize_key_cdr(data: &DynamicData) -> DdsResult<(Vec<u8>, bool)> {
     // 4-byte header so the alignment math is relative to it, then strip it.
     let mut serializer = Xcdr2Serializer::with_capacity(false, ExtensibilityKind::Final, 64);
     serializer.write_encapsulation_header().map_err(cdr_error)?;
-    let mut nested = serialize_struct_xcdr;
+    let mut nested = serialize_key_holder_struct;
     for member in &members {
         let value = member_value_or_default(data, member).ok_or_else(|| {
             DdsError::Error(format!("Missing key member value for '{}'", member.name))
@@ -1130,14 +1130,128 @@ pub fn deserialize_key_cdr(
     bytes: &[u8],
     dynamic_type: &Arc<DynamicType>,
 ) -> DdsResult<DynamicData> {
-    let members = key_members_ordered(dynamic_type);
     let mut deserializer = Xcdr2Deserializer::new_without_header(bytes, false);
+    deserialize_key_holder_struct(&mut deserializer, dynamic_type)
+}
+
+/// Projecting nested-struct serializer for the key holder: when the struct has
+/// `@key` members, write only those (member_id order); otherwise write all
+/// members. This is the recursive key projection required by RTPS KeyHash
+/// (DDSI-RTPS 9.6.4.8 step 1/3).
+fn serialize_key_holder_struct(
+    serializer: &mut Xcdr2Serializer,
+    data: &DynamicData,
+) -> DdsResult<()> {
+    let members = key_members_ordered(data.dynamic_type());
+    if members.is_empty() {
+        // Nested aggregated type with no @key members: keep all members.
+        return serialize_struct_xcdr(serializer, data);
+    }
+    let mut nested = serialize_key_holder_struct;
+    for member in &members {
+        let value = member_value_or_default(data, member).ok_or_else(|| {
+            DdsError::Error(format!("Missing key member value for '{}'", member.name))
+        })?;
+        serialize_value_xcdr2(serializer, &value, &member.member_type, &mut nested)?;
+    }
+    Ok(())
+}
+
+/// Read side of [`serialize_key_holder_struct`]: reconstruct only the projected
+/// key members from a key-holder CDR stream.
+fn deserialize_key_holder_struct(
+    deserializer: &mut Xcdr2Deserializer,
+    dynamic_type: &Arc<DynamicType>,
+) -> DdsResult<DynamicData> {
+    let members = key_members_ordered(dynamic_type);
+    if members.is_empty() {
+        return deserialize_struct_xcdr(deserializer, dynamic_type);
+    }
     let mut values = HashMap::new();
     for member in &members {
-        let value = deserialize_value_xcdr2(&mut deserializer, &member.member_type)?;
+        let value = deserialize_key_holder_value(deserializer, &member.member_type)?;
         values.insert(member.name.clone(), value);
     }
     Ok(DynamicData::with_values(dynamic_type.clone(), values))
+}
+
+fn deserialize_key_holder_value(
+    deserializer: &mut Xcdr2Deserializer,
+    kind: &DynamicTypeKind,
+) -> DdsResult<DynamicValue> {
+    // A nested struct key member is itself projected to its key holder.
+    if let DynamicTypeKind::TypeRef(inner) = kind {
+        if matches!(inner.kind(), DynamicTypeKind::Struct(_)) {
+            let nested = deserialize_key_holder_struct(deserializer, inner)?;
+            return Ok(DynamicValue::Struct(Box::new(nested)));
+        }
+    }
+    deserialize_value_xcdr2(deserializer, kind)
+}
+
+/// Maximum PLAIN_CDR2 (max alignment 4) serialized size of the key holder of
+/// `dynamic_type`, per RTPS KeyHash step 5. `None` means the key holder has an
+/// unbounded maximum size, so the KeyHash is always the MD5 of the actual stream.
+pub fn key_holder_max_size(dynamic_type: &DynamicType) -> Option<usize> {
+    let members = key_members_ordered(dynamic_type);
+    if members.is_empty() {
+        // No @key members: the whole aggregated type is the key holder.
+        return dynamic_type
+            .as_struct()
+            .and_then(|d| accumulate_members_max_size(d.members().iter().map(|m| &m.member_type)));
+    }
+    accumulate_members_max_size(members.iter().map(|m| &m.member_type))
+}
+
+fn accumulate_members_max_size<'a, I>(member_types: I) -> Option<usize>
+where
+    I: Iterator<Item = &'a DynamicTypeKind>,
+{
+    let mut pos = 0usize;
+    for kind in member_types {
+        let (align, size) = type_kind_max_size(kind)?;
+        pos = align_up(pos, align);
+        pos = pos.checked_add(size)?;
+    }
+    Some(pos)
+}
+
+/// `(alignment, maximum serialized size)` of a single member's contribution to the
+/// key holder, or `None` if that member has no finite maximum (=> MD5 the holder).
+fn type_kind_max_size(kind: &DynamicTypeKind) -> Option<(usize, usize)> {
+    match resolved_kind(kind) {
+        DynamicTypeKind::Primitive(p) => {
+            let s = p.size();
+            Some((s.min(4), s))
+        }
+        DynamicTypeKind::Enum(_) => Some((4, 4)),
+        DynamicTypeKind::String { bound: Some(n) } => Some((4, 4 + *n as usize + 1)),
+        DynamicTypeKind::WString { bound: Some(n) } => Some((4, 4 + 2 * (*n as usize + 1))),
+        DynamicTypeKind::Struct(desc) => {
+            // Nested key holder: project to its own @key members (member_id order),
+            // or keep all members when it has none.
+            let mut key_members: Vec<&MemberDescriptor> =
+                desc.members().iter().filter(|m| m.is_key).collect();
+            let size = if key_members.is_empty() {
+                accumulate_members_max_size(desc.members().iter().map(|m| &m.member_type))?
+            } else {
+                key_members.sort_by_key(|m| m.member_id);
+                accumulate_members_max_size(key_members.iter().map(|m| &m.member_type))?
+            };
+            Some((4, size))
+        }
+        // Unbounded string/wstring, sequences, maps, and anything else with no
+        // finite maximum serialized size => hash the actual bytes.
+        _ => None,
+    }
+}
+
+fn align_up(pos: usize, align: usize) -> usize {
+    if align <= 1 {
+        pos
+    } else {
+        (pos + align - 1) & !(align - 1)
+    }
 }
 
 fn serialize_xcdr(

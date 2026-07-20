@@ -18,7 +18,8 @@ use crate::{
 
 use super::dynamic_data::{DynamicData, DynamicValue};
 use super::dynamic_serialization::{
-    deserialize_dynamic_data, deserialize_key_cdr, serialize_dynamic_data, serialize_key_cdr,
+    deserialize_dynamic_data, deserialize_key_cdr, key_holder_max_size, serialize_dynamic_data,
+    serialize_key_cdr,
 };
 use super::dynamic_type::DynamicType;
 
@@ -251,11 +252,12 @@ impl TypeSupport for DynamicTypeSupport {
         };
 
         match serialize_key_cdr(dynamic_data) {
-            Ok((key_cdr, single_unbounded_string)) if !key_cdr.is_empty() => {
-                if single_unbounded_string {
-                    InstanceHandle::from_key_cdr_hashed(&key_cdr)
-                } else {
-                    InstanceHandle::from_key_cdr(&key_cdr)
+            Ok((key_cdr, _single)) if !key_cdr.is_empty() => {
+                // RTPS KeyHash step 5: the raw-vs-MD5 decision is made on the key
+                // holder's *maximum* serialized size, not the actual length.
+                match key_holder_max_size(&self.dynamic_type) {
+                    Some(n) if n <= 16 => InstanceHandle::from_key_cdr(&key_cdr),
+                    _ => InstanceHandle::from_key_cdr_hashed(&key_cdr),
                 }
             }
             _ => InstanceHandle::NIL,
