@@ -451,9 +451,9 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
             // Downcast to get underlying Topic for QoS
             let topic_qos = if let Some(topic) = topic_description.as_any().downcast_ref::<Topic>()
             {
-                topic.get_qos()?
+                topic.get_qos_arc()?
             } else if let Some(content_filtered_topic) = cft {
-                content_filtered_topic.get_related_topic()?.get_qos()?
+                content_filtered_topic.get_related_topic()?.get_qos_arc()?
             } else {
                 return Err(DdsError::Error("Unsupported TopicDescription type".to_string()));
             };
@@ -467,11 +467,10 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
                 return Err(DdsError::Error("Unsupported TopicDescription type".to_string()));
             };
 
-            let mut subscription_builtin_topic_data = SubscriptionBuiltinTopicData::new(
-                &self.get_qos()?,
-                &subscriber.get_qos()?,
-                &topic_qos,
-            );
+            let reader_qos = self.get_qos_arc()?;
+            let subscriber_qos = subscriber.get_qos_arc()?;
+            let mut subscription_builtin_topic_data =
+                SubscriptionBuiltinTopicData::new(&reader_qos, &subscriber_qos, &topic_qos);
             subscription_builtin_topic_data.set_topic_name(topic_name);
             subscription_builtin_topic_data
                 .set_type_name(topic_description.get_type_name().to_string());
@@ -540,8 +539,10 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
     fn update_rtps_entity(&self, qos: &Self::Qos) -> DdsResult<()> {
         let subscriber = self.get_subscriber()?;
         let topic = self.get_topic()?;
+        let subscriber_qos = subscriber.get_qos_arc()?;
+        let topic_qos = topic.get_qos_arc()?;
         let mut subscription_builtin_topic_data =
-            SubscriptionBuiltinTopicData::new(qos, &subscriber.get_qos()?, &topic.get_qos()?);
+            SubscriptionBuiltinTopicData::new(qos, &subscriber_qos, &topic_qos);
         subscription_builtin_topic_data.set_topic_name(topic.get_name().to_string());
         subscription_builtin_topic_data.set_type_name(topic.get_type_name().to_string());
         subscription_builtin_topic_data.set_endpoint_guid(self.guid);
@@ -1064,7 +1065,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     }
 
     fn get_max_samples(&self) -> DdsResult<usize> {
-        let qos = self.get_qos()?;
+        let qos = self.get_qos_arc()?;
 
         let samples_limit = match qos.history.kind {
             HistoryQosPolicyKind::KeepLast(depth) => depth,
@@ -1595,7 +1596,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
     fn subscriber_topic_ordered(&self) -> bool {
         self.get_subscriber()
-            .and_then(|s| s.get_qos())
+            .and_then(|s| s.get_qos_arc())
             .map(|q| {
                 q.presentation.ordered_access
                     && q.presentation.access_scope == PresentationQosAccessScopeKind::Topic
@@ -1605,7 +1606,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
     pub(crate) fn is_subscriber_coherent(&self) -> bool {
         self.get_subscriber()
-            .and_then(|s| s.get_qos())
+            .and_then(|s| s.get_qos_arc())
             .map(|q| q.presentation.coherent_access)
             .unwrap_or(false)
     }
@@ -1957,7 +1958,8 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                         monitor.cancel_instance(&instance_handle);
                     }
 
-                    let reader_data_lifecycle_qos = &self.get_qos()?.reader_data_lifecycle;
+                    let reader_qos = self.get_qos_arc()?;
+                    let reader_data_lifecycle_qos = &reader_qos.reader_data_lifecycle;
                     if !reader_data_lifecycle_qos.autopurge_disposed_samples_delay.is_infinite() {
                         let std_duration = std::time::Duration::from_nanos(
                             reader_data_lifecycle_qos.autopurge_disposed_samples_delay.as_nanos()
@@ -2003,7 +2005,8 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                         }
                     }
 
-                    let reader_data_lifecycle_qos = &self.get_qos()?.reader_data_lifecycle;
+                    let reader_qos = self.get_qos_arc()?;
+                    let reader_data_lifecycle_qos = &reader_qos.reader_data_lifecycle;
                     if !reader_data_lifecycle_qos.autopurge_nowriter_samples_delay.is_infinite() {
                         let std_duration = std::time::Duration::from_nanos(
                             reader_data_lifecycle_qos.autopurge_nowriter_samples_delay.as_nanos()
@@ -2176,7 +2179,7 @@ impl<Foo: DdsType> DataReader<Foo> {
             datareader_cache.set_update_status(status_callback.clone());
         }
 
-        let period = reader.get_qos()?.deadline.period;
+        let period = reader.get_qos_arc()?.deadline.period;
         if !period.is_infinite() {
             *reader.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))? =
                 Some(DeadlineMonitor::new(period, status_callback, false));
