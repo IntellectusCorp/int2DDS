@@ -53,22 +53,27 @@ def main() -> None:
         waitset = WaitSet()
         waitset.attach(writer)
 
-        while writer.matched_readers == 0:
-            try:
-                waitset.wait(timeout=1.0)
-            except Exception:
-                pass  # Timeout, check again
+        # Run until Ctrl-C, then the participant context manager cleans up
+        # gracefully (matches the Rust example).
+        try:
+            while writer.matched_readers == 0:
+                try:
+                    waitset.wait(timeout=1.0)
+                except Exception:
+                    pass  # Timeout, check again
 
-        print(f"Matched {writer.matched_readers} reader(s)")
+            print(f"Matched {writer.matched_readers} reader(s)")
 
-        # Publish samples indefinitely (Ctrl-C to stop), like the Rust/C#/C examples
-        i = 0
-        while True:
-            sample = HelloWorld(index=i, message=f"Hello from Python! ({i})")
-            writer.write(sample)
-            print(f"Published: index={sample.index}, message='{sample.message}'")
-            time.sleep(1.0)
-            i += 1
+            # Publish samples until Ctrl-C, like the Rust/C#/C examples
+            i = 0
+            while True:
+                sample = HelloWorld(index=i, message=f"Hello from Python! ({i})")
+                writer.write(sample)
+                print(f"Published: index={sample.index}, message='{sample.message}'")
+                time.sleep(1.0)
+                i += 1
+        except KeyboardInterrupt:
+            print("\nShutting down...")
 
 
 if __name__ == "__main__":

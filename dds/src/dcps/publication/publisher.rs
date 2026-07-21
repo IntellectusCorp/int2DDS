@@ -21,7 +21,7 @@ use std::{
     collections::HashMap,
     fmt::Debug,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         Arc, Mutex, RwLock, Weak,
     },
 };
@@ -87,6 +87,8 @@ pub struct Publisher {
     orphaned_writers: Arc<Mutex<Vec<Arc<dyn DataWriterInternal<Qos = DataWriterQos>>>>>,
     default_datawriter_qos: Arc<Mutex<Option<DataWriterQos>>>,
     participant: Option<Weak<DomainParticipant>>,
+    // Nesting depth of begin/end_coherent_changes; the set is open while non-zero.
+    coherent_depth: Arc<AtomicU32>,
 }
 
 impl Debug for Publisher {
@@ -188,6 +190,7 @@ impl Publisher {
             orphaned_writers: Arc::new(Mutex::new(Vec::new())),
             default_datawriter_qos: Arc::new(Mutex::new(None)),
             participant: Some(Arc::downgrade(participant)),
+            coherent_depth: Arc::new(AtomicU32::new(0)),
         };
         let publisher_arc = Arc::new(publisher.clone());
         let weak_ref = Arc::downgrade(&publisher_arc);
@@ -328,7 +331,7 @@ impl Publisher {
         )?;
 
         if let Ok(()) = self.is_enabled() {
-            if self.get_qos()?.entity_factory.autoenable_created_entities {
+            if self.get_qos_arc()?.entity_factory.autoenable_created_entities {
                 datawriter.enable()?;
             }
         }
@@ -864,7 +867,6 @@ impl Publisher {
         Err(DdsError::Unsupported)
     }
 
-    // TODO
     pub fn begin_coherent_changes(&self) -> DdsResult<()> {
         /*
             This operation requests the application to begin a 'coherent set' of modifications using DataWriter objects attached to the Publisher.
@@ -884,17 +886,53 @@ impl Publisher {
             Without delivering both values together, readers might misinterpret them as indicating an aircraft on a collision course.
         */
         self.is_deleted()?;
-        Err(DdsError::Unsupported)
+        // Nested calls only deepen the current set; a new set starts at depth 0 -> 1.
+        self.coherent_depth.fetch_add(1, Ordering::AcqRel);
+        Ok(())
     }
 
-    // TODO
     pub fn end_coherent_changes(&self) -> DdsResult<()> {
         /*
             This operation terminates the 'coherent set' initiated by begin_coherent_changes.
             If called without a matching begin_coherent_changes call, this operation returns PRECONDITION_NOT_MET error.
         */
         self.is_deleted()?;
-        Err(DdsError::Unsupported)
+
+        // fetch_update returns the pre-decrement depth; checked_sub refuses to go below zero.
+        match self
+            .coherent_depth
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |depth| depth.checked_sub(1))
+        {
+            // Depth was 0: no matching begin_coherent_changes.
+            Err(_) => Err(DdsError::PreconditionNotMet),
+            // Depth 1 -> 0: outermost end closes the set, writers send their end markers.
+            Ok(1) => self.end_writer_coherent_sets(),
+            // Depth 2+ -> 1+: nested end, the set stays open.
+            Ok(_) => Ok(()),
+        }
+    }
+
+    // Ask every attached writer to close its open coherent set; returns the first error.
+    fn end_writer_coherent_sets(&self) -> DdsResult<()> {
+        let writers_by_topic_name =
+            self.writers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        let mut result = Ok(());
+        for weak_writers in writers_by_topic_name.values() {
+            for weak_writer in weak_writers.iter() {
+                if let Some(writer) = weak_writer.upgrade() {
+                    let end_result = writer.end_coherent_set();
+                    if result.is_ok() {
+                        result = end_result;
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    // True while a coherent set is open (begin called without matching end).
+    pub(crate) fn in_coherent_changes(&self) -> bool {
+        self.coherent_depth.load(Ordering::Acquire) > 0
     }
 
     pub fn delete_contained_entities(&self) -> DdsResult<()> {

@@ -258,13 +258,11 @@ impl DcpsBridge {
             publication_builtin_topic_data.add_unicast_locator(locator.clone());
         }
 
-        #[allow(unused_assignments)]
-        let mut writer: Option<Arc<dyn Writer + Send + Sync>> = None;
+        let fragment_size = publication_builtin_topic_data.data_frag().effective_max_size();
 
-        let fragment_size = crate::common::env::get_fragment_size();
-
-        if publication_builtin_topic_data.is_reliable() {
-            let _writer = StatefulWriter::new(
+        let writer: Arc<dyn Writer + Send + Sync> = if publication_builtin_topic_data.is_reliable()
+        {
+            Arc::new(StatefulWriter::new(
                 datawriter_guid,
                 unicast_locator_list,
                 multicast_locator_list,
@@ -275,10 +273,9 @@ impl DcpsBridge {
                 f,
                 publication_builtin_topic_data.clone(),
                 Arc::downgrade(&self.participant),
-            );
-            writer = Some(Arc::new(_writer));
+            ))
         } else {
-            let _writer = StatelessWriter::new(
+            Arc::new(StatelessWriter::new(
                 datawriter_guid,
                 unicast_locator_list,
                 multicast_locator_list,
@@ -291,9 +288,8 @@ impl DcpsBridge {
                 f,
                 publication_builtin_topic_data.clone(),
                 Arc::downgrade(&self.participant),
-            );
-            writer = Some(Arc::new(_writer));
-        }
+            ))
+        };
 
         let writer_data = DiscoveredWriterData {
             publication_builtin_topic_data: publication_builtin_topic_data.clone(),
@@ -323,11 +319,6 @@ impl DcpsBridge {
                 publication_builtin_topic_data.endpoint_guid(),
                 publication_builtin_topic_data.clone(),
             );
-
-        let writer = writer.ok_or_else(|| {
-            log::error!("writer is not set");
-            RtpsError::new(RtpsErrorCode::LockError, "Writer lock error")
-        })?;
 
         let _ = self
             .participant
@@ -397,9 +388,6 @@ impl DcpsBridge {
 
         let (unicast_locator_list, multicast_locator_list) = self.default_endpoint_info()?;
 
-        #[allow(unused_assignments)]
-        let mut reader: Option<Arc<dyn Reader + Send + Sync>> = None;
-
         // Clone locator lists before using them in Reader constructors
         let unicast_locator_list_clone = unicast_locator_list.clone();
         let multicast_locator_list_clone = multicast_locator_list.clone();
@@ -412,8 +400,9 @@ impl DcpsBridge {
             subscription_builtin_topic_data.add_multicast_locator(locator.clone());
         }
 
-        if subscription_builtin_topic_data.is_reliable() {
-            let _reader = StatefulReader::new(
+        let reader: Arc<dyn Reader + Send + Sync> = if subscription_builtin_topic_data.is_reliable()
+        {
+            Arc::new(StatefulReader::new(
                 datareader_guid,
                 topic_kind,
                 ReliabilityQosPolicyKind::Reliable,
@@ -425,10 +414,9 @@ impl DcpsBridge {
                 status_callback,
                 subscription_builtin_topic_data.clone(),
                 self.participant.guid(),
-            );
-            reader = Some(Arc::new(_reader));
+            ))
         } else {
-            let _reader = StatelessReader::new(
+            Arc::new(StatelessReader::new(
                 datareader_guid,
                 topic_kind,
                 ReliabilityQosPolicyKind::BestEffort,
@@ -440,9 +428,8 @@ impl DcpsBridge {
                 status_callback,
                 subscription_builtin_topic_data.clone(),
                 self.participant.guid(),
-            );
-            reader = Some(Arc::new(_reader));
-        }
+            ))
+        };
 
         // Create DiscoveredReaderData and serialize using SEDPMessage.
         let reader_data = DiscoveredReaderData {
@@ -475,11 +462,6 @@ impl DcpsBridge {
                 subscription_builtin_topic_data.endpoint_guid(),
                 subscription_builtin_topic_data.clone(),
             );
-
-        let reader = reader.ok_or_else(|| {
-            log::error!("Reader is not set");
-            RtpsError::new(RtpsErrorCode::LockError, "Reader lock error")
-        })?;
 
         // Register the reader in the participant store BEFORE matching so that
         // any liveliness/match notifications fired during cross-match can find it.
