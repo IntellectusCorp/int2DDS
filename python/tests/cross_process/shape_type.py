@@ -17,7 +17,6 @@ from dataclasses import dataclass, field
 from typing import ClassVar, List
 
 from int2dds.cdr import CdrReader, CdrWriter, Extensibility
-from int2dds.cdr.writer import CdrKeyWriter
 
 
 @dataclass
@@ -73,9 +72,3 @@ class ShapeType:
                 additional_payload_size = r.read_bytes(seq_len)
         return cls(color=color, x=x, y=y, shapesize=shapesize,
                    additional_payload_size=additional_payload_size)
-
-    def _serialize_key(self) -> bytes:
-        """Serialize key fields only (color is the key)."""
-        w = CdrKeyWriter()
-        w.write_string(self.color)
-        return w.to_bytes()

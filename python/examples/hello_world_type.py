@@ -10,7 +10,6 @@ from enum import IntEnum, IntFlag
 from typing import ClassVar
 
 from int2dds.cdr import CdrReader, CdrWriter, Extensibility
-from int2dds.cdr.writer import CdrKeyWriter
 
 
 @dataclass
@@ -78,8 +77,5 @@ class HelloWorld:
             message = r.read_string()
         return cls(index, message)
 
-    def _serialize_key(self) -> bytes:
-        """Serialize key fields only (big-endian, no encapsulation)."""
-        return b""
 
 
