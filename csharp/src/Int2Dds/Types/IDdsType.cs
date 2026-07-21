@@ -21,6 +21,5 @@ namespace Int2Dds.Types
     {
         byte[] SerializeCdr();
         byte[] SerializeCdr(bool xcdr2);
-        byte[] SerializeKey();
     }
 }

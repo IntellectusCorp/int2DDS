@@ -184,7 +184,24 @@ impl TypeSupport for RawTypeSupport {
         }))
     }
 
-    fn serialize_key(&self, _data: &dyn Any) -> DdsResult<SerializedData> {
+    fn serialize_key(&self, data: &dyn Any) -> DdsResult<SerializedData> {
+        // Canonical RTPS KeyHash CDR (headerless, big-endian, §9.6.4.8) derived
+        // from the full sample bytes via the shared DynamicData key machinery —
+        // the same projection `compute_key` hashes and native Rust/derive emit.
+        // No full TypeObject (name-only keyed topic) => empty key.
+        let int2dds_data = match data.downcast_ref::<crate::data::Int2DdsData>() {
+            Some(d) => d,
+            None => return Ok(Arc::from(Vec::new())),
+        };
+        let cdr_bytes = match &int2dds_data.cdr_bytes {
+            Some(b) => b,
+            None => return Ok(Arc::from(Vec::new())),
+        };
+        if let Some(dts) = &self.dynamic_key_support {
+            if let Ok(dyn_data) = deserialize_dynamic_data(cdr_bytes, dts.dynamic_type()) {
+                return dts.serialize_key(&dyn_data);
+            }
+        }
         Ok(Arc::from(Vec::new()))
     }
 
