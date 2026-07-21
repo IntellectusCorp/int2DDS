@@ -35,10 +35,10 @@ pub(crate) trait HistoryCache {
     fn get_max_instances(&self) -> i32;
     fn get_max_samples_per_instance(&self) -> i32;
     // Storage-agnostic counts backing the resource-limit checks below.
-    fn sample_count(&self) -> usize;
-    fn instance_count(&self) -> usize;
-    fn contains_instance(&self, instance_handle: InstanceHandle) -> bool;
-    fn sample_count_of_instance(&self, instance_handle: InstanceHandle) -> usize;
+    fn sample_count(&self) -> DdsResult<usize>;
+    fn instance_count(&self) -> DdsResult<usize>;
+    fn contains_instance(&self, instance_handle: InstanceHandle) -> DdsResult<bool>;
+    fn sample_count_of_instance(&self, instance_handle: InstanceHandle) -> DdsResult<usize>;
     fn get_lifespan_timers(&self) -> Arc<Mutex<HashMap<Guid, TimerId>>>;
     fn get_timer_handler(&self, guid_prefix: GuidPrefix) -> DdsResult<Arc<Mutex<TimerHandler>>> {
         Ok(TimerHandler::get_instance(guid_prefix))
@@ -75,12 +75,12 @@ pub(crate) trait HistoryCache {
     ) -> DdsResult<Arc<CacheChange>>;
 
     fn is_max_instances_exceeded(&self, instance_handle: InstanceHandle) -> DdsResult<bool> {
-        Ok(!self.contains_instance(instance_handle)
-            && self.instance_count() as i32 >= self.get_max_instances())
+        Ok(!self.contains_instance(instance_handle)?
+            && self.instance_count()? as i32 >= self.get_max_instances())
     }
 
-    fn is_max_samples_exceeded(&self) -> bool {
-        self.sample_count() as i32 >= self.get_max_samples()
+    fn is_max_samples_exceeded(&self) -> DdsResult<bool> {
+        Ok(self.sample_count()? as i32 >= self.get_max_samples())
     }
 
     fn is_max_samples_per_instance_exceeded(
@@ -89,12 +89,21 @@ pub(crate) trait HistoryCache {
     ) -> DdsResult<bool> {
         if instance_handle.is_nil() {
             // MAX_SAMPLES already considered DEPTH when initialized for NO_KEY && KEEP_LAST
-            return Ok(self.is_max_samples_exceeded());
+            return self.is_max_samples_exceeded();
         }
 
-        Ok(self.contains_instance(instance_handle)
-            && self.sample_count_of_instance(instance_handle) as i32
+        Ok(self.contains_instance(instance_handle)?
+            && self.sample_count_of_instance(instance_handle)? as i32
                 >= self.get_max_samples_per_instance())
+    }
+
+    // Dry run of ensure_capacity for a batch given its per-instance sample counts. Non-mutating;
+    // default true for caches that never add changes as an atomic batch.
+    fn ensure_capacity_dry(
+        &self,
+        _len_per_instance: &HashMap<InstanceHandle, usize>,
+    ) -> DdsResult<bool> {
+        Ok(true)
     }
 
     // Insert keeping source/reception-timestamp order. Used when lifespan qos is enabled.

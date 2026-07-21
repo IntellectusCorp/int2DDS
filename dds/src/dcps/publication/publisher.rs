@@ -331,7 +331,7 @@ impl Publisher {
         )?;
 
         if let Ok(()) = self.is_enabled() {
-            if self.get_qos()?.entity_factory.autoenable_created_entities {
+            if self.get_qos_arc()?.entity_factory.autoenable_created_entities {
                 datawriter.enable()?;
             }
         }

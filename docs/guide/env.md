@@ -15,7 +15,6 @@ This document describes the environment variables available in int2dds.
 | `INT2DDS_USE_LOOPBACK_INTERFACE`     | Enable loopback interface                  | false                   |
 | `INT2DDS_UDP_SOCKET_BUFFER`          | UDP socket buffer size (bytes)             | OS default              |
 | `INT2DDS_SHM_BUFFER_SIZE`            | Shared-memory ring buffer size (bytes)     | 1048576 (1MB)           |
-| `INT2DDS_FRAGMENT_SIZE`              | Writer fragment size in bytes (1-65000)    | 65000                   |
 | `INT2DDS_MULTICAST_TTL`              | IPv4 multicast TTL fallback (0-255)        | 1                       |
 | `INT2DDS_EXTENDED_DISCOVERY`         | Enable extended discovery                  | false                   |
 | `INT2DDS_INITIAL_PEERS`              | Initial peer list                          | none                    |
@@ -253,27 +252,6 @@ export INT2DDS_SHM_BUFFER_SIZE=2097152
 cargo run --example hello_world_pub
 ```
 
-### INT2DDS_FRAGMENT_SIZE
-
-Sets the writer fragment size in bytes. Samples larger than this are split into
-fragments of this size. Default: 65000. Valid range `1`-`65000`; out-of-range
-values are clamped, invalid values fall back to the default.
-
-#### Configuration
-
-```powershell
-# Windows PowerShell
-$env:INT2DDS_FRAGMENT_SIZE = "1344"  # fits within a 1500-byte MTU after headers
-
-cargo run --example hello_world_pub
-```
-
-```bash
-# Linux/macOS
-export INT2DDS_FRAGMENT_SIZE=1344
-
-cargo run --example hello_world_pub
-```
 
 ### INT2DDS_MULTICAST_TTL
 
