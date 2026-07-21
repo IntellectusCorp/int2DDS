@@ -319,7 +319,7 @@ pub unsafe extern "C" fn int2dds_create_topic_with_type_info(
 
     // Create RawTypeSupport with type info for discovery. Keyed types compute instance
     // keys through the canonical DynamicData path built from the full TypeObject.
-    let raw_type_support = RawTypeSupport::with_type_info_and_deps(
+    let mut raw_type_support = RawTypeSupport::with_type_info_and_deps(
         dds_type_name.clone(),
         ti.extensibility,
         ti.has_key_field(),
@@ -327,6 +327,13 @@ pub unsafe extern "C" fn int2dds_create_topic_with_type_info(
         type_object,
         ti.dependency_closure(),
     );
+
+    // Flat CDR field descriptors so ContentFilteredTopic / QueryCondition filters work on
+    // generated (type_info) topics. None when any member is non-flat (nested/collection/
+    // enum/float/wide-string) — filtering then stays unavailable, as before.
+    if let Some(descriptors) = ti.cdr_field_descriptors() {
+        raw_type_support.set_all_fields(descriptors);
+    }
 
     finalize_topic(
         participant_ref,
