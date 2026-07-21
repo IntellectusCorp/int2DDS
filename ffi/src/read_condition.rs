@@ -222,24 +222,28 @@ pub unsafe extern "C" fn int2dds_readcondition_delete(
     if condition.is_null() {
         return INT2DDS_RET_NULL_POINTER;
     }
-    // Take ownership; the box frees on drop at the end of every path below.
+    // Take ownership; the box frees on drop at the end of every path below (the FFI
+    // contract forbids reusing `condition` after this call, so we never re-leak it).
+    // Detach from the owning reader so the core drops its retained Arc, and surface a
+    // core delete failure to the caller. An expired reader Weak means the reader (and
+    // its condition list) is already gone — nothing to detach, which is success.
     let boxed = Box::from_raw(condition);
-    // Best-effort: detach from the owning reader so the core drops its retained Arc.
-    // Without this the ReadCondition lives for the reader's lifetime. An expired reader
-    // Weak means the reader (and its condition list) is already gone — nothing to detach.
     match &boxed.kind {
-        ReadConditionKind::Read(rc) => {
-            if let Ok(reader) = rc.get_datareader::<crate::data::Int2DdsData>() {
-                let _ = reader.delete_readcondition(rc.clone());
-            }
-        }
-        ReadConditionKind::Query(qc) => {
-            if let Ok(reader) = qc.get_datareader::<crate::data::Int2DdsData>() {
-                let _ = reader.delete_readcondition(qc.clone());
-            }
-        }
+        ReadConditionKind::Read(rc) => match rc.get_datareader::<crate::data::Int2DdsData>() {
+            Ok(reader) => match reader.delete_readcondition(rc.clone()) {
+                Ok(()) => INT2DDS_RET_OK,
+                Err(e) => dds_error_to_code(&e),
+            },
+            Err(_) => INT2DDS_RET_OK,
+        },
+        ReadConditionKind::Query(qc) => match qc.get_datareader::<crate::data::Int2DdsData>() {
+            Ok(reader) => match reader.delete_readcondition(qc.clone()) {
+                Ok(()) => INT2DDS_RET_OK,
+                Err(e) => dds_error_to_code(&e),
+            },
+            Err(_) => INT2DDS_RET_OK,
+        },
     }
-    INT2DDS_RET_OK
 }
 
 /// Take samples matching a Read/QueryCondition, returned as serialized bytes.
