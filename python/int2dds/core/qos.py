@@ -261,9 +261,9 @@ class Property:
 
 @dataclass
 class DataWriterQos:
-    reliability: Reliability = field(default_factory=lambda: Reliability("RELIABLE"))
-    durability: Durability = field(default_factory=lambda: Durability("VOLATILE"))
-    history: History = field(default_factory=History)
+    reliability: Reliability | None = None
+    durability: Durability | None = None
+    history: History | None = None
     ownership: Ownership | None = None
     ownership_strength: OwnershipStrength | None = None
     resource_limits: ResourceLimits | None = None
@@ -280,9 +280,9 @@ class DataWriterQos:
 
 @dataclass
 class DataReaderQos:
-    reliability: Reliability = field(default_factory=lambda: Reliability("BEST_EFFORT"))
-    durability: Durability = field(default_factory=lambda: Durability("VOLATILE"))
-    history: History = field(default_factory=History)
+    reliability: Reliability | None = None
+    durability: Durability | None = None
+    history: History | None = None
     ownership: Ownership | None = None
     resource_limits: ResourceLimits | None = None
     destination_order: DestinationOrder | None = None
