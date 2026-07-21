@@ -28,15 +28,18 @@ T = TypeVar("T", bound="DdsType")
 def _apply_datawriter_qos(handle: CData, qos: "DataWriterQos") -> None:
     """Apply DataWriterQos policies onto a native writer QoS handle.
 
-    Shared by writer creation and set_qos. reliability/durability/history are always
-    present (dataclass defaults) and applied unconditionally; the rest are optional
-    and applied only when set.
+    Shared by writer creation and set_qos. Every policy is optional; only the ones
+    explicitly set on `qos` are applied, so unset policies retain the base handle's
+    value (the native default at creation, or the current QoS on set_qos merge).
     """
-    check_ret(lib.int2dds_datawriter_qos_set_reliability(
-        handle, qos.reliability._kind_int, qos.reliability._max_blocking_time_ns))
-    check_ret(lib.int2dds_datawriter_qos_set_durability(handle, qos.durability._kind_int))
-    check_ret(lib.int2dds_datawriter_qos_set_history(
-        handle, qos.history._kind_int, qos.history.depth))
+    if qos.reliability is not None:
+        check_ret(lib.int2dds_datawriter_qos_set_reliability(
+            handle, qos.reliability._kind_int, qos.reliability._max_blocking_time_ns))
+    if qos.durability is not None:
+        check_ret(lib.int2dds_datawriter_qos_set_durability(handle, qos.durability._kind_int))
+    if qos.history is not None:
+        check_ret(lib.int2dds_datawriter_qos_set_history(
+            handle, qos.history._kind_int, qos.history.depth))
     if qos.ownership is not None:
         check_ret(lib.int2dds_datawriter_qos_set_ownership(handle, qos.ownership._kind_int))
     if qos.ownership_strength is not None:

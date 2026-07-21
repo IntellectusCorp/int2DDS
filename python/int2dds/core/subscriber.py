@@ -59,14 +59,17 @@ class Sample(Generic[T]):
 def _apply_datareader_qos(handle: CData, qos: "DataReaderQos") -> None:
     """Apply DataReaderQos policies onto a native reader QoS handle.
 
-    Shared by reader creation and set_qos. reliability/durability/history are always
-    present (dataclass defaults) and applied unconditionally; the rest are optional
-    and applied only when set.
+    Shared by reader creation and set_qos. Every policy is optional; only the ones
+    explicitly set on `qos` are applied, so unset policies retain the base handle's
+    value (the native default at creation, or the current QoS on set_qos merge).
     """
-    check_ret(lib.int2dds_datareader_qos_set_reliability(handle, qos.reliability._kind_int))
-    check_ret(lib.int2dds_datareader_qos_set_durability(handle, qos.durability._kind_int))
-    check_ret(lib.int2dds_datareader_qos_set_history(
-        handle, qos.history._kind_int, qos.history.depth))
+    if qos.reliability is not None:
+        check_ret(lib.int2dds_datareader_qos_set_reliability(handle, qos.reliability._kind_int))
+    if qos.durability is not None:
+        check_ret(lib.int2dds_datareader_qos_set_durability(handle, qos.durability._kind_int))
+    if qos.history is not None:
+        check_ret(lib.int2dds_datareader_qos_set_history(
+            handle, qos.history._kind_int, qos.history.depth))
     if qos.ownership is not None:
         check_ret(lib.int2dds_datareader_qos_set_ownership(handle, qos.ownership._kind_int))
     if qos.resource_limits is not None:
