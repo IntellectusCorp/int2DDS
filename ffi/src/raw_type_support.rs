@@ -205,8 +205,27 @@ impl TypeSupport for RawTypeSupport {
         Ok(Arc::from(Vec::new()))
     }
 
-    fn deserialize_key(&self, _serialized_key: &[u8]) -> DdsResult<Box<dyn Any + Send + Sync>> {
-        Err(DdsError::Error("RawTypeSupport: use take_serialized() for key access".to_string()))
+    fn deserialize_key(&self, serialized_key: &[u8]) -> DdsResult<Box<dyn Any + Send + Sync>> {
+        // Reconstruct the key as DynamicData via the canonical key machinery so the wire
+        // serializedKey path (serialize_key_payload) works on the raw FFI path, which has
+        // no typed value — e.g. dispose/unregister from stored key bytes. A keyed raw topic
+        // always carries this (creation is rejected otherwise, see topic.rs); the guard is
+        // defensive against a keyed topic that reached here without a full TypeObject.
+        match &self.dynamic_key_support {
+            Some(dts) => dts.deserialize_key(serialized_key),
+            None => Err(DdsError::PreconditionNotMet),
+        }
+    }
+
+    fn serialize_key_payload(
+        &self,
+        data: &dyn Any,
+        format: &SerializationFormat,
+    ) -> DdsResult<SerializedData> {
+        match &self.dynamic_key_support {
+            Some(dts) => dts.serialize_key_payload(data, format),
+            None => Err(DdsError::PreconditionNotMet),
+        }
     }
 
     fn compute_key(&self, data: &dyn Any) -> InstanceHandle {

@@ -245,6 +245,39 @@ impl TypeSupport for DynamicTypeSupport {
         Ok(Box::new(key_data))
     }
 
+    fn serialize_key_payload(
+        &self,
+        data: &dyn Any,
+        format: &SerializationFormat,
+    ) -> DdsResult<SerializedData> {
+        // Wrap the canonical KeyHash body (big-endian, max-align-4, headerless FINAL
+        // key-holder projection) as a wire serializedKey with the representation-correct
+        // encapsulation id, so peers frame it as the topic's representation instead of
+        // the default's always-CDR_BE. This is the raw/dynamic path used when no typed
+        // value is available (e.g. FFI dispose from stored key bytes). Byte-exact XCDR1
+        // 8-byte alignment and nested DELIMITED framing are deferred; the reader's
+        // primary instance match is the 16-byte KeyHash inline QoS, not this body.
+        let body = self.serialize_key(data)?;
+        let mut payload = Vec::with_capacity(body.len() + 8);
+        match format {
+            SerializationFormat::Cdr => {
+                payload.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // CDR_BE
+                payload.extend_from_slice(&body);
+            }
+            SerializationFormat::Xcdr { extensibility_kind, .. } => {
+                if matches!(extensibility_kind, ExtensibilityKind::Final) {
+                    payload.extend_from_slice(&[0x00, 0x06, 0x00, 0x00]); // PLAIN_CDR2_BE
+                    payload.extend_from_slice(&body);
+                } else {
+                    payload.extend_from_slice(&[0x00, 0x08, 0x00, 0x00]); // DELIMITED_CDR2_BE
+                    payload.extend_from_slice(&(body.len() as u32).to_be_bytes()); // DHEADER
+                    payload.extend_from_slice(&body);
+                }
+            }
+        }
+        Ok(Arc::from(payload.into_boxed_slice()))
+    }
+
     fn compute_key(&self, data: &dyn Any) -> InstanceHandle {
         let dynamic_data = match data.downcast_ref::<DynamicData>() {
             Some(d) => d,
