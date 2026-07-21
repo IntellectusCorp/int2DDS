@@ -44,13 +44,6 @@ namespace Int2Dds.Tests
             w.DheaderFinalize(token);
             return w.ToBytes();
         }
-
-        public byte[] SerializeKey()
-        {
-            var w = new CdrKeyWriter();
-            w.WriteString(Color);
-            return w.ToBytes();
-        }
     }
 
     public class TypeInfoAdvertiseTests
