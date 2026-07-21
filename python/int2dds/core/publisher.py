@@ -335,18 +335,13 @@ class DataWriter(Generic[T]):
         Args:
             sample: The data sample to write
         """
-        # Serialize the sample
+        # Serialize the sample; the core derives the canonical key/handle from it.
         data = sample._serialize_cdr(self._xcdr2)
-
-        # Serialize key if the type has key fields
-        key: bytes | None = None
-        if getattr(sample, "_has_key", False):
-            key = sample._serialize_key()
 
         # Write to the FFI
         data_ptr = ffi.from_buffer(data)
-        key_ptr = ffi.from_buffer(key) if key else ffi.NULL
-        key_len = len(key) if key else 0
+        key_ptr = ffi.NULL
+        key_len = 0
 
         check_ret(
             lib.int2dds_write_serialized(self._handle, data_ptr, len(data), key_ptr, key_len)
@@ -363,7 +358,7 @@ class DataWriter(Generic[T]):
         """
         key: bytes | None = None
         if getattr(sample, "_has_key", False):
-            key = sample._serialize_key()
+            key = sample._serialize_cdr(self._xcdr2)
 
         if not key:
             return b'\x00' * 16
@@ -392,7 +387,7 @@ class DataWriter(Generic[T]):
         """
         key: bytes | None = None
         if getattr(sample, "_has_key", False):
-            key = sample._serialize_key()
+            key = sample._serialize_cdr(self._xcdr2)
 
         if not key:
             return
@@ -419,7 +414,7 @@ class DataWriter(Generic[T]):
         """
         key: bytes | None = None
         if getattr(sample, "_has_key", False):
-            key = sample._serialize_key()
+            key = sample._serialize_cdr(self._xcdr2)
 
         if not key:
             return
@@ -449,7 +444,7 @@ class DataWriter(Generic[T]):
         """
         key: bytes | None = None
         if getattr(sample, "_has_key", False):
-            key = sample._serialize_key()
+            key = sample._serialize_cdr(self._xcdr2)
 
         if not key:
             return b'\x00' * 16

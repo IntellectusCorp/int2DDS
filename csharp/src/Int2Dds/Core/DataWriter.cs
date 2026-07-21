@@ -171,7 +171,7 @@ namespace Int2Dds.Core
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
             var data = sample.SerializeCdr(_xcdr2);
-            var key = s_hasKey ? sample.SerializeKey() : null;
+            byte[] key = null;
 
             unsafe
             {
@@ -197,7 +197,7 @@ namespace Int2Dds.Core
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
             var data = sample.SerializeCdr(_xcdr2);
-            var key = s_hasKey ? sample.SerializeKey() : null;
+            byte[] key = null;
 
             var epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
             var elapsed = timestamp.ToUniversalTime() - epoch;
@@ -226,7 +226,7 @@ namespace Int2Dds.Core
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
-            var key = s_hasKey ? sample.SerializeKey() : null;
+            var key = s_hasKey ? sample.SerializeCdr(_xcdr2) : null;
             if (key == null || key.Length == 0)
                 return InstanceHandle.Nil;
 
@@ -253,7 +253,7 @@ namespace Int2Dds.Core
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
-            var key = s_hasKey ? sample.SerializeKey() : null;
+            var key = s_hasKey ? sample.SerializeCdr(_xcdr2) : null;
             if (key == null || key.Length == 0)
                 return;
 
@@ -278,7 +278,7 @@ namespace Int2Dds.Core
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
-            var key = s_hasKey ? sample.SerializeKey() : null;
+            var key = s_hasKey ? sample.SerializeCdr(_xcdr2) : null;
             if (key == null || key.Length == 0)
                 return;
 
@@ -303,7 +303,7 @@ namespace Int2Dds.Core
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
-            var key = s_hasKey ? sample.SerializeKey() : null;
+            var key = s_hasKey ? sample.SerializeCdr(_xcdr2) : null;
             if (key == null || key.Length == 0)
                 return InstanceHandle.Nil;
 

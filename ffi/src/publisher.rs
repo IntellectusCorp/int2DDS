@@ -1090,7 +1090,9 @@ unsafe fn handle_from_c(handle_ptr: *const [u8; 16]) -> InstanceHandle {
     }
 }
 
-/// Register an instance with serialized key bytes
+/// Register an instance from the full serialized sample. The canonical KeyHash is
+/// derived from the sample by the core (matching the wire); `key`/`key_len` carry
+/// the serialized sample bytes.
 ///
 /// # Safety
 /// - `writer` must be a valid datawriter
@@ -1108,9 +1110,9 @@ pub unsafe extern "C" fn int2dds_datawriter_register_instance(
     check_null!(handle_out);
 
     let writer_ref = &*writer;
-    let key_bytes = std::slice::from_raw_parts(key, key_len);
+    let sample_bytes = std::slice::from_raw_parts(key, key_len);
 
-    let handle = ffi_try!(writer_ref.inner.register_instance_serialized(key_bytes));
+    let handle = ffi_try!(writer_ref.inner.register_instance_serialized(sample_bytes));
     *handle_out = *handle.value();
 
     INT2DDS_RET_OK

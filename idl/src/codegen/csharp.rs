@@ -847,9 +847,6 @@ impl<'a> CsGen<'a> {
         self.emit_serialize_cdr_inline(&full_struct);
         self.line("");
 
-        // SerializeKey method
-        self.emit_serialize_key(&full_struct);
-
         self.indent -= 1;
         self.line("}");
     }
@@ -1529,117 +1526,6 @@ impl<'a> CsGen<'a> {
         }
     }
 
-    fn emit_serialize_key(&mut self, s: &ResolvedStruct) {
-        let key_fields: Vec<&ResolvedMember> = s.members.iter().filter(|m| m.is_key).collect();
-
-        if key_fields.is_empty() {
-            // Cached zero-length array. Cannot use Array.Empty<byte>() because
-            // it requires .NET Framework 4.6+ (this binding also targets net45).
-            self.line("private static readonly byte[] s_emptyKey = new byte[0];");
-            self.line("public byte[] SerializeKey() => s_emptyKey;");
-        } else {
-            self.line("public byte[] SerializeKey()");
-            self.line("{");
-            self.indent += 1;
-            self.line("var w = new CdrKeyWriter();");
-            for m in key_fields {
-                let accessor = cs_ident(&m.name);
-                self.emit_write_key_field(&m.resolved_type, &accessor, 0);
-            }
-            self.line("return w.ToBytes();");
-            self.indent -= 1;
-            self.line("}");
-        }
-    }
-
-    fn emit_write_key_field(&mut self, ty: &ResolvedType, accessor: &str, depth: usize) {
-        match ty {
-            ResolvedType::Bool => self.line(&format!("w.WriteBool({});", accessor)),
-            ResolvedType::U8 | ResolvedType::UInt8 => {
-                self.line(&format!("w.WriteU8({});", accessor))
-            }
-            ResolvedType::I8 => self.line(&format!("w.WriteI8({});", accessor)),
-            ResolvedType::I16 => self.line(&format!("w.WriteI16({});", accessor)),
-            ResolvedType::U16 => self.line(&format!("w.WriteU16({});", accessor)),
-            ResolvedType::I32 => self.line(&format!("w.WriteI32({});", accessor)),
-            ResolvedType::U32 => self.line(&format!("w.WriteU32({});", accessor)),
-            ResolvedType::I64 => self.line(&format!("w.WriteI64({});", accessor)),
-            ResolvedType::U64 => self.line(&format!("w.WriteU64({});", accessor)),
-            ResolvedType::F32 => self.line(&format!("w.WriteF32({});", accessor)),
-            ResolvedType::F64 => self.line(&format!("w.WriteF64({});", accessor)),
-            ResolvedType::Char => {
-                self.line(&format!("w.WriteU8((byte){});", accessor));
-            }
-            ResolvedType::WChar => {
-                self.line(&format!("w.WriteU16((ushort){});", accessor));
-            }
-            ResolvedType::String { .. } => {
-                self.line(&format!("w.WriteString({});", accessor));
-            }
-            ResolvedType::WString { .. } => {
-                self.line(&format!("w.WriteWString({});", accessor));
-            }
-            ResolvedType::Enum(_) => {
-                self.line(&format!("w.WriteEnum((int){});", accessor));
-            }
-            ResolvedType::Bitmask(bitmask_name) => {
-                let bit_bound = self.find_bitmask(bitmask_name).map(|b| b.bit_bound).unwrap_or(32);
-                let (cs_type, write_method, _, _) = Self::bitmask_backing_info(bit_bound);
-                self.line(&format!("w.{}(({}){}); ", write_method, cs_type, accessor));
-            }
-            // A Final/Appendable nested struct key member contributes all of
-            // its fields inline (matching the Rust dynamic `serialize_struct_cdr`
-            // used by the key path), recursively and in declaration order. A
-            // Mutable nested struct instead serializes as PL_CDR with member
-            // headers, which the flat key writer cannot express; mark it
-            // unsupported rather than emit silently-wrong inline bytes.
-            ResolvedType::Struct(name) => match self.find_struct(name).cloned() {
-                Some(nested) if nested.extensibility == ExtensibilityKind::Mutable => {
-                    self.line(&format!(
-                        "// Unsupported: mutable nested struct key field {}",
-                        accessor
-                    ));
-                }
-                Some(nested) => {
-                    for m in self.collect_all_members(&nested) {
-                        let inner = format!("{}.{}", accessor, cs_ident(&m.name));
-                        self.emit_write_key_field(&m.resolved_type, &inner, depth);
-                    }
-                }
-                None => {
-                    self.line(&format!(
-                        "// Unsupported: unresolved nested struct key field {}",
-                        accessor
-                    ));
-                }
-            },
-            // Sequence: u32 length prefix, then each element inline.
-            ResolvedType::Sequence { element, .. } => {
-                let var = format!("_ke{}", depth);
-                self.line(&format!("w.WriteU32((uint){}.Count);", accessor));
-                self.line(&format!("foreach (var {} in {})", var, accessor));
-                self.line("{");
-                self.indent += 1;
-                self.emit_write_key_field(element, &var, depth + 1);
-                self.indent -= 1;
-                self.line("}");
-            }
-            // Array: fixed length, elements inline with no length prefix.
-            ResolvedType::Array { element, .. } => {
-                let var = format!("_ke{}", depth);
-                self.line(&format!("foreach (var {} in {})", var, accessor));
-                self.line("{");
-                self.indent += 1;
-                self.emit_write_key_field(element, &var, depth + 1);
-                self.indent -= 1;
-                self.line("}");
-            }
-            ResolvedType::Map { .. } => {
-                self.line(&format!("// Unsupported: map key field {}", accessor));
-            }
-        }
-    }
-
     fn find_bitmask(&self, name: &str) -> Option<&ResolvedBitmask> {
         let simple = name.rsplit("::").next().unwrap_or(name);
         self.model
@@ -1757,57 +1643,6 @@ mod tests {
         // The nested struct still emits its own flat metadata (recursion source of truth).
         assert!(code.contains(r#"new DdsTypeInfoField("field", "a", 5, 0u, 0),"#), "{}", code);
         assert!(code.contains(r#"new DdsTypeInfoField("field", "b", 5, 0u, 0),"#), "{}", code);
-    }
-
-    #[test]
-    fn test_serialize_key_recurses_into_nested_and_collections() {
-        let defs = parse_idl(
-            r#"
-            @final
-            struct Point { long x; long y; };
-            @final
-            struct NestedKeyed { @key Point p; long payload; };
-            @final
-            struct ArrKeyed { @key Point grid[2]; long payload; };
-            @final
-            struct SeqKeyed { @key sequence<Point> items; long payload; };
-            "#,
-        )
-        .unwrap();
-        let model = resolve(defs).unwrap();
-        let code = generate(&model, "Keys.idl", &CSharpOptions::default());
-
-        // Nested struct key serializes each field inline.
-        assert!(code.contains("w.WriteI32(P.X);"), "{}", code);
-        assert!(code.contains("w.WriteI32(P.Y);"), "{}", code);
-        // Array key: no length prefix, iterate elements inline.
-        assert!(code.contains("foreach (var _ke0 in Grid)"), "{}", code);
-        // Sequence key: u32 length prefix then elements.
-        assert!(code.contains("w.WriteU32((uint)Items.Count);"), "{}", code);
-        assert!(code.contains("foreach (var _ke0 in Items)"), "{}", code);
-        // No stale TODO catch-all remains.
-        assert!(!code.contains("// TODO: Complex key field"), "{}", code);
-    }
-
-    #[test]
-    fn test_serialize_key_guards_mutable_nested_struct() {
-        // A Mutable nested struct serializes as PL_CDR (member headers), which the
-        // flat key writer cannot express: the generator must mark it unsupported
-        // rather than emit silently-wrong inline writes.
-        let defs = parse_idl(
-            r#"
-            @mutable
-            struct MutInner { long x; long y; };
-            @final
-            struct MutKeyed { @key MutInner inner; long payload; };
-            "#,
-        )
-        .unwrap();
-        let model = resolve(defs).unwrap();
-        let code = generate(&model, "MutKeyed.idl", &CSharpOptions::default());
-
-        assert!(code.contains("// Unsupported: mutable nested struct key field Inner"), "{}", code);
-        assert!(!code.contains("w.WriteI32(Inner.X);"), "{}", code);
     }
 
     /// The no-arg convenience `SerializeCdr()` must default to XCDR1 (spec effective

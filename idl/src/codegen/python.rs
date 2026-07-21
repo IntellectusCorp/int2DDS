@@ -60,7 +60,6 @@ impl<'a> PyGen<'a> {
         self.line("from typing import ClassVar");
         self.line("");
         self.line(&format!("from {}.cdr import CdrReader, CdrWriter, Extensibility", module_name));
-        self.line(&format!("from {}.cdr.writer import CdrKeyWriter", module_name));
         self.line("");
         self.emit_cross_file_imports();
         self.line("");
@@ -249,13 +248,6 @@ impl<'a> PyGen<'a> {
         self.indent -= 1;
         self.line("");
 
-        // _serialize_key
-        self.line("def _serialize_key(self) -> bytes:");
-        self.indent += 1;
-        self.line("\"\"\"Serialize key fields only (bitsets have no key).\"\"\"");
-        self.line("return b\"\"");
-        self.indent -= 1;
-
         self.indent -= 1;
     }
 
@@ -436,13 +428,6 @@ impl<'a> PyGen<'a> {
         self.indent -= 1;
         self.line("");
 
-        // _serialize_key (no key for unions)
-        self.line("def _serialize_key(self) -> bytes:");
-        self.indent += 1;
-        self.line("\"\"\"Serialize key fields only (unions have no key).\"\"\"");
-        self.line("return b\"\"");
-        self.indent -= 1;
-
         self.indent -= 1;
     }
 
@@ -590,9 +575,6 @@ impl<'a> PyGen<'a> {
         // _deserialize_cdr_inline class method (for nested struct deserialization)
         self.emit_deserialize_cdr_inline(s);
         self.line("");
-
-        // _serialize_key method
-        self.emit_serialize_key(s);
 
         self.indent -= 1;
     }
@@ -1463,103 +1445,6 @@ impl<'a> PyGen<'a> {
         }
     }
 
-    fn emit_serialize_key(&mut self, s: &ResolvedStruct) {
-        self.line("def _serialize_key(self) -> bytes:");
-        self.indent += 1;
-        self.line("\"\"\"Serialize key fields only (big-endian, no encapsulation).\"\"\"");
-
-        let all_members = self.collect_all_members(s);
-        let key_fields: Vec<ResolvedMember> =
-            all_members.into_iter().filter(|m| m.is_key).collect();
-
-        if key_fields.is_empty() {
-            self.line("return b\"\"");
-        } else {
-            self.line("w = CdrKeyWriter()");
-            for m in key_fields {
-                let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
-                self.emit_write_key_field(&m.resolved_type, &format!("self.{}", field_name), 0);
-            }
-            self.line("return w.to_bytes()");
-        }
-
-        self.indent -= 1;
-    }
-
-    fn emit_write_key_field(&mut self, ty: &ResolvedType, accessor: &str, depth: usize) {
-        match ty {
-            ResolvedType::Bool => self.line(&format!("w.write_bool({})", accessor)),
-            ResolvedType::U8 | ResolvedType::UInt8 => {
-                self.line(&format!("w.write_u8({})", accessor))
-            }
-            ResolvedType::I8 => self.line(&format!("w.write_i8({})", accessor)),
-            ResolvedType::I16 => self.line(&format!("w.write_i16({})", accessor)),
-            ResolvedType::U16 => self.line(&format!("w.write_u16({})", accessor)),
-            ResolvedType::I32 => self.line(&format!("w.write_i32({})", accessor)),
-            ResolvedType::U32 => self.line(&format!("w.write_u32({})", accessor)),
-            ResolvedType::I64 => self.line(&format!("w.write_i64({})", accessor)),
-            ResolvedType::U64 => self.line(&format!("w.write_u64({})", accessor)),
-            ResolvedType::F32 => self.line(&format!("w.write_f32({})", accessor)),
-            ResolvedType::F64 => self.line(&format!("w.write_f64({})", accessor)),
-            ResolvedType::String { .. } => self.line(&format!("w.write_string({})", accessor)),
-            ResolvedType::Enum(_) => self.line(&format!("w.write_enum(int({}))", accessor)),
-            ResolvedType::Char => self.line(&format!("w.write_char({})", accessor)),
-            ResolvedType::WChar => self.line(&format!("w.write_wchar({})", accessor)),
-            ResolvedType::WString { .. } => self.line(&format!("w.write_wstring({})", accessor)),
-            ResolvedType::Bitmask(bitmask_name) => {
-                let (write_fn, _) = self.bitmask_methods(bitmask_name);
-                self.line(&format!("w.{}(int({}))", write_fn, accessor));
-            }
-            // A Final/Appendable nested struct key member contributes all of
-            // its fields inline (matching the Rust dynamic `serialize_struct_cdr`
-            // used by the key path), recursively and in declaration order. A
-            // Mutable nested struct instead serializes as PL_CDR with member
-            // headers, which the flat key writer cannot express; mark it
-            // unsupported rather than emit silently-wrong inline bytes.
-            ResolvedType::Struct(name) => match self.find_struct(name).cloned() {
-                Some(nested) if nested.extensibility == ExtensibilityKind::Mutable => {
-                    self.line(&format!(
-                        "# Unsupported: mutable nested struct key field {}",
-                        accessor
-                    ));
-                }
-                Some(nested) => {
-                    for m in self.collect_all_members(&nested) {
-                        let fname = naming::escape_keyword(&m.name, naming::TargetLang::Python);
-                        let inner = format!("{}.{}", accessor, fname);
-                        self.emit_write_key_field(&m.resolved_type, &inner, depth);
-                    }
-                }
-                None => {
-                    self.line(&format!(
-                        "# Unsupported: unresolved nested struct key field {}",
-                        accessor
-                    ));
-                }
-            },
-            // Sequence: u32 length prefix, then each element inline.
-            ResolvedType::Sequence { element, .. } => {
-                let var = format!("_ke{}", depth);
-                self.line(&format!("w.write_u32(len({}))", accessor));
-                self.line(&format!("for {} in {}:", var, accessor));
-                self.indent += 1;
-                self.emit_write_key_field(element, &var, depth + 1);
-                self.indent -= 1;
-            }
-            // Array: fixed length, elements inline with no length prefix.
-            ResolvedType::Array { element, .. } => {
-                let var = format!("_ke{}", depth);
-                self.line(&format!("for {} in {}:", var, accessor));
-                self.indent += 1;
-                self.emit_write_key_field(element, &var, depth + 1);
-                self.indent -= 1;
-            }
-            ResolvedType::Map { .. } => {
-                self.line(&format!("# Unsupported: map key field {}", accessor));
-            }
-        }
-    }
-
     // ---- Helpers ----
 
     fn line(&mut self, s: &str) {
@@ -1741,61 +1626,6 @@ mod tests {
         // The nested struct still emits its own flat metadata (recursion source of truth).
         assert!(code.contains(r#"("field", "a", 5, 0, 0),"#), "{}", code);
         assert!(code.contains(r#"("field", "b", 5, 0, 0),"#), "{}", code);
-    }
-
-    #[test]
-    fn test_serialize_key_recurses_into_nested_and_collections() {
-        let defs = parse_idl(
-            r#"
-            @final
-            struct Point { long x; long y; };
-            @final
-            struct NestedKeyed { @key Point p; long payload; };
-            @final
-            struct ArrKeyed { @key Point grid[2]; long payload; };
-            @final
-            struct SeqKeyed { @key sequence<Point> items; long payload; };
-            "#,
-        )
-        .unwrap();
-        let model = resolve(defs).unwrap();
-        let code = generate(&model, "Keys.idl", &PythonOptions::new());
-
-        // Nested struct key serializes each field inline.
-        assert!(code.contains("w.write_i32(self.p.x)"), "{}", code);
-        assert!(code.contains("w.write_i32(self.p.y)"), "{}", code);
-        // Array key: no length prefix, iterate elements inline.
-        assert!(code.contains("for _ke0 in self.grid:"), "{}", code);
-        // Sequence key: u32 length prefix then elements.
-        assert!(code.contains("w.write_u32(len(self.items))"), "{}", code);
-        assert!(code.contains("for _ke0 in self.items:"), "{}", code);
-        // No stale TODO catch-all remains.
-        assert!(!code.contains("# TODO: Complex key field"), "{}", code);
-    }
-
-    #[test]
-    fn test_serialize_key_guards_mutable_nested_struct() {
-        // A Mutable nested struct serializes as PL_CDR (member headers), which the
-        // flat key writer cannot express: the generator must mark it unsupported
-        // rather than emit silently-wrong inline writes.
-        let defs = parse_idl(
-            r#"
-            @mutable
-            struct MutInner { long x; long y; };
-            @final
-            struct MutKeyed { @key MutInner inner; long payload; };
-            "#,
-        )
-        .unwrap();
-        let model = resolve(defs).unwrap();
-        let code = generate(&model, "MutKeyed.idl", &PythonOptions::new());
-
-        assert!(
-            code.contains("# Unsupported: mutable nested struct key field self.inner"),
-            "{}",
-            code
-        );
-        assert!(!code.contains("w.write_i32(self.inner.x)"), "{}", code);
     }
 
     #[test]

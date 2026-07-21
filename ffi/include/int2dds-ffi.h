@@ -2418,7 +2418,9 @@ Int2DdsRet int2dds_publisher_wait_for_acknowledgments(const struct Int2DdsPublis
                                                       int64_t timeout_ms);
 
 /**
- * Register an instance with serialized key bytes
+ * Register an instance from the full serialized sample. The canonical KeyHash is
+ * derived from the sample by the core (matching the wire); `key`/`key_len` carry
+ * the serialized sample bytes.
  *
  * # Safety
  * - `writer` must be a valid datawriter

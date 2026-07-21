@@ -876,14 +876,13 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         }
     }
 
-    /// Look up an instance handle from raw serialized key bytes.
+    /// Look up an instance handle from the stored serialized key bytes.
     ///
     /// Serialized counterpart of [`lookup_instance`](Self::lookup_instance) for the FFI
-    /// raw-serialized path. The key derivation on the raw path depends on type metadata
-    /// (single-string vs multi-field keys) that is not recoverable from key bytes alone,
-    /// so this matches on the serialized key bytes actually stored per instance rather
-    /// than recomputing a handle. Returns `InstanceHandle::NIL` if the instance is not
-    /// known to this reader. Round-trips with `get_key_value_serialized`.
+    /// raw-serialized path. The reader stores each instance's canonical key CDR (via the
+    /// type support's `serialize_key`, the same projection the wire uses), so this matches
+    /// on the stored key bytes — as returned by [`get_key_value_serialized`](Self::get_key_value_serialized).
+    /// Returns `InstanceHandle::NIL` if the instance is not known to this reader.
     pub fn lookup_instance_serialized(&self, key: &[u8]) -> DdsResult<InstanceHandle> {
         self.is_deleted()?;
 

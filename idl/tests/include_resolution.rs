@@ -96,7 +96,7 @@ module sensor_msgs { module msg {
 fn test_cross_file_nested_key_codegen() {
     // A `@key` field whose type is a struct from an `#include`d file must produce
     // working Python and C#: the imported type is referenced by its leaf name
-    // (import in Python; shared namespace in C#) and the key inlines its fields.
+    // (import in Python; shared namespace in C#) and resolves for (de)serialization.
     let root = unique_dir("xkey");
     fs::create_dir_all(&root).unwrap();
     let header = root.join("header.idl");
@@ -140,27 +140,21 @@ module app { module msg {
         "msg.idl",
         &codegen::python::PythonOptions { int2dds_module: "int2dds".to_string() },
     );
-    // Import emitted, leaf-named references, and key inlines Header's fields.
+    // Import emitted and leaf-named references resolve the imported nested type.
     assert!(py.contains("from header import Header"), "missing import:\n{py}");
     assert!(py.contains("field(default_factory=lambda: Header())"), "{py}");
     assert!(py.contains("Header._deserialize_cdr_inline(r)"), "{py}");
-    assert!(py.contains("w.write_u32(self.header.stamp)"), "{py}");
-    assert!(py.contains("w.write_u32(self.header.seq)"), "{py}");
     assert!(!py.contains("dep::msg::Header"), "leaked qualified name:\n{py}");
-    assert!(!py.contains("Unsupported"), "unsupported key marker:\n{py}");
 
     let cs = codegen::csharp::generate(
         &model,
         "msg.idl",
         &codegen::csharp::CSharpOptions { namespace: "GeneratedTypes".to_string() },
     );
-    // Shared namespace resolves the leaf name; key inlines Header's fields.
+    // Shared namespace resolves the leaf name for the imported nested type.
     assert!(cs.contains("public Header Header"), "{cs}");
     assert!(cs.contains("Header.DeserializeCdrInline(r)"), "{cs}");
-    assert!(cs.contains("w.WriteU32(Header.Stamp)"), "{cs}");
-    assert!(cs.contains("w.WriteU32(Header.Seq)"), "{cs}");
     assert!(!cs.contains("Dep::msg::Header"), "leaked qualified name:\n{cs}");
-    assert!(!cs.contains("Unsupported"), "unsupported key marker:\n{cs}");
 
     fs::remove_dir_all(&root).ok();
 }
