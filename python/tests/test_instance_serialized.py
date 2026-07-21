@@ -17,7 +17,6 @@ import pytest
 sys.path.insert(0, os.path.dirname(__file__))
 
 from int2dds.cdr import CdrReader, CdrWriter, Extensibility
-from int2dds.cdr.writer import CdrKeyWriter
 from int2dds.core.participant import DomainParticipant
 from int2dds.core.qos import DataWriterQos, DataReaderQos, Reliability, History
 
@@ -41,11 +40,6 @@ class Keyed:
     def _deserialize_cdr(cls, data: bytes) -> "Keyed":
         r = CdrReader(data)
         return cls(sensor_id=r.read_u32(), value=r.read_f64())
-
-    def _serialize_key(self) -> bytes:
-        w = CdrKeyWriter()
-        w.write_u32(self.sensor_id)
-        return w.to_bytes()
 
 
 DOMAIN = 96

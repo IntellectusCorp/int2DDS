@@ -12,7 +12,6 @@ from typing import ClassVar
 import pytest
 
 from int2dds.cdr import CdrReader, CdrWriter, Extensibility
-from int2dds.cdr.writer import CdrKeyWriter
 
 try:
     from int2dds import DomainParticipant, WaitSet
@@ -46,7 +45,15 @@ class AdShape:
 
     def _serialize_cdr(self, xcdr2: bool = False) -> bytes:
         w = CdrWriter(extensibility=self._extensibility, xcdr2=xcdr2)
-        with w.dheader():
+        if xcdr2:
+            with w.dheader():
+                w.write_string(self.color)
+                w.write_i32(self.x)
+                w.write_i32(self.shapesize)
+                w.write_seq_header(len(self.payload))
+                for b in self.payload:
+                    w.write_u8(b)
+        else:
             w.write_string(self.color)
             w.write_i32(self.x)
             w.write_i32(self.shapesize)
@@ -58,19 +65,16 @@ class AdShape:
     @classmethod
     def _deserialize_cdr(cls, data: bytes) -> "AdShape":
         r = CdrReader(data)
-        _dsize, _dstart = r.read_dheader()
+        if r._xcdr2:
+            _dsize, _dstart = r.read_dheader()
         color = r.read_string()
         x = r.read_i32()
         shapesize = r.read_i32()
         n = r.read_seq_header()
         payload = [r.read_u8() for _ in range(n)]
-        r.read_dheader_end(_dsize, _dstart)
+        if r._xcdr2:
+            r.read_dheader_end(_dsize, _dstart)
         return cls(color=color, x=x, shapesize=shapesize, payload=payload)
-
-    def _serialize_key(self) -> bytes:
-        w = CdrKeyWriter()
-        w.write_string(self.color)
-        return w.to_bytes()
 
 
 def test_topic_created_via_type_info(domain_id: int):

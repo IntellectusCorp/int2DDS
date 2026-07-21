@@ -14,7 +14,6 @@ import sys
 import pytest
 
 from int2dds.cdr import CdrReader, CdrWriter, Extensibility
-from int2dds.cdr.writer import CdrKeyWriter
 
 # Skip all tests if FFI library is not available
 try:
@@ -318,11 +317,6 @@ class KeyedType:
     def _deserialize_cdr(cls, data: bytes) -> "KeyedType":
         r = CdrReader(data)
         return cls(sensor_id=r.read_u32(), value=r.read_f64())
-
-    def _serialize_key(self) -> bytes:
-        w = CdrKeyWriter()
-        w.write_u32(self.sensor_id)
-        return w.to_bytes()
 
 
 @dataclass
