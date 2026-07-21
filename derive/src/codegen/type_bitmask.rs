@@ -95,6 +95,11 @@ pub fn derive_bitmask_impl(
         })
         .collect();
 
+    // Mask of every declared flag bit, used to reject unknown bits in `from_bits`.
+    let valid_mask: u64 = positions.iter().map(|(_, p)| 1u64 << *p).fold(0, |a, b| a | b);
+    let valid_mask_lit: proc_macro2::TokenStream =
+        format!("{}_{}", valid_mask, quote!(#wire_type)).parse().unwrap();
+
     // Generate additional derives
     let additional_derives =
         crate::codegen::derives::generate_additional_derives(input, name, type_config);
@@ -124,19 +129,42 @@ pub fn derive_bitmask_impl(
                 (self.0 & flag.0) == flag.0
             }
 
-            /// Set a flag
-            pub fn set(&mut self, flag: #value_name) {
+            /// Insert a flag (set its bits)
+            pub fn insert(&mut self, flag: #value_name) {
                 self.0 |= flag.0;
             }
 
-            /// Clear a flag
-            pub fn clear(&mut self, flag: #value_name) {
+            /// Remove a flag (clear its bits)
+            pub fn remove(&mut self, flag: #value_name) {
                 self.0 &= !flag.0;
             }
 
             /// Get the raw value
             pub fn bits(&self) -> #wire_type {
                 self.0
+            }
+
+            /// Construct from a raw value, returning `None` when a bit is set that
+            /// corresponds to no declared flag.
+            pub fn from_bits(bits: #wire_type) -> Option<Self> {
+                if bits & !#valid_mask_lit != 0 {
+                    None
+                } else {
+                    Some(Self(bits))
+                }
+            }
+        }
+
+        impl std::ops::BitXor for #value_name {
+            type Output = Self;
+            fn bitxor(self, rhs: Self) -> Self {
+                Self(self.0 ^ rhs.0)
+            }
+        }
+
+        impl std::ops::BitXorAssign for #value_name {
+            fn bitxor_assign(&mut self, rhs: Self) {
+                self.0 ^= rhs.0;
             }
         }
 
