@@ -75,7 +75,7 @@ use crate::{
             types::{ChangeKind, SerializedData},
         },
         entities::{
-            history::cache_change::CacheChange,
+            history::cache_change::{CacheChange, PresentationInfo},
             writer::{StatefulWriter, Writer as RtpsWriter},
         },
         logic::wlp_logic::WlpLogic,
@@ -130,6 +130,7 @@ pub(crate) trait DataWriterInternal: DataWriterBase {
     fn delete(&self);
     fn is_deleted(&self) -> DdsResult<()>;
     fn is_builtin(&self) -> bool;
+    fn end_coherent_set(&self) -> DdsResult<()>;
 }
 
 pub struct DataWriter<Foo> {
@@ -168,6 +169,8 @@ pub struct DataWriter<Foo> {
     _phantom: PhantomData<fn() -> Foo>,
     datawriter_cache: Arc<Mutex<DataWriterHistoryCache<Foo>>>,
     wlp_logic: Option<WlpLogic>,
+    // First sequence number of this writer's open coherent set; None outside a set.
+    current_coherent_start: Arc<Mutex<Option<SequenceNumber>>>,
 }
 
 impl<Foo> Debug for DataWriter<Foo> {
@@ -237,6 +240,7 @@ impl<Foo: 'static + Clone> Clone for DataWriter<Foo> {
             _phantom: self._phantom,
             datawriter_cache: self.datawriter_cache.clone(),
             wlp_logic: self.wlp_logic.clone(),
+            current_coherent_start: self.current_coherent_start.clone(),
         }
     }
 }
@@ -293,11 +297,11 @@ impl<Foo: 'static + Clone> EnableChild for DataWriter<Foo> {
         let publisher = self.get_publisher()?;
         let participant = publisher.get_participant()?;
         let topic = self.get_topic()?;
-        let mut publication_builtin_topic_data = PublicationBuiltinTopicData::new(
-            &self.get_qos()?,
-            &publisher.get_qos()?,
-            &topic.get_qos()?,
-        );
+        let writer_qos = self.get_qos_arc()?;
+        let publisher_qos = publisher.get_qos_arc()?;
+        let topic_qos = topic.get_qos_arc()?;
+        let mut publication_builtin_topic_data =
+            PublicationBuiltinTopicData::new(&writer_qos, &publisher_qos, &topic_qos);
         publication_builtin_topic_data.set_topic_name(topic.get_name().to_string());
         publication_builtin_topic_data.set_type_name(topic.get_type_name().to_string());
         publication_builtin_topic_data.set_endpoint_guid(self.guid);
@@ -309,9 +313,11 @@ impl<Foo: 'static + Clone> EnableChild for DataWriter<Foo> {
         if let Some(type_obj) = self.type_support.get_type_object() {
             publication_builtin_topic_data.set_type_object(Some(type_obj));
         }
+        let type_closure = self.type_support.get_type_object_closure();
+        publication_builtin_topic_data
+            .set_type_information(crate::xtypes::TypeInformation::from_closure(&type_closure));
         if let Ok(rtps_participant) = participant.get_rtps_participant() {
-            rtps_participant
-                .register_local_type_objects(&self.type_support.get_type_object_closure());
+            rtps_participant.register_local_type_objects(&type_closure);
         }
 
         let status_callback = self.create_status_callback()?;
@@ -340,7 +346,7 @@ impl<Foo: 'static + Clone> EnableChild for DataWriter<Foo> {
 
         // A volatile, keep-all writer has no reason to keep samples acked by all readers,
         // so register a callback that removes them unless the user opted into strict mode
-        let qos = self.get_qos()?;
+        let qos = self.get_qos_arc()?;
         if qos.durability.kind == DurabilityQosPolicyKind::Volatile
             && qos.history.kind == HistoryQosPolicyKind::KeepAll
             && !qos.history.strict
@@ -363,8 +369,10 @@ impl<Foo: 'static + Clone> EnableChild for DataWriter<Foo> {
     fn update_rtps_entity(&self, qos: &Self::Qos) -> DdsResult<()> {
         let publisher = self.get_publisher()?;
         let topic = self.get_topic()?;
+        let publisher_qos = publisher.get_qos_arc()?;
+        let topic_qos = topic.get_qos_arc()?;
         let mut publication_builtin_topic_data =
-            PublicationBuiltinTopicData::new(qos, &publisher.get_qos()?, &topic.get_qos()?);
+            PublicationBuiltinTopicData::new(qos, &publisher_qos, &topic_qos);
         publication_builtin_topic_data.set_topic_name(topic.get_name().to_string());
         publication_builtin_topic_data.set_type_name(topic.get_type_name().to_string());
         publication_builtin_topic_data.set_endpoint_guid(self.guid);
@@ -376,6 +384,11 @@ impl<Foo: 'static + Clone> EnableChild for DataWriter<Foo> {
         if let Some(type_obj) = self.type_support.get_type_object() {
             publication_builtin_topic_data.set_type_object(Some(type_obj));
         }
+        publication_builtin_topic_data.set_type_information(
+            crate::xtypes::TypeInformation::from_closure(
+                &self.type_support.get_type_object_closure(),
+            ),
+        );
 
         let rtps_writer = self.get_rtps_writer()?;
         rtps_writer
@@ -500,6 +513,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 type_support.is_compute_key_provided(),
             ))),
             wlp_logic,
+            current_coherent_start: Arc::new(Mutex::new(None)),
         };
         let writer_arc = Arc::new(writer.clone());
         let weak_ref = Arc::downgrade(&writer_arc);
@@ -518,7 +532,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 writer.self_ref.lock().map_err(|e| DdsError::Error(e.to_string()))?;
             *self_ref = Some(writer_arc);
         }
-        let period = writer.get_qos()?.deadline.period;
+        let period = writer.get_qos_arc()?.deadline.period;
         if !period.is_infinite()
             && (guid.entity_kind() == EntityKind::USER_DEFINED_WRITER_WITH_KEY
                 || guid.entity_kind() == EntityKind::USER_DEFINED_WRITER_NO_KEY)
@@ -980,6 +994,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             seq_num,
             Some(timestamp.into()),
         );
+        self.configure_coherent_set(&mut loan.change, seq_num)?;
         unsafe {
             loan.change.data_mut().set_len(actual_size);
         }
@@ -1311,6 +1326,34 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         }
     }
 
+    // True while the owning publisher has an open coherent set.
+    fn publisher_in_coherent_changes(&self) -> bool {
+        self.publisher
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .is_some_and(|publisher| publisher.in_coherent_changes())
+    }
+
+    // Stamp PID_COHERENT_SET on the change while the publisher's coherent set is open,
+    // recording this writer's first member seq as the set id. No-op outside a set.
+    fn configure_coherent_set(
+        &self,
+        change: &mut CacheChange,
+        seq_num: SequenceNumber,
+    ) -> DdsResult<()> {
+        if !self.publisher_in_coherent_changes() {
+            return Ok(());
+        }
+        let mut start =
+            self.current_coherent_start.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        let set_start = *start.get_or_insert(seq_num);
+        change.set_presentation_info(PresentationInfo {
+            coherent_set: Some(set_start),
+            ..Default::default()
+        });
+        Ok(())
+    }
+
     /// Pool-based add_change skeleton: acquire from pool → reset → fill buffer → add to history.
     /// Avoids per-write heap allocation by reusing CacheChange and its internal buffer.
     /// `fill` writes the payload into the reused buffer (already cleared by reset).
@@ -1335,6 +1378,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
 
         // 3. Reset metadata + fill the reused buffer
         change.reset(kind, rtps_writer.guid(), handle, seq_num, source_timestamp);
+        self.configure_coherent_set(&mut change, seq_num)?;
         fill(change.data_mut())?;
         change.apply_fragmentation(rtps_writer.data_max_size_serialized() as usize);
 
@@ -1715,7 +1759,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
     }
 
     fn update_liveliness(&self) -> DdsResult<()> {
-        match self.get_qos()?.liveliness.kind {
+        match self.get_qos_arc()?.liveliness.kind {
             LivelinessQosPolicyKind::Automatic => Ok(()),
             LivelinessQosPolicyKind::ManualByParticipant => {
                 let wlp = self
@@ -1896,7 +1940,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         }
 
         let change_kind =
-            if self.get_qos()?.writer_data_lifecycle.autodispose_unregistered_instances {
+            if self.get_qos_arc()?.writer_data_lifecycle.autodispose_unregistered_instances {
                 ChangeKind::NotAliveDisposedUnregistered
             } else {
                 ChangeKind::NotAliveUnregistered
@@ -2152,7 +2196,7 @@ impl<Foo: 'static + Clone> DataWriterBase for DataWriter<Foo> {
         */
         self.is_enabled()?;
 
-        match self.get_qos()?.liveliness.kind {
+        match self.get_qos_arc()?.liveliness.kind {
             LivelinessQosPolicyKind::Automatic => Ok(()),
             LivelinessQosPolicyKind::ManualByParticipant => {
                 self.get_publisher()?.get_participant()?.assert_liveliness()
@@ -2357,7 +2401,7 @@ impl<Foo: 'static + Clone> DataWriterBase for DataWriter<Foo> {
         A TIMEOUT return value indicates that max_wait has elapsed but some data has not yet been acknowledged.
         */
         self.is_enabled()?;
-        let reliability = self.get_qos()?.reliability;
+        let reliability = self.get_qos_arc()?.reliability;
         if reliability.kind == ReliabilityQosPolicyKind::Reliable {
             let rtps_writer = self.get_rtps_writer()?;
             if rtps_writer.wait_for_all_acked(max_wait) {
@@ -2410,6 +2454,37 @@ impl<Foo: 'static + Clone> DataWriterInternal for DataWriter<Foo> {
 
     fn is_builtin(&self) -> bool {
         self.is_builtin
+    }
+
+    // Close this writer's open coherent set by sending a payload-less end marker that
+    // carries no coherent set id. No-op when no set is open.
+    fn end_coherent_set(&self) -> DdsResult<()> {
+        let started =
+            self.current_coherent_start.lock().map_err(|e| DdsError::Error(e.to_string()))?.take();
+        if started.is_none() {
+            return Ok(());
+        }
+
+        // A payload-less Data carrying no coherent set id marks the end of the coherent set.
+        let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
+        let rtps_writer = self.get_rtps_writer()?;
+        let mut change = {
+            let mut cache =
+                self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            cache.acquire_change()
+        };
+        let seq_num = rtps_writer.allocate_sequence_number();
+        change.reset(
+            ChangeKind::Alive,
+            rtps_writer.guid(),
+            InstanceHandle::NIL,
+            seq_num,
+            Some(timestamp.into()),
+        );
+
+        let mut cache = self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        cache.add_change_with_cleanup(Arc::new(change), false)?;
+        Ok(())
     }
 }
 
@@ -2501,6 +2576,9 @@ mod tests {
             initial_writers_count + 1,
             "Writer should be moved to orphaned_writers"
         );
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -2578,6 +2656,9 @@ mod tests {
             final_writers_count, initial_writers_count,
             "No writers should be added to orphaned_writers when properly deleted"
         );
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -2612,16 +2693,22 @@ mod tests {
             let rtps_writer = writer.get_rtps_writer();
             assert!(rtps_writer.is_ok());
         }
-        let mut dcps_bridge = domain_participant.get_dcps_bridge().unwrap();
-        let dcps_bridge = dcps_bridge.as_mut().unwrap();
-        dcps_bridge
-            .delete_rtps_writer(
-                "TestTopic".to_string(),
-                writer.get_instance_handle().unwrap().to_guid().entity_id(),
-            )
-            .unwrap();
+        {
+            let mut dcps_bridge = domain_participant.get_dcps_bridge().unwrap();
+            let dcps_bridge = dcps_bridge.as_mut().unwrap();
+            dcps_bridge
+                .delete_rtps_writer(
+                    "TestTopic".to_string(),
+                    writer.get_instance_handle().unwrap().to_guid().entity_id(),
+                )
+                .unwrap();
+        }
         let rtps_writer = writer.get_rtps_writer();
         assert!(rtps_writer.is_err());
+
+        drop(writer);
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     // Listener for DeadlineQos testing
@@ -2712,6 +2799,9 @@ mod tests {
             "At least one deadline miss should be detected, got {}",
             miss_count
         );
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -2761,6 +2851,9 @@ mod tests {
         writer.unregister_instance(&data, handle2).unwrap();
 
         println!("All operations completed without error with infinite deadline");
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -2833,6 +2926,9 @@ mod tests {
             count_after_dispose - count_before_dispose <= 1,
             "Deadline miss should not occur after dispose"
         );
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -2894,6 +2990,9 @@ mod tests {
             "At least 3 deadline misses expected (one per instance), got {}",
             miss_count
         );
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -2957,6 +3056,9 @@ mod tests {
             deadline_miss_count.load(Ordering::SeqCst) >= 1,
             "Deadline miss should occur after stopping writes"
         );
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -3024,6 +3126,9 @@ mod tests {
             count_before_delete, count_after_delete,
             "Deadline miss should not occur after delete (shutdown)"
         );
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     // ========================================================================
@@ -3120,7 +3225,7 @@ mod tests {
 
     #[test]
     fn test_mask_offered_incompatible_qos() {
-        let (_participant, publisher, topic) = setup_mask_test();
+        let (participant, publisher, topic) = setup_mask_test();
 
         let listener = Arc::new(MaskTestListener::new());
         let writer = publisher
@@ -3141,11 +3246,14 @@ mod tests {
                 .load(Ordering::SeqCst),
             "on_offered_incompatible_qos should be called when mask contains OFFERED_INCOMPATIBLE_QOS"
         );
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_mask_publication_matched() {
-        let (_participant, publisher, topic) = setup_mask_test();
+        let (participant, publisher, topic) = setup_mask_test();
 
         let listener = Arc::new(MaskTestListener::new());
         let writer = publisher
@@ -3170,11 +3278,14 @@ mod tests {
             listener.publication_matched_called.load(Ordering::SeqCst),
             "on_publication_matched should be called when mask contains PUBLICATION_MATCHED"
         );
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_mask_liveliness_lost() {
-        let (_participant, publisher, topic) = setup_mask_test();
+        let (participant, publisher, topic) = setup_mask_test();
 
         let listener = Arc::new(MaskTestListener::new());
         let writer = publisher
@@ -3192,11 +3303,14 @@ mod tests {
             listener.liveliness_lost_called.load(Ordering::SeqCst),
             "on_liveliness_lost should be called when mask contains LIVELINESS_LOST"
         );
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_mask_offered_deadline_missed() {
-        let (_participant, publisher, topic) = setup_mask_test();
+        let (participant, publisher, topic) = setup_mask_test();
 
         let listener = Arc::new(MaskTestListener::new());
         let writer = publisher
@@ -3217,6 +3331,9 @@ mod tests {
                 .load(Ordering::SeqCst),
             "on_offered_deadline_missed should be called when mask contains OFFERED_DEADLINE_MISSED"
         );
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 
     // Builds a writer with KeepLast(depth) and returns it plus a way to read the pool size.

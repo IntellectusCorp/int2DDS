@@ -48,10 +48,7 @@ use crate::{
             user_logic::UserLogic,
         },
         messages::sedp_message::SEDPMessage,
-        task::{
-            peer_monitor::PeerMonitor, sending_handler::SendingHandler,
-            thread_monitor::ThreadMonitor,
-        },
+        task::{sending_handler::SendingHandler, thread_monitor::ThreadMonitor},
         transport::{
             plugin::{TransportPlugin, TransportPluginFactory},
             socket::Socket,
@@ -87,13 +84,7 @@ impl DcpsBridge {
             .and_then(|v| v.parse().ok())
             .unwrap_or_else(crate::rtps::transport::get_transport_type);
 
-        // The pure-TCP "initial peers required" check now lives in
-        // `TcpTransportPlugin::new`, gated on the resolved `transport_type`
-        // (Hybrid is exempt — it bootstraps over UDP multicast).
-
-        // Build optional TLS config from the same PropertyQosPolicy.
-        // A partial/invalid TLS config is a hard error so misconfiguration
-        // surfaces immediately instead of silently falling back to plain TCP.
+        // Build optional TLS config from the PropertyQosPolicy.
         let tls_config = match crate::rtps::transport::tcp::tls::TlsConfig::from_property(property)
         {
             Ok(cfg) => cfg.map(std::sync::Arc::new),
@@ -116,7 +107,6 @@ impl DcpsBridge {
             temp.guid().prefix()
         };
 
-        // Create transport plugin via factory — single branching point
         let bind_ip = socket.get_sender_bind_addr();
         let multicast_if_ip = socket.get_sender_multicast_if_addr();
         let working_ips: Vec<String> =
@@ -154,9 +144,7 @@ impl DcpsBridge {
         let participant_id = transport.participant_id();
 
         // Ask the transport itself which locators this participant should
-        // advertise over SPDP. The plugin encapsulates the locator kind
-        // (UDP/TCP/SHM), per-NIC expansion, port formulas, and any WAN
-        // public-address override — so Participant never needs to know.
+        // advertise over SPDP.
         let metatraffic_unicast_locators = transport.advertised_metatraffic_unicast_locators();
         let default_unicast_locators = transport.advertised_default_unicast_locators();
 
@@ -174,7 +162,7 @@ impl DcpsBridge {
 
         let (spdp_logic, sedp_logic, user_logic) = participant.get_logics();
 
-        let _ = SendingHandler::get_instance(participant.clone(), Some(transport));
+        let _ = SendingHandler::get_instance(participant.clone(), Some(transport.port()));
 
         if let Ok(mut participants) = PARTICIPANTS.write() {
             participants.push(Arc::downgrade(&participant));
@@ -218,12 +206,6 @@ impl DcpsBridge {
                 .start_user_traffic(self.domain_id, transport.take_user_data_unicast_source())?;
         } else {
             log::error!("user_logic is not set");
-        }
-
-        // Start dead peer monitoring (TCP keepalive-based)
-        if let Some(dead_peer_rx) = transport.take_dead_peer_receiver() {
-            let mut peer_monitor = PeerMonitor::new(&self.participant, dead_peer_rx);
-            peer_monitor.start();
         }
 
         // Initialize thread monitoring
@@ -313,16 +295,9 @@ impl DcpsBridge {
             writer = Some(Arc::new(_writer));
         }
 
-        self.participant.register_local_type(publication_builtin_topic_data.type_object());
-
-        let mut wire_topic_data = publication_builtin_topic_data.clone();
-        if crate::common::env::get_disable_inline_type_info() {
-            wire_topic_data.set_type_identifier(None);
-            wire_topic_data.set_type_object(None);
-        } else if crate::common::env::get_disable_inline_type_object() {
-            wire_topic_data.set_type_object(None);
-        }
-        let writer_data = DiscoveredWriterData { publication_builtin_topic_data: wire_topic_data };
+        let writer_data = DiscoveredWriterData {
+            publication_builtin_topic_data: publication_builtin_topic_data.clone(),
+        };
         let payload = SEDPMessage::create_publication_serialized_data(&writer_data);
 
         let change = self.participant.sedp_builtin_publications_writer().new_change(
@@ -469,18 +444,9 @@ impl DcpsBridge {
             reader = Some(Arc::new(_reader));
         }
 
-        self.participant.register_local_type(subscription_builtin_topic_data.type_object());
-
         // Create DiscoveredReaderData and serialize using SEDPMessage.
-        let mut wire_topic_data = subscription_builtin_topic_data.clone();
-        if crate::common::env::get_disable_inline_type_info() {
-            wire_topic_data.set_type_identifier(None);
-            wire_topic_data.set_type_object(None);
-        } else if crate::common::env::get_disable_inline_type_object() {
-            wire_topic_data.set_type_object(None);
-        }
         let reader_data = DiscoveredReaderData {
-            subscription_builtin_topic_data: wire_topic_data,
+            subscription_builtin_topic_data: subscription_builtin_topic_data.clone(),
             content_filter: content_filter_property,
         };
 

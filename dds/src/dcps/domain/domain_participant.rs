@@ -767,7 +767,7 @@ impl DomainParticipant {
             .as_ref()
             .ok_or(DdsError::Error("DomainParticipant is not properly initialized".to_string()))?;
         let publisher = Publisher::new(false, qos, listener, mask, handle, self_ref);
-        let qos = self.get_qos()?;
+        let qos = self.get_qos_arc()?;
         if let Ok(()) = self.is_enabled() {
             if qos.entity_factory.autoenable_created_entities {
                 publisher.enable()?;
@@ -983,7 +983,7 @@ impl DomainParticipant {
             .as_ref()
             .ok_or(DdsError::Error("DomainParticipant not properly initialized".to_string()))?;
         let subscriber = Subscriber::new(false, qos, listener, mask, handle, self_ref);
-        let qos = self.get_qos()?;
+        let qos = self.get_qos_arc()?;
         if let Ok(()) = self.is_enabled() {
             if qos.entity_factory.autoenable_created_entities {
                 subscriber.enable()?;
@@ -1613,7 +1613,7 @@ impl DomainParticipant {
             .as_ref()
             .ok_or(DdsError::Error("DomainParticipant not properly initialized".to_string()))?;
         let topic = Topic::new(false, topic_name, type_name, qos, listener, mask, handle, self_ref);
-        let qos = self.get_qos()?;
+        let qos = self.get_qos_arc()?;
         if let Ok(()) = self.is_enabled() {
             if qos.entity_factory.autoenable_created_entities {
                 topic.enable()?;
@@ -1669,6 +1669,49 @@ impl DomainParticipant {
     {
         let qos = self.get_topic_qos_from_profile(qos_path)?;
         self.create_topic::<Foo>(topic_name, type_name, qos, listener, mask)
+    }
+
+    /// Creates a `Topic` from a `<domain_library>` declaration loaded via
+    /// [`DomainParticipantFactory::load_profiles`]. The topic name, registered type
+    /// name, and topic QoS are taken from the XML at `path` (`DomainLibrary::Domain::Topic`);
+    /// the Rust type `Foo` must match the declared type.
+    pub fn create_topic_from_domain<Foo>(
+        &self,
+        path: &str,
+        listener: Option<Arc<dyn TopicListener>>,
+        mask: StatusMask,
+    ) -> DdsResult<Topic>
+    where
+        Foo: DdsType,
+    {
+        let resolved = DomainParticipantFactory::get_instance().resolve_topic(path)?;
+        self.create_topic::<Foo>(
+            &resolved.topic_name,
+            &resolved.type_name,
+            resolved.topic_qos,
+            listener,
+            mask,
+        )
+    }
+
+    /// Like [`create_topic_from_domain`](Self::create_topic_from_domain) but resolves the
+    /// type from the `<types>` section into a `DynamicData` topic (no Rust type required).
+    pub fn create_topic_from_domain_dynamic(
+        &self,
+        path: &str,
+        listener: Option<Arc<dyn TopicListener>>,
+        mask: StatusMask,
+    ) -> DdsResult<Topic> {
+        let factory = DomainParticipantFactory::get_instance();
+        let resolved = factory.resolve_topic(path)?;
+        let type_support = factory.get_dynamic_type_support(&resolved.type_ref)?;
+        self.create_topic_dynamic(
+            &resolved.topic_name,
+            Arc::new(type_support),
+            resolved.topic_qos,
+            listener,
+            mask,
+        )
     }
 
     /// Creates a builtin topic for internal use.
@@ -2590,7 +2633,7 @@ impl DomainParticipant {
             .ok_or(DdsError::Error("DomainParticipant not properly initialized".to_string()))?;
         let topic =
             Topic::new(false, topic_name, &type_name, qos, listener, mask, handle, self_ref);
-        let qos = self.get_qos()?;
+        let qos = self.get_qos_arc()?;
         if let Ok(()) = self.is_enabled() {
             if qos.entity_factory.autoenable_created_entities {
                 topic.enable()?;
@@ -2777,8 +2820,9 @@ impl DomainParticipant {
 
         // Resolve from the registry (populated by an earlier TypeLookup reply).
         if let Ok(registry) = rtps_participant.type_registry().read() {
-            if let Some(obj) = registry.resolve_type(&type_id) {
-                return Ok(crate::xtypes::TypeObject::Complete(obj.clone()));
+            use crate::xtypes::TypeResolver;
+            if let Some(obj) = registry.resolve_complete(&type_id) {
+                return Ok(obj);
             }
         }
 
@@ -2965,7 +3009,8 @@ impl DomainParticipant {
         for publisher in publishers {
             let writers = publisher.get_data_writers()?;
             for writer in writers {
-                if writer.get_qos()?.liveliness.kind == LivelinessQosPolicyKind::ManualByParticipant
+                if writer.get_qos_arc()?.liveliness.kind
+                    == LivelinessQosPolicyKind::ManualByParticipant
                 {
                     return Ok(true);
                 }
@@ -3109,6 +3154,15 @@ mod domain_participant_tests {
         assert!(Arc::ptr_eq(&participant1.publishers, &participant1_clone.publishers));
         assert!(Arc::ptr_eq(&participant1.subscribers, &participant1_clone.subscribers));
         assert!(Arc::ptr_eq(&participant1.topics, &participant1_clone.topics));
+
+        participant1.delete_contained_entities().unwrap();
+        factory.delete_participant(participant1).unwrap();
+        participant2.delete_contained_entities().unwrap();
+        factory.delete_participant(participant2).unwrap();
+        participant3.delete_contained_entities().unwrap();
+        factory.delete_participant(participant3).unwrap();
+        participant4.delete_contained_entities().unwrap();
+        factory.delete_participant(participant4).unwrap();
     }
 
     #[test]
@@ -3129,6 +3183,9 @@ mod domain_participant_tests {
         // Add Publisher to participant
 
         assert!(participant == participant_clone);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -3191,6 +3248,9 @@ mod domain_participant_tests {
         let res_2 = writer
             .write(&HelloWorld { index: 0, message: "hello".to_string() }, InstanceHandle::NIL);
         assert!(res_2.is_ok());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -3248,6 +3308,9 @@ mod domain_participant_tests {
         let res_2 = writer
             .write(&HelloWorld { index: 0, message: "hello".to_string() }, InstanceHandle::NIL);
         assert!(res_2.is_ok());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     use crate::dcps::topic::type_support::DdsType;
@@ -3289,6 +3352,9 @@ mod domain_participant_tests {
                 panic!("Test failed: Could not find existing topic, error code: {:?}", code);
             }
         }
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -3312,6 +3378,9 @@ mod domain_participant_tests {
                 println!("Test passed: Timeout occurred appropriately with timeout 0");
             }
         }
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -3364,6 +3433,9 @@ mod domain_participant_tests {
 
         // Wait for creation thread to complete
         create_thread.join().expect("Failed to join delayed_topic_creator thread");
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -3401,6 +3473,9 @@ mod domain_participant_tests {
                 );
             }
         }
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -3432,6 +3507,9 @@ mod domain_participant_tests {
         } else {
             panic!("StatusCondition's entity is None");
         }
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -3473,6 +3551,9 @@ mod domain_participant_tests {
         } else {
             panic!("StatusCondition's entity is None");
         }
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -3500,6 +3581,9 @@ mod domain_participant_tests {
             pp_publisher.get_instance_handle().unwrap(),
             "Publisher returned from DomainParticipant differs from the Publisher."
         );
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -3949,6 +4033,9 @@ mod domain_participant_tests {
         // Topic deletion succeeds
         assert!(participant.delete_topic(topic).is_ok());
         assert!(participant.get_topic_strong_count("RefCountTestTopic").is_none());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -4025,6 +4112,9 @@ mod domain_participant_tests {
 
         // Deletion now succeeds
         assert!(participant.delete_topic(topic).is_ok());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -4052,6 +4142,11 @@ mod domain_participant_tests {
 
         // Attempt to delete non-existent topic
         assert!(matches!(participant.delete_topic(topic), Err(_)));
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+        other_participant.delete_contained_entities().unwrap();
+        factory.delete_participant(other_participant).unwrap();
     }
 
     #[test]
@@ -4120,6 +4215,8 @@ mod domain_participant_tests {
         assert!(subscriber.get_data_readers().is_err());
         assert!(participant.get_subscribers().unwrap().is_empty());
         assert!(participant.get_publishers().unwrap().is_empty());
+
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -4134,6 +4231,9 @@ mod domain_participant_tests {
         let instance_handle = participant.get_instance_handle().unwrap();
         println!("instance_handle: {}", instance_handle);
         assert_eq!(instance_handle.is_nil(), false);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -4216,6 +4316,9 @@ mod domain_participant_tests {
             .unwrap();
 
         println!("domain_participant guid: {:?}", domain_participant.guid());
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     impl DomainParticipant {
@@ -4258,6 +4361,9 @@ mod domain_participant_tests {
 
         // Check if type is unregistered
         assert!(!domain_participant.is_type_registered(type_name));
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -4299,6 +4405,9 @@ mod domain_participant_tests {
 
         // Should still be registered
         assert!(domain_participant.is_type_registered(type_name));
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     // ==================== Builtin Subscriber Tests (DDS 2.2.2.2.1.13) ====================

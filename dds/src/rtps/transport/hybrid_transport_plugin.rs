@@ -94,13 +94,18 @@ impl HybridTransportPlugin {
         // Pass the final participant_id so TCP's identity matches UDP's. The TCP
         // listen port comes from the per-participant TcpConfig (bind_port
         // property, else the domain formula).
+        // Hybrid discovers peers over UDP multicast, so the embedded TCP plugin
+        // must dial any discovered peer's TCP locators — force accept-undefined-
+        // peers regardless of the configured value.
+        let mut tcp_config = hybrid_config.tcp;
+        tcp_config.accept_undefined_peers = true;
         let tcp_plugin = TcpTransportPlugin::new(
             domain_id,
             participant_id,
             bind_ip,
             working_ips.clone(),
             guid_prefix,
-            hybrid_config.tcp,
+            tcp_config,
         )?;
 
         // Create merged discovery unicast channel: UDP listener + TCP discovery rx
@@ -182,13 +187,12 @@ impl TransportPlugin for HybridTransportPlugin {
     fn send(&self, data: &[u8], target: &SendTarget) -> io::Result<()> {
         match target {
             SendTarget::SPDPDiscovery { initial_peers } => {
+                // SPDP is UDP only — multicast plus unicast to the
+                // configured initial_peers. SEDP/liveliness/user data ride TCP.
                 let _ = self.udp_sender.send_multicast(self.domain_id, data);
-                // initial_peers fan-out: Hybrid reaches them over both UDP and
-                // TCP so peers reachable on either transport get the SPDP.
                 for peer_addr in *initial_peers {
                     let _ = self.udp_sender.send(peer_addr, data);
                 }
-                let _ = self.tcp_plugin.send(data, target);
                 Ok(())
             }
             SendTarget::SEDPDiscovery(locator) => {
@@ -226,22 +230,14 @@ impl TransportPlugin for HybridTransportPlugin {
     }
 
     fn advertised_metatraffic_unicast_locators(&self) -> Vec<Locator> {
-        let udp_port =
-            PortManager::get_discovery_traffic_unicast_port(self.domain_id, self.participant_id)
-                as u32;
-        let mut locators = self.udp_locators(udp_port);
-        // Hybrid advertises both UDP and TCP endpoints so peers on either
-        // transport can reach us.
-        locators.extend(self.tcp_plugin.advertised_metatraffic_unicast_locators());
-        locators
+        // unicast metatraffic (SEDP, liveliness) rides TCP. UDP carries
+        // only multicast SPDP, so no UDP unicast locator is advertised.
+        self.tcp_plugin.advertised_metatraffic_unicast_locators()
     }
 
     fn advertised_default_unicast_locators(&self) -> Vec<Locator> {
-        let udp_port =
-            PortManager::get_user_traffic_unicast_port(self.domain_id, self.participant_id) as u32;
-        let mut locators = self.udp_locators(udp_port);
-        locators.extend(self.tcp_plugin.advertised_default_unicast_locators());
-        locators
+        // user data rides TCP.
+        self.tcp_plugin.advertised_default_unicast_locators()
     }
 
     fn take_discovery_multicast_source(&self) -> Option<MessageSource> {
@@ -265,6 +261,13 @@ impl TransportPlugin for HybridTransportPlugin {
 
     fn tcp_listener_port(&self) -> Option<u16> {
         self.tcp_plugin.tcp_listener_port()
+    }
+
+    fn disconnect_peer(&self, locators: &[Locator]) {
+        // Only TCP holds per-peer connections; UDP is connectionless. Forward to
+        // the embedded TCP plugin so a DDS-layer unmatch releases the peer's TCP
+        // resources promptly instead of lingering until OS keepalive.
+        self.tcp_plugin.disconnect_peer(locators);
     }
 
     fn participant_id(&self) -> u32 {

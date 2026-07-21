@@ -44,12 +44,12 @@ CMD ["bash", "-lc", "\
     rustc -vV | grep host || true; \
     cargo build --release -p int2dds-ffi; \
     ver=$(grep -m1 '^version' /src/Cargo.toml | cut -d'\"' -f2); \
-    mm=${ver%.*}; \
-    real=libint2dds_ffi.so.$ver; son=libint2dds_ffi.so.$mm; \
+    maj=${ver%%.*}; \
+    real=libint2dds_ffi.so.$ver; son=libint2dds_ffi.so.$maj; \
     out=/src/ffi/dist/$DIST; mkdir -p \"$out\"; \
     cp -v \"$CARGO_TARGET_DIR/release/libint2dds_ffi.so\" \"$out/$real\"; \
     ln -sfn \"$real\" \"$out/$son\"; \
-    ln -sfn \"$real\" \"$out/libint2dds_ffi.so\"; \
+    ln -sfn \"$son\" \"$out/libint2dds_ffi.so\"; \
     cp -v /src/ffi/include/int2dds-ffi.h /src/ffi/dist/ 2>/dev/null || true; \
     echo '== artifact =='; \
     readelf -h \"$out/$real\" | grep -E 'Class|Machine|Type' || true; \

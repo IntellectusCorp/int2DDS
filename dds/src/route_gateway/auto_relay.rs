@@ -27,6 +27,7 @@ use crate::{
         qos::DataReaderQos,
         sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind},
     },
+    xtypes::{SharedTypeRegistry, TypeResolver},
 };
 
 use super::{
@@ -340,11 +341,13 @@ impl AutoRelay {
         // Collect newly discovered topics from both sides.
         {
             let mut side = self.local_side.lock().unwrap();
-            collect_new_publications(&mut side, &self.filter, &mut new_topics);
+            let registry = self.local.get_rtps_participant()?.type_registry();
+            collect_new_publications(&mut side, &self.filter, &registry, &mut new_topics);
         }
         {
             let mut side = self.remote_side.lock().unwrap();
-            collect_new_publications(&mut side, &self.filter, &mut new_topics);
+            let registry = self.remote.get_rtps_participant()?.type_registry();
+            collect_new_publications(&mut side, &self.filter, &registry, &mut new_topics);
         }
 
         let mut created = 0;
@@ -388,6 +391,7 @@ impl AutoRelay {
 fn collect_new_publications(
     side: &mut DiscoverySide,
     filter: &TopicFilter,
+    registry: &SharedTypeRegistry,
     out: &mut Vec<(String, crate::xtypes::TypeObject)>,
 ) {
     let samples = match side.publication_reader.read(
@@ -409,7 +413,7 @@ fn collect_new_publications(
         if !info.valid_data {
             continue;
         }
-        if !side.seen_instances.insert(info.instance_handle) {
+        if side.seen_instances.contains(&info.instance_handle) {
             continue;
         }
 
@@ -419,23 +423,39 @@ fn collect_new_publications(
         };
 
         let topic_name = pub_data.topic_name().to_string();
-        if is_builtin_topic(&topic_name) {
+        if is_builtin_topic(&topic_name) || !filter.matches(&topic_name) {
+            side.seen_instances.insert(info.instance_handle);
             continue;
         }
-        if !filter.matches(&topic_name) {
-            continue;
-        }
-        if !side.seen_topics.insert(topic_name.clone()) {
+        if side.seen_topics.contains(&topic_name) {
+            side.seen_instances.insert(info.instance_handle);
             continue;
         }
 
-        match pub_data.type_object() {
-            Some(type_obj) => out.push((topic_name, type_obj.clone())),
+        // TypeObject acquisition: inline 0x0072 (legacy peers) first, else
+        // resolve the discovered TypeIdentifier against the participant's
+        // TypeRegistry (populated on demand via TypeLookup).
+        let type_object = if let Some(type_obj) = pub_data.type_object() {
+            Some(type_obj.clone())
+        } else if let Some(type_id) = pub_data.type_identifier() {
+            registry.read().ok().and_then(|r| r.resolve_complete(type_id))
+        } else {
+            log::warn!(
+                "[AutoRelay] publication on '{}' has no TypeObject or TypeIdentifier; skipping",
+                topic_name
+            );
+            side.seen_instances.insert(info.instance_handle);
+            continue;
+        };
+
+        match type_object {
+            Some(type_obj) => {
+                side.seen_instances.insert(info.instance_handle);
+                side.seen_topics.insert(topic_name.clone());
+                out.push((topic_name, type_obj));
+            }
             None => {
-                log::warn!(
-                    "[AutoRelay] publication on '{}' has no TypeObject; skipping",
-                    topic_name
-                );
+                log::debug!("[AutoRelay] type for '{}' not yet resolved; will retry", topic_name);
             }
         }
     }

@@ -378,14 +378,12 @@ pub fn tokenize(source: &str) -> Result<Vec<SpannedToken>, LexError> {
                 "string" => Token::StringKw,
                 "wstring" => Token::WStringKw,
                 "boolean" => Token::Boolean,
-                "octet" | "uint8" | "int8" => {
-                    // uint8/int8 are aliases
-                    if ident == "int8" {
-                        Token::Ident("int8".to_string())
-                    } else {
-                        Token::Octet
-                    }
-                }
+                "octet" => Token::Octet,
+                // int8/uint8 are integer aliases distinct from octet: octet is TK_BYTE while
+                // int8/uint8 are TK_INT8/TK_UINT8. Emit them as named types so the resolver
+                // maps them to I8/UInt8 (octet -> uint8 collapse would break XTypes matching).
+                "uint8" => Token::Ident("uint8".to_string()),
+                "int8" => Token::Ident("int8".to_string()),
                 "char" => Token::Char,
                 "wchar" => Token::WCharKw,
                 "short" => Token::Short,

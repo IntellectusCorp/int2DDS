@@ -17,7 +17,7 @@ use crate::{
     rtps::common::{guid::Guid, locator::Locator, types::SerializedData},
     subscription::qos::{DataReaderQos, SubscriberQos},
     topic::{qos::TopicQos, DdsType},
-    xtypes::{TypeIdentifier, TypeObject},
+    xtypes::{TypeIdentifier, TypeInformation, TypeObject},
 };
 
 #[derive(DdsType, Eq)]
@@ -71,6 +71,8 @@ pub struct SubscriptionBuiltinTopicData {
     type_object: Option<TypeObject>,
     #[dds(id = 0x0074)] // PidTypeConsistencyEnforcement
     type_consistency_enforcement: TypeConsistencyEnforcementQosPolicy,
+    #[dds(non_serialized)] // enriched 0x0075 payload; emitted by the manual serializer
+    type_information: Option<TypeInformation>,
     #[dds(non_serialized)]
     reader_reliability_extension: ReaderReliabilityExtensionQosPolicy,
 }
@@ -108,6 +110,7 @@ impl SubscriptionBuiltinTopicData {
             type_identifier: None,
             type_object: None,
             type_consistency_enforcement: datareader_qos.type_consistency_enforcement,
+            type_information: None,
             reader_reliability_extension: datareader_qos.reader_reliability_extension,
         }
     }
@@ -291,6 +294,14 @@ impl SubscriptionBuiltinTopicData {
         self.type_object = type_obj;
     }
 
+    pub fn type_information(&self) -> Option<&TypeInformation> {
+        self.type_information.as_ref()
+    }
+
+    pub fn set_type_information(&mut self, type_info: Option<TypeInformation>) {
+        self.type_information = type_info;
+    }
+
     pub fn type_consistency_enforcement(&self) -> &TypeConsistencyEnforcementQosPolicy {
         &self.type_consistency_enforcement
     }
@@ -354,6 +365,7 @@ impl SubscriptionBuiltinTopicData {
         // DDS-XTypes fields
         subscription_data.type_identifier = parsed.type_identifier;
         subscription_data.type_object = parsed.type_object;
+        subscription_data.type_information = parsed.type_information;
         if let Some(tce) = parsed.type_consistency_enforcement {
             subscription_data.type_consistency_enforcement = tce;
         }

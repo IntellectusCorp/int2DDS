@@ -29,6 +29,8 @@ pub struct FieldConfig {
     pub bitfield: Option<u8>,
     /// #[dds(char)]: storage is u8 / [u8; N] but TypeObject must register CHAR8.
     pub as_char: bool,
+    /// #[dds(uint8)]: storage is u8 / Vec<u8> / [u8; N] but TypeObject must register UINT8 (not BYTE).
+    pub as_uint8: bool,
     /// @try_construct: deserialize-side behavior on bound violation.
     pub try_construct: TryConstructKind,
     /// @non_serialized: field is excluded from wire and from TypeObject.
@@ -112,6 +114,8 @@ pub fn parse_field_attributes(field: &syn::Field) -> FieldConfig {
                     config.bitfield = Some(lit.base10_parse::<u8>()?);
                 } else if meta.path.is_ident("char") {
                     config.as_char = true;
+                } else if meta.path.is_ident("uint8") {
+                    config.as_uint8 = true;
                 } else if meta.path.is_ident("non_serialized") {
                     config.non_serialized = true;
                 } else if meta.path.is_ident("try_construct") {
@@ -143,6 +147,15 @@ pub fn parse_field_attributes(field: &syn::Field) -> FieldConfig {
             field.ident.as_ref().map(ToString::to_string).unwrap_or_else(|| "<anon>".to_string());
         panic!(
             "Field '{}' cannot be both #[dds(key)] and #[dds(non_serialized)] (XTypes 7.3.1.2.1.14)",
+            field_name
+        );
+    }
+
+    if config.as_char && config.as_uint8 {
+        let field_name =
+            field.ident.as_ref().map(ToString::to_string).unwrap_or_else(|| "<anon>".to_string());
+        panic!(
+            "Field '{}' cannot be both #[dds(char)] and #[dds(uint8)]: a u8 maps to exactly one of CHAR8/UINT8/BYTE",
             field_name
         );
     }

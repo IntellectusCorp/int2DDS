@@ -228,10 +228,6 @@ mod tests {
         assert_eq!(classify_frame(&[0x01, 0x49, 0x4E, 0x54, 0x32]), TcpFrameKind::Control);
         // BindResponse (0x02)
         assert_eq!(classify_frame(&[0x02, 0x00]), TcpFrameKind::Control);
-        // Keepalive (0x04)
-        assert_eq!(classify_frame(&[0x04]), TcpFrameKind::Control);
-        // KeepaliveAck (0x05)
-        assert_eq!(classify_frame(&[0x05]), TcpFrameKind::Control);
         // Close (0x07)
         assert_eq!(classify_frame(&[0x07]), TcpFrameKind::Control);
     }

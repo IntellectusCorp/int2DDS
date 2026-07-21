@@ -9,7 +9,6 @@ use crate::rtps::logic::sedp_logic::SedpLogic;
 use crate::rtps::logic::spdp_logic::SpdpLogic;
 use crate::rtps::logic::user_logic::UserLogic;
 use crate::rtps::task::sending_handler::MessageType;
-use crate::rtps::transport::plugin::TransportPlugin;
 use crate::rtps::transport::socket::MAX_EVENTS;
 
 pub(crate) struct SendingTask {
@@ -23,9 +22,7 @@ pub(crate) struct SendingTask {
 }
 
 impl SendingTask {
-    pub(crate) fn new(participant: Arc<Participant>, transport: Arc<dyn TransportPlugin>) -> Self {
-        let port = transport.port();
-
+    pub(crate) fn new(participant: Arc<Participant>, port: u16) -> Self {
         let (spdp_logic, sedp_logic, user_logic) = participant.get_logics();
         let poll = Poll::new().unwrap();
         let events = Events::with_capacity(MAX_EVENTS);

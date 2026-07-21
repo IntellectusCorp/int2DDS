@@ -27,6 +27,62 @@ use crate::type_info::Int2DdsTypeInfo;
 
 use super::{error::*, qos::Int2DdsTopicQos, types::*};
 
+/// Shared tail for topic creation once a `RawTypeSupport` is fully built: register the
+/// type support, resolve QoS (NULL -> default sentinel so profile fallback engages),
+/// create the topic, and hand back a boxed `Int2DdsTopic`.
+unsafe fn finalize_topic(
+    participant_ref: &Int2DdsParticipant,
+    topic_name_str: &str,
+    dds_type_name: &str,
+    type_support: Arc<dyn TypeSupport>,
+    qos: *const Int2DdsTopicQos,
+    topic_out: *mut *mut Int2DdsTopic,
+) -> Int2DdsRet {
+    ffi_try!(participant_ref.inner.register_type_support(type_support, dds_type_name));
+
+    let topic_qos = if qos.is_null() {
+        int2dds::infrastructure::qos_kind::QosKind::Default
+    } else {
+        int2dds::infrastructure::qos_kind::QosKind::Specific((*qos).inner.clone())
+    };
+
+    let topic = ffi_try!(participant_ref.inner.create_topic::<Int2DdsData>(
+        topic_name_str,
+        dds_type_name,
+        topic_qos,
+        None,
+        StatusMask::default()
+    ));
+
+    let topic_handle =
+        Box::new(Int2DdsTopic { inner: Arc::new(topic), type_name: dds_type_name.to_string() });
+    *topic_out = Box::into_raw(topic_handle);
+    INT2DDS_RET_OK
+}
+
+/// Map a `create_topic_with_field_descriptors` field-type code (scalar-only, and a
+/// distinct encoding from the `INT2DDS_FIELD_*` constants) to its CDR descriptor type
+/// and XTypes `TypeIdentifier`. Returns `None` for unsupported codes.
+fn field_descriptor_type(
+    code: u32,
+) -> Option<(crate::data::CdrFieldType, int2dds::xtypes::TypeIdentifier)> {
+    use crate::data::CdrFieldType;
+    use int2dds::xtypes::TypeIdentifier;
+    Some(match code {
+        0 => (CdrFieldType::String, TypeIdentifier::String8),
+        1 => (CdrFieldType::Int32, TypeIdentifier::Int32),
+        2 => (CdrFieldType::UInt32, TypeIdentifier::Uint32),
+        3 => (CdrFieldType::Int16, TypeIdentifier::Int16),
+        4 => (CdrFieldType::UInt16, TypeIdentifier::Uint16),
+        5 => (CdrFieldType::Int64, TypeIdentifier::Int64),
+        6 => (CdrFieldType::UInt64, TypeIdentifier::Uint64),
+        7 => (CdrFieldType::Int8, TypeIdentifier::Int8),
+        8 => (CdrFieldType::UInt8, TypeIdentifier::Uint8),
+        9 => (CdrFieldType::Bool, TypeIdentifier::Boolean),
+        _ => return None,
+    })
+}
+
 /// Create a Topic
 ///
 /// Creates a topic with RawTypeSupport for use with `int2dds_write_serialized()`
@@ -260,41 +316,26 @@ pub unsafe extern "C" fn int2dds_create_topic_with_type_info(
     let type_identifier = ti.build_type_identifier();
     let type_object = ti.build_type_object();
 
-    // Create RawTypeSupport with type info for discovery
-    let type_support = Arc::new(RawTypeSupport::with_type_info(
+    // Create RawTypeSupport with type info for discovery. Also register key fields derived
+    // from the type_info so keyed types created this way still compute instance keys
+    // (matching the create_topic_with_field_descriptors path).
+    let mut raw_type_support = RawTypeSupport::with_type_info(
         dds_type_name.clone(),
         ti.extensibility,
         ti.has_key_field(),
         type_identifier,
         type_object,
-    ));
+    );
+    raw_type_support.set_key_fields(ti.key_field_infos());
 
-    // Register the RawTypeSupport with the participant
-    ffi_try!(participant_ref
-        .inner
-        .register_type_support(type_support as Arc<dyn TypeSupport>, dds_type_name));
-
-    // NULL qos → default sentinel (engages profile fallback). Non-NULL → use as-is.
-    let topic_qos = if qos.is_null() {
-        int2dds::infrastructure::qos_kind::QosKind::Default
-    } else {
-        int2dds::infrastructure::qos_kind::QosKind::Specific((*qos).inner.clone())
-    };
-
-    let topic = ffi_try!(participant_ref.inner.create_topic::<Int2DdsData>(
+    finalize_topic(
+        participant_ref,
         topic_name_str,
         dds_type_name,
-        topic_qos,
-        None,
-        StatusMask::default()
-    ));
-
-    let topic_handle =
-        Box::new(Int2DdsTopic { inner: Arc::new(topic), type_name: dds_type_name.clone() });
-
-    *topic_out = Box::into_raw(topic_handle);
-
-    INT2DDS_RET_OK
+        Arc::new(raw_type_support) as Arc<dyn TypeSupport>,
+        qos,
+        topic_out,
+    )
 }
 
 /// Set QoS on a Topic
@@ -396,12 +437,12 @@ pub unsafe extern "C" fn int2dds_topic_get_name(
     let name = topic_ref.inner.get_name();
     let name_cstr = match CString::new(name) {
         Ok(s) => s,
-        Err(_) => return INT2DDS_RET_ERROR,
+        Err(_) => ffi_bail!("topic name contains interior NUL byte"),
     };
 
     let name_bytes = name_cstr.as_bytes_with_nul();
     if name_bytes.len() > name_size {
-        return INT2DDS_RET_ERROR;
+        return INT2DDS_RET_BUFFER_TOO_SMALL;
     }
 
     std::ptr::copy_nonoverlapping(name_bytes.as_ptr() as *const c_char, name_out, name_bytes.len());
@@ -430,12 +471,12 @@ pub unsafe extern "C" fn int2dds_topic_get_type_name(
 
     let type_name_cstr = match CString::new(type_name.as_str()) {
         Ok(s) => s,
-        Err(_) => return INT2DDS_RET_ERROR,
+        Err(_) => ffi_bail!("topic type name contains interior NUL byte"),
     };
 
     let type_name_bytes = type_name_cstr.as_bytes_with_nul();
     if type_name_bytes.len() > type_name_size {
-        return INT2DDS_RET_ERROR;
+        return INT2DDS_RET_BUFFER_TOO_SMALL;
     }
 
     std::ptr::copy_nonoverlapping(
@@ -796,95 +837,100 @@ pub unsafe extern "C" fn int2dds_create_topic_with_field_descriptors(
         _ => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
-    // Build field descriptors and key fields
-    use crate::data::{CdrFieldDescriptor, CdrFieldType};
-    use crate::raw_type_support::{KeyFieldInfo, KeyFieldType};
-
-    let mut all_fields = Vec::new();
-    let mut key_fields = Vec::new();
-
-    if field_count > 0 {
-        check_null!(field_names);
-        check_null!(field_types);
-        check_null!(field_is_key);
-
-        for i in 0..field_count {
-            let name_ptr = *field_names.add(i);
-            if name_ptr.is_null() {
-                return INT2DDS_RET_INVALID_ARGUMENT;
-            }
-            let name = match CStr::from_ptr(name_ptr).to_str() {
-                Ok(s) => s.to_string(),
-                Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
-            };
-
-            let type_id = *field_types.add(i);
-            let is_key = *field_is_key.add(i);
-
-            let cdr_type = match type_id {
-                0 => CdrFieldType::String,
-                1 => CdrFieldType::Int32,
-                2 => CdrFieldType::UInt32,
-                3 => CdrFieldType::Int16,
-                4 => CdrFieldType::UInt16,
-                5 => CdrFieldType::Int64,
-                6 => CdrFieldType::UInt64,
-                7 => CdrFieldType::Int8,
-                8 => CdrFieldType::UInt8,
-                9 => CdrFieldType::Bool,
-                _ => return INT2DDS_RET_INVALID_ARGUMENT,
-            };
-
-            all_fields.push(CdrFieldDescriptor {
-                name: name.clone(),
-                field_type: cdr_type,
-                is_key,
-            });
-
-            if is_key {
-                let key_type = match type_id {
-                    0 => KeyFieldType::String,
-                    1 => KeyFieldType::Int32,
-                    2 => KeyFieldType::UInt32,
-                    3 => KeyFieldType::Int16,
-                    4 => KeyFieldType::UInt16,
-                    5 => KeyFieldType::Int64,
-                    6 => KeyFieldType::UInt64,
-                    7 => KeyFieldType::Int8,
-                    8 => KeyFieldType::UInt8,
-                    9 => KeyFieldType::Bool,
-                    _ => return INT2DDS_RET_INVALID_ARGUMENT,
-                };
-                key_fields.push(KeyFieldInfo { field_index: i, field_type: key_type });
-            }
-        }
+    // No field structure provided: keep the prior name-only behavior (advertise no type
+    // info) rather than a bogus empty-struct TypeObject that could turn a name match into
+    // a structural mismatch against a real multi-field peer.
+    if field_count == 0 {
+        let type_support =
+            RawTypeSupport::new_with_key(dds_type_name_str.to_string(), ext_kind, has_key);
+        return finalize_topic(
+            participant_ref,
+            topic_name_str,
+            dds_type_name_str,
+            Arc::new(type_support) as Arc<dyn TypeSupport>,
+            qos,
+            topic_out,
+        );
     }
 
-    // Create RawTypeSupport with both key fields and all fields
-    let mut type_support =
-        RawTypeSupport::new_with_key(dds_type_name_str.to_string(), ext_kind, has_key);
-    type_support.set_key_fields(key_fields);
+    check_null!(field_names);
+    check_null!(field_types);
+    check_null!(field_is_key);
+
+    // Build XTypes type info (for discovery) and CDR field descriptors (for
+    // ContentFilteredTopic get_field_value) from the same flat fields.
+    use crate::data::CdrFieldDescriptor;
+
+    let mut all_fields = Vec::new();
+    let mut ti = Int2DdsTypeInfo::new(dds_type_name_str.to_string(), ext_kind);
+
+    for i in 0..field_count {
+        let name_ptr = *field_names.add(i);
+        if name_ptr.is_null() {
+            return INT2DDS_RET_INVALID_ARGUMENT;
+        }
+        let name = match CStr::from_ptr(name_ptr).to_str() {
+            Ok(s) => s.to_string(),
+            Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+        };
+
+        let is_key = *field_is_key.add(i);
+        let (cdr_type, xtypes_id) = match field_descriptor_type(*field_types.add(i)) {
+            Some(t) => t,
+            None => return INT2DDS_RET_INVALID_ARGUMENT,
+        };
+
+        all_fields.push(CdrFieldDescriptor { name: name.clone(), field_type: cdr_type, is_key });
+
+        let flags = if is_key { crate::type_info::INT2DDS_MEMBER_KEY } else { 0 };
+        ti.push_field(name, xtypes_id, flags);
+    }
+
+    // Advertise TypeIdentifier/TypeObject (0x0075) like the derive macro, while keeping
+    // CDR field descriptors for ContentFilteredTopic and instance-key extraction.
+    let mut type_support = RawTypeSupport::with_type_info(
+        dds_type_name_str.to_string(),
+        ext_kind,
+        has_key,
+        ti.build_type_identifier(),
+        ti.build_type_object(),
+    );
+    type_support.set_key_fields(ti.key_field_infos());
     type_support.set_all_fields(all_fields);
 
-    // Register the RawTypeSupport with the participant
-    ffi_try!(participant_ref
-        .inner
-        .register_type_support(Arc::new(type_support) as Arc<dyn TypeSupport>, dds_type_name_str));
-
-    let topic_qos = if qos.is_null() { TopicQos::default() } else { (*qos).inner.clone() };
-
-    let topic = ffi_try!(participant_ref.inner.create_topic::<Int2DdsData>(
+    finalize_topic(
+        participant_ref,
         topic_name_str,
         dds_type_name_str,
-        topic_qos,
-        None,
-        StatusMask::default()
-    ));
+        Arc::new(type_support) as Arc<dyn TypeSupport>,
+        qos,
+        topic_out,
+    )
+}
 
-    let topic_handle =
-        Box::new(Int2DdsTopic { inner: Arc::new(topic), type_name: dds_type_name_str.to_string() });
+#[cfg(test)]
+mod tests {
+    use super::field_descriptor_type;
+    use int2dds::xtypes::TypeIdentifier;
 
-    *topic_out = Box::into_raw(topic_handle);
-
-    INT2DDS_RET_OK
+    #[test]
+    fn field_descriptor_type_maps_scalar_codes() {
+        let expected = [
+            (0u32, TypeIdentifier::String8),
+            (1, TypeIdentifier::Int32),
+            (2, TypeIdentifier::Uint32),
+            (3, TypeIdentifier::Int16),
+            (4, TypeIdentifier::Uint16),
+            (5, TypeIdentifier::Int64),
+            (6, TypeIdentifier::Uint64),
+            (7, TypeIdentifier::Int8),
+            (8, TypeIdentifier::Uint8),
+            (9, TypeIdentifier::Boolean),
+        ];
+        for (code, tid) in expected {
+            let (_, got) = field_descriptor_type(code).expect("scalar code must map");
+            assert_eq!(got, tid, "field_descriptor code {code} maps to wrong TypeIdentifier");
+        }
+        assert!(field_descriptor_type(10).is_none(), "code 10 must be rejected");
+    }
 }

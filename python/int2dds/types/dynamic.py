@@ -626,6 +626,10 @@ class DynamicValue:
     def as_string(self) -> str:
         return _read_string(lib.int2dds_dynamic_value_as_string, self._handle)
 
+    def __str__(self) -> str:
+        """Format the value regardless of kind (mirrors the core Display)."""
+        return _read_string(lib.int2dds_dynamic_value_to_string, self._handle)
+
     def as_enum(self) -> tuple[str, int]:
         out_value = ffi.new("int32_t*")
         out_len = ffi.new("uintptr_t*")

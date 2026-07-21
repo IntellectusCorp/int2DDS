@@ -88,7 +88,10 @@ use crate::{
     },
     serialize::pl_cdr::InlineQosParameters,
     utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
-    xtypes::{check_structural_compatibility, SampleIdentity, TypeIdentifier, TypeObject},
+    xtypes::{
+        evaluate_structural_compatibility, SampleIdentity, TypeCompatibility, TypeIdentifier,
+        TypeObject,
+    },
 };
 
 enum MatchType {
@@ -100,6 +103,15 @@ enum BuiltinTopicData {
     Publication(PublicationBuiltinTopicData),
     Subscription(SubscriptionBuiltinTopicData),
 }
+
+/// Outcome of endpoint compatibility validation.
+enum MatchDecision {
+    Match,
+    Reject(RtpsError),
+    Defer,
+}
+
+const TYPE_LOOKUP_MATCH_TIMEOUT: StdDuration = StdDuration::from_secs(5);
 
 #[derive(Clone)]
 #[allow(dead_code)]
@@ -113,85 +125,209 @@ pub(crate) struct SedpLogic {
     multicast_listening_waker: Arc<std::sync::OnceLock<Arc<mio::Waker>>>,
     unicast_listening_waker: Arc<std::sync::OnceLock<Arc<mio::Waker>>>,
     timer_handler: Arc<Mutex<TimerHandler>>,
-    /// Correlates an outstanding `getTypeDependencies` request (by its
-    /// `SampleIdentity`) with the remote prefix and root `TypeIdentifier` being
-    /// resolved, so the reply can re-issue the next continuation round and add
-    /// the root to the final `getTypes` batch.
     pub(crate) type_lookup_pending:
         Arc<Mutex<HashMap<SampleIdentity, (GuidPrefix, TypeIdentifier)>>>,
+    deferred_type_matches: Arc<Mutex<HashMap<Guid, Instant>>>,
 }
 
-fn validate_endpoint_compatibility<L>(
-    local: &L,
-    requested: &SubscriptionBuiltinTopicData,
-    offered: &PublicationBuiltinTopicData,
-    update_incompatible_qos: impl Fn(&L, QosPolicyId),
-    update_incompatible_type: impl Fn(&L),
-    update_inconsistent_topic: impl Fn(&L),
-    who: &'static str, // for log
-) -> RtpsResult<()> {
-    // TopicKind - reject if writer and reader disagree on keyed vs keyless
-    let writer_keyed = offered.endpoint_guid().entity_kind().is_with_key();
-    let reader_keyed = requested.endpoint_guid().entity_kind().is_with_key();
-    if writer_keyed != reader_keyed {
-        update_inconsistent_topic(local);
-        debug!(
-            "[{}] TopicKind mismatch: writer keyed={}, reader keyed={}",
-            who, writer_keyed, reader_keyed
-        );
-        return Err(RtpsError::new(
-            RtpsErrorCode::TopicKindIncompatible,
-            format!(
-                "[TopicKind mismatch: writer keyed={}, reader keyed={} :{}]",
-                writer_keyed, reader_keyed, who
-            ),
-        ));
-    }
-
-    // QoS
-    if !check_qos_compatibility(requested, offered) {
-        if let Some(pid) = check_qos_compatibility_with_policy_id(requested, offered) {
-            update_incompatible_qos(local, pid);
+impl SedpLogic {
+    #[allow(clippy::too_many_arguments)]
+    fn validate_endpoint_compatibility<L>(
+        &self,
+        local: &L,
+        remote_guid: Guid,
+        requested: &SubscriptionBuiltinTopicData,
+        offered: &PublicationBuiltinTopicData,
+        update_incompatible_qos: impl Fn(&L, QosPolicyId),
+        update_incompatible_type: impl Fn(&L),
+        update_inconsistent_topic: impl Fn(&L),
+        who: &'static str, // for log
+    ) -> MatchDecision {
+        // TopicKind - reject if writer and reader disagree on keyed vs keyless
+        let writer_keyed = offered.endpoint_guid().entity_kind().is_with_key();
+        let reader_keyed = requested.endpoint_guid().entity_kind().is_with_key();
+        if writer_keyed != reader_keyed {
+            update_inconsistent_topic(local);
+            debug!(
+                "[{}] TopicKind mismatch: writer keyed={}, reader keyed={}",
+                who, writer_keyed, reader_keyed
+            );
+            return MatchDecision::Reject(RtpsError::new(
+                RtpsErrorCode::TopicKindIncompatible,
+                format!(
+                    "[TopicKind mismatch: writer keyed={}, reader keyed={} :{}]",
+                    writer_keyed, reader_keyed, who
+                ),
+            ));
         }
-        let err = RtpsError::new(RtpsErrorCode::QosIncompatible, format!("[QoS failed :{}]", who));
 
-        return Err(err);
+        // QoS
+        if !check_qos_compatibility(requested, offered) {
+            if let Some(pid) = check_qos_compatibility_with_policy_id(requested, offered) {
+                update_incompatible_qos(local, pid);
+            }
+            return MatchDecision::Reject(RtpsError::new(
+                RtpsErrorCode::QosIncompatible,
+                format!("[QoS failed :{}]", who),
+            ));
+        }
+
+        // Partition
+        if !is_partition_compatible(&requested.partition().name, &offered.partition().name) {
+            return MatchDecision::Reject(RtpsError::new(
+                RtpsErrorCode::PartitionIncompatible,
+                format!("[Partition failed :{}]", who),
+            ));
+        }
+
+        // Type Compatibility (DDS-XTypes): resolve via registry, defer if unknown.
+        match self.evaluate_type_match(offered, requested, remote_guid) {
+            MatchDecision::Reject(e) => {
+                debug!(
+                    "[{}] Type compatibility check failed: writer={:?}, reader={:?}",
+                    who,
+                    offered.type_identifier(),
+                    requested.type_identifier()
+                );
+                update_incompatible_type(local);
+                MatchDecision::Reject(e)
+            }
+            decision => decision,
+        }
     }
 
-    // Partition
-    if !is_partition_compatible(&requested.partition().name, &offered.partition().name) {
-        let err = RtpsError::new(
-            RtpsErrorCode::PartitionIncompatible,
-            format!("[Partition failed :{}]", who),
-        );
-        return Err(err);
+    fn evaluate_type_match(
+        &self,
+        offered: &PublicationBuiltinTopicData,
+        requested: &SubscriptionBuiltinTopicData,
+        remote_guid: Guid,
+    ) -> MatchDecision {
+        let w_id = offered.type_identifier();
+        let r_id = requested.type_identifier();
+        let tce = requested.type_consistency_enforcement();
+
+        let participant = match self.get_upgraded_participant() {
+            Ok(p) => p,
+            Err(_) => return MatchDecision::Defer,
+        };
+        let type_registry = participant.type_registry();
+        let compat = match type_registry.read() {
+            Ok(registry) => evaluate_structural_compatibility(
+                w_id,
+                r_id,
+                offered.type_object(),
+                requested.type_object(),
+                tce,
+                &*registry,
+            ),
+            Err(_) => return MatchDecision::Defer,
+        };
+
+        match compat {
+            TypeCompatibility::Compatible => {
+                self.clear_deferred(remote_guid);
+                MatchDecision::Match
+            }
+            TypeCompatibility::Incompatible(_) => {
+                self.clear_deferred(remote_guid);
+                MatchDecision::Reject(RtpsError::new(
+                    RtpsErrorCode::QosIncompatible,
+                    "[Type compatibility failed]",
+                ))
+            }
+            TypeCompatibility::Indeterminate => {
+                self.decide_deferred(remote_guid, tce.force_type_validation)
+            }
+        }
     }
 
-    // Type Compatibility (DDS-XTypes)
-    if check_structural_compatibility(
-        offered.type_identifier(),
-        requested.type_identifier(),
-        offered.type_object(),
-        requested.type_object(),
-        requested.type_consistency_enforcement(),
-    )
-    .is_err()
-    {
-        debug!(
-            "[{}] Type compatibility check failed: writer={:?}, reader={:?}",
-            who,
-            offered.type_identifier(),
-            requested.type_identifier()
-        );
-        update_incompatible_type(local);
-        let err = RtpsError::new(
-            RtpsErrorCode::QosIncompatible,
-            format!("[Type compatibility failed :{}]", who),
-        );
-        return Err(err);
+    fn decide_deferred(&self, remote_guid: Guid, force_validation: bool) -> MatchDecision {
+        let now = Instant::now();
+        let mut map = match self.deferred_type_matches.lock() {
+            Ok(m) => m,
+            Err(_) => return MatchDecision::Defer,
+        };
+        match map.get(&remote_guid).copied() {
+            Some(started) => {
+                if now.duration_since(started) < TYPE_LOOKUP_MATCH_TIMEOUT {
+                    return MatchDecision::Defer;
+                }
+                map.remove(&remote_guid);
+                drop(map);
+                if force_validation {
+                    MatchDecision::Reject(RtpsError::new(
+                        RtpsErrorCode::QosIncompatible,
+                        "[Type resolution timed out with force_type_validation]",
+                    ))
+                } else {
+                    MatchDecision::Match
+                }
+            }
+            None => {
+                map.insert(remote_guid, now);
+                drop(map);
+                self.register_deferred_match_timer(remote_guid);
+                MatchDecision::Defer
+            }
+        }
     }
 
-    Ok(())
+    fn clear_deferred(&self, remote_guid: Guid) {
+        if let Ok(mut map) = self.deferred_type_matches.lock() {
+            map.remove(&remote_guid);
+        }
+    }
+
+    fn register_deferred_match_timer(&self, remote_guid: Guid) {
+        let timer_id = TimerId::DeferredTypeMatch { remote_guid };
+        let this = self.clone();
+        let callback = move || this.re_match_resolved_types(remote_guid.prefix());
+        if let Ok(timer_handler) = self.timer_handler.lock() {
+            timer_handler.add_timer(timer_id, TYPE_LOOKUP_MATCH_TIMEOUT, false, callback);
+        }
+    }
+
+    pub(crate) fn re_match_resolved_types(&self, remote_prefix: GuidPrefix) {
+        let participant = match self.get_upgraded_participant() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        // Snapshot first to avoid holding DashMap shard locks during matching.
+        let pubs: Vec<(String, PublicationBuiltinTopicData)> = participant
+            .remote_publications()
+            .iter()
+            .flat_map(|e| {
+                e.value()
+                    .iter()
+                    .filter(|(g, _)| g.prefix() == remote_prefix)
+                    .map(|(_, d)| (e.key().clone(), d.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (topic, data) in pubs {
+            for reader in participant.find_readers_from_topic_name(&topic) {
+                self.match_reader_with_publication(reader, data.clone());
+            }
+        }
+
+        let subs: Vec<(String, SubscriptionBuiltinTopicData)> = participant
+            .remote_subscriptions()
+            .iter()
+            .flat_map(|e| {
+                e.value()
+                    .iter()
+                    .filter(|(g, _)| g.prefix() == remote_prefix)
+                    .map(|(_, d)| (e.key().clone(), d.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (topic, data) in subs {
+            for writer in participant.find_writers_from_topic_name(&topic) {
+                let _ = self.match_writer_with_subscription(writer, data.clone());
+            }
+        }
+    }
 }
 
 fn is_partition_compatible(requested: &[String], offered: &[String]) -> bool {
@@ -237,6 +373,7 @@ impl SedpLogic {
             unicast_listening_waker: Arc::new(std::sync::OnceLock::new()),
             timer_handler,
             type_lookup_pending: Arc::new(Mutex::new(HashMap::new())),
+            deferred_type_matches: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -568,7 +705,7 @@ impl SedpLogic {
                     return Ok(());
                 }
             } else {
-                error!("Inline qos STATUS_INFO not parsed in SubscriptionBuiltinTopicData");
+                debug!("ALIVE SubscriptionBuiltinTopicData, no STATUS_INFO parameter found");
             }
         }
 
@@ -605,7 +742,11 @@ impl SedpLogic {
             );
         }
 
-        Self::register_discovered_type(&participant, subscription_builtin_topic_data.type_object());
+        Self::register_discovered_type(
+            &participant,
+            subscription_builtin_topic_data.type_identifier(),
+            subscription_builtin_topic_data.type_object(),
+        );
         self.maybe_request_discovered_type(
             endpoint_guid.prefix(),
             subscription_builtin_topic_data.type_identifier(),
@@ -631,8 +772,9 @@ impl SedpLogic {
 
         if writer.matched_reader_is_matched(endpoint_guid) {
             // Check QoS compatibility in case of QoS change of writer itself or remote reader
-            if let Err(e) = validate_endpoint_compatibility(
+            if let MatchDecision::Reject(e) = self.validate_endpoint_compatibility(
                 writer,
+                endpoint_guid,
                 &subscription_builtin_topic_data,
                 &writer.publication_builtin_topic_data()?,
                 |w, pid| w.update_offered_incompatible_qos_status(pid),
@@ -697,15 +839,20 @@ impl SedpLogic {
             return Ok(());
         }
 
-        validate_endpoint_compatibility(
+        match self.validate_endpoint_compatibility(
             writer,
+            endpoint_guid,
             &subscription_builtin_topic_data,
             &writer.publication_builtin_topic_data()?,
             |w, pid| w.update_offered_incompatible_qos_status(pid),
             |w| w.update_offered_incompatible_type_status(),
             |w| w.update_status(StatusKind::INCONSISTENT_TOPIC, None),
             "writer->reader",
-        )?;
+        ) {
+            MatchDecision::Match => {}
+            MatchDecision::Defer => return Ok(()),
+            MatchDecision::Reject(e) => return Err(e),
+        }
 
         let is_volatile =
             subscription_builtin_topic_data.durability().kind == DurabilityQosPolicyKind::Volatile;
@@ -776,8 +923,9 @@ impl SedpLogic {
 
         if writer.matched_reader_is_matched(endpoint_guid) {
             // Check QoS compatibility in case of QoS change of writer itself or remote reader
-            if let Err(e) = validate_endpoint_compatibility(
+            if let MatchDecision::Reject(e) = self.validate_endpoint_compatibility(
                 writer,
+                endpoint_guid,
                 &subscription_builtin_topic_data,
                 &writer.publication_builtin_topic_data()?,
                 |w, pid| w.update_offered_incompatible_qos_status(pid),
@@ -843,8 +991,9 @@ impl SedpLogic {
             return Ok(());
         }
 
-        if let Err(e) = validate_endpoint_compatibility(
+        match self.validate_endpoint_compatibility(
             writer,
+            endpoint_guid,
             &subscription_builtin_topic_data,
             &writer.publication_builtin_topic_data()?,
             |w, pid| w.update_offered_incompatible_qos_status(pid),
@@ -852,8 +1001,12 @@ impl SedpLogic {
             |w| w.update_status(StatusKind::INCONSISTENT_TOPIC, None),
             "writer->reader",
         ) {
-            error!("StatelessWriter compatibility error -> {}", e);
-            return Err(e);
+            MatchDecision::Match => {}
+            MatchDecision::Defer => return Ok(()),
+            MatchDecision::Reject(e) => {
+                error!("StatelessWriter compatibility error -> {}", e);
+                return Err(e);
+            }
         }
 
         let mut highest_sent_change_sn = None;
@@ -941,10 +1094,17 @@ impl SedpLogic {
 
 /// Publication Handling (Local Reader <-> Remote Writer)
 impl SedpLogic {
-    fn register_discovered_type(participant: &Participant, type_object: Option<&TypeObject>) {
+    fn register_discovered_type(
+        participant: &Participant,
+        type_identifier: Option<&TypeIdentifier>,
+        type_object: Option<&TypeObject>,
+    ) {
         if let Some(type_object) = type_object {
             if let Ok(mut registry) = participant.type_registry().write() {
-                registry.register_type_object(type_object.clone());
+                match type_identifier {
+                    Some(id) => registry.register_type_object_with_id(id, type_object.clone()),
+                    None => registry.register_type_object(type_object.clone()),
+                }
             }
         }
     }
@@ -979,7 +1139,7 @@ impl SedpLogic {
                     return Ok(());
                 }
             } else {
-                error!("Inline qos STATUS_INFO not parsed in PublicationBuiltinTopicData");
+                debug!("ALIVE SubscriptionBuiltinTopicData, no STATUS_INFO parameter found");
             }
         }
 
@@ -998,7 +1158,11 @@ impl SedpLogic {
             );
         }
 
-        Self::register_discovered_type(&participant, publication_builtin_topic_data.type_object());
+        Self::register_discovered_type(
+            &participant,
+            publication_builtin_topic_data.type_identifier(),
+            publication_builtin_topic_data.type_object(),
+        );
         self.maybe_request_discovered_type(
             endpoint_guid.prefix(),
             publication_builtin_topic_data.type_identifier(),
@@ -1025,8 +1189,9 @@ impl SedpLogic {
         // Check if writer is already matched to avoid duplicates
         if reader.matched_writer_is_matched(endpoint_guid) {
             // Check QoS compatibility in case of QoS change of writer itself or remote reader
-            if let Err(e) = validate_endpoint_compatibility(
+            if let MatchDecision::Reject(e) = self.validate_endpoint_compatibility(
                 reader,
+                endpoint_guid,
                 &reader.subscription_builtin_topic_data()?,
                 &publication_builtin_topic_data,
                 |r, pid| r.update_requested_incompatible_qos_status(pid),
@@ -1099,15 +1264,20 @@ impl SedpLogic {
         }
 
         // Check QoS and Partition compatibility
-        validate_endpoint_compatibility(
+        match self.validate_endpoint_compatibility(
             reader,
+            endpoint_guid,
             &reader.subscription_builtin_topic_data()?,
             &publication_builtin_topic_data,
             |r, pid| r.update_requested_incompatible_qos_status(pid),
             |r| r.update_requested_incompatible_type_status(),
             |r| r.update_status(StatusKind::INCONSISTENT_TOPIC, None),
             "reader->writer",
-        )?;
+        ) {
+            MatchDecision::Match => {}
+            MatchDecision::Defer => return Ok(()),
+            MatchDecision::Reject(e) => return Err(e),
+        }
 
         let writer_proxy = WriterProxy::new(
             publication_builtin_topic_data.endpoint_guid(),
@@ -1152,8 +1322,9 @@ impl SedpLogic {
         // Check if writer is already matched to avoid duplicates
         if reader.matched_writer_is_matched(endpoint_guid) {
             // Check QoS compatibility in case of QoS change of writer itself or remote reader
-            if let Err(e) = validate_endpoint_compatibility(
+            if let MatchDecision::Reject(e) = self.validate_endpoint_compatibility(
                 reader,
+                endpoint_guid,
                 &reader.subscription_builtin_topic_data()?,
                 &publication_builtin_topic_data,
                 |r, pid| r.update_requested_incompatible_qos_status(pid),
@@ -1228,15 +1399,20 @@ impl SedpLogic {
             return Ok(());
         }
 
-        validate_endpoint_compatibility(
+        match self.validate_endpoint_compatibility(
             reader,
+            endpoint_guid,
             &reader.subscription_builtin_topic_data()?,
             &publication_builtin_topic_data,
             |r, pid| r.update_requested_incompatible_qos_status(pid),
             |r| r.update_requested_incompatible_type_status(),
             |r| r.update_status(StatusKind::INCONSISTENT_TOPIC, None),
             "reader->writer",
-        )?;
+        ) {
+            MatchDecision::Match => {}
+            MatchDecision::Defer => return Ok(()),
+            MatchDecision::Reject(e) => return Err(e),
+        }
 
         let remote_writer_info =
             RemoteWriterInfo::new(endpoint_guid, publication_builtin_topic_data.clone());
@@ -1388,7 +1564,6 @@ impl SedpLogic {
         };
 
         let mut is_sent = false;
-        let mut peer_disconnected = false;
         let mut matched_any = false;
 
         let participant_guid = {
@@ -1398,7 +1573,7 @@ impl SedpLogic {
 
         match writer.reader_proxies().lock() {
             Ok(reader_proxies) => {
-                'outer: for reader_proxy in reader_proxies.iter() {
+                for reader_proxy in reader_proxies.iter() {
                     if reader_proxy.remote_reader_guid().prefix() != *guid_prefix {
                         continue;
                     }
@@ -1432,16 +1607,6 @@ impl SedpLogic {
                                         is_sent = true;
                                     }
                                     Err(e) => {
-                                        let disconnected = matches!(
-                                            e.kind(),
-                                            std::io::ErrorKind::BrokenPipe
-                                                | std::io::ErrorKind::ConnectionReset
-                                                | std::io::ErrorKind::ConnectionRefused
-                                        );
-                                        if disconnected {
-                                            peer_disconnected = true;
-                                            break 'outer;
-                                        }
                                         warn!("Failed to send SEDP heartbeat: {:?}", e);
                                     }
                                 }
@@ -1462,12 +1627,7 @@ impl SedpLogic {
             }
         }
 
-        if peer_disconnected {
-            let peer_guid = Guid::new(*guid_prefix, EntityId::PARTICIPANT);
-            let _ = participant.unmatch_with_remote_participant(&peer_guid);
-        }
-
-        // In case not peer_disconnected & timer had not been removed after remote participant was unmatched
+        // No matched readers remain: remove the scheduled SEDP timer.
         if !matched_any {
             if let Ok(handler) = self.timer_handler.lock() {
                 handler.remove_timer(TimerId::SedpScheduledMessage {
@@ -1767,15 +1927,8 @@ impl SedpLogic {
             return Ok(false);
         };
         for locator in remote_participant_data.metatraffic_unicast_locator_list() {
-            match self.send_to_single_locator(buffer, locator.clone(), message_type) {
-                Ok(()) => (),
-                Err(e) if e.code == RtpsErrorCode::PeerDisconnected => {
-                    let _ = participant.unmatch_with_remote_participant(
-                        &remote_participant_data.participant_guid(),
-                    );
-                    return Ok(false);
-                }
-                Err(_) => (),
+            if let Err(e) = self.send_to_single_locator(buffer, locator.clone(), message_type) {
+                debug!("[{}] send to {:?} skipped: {}", message_type, locator, e);
             }
         }
         Ok(true)
@@ -1793,23 +1946,14 @@ impl SedpLogic {
             .lock()
             .map_err(|_| RtpsError::new(RtpsErrorCode::LockError, None))?;
 
-        let mut disconnected_participants: Vec<Guid> = Vec::new();
         for remote_participant_data in remote_participant_datas_guard.iter() {
             for locator in remote_participant_data.metatraffic_unicast_locator_list() {
-                match self.send_to_single_locator(buffer, locator.clone(), message_type) {
-                    Ok(()) => (),
-                    Err(e) if e.code == RtpsErrorCode::PeerDisconnected => {
-                        disconnected_participants.push(remote_participant_data.participant_guid());
-                        break;
-                    }
-                    Err(_) => (),
+                if let Err(e) = self.send_to_single_locator(buffer, locator.clone(), message_type) {
+                    debug!("[{}] fan-out to {:?} skipped: {}", message_type, locator, e);
                 }
             }
         }
         drop(remote_participant_datas_guard);
-        for guid in disconnected_participants {
-            let _ = participant.unmatch_with_remote_participant(&guid);
-        }
 
         Ok(())
     }
@@ -1821,14 +1965,8 @@ impl SedpLogic {
         message_type: &str,
     ) -> RtpsResult<()> {
         self.transport.send(buffer, &SendTarget::SEDPDiscovery(&locator)).map_err(|e| {
-            let code = match e.kind() {
-                std::io::ErrorKind::BrokenPipe
-                | std::io::ErrorKind::ConnectionReset
-                | std::io::ErrorKind::ConnectionRefused => RtpsErrorCode::PeerDisconnected,
-                _ => RtpsErrorCode::NotSent,
-            };
             RtpsError::new(
-                code,
+                RtpsErrorCode::NotSent,
                 format!("[{}] SEDP Logic: Failed to send message: {}", message_type, e),
             )
         })?;

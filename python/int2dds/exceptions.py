@@ -36,13 +36,6 @@ class DdsInvalidArgument(DdsError):
         super().__init__(message, code=11)
 
 
-class DdsBadAlloc(DdsError):
-    """Memory allocation failed."""
-
-    def __init__(self, message: str = "Bad allocation") -> None:
-        super().__init__(message, code=10)
-
-
 class DdsAlreadyDeleted(DdsError):
     """Entity was already deleted."""
 
@@ -106,12 +99,18 @@ class DdsNullPointer(DdsError):
         super().__init__(message, code=100)
 
 
+class DdsBufferTooSmall(DdsError):
+    """Output buffer too small for the value."""
+
+    def __init__(self, message: str = "Buffer too small") -> None:
+        super().__init__(message, code=101)
+
+
 # Return code constants (matching int2dds-ffi.h)
 INT2DDS_RET_OK = 0
 INT2DDS_RET_ERROR = 1
 INT2DDS_RET_TIMEOUT = 2
 INT2DDS_RET_UNSUPPORTED = 3
-INT2DDS_RET_BAD_ALLOC = 10
 INT2DDS_RET_INVALID_ARGUMENT = 11
 INT2DDS_RET_ALREADY_DELETED = 20
 INT2DDS_RET_NOT_ENABLED = 21
@@ -122,13 +121,13 @@ INT2DDS_RET_OUT_OF_RESOURCES = 25
 INT2DDS_RET_ILLEGAL_OPERATION = 26
 INT2DDS_RET_NO_DATA = 27
 INT2DDS_RET_NULL_POINTER = 100
+INT2DDS_RET_BUFFER_TOO_SMALL = 101
 
 # Exception mapping
 _EXCEPTION_MAP: dict[int, type[DdsError]] = {
     INT2DDS_RET_ERROR: DdsError,
     INT2DDS_RET_TIMEOUT: DdsTimeout,
     INT2DDS_RET_UNSUPPORTED: DdsUnsupported,
-    INT2DDS_RET_BAD_ALLOC: DdsBadAlloc,
     INT2DDS_RET_INVALID_ARGUMENT: DdsInvalidArgument,
     INT2DDS_RET_ALREADY_DELETED: DdsAlreadyDeleted,
     INT2DDS_RET_NOT_ENABLED: DdsNotEnabled,
@@ -139,12 +138,34 @@ _EXCEPTION_MAP: dict[int, type[DdsError]] = {
     INT2DDS_RET_ILLEGAL_OPERATION: DdsIllegalOperation,
     INT2DDS_RET_NO_DATA: DdsNoData,
     INT2DDS_RET_NULL_POINTER: DdsNullPointer,
+    INT2DDS_RET_BUFFER_TOO_SMALL: DdsBufferTooSmall,
 }
+
+
+def _last_error_message() -> str:
+    """Return the calling thread's last FFI error message ("" if none)."""
+    from int2dds._ffi import ffi, lib  # lazy import avoids a cycle
+
+    length = lib.int2dds_last_error_message(ffi.NULL, 0)  # query length
+    if length <= 0:
+        return ""
+    buf = ffi.new("char[]", length + 1)
+    written = lib.int2dds_last_error_message(buf, length + 1)
+    if written <= 0:
+        return ""
+    n = min(written, length)
+    return bytes(ffi.buffer(buf, n)).decode("utf-8", "replace")
 
 
 def check_ret(ret: int) -> None:
     """Check FFI return code and raise appropriate exception."""
     if ret == INT2DDS_RET_OK:
         return
-    exc_class = _EXCEPTION_MAP.get(ret, DdsError)
+    exc_class = _EXCEPTION_MAP.get(ret)
+    if exc_class is None:
+        raise DdsError(code=ret)  # unknown code (e.g. dynamic 200-204): preserve it
+    if ret == INT2DDS_RET_ERROR:
+        msg = _last_error_message()
+        if msg:
+            raise exc_class(msg)
     raise exc_class()

@@ -9,10 +9,16 @@ namespace Int2Dds.Interop
         internal static unsafe extern int int2dds_type_info_create(byte* type_name, int extensibility, out IntPtr type_info_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static unsafe extern int int2dds_type_info_add_field(IntPtr type_info, byte* field_name, int field_type, int is_key);
+        internal static unsafe extern int int2dds_type_info_add_field(IntPtr type_info, byte* field_name, int field_type, int flags);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static unsafe extern int int2dds_type_info_add_sequence_field(IntPtr type_info, byte* field_name, int element_type, uint bound, int is_key);
+        internal static unsafe extern int int2dds_type_info_add_string_field(IntPtr type_info, byte* field_name, uint bound, int flags);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_type_info_add_wstring_field(IntPtr type_info, byte* field_name, uint bound, int flags);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_type_info_add_sequence_field(IntPtr type_info, byte* field_name, int element_type, uint bound, int flags);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static unsafe extern int int2dds_type_info_add_array_field(IntPtr type_info, byte* field_name, int element_type, uint array_size, int is_key);

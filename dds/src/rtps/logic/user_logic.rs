@@ -22,7 +22,7 @@ use crate::rtps::common::types::ChangeKind;
 use crate::rtps::common::types::DomainId;
 use crate::rtps::entities::endpoint::Endpoint;
 use crate::rtps::entities::entity::Entity;
-use crate::rtps::entities::history::cache_change::CacheChange;
+use crate::rtps::entities::history::cache_change::{CacheChange, PresentationInfo};
 use crate::rtps::entities::history::history_cache::HistoryCache;
 use crate::rtps::entities::history::writer_history::WriterHistoryCache;
 use crate::rtps::entities::reader::{
@@ -197,6 +197,12 @@ impl UserLogic {
                     continue;
                 }
 
+                // Change in a coherent set whose first sequence number was GAPped: answer with GAP.
+                if reader_proxy.is_change_in_gapped_coherent_set(&a_change) {
+                    gap_list.push(*requested_change_sn);
+                    continue;
+                }
+
                 // TODO: Filter message according to Reader Proxy's request (time based filter, content filtered topic, etc)
                 // Send DATA message or GAP message depending on filter result
 
@@ -348,7 +354,6 @@ impl UserLogic {
         })?;
 
         let participant = self.get_upgraded_participant()?;
-        let mut disconnected_peer: Option<GuidPrefix> = None;
 
         // Send unsent CacheChanges to matched readers
         for reader_proxy in reader_proxies.iter_mut() {
@@ -379,6 +384,24 @@ impl UserLogic {
 
                 // Send DATA message or GAP message depending on filter result
                 if let Some(a_change) = history_cache.get_change(a_change_seq_num) {
+                    // A change in a coherent set whose first sequence number was GAPped can never
+                    // complete on this reader; answer with GAP so no DATA references a gapped set start.
+                    if reader_proxy.is_change_in_gapped_coherent_set(&a_change) {
+                        if reader_proxy.is_reliable() {
+                            self.send_gap_for_range(
+                                participant.guid(),
+                                reader_proxy,
+                                writer.endpoint_id(),
+                                a_change_seq_num,
+                                a_change_seq_num,
+                            )?;
+                        }
+
+                        reader_proxy.extend_last_irrelevant_sn(a_change_seq_num);
+                        reader_proxy.set_highest_sent_change_sn(a_change_seq_num);
+                        continue;
+                    }
+
                     let first_sn = history_cache.get_seq_num_min().ok_or_else(|| {
                         RtpsError::new(
                             RtpsErrorCode::DataNotSet,
@@ -420,7 +443,7 @@ impl UserLogic {
                                 ));
                             }
 
-                            match self.send_data_frag_to_reader_proxy(
+                            if self.send_data_frag_to_reader_proxy(
                                 &a_change,
                                 reader_proxy,
                                 writer.endpoint_id(),
@@ -429,24 +452,12 @@ impl UserLogic {
                                 timestamp,
                                 &mut send_buffer,
                             ) {
-                                Ok(true) => {
-                                    if !writer.disable_piggyback_heartbeat() {
-                                        writer.increase_heartbeat_count();
-                                        if !reader_proxy.is_first_hb_sent() {
-                                            reader_proxy.set_first_hb_sent();
-                                        }
+                                if !writer.disable_piggyback_heartbeat() {
+                                    writer.increase_heartbeat_count();
+                                    if !reader_proxy.is_first_hb_sent() {
+                                        reader_proxy.set_first_hb_sent();
                                     }
                                 }
-                                Err(e) if e.code == RtpsErrorCode::PeerDisconnected => {
-                                    warn!(
-                                        "[DataFrag] Peer disconnected for reader {}",
-                                        reader_proxy.remote_reader_guid()
-                                    );
-                                    disconnected_peer =
-                                        Some(reader_proxy.remote_reader_guid().prefix());
-                                    break;
-                                }
-                                _ => {}
                             }
                         }
 
@@ -505,25 +516,13 @@ impl UserLogic {
                                 )
                             })?
                             .release(send_buffer);
-                        match send_result {
-                            Ok(()) => {
-                                if !writer.disable_piggyback_heartbeat() {
-                                    writer.increase_heartbeat_count();
-                                    if !reader_proxy.is_first_hb_sent() {
-                                        reader_proxy.set_first_hb_sent();
-                                    }
+                        if send_result.is_ok() {
+                            if !writer.disable_piggyback_heartbeat() {
+                                writer.increase_heartbeat_count();
+                                if !reader_proxy.is_first_hb_sent() {
+                                    reader_proxy.set_first_hb_sent();
                                 }
                             }
-                            Err(e) if e.code == RtpsErrorCode::PeerDisconnected => {
-                                warn!(
-                                    "[Data] Peer disconnected for reader {}",
-                                    reader_proxy.remote_reader_guid()
-                                );
-                                disconnected_peer =
-                                    Some(reader_proxy.remote_reader_guid().prefix());
-                                break;
-                            }
-                            Err(_) => {}
                         }
                     }
                 } else {
@@ -538,11 +537,6 @@ impl UserLogic {
         }
 
         drop(reader_proxies);
-
-        if let Some(prefix) = disconnected_peer {
-            let guid = Guid::new(prefix, EntityId::PARTICIPANT);
-            let _ = participant.unmatch_with_remote_participant(&guid);
-        }
 
         // Periodic heartbeat timer resuming when new changes are sent
         if !writer.heartbeat_timer_running() {
@@ -720,7 +714,6 @@ impl UserLogic {
         Ok(())
     }
 
-    /// Returns Ok(true) if sent, Ok(false) if skipped, Err(PeerDisconnected) if peer is gone.
     fn send_data_frag_to_reader_proxy(
         &self,
         change: &CacheChange,
@@ -730,7 +723,7 @@ impl UserLogic {
         heartbeat_info: Option<(u32, SequenceNumber, SequenceNumber, bool, bool)>,
         timestamp: DateTime<Utc>,
         send_buffer: &mut Vec<u8>,
-    ) -> RtpsResult<bool> {
+    ) -> bool {
         if let Some(fragment_data) = change.get_fragment_data(fragment_num) {
             let result = MessageCreator::create_data_frag_msg(
                 change,
@@ -748,17 +741,15 @@ impl UserLogic {
             );
 
             if result.is_ok() {
-                return match self.send_rtps_message_to_locators(
-                    reader_proxy.unicast_locator_list(),
-                    send_buffer.as_slice(),
-                ) {
-                    Ok(()) => Ok(true),
-                    Err(e) if e.code == RtpsErrorCode::PeerDisconnected => Err(e),
-                    Err(_) => Ok(false),
-                };
+                return self
+                    .send_rtps_message_to_locators(
+                        reader_proxy.unicast_locator_list(),
+                        send_buffer.as_slice(),
+                    )
+                    .is_ok();
             }
         }
-        Ok(false)
+        false
     }
 
     // Sending heartbeat message to all matched reader proxies of the given writer
@@ -1244,17 +1235,18 @@ impl UserLogic {
         Ok(())
     }
 
-    // Add a single change to the reader cache and notify the application. TIME_BASED_FILTER is
-    // applied inside the reader history cache: a held sample returns None and is delivered later
-    // by the cache's own timer, so it is not notified here.
+    // Add a change to the reader cache and notify every change it makes available:
+    // none when held (TIME_BASED_FILTER) or buffered, several when a coherent set closes.
     fn deliver_change(reader: &dyn Reader, change: CacheChange) {
         let reader_cache = reader.reader_cache();
-        let mut res: Option<RtpsResult<Option<Arc<CacheChange>>>> = None;
+        let mut res: Option<RtpsResult<Vec<Arc<CacheChange>>>> = None;
         if let Ok(mut cache_guard) = reader_cache.lock() {
             res = Some(cache_guard.add_change(change, true));
         }
-        if let Some(Ok(Some(change))) = res {
-            reader.on_change(change);
+        if let Some(Ok(changes)) = res {
+            for change in changes {
+                reader.on_change(change);
+            }
         }
     }
 }
@@ -1392,23 +1384,8 @@ impl UserLogic {
                 }
                 Err(e) => {
                     warn!("[UserLogic] Failed to send to locator {}: {:?}", locator, e);
-                    match e.kind() {
-                        std::io::ErrorKind::BrokenPipe
-                        | std::io::ErrorKind::ConnectionReset
-                        | std::io::ErrorKind::ConnectionRefused => {
-                            return Err(RtpsError::new(
-                                RtpsErrorCode::PeerDisconnected,
-                                format!(
-                                    "[UserLogic] Peer disconnected at locator {}: {}",
-                                    locator, e
-                                ),
-                            ));
-                        }
-                        _ => {
-                            last_error = Some(e);
-                            continue;
-                        }
-                    }
+                    last_error = Some(e);
+                    continue;
                 }
             }
         }
@@ -1554,6 +1531,13 @@ impl UserLogic {
                 cache_change.set_kind(ChangeKind::AliveFiltered);
             }
         }
+
+        // Restore per-sample coherent/group presentation metadata.
+        cache_change.set_presentation_info(PresentationInfo {
+            coherent_set: inline_qos.get_coherent_set(),
+            group_seq_num: inline_qos.get_group_seq_num(),
+            group_coherent_set: inline_qos.get_group_coherent_set(),
+        });
 
         Ok(())
     }
@@ -2391,7 +2375,7 @@ impl UnicastMessageProcessor for UserLogic {
             .acquire();
         for fragment_num in requested_fragments {
             if fragment_num >= 1 && fragment_num <= total_frags {
-                if let Err(e) = self.send_data_frag_to_reader_proxy(
+                self.send_data_frag_to_reader_proxy(
                     &change,
                     reader_proxy,
                     writer_id,
@@ -2399,15 +2383,7 @@ impl UnicastMessageProcessor for UserLogic {
                     heartbeat_info,
                     timestamp,
                     &mut send_buffer,
-                ) {
-                    if e.code == RtpsErrorCode::PeerDisconnected {
-                        warn!(
-                            "[NackFrag] Peer disconnected during retransmit for reader {}",
-                            reader_proxy.remote_reader_guid()
-                        );
-                        break;
-                    }
-                }
+                );
             }
         }
         participant

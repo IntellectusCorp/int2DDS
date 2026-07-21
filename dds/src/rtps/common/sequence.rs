@@ -42,6 +42,10 @@ impl SequenceNumber {
         result += 1;
         result
     }
+
+    pub fn previous(&self) -> Self {
+        SequenceNumber::from_i64(self.to_i64() - 1)
+    }
 }
 impl std::fmt::Display for SequenceNumber {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

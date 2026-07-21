@@ -74,6 +74,9 @@ fn test_datareader_with_topic() {
     let topic_desc = cft_reader.get_topicdescription().unwrap();
     assert_eq!(topic_desc.get_name(), "filtered_topic");
     assert_eq!(topic_desc.get_type_name(), KeyedDataType::get_type_name());
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -168,6 +171,9 @@ fn test_content_filtered_topic_read() {
     assert_eq!(samples.len(), 2);
     assert_eq!(samples[0].data().unwrap().key, 2);
     assert_eq!(samples[1].data().unwrap().key, 3);
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -253,6 +259,9 @@ fn test_content_filtered_topic_take_serialized() {
     assert!(result.is_ok());
     let samples = result.unwrap();
     assert_eq!(samples.len(), 2);
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -354,6 +363,9 @@ fn test_content_filtered_topic_with_read_condition() {
     let result = data_reader.read_w_condition(10, read_condition.clone());
     assert!(result.is_err());
     assert_eq!(result.unwrap_err(), DdsError::NoData);
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -476,4 +488,7 @@ fn test_content_filtered_topic_with_query_condition() {
     // Sorted by value field in ascending order
     assert_eq!(samples[0].data().unwrap().value, 1);
     assert_eq!(samples[1].data().unwrap().value, 1);
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }

@@ -5,7 +5,12 @@ use std::collections::HashSet;
 #[derive(Debug, Clone)]
 pub enum ResolvedType {
     Bool,
+    /// `octet` — maps to TK_BYTE (FIELD_BYTE). Serializes as a raw byte. Distinct XTypes
+    /// kind from `UInt8`: octet and uint8 are NOT assignable, so they must stay separate.
     U8,
+    /// `uint8` — maps to TK_UINT8 (FIELD_UINT8). Byte-identical CDR wire to `U8`, but a
+    /// distinct TypeObject kind (and `#[dds(uint8)]` in generated Rust).
+    UInt8,
     I8,
     I16,
     U16,
@@ -17,11 +22,25 @@ pub enum ResolvedType {
     F64,
     Char,
     WChar,
-    String { bound: Option<u32> },
-    WString { bound: Option<u32> },
-    Sequence { element: Box<ResolvedType>, bound: Option<u32> },
-    Array { element: Box<ResolvedType>, size: u32 },
-    Map { key: Box<ResolvedType>, value: Box<ResolvedType>, bound: Option<u32> },
+    String {
+        bound: Option<u32>,
+    },
+    WString {
+        bound: Option<u32>,
+    },
+    Sequence {
+        element: Box<ResolvedType>,
+        bound: Option<u32>,
+    },
+    Array {
+        element: Box<ResolvedType>,
+        size: u32,
+    },
+    Map {
+        key: Box<ResolvedType>,
+        value: Box<ResolvedType>,
+        bound: Option<u32>,
+    },
     Struct(String),
     Enum(String),
     Bitmask(String),

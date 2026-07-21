@@ -68,7 +68,7 @@ use crate::{
             EnableChild, Entity, EntityInternal, UpdateStatus,
         },
         history_cache::HistoryCache as DcpsHistoryCache,
-        qos_policy::{DestinationOrderQosPolicyKind, HistoryQosPolicyKind, Qos},
+        qos_policy::{HistoryQosPolicyKind, PresentationQosAccessScopeKind, Qos},
         status::{
             LivelinessChangedStatus, RequestedDeadlineMissedStatus, RequestedIncompatibleQosStatus,
             RequestedIncompatibleTypeStatus, SampleLostStatus, SampleRejectedStatus, StatusInfo,
@@ -451,9 +451,9 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
             // Downcast to get underlying Topic for QoS
             let topic_qos = if let Some(topic) = topic_description.as_any().downcast_ref::<Topic>()
             {
-                topic.get_qos()?
+                topic.get_qos_arc()?
             } else if let Some(content_filtered_topic) = cft {
-                content_filtered_topic.get_related_topic()?.get_qos()?
+                content_filtered_topic.get_related_topic()?.get_qos_arc()?
             } else {
                 return Err(DdsError::Error("Unsupported TopicDescription type".to_string()));
             };
@@ -467,11 +467,10 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
                 return Err(DdsError::Error("Unsupported TopicDescription type".to_string()));
             };
 
-            let mut subscription_builtin_topic_data = SubscriptionBuiltinTopicData::new(
-                &self.get_qos()?,
-                &subscriber.get_qos()?,
-                &topic_qos,
-            );
+            let reader_qos = self.get_qos_arc()?;
+            let subscriber_qos = subscriber.get_qos_arc()?;
+            let mut subscription_builtin_topic_data =
+                SubscriptionBuiltinTopicData::new(&reader_qos, &subscriber_qos, &topic_qos);
             subscription_builtin_topic_data.set_topic_name(topic_name);
             subscription_builtin_topic_data
                 .set_type_name(topic_description.get_type_name().to_string());
@@ -484,9 +483,11 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
             if let Some(type_obj) = self.type_support.get_type_object() {
                 subscription_builtin_topic_data.set_type_object(Some(type_obj));
             }
+            let type_closure = self.type_support.get_type_object_closure();
+            subscription_builtin_topic_data
+                .set_type_information(crate::xtypes::TypeInformation::from_closure(&type_closure));
             if let Ok(rtps_participant) = participant.get_rtps_participant() {
-                rtps_participant
-                    .register_local_type_objects(&self.type_support.get_type_object_closure());
+                rtps_participant.register_local_type_objects(&type_closure);
             }
 
             let status_callback = self
@@ -538,8 +539,10 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
     fn update_rtps_entity(&self, qos: &Self::Qos) -> DdsResult<()> {
         let subscriber = self.get_subscriber()?;
         let topic = self.get_topic()?;
+        let subscriber_qos = subscriber.get_qos_arc()?;
+        let topic_qos = topic.get_qos_arc()?;
         let mut subscription_builtin_topic_data =
-            SubscriptionBuiltinTopicData::new(qos, &subscriber.get_qos()?, &topic.get_qos()?);
+            SubscriptionBuiltinTopicData::new(qos, &subscriber_qos, &topic_qos);
         subscription_builtin_topic_data.set_topic_name(topic.get_name().to_string());
         subscription_builtin_topic_data.set_type_name(topic.get_type_name().to_string());
         subscription_builtin_topic_data.set_endpoint_guid(self.guid);
@@ -551,6 +554,11 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
         if let Some(type_obj) = self.type_support.get_type_object() {
             subscription_builtin_topic_data.set_type_object(Some(type_obj));
         }
+        subscription_builtin_topic_data.set_type_information(
+            crate::xtypes::TypeInformation::from_closure(
+                &self.type_support.get_type_object_closure(),
+            ),
+        );
 
         let rtps_reader = self.get_rtps_reader()?;
         rtps_reader
@@ -1057,7 +1065,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     }
 
     fn get_max_samples(&self) -> DdsResult<usize> {
-        let qos = self.get_qos()?;
+        let qos = self.get_qos_arc()?;
 
         let samples_limit = match qos.history.kind {
             HistoryQosPolicyKind::KeepLast(depth) => depth,
@@ -1570,13 +1578,37 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     }
 
     pub(crate) fn get_available_changes(&self) -> DdsResult<Vec<Arc<CacheChange>>> {
+        let topic_ordered = self.subscriber_topic_ordered();
         let datareader_cache = self.get_datareader_cache();
         let arc = datareader_cache?;
         let mut guard = arc.lock().map_err(|e| DdsError::Error(e.to_string()))?;
         // Enforce Lifespan QoS at read time so expired samples are never returned,
         // even if the periodic cleanup timer hasn't fired yet.
         guard.purge_expired_on_read()?;
-        Ok(guard.get_changes().clone())
+        // TOPIC ordered_access presents samples in topic-wide DESTINATION_ORDER across instances;
+        // otherwise return the per-instance storage order.
+        if topic_ordered {
+            Ok(guard.get_changes_for_topic_scoped_ordered_access())
+        } else {
+            Ok(guard.get_changes())
+        }
+    }
+
+    fn subscriber_topic_ordered(&self) -> bool {
+        self.get_subscriber()
+            .and_then(|s| s.get_qos_arc())
+            .map(|q| {
+                q.presentation.ordered_access
+                    && q.presentation.access_scope == PresentationQosAccessScopeKind::Topic
+            })
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn is_subscriber_coherent(&self) -> bool {
+        self.get_subscriber()
+            .and_then(|s| s.get_qos_arc())
+            .map(|q| q.presentation.coherent_access)
+            .unwrap_or(false)
     }
 
     pub fn has_cached_data(&self) -> DdsResult<bool> {
@@ -1926,7 +1958,8 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                         monitor.cancel_instance(&instance_handle);
                     }
 
-                    let reader_data_lifecycle_qos = &self.get_qos()?.reader_data_lifecycle;
+                    let reader_qos = self.get_qos_arc()?;
+                    let reader_data_lifecycle_qos = &reader_qos.reader_data_lifecycle;
                     if !reader_data_lifecycle_qos.autopurge_disposed_samples_delay.is_infinite() {
                         let std_duration = std::time::Duration::from_nanos(
                             reader_data_lifecycle_qos.autopurge_disposed_samples_delay.as_nanos()
@@ -1972,7 +2005,8 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                         }
                     }
 
-                    let reader_data_lifecycle_qos = &self.get_qos()?.reader_data_lifecycle;
+                    let reader_qos = self.get_qos_arc()?;
+                    let reader_data_lifecycle_qos = &reader_qos.reader_data_lifecycle;
                     if !reader_data_lifecycle_qos.autopurge_nowriter_samples_delay.is_infinite() {
                         let std_duration = std::time::Duration::from_nanos(
                             reader_data_lifecycle_qos.autopurge_nowriter_samples_delay.as_nanos()
@@ -2111,6 +2145,7 @@ impl<Foo: DdsType> DataReader<Foo> {
                 qos.resource_limits,
                 type_support.is_compute_key_provided(),
                 qos.ownership.kind,
+                qos.destination_order.kind,
             ))),
         };
 
@@ -2144,7 +2179,7 @@ impl<Foo: DdsType> DataReader<Foo> {
             datareader_cache.set_update_status(status_callback.clone());
         }
 
-        let period = reader.get_qos()?.deadline.period;
+        let period = reader.get_qos_arc()?.deadline.period;
         if !period.is_infinite() {
             *reader.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))? =
                 Some(DeadlineMonitor::new(period, status_callback, false));
@@ -2612,14 +2647,10 @@ impl<Foo: DdsType> DataReader<Foo> {
         let mut remaining = if max_samples == -1 { i32::MAX } else { max_samples };
 
         let get_changes_t0 = Instant::now();
-        let mut changes = self.get_available_changes()?;
+        let changes = self.get_available_changes()?;
         let get_changes_us = if profile { elapsed_us(get_changes_t0, Instant::now()) } else { 0 };
 
-        let sort_t0 = Instant::now();
-        if !changes.is_empty() {
-            self.sort_changes_by_timestamp(&mut changes)?;
-        }
-        let sort_us = if profile { elapsed_us(sort_t0, Instant::now()) } else { 0 };
+        let sort_us = 0u64;
 
         // ContentFilteredTopic is applied on the receive path, so the cache is already filtered.
         let filter_setup_us = 0u64;
@@ -2855,22 +2886,13 @@ impl<Foo: DdsType> DataReader<Foo> {
                 if let Some(order_by_fields) = query_condition.get_order_by_fields() {
                     log::debug!("QueryCondition ORDER BY detected: {:?}", order_by_fields);
                     self.sort_changes_by_order_fields(&mut changes, order_by_fields)?;
-                } else {
-                    // Default sorting if no ORDER BY
-                    log::debug!("No ORDER BY, using timestamp sort");
-                    self.sort_changes_by_timestamp(&mut changes)?;
                 }
-            } else {
-                // Default sorting for ReadCondition
-                log::debug!("ReadCondition detected, using timestamp sort");
-                self.sort_changes_by_timestamp(&mut changes)?;
             }
             states
         } else if let (Some(sample_states), Some(view_states), Some(instance_states)) =
             (direct_sample_states, direct_view_states, direct_instance_states)
         {
             log::debug!("Using direct state masks");
-            self.sort_changes_by_timestamp(&mut changes)?;
             (sample_states, view_states, instance_states)
         } else {
             // No mask
@@ -3162,26 +3184,6 @@ impl<Foo: DdsType> DataReader<Foo> {
             valid_data: has_valid_data,
         };
         Ok(DataSample::new(data, sample_info, Some(self.type_support.clone())))
-    }
-
-    fn sort_changes_by_timestamp(&self, changes: &mut [Arc<CacheChange>]) -> DdsResult<()> {
-        let destination_kind = self.get_qos()?.destination_order.kind;
-        changes.sort_by(|a, b| {
-            if destination_kind == DestinationOrderQosPolicyKind::ByReceptionTimestamp {
-                // Sort by reception_timestamp (oldest to newest)
-                a.reception_timestamp()
-                    .cmp(&b.reception_timestamp())
-                    // If timestamp is same, compare by sequence_number (safety mechanism)
-                    .then_with(|| a.sequence_number().cmp(&b.sequence_number()))
-            } else {
-                // Sort by source_timestamp (oldest to newest)
-                a.source_timestamp()
-                    .cmp(&b.source_timestamp())
-                    // If timestamp is same, compare by sequence_number (safety mechanism)
-                    .then_with(|| a.sequence_number().cmp(&b.sequence_number()))
-            }
-        });
-        Ok(())
     }
 
     /// Sort changes according to ORDER BY fields
@@ -3806,11 +3808,14 @@ pub(crate) mod tests {
     use crate::domain::domain_participant_factory::DomainParticipantFactory;
     use crate::domain::qos::DomainParticipantQos;
     use crate::infrastructure::qos_policy::{
-        HistoryQosPolicy, ReliabilityQosPolicy, ReliabilityQosPolicyKind,
+        DurabilityQosPolicy, DurabilityQosPolicyKind, HistoryQosPolicy,
+        PresentationQosAccessScopeKind, PresentationQosPolicy, ReliabilityQosPolicy,
+        ReliabilityQosPolicyKind,
     };
     use crate::infrastructure::wait_set::WaitSet;
     use crate::publication::data_writer_listener::DataWriterListener;
     use crate::publication::qos::{DataWriterQos, PublisherQos};
+    use crate::rtps::entities::reader::StatefulReader;
     use crate::subscription::data_reader_listener::DataReaderListener;
     use crate::subscription::qos::SubscriberQos;
     use crate::subscription::sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind};
@@ -3879,7 +3884,10 @@ pub(crate) mod tests {
 
         println!("{:?}", status_condition.get_entity());
 
-        assert!(status_condition.get_entity().is_err())
+        assert!(status_condition.get_entity().is_err());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     struct SubListener {
@@ -4008,6 +4016,9 @@ pub(crate) mod tests {
         assert_eq!(samples[1].sample_info().sample_rank, 0);
         assert_eq!(samples[0].data().unwrap().index, data1.index);
         assert_eq!(samples[1].data().unwrap().index, data2.index);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -4129,6 +4140,9 @@ pub(crate) mod tests {
         assert_eq!(sample2[0].sample_info().sample_rank, 0);
         assert_eq!(sample1[0].data().unwrap().index, data1.index);
         assert_eq!(sample2[0].data().unwrap().index, data1.index);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -4247,6 +4261,9 @@ pub(crate) mod tests {
             &[InstanceStateKind::ANY_INSTANCE_STATE],
         );
         assert!(second_take.is_err());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -4366,6 +4383,9 @@ pub(crate) mod tests {
             &[InstanceStateKind::ANY_INSTANCE_STATE],
         );
         assert!(second_take.is_err());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -4469,6 +4489,9 @@ pub(crate) mod tests {
         assert_eq!(sample1.sample_info().sample_rank, 0);
         assert_eq!(sample0.data().unwrap().index, data1.index);
         assert_eq!(sample1.data().unwrap().index, data2.index);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -4572,6 +4595,9 @@ pub(crate) mod tests {
         assert_eq!(sample1.sample_info().sample_rank, 0);
         assert_eq!(sample0.data().unwrap().index, data1.index);
         assert_eq!(sample1.data().unwrap().index, data2.index);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     struct SubKeyListener {
@@ -4751,6 +4777,9 @@ pub(crate) mod tests {
         for sample in &samples {
             assert_eq!(sample.sample_info().instance_handle, instance_handle_1);
         }
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -4896,6 +4925,9 @@ pub(crate) mod tests {
             .expect("Failed to take remaining instance samples");
 
         assert_eq!(remaining_samples.len(), 2);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -4976,6 +5008,9 @@ pub(crate) mod tests {
 
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), DdsError::BadParameter);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -5091,6 +5126,9 @@ pub(crate) mod tests {
 
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), DdsError::NoData);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -5221,6 +5259,9 @@ pub(crate) mod tests {
             .expect("Failed to read read samples");
 
         assert_eq!(read_samples.len(), 2);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -5362,6 +5403,9 @@ pub(crate) mod tests {
         let samples = result.unwrap();
         assert_eq!(samples.len(), 1);
         assert_eq!(*samples[0].data().unwrap().serialize().unwrap(), *payload3);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -5476,6 +5520,9 @@ pub(crate) mod tests {
 
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), DdsError::NoData);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -5624,6 +5671,9 @@ pub(crate) mod tests {
 
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), DdsError::NoData);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     // take_next_instance must advance past an instance whose samples were already
@@ -5748,6 +5798,9 @@ pub(crate) mod tests {
         assert_ne!(first_index, second_index);
         assert!(first_index == 0 || first_index == 1);
         assert!(second_index == 0 || second_index == 1);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -5866,6 +5919,9 @@ pub(crate) mod tests {
         let info = no_writers[0].sample_info();
         assert!(!info.valid_data);
         assert_eq!(info.instance_state, InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -5999,6 +6055,9 @@ pub(crate) mod tests {
         let samples = result.unwrap();
         assert_eq!(samples.len(), 1);
         assert_eq!(*samples[0].data().unwrap().serialize().unwrap(), *payload2);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -6147,6 +6206,9 @@ pub(crate) mod tests {
         let samples = result.unwrap();
         assert_eq!(samples.len(), 1); // 1 sample of the third instance
         assert_eq!(*samples[0].data().unwrap().serialize().unwrap(), *payload4);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -6261,6 +6323,9 @@ pub(crate) mod tests {
         );
 
         assert_eq!(result.unwrap_err(), DdsError::NoData); // In current implementation, compares by instance_handle size..
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -6381,6 +6446,9 @@ pub(crate) mod tests {
         assert!(result.is_ok());
         let samples = result.unwrap();
         assert_eq!(samples.len(), 1); // Return only 1 out of 2
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
     //
 
@@ -6439,6 +6507,9 @@ pub(crate) mod tests {
         reader.delete_contained_entities().unwrap();
 
         assert!(reader.get_readconditions().unwrap().is_empty());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -6479,16 +6550,22 @@ pub(crate) mod tests {
             let rtps_reader = reader.get_rtps_reader();
             assert!(rtps_reader.is_ok());
         }
-        let mut dcps_bridge = domain_participant.get_dcps_bridge().unwrap();
-        let dcps_bridge = dcps_bridge.as_mut().unwrap();
-        dcps_bridge
-            .delete_rtps_reader(
-                "hello_world".to_string(),
-                reader.get_instance_handle().unwrap().to_guid().entity_id(),
-            )
-            .unwrap();
+        {
+            let mut dcps_bridge = domain_participant.get_dcps_bridge().unwrap();
+            let dcps_bridge = dcps_bridge.as_mut().unwrap();
+            dcps_bridge
+                .delete_rtps_reader(
+                    "hello_world".to_string(),
+                    reader.get_instance_handle().unwrap().to_guid().entity_id(),
+                )
+                .unwrap();
+        }
         let rtps_reader = reader.get_rtps_reader();
         assert!(rtps_reader.is_err());
+
+        drop(reader);
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -6569,5 +6646,150 @@ pub(crate) mod tests {
             .unwrap();
 
         std::thread::sleep(std::time::Duration::from_secs(10));
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
+    }
+
+    #[test]
+    fn volatile_late_joiner_receives_gap_for_open_set_member() {
+        // A volatile reader that joins mid coherent set must never receive a DATA whose
+        // set start was GAPped. The writer GAPs those members instead, so on the reader
+        // side the open-set member (sn5) arrives as an irrelevant (GAP) change, not DATA,
+        // and nothing is buffered for the incomplete set.
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "volatile_coherent_gap",
+                "HelloWorldType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        // The publisher must offer the same coherent presentation as the subscriber requests,
+        // otherwise presentation QoS is incompatible and the endpoints never match.
+        let publisher_qos = PublisherQos {
+            presentation: PresentationQosPolicy {
+                access_scope: PresentationQosAccessScopeKind::Topic,
+                coherent_access: true,
+                ordered_access: false,
+            },
+            ..Default::default()
+        };
+        let publisher =
+            participant.create_publisher(publisher_qos, None, StatusMask::default()).unwrap();
+
+        let writer_qos = DataWriterQos {
+            durability: DurabilityQosPolicy { kind: DurabilityQosPolicyKind::Volatile },
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(&topic, writer_qos, None, StatusMask::default())
+            .unwrap();
+
+        // Open a coherent set and write sn1..4 before any reader has matched.
+        publisher.begin_coherent_changes().unwrap();
+        for index in 0..4 {
+            let data = HelloWorld { index, message: "member".to_string() };
+            writer.write(&data, InstanceHandle::NIL).unwrap();
+        }
+
+        // A coherent subscriber so the reader buffers set members when it does receive DATA.
+        let subscriber_qos = SubscriberQos {
+            presentation: PresentationQosPolicy {
+                access_scope: PresentationQosAccessScopeKind::Topic,
+                coherent_access: true,
+                ordered_access: false,
+            },
+            ..Default::default()
+        };
+        let subscriber =
+            participant.create_subscriber(subscriber_qos, None, StatusMask::default()).unwrap();
+        let reader_qos = DataReaderQos {
+            durability: DurabilityQosPolicy { kind: DurabilityQosPolicyKind::Volatile },
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let data_reader = subscriber
+            .create_datareader::<HelloWorld>(&topic, reader_qos, None, StatusMask::default())
+            .unwrap();
+
+        // Wait for the reader to late-join: its match horizon is fixed at sn4.
+        let wait_set = WaitSet::new();
+        let condition = writer.get_statuscondition().unwrap().clone();
+        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
+        wait_set.attach_condition(condition.clone()).unwrap();
+        wait_set
+            .wait(Duration::from_seconds(10))
+            .expect("timed out waiting for PUBLICATION_MATCHED");
+        wait_set.detach_condition(condition).unwrap();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
+        condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
+        wait_set.attach_condition(condition.clone()).unwrap();
+        wait_set
+            .wait(Duration::from_seconds(10))
+            .expect("timed out waiting for SUBSCRIPTION_MATCHED");
+        wait_set.detach_condition(condition).unwrap();
+
+        // Write one more member (sn5) while the set is still open.
+        let data = HelloWorld { index: 4, message: "member".to_string() };
+        writer.write(&data, InstanceHandle::NIL).unwrap();
+
+        let writer_guid = writer.guid();
+        let rtps_reader = data_reader.get_rtps_reader().unwrap();
+        let stateful_reader =
+            rtps_reader.as_any().downcast_ref::<StatefulReader>().expect("stateful reader");
+        let writer_proxies = stateful_reader.writer_proxies();
+        let reader_cache = rtps_reader.reader_cache();
+
+        // Poll until sn5 has been received on the reader side (as DATA or GAP).
+        let sn5 = SequenceNumber::from_i64(5);
+        let mut is_relevant = None;
+        for _ in 0..100 {
+            is_relevant = writer_proxies
+                .lock()
+                .unwrap()
+                .first()
+                .and_then(|wp| wp.received_change_is_relevant(sn5));
+            if is_relevant.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        // sn5 must arrive as an irrelevant (GAP) change, and no member of the incomplete
+        // set may be buffered on the reader.
+        assert_eq!(is_relevant, Some(false), "sn5 should be received via GAP, not DATA");
+        assert_eq!(
+            reader_cache.lock().unwrap().pending_coherent_len(writer_guid),
+            0,
+            "no member of the GAPped set should be buffered"
+        );
+
+        publisher.end_coherent_changes().unwrap();
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 }

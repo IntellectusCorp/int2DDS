@@ -406,7 +406,6 @@ INT2DDS_RET_OK                      = 0    // Success
 INT2DDS_RET_ERROR                   = 1    // General error
 INT2DDS_RET_TIMEOUT                 = 2    // Timeout
 INT2DDS_RET_UNSUPPORTED             = 3    // Unsupported operation
-INT2DDS_RET_BAD_ALLOC               = 10   // Memory allocation failure
 INT2DDS_RET_INVALID_ARGUMENT        = 11   // Invalid argument
 INT2DDS_RET_ALREADY_DELETED         = 20   // Entity already deleted
 INT2DDS_RET_NOT_ENABLED             = 21   // Entity not enabled
@@ -417,6 +416,7 @@ INT2DDS_RET_OUT_OF_RESOURCES        = 25   // Out of resources
 INT2DDS_RET_ILLEGAL_OPERATION       = 26   // Illegal operation
 INT2DDS_RET_NO_DATA                 = 27   // No data available
 INT2DDS_RET_NULL_POINTER            = 100  // Null pointer
+INT2DDS_RET_BUFFER_TOO_SMALL        = 101  // Output buffer too small
 INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND = 200  // Dynamic field not found
 INT2DDS_RET_DYNAMIC_TYPE_MISMATCH   = 201  // Dynamic type mismatch
 INT2DDS_RET_DYNAMIC_UNSUPPORTED_TYPE = 202 // Dynamic unsupported type
@@ -586,36 +586,22 @@ int2dds_type_object_destroy(type_obj);
 
 ## Examples
 
-See the [examples](examples/) directory for complete C examples:
+The core repo ships minimal C hello_world examples in the [examples](examples/) directory:
 
-### hello_world
-- `hello_world/hello_world_publisher.c` - Basic publisher example
-- `hello_world/hello_world_subscriber.c` - Basic subscriber example
-- `hello_world/waitset_publisher.c` - Using WaitSet for publisher notification
-- `hello_world/waitset_subscriber.c` - Using WaitSet for data notification
-- `hello_world/keyed_publisher.c` - Keyed data with instance management
-- `hello_world/keyed_subscriber.c` - Receiving keyed data
+- `hello_world/hello_world_pub.c` - Basic publisher example
+- `hello_world/hello_world_sub.c` - Basic subscriber example
 
-### listener
-- `listener/listener_publisher.c` - Publisher with listener callbacks
-- `listener/listener_subscriber.c` - Subscriber with listener callbacks
-
-### multiple_participant
-- `multiple_participant/multi_pub_sub.c` - Multiple participants example
-- `multiple_participant/multi_participant_1.c` - Multi-participant test 1
-- `multiple_participant/multi_participant_2.c` - Multi-participant test 2
-
-### xtypes (Dynamic Type Discovery)
-- `xtypes/dynamic_type_publisher.c` - Publishes typed data with TypeObject metadata
-- `xtypes/dynamic_type_subscriber.c` - Discovers type at runtime, decodes fields dynamically
-
-Build examples:
+Build them:
 ```bash
 cd ffi/examples
 mkdir build && cd build
 cmake ..
 cmake --build .
 ```
+
+The full C example suite (listener, waitset, keyed data, multiple participants,
+XTypes, QoS profiles) lives in the separate
+[int2DDS-examples](https://github.com/IntellectusCorp/int2DDS-examples) repository.
 
 ## Usage Example
 
