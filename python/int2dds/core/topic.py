@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Generic, TypeVar
 
-from int2dds._ffi import ffi, lib
+from int2dds._ffi import CData, ffi, lib
 from int2dds.cdr.writer import Extensibility
 from int2dds.core.conditions import StatusCondition
 from int2dds.exceptions import check_ret
@@ -133,6 +133,46 @@ def _build_type_info(type_name: str, extensibility: Extensibility, fields: list)
     return ti
 
 
+def _apply_topic_qos(handle: CData, qos: "TopicQos") -> None:
+    """Apply TopicQos policies onto a native topic QoS handle.
+
+    Shared by topic creation and set_qos. All TopicQos policies are optional and
+    applied only when set.
+    """
+    if qos.reliability is not None:
+        check_ret(lib.int2dds_topic_qos_set_reliability(
+            handle, qos.reliability._kind_int, qos.reliability._max_blocking_time_ns))
+    if qos.durability is not None:
+        check_ret(lib.int2dds_topic_qos_set_durability(handle, qos.durability._kind_int))
+    if qos.history is not None:
+        check_ret(lib.int2dds_topic_qos_set_history(
+            handle, qos.history._kind_int, qos.history.depth))
+    if qos.deadline is not None:
+        check_ret(lib.int2dds_topic_qos_set_deadline(handle, qos.deadline._period_ns))
+    if qos.liveliness is not None:
+        check_ret(lib.int2dds_topic_qos_set_liveliness(
+            handle, qos.liveliness._kind_int, qos.liveliness._lease_duration_ns))
+    if qos.destination_order is not None:
+        check_ret(lib.int2dds_topic_qos_set_destination_order(
+            handle, qos.destination_order._kind_int))
+    if qos.resource_limits is not None:
+        check_ret(lib.int2dds_topic_qos_set_resource_limits(
+            handle,
+            qos.resource_limits.max_samples,
+            qos.resource_limits.max_instances,
+            qos.resource_limits.max_samples_per_instance))
+    if qos.transport_priority is not None:
+        check_ret(lib.int2dds_topic_qos_set_transport_priority(
+            handle, qos.transport_priority.value))
+    if qos.lifespan is not None:
+        check_ret(lib.int2dds_topic_qos_set_lifespan(handle, qos.lifespan._duration_ns))
+    if qos.ownership is not None:
+        check_ret(lib.int2dds_topic_qos_set_ownership(handle, qos.ownership._kind_int))
+    if qos.data_representation is not None:
+        check_ret(lib.int2dds_topic_qos_set_data_representation(
+            handle, qos.data_representation._kind_int))
+
+
 class Topic(Generic[T]):
     """
     Topic - associates a name with a data type for publish/subscribe.
@@ -177,42 +217,7 @@ class Topic(Generic[T]):
             qos_handle_ptr = ffi.new("Int2DdsTopicQos **")
             check_ret(lib.int2dds_topic_qos_create_default(qos_handle_ptr))
             qos_handle = qos_handle_ptr[0]
-            if qos.reliability is not None:
-                check_ret(lib.int2dds_topic_qos_set_reliability(
-                    qos_handle, qos.reliability._kind_int, qos.reliability._max_blocking_time_ns))
-            if qos.durability is not None:
-                check_ret(lib.int2dds_topic_qos_set_durability(
-                    qos_handle, qos.durability._kind_int))
-            if qos.history is not None:
-                check_ret(lib.int2dds_topic_qos_set_history(
-                    qos_handle, qos.history._kind_int, qos.history.depth))
-            if qos.deadline is not None:
-                check_ret(lib.int2dds_topic_qos_set_deadline(
-                    qos_handle, qos.deadline._period_ns))
-            if qos.liveliness is not None:
-                check_ret(lib.int2dds_topic_qos_set_liveliness(
-                    qos_handle, qos.liveliness._kind_int, qos.liveliness._lease_duration_ns))
-            if qos.destination_order is not None:
-                check_ret(lib.int2dds_topic_qos_set_destination_order(
-                    qos_handle, qos.destination_order._kind_int))
-            if qos.resource_limits is not None:
-                check_ret(lib.int2dds_topic_qos_set_resource_limits(
-                    qos_handle,
-                    qos.resource_limits.max_samples,
-                    qos.resource_limits.max_instances,
-                    qos.resource_limits.max_samples_per_instance))
-            if qos.transport_priority is not None:
-                check_ret(lib.int2dds_topic_qos_set_transport_priority(
-                    qos_handle, qos.transport_priority.value))
-            if qos.lifespan is not None:
-                check_ret(lib.int2dds_topic_qos_set_lifespan(
-                    qos_handle, qos.lifespan._duration_ns))
-            if qos.ownership is not None:
-                check_ret(lib.int2dds_topic_qos_set_ownership(
-                    qos_handle, qos.ownership._kind_int))
-            if qos.data_representation is not None:
-                check_ret(lib.int2dds_topic_qos_set_data_representation(
-                    qos_handle, qos.data_representation._kind_int))
+            _apply_topic_qos(qos_handle, qos)
             qos_ptr = qos_handle
 
         topic_ptr = ffi.new("Int2DdsTopic **")
@@ -417,6 +422,22 @@ class Topic(Generic[T]):
         mask_out = ffi.new("uint32_t *")
         check_ret(lib.int2dds_topic_get_status_changes(self._handle, mask_out))
         return mask_out[0]
+
+    def set_qos(self, qos: "TopicQos") -> None:
+        """Set this topic's QoS.
+
+        The given policies are merged onto the topic's current QoS (fetched as the
+        base), then applied. Changing an immutable policy to a different value is
+        rejected by the core.
+        """
+        qos_ptr = ffi.new("Int2DdsTopicQos **")
+        check_ret(lib.int2dds_topic_get_qos(self._handle, qos_ptr))
+        handle = qos_ptr[0]
+        try:
+            _apply_topic_qos(handle, qos)
+            check_ret(lib.int2dds_topic_set_qos(self._handle, handle))
+        finally:
+            lib.int2dds_topic_qos_destroy(handle)
 
     def close(self) -> None:
         """Delete the topic."""

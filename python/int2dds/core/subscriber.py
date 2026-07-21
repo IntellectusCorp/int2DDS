@@ -56,6 +56,53 @@ class Sample(Generic[T]):
     instance_handle: bytes | None = None
 
 
+def _apply_datareader_qos(handle: CData, qos: "DataReaderQos") -> None:
+    """Apply DataReaderQos policies onto a native reader QoS handle.
+
+    Shared by reader creation and set_qos. reliability/durability/history are always
+    present (dataclass defaults) and applied unconditionally; the rest are optional
+    and applied only when set.
+    """
+    check_ret(lib.int2dds_datareader_qos_set_reliability(handle, qos.reliability._kind_int))
+    check_ret(lib.int2dds_datareader_qos_set_durability(handle, qos.durability._kind_int))
+    check_ret(lib.int2dds_datareader_qos_set_history(
+        handle, qos.history._kind_int, qos.history.depth))
+    if qos.ownership is not None:
+        check_ret(lib.int2dds_datareader_qos_set_ownership(handle, qos.ownership._kind_int))
+    if qos.resource_limits is not None:
+        check_ret(lib.int2dds_datareader_qos_set_resource_limits(
+            handle,
+            qos.resource_limits.max_samples,
+            qos.resource_limits.max_instances,
+            qos.resource_limits.max_samples_per_instance))
+    if qos.destination_order is not None:
+        check_ret(lib.int2dds_datareader_qos_set_destination_order(
+            handle, qos.destination_order._kind_int))
+    if qos.time_based_filter is not None:
+        check_ret(lib.int2dds_datareader_qos_set_time_based_filter(
+            handle, qos.time_based_filter._minimum_separation_ns))
+    if qos.latency_budget is not None:
+        check_ret(lib.int2dds_datareader_qos_set_latency_budget(
+            handle, qos.latency_budget._duration_ns))
+    if qos.user_data is not None and qos.user_data.data:
+        data_ptr = ffi.from_buffer(qos.user_data.data)
+        check_ret(lib.int2dds_datareader_qos_set_user_data(
+            handle, data_ptr, len(qos.user_data.data)))
+    if qos.reader_data_lifecycle is not None:
+        check_ret(lib.int2dds_datareader_qos_set_reader_data_lifecycle(
+            handle,
+            qos.reader_data_lifecycle._autopurge_nowriter_ns,
+            qos.reader_data_lifecycle._autopurge_disposed_ns))
+    if qos.data_representation is not None:
+        check_ret(lib.int2dds_datareader_qos_set_data_representation(
+            handle, qos.data_representation._kind_int))
+    if qos.deadline is not None:
+        check_ret(lib.int2dds_datareader_qos_set_deadline(handle, qos.deadline._period_ns))
+    if qos.liveliness is not None:
+        check_ret(lib.int2dds_datareader_qos_set_liveliness(
+            handle, qos.liveliness._kind_int, qos.liveliness._lease_duration_ns))
+
+
 class Subscriber:
     """
     Subscriber - groups DataReaders for coherent subscription.
@@ -138,6 +185,25 @@ class Subscriber:
         check_ret(lib.int2dds_subscriber_get_status_changes(self._handle, mask_out))
         return mask_out[0]
 
+    def set_qos(self, qos: "SubscriberQos") -> None:
+        """Set this subscriber's QoS.
+
+        The current QoS is used as the merge base, then the ``partition`` policy
+        from ``qos`` (the only mutable SubscriberQos policy) is applied on top.
+        """
+        qos_ptr = ffi.new("Int2DdsSubscriberQos **")
+        check_ret(lib.int2dds_subscriber_get_qos(self._handle, qos_ptr))
+        handle = qos_ptr[0]
+        try:
+            if qos is not None and qos.partition is not None and qos.partition.names:
+                c_strings = [ffi.new("char[]", n.encode()) for n in qos.partition.names]
+                c_array = ffi.new("char*[]", c_strings)
+                check_ret(lib.int2dds_subscriber_qos_set_partition(
+                    handle, c_array, len(qos.partition.names)))
+            check_ret(lib.int2dds_subscriber_set_qos(self._handle, handle))
+        finally:
+            lib.int2dds_subscriber_qos_destroy(handle)
+
     def close(self) -> None:
         """Delete the subscriber."""
         if not self._closed and self._handle is not None:
@@ -201,59 +267,7 @@ class DataReader(Generic[T]):
             qos_handle_ptr = ffi.new("Int2DdsDataReaderQos **")
             check_ret(lib.int2dds_datareader_qos_create_default(qos_handle_ptr))
             self._qos_handle = qos_handle_ptr[0]
-
-            # Apply QoS settings
-            check_ret(
-                lib.int2dds_datareader_qos_set_reliability(
-                    self._qos_handle, qos.reliability._kind_int
-                )
-            )
-            check_ret(
-                lib.int2dds_datareader_qos_set_durability(
-                    self._qos_handle, qos.durability._kind_int
-                )
-            )
-            check_ret(
-                lib.int2dds_datareader_qos_set_history(
-                    self._qos_handle, qos.history._kind_int, qos.history.depth
-                )
-            )
-            if qos.ownership is not None:
-                check_ret(lib.int2dds_datareader_qos_set_ownership(
-                    self._qos_handle, qos.ownership._kind_int))
-            if qos.resource_limits is not None:
-                check_ret(lib.int2dds_datareader_qos_set_resource_limits(
-                    self._qos_handle,
-                    qos.resource_limits.max_samples,
-                    qos.resource_limits.max_instances,
-                    qos.resource_limits.max_samples_per_instance))
-            if qos.destination_order is not None:
-                check_ret(lib.int2dds_datareader_qos_set_destination_order(
-                    self._qos_handle, qos.destination_order._kind_int))
-            if qos.time_based_filter is not None:
-                check_ret(lib.int2dds_datareader_qos_set_time_based_filter(
-                    self._qos_handle, qos.time_based_filter._minimum_separation_ns))
-            if qos.latency_budget is not None:
-                check_ret(lib.int2dds_datareader_qos_set_latency_budget(
-                    self._qos_handle, qos.latency_budget._duration_ns))
-            if qos.user_data is not None and qos.user_data.data:
-                data_ptr = ffi.from_buffer(qos.user_data.data)
-                check_ret(lib.int2dds_datareader_qos_set_user_data(
-                    self._qos_handle, data_ptr, len(qos.user_data.data)))
-            if qos.reader_data_lifecycle is not None:
-                check_ret(lib.int2dds_datareader_qos_set_reader_data_lifecycle(
-                    self._qos_handle,
-                    qos.reader_data_lifecycle._autopurge_nowriter_ns,
-                    qos.reader_data_lifecycle._autopurge_disposed_ns))
-            if qos.data_representation is not None:
-                check_ret(lib.int2dds_datareader_qos_set_data_representation(
-                    self._qos_handle, qos.data_representation._kind_int))
-            if qos.deadline is not None:
-                check_ret(lib.int2dds_datareader_qos_set_deadline(
-                    self._qos_handle, qos.deadline._period_ns))
-            if qos.liveliness is not None:
-                check_ret(lib.int2dds_datareader_qos_set_liveliness(
-                    self._qos_handle, qos.liveliness._kind_int, qos.liveliness._lease_duration_ns))
+            _apply_datareader_qos(self._qos_handle, qos)
             qos_ptr = self._qos_handle
 
         reader_ptr = ffi.new("Int2DdsDataReader **")
@@ -723,6 +737,22 @@ class DataReader(Generic[T]):
             durability=Durability(kind=DurabilityKind(dur_kind[0]).name),
             history=History(kind=HistoryKind(hist_kind[0]).name, depth=depth[0]),
         )
+
+    def set_qos(self, qos: "DataReaderQos") -> None:
+        """Set this reader's QoS.
+
+        The given policies are merged onto the reader's current QoS (fetched as the
+        base), then applied. Changing an immutable policy to a different value is
+        rejected by the core.
+        """
+        qos_ptr = ffi.new("Int2DdsDataReaderQos **")
+        check_ret(lib.int2dds_datareader_get_qos(self._handle, qos_ptr))
+        handle = qos_ptr[0]
+        try:
+            _apply_datareader_qos(handle, qos)
+            check_ret(lib.int2dds_datareader_set_qos(self._handle, handle))
+        finally:
+            lib.int2dds_datareader_qos_destroy(handle)
 
     def get_liveliness_changed_status(self) -> dict:
         """Get liveliness changed status.
