@@ -222,7 +222,23 @@ pub unsafe extern "C" fn int2dds_readcondition_delete(
     if condition.is_null() {
         return INT2DDS_RET_NULL_POINTER;
     }
-    let _ = Box::from_raw(condition);
+    // Take ownership; the box frees on drop at the end of every path below.
+    let boxed = Box::from_raw(condition);
+    // Best-effort: detach from the owning reader so the core drops its retained Arc.
+    // Without this the ReadCondition lives for the reader's lifetime. An expired reader
+    // Weak means the reader (and its condition list) is already gone — nothing to detach.
+    match &boxed.kind {
+        ReadConditionKind::Read(rc) => {
+            if let Ok(reader) = rc.get_datareader::<crate::data::Int2DdsData>() {
+                let _ = reader.delete_readcondition(rc.clone());
+            }
+        }
+        ReadConditionKind::Query(qc) => {
+            if let Ok(reader) = qc.get_datareader::<crate::data::Int2DdsData>() {
+                let _ = reader.delete_readcondition(qc.clone());
+            }
+        }
+    }
     INT2DDS_RET_OK
 }
 
