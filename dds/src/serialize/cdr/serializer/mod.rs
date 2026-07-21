@@ -479,8 +479,8 @@ mod cdr_struct_tests {
         #[test]
         fn test_bitmask_combined_flags() {
             let mut value = MyBitmaskValue::empty();
-            value.set(MyBitmaskValue::FLAG0);
-            value.set(MyBitmaskValue::FLAG7);
+            value.insert(MyBitmaskValue::FLAG0);
+            value.insert(MyBitmaskValue::FLAG7);
             assert!(value.contains(MyBitmaskValue::FLAG0));
             assert!(!value.contains(MyBitmaskValue::FLAG1));
             assert!(value.contains(MyBitmaskValue::FLAG7));
@@ -508,6 +508,39 @@ mod cdr_struct_tests {
             let masked = combined & MyBitmaskValue::from(MyBitmask::FLAG0);
             assert!(masked.contains(MyBitmaskValue::FLAG0));
             assert!(!masked.contains(MyBitmaskValue::FLAG1));
+        }
+
+        #[test]
+        fn test_bitmask_insert_remove() {
+            // Spec §7.2.4.3.6: the companion value provides insert/remove.
+            let mut value = MyBitmaskValue::empty();
+            value.insert(MyBitmaskValue::FLAG0);
+            value.insert(MyBitmaskValue::FLAG7);
+            assert!(value.contains(MyBitmaskValue::FLAG0));
+            assert!(value.contains(MyBitmaskValue::FLAG7));
+            value.remove(MyBitmaskValue::FLAG0);
+            assert!(!value.contains(MyBitmaskValue::FLAG0));
+            assert!(value.contains(MyBitmaskValue::FLAG7));
+        }
+
+        #[test]
+        fn test_bitmask_from_bits() {
+            // Spec §7.2.4.3.6: from_bits returns None for a bit with no declared flag.
+            let ok = MyBitmaskValue::from_bits(0b1000_0011);
+            assert_eq!(ok, Some(MyBitmaskValue(0b1000_0011)));
+            // bit 2 corresponds to no declared flag (positions are 0, 1, 7).
+            assert_eq!(MyBitmaskValue::from_bits(0b0000_0100), None);
+        }
+
+        #[test]
+        fn test_bitmask_bitxor() {
+            // Spec §7.2.4.3.6: the companion value implements BitXor.
+            let a = MyBitmaskValue::from(MyBitmask::FLAG0);
+            let b = MyBitmaskValue::from(MyBitmask::FLAG1);
+            let x = a ^ b;
+            assert_eq!(x.bits(), 0b11);
+            let y = x ^ b;
+            assert_eq!(y.bits(), 0b01);
         }
 
         #[test]
