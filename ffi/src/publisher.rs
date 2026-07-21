@@ -850,8 +850,9 @@ pub unsafe extern "C" fn int2dds_publisher_delete_contained_entities(
 /// - `writer`: A valid datawriter
 /// - `data`: Pointer to the CDR-serialized byte buffer
 /// - `data_len`: Length of the serialized data in bytes
-/// - `key`: Pointer to the serialized key bytes (can be null if no key)
-/// - `key_len`: Length of the key bytes
+/// - `key`: Ignored, retained for ABI compatibility. The instance key and KeyHash are
+///   derived canonically from `data` (the full serialized sample); pass null/0.
+/// - `key_len`: Ignored, retained for ABI compatibility
 ///
 /// # Safety
 /// - `writer` must be a valid datawriter
@@ -985,8 +986,9 @@ pub unsafe extern "C" fn int2dds_abort_serialized_write(
 /// - `writer`: A valid datawriter
 /// - `data`: Pointer to the CDR-serialized byte buffer
 /// - `data_len`: Length of the serialized data in bytes
-/// - `key`: Pointer to the serialized key bytes (can be null if no key)
-/// - `key_len`: Length of the key bytes
+/// - `key`: Ignored, retained for ABI compatibility. The instance key and KeyHash are
+///   derived canonically from `data` (the full serialized sample); pass null/0.
+/// - `key_len`: Ignored, retained for ABI compatibility
 /// - `timestamp_sec`: Seconds component of the source timestamp
 /// - `timestamp_nanosec`: Nanoseconds component of the source timestamp
 ///
@@ -1118,7 +1120,11 @@ pub unsafe extern "C" fn int2dds_datawriter_register_instance(
     INT2DDS_RET_OK
 }
 
-/// Dispose an instance with serialized key bytes
+/// Dispose an instance from the full serialized sample. `key`/`key_len` carry the
+/// serialized sample bytes (not a pre-serialized key); the core derives the canonical
+/// KeyHash from them. A keyed topic must have been created with a full TypeObject
+/// (int2dds_create_topic_with_type_info / _with_field_descriptors), otherwise this
+/// returns INT2DDS_RET_PRECONDITION_NOT_MET.
 ///
 /// # Safety
 /// - `writer` must be a valid datawriter
@@ -1143,7 +1149,11 @@ pub unsafe extern "C" fn int2dds_datawriter_dispose(
     INT2DDS_RET_OK
 }
 
-/// Unregister an instance with serialized key bytes
+/// Unregister an instance from the full serialized sample. `key`/`key_len` carry the
+/// serialized sample bytes (not a pre-serialized key); the core derives the canonical
+/// KeyHash from them. A keyed topic must have been created with a full TypeObject
+/// (int2dds_create_topic_with_type_info / _with_field_descriptors), otherwise this
+/// returns INT2DDS_RET_PRECONDITION_NOT_MET.
 ///
 /// # Safety
 /// - `writer` must be a valid datawriter
@@ -1168,7 +1178,11 @@ pub unsafe extern "C" fn int2dds_datawriter_unregister_instance(
     INT2DDS_RET_OK
 }
 
-/// Lookup an instance handle from serialized key bytes
+/// Lookup an instance handle from the full serialized sample. `key`/`key_len` carry the
+/// serialized sample bytes (not a pre-serialized key); the core derives the canonical
+/// KeyHash from them. A keyed topic must have been created with a full TypeObject
+/// (int2dds_create_topic_with_type_info / _with_field_descriptors), otherwise this
+/// returns INT2DDS_RET_PRECONDITION_NOT_MET.
 ///
 /// # Safety
 /// - `writer` must be a valid datawriter

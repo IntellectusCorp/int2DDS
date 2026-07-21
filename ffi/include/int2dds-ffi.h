@@ -2326,8 +2326,9 @@ Int2DdsRet int2dds_publisher_delete_contained_entities(const struct Int2DdsPubli
  * - `writer`: A valid datawriter
  * - `data`: Pointer to the CDR-serialized byte buffer
  * - `data_len`: Length of the serialized data in bytes
- * - `key`: Pointer to the serialized key bytes (can be null if no key)
- * - `key_len`: Length of the key bytes
+ * - `key`: Ignored, retained for ABI compatibility. The instance key and KeyHash are
+ *   derived canonically from `data` (the full serialized sample); pass null/0.
+ * - `key_len`: Ignored, retained for ABI compatibility
  *
  * # Safety
  * - `writer` must be a valid datawriter
@@ -2379,8 +2380,9 @@ Int2DdsRet int2dds_abort_serialized_write(struct Int2DdsSerializedWriteLoan *loa
  * - `writer`: A valid datawriter
  * - `data`: Pointer to the CDR-serialized byte buffer
  * - `data_len`: Length of the serialized data in bytes
- * - `key`: Pointer to the serialized key bytes (can be null if no key)
- * - `key_len`: Length of the key bytes
+ * - `key`: Ignored, retained for ABI compatibility. The instance key and KeyHash are
+ *   derived canonically from `data` (the full serialized sample); pass null/0.
+ * - `key_len`: Ignored, retained for ABI compatibility
  * - `timestamp_sec`: Seconds component of the source timestamp
  * - `timestamp_nanosec`: Nanoseconds component of the source timestamp
  *
@@ -2433,7 +2435,11 @@ Int2DdsRet int2dds_datawriter_register_instance(const struct Int2DdsDataWriter *
                                                 uint8_t (*handle_out)[16]);
 
 /**
- * Dispose an instance with serialized key bytes
+ * Dispose an instance from the full serialized sample. `key`/`key_len` carry the
+ * serialized sample bytes (not a pre-serialized key); the core derives the canonical
+ * KeyHash from them. A keyed topic must have been created with a full TypeObject
+ * (int2dds_create_topic_with_type_info / _with_field_descriptors), otherwise this
+ * returns INT2DDS_RET_PRECONDITION_NOT_MET.
  *
  * # Safety
  * - `writer` must be a valid datawriter
@@ -2446,7 +2452,11 @@ Int2DdsRet int2dds_datawriter_dispose(const struct Int2DdsDataWriter *writer,
                                       const uint8_t (*handle)[16]);
 
 /**
- * Unregister an instance with serialized key bytes
+ * Unregister an instance from the full serialized sample. `key`/`key_len` carry the
+ * serialized sample bytes (not a pre-serialized key); the core derives the canonical
+ * KeyHash from them. A keyed topic must have been created with a full TypeObject
+ * (int2dds_create_topic_with_type_info / _with_field_descriptors), otherwise this
+ * returns INT2DDS_RET_PRECONDITION_NOT_MET.
  *
  * # Safety
  * - `writer` must be a valid datawriter
@@ -2459,7 +2469,11 @@ Int2DdsRet int2dds_datawriter_unregister_instance(const struct Int2DdsDataWriter
                                                   const uint8_t (*handle)[16]);
 
 /**
- * Lookup an instance handle from serialized key bytes
+ * Lookup an instance handle from the full serialized sample. `key`/`key_len` carry the
+ * serialized sample bytes (not a pre-serialized key); the core derives the canonical
+ * KeyHash from them. A keyed topic must have been created with a full TypeObject
+ * (int2dds_create_topic_with_type_info / _with_field_descriptors), otherwise this
+ * returns INT2DDS_RET_PRECONDITION_NOT_MET.
  *
  * # Safety
  * - `writer` must be a valid datawriter

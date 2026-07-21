@@ -167,6 +167,12 @@ pub unsafe extern "C" fn int2dds_create_topic_keyed(
         _ => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
+    // Keyed topics require a full TypeObject to compute a spec-conformant KeyHash; the
+    // flat key parser was removed (#334). Reject at creation rather than silently yielding
+    // NIL instance handles at register/dispose/unregister/lookup time.
+    if has_key {
+        return INT2DDS_RET_UNSUPPORTED;
+    }
     // Create RawTypeSupport
     let type_support =
         Arc::new(RawTypeSupport::new_with_key(dds_type_name_str.to_string(), ext_kind, has_key));
@@ -252,6 +258,12 @@ pub unsafe extern "C" fn int2dds_create_topic_with_profile(
         _ => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
+    // Keyed topics require a full TypeObject to compute a spec-conformant KeyHash; the
+    // flat key parser was removed (#334). Reject at creation rather than silently yielding
+    // NIL instance handles at register/dispose/unregister/lookup time.
+    if has_key {
+        return INT2DDS_RET_UNSUPPORTED;
+    }
     // Create RawTypeSupport
     let type_support =
         Arc::new(RawTypeSupport::new_with_key(dds_type_name_str.to_string(), ext_kind, has_key));
@@ -792,6 +804,11 @@ pub unsafe extern "C" fn int2dds_create_topic_keyed_with_key_fields(
     };
 
     // Name-only keyed topic (field_count == 0): equivalent to int2dds_create_topic_keyed.
+    // A keyed topic needs a full TypeObject for a spec-conformant KeyHash; reject rather
+    // than silently yield NIL instance handles.
+    if has_key {
+        return INT2DDS_RET_UNSUPPORTED;
+    }
     let type_support =
         RawTypeSupport::new_with_key(dds_type_name_str.to_string(), ext_kind, has_key);
 
@@ -872,6 +889,11 @@ pub unsafe extern "C" fn int2dds_create_topic_with_field_descriptors(
     // info) rather than a bogus empty-struct TypeObject that could turn a name match into
     // a structural mismatch against a real multi-field peer.
     if field_count == 0 {
+        // Name-only: no field structure => no TypeObject => no spec-conformant KeyHash.
+        // A keyed topic here would silently yield NIL instance handles, so reject it.
+        if has_key {
+            return INT2DDS_RET_UNSUPPORTED;
+        }
         let type_support =
             RawTypeSupport::new_with_key(dds_type_name_str.to_string(), ext_kind, has_key);
         return finalize_topic(

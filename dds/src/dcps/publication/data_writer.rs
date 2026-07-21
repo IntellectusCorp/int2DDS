@@ -1034,10 +1034,14 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         }
         let (key, handle) = self.key_info_from_serialized_sample(sample)?;
         if key.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some((key, handle)))
+            // is_compute_key_provided() is true but the key machinery produced nothing —
+            // a keyed topic whose key cannot be computed (e.g. a raw topic without a full
+            // TypeObject). Surface it instead of silently returning NIL, so keyed
+            // register/dispose/unregister/lookup fail loudly rather than acting on a bogus
+            // NIL instance.
+            return Err(DdsError::PreconditionNotMet);
         }
+        Ok(Some((key, handle)))
     }
 
     /// Register an instance from a full serialized sample.
