@@ -767,7 +767,7 @@ impl DomainParticipant {
             .as_ref()
             .ok_or(DdsError::Error("DomainParticipant is not properly initialized".to_string()))?;
         let publisher = Publisher::new(false, qos, listener, mask, handle, self_ref);
-        let qos = self.get_qos()?;
+        let qos = self.get_qos_arc()?;
         if let Ok(()) = self.is_enabled() {
             if qos.entity_factory.autoenable_created_entities {
                 publisher.enable()?;
@@ -983,7 +983,7 @@ impl DomainParticipant {
             .as_ref()
             .ok_or(DdsError::Error("DomainParticipant not properly initialized".to_string()))?;
         let subscriber = Subscriber::new(false, qos, listener, mask, handle, self_ref);
-        let qos = self.get_qos()?;
+        let qos = self.get_qos_arc()?;
         if let Ok(()) = self.is_enabled() {
             if qos.entity_factory.autoenable_created_entities {
                 subscriber.enable()?;
@@ -1613,7 +1613,7 @@ impl DomainParticipant {
             .as_ref()
             .ok_or(DdsError::Error("DomainParticipant not properly initialized".to_string()))?;
         let topic = Topic::new(false, topic_name, type_name, qos, listener, mask, handle, self_ref);
-        let qos = self.get_qos()?;
+        let qos = self.get_qos_arc()?;
         if let Ok(()) = self.is_enabled() {
             if qos.entity_factory.autoenable_created_entities {
                 topic.enable()?;
@@ -2633,7 +2633,7 @@ impl DomainParticipant {
             .ok_or(DdsError::Error("DomainParticipant not properly initialized".to_string()))?;
         let topic =
             Topic::new(false, topic_name, &type_name, qos, listener, mask, handle, self_ref);
-        let qos = self.get_qos()?;
+        let qos = self.get_qos_arc()?;
         if let Ok(()) = self.is_enabled() {
             if qos.entity_factory.autoenable_created_entities {
                 topic.enable()?;
@@ -3009,7 +3009,8 @@ impl DomainParticipant {
         for publisher in publishers {
             let writers = publisher.get_data_writers()?;
             for writer in writers {
-                if writer.get_qos()?.liveliness.kind == LivelinessQosPolicyKind::ManualByParticipant
+                if writer.get_qos_arc()?.liveliness.kind
+                    == LivelinessQosPolicyKind::ManualByParticipant
                 {
                     return Ok(true);
                 }
