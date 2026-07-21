@@ -1286,8 +1286,21 @@ fn type_kind_max_size(kind: &DynamicTypeKind) -> Option<(usize, usize)> {
             let size = stride.checked_mul(count - 1)?.checked_add(elem_size)?;
             Some((elem_align, size))
         }
-        // Unbounded string/wstring, sequences, maps, and anything else with no
-        // finite maximum serialized size => hash the actual bytes.
+        // Bounded sequence: `u32` length prefix (align 4) then up to `bound` packed
+        // (max-align-4) elements. Unbounded elements collapse the whole holder to MD5.
+        DynamicTypeKind::Sequence { element_type, bound: Some(n) } => {
+            let (elem_align, elem_size) = type_kind_max_size(element_type)?;
+            let n = *n as usize;
+            let size = if n == 0 {
+                4
+            } else {
+                let stride = align_up(elem_size, elem_align);
+                4usize.checked_add(stride.checked_mul(n - 1)?)?.checked_add(elem_size)?
+            };
+            Some((4, size))
+        }
+        // Unbounded string/wstring, unbounded sequences, maps, and anything else
+        // with no finite maximum serialized size => hash the actual bytes.
         _ => None,
     }
 }

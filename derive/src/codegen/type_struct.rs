@@ -436,6 +436,30 @@ fn generate_key_holder_field_max_size(
         };
     }
 
+    // A `Vec<T>` sequence field: bounded (`#[dds(bound = N)]`) with a finite-size
+    // element has a finite key-holder max (`u32` length + up to N packed elements),
+    // matching the dynamic path's bounded-sequence arm; unbounded or unbounded-element
+    // sequences have no finite maximum (`return None` => always MD5).
+    if let Some(elem_ty) = sequence_element_type(field_type) {
+        if let Some(bound) = cfg.bound {
+            return quote! {
+                {
+                    #[allow(unused_imports)]
+                    use #crate_path::serialize::KeyHolderFallback as _;
+                    let __kh = #crate_path::serialize::KeyHolderAccessor::<#elem_ty>(core::marker::PhantomData);
+                    let __elem = __kh.kh_max_size()?;
+                    let __stride = #crate_path::serialize::key_holder_align_up(__elem, __kh.kh_align());
+                    pos = #crate_path::serialize::key_holder_align_up(pos, 4);
+                    pos = pos.checked_add(4usize)?;
+                    if #bound > 0usize {
+                        pos = pos.checked_add(__stride.checked_mul(#bound - 1)?)?.checked_add(__elem)?;
+                    }
+                }
+            };
+        }
+        return quote! { return None; };
+    }
+
     match get_serialization_method(field_type) {
         SerializationMethod::String => {
             if let Some(bound) = cfg.bound {
@@ -485,6 +509,21 @@ fn generate_key_holder_field_max_size(
         // Sequences and arrays have no finite maximum key-holder size.
         _ => quote! { return None; },
     }
+}
+
+/// The element type `T` of a `Vec<T>` sequence field, or `None` for non-sequences.
+fn sequence_element_type(ty: &syn::Type) -> Option<&syn::Type> {
+    if let syn::Type::Path(p) = ty {
+        let seg = p.path.segments.last()?;
+        if seg.ident == "Vec" {
+            if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                if let Some(syn::GenericArgument::Type(t)) = args.args.first() {
+                    return Some(t);
+                }
+            }
+        }
+    }
+    None
 }
 
 fn builtin_topic_type_paths(
