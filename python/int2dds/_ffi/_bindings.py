@@ -364,6 +364,30 @@ ffi.cdef("""
         const Int2DdsDataReader *reader,
         Int2DdsDataReaderQos **qos_out
     );
+    Int2DdsRet int2dds_datawriter_set_qos(
+        const Int2DdsDataWriter *writer,
+        const Int2DdsDataWriterQos *qos
+    );
+    Int2DdsRet int2dds_datareader_set_qos(
+        const Int2DdsDataReader *reader,
+        const Int2DdsDataReaderQos *qos
+    );
+    Int2DdsRet int2dds_subscriber_get_qos(
+        const Int2DdsSubscriber *subscriber,
+        Int2DdsSubscriberQos **qos_out
+    );
+    Int2DdsRet int2dds_subscriber_set_qos(
+        const Int2DdsSubscriber *subscriber,
+        const Int2DdsSubscriberQos *qos
+    );
+    Int2DdsRet int2dds_topic_get_qos(
+        const Int2DdsTopic *topic,
+        Int2DdsTopicQos **qos_out
+    );
+    Int2DdsRet int2dds_topic_set_qos(
+        const Int2DdsTopic *topic,
+        const Int2DdsTopicQos *qos
+    );
     Int2DdsRet int2dds_datawriter_qos_get_reliability(
         const Int2DdsDataWriterQos *qos, int32_t *kind_out, int64_t *max_blocking_time_ns_out
     );
