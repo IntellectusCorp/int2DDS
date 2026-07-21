@@ -126,9 +126,14 @@ impl<'a> RustGen<'a> {
         }
     }
 
+    /// Whether a type contains a map that is emitted as `HashMap` (i.e. a non-float key).
+    /// Float-key maps are emitted as `Vec<(K, V)>` and need no `HashMap` import.
     fn type_uses_map(ty: &ResolvedType) -> bool {
         match ty {
-            ResolvedType::Map { .. } => true,
+            ResolvedType::Map { key, value, .. } => {
+                !matches!(**key, ResolvedType::F32 | ResolvedType::F64)
+                    || Self::type_uses_map(value)
+            }
             ResolvedType::Sequence { element, .. } | ResolvedType::Array { element, .. } => {
                 Self::type_uses_map(element)
             }
@@ -141,7 +146,10 @@ impl<'a> RustGen<'a> {
             return;
         }
         for c in &self.model.constants {
-            let name = naming::escape_keyword(&c.name, naming::TargetLang::Rust);
+            let name = naming::escape_keyword(
+                &naming::to_screaming_snake(&c.name),
+                naming::TargetLang::Rust,
+            );
             let ty = self.const_rust_type(&c.resolved_type);
             let val = self.const_rust_value(&c.value);
             self.line(&format!("pub const {}: {} = {};", name, ty, val));
@@ -274,9 +282,6 @@ impl<'a> RustGen<'a> {
     }
 
     fn default_discriminant(&self, u: &ResolvedUnion, repr: &str) -> String {
-        if matches!(repr, "i16" | "i32" | "i64") {
-            return "-1".to_string();
-        }
         let used: std::collections::HashSet<i64> = u
             .cases
             .iter()
@@ -287,16 +292,31 @@ impl<'a> RustGen<'a> {
                 ResolvedUnionLabel::Ident(_) => None,
             })
             .collect();
-        let mut candidate = 0i64;
-        while used.contains(&candidate) {
-            candidate += 1;
+
+        // Signed discriminators default to -1, or, when -1 is already a declared label,
+        // the negative value closest to zero that no label uses (spec §7.14.2).
+        // Unsigned discriminators use the value closest to zero that no label uses.
+        if matches!(repr, "i8" | "i16" | "i32" | "i64") {
+            let mut candidate = -1i64;
+            while used.contains(&candidate) {
+                candidate -= 1;
+            }
+            candidate.to_string()
+        } else {
+            let mut candidate = 0i64;
+            while used.contains(&candidate) {
+                candidate += 1;
+            }
+            candidate.to_string()
         }
-        candidate.to_string()
     }
 
     fn discriminant_repr(&self, ty: &ResolvedType) -> &'static str {
         match ty {
             ResolvedType::Bool => "u8",
+            // char, octet and uint8 are byte-width unsigned discriminators (spec Table 7.9).
+            ResolvedType::Char | ResolvedType::U8 | ResolvedType::UInt8 => "u8",
+            ResolvedType::I8 => "i8",
             ResolvedType::I16 => "i16",
             ResolvedType::U16 => "u16",
             ResolvedType::I32 | ResolvedType::Enum(_) => "i32",
@@ -351,11 +371,14 @@ impl<'a> RustGen<'a> {
         self.line(&format!("pub struct {} {{", rust_name));
         self.indent += 1;
 
-        // If there's a base type, emit parent field first
+        // If there's a base type, emit the inherited base field first. It is named `base`,
+        // or `base_` when a member also maps to `base` (spec §7.2.4.3.2).
         if let Some(base) = &s.base_type {
             let base_rust = naming::to_pascal_case(base.rsplit("::").next().unwrap_or(base));
+            let collides = s.members.iter().any(|m| naming::to_snake_case(&m.name) == "base");
+            let field_name = if collides { "base_" } else { "base" };
             self.line("#[dds(parent)]");
-            self.line(&format!("pub parent: {},", base_rust));
+            self.line(&format!("pub {}: {},", field_name, base_rust));
         }
 
         for m in &s.members {
@@ -455,16 +478,18 @@ impl<'a> RustGen<'a> {
             self.line(&format!("#[dds({})]", dds_attrs.join(", ")));
         }
 
-        let type_str = self.type_to_rust(&m.resolved_type);
-        let final_type = if m.is_external {
-            format!("Box<{}>", type_str)
-        } else if m.is_optional {
-            format!("Option<{}>", type_str)
-        } else {
-            type_str
-        };
+        // `@external` introduces `Box<T>`; `@optional` wraps the result in `Option<...>`.
+        // Both may apply, giving `Option<Box<T>>` (spec §7.2.4.4).
+        let mut final_type = self.type_to_rust(&m.resolved_type);
+        if m.is_external {
+            final_type = format!("Box<{}>", final_type);
+        }
+        if m.is_optional {
+            final_type = format!("Option<{}>", final_type);
+        }
 
-        let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Rust);
+        let field_name =
+            naming::escape_keyword(&naming::to_snake_case(&m.name), naming::TargetLang::Rust);
         self.line(&format!("pub {}: {},", field_name, final_type));
     }
 
@@ -492,7 +517,13 @@ impl<'a> RustGen<'a> {
                 format!("[{}; {}]", self.type_to_rust(element), size)
             }
             ResolvedType::Map { key, value, .. } => {
-                format!("HashMap<{}, {}>", self.type_to_rust(key), self.type_to_rust(value))
+                // A floating-point key does not implement Eq + Hash, so HashMap would not
+                // compile. Fall back to an insertion-ordered Vec of pairs (spec §7.2.4.2.5).
+                if matches!(**key, ResolvedType::F32 | ResolvedType::F64) {
+                    format!("Vec<({}, {})>", self.type_to_rust(key), self.type_to_rust(value))
+                } else {
+                    format!("HashMap<{}, {}>", self.type_to_rust(key), self.type_to_rust(value))
+                }
             }
             ResolvedType::Struct(name) | ResolvedType::Enum(name) => {
                 if self.is_external(name) {
@@ -802,8 +833,143 @@ mod tests {
         let code = generate(&model, "Derived.idl", &RustOptions::default());
 
         assert!(code.contains("#[dds(parent)]"));
-        assert!(code.contains("pub parent: Base,"));
+        assert!(code.contains("pub base: Base,"), "got:\n{}", code);
         assert!(code.contains("pub y: i32,"));
+    }
+
+    #[test]
+    fn test_inheritance_base_field_collision() {
+        // Spec §7.2.4.3.2: the base field is named `base`, or `base_` when a member also
+        // maps to `base`.
+        let defs = parse_idl(
+            r#"
+            struct Root {
+                long x;
+            };
+            struct Leaf : Root {
+                long base;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Leaf.idl", &RustOptions::default());
+
+        assert!(code.contains("pub base_: Root,"), "got:\n{}", code);
+        assert!(code.contains("pub base: i32,"), "got:\n{}", code);
+    }
+
+    #[test]
+    fn test_member_name_snake_case() {
+        // Spec §7.1.1: structure members map to snake_case.
+        let defs = parse_idl(
+            r#"
+            struct Data {
+                long fooBar;
+                long HTTPStatus;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Data.idl", &RustOptions::default());
+
+        assert!(code.contains("pub foo_bar: i32,"), "got:\n{}", code);
+        assert!(code.contains("pub http_status: i32,"), "got:\n{}", code);
+    }
+
+    #[test]
+    fn test_constant_name_screaming_snake() {
+        // Spec §7.1.1: constants map to SCREAMING_SNAKE_CASE.
+        let defs = parse_idl("const long maxSize = 5;").unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "C.idl", &RustOptions::default());
+
+        assert!(code.contains("pub const MAX_SIZE: i32 = 5;"), "got:\n{}", code);
+    }
+
+    #[test]
+    fn test_optional_external_codegen() {
+        // Spec §7.2.4.4: an optional member that closes a recursion maps to Option<Box<T>>.
+        let defs = parse_idl(
+            r#"
+            struct Config {
+                @optional @external Config fallback;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Config.idl", &RustOptions::default());
+
+        assert!(code.contains("pub fallback: Option<Box<Config>>,"), "got:\n{}", code);
+    }
+
+    #[test]
+    fn test_map_float_key_uses_vec() {
+        // Spec §7.2.4.2.5: a floating-point key type does not implement Eq + Hash,
+        // so the map maps to Vec<(K, V)> rather than HashMap (which would not compile).
+        let defs = parse_idl(
+            r#"
+            struct M {
+                map<double, long> by_val;
+                map<float, string> by_f;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "M.idl", &RustOptions::default());
+
+        assert!(code.contains("pub by_val: Vec<(f64, i32)>,"), "got:\n{}", code);
+        assert!(code.contains("pub by_f: Vec<(f32, String)>,"), "got:\n{}", code);
+        assert!(!code.contains("HashMap<f64"), "float key must not use HashMap:\n{}", code);
+        // Only float-key maps present -> no HashMap emitted -> no HashMap import.
+        assert!(!code.contains("use std::collections::HashMap;"), "unused import:\n{}", code);
+    }
+
+    #[test]
+    fn test_union_byte_width_discriminator_repr() {
+        // Spec Table 7.9: octet/char/uint8 discriminators map to repr(u8), int8 to repr(i8),
+        // not the i32 fallback (which would change the wire size).
+        for (disc, repr) in [("octet", "u8"), ("char", "u8"), ("uint8", "u8"), ("int8", "i8")] {
+            let src = format!("union U switch({}) {{ case 0: long a; case 1: long b; }};", disc);
+            let model = resolve(parse_idl(&src).unwrap()).unwrap();
+            let code = generate(&model, "U.idl", &RustOptions::default());
+            assert!(
+                code.contains(&format!("#[repr({})]", repr)),
+                "discriminator {} should map to repr({}):\n{}",
+                disc,
+                repr,
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn test_union_signed_default_avoids_used_minus_one() {
+        // Spec §7.14.2: default discriminant is -1, unless -1 is a declared label, in which
+        // case it is the negative value closest to zero that no label uses.
+        let defs = parse_idl(
+            r#"
+            union U switch(long) {
+                case -1: long a;
+                case -2: long b;
+                default: string d;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "U.idl", &RustOptions::default());
+
+        // The default variant D must not reuse -1 (taken by label a); it takes -3.
+        assert!(!code.contains("D(String) = -1,"), "default must not reuse -1:\n{}", code);
+        assert!(
+            code.contains("D(String) = -3,"),
+            "default should be -3 (nearest unused negative):\n{}",
+            code
+        );
     }
 
     #[test]
