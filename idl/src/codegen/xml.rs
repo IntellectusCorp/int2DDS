@@ -295,6 +295,7 @@ impl<'a> XmlGen<'a> {
             ResolvedType::Enum(_)
             | ResolvedType::Bool
             | ResolvedType::U8
+            | ResolvedType::UInt8
             | ResolvedType::I8
             | ResolvedType::I16
             | ResolvedType::U16
@@ -317,6 +318,7 @@ impl<'a> XmlGen<'a> {
             }
             ResolvedType::Bool
             | ResolvedType::U8
+            | ResolvedType::UInt8
             | ResolvedType::I8
             | ResolvedType::I16
             | ResolvedType::U16
@@ -387,6 +389,7 @@ fn scalar_name(ty: &ResolvedType) -> &'static str {
     match ty {
         ResolvedType::Bool => "boolean",
         ResolvedType::U8 => "byte",
+        ResolvedType::UInt8 => "uint8",
         ResolvedType::I8 => "int8",
         ResolvedType::I16 => "int16",
         ResolvedType::U16 => "uint16",

@@ -41,6 +41,8 @@ fn match_alive() {
     // Manual qos: alive only after the writer actively asserts.
     writer.write(&KeyedDataType::default(), InstanceHandle::NIL).unwrap();
     wait_for_liveliness_changed_state(&reader, 1, 0, StdDuration::from_secs(2)).unwrap();
+
+    s.teardown();
 }
 
 #[test]
@@ -57,6 +59,8 @@ fn lost() {
     // to (alive=0, not_alive=1).
     wait_for_liveliness_changed_state(&reader, 0, 1, StdDuration::from_secs(LEASE as u64 + 2))
         .unwrap();
+
+    s.teardown();
 }
 
 #[test]
@@ -75,6 +79,8 @@ fn recovered() {
     // not_alive count (Lost→Recovered, not Lost+Match).
     writer.write(&KeyedDataType::default(), InstanceHandle::NIL).unwrap();
     wait_for_liveliness_changed_state(&reader, 1, 0, StdDuration::from_secs(2)).unwrap();
+
+    s.teardown();
 }
 
 #[test]
@@ -89,6 +95,8 @@ fn unmatch_alive() {
 
     s.publisher.delete_datawriter(writer).unwrap();
     wait_for_liveliness_changed_state(&reader, 0, 0, StdDuration::from_secs(2)).unwrap();
+
+    s.teardown();
 }
 
 #[test]
@@ -111,6 +119,8 @@ fn sibling_kept_alive() {
     }
     let status = reader.get_liveliness_changed_status().unwrap();
     assert_eq!((status.alive_count(), status.not_alive_count()), (2, 0));
+
+    s.teardown();
 }
 
 #[test]
@@ -128,6 +138,8 @@ fn unmatch_not_alive() {
     // Deleting an already-not-alive writer must drop not_alive_count to 0.
     s.publisher.delete_datawriter(writer).unwrap();
     wait_for_liveliness_changed_state(&reader, 0, 0, StdDuration::from_secs(2)).unwrap();
+
+    s.teardown();
 }
 
 #[test]
@@ -147,4 +159,6 @@ fn assert_keeps_alive() {
     }
     let status = reader.get_liveliness_changed_status().unwrap();
     assert_eq!((status.alive_count(), status.not_alive_count()), (1, 0));
+
+    s.teardown();
 }

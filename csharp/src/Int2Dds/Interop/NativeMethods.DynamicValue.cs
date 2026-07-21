@@ -246,6 +246,9 @@ namespace Int2Dds.Interop
         internal static unsafe extern int int2dds_dynamic_value_as_string(IntPtr value, byte* buf, UIntPtr buf_len, out UIntPtr out_len);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_dynamic_value_to_string(IntPtr value, byte* buf, UIntPtr buf_len, out UIntPtr out_len);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static unsafe extern int int2dds_dynamic_value_as_enum(IntPtr value, byte* buf, UIntPtr buf_len, out UIntPtr out_len, out int out_value);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]

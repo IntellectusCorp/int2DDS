@@ -340,7 +340,7 @@ impl Subscriber {
         )?;
 
         if let Ok(()) = self.is_enabled() {
-            if self.get_qos()?.entity_factory.autoenable_created_entities {
+            if self.get_qos_arc()?.entity_factory.autoenable_created_entities {
                 datareader.enable()?;
             }
         }
@@ -409,6 +409,26 @@ impl Subscriber {
         }
         let qos = self.get_datareader_qos_from_profile(qos_path)?;
         self.create_datareader::<Foo>(topic_description, qos, listener, mask)
+    }
+
+    /// Creates a `DataReader` from a `<domain_participant_library>` declaration at `path`
+    /// (`ParticipantLibrary::Participant::Subscriber::Reader`). The topic (name, type, QoS)
+    /// it follows and the reader QoS all come from the XML; only the Rust type `Foo` is in code.
+    pub fn create_datareader_from_config<Foo: DdsType>(
+        &self,
+        path: &str,
+        listener: Option<Arc<dyn DataReaderListener<Foo = Foo>>>,
+        mask: StatusMask,
+    ) -> DdsResult<DataReader<Foo>> {
+        let resolved = DomainParticipantFactory::get_instance().resolve_datareader(path)?;
+        let topic = self.get_participant()?.create_topic::<Foo>(
+            &resolved.topic.topic_name,
+            &resolved.topic.type_name,
+            resolved.topic.topic_qos,
+            None,
+            mask,
+        )?;
+        self.create_datareader::<Foo>(&topic, resolved.qos, listener, mask)
     }
 
     /// Creates a `DataReader` for `DynamicData` using a `DynamicTypeSupport`.
@@ -502,7 +522,7 @@ impl Subscriber {
 
         // Enable if subscriber is enabled and autoenable is set (same as create_datareader)
         if let Ok(()) = self.is_enabled() {
-            if self.get_qos()?.entity_factory.autoenable_created_entities {
+            if self.get_qos_arc()?.entity_factory.autoenable_created_entities {
                 datareader.enable()?;
             }
         }
@@ -993,7 +1013,7 @@ impl Subscriber {
             Additional error code that may be returned besides standard errors: PRECONDITION_NOT_MET.
         */
         self.is_deleted()?;
-        if self.get_qos()?.presentation.access_scope != PresentationQosAccessScopeKind::Group {
+        if self.get_qos_arc()?.presentation.access_scope != PresentationQosAccessScopeKind::Group {
             return Ok(());
         }
         Err(DdsError::Unsupported)
@@ -1009,7 +1029,7 @@ impl Subscriber {
             Additional error code that may be returned besides standard errors: PRECONDITION_NOT_MET.
         */
         self.is_deleted()?;
-        if self.get_qos()?.presentation.access_scope != PresentationQosAccessScopeKind::Group {
+        if self.get_qos_arc()?.presentation.access_scope != PresentationQosAccessScopeKind::Group {
             return Ok(());
         }
         Err(DdsError::Unsupported)
@@ -1037,7 +1057,9 @@ impl Subscriber {
         if let Some(weak_ref) = self.participant.as_ref() {
             // Attempt to upgrade Weak<T> to Arc<T>
             if let Some(participant_arc) = weak_ref.upgrade() {
-                return Ok((*participant_arc).clone());
+                let mut participant = (*participant_arc).clone();
+                participant.self_ref = Some(participant_arc);
+                return Ok(participant);
             }
         }
 
@@ -1490,5 +1512,8 @@ mod tests {
         subscriber.delete_contained_entities().unwrap();
 
         assert!(subscriber.get_data_readers().unwrap().is_empty());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 }

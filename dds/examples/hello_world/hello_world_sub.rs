@@ -10,11 +10,15 @@ use int2dds::{
         env::{set_console_log_level, set_log_type},
         log::{LogLevel, LogType},
     },
+    core::time::Duration as DdsDuration,
     domain::{domain_participant_factory::DomainParticipantFactory, qos::PARTICIPANT_QOS_DEFAULT},
-    infrastructure::status::StatusMask,
+    infrastructure::{
+        qos_policy::{ReliabilityQosPolicy, ReliabilityQosPolicyKind},
+        status::StatusMask,
+    },
     subscription::{
         data_reader_listener::DataReaderListener,
-        qos::{DATAREADER_QOS_DEFAULT, SUBSCRIBER_QOS_DEFAULT},
+        qos::{DataReaderQos, SUBSCRIBER_QOS_DEFAULT},
         sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind},
     },
     topic::{qos::TOPIC_QOS_DEFAULT, type_support::DdsType},
@@ -23,10 +27,11 @@ use log::info;
 
 const TOPIC_NAME: &str = "hello_world_topic";
 
-/// The domain id is the only CLI option; everything else is fixed.
+/// Reliability is selectable on the CLI; the remaining QoS comes from the
+/// spec default. Richer profiles live in the int2DDS-examples repository.
 #[derive(Parser, Debug)]
 #[command(
-    about = "Hello World DDS Subscriber (QoS via profile or spec default)",
+    about = "Hello World DDS Subscriber (best-effort by default, --reliable for reliable)",
     disable_help_flag = true
 )]
 struct Args {
@@ -37,19 +42,23 @@ struct Args {
     /// Domain ID
     #[arg(short = 'd', long, default_value_t = 0)]
     domain: i32,
+
+    /// Use RELIABLE reliability (default is BEST_EFFORT)
+    #[arg(long, default_value_t = false)]
+    reliable: bool,
 }
 
+// HelloWorld type generated from idl/input/HelloWorld.idl by int2dds-idl.
 #[derive(DdsType)]
-#[dds_type(crate_path = "int2dds", extensibility = "final")]
-struct HelloWorldType {
-    index: u32,
-    message: String,
+pub struct HelloWorld {
+    pub index: u32,
+    pub message: String,
 }
 
 struct SubListener;
 
 impl DataReaderListener for SubListener {
-    type Foo = HelloWorldType;
+    type Foo = HelloWorld;
     fn on_subscription_matched(
         &self,
         _reader: &int2dds::subscription::data_reader::DataReader<Self::Foo>,
@@ -93,7 +102,13 @@ fn main() {
     set_log_type(LogType::Console);
     set_console_log_level(LogLevel::Info);
 
-    let domain_id = Args::parse().domain;
+    let args = Args::parse();
+    let domain_id = args.domain;
+    let reliability_kind = if args.reliable {
+        ReliabilityQosPolicyKind::Reliable
+    } else {
+        ReliabilityQosPolicyKind::BestEffort
+    };
     let shutdown = Shutdown::install();
     let factory = DomainParticipantFactory::get_instance();
 
@@ -101,9 +116,9 @@ fn main() {
         .create_participant(domain_id, PARTICIPANT_QOS_DEFAULT, None, StatusMask::default())
         .unwrap();
     let topic = participant
-        .create_topic::<HelloWorldType>(
+        .create_topic::<HelloWorld>(
             TOPIC_NAME,
-            "HelloWorldType",
+            "HelloWorld",
             TOPIC_QOS_DEFAULT,
             None,
             StatusMask::default(),
@@ -111,10 +126,17 @@ fn main() {
         .unwrap();
     let subscriber =
         participant.create_subscriber(SUBSCRIBER_QOS_DEFAULT, None, StatusMask::default()).unwrap();
+    let reader_qos = DataReaderQos {
+        reliability: ReliabilityQosPolicy {
+            kind: reliability_kind,
+            max_blocking_time: DdsDuration { sec: 0, nanosec: 100_000_000 },
+        },
+        ..Default::default()
+    };
     let reader = subscriber
-        .create_datareader::<HelloWorldType>(
+        .create_datareader::<HelloWorld>(
             &topic,
-            DATAREADER_QOS_DEFAULT,
+            reader_qos,
             Some(Arc::new(SubListener)),
             StatusMask::default(),
         )

@@ -79,6 +79,9 @@ fn test_volatile_stateless_best_effort() {
 
     assert_eq!(samples[0].data().unwrap().value, 5);
     assert_eq!(samples.len(), 1);
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -140,6 +143,9 @@ fn test_volatile_stateful_best_effort() {
 
     assert_eq!(samples[0].data().unwrap().value, 5);
     assert_eq!(samples.len(), 1);
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -211,6 +217,9 @@ fn test_volatile_reliable() {
 
     assert_eq!(samples[0].data().unwrap().value, 5);
     assert_eq!(samples.len(), 1);
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -280,6 +289,9 @@ fn test_transient_local_best_effort() {
 
     assert_eq!(samples[0].data().unwrap().value, 0);
     assert_eq!(samples.len(), 6);
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -353,4 +365,7 @@ fn test_transient_local_reliable() {
 
     assert_eq!(samples[0].data().unwrap().value, 0);
     assert_eq!(samples.len(), 6);
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }

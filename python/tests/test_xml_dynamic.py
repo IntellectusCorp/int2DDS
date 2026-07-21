@@ -20,7 +20,7 @@ from int2dds.types.dynamic import (
     VALUE_KIND_SEQUENCE,
 )
 
-XTYPES_DIR = Path(__file__).resolve().parents[2] / "dds" / "examples" / "xtypes"
+XTYPES_DIR = Path(__file__).resolve().parent
 
 FLAT_XML = """
 <types>

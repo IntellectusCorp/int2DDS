@@ -110,6 +110,10 @@ fn client_service_basic_roundtrip() {
     assert_eq!(data.header.remote_ex, RemoteExceptionCode::Ok);
 
     handle.join().unwrap().unwrap();
+
+    drop(client);
+    participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -141,6 +145,10 @@ fn client_service_sequential_requests() {
     }
 
     handle.join().unwrap().unwrap();
+
+    drop(client);
+    participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -170,6 +178,10 @@ fn client_service_async_future() {
     assert_eq!(data.data.result, 15);
 
     handle.join().unwrap().unwrap();
+
+    drop(client);
+    participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -193,6 +205,11 @@ fn client_service_async_no_reply_timeout() {
     let future = client.send_request_async(&AddCall { a: 1, b: 2 }).unwrap();
     let result = future.get_timeout(Duration::from_millis(300));
     assert!(result.is_err());
+
+    drop(client);
+    drop(_service);
+    participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -224,6 +241,10 @@ fn client_service_exception_code() {
     assert_eq!(data.header.remote_ex, RemoteExceptionCode::Unsupported);
 
     handle.join().unwrap().unwrap();
+
+    drop(client);
+    participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -239,6 +260,10 @@ fn client_receive_timeout_no_service() {
     // No service exists → receive_reply should timeout
     let result = client.receive_reply(Duration::from_millis(200));
     assert!(result.is_err());
+
+    drop(client);
+    participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -285,6 +310,11 @@ fn server_multiple_services() {
     assert_eq!(reply.data().unwrap().data.msg, "hello");
 
     handle.join().unwrap().unwrap();
+
+    drop(add_client);
+    drop(echo_client);
+    participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -307,6 +337,10 @@ fn server_run_for_duration() {
 
     assert!(elapsed >= Duration::from_millis(250));
     assert!(elapsed < Duration::from_millis(600));
+
+    drop(server);
+    participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -326,6 +360,10 @@ fn service_pause_resume() {
 
     service.resume();
     assert_eq!(service.status(), ServiceStatus::Running);
+
+    drop(service);
+    participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
 }
 
 #[test]
@@ -345,4 +383,8 @@ fn service_close_via_server() {
     assert!(!server.is_closed());
     server.close().unwrap();
     assert!(server.is_closed());
+
+    drop(server);
+    participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
 }

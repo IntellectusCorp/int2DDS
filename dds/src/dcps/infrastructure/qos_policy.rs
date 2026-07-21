@@ -56,7 +56,7 @@ use speedy::{Readable, Writable};
 
 use crate::{
     core::{
-        error::DdsResult,
+        error::{DdsError, DdsResult},
         time::Duration,
         types::{deserialize_i32_or_unlimited, serialize_i32_or_unlimited, LENGTH_UNLIMITED},
     },
@@ -849,6 +849,12 @@ pub const PROP_TRANSPORT: &str = "int2dds.transport";
 /// `INT2DDS_INITIAL_PEERS` env var when absent.
 pub const PROP_INITIAL_PEERS: &str = "int2dds.initial_peers";
 
+/// Whether to dial peers discovered at runtime that are NOT in `initial_peers`.
+/// `false` (default): only dial `initial_peers` (or every advertised locator when
+/// `initial_peers` is empty).
+/// `true`: also dial runtime-discovered peers.
+pub const PROP_ACCEPT_UNDEFINED_PEERS: &str = "int2dds.accept_undefined_peers";
+
 /// ---------TCP QoS ----------
 /// TCP listen (server bind) port. When absent, defaults to the domain port
 /// formula `PB + DG * domain_id`.
@@ -861,15 +867,16 @@ pub const PROP_TCP_NODELAY: &str = "int2dds.transport.TCPv4.nodelay";
 pub const PROP_TCP_CONNECT_TIMEOUT_MS: &str = "int2dds.transport.TCPv4.connect_timeout_ms";
 /// BIND handshake response timeout, milliseconds. Default `5000`.
 pub const PROP_TCP_BIND_TIMEOUT_MS: &str = "int2dds.transport.TCPv4.bind_timeout_ms";
-/// Control keepalive send interval, milliseconds. Default `10000`.
+/// Max time (ms) unacknowledged data may stay outstanding before the OS drops
+/// the connection, so a dead link surfaces as a write error instead of blocking
+/// the sender ~indefinitely. Default `5000`; `0` uses the OS default.
+pub const PROP_TCP_UNACKED_TIMEOUT_MS: &str = "int2dds.transport.TCPv4.unacked_timeout_ms";
+/// OS keepalive idle time before the first probe (`TCP_KEEPIDLE`), ms. Default `10000`.
 pub const PROP_TCP_KEEPALIVE_INTERVAL_MS: &str = "int2dds.transport.TCPv4.keepalive_interval_ms";
-/// Keepalive response timeout, milliseconds. Default `5000`.
+/// OS keepalive interval between probes (`TCP_KEEPINTVL`), ms. Default `5000`.
 pub const PROP_TCP_KEEPALIVE_TIMEOUT_MS: &str = "int2dds.transport.TCPv4.keepalive_timeout_ms";
-/// Keepalive max consecutive misses before disconnect. Default `3`.
+/// OS keepalive probe count before the connection is dropped (`TCP_KEEPCNT`). Default `3`.
 pub const PROP_TCP_KEEPALIVE_MAX_MISSES: &str = "int2dds.transport.TCPv4.keepalive_max_misses";
-/// Idle timeout for incoming connections, milliseconds. Default `60000`.
-pub const PROP_TCP_INCOMING_IDLE_TIMEOUT_MS: &str =
-    "int2dds.transport.TCPv4.incoming_idle_timeout_ms";
 /// Forced `SO_RCVBUF` in bytes. Default OS-managed (absent).
 pub const PROP_TCP_SO_RCVBUF: &str = "int2dds.transport.TCPv4.so_rcvbuf";
 /// Forced `SO_SNDBUF` in bytes. Default OS-managed (absent).
@@ -1780,6 +1787,19 @@ impl ConstDefault for ResourceLimitsQosPolicy {
 impl QosPolicy for ResourceLimitsQosPolicy {
     fn name(&self) -> &str {
         RESOURCELIMITS_QOS_POLICY_NAME
+    }
+}
+
+impl ResourceLimitsQosPolicy {
+    // max_samples must be at least max_samples_per_instance; LENGTH_UNLIMITED means unbounded
+    pub(crate) fn is_consistent(&self) -> DdsResult<()> {
+        if self.max_samples != LENGTH_UNLIMITED
+            && (self.max_samples_per_instance == LENGTH_UNLIMITED
+                || self.max_samples < self.max_samples_per_instance)
+        {
+            return Err(DdsError::InconsistentPolicy);
+        }
+        Ok(())
     }
 }
 

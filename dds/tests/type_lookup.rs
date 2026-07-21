@@ -35,6 +35,7 @@ use int2dds::{
         status::StatusMask,
     },
     publication::qos::{DataWriterQos, PublisherQos},
+    subscription::qos::{DataReaderQos, SubscriberQos},
     topic::{qos::TopicQos, type_support::DdsType},
     xtypes::{
         CompleteStructMember, CompleteStructType, CompleteTypeObject, DynamicType, DynamicTypeKind,
@@ -53,7 +54,7 @@ fn nested_pair() -> (CompleteTypeObject, EquivalenceHash, CompleteTypeObject, Eq
         "Inner".to_string(),
         None,
     ));
-    let inner_hash = EquivalenceHash::compute(&inner.serialize());
+    let inner_hash = TypeObject::Complete(inner.clone()).compute_hash();
 
     let mut outer_struct = CompleteStructType::new(
         TypeFlag::new(ExtensibilityKind::Final, false, false),
@@ -73,7 +74,7 @@ fn nested_pair() -> (CompleteTypeObject, EquivalenceHash, CompleteTypeObject, Eq
         "child".to_string(),
     ));
     let outer = CompleteTypeObject::Struct(outer_struct);
-    let outer_hash = EquivalenceHash::compute(&outer.serialize());
+    let outer_hash = TypeObject::Complete(outer.clone()).compute_hash();
     (inner, inner_hash, outer, outer_hash)
 }
 
@@ -105,7 +106,7 @@ fn get_types_closure_reply_resolves_nested_on_requester() {
             ),
             remote_exception_code: 0,
         },
-        data: TypeLookupReturn::GetTypes(GetTypesOut { types }),
+        data: TypeLookupReturn::GetTypes(GetTypesOut { types, complete_to_minimal: Vec::new() }),
     };
 
     // Wire round-trip (what the requester actually receives).
@@ -151,9 +152,7 @@ const FLAT_TOPIC: &str = "type_lookup_flat_probe";
 
 #[test]
 fn consumer_fetches_type_object_via_type_lookup() {
-    // Advertise TypeIdentifier only, forcing the TypeLookup fetch path.
-    unsafe { std::env::set_var("INT2DDS_DISABLE_INLINE_TYPE_OBJECT", "1") };
-
+    // SEDP advertises TypeIdentifier only; the consumer fetches the TypeObject via TypeLookup.
     let domain = next_domain_id();
     let factory = DomainParticipantFactory::get_instance();
 
@@ -214,6 +213,11 @@ fn consumer_fetches_type_object_via_type_lookup() {
         built,
         "consumer must fetch the FlatProbe TypeObject via TypeLookup and build its topic"
     );
+
+    producer.delete_contained_entities().unwrap();
+    factory.delete_participant(producer).unwrap();
+    consumer.delete_contained_entities().unwrap();
+    factory.delete_participant((*consumer).clone()).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -246,8 +250,6 @@ const SEQ_TOPIC: &str = "type_lookup_sequence_probe";
 
 #[test]
 fn consumer_resolves_nested_member_via_type_lookup() {
-    unsafe { std::env::set_var("INT2DDS_DISABLE_INLINE_TYPE_OBJECT", "1") };
-
     let domain = next_domain_id();
     let factory = DomainParticipantFactory::get_instance();
 
@@ -307,12 +309,15 @@ fn consumer_resolves_nested_member_via_type_lookup() {
         "nested 'leaf' member must resolve to a TypeRef over the wire, got {:?}",
         leaf.member_type
     );
+
+    producer.delete_contained_entities().unwrap();
+    factory.delete_participant(producer).unwrap();
+    consumer.delete_contained_entities().unwrap();
+    factory.delete_participant(consumer).unwrap();
 }
 
 #[test]
 fn consumer_resolves_sequence_member_via_type_lookup() {
-    unsafe { std::env::set_var("INT2DDS_DISABLE_INLINE_TYPE_OBJECT", "1") };
-
     let domain = next_domain_id();
     let factory = DomainParticipantFactory::get_instance();
 
@@ -378,4 +383,101 @@ fn consumer_resolves_sequence_member_via_type_lookup() {
         ),
         other => panic!("'leaves' member must be a Sequence, got {:?}", other),
     }
+
+    producer.delete_contained_entities().unwrap();
+    factory.delete_participant(producer).unwrap();
+    consumer.delete_contained_entities().unwrap();
+    factory.delete_participant(consumer).unwrap();
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+struct CoercionWriter {
+    id: i32,
+    value: i64,
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+struct CoercionReader {
+    id: i32,
+    value: i64,
+}
+
+const COERCION_TOPIC: &str = "type_lookup_deferred_match_probe";
+const COERCION_TYPE: &str = "CoercionProbe";
+
+#[test]
+fn deferred_match_resolves_via_type_lookup() {
+    let domain = next_domain_id();
+    let factory = DomainParticipantFactory::get_instance();
+
+    let producer = factory
+        .create_participant(domain, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+    let w_topic = producer
+        .create_topic::<CoercionWriter>(
+            COERCION_TOPIC,
+            COERCION_TYPE,
+            TopicQos::default(),
+            None,
+            StatusMask::default(),
+        )
+        .unwrap();
+    let publisher =
+        producer.create_publisher(PublisherQos::default(), None, StatusMask::default()).unwrap();
+    let writer = publisher
+        .create_datawriter::<CoercionWriter>(
+            &w_topic,
+            DataWriterQos::default(),
+            None,
+            StatusMask::default(),
+        )
+        .unwrap();
+
+    let consumer = factory
+        .create_participant(domain, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+    let r_topic = consumer
+        .create_topic::<CoercionReader>(
+            COERCION_TOPIC,
+            COERCION_TYPE,
+            TopicQos::default(),
+            None,
+            StatusMask::default(),
+        )
+        .unwrap();
+    let subscriber =
+        consumer.create_subscriber(SubscriberQos::default(), None, StatusMask::default()).unwrap();
+    let reader = subscriber
+        .create_datareader::<CoercionReader>(
+            &r_topic,
+            DataReaderQos::default(),
+            None,
+            StatusMask::default(),
+        )
+        .unwrap();
+
+    let mut matched = false;
+    for _ in 0..150 {
+        let r = reader
+            .get_subscription_matched_status()
+            .map(|s| s.current_count() >= 1)
+            .unwrap_or(false);
+        let w = writer
+            .get_publication_matched_status()
+            .map(|s| s.current_count() >= 1)
+            .unwrap_or(false);
+        if r && w {
+            matched = true;
+            break;
+        }
+        sleep(StdDuration::from_millis(100));
+    }
+
+    assert!(
+        matched,
+        "deferred match must complete via TypeLookup: writer and reader advertise \
+         structurally-identical types under different hashes with no inline TypeObject"
+    );
 }

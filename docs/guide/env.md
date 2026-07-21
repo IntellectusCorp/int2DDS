@@ -7,7 +7,6 @@ This document describes the environment variables available in int2dds.
 | Environment Variable                 | Description                                | Default                 |
 | ------------------------------------ | ------------------------------------------ | ----------------------- |
 | `INT2DDS_TRANSPORT`                  | Transport protocol (udp, tcp, hybrid, shm) | udp                     |
-| `INT2DDS_DISCOVERY_MODE`             | Discovery mode (udp, tcp, hybrid)          | udp                     |
 | `INT2DDS_LOG_TYPE`                   | Log output type (console, file, all, none) | none                    |
 | `INT2DDS_CONSOLE_LOG_LEVEL`          | Console log level                          | info                    |
 | `INT2DDS_FILE_LOG_LEVEL`             | File log level                             | info                    |
@@ -54,32 +53,6 @@ cargo run --example hello_world_pub
 ```bash
 # Linux/macOS - Environment variable
 export INT2DDS_TRANSPORT=tcp
-
-cargo run --example hello_world_pub
-```
-
-### INT2DDS_DISCOVERY_MODE
-
-Sets the DDS Participant Discovery mode.
-
-| Value    | Discovery Method            | User Data Transport | Initial Peers Required |
-| -------- | --------------------------- | ------------------- | ---------------------- |
-| `udp`    | UDP multicast               | UDP                 | No                     |
-| `tcp`    | TCP unicast                 | TCP                 | **Yes**                |
-| `hybrid` | UDP multicast + TCP unicast | TCP                 | Optional               |
-
-#### Configuration
-
-```powershell
-# Windows PowerShell
-$env:INT2DDS_DISCOVERY_MODE = "hybrid"
-
-cargo run --example hello_world_pub
-```
-
-```bash
-# Linux/macOS
-export INT2DDS_DISCOVERY_MODE=hybrid
 
 cargo run --example hello_world_pub
 ```

@@ -576,9 +576,6 @@ impl WlpLogic {
             for remote_data in remote_datas_guard.iter() {
                 if remote_data.participant_guid().prefix() == remote_prefix {
                     for locator in remote_data.metatraffic_unicast_locator_list() {
-                        if !locator.is_udp() {
-                            continue;
-                        }
                         let _ = self.transport.send(&buffer, &SendTarget::SEDPDiscovery(locator));
                     }
                     break;
@@ -688,9 +685,6 @@ impl WlpLogic {
             }
 
             for locator in reader_proxy.unicast_locator_list() {
-                if !locator.is_udp() {
-                    continue;
-                }
                 if let Err(e) =
                     self.transport.send(&send_buffer, &SendTarget::SEDPDiscovery(&locator))
                 {
@@ -721,9 +715,6 @@ impl WlpLogic {
                 for remote_participant_data in remote_participant_datas.iter() {
                     if remote_participant_data.participant_guid().prefix() == remote_guid.prefix() {
                         for locator in remote_participant_data.metatraffic_unicast_locator_list() {
-                            if !locator.is_udp() {
-                                continue;
-                            }
                             let _ =
                                 self.transport.send(buffer, &SendTarget::SEDPDiscovery(&locator));
                             debug!(
@@ -852,6 +843,14 @@ impl WlpLogic {
                 matched_writers.iter_mut().find(|proxy| proxy.remote_writer_guid() == remote_guid)
             {
                 writer_proxy.mark_change_received(writer_sn, None);
+
+                // Advance the acknack bitmap base so the received message gets acknowledged.
+                if writer_proxy.expected_sn() == SequenceNumber::UNKNOWN {
+                    writer_proxy.set_expected_sn(writer_sn);
+                }
+                if writer_sn == writer_proxy.expected_sn() {
+                    writer_proxy.increment_expected_sn();
+                }
 
                 // 3. Update Liveliness timer
                 self.update_remote_participant_liveliness(participant_message_data)?;
@@ -1646,9 +1645,6 @@ impl UnicastMessageProcessor for WlpLogic {
                 }
 
                 for locator in reader_proxy.unicast_locator_list() {
-                    if !locator.is_udp() {
-                        continue;
-                    }
                     if let Err(e) =
                         self.transport.send(&send_buffer, &SendTarget::SEDPDiscovery(&locator))
                     {

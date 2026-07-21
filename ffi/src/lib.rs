@@ -50,12 +50,14 @@
 pub mod error;
 
 pub mod condition;
+pub mod config;
 pub mod context;
 pub mod data;
 pub mod discovery;
 pub mod dynamic;
 pub mod dynamic_value;
 pub mod env;
+pub mod last_error;
 pub mod listener;
 pub mod participant;
 pub mod publisher;

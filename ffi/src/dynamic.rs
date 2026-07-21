@@ -1,9 +1,5 @@
 //! # Dynamic XTypes
 //!
-//! PHASE 1 of the FFI <-> Rust xtypes parity effort. See:
-//!  - `docs/superpowers/specs/2026-04-09-ffi-xtypes-parity-roadmap.md`
-//!  - `docs/superpowers/specs/2026-04-09-ffi-dynamic-subscriber-phase1-design.md`
-//!
 //! This module exposes a C-callable surface that lets a subscriber:
 //!  - Discover a publisher's TypeObject at runtime
 //!  - Introspect it (extensibility, members, kinds, member_ids, flags)
@@ -926,14 +922,14 @@ unsafe impl Sync for Int2DdsDynamicTypeSupport {}
 
 /// Opaque handle to a dynamic DataWriter (`DataWriter<DynamicData>`).
 pub struct Int2DdsDynamicDataWriter {
-    inner: DataWriter<DynamicData>,
+    pub(crate) inner: DataWriter<DynamicData>,
 }
 unsafe impl Send for Int2DdsDynamicDataWriter {}
 unsafe impl Sync for Int2DdsDynamicDataWriter {}
 
 /// Opaque handle to a dynamic DataReader (`DataReader<DynamicData>`).
 pub struct Int2DdsDynamicDataReader {
-    inner: DataReader<DynamicData>,
+    pub(crate) inner: DataReader<DynamicData>,
 }
 unsafe impl Send for Int2DdsDynamicDataReader {}
 unsafe impl Sync for Int2DdsDynamicDataReader {}

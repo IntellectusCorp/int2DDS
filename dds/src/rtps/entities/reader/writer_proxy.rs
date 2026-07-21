@@ -104,6 +104,19 @@ impl WriterProxy {
         self.expected_sn
     }
 
+    // For a change already received (via DATA or GAP), whether it was relevant
+    // (DATA) or irrelevant (GAP). None if the change is not yet received.
+    #[cfg(test)]
+    pub(crate) fn received_change_is_relevant(&self, seq_num: SequenceNumber) -> Option<bool> {
+        self.changes_from_writer.get(&seq_num).and_then(|change| {
+            if change.status == ChangeFromWriterStatusKind::Received {
+                Some(change.is_relevant)
+            } else {
+                None
+            }
+        })
+    }
+
     pub(crate) fn last_heartbeat_count(&self) -> Option<u32> {
         self.last_heartbeat_count
     }

@@ -20,7 +20,7 @@ use crate::rtps::common::locator::Locator;
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::plugin::{IncomingMessage, MessageSource, SendTarget, TransportPlugin};
 use crate::rtps::transport::port_manager::PortManager;
-use crate::rtps::transport::tcp::mux_state::TcpSocketTuning;
+use crate::rtps::transport::tcp::connection_registry::{KeepaliveParams, TcpSocketTuning};
 use crate::rtps::transport::tcp::tcp_mux_listener::TcpMuxListener;
 use crate::rtps::transport::tcp::tcp_sender::TcpSender;
 use crate::rtps::transport::tcp::tls::TlsConfig;
@@ -52,6 +52,9 @@ pub(crate) struct TcpTransportPlugin {
     /// Public endpoint advertised in SPDP for WAN/NAT traversal (per participant).
     public_address: Option<SocketAddr>,
 
+    /// Dial peers discovered at runtime that are not in `initial_peers`
+    accept_undefined_peers: bool,
+
     /// runtime isolating tcp tasks. Dropped last (after listener
     /// and sender) so tasks can drain on shutdown.
     runtime: Arc<tokio::runtime::Runtime>,
@@ -66,7 +69,6 @@ pub(crate) struct TcpTransportPlugin {
     /// Take-once receivers handed out via `take_*_source()`.
     discovery_rx: Mutex<Option<crossbeam_channel::Receiver<IncomingMessage>>>,
     user_data_rx: Mutex<Option<crossbeam_channel::Receiver<IncomingMessage>>>,
-    dead_peer_rx: Mutex<Option<crossbeam_channel::Receiver<SocketAddr>>>,
 }
 
 impl TcpTransportPlugin {
@@ -104,10 +106,9 @@ impl TcpTransportPlugin {
         let physical_port =
             tcp_config.bind_port.unwrap_or_else(|| PortManager::get_tcp_physical_port(domain_id));
 
-        // Dial gate, resolved per participant (int2dds.initial_peers property →
-        // INT2DDS_INITIAL_PEERS env).
         let initial_peers = tcp_config.initial_peers.clone();
 
+        // **Verify whether `initial_peers` has been initialized.**
         // Pure TCP has no multicast, so discovery cannot bootstrap without
         // initial peers — fail fast with a clear message. Hybrid embeds this
         // plugin but bootstraps over UDP multicast, so its `transport_type`
@@ -121,13 +122,10 @@ impl TcpTransportPlugin {
             ));
         }
 
-        // Crossbeam bridges async → sync. Listener writes to *_tx; the DDS
-        // layer reads from *_rx via `take_*_source()`.
+        // Crossbeam bridges async → sync.
         let (discovery_tx, discovery_rx) = bounded::<IncomingMessage>(CHANNEL_BUFFER_SIZE);
         let (user_data_tx, user_data_rx) = bounded::<IncomingMessage>(USER_CHANNEL_CAPACITY);
-        let (dead_peer_tx, dead_peer_rx) = bounded::<SocketAddr>(CHANNEL_BUFFER_SIZE);
 
-        // Runtime worker count (per participant). Default keeps a small footprint.
         let worker_threads = tcp_config.async_workers.unwrap_or_else(default_worker_count);
         let runtime = Arc::new(
             tokio::runtime::Builder::new_multi_thread()
@@ -143,15 +141,19 @@ impl TcpTransportPlugin {
                 })?,
         );
 
-        let idle_timeout = tcp_config.incoming_idle_timeout;
         let tuning = TcpSocketTuning {
             nodelay: tcp_config.nodelay,
             so_rcvbuf: tcp_config.so_rcvbuf,
             so_sndbuf: tcp_config.so_sndbuf,
+            unacked_timeout: tcp_config.unacked_timeout,
+            keepalive: Some(KeepaliveParams {
+                time: tcp_config.keepalive_interval,
+                interval: tcp_config.keepalive_timeout,
+                retries: tcp_config.keepalive_max_misses,
+            }),
         };
 
-        // Build listener + sender inside a runtime context — both
-        // constructors call `tokio::spawn`, which needs `Handle::current()`.
+        // Build listener + sender inside a runtime context
         let (mux_listener, sender) = runtime.block_on(async {
             let listener = TcpMuxListener::bind_and_spawn(
                 physical_port,
@@ -161,7 +163,6 @@ impl TcpTransportPlugin {
                 discovery_tx,
                 user_data_tx,
                 tls_config.clone(),
-                idle_timeout,
                 tuning,
             )
             .map_err(|e| {
@@ -184,7 +185,7 @@ impl TcpTransportPlugin {
 
             let listener_port = listener.port();
 
-            // Share the listener's MuxState with the sender so outbound
+            // Share the listener's ConnectionRegistry with the sender so outbound
             // connections register into the same per-connection map and
             // dispatch routes responses back into the same pending_ack slots.
             let shared = Arc::clone(listener.shared());
@@ -199,8 +200,6 @@ impl TcpTransportPlugin {
                 shared,
                 &tcp_config,
             );
-
-            sender.set_dead_peer_tx(dead_peer_tx);
 
             Ok::<_, io::Error>((listener, sender))
         })?;
@@ -219,12 +218,12 @@ impl TcpTransportPlugin {
             listener_port,
             initial_peers,
             public_address: tcp_config.public_address,
+            accept_undefined_peers: tcp_config.accept_undefined_peers,
             runtime,
             sender,
             mux_listener: Mutex::new(Some(mux_listener)),
             discovery_rx: Mutex::new(Some(discovery_rx)),
             user_data_rx: Mutex::new(Some(user_data_rx)),
-            dead_peer_rx: Mutex::new(Some(dead_peer_rx)),
         })
     }
 
@@ -265,12 +264,13 @@ impl TcpTransportPlugin {
             .collect()
     }
 
-    /// Whether an outbound dial to `addr` is permitted under the initial-peers
-    /// policy. With initial peers configured, only those addresses are dialed
-    /// (so unreachable advertised locators are never attempted); with none
-    /// configured, every advertised locator is allowed as a fallback.
+    /// Whether an outbound dial to `addr` is permitted. Restricted to
+    /// `initial_peers` unless `accept_undefined_peers` is set
+    /// or `initial_peers` is empty (dial-all fallback).
     fn should_dial(&self, addr: &SocketAddr) -> bool {
-        self.initial_peers.is_empty() || self.initial_peers.contains(addr)
+        self.accept_undefined_peers
+            || self.initial_peers.is_empty()
+            || self.initial_peers.contains(addr)
     }
 }
 
@@ -339,10 +339,6 @@ impl TransportPlugin for TcpTransportPlugin {
         Some(MessageSource::Channel { rx })
     }
 
-    fn take_dead_peer_receiver(&self) -> Option<crossbeam_channel::Receiver<SocketAddr>> {
-        self.dead_peer_rx.lock().expect("dead_peer_rx lock").take()
-    }
-
     fn port(&self) -> u16 {
         self.listener_port
     }
@@ -366,10 +362,27 @@ impl TransportPlugin for TcpTransportPlugin {
             }
         }
 
-        // 2. Tear down the sender's lifecycle tasks (keepalive, orphan prune).
+        // 2. Cancel the sender's shared token, tearing down every connection actor.
         self.runtime.block_on(self.sender.shutdown());
 
         debug!("[TcpTransportPlugin] Closed");
+    }
+
+    fn disconnect_peer(&self, locators: &[Locator]) {
+        let mut seen: Vec<SocketAddr> = Vec::new();
+        for locator in locators {
+            if !locator.is_tcp() {
+                continue;
+            }
+            let addr = SocketAddr::new(
+                std::net::IpAddr::V4(locator.to_ip_v4_addr()),
+                locator.tcp_physical_port(),
+            );
+            if !seen.contains(&addr) {
+                seen.push(addr);
+                self.sender.disconnect_peer(addr);
+            }
+        }
     }
 }
 
@@ -454,9 +467,6 @@ mod tests {
         assert!(plugin.take_user_data_unicast_source().is_some());
         assert!(plugin.take_user_data_unicast_source().is_none());
 
-        assert!(plugin.take_dead_peer_receiver().is_some());
-        assert!(plugin.take_dead_peer_receiver().is_none());
-
         plugin.close();
     }
 
@@ -477,8 +487,8 @@ mod tests {
     }
 
     /// Sending to a TCP locator does not panic / block the caller.
-    /// The connect_task internally either succeeds or notifies dead_peer;
-    /// the sync `send` call itself is fire-and-forget.
+    /// The connect path either succeeds or returns an error; the sync `send`
+    /// call itself is fire-and-forget.
     #[test]
     fn send_to_unreachable_does_not_panic() {
         let plugin = make_plugin(next_test_domain());

@@ -33,8 +33,8 @@ use int2dds::{
     topic::qos::TopicQos,
     xtypes::{
         CompleteStructMember, CompleteStructType, CompleteTypeObject, DynamicData, DynamicTypeKind,
-        DynamicTypeSupport, DynamicValue, EquivalenceHash, ExtensibilityKind, HasTypeObject,
-        MemberFlag, TryConstructKind, TypeFlag, TypeIdentifier,
+        DynamicTypeSupport, DynamicValue, ExtensibilityKind, HasTypeObject, MemberFlag,
+        TryConstructKind, TypeFlag, TypeIdentifier, TypeObject,
     },
 };
 
@@ -406,7 +406,7 @@ fn xml_inheritance_pubsub_loopback() {
     );
     let support = Arc::new(registry.get("Dog").unwrap());
 
-    let (writer, reader, _guard) = dynamic_loopback("DogTopic", &support);
+    let (writer, reader, guard) = dynamic_loopback("DogTopic", &support);
 
     let mut data = support.create_data();
     // 'legs' is an inherited (flattened) parent member; 'name' is the child member.
@@ -417,6 +417,9 @@ fn xml_inheritance_pubsub_loopback() {
     let received = take_one(&reader);
     assert_eq!(received.get::<i32>("legs").unwrap(), 4);
     assert_eq!(received.get::<String>("name").unwrap(), "rex");
+
+    guard._participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(guard._participant).unwrap();
 }
 
 #[test]
@@ -515,7 +518,7 @@ fn xml_bitmask_bitset_pubsub_loopback() {
     );
     let support = Arc::new(registry.get("Record").unwrap());
 
-    let (writer, reader, _guard) = dynamic_loopback("RecordTopic", &support);
+    let (writer, reader, guard) = dynamic_loopback("RecordTopic", &support);
 
     let mut data = support.create_data();
     data.set("id", 7i32).unwrap();
@@ -535,6 +538,9 @@ fn xml_bitmask_bitset_pubsub_loopback() {
         DynamicValue::Bitset(bits) => assert_eq!(*bits, (10u64 << 4) | 3),
         other => panic!("expected bitset, got {other:?}"),
     }
+
+    guard._participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(guard._participant).unwrap();
 }
 
 #[test]
@@ -559,7 +565,7 @@ fn xml_union_pubsub_loopback() {
     );
     let support = Arc::new(registry.get("Event").unwrap());
 
-    let (writer, reader, _guard) = dynamic_loopback("EventTopic", &support);
+    let (writer, reader, guard) = dynamic_loopback("EventTopic", &support);
 
     let mut data = support.create_data();
     data.set("seq", 1i32).unwrap();
@@ -582,6 +588,9 @@ fn xml_union_pubsub_loopback() {
         }
         other => panic!("expected union, got {other:?}"),
     }
+
+    guard._participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(guard._participant).unwrap();
 }
 
 #[test]
@@ -745,16 +754,16 @@ fn relative_module_references_resolve() {
              </module>
            </types>"#,
     );
+
+    let content_id = |name: &str| {
+        TypeIdentifier::CompleteTypeId(
+            TypeObject::Complete(registry.get_type_object(name).unwrap().clone()).compute_hash(),
+        )
+    };
     let holder = registry.get_type_object("geo::inner::Holder").unwrap();
     let CompleteTypeObject::Struct(s) = holder else { panic!("expected struct") };
-    assert_eq!(
-        s.member_seq[0].common.member_type_id,
-        TypeIdentifier::MinimalTypeId(EquivalenceHash::compute("geo::Point".as_bytes()))
-    );
-    assert_eq!(
-        s.member_seq[1].common.member_type_id,
-        TypeIdentifier::MinimalTypeId(EquivalenceHash::compute("Mode".as_bytes()))
-    );
+    assert_eq!(s.member_seq[0].common.member_type_id, content_id("geo::Point"));
+    assert_eq!(s.member_seq[1].common.member_type_id, content_id("Mode"));
     registry.get("geo::inner::Holder").unwrap();
 }
 
@@ -819,22 +828,12 @@ fn temp_xml_dir(tag: &str) -> std::path::PathBuf {
 
 #[test]
 fn xml_nested_type_via_type_lookup_cross_participant() {
-    // TypeLookup-only: inline TypeObject disabled, so the consumer pulls the whole closure via TypeLookup.
-    run_cross_participant_nested(true);
-    // Hybrid: inline carries only the top-level Holder; the consumer backfills the nested Point via TypeLookup.
-    run_cross_participant_nested(false);
+    // SEDP advertises TypeInformation only; the consumer pulls the whole nested closure via TypeLookup.
+    run_cross_participant_nested();
 }
 
-fn run_cross_participant_nested(disable_inline: bool) {
+fn run_cross_participant_nested() {
     // Consumer has no type definition; it obtains the nested 'origin' (Point) over the wire.
-    unsafe {
-        if disable_inline {
-            std::env::set_var("INT2DDS_DISABLE_INLINE_TYPE_OBJECT", "1");
-        } else {
-            std::env::remove_var("INT2DDS_DISABLE_INLINE_TYPE_OBJECT");
-        }
-    }
-
     let domain_id = next_domain_id();
     let factory = DomainParticipantFactory::get_instance();
 
@@ -899,6 +898,11 @@ fn run_cross_participant_nested(disable_inline: bool) {
         "nested 'origin' member must resolve to a TypeRef over the wire, got {:?}",
         origin.member_type
     );
+
+    producer.delete_contained_entities().unwrap();
+    factory.delete_participant(producer).unwrap();
+    consumer.delete_contained_entities().unwrap();
+    factory.delete_participant(consumer).unwrap();
 }
 
 #[test]
@@ -1133,7 +1137,7 @@ fn xml_dynamic_pubsub_loopback() {
     );
     let support = Arc::new(registry.get("SensorData").unwrap());
 
-    let (writer, reader, _guard) = dynamic_loopback("SensorTopic", &support);
+    let (writer, reader, guard) = dynamic_loopback("SensorTopic", &support);
 
     let mut data = support.create_data();
     data.set("sensor_id", 7i32).unwrap();
@@ -1148,6 +1152,9 @@ fn xml_dynamic_pubsub_loopback() {
     assert_eq!(sensor_id, 7);
     assert_eq!(temperature, 21.5);
     assert!(active);
+
+    guard._participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(guard._participant).unwrap();
 }
 
 #[test]
@@ -1163,7 +1170,7 @@ fn xml_collections_pubsub_loopback() {
     );
     let support = Arc::new(registry.get("LogRecord").unwrap());
 
-    let (writer, reader, _guard) = dynamic_loopback("LogTopic", &support);
+    let (writer, reader, guard) = dynamic_loopback("LogTopic", &support);
 
     let mut data = support.create_data();
     data.set("name", "logger-1").unwrap();
@@ -1192,6 +1199,9 @@ fn xml_collections_pubsub_loopback() {
     assert_eq!(values, [10, -20, 30]);
     assert_eq!(tags, ["a", "bb"]);
     assert_eq!(array_samples, [1.5, -2.5, 0.0]);
+
+    guard._participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(guard._participant).unwrap();
 }
 
 #[test]
@@ -1204,7 +1214,7 @@ fn xml_map_pubsub_loopback() {
     );
     let support = Arc::new(registry.get("MapRecord").unwrap());
 
-    let (writer, reader, _guard) = dynamic_loopback("MapTopic", &support);
+    let (writer, reader, guard) = dynamic_loopback("MapTopic", &support);
 
     let mut lookup = HashMap::new();
     lookup.insert(1i32, "one".to_string());
@@ -1230,6 +1240,9 @@ fn xml_map_pubsub_loopback() {
         }
         other => panic!("expected map, got {other:?}"),
     }
+
+    guard._participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(guard._participant).unwrap();
 }
 
 #[test]
@@ -1238,7 +1251,7 @@ fn xml_nested_enum_pubsub_loopback() {
     let support = Arc::new(registry.get("Holder").unwrap());
     let point_support = registry.get("Point").unwrap();
 
-    let (writer, reader, _guard) = dynamic_loopback("HolderTopic", &support);
+    let (writer, reader, guard) = dynamic_loopback("HolderTopic", &support);
 
     let mut origin = point_support.create_data();
     origin.set("x", 3i32).unwrap();
@@ -1278,4 +1291,7 @@ fn xml_nested_enum_pubsub_loopback() {
         }
         other => panic!("expected sequence, got {other:?}"),
     }
+
+    guard._participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(guard._participant).unwrap();
 }

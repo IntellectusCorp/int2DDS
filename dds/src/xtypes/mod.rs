@@ -51,14 +51,17 @@ mod type_compatibility;
 mod type_lookup;
 mod type_object;
 mod type_object_v1;
+mod type_object_xcdr;
 mod type_registry;
 
 pub use type_compatibility::{
-    check_structural_compatibility, complete_key_erased, complete_key_holder, minimal_key_erased,
-    minimal_key_holder, TypeCompatibilityError, TypeCompatibilityResult,
+    check_structural_compatibility, complete_key_erased, complete_key_holder,
+    evaluate_structural_compatibility, minimal_key_erased, minimal_key_holder, TypeCompatibility,
+    TypeCompatibilityError, TypeCompatibilityResult, TypeResolver,
 };
 pub use type_object::*;
 pub use type_object_v1::TypeObjectV1;
+pub use type_object_xcdr::{deserialize_type_object, serialize_type_object, spec_hash};
 
 // Dynamic type support
 pub use dynamic_data::{DynamicData, DynamicValue, FromDynamicValue, IntoDynamicValue};
@@ -74,4 +77,6 @@ pub use type_lookup::{
     TypeLookupCall, TypeLookupReply, TypeLookupRequest, TypeLookupReturn,
     MAX_DEPENDENCIES_PER_REPLY,
 };
-pub use type_registry::{new_shared_registry, SharedTypeRegistry, TypeRegistry};
+pub use type_registry::{
+    build_minimal_closure, new_shared_registry, SharedTypeRegistry, TypeRegistry,
+};
