@@ -107,8 +107,8 @@ impl FieldAccessor for SampleIdentityFieldAccessor {
         if let Some((first, rest)) = field_path.split_once('.') {
             match first {
                 "sequence_number" => match rest {
-                    "high" => Ok(Parameter::IntegerValue(typed.sequence_number.high as i64)),
-                    "low" => Ok(Parameter::IntegerValue(typed.sequence_number.low as i64)),
+                    "high" => Ok(Parameter::IntegerValue(typed.sequence_number.high as i128)),
+                    "low" => Ok(Parameter::IntegerValue(typed.sequence_number.low as i128)),
                     _ => Err(DdsError::Error(format!("Field '{}' not found", field_path))),
                 },
                 _ => Err(DdsError::Error(format!("Field '{}' not found", first))),

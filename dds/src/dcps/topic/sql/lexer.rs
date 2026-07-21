@@ -92,13 +92,13 @@ impl Lexer {
         }
 
         if is_hex {
-            let val = i64::from_str_radix(&result[2..], 16).unwrap_or(0);
+            let val = i128::from_str_radix(&result[2..], 16).unwrap_or(0);
             (TokenType::IntegerValue, Parameter::IntegerValue(val))
         } else if is_float {
             let val = result.parse::<f64>().unwrap_or(0.0);
             (TokenType::FloatValue, Parameter::FloatValue(val))
         } else {
-            let val = result.parse::<i64>().unwrap_or(0);
+            let val = result.parse::<i128>().unwrap_or(0);
             (TokenType::IntegerValue, Parameter::IntegerValue(val))
         }
     }
