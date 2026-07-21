@@ -340,7 +340,7 @@ impl Subscriber {
         )?;
 
         if let Ok(()) = self.is_enabled() {
-            if self.get_qos()?.entity_factory.autoenable_created_entities {
+            if self.get_qos_arc()?.entity_factory.autoenable_created_entities {
                 datareader.enable()?;
             }
         }
@@ -522,7 +522,7 @@ impl Subscriber {
 
         // Enable if subscriber is enabled and autoenable is set (same as create_datareader)
         if let Ok(()) = self.is_enabled() {
-            if self.get_qos()?.entity_factory.autoenable_created_entities {
+            if self.get_qos_arc()?.entity_factory.autoenable_created_entities {
                 datareader.enable()?;
             }
         }
@@ -1013,7 +1013,7 @@ impl Subscriber {
             Additional error code that may be returned besides standard errors: PRECONDITION_NOT_MET.
         */
         self.is_deleted()?;
-        if self.get_qos()?.presentation.access_scope != PresentationQosAccessScopeKind::Group {
+        if self.get_qos_arc()?.presentation.access_scope != PresentationQosAccessScopeKind::Group {
             return Ok(());
         }
         Err(DdsError::Unsupported)
@@ -1029,7 +1029,7 @@ impl Subscriber {
             Additional error code that may be returned besides standard errors: PRECONDITION_NOT_MET.
         */
         self.is_deleted()?;
-        if self.get_qos()?.presentation.access_scope != PresentationQosAccessScopeKind::Group {
+        if self.get_qos_arc()?.presentation.access_scope != PresentationQosAccessScopeKind::Group {
             return Ok(());
         }
         Err(DdsError::Unsupported)

@@ -38,7 +38,7 @@ use crate::{
     },
     publication::data_writer::DataWriter,
     rtps::{
-        common::{guid::Guid, sequence::SequenceNumber},
+        common::{guid::Guid, sequence::SequenceNumber, time::RtpsTime},
         entities::{
             history::{
                 cache_change::CacheChange, cache_change_pool::CacheChangePool,
@@ -123,20 +123,20 @@ pub(crate) struct DataWriterHistoryCache<Foo> {
 
 impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
     // Returns a reference to the list of CacheChanges.
-    fn get_changes(&self) -> &Vec<Arc<CacheChange>> {
-        &self.changes
+    fn get_changes(&self) -> Vec<Arc<CacheChange>> {
+        self.changes.clone()
     }
 
-    // Returns a mutable reference to the list of CacheChanges.
-    fn get_changes_mut(&mut self) -> &mut Vec<Arc<CacheChange>> {
-        &mut self.changes
-    }
-
-    // Returns the instance map that tracks CacheChanges per instance.
-    fn get_instance_map(
-        &self,
-    ) -> Arc<Mutex<HashMap<InstanceHandle, Vec<std::sync::Weak<CacheChange>>>>> {
-        self.instance_map.clone()
+    fn insert_change_sorted(&mut self, change: Arc<CacheChange>) {
+        let change_ts =
+            change.source_timestamp().or(change.reception_timestamp()).unwrap_or(RtpsTime::ZERO);
+        let pos = self
+            .changes
+            .binary_search_by_key(&change_ts, |c| {
+                c.source_timestamp().or(c.reception_timestamp()).unwrap_or(RtpsTime::ZERO)
+            })
+            .unwrap_or_else(|pos| pos);
+        self.changes.insert(pos, change);
     }
 
     // Returns the maximum number of samples allowed.
@@ -152,6 +152,25 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
     // Returns the maximum number of samples per instance allowed.
     fn get_max_samples_per_instance(&self) -> i32 {
         self.max_samples_per_instance
+    }
+
+    fn sample_count(&self) -> DdsResult<usize> {
+        Ok(self.changes.len())
+    }
+
+    fn instance_count(&self) -> DdsResult<usize> {
+        let map = self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        Ok(map.len())
+    }
+
+    fn contains_instance(&self, instance_handle: InstanceHandle) -> DdsResult<bool> {
+        let map = self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        Ok(map.contains_key(&instance_handle))
+    }
+
+    fn sample_count_of_instance(&self, instance_handle: InstanceHandle) -> DdsResult<usize> {
+        let map = self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        Ok(map.get(&instance_handle).map_or(0, |v| v.len()))
     }
 
     // Returns the map of lifespan timers keyed by writer GUID.
@@ -190,7 +209,7 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
         let lifespan_t0 = Instant::now();
         // Set lifespan timer if lifespan qos is configured
         let lifespan_duration = self.data_writer.upgrade().and_then(|data_writer| {
-            data_writer.get_qos().ok().and_then(|qos| {
+            data_writer.get_qos_arc().ok().and_then(|qos| {
                 if !qos.lifespan.duration.is_infinite() {
                     Some(qos.lifespan.duration)
                 } else {
@@ -296,7 +315,7 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
             return Ok(Some(removed));
         }
 
-        if self.is_max_samples_exceeded() {
+        if self.is_max_samples_exceeded()? {
             let removed = self.try_remove_oldest_change_of_all()?;
             return Ok(Some(removed));
         }
@@ -814,14 +833,15 @@ mod tests {
         topic::qos::TopicQos,
     };
 
-    // Helper function to create a test CacheChange
+    // Helper function to create a test CacheChange.
+    // Payload is non-empty so the change is not classified as a coherent-set end marker.
     fn create_change(seq: i64, handle: InstanceHandle) -> Arc<CacheChange> {
         Arc::new(CacheChange::new(
             ChangeKind::Alive,
             Guid::UNKNOWN,
             handle,
             SequenceNumber::from_i64(seq),
-            vec![],
+            vec![1],
             None,
         ))
     }

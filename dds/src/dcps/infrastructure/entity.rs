@@ -34,6 +34,7 @@ pub trait Entity: BaseEntity {
     fn get_statuscondition(&self) -> DdsResult<StatusCondition<Self::Qos>>;
     fn set_qos(&self, qos: Self::Qos) -> DdsResult<()>;
     fn get_qos(&self) -> DdsResult<Self::Qos>;
+    fn get_qos_arc(&self) -> DdsResult<Arc<Self::Qos>>;
 }
 
 pub(crate) trait EnableChild: Entity {
@@ -96,7 +97,7 @@ macro_rules! impl_dds_entity_impl {
 
                 self.check_parent_enabled()?;
 
-                let qos = self.get_qos()?;
+                let qos = self.get_qos_arc()?;
                 qos.check_unsupported_policies()?;
                 qos.is_consistent()?;
 
@@ -137,7 +138,7 @@ macro_rules! impl_dds_entity_impl {
                 qos.is_consistent()?;
 
                 if self.is_enabled().is_ok() {
-                    self.get_qos()?.check_immutable_change(&qos)?;
+                    self.get_qos_arc()?.check_immutable_change(&qos)?;
                 }
 
                 // Allow only one set_qos to run at a time so that the cache store
@@ -154,6 +155,11 @@ macro_rules! impl_dds_entity_impl {
             fn get_qos(&self) -> DdsResult<Self::Qos> {
                 self.is_deleted()?;
                 Ok((**self.qos.load()).clone())
+            }
+
+            fn get_qos_arc(&self) -> DdsResult<std::sync::Arc<Self::Qos>> {
+                self.is_deleted()?;
+                Ok(self.qos.load_full())
             }
         }
 
@@ -209,6 +215,13 @@ macro_rules! impl_dds_entity_impl {
             #[inline]
             pub fn get_qos(&self) -> DdsResult<$qos_type> {
                 <Self as Entity>::get_qos(self)
+            }
+
+            // Shared read-only handle to the current QoS. Avoids a deep clone
+            // on hot paths that only read a field.
+            #[inline]
+            pub(crate) fn get_qos_arc(&self) -> DdsResult<std::sync::Arc<$qos_type>> {
+                <Self as Entity>::get_qos_arc(self)
             }
         }
     };
