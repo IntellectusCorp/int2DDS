@@ -183,7 +183,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           pattern: tshark_*
-          merge-multiple: true
+          merge-multiple: false
           path: ./packets
         continue-on-error: true
       - name: Install junitparser
@@ -211,7 +211,7 @@ jobs:
           if [ -d "./packets" ] && [ "$(ls -A ./packets)" ]; then
             cd packets
             ls -la
-            zip -r ../packet_captures.zip *.pcap
+            zip -r ../packet_captures.zip .
             cd ..
           else
             echo "No packet captures found, skipping archive creation"
