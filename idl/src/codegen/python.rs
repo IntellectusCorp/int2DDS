@@ -877,7 +877,10 @@ impl<'a> PyGen<'a> {
                 self.indent -= 1;
             }
             ExtensibilityKind::Mutable => {
-                // Mutable: DHEADER + EMHEADER per field (no sentinel; DHEADER bounds the struct)
+                // XCDR2: DHEADER + EMHEADER per field (no sentinel; DHEADER bounds the struct).
+                // XCDR1: PL_CDR (PID member headers) terminated by a sentinel, no DHEADER.
+                self.line("if w._xcdr2:");
+                self.indent += 1;
                 self.line("with w.dheader():");
                 self.indent += 1;
                 for (i, m) in members.iter().enumerate() {
@@ -892,6 +895,23 @@ impl<'a> PyGen<'a> {
                     self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
                     self.indent -= 1;
                 }
+                self.indent -= 1;
+                self.indent -= 1;
+                self.line("else:");
+                self.indent += 1;
+                for (i, m) in members.iter().enumerate() {
+                    let member_id = m.member_id.unwrap_or(i as u32);
+                    let must_understand = if m.must_understand { "True" } else { "False" };
+                    self.line(&format!(
+                        "with w.member_v1(member_id={}, must_understand={}):",
+                        member_id, must_understand
+                    ));
+                    self.indent += 1;
+                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
+                    self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
+                    self.indent -= 1;
+                }
+                self.line("w.end_mutable_struct()");
                 self.indent -= 1;
             }
         }
@@ -936,6 +956,8 @@ impl<'a> PyGen<'a> {
                 self.indent -= 1;
             }
             ExtensibilityKind::Mutable => {
+                self.line("if w._xcdr2:");
+                self.indent += 1;
                 self.line("with w.dheader():");
                 self.indent += 1;
                 for (i, m) in members.iter().enumerate() {
@@ -950,6 +972,23 @@ impl<'a> PyGen<'a> {
                     self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
                     self.indent -= 1;
                 }
+                self.indent -= 1;
+                self.indent -= 1;
+                self.line("else:");
+                self.indent += 1;
+                for (i, m) in members.iter().enumerate() {
+                    let member_id = m.member_id.unwrap_or(i as u32);
+                    let must_understand = if m.must_understand { "True" } else { "False" };
+                    self.line(&format!(
+                        "with w.member_v1(member_id={}, must_understand={}):",
+                        member_id, must_understand
+                    ));
+                    self.indent += 1;
+                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
+                    self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
+                    self.indent -= 1;
+                }
+                self.line("w.end_mutable_struct()");
                 self.indent -= 1;
             }
         }
@@ -1176,6 +1215,29 @@ impl<'a> PyGen<'a> {
         }
     }
 
+    /// Emit the `if _mid == N: <read> ... else: r.skip(_mlen)` dispatch shared by the
+    /// XCDR2 (EMHEADER) and XCDR1 (PL_CDR) mutable deserialize loops.
+    fn emit_mutable_member_dispatch(&mut self, members: &[ResolvedMember]) {
+        let mut first = true;
+        for (i, m) in members.iter().enumerate() {
+            let member_id = m.member_id.unwrap_or(i as u32);
+            let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
+            if first {
+                self.line(&format!("if _mid == {}:", member_id));
+                first = false;
+            } else {
+                self.line(&format!("elif _mid == {}:", member_id));
+            }
+            self.indent += 1;
+            self.emit_read_field(&m.resolved_type, &field_name);
+            self.indent -= 1;
+        }
+        self.line("else:");
+        self.indent += 1;
+        self.line("r.skip(_mlen)  # Unknown field");
+        self.indent -= 1;
+    }
+
     fn emit_deserialize_cdr(&mut self, s: &ResolvedStruct) {
         let members = self.collect_all_members(s);
         self.line("@classmethod");
@@ -1213,10 +1275,9 @@ impl<'a> PyGen<'a> {
                 self.indent -= 1;
             }
             ExtensibilityKind::Mutable => {
-                // Mutable: read DHEADER, then loop over EMHEADERs
-                self.line("_dsize, _dstart = r.read_dheader()");
-
-                // Initialize all fields with defaults
+                // Default-init every field (any member may be absent), then read member
+                // headers — XCDR2 EMHEADERs bounded by a DHEADER, or XCDR1 PL_CDR headers
+                // terminated by a sentinel.
                 for m in &members {
                     let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
                     let default = self.default_value(&m.resolved_type);
@@ -1243,33 +1304,29 @@ impl<'a> PyGen<'a> {
                     }
                 }
 
+                self.line("if r._xcdr2:");
+                self.indent += 1;
+                self.line("_dsize, _dstart = r.read_dheader()");
                 self.line("_dend = _dstart + _dsize");
                 self.line("while r.position < _dend:");
                 self.indent += 1;
                 self.line("_mid, _mlen, _mu = r.read_emheader()");
-
-                // Switch on member_id
-                let mut first = true;
-                for (i, m) in members.iter().enumerate() {
-                    let member_id = m.member_id.unwrap_or(i as u32);
-                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
-                    if first {
-                        self.line(&format!("if _mid == {}:", member_id));
-                        first = false;
-                    } else {
-                        self.line(&format!("elif _mid == {}:", member_id));
-                    }
-                    self.indent += 1;
-                    self.emit_read_field(&m.resolved_type, &field_name);
-                    self.indent -= 1;
-                }
-                self.line("else:");
-                self.indent += 1;
-                self.line("r.skip(_mlen)  # Unknown field");
-                self.indent -= 1;
-
+                self.emit_mutable_member_dispatch(&members);
                 self.indent -= 1;
                 self.line("r.read_dheader_end(_dsize, _dstart)");
+                self.indent -= 1;
+                self.line("else:");
+                self.indent += 1;
+                self.line("while True:");
+                self.indent += 1;
+                self.line("_kind, _mid, _mlen, _mu = r.read_parameter_header()");
+                self.line("if _kind == \"sentinel\":");
+                self.indent += 1;
+                self.line("break");
+                self.indent -= 1;
+                self.emit_mutable_member_dispatch(&members);
+                self.indent -= 1;
+                self.indent -= 1;
             }
         }
 
@@ -1315,7 +1372,6 @@ impl<'a> PyGen<'a> {
                 self.indent -= 1;
             }
             ExtensibilityKind::Mutable => {
-                self.line("_dsize, _dstart = r.read_dheader()");
                 for m in &members {
                     let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
                     let default = self.default_value(&m.resolved_type);
@@ -1335,30 +1391,29 @@ impl<'a> PyGen<'a> {
                         self.line(&format!("{} = {}", field_name, default));
                     }
                 }
+                self.line("if r._xcdr2:");
+                self.indent += 1;
+                self.line("_dsize, _dstart = r.read_dheader()");
                 self.line("_dend = _dstart + _dsize");
                 self.line("while r.position < _dend:");
                 self.indent += 1;
                 self.line("_mid, _mlen, _mu = r.read_emheader()");
-                let mut first = true;
-                for (i, m) in members.iter().enumerate() {
-                    let member_id = m.member_id.unwrap_or(i as u32);
-                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
-                    if first {
-                        self.line(&format!("if _mid == {}:", member_id));
-                        first = false;
-                    } else {
-                        self.line(&format!("elif _mid == {}:", member_id));
-                    }
-                    self.indent += 1;
-                    self.emit_read_field(&m.resolved_type, &field_name);
-                    self.indent -= 1;
-                }
-                self.line("else:");
-                self.indent += 1;
-                self.line("r.skip(_mlen)  # Unknown field");
-                self.indent -= 1;
+                self.emit_mutable_member_dispatch(&members);
                 self.indent -= 1;
                 self.line("r.read_dheader_end(_dsize, _dstart)");
+                self.indent -= 1;
+                self.line("else:");
+                self.indent += 1;
+                self.line("while True:");
+                self.indent += 1;
+                self.line("_kind, _mid, _mlen, _mu = r.read_parameter_header()");
+                self.line("if _kind == \"sentinel\":");
+                self.indent += 1;
+                self.line("break");
+                self.indent -= 1;
+                self.emit_mutable_member_dispatch(&members);
+                self.indent -= 1;
+                self.indent -= 1;
             }
         }
 

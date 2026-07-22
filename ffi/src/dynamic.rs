@@ -129,7 +129,7 @@ pub(crate) unsafe fn copy_str_to_c(
     let bytes = s.as_bytes();
     *out_len = bytes.len();
     if buf_len < bytes.len() + 1 {
-        return INT2DDS_RET_DYNAMIC_DECODE_ERROR;
+        return INT2DDS_RET_BUFFER_TOO_SMALL;
     }
     std::ptr::copy_nonoverlapping(bytes.as_ptr() as *const c_char, buf, bytes.len());
     *buf.add(bytes.len()) = 0;
@@ -1614,7 +1614,7 @@ mod tests {
                 &mut out_len,
             )
         };
-        assert_eq!(ret, INT2DDS_RET_DYNAMIC_DECODE_ERROR);
+        assert_eq!(ret, INT2DDS_RET_BUFFER_TOO_SMALL);
         assert_eq!(out_len, 5);
         unsafe { int2dds_type_object_destroy(h) };
     }
