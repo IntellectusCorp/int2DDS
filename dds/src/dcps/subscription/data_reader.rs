@@ -100,6 +100,11 @@ use crate::{
     utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
 };
 
+pub enum BoundedSerialized {
+    Fit(Bytes, SampleInfo),
+    TooSmall { required: usize },
+}
+
 static SERIALIZED_TAKE_PROFILE_COUNT: AtomicU64 = AtomicU64::new(0);
 static SERIALIZED_TAKE_PROFILE_PRECHECK_US: AtomicU64 = AtomicU64::new(0);
 static SERIALIZED_TAKE_PROFILE_GET_CHANGES_US: AtomicU64 = AtomicU64::new(0);
@@ -773,6 +778,31 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         }
     }
 
+    /// Get the raw serialized key bytes for a given instance handle.
+    ///
+    /// Serialized counterpart of [`get_key_value`](Self::get_key_value) for the FFI
+    /// raw-serialized path, mirroring the writer's `get_key_value_serialized`. For
+    /// native (derive) types this returns the CDR-serialized key; for raw FFI types
+    /// (which cannot deserialize/re-serialize a key) it returns the stored instance
+    /// handle bytes, which still round-trip through `lookup_instance_serialized`.
+    pub fn get_key_value_serialized(&self, handle: InstanceHandle) -> DdsResult<Arc<[u8]>> {
+        self.is_enabled()?;
+
+        if handle.is_nil() {
+            return Err(DdsError::BadParameter);
+        }
+
+        let instance_info = self.get_instance_infos()?;
+        if let Some(info) = instance_info.get(&handle) {
+            if info.key.is_empty() {
+                return Err(DdsError::Error("Unknown Key".to_string()));
+            }
+            Ok(info.key.clone())
+        } else {
+            Err(DdsError::BadParameter)
+        }
+    }
+
     /// Looks up the instance handle corresponding to a data instance.
     ///
     /// This operation takes an instance and returns the handle that can be used in subsequent
@@ -845,6 +875,31 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                 None => InstanceHandle::NIL, // Unregistered instance
             })
         }
+    }
+
+    /// Look up an instance handle from the stored serialized key bytes.
+    ///
+    /// Serialized counterpart of [`lookup_instance`](Self::lookup_instance) for the FFI
+    /// raw-serialized path. The reader stores each instance's canonical key CDR (via the
+    /// type support's `serialize_key`, the same projection the wire uses), so this matches
+    /// on the stored key bytes — as returned by [`get_key_value_serialized`](Self::get_key_value_serialized).
+    /// Returns `InstanceHandle::NIL` if the instance is not known to this reader.
+    pub fn lookup_instance_serialized(&self, key: &[u8]) -> DdsResult<InstanceHandle> {
+        self.is_deleted()?;
+
+        if key.is_empty() {
+            return Ok(InstanceHandle::NIL);
+        }
+
+        let instances = self.instance_infos.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
+        for (handle, info) in instances.iter() {
+            if info.key.as_ref() == key {
+                return Ok(*handle);
+            }
+        }
+
+        Ok(InstanceHandle::NIL)
     }
 
     // For Entity
@@ -2554,7 +2609,60 @@ impl<Foo: DdsType> DataReader<Foo> {
         view_states: &[ViewStateKind],
         instance_states: &[InstanceStateKind],
     ) -> DdsResult<Vec<(Arc<[u8]>, SampleInfo)>> {
-        self.read_or_take_serialized(max_samples, sample_states, view_states, instance_states, true)
+        self.read_or_take_serialized(
+            max_samples,
+            sample_states,
+            view_states,
+            instance_states,
+            true,
+            None,
+        )
+    }
+
+    /// Take pre-serialized samples belonging to a single instance.
+    ///
+    /// Like [`take_serialized`](Self::take_serialized) but restricted to the
+    /// instance identified by `handle`. A nil handle returns `BadParameter`; an
+    /// unknown handle yields no samples (mirroring `take_instance`).
+    pub fn take_instance_serialized(
+        &self,
+        max_samples: i32,
+        handle: InstanceHandle,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+    ) -> DdsResult<Vec<(Arc<[u8]>, SampleInfo)>> {
+        self.read_or_take_serialized(
+            max_samples,
+            sample_states,
+            view_states,
+            instance_states,
+            true,
+            Some(handle),
+        )
+    }
+
+    /// Read pre-serialized samples belonging to a single instance.
+    ///
+    /// Like [`read_serialized`](Self::read_serialized) but restricted to the
+    /// instance identified by `handle`. A nil handle returns `BadParameter`; an
+    /// unknown handle yields no samples (mirroring `read_instance`).
+    pub fn read_instance_serialized(
+        &self,
+        max_samples: i32,
+        handle: InstanceHandle,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+    ) -> DdsResult<Vec<(Arc<[u8]>, SampleInfo)>> {
+        self.read_or_take_serialized(
+            max_samples,
+            sample_states,
+            view_states,
+            instance_states,
+            false,
+            Some(handle),
+        )
     }
 
     /// Read pre-serialized data directly from the cache, bypassing TypeSupport deserialization.
@@ -2577,6 +2685,7 @@ impl<Foo: DdsType> DataReader<Foo> {
             view_states,
             instance_states,
             false,
+            None,
         )
     }
 
@@ -2588,20 +2697,96 @@ impl<Foo: DdsType> DataReader<Foo> {
             &[ViewStateKind::ANY_VIEW_STATE],
             &[InstanceStateKind::ANY_INSTANCE_STATE],
             true,
+            None,
         )?;
         results.into_iter().next().ok_or(DdsError::NoData)
     }
 
     /// Take a single pre-serialized sample without copying shared receive payloads.
     pub fn take_next_serialized_bytes(&self) -> DdsResult<(Bytes, SampleInfo)> {
-        let results = self.read_or_take_serialized_bytes(
+        let (results, _) = self.read_or_take_serialized_bytes(
             1,
             &[SampleStateKind::NOT_READ_SAMPLE_STATE],
             &[ViewStateKind::ANY_VIEW_STATE],
             &[InstanceStateKind::ANY_INSTANCE_STATE],
             true,
+            None,
+            None,
         )?;
         results.into_iter().next().ok_or(DdsError::NoData)
+    }
+
+    fn bounded_single_serialized(
+        &self,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+        take: bool,
+        max_bytes: usize,
+    ) -> DdsResult<BoundedSerialized> {
+        let (results, too_small) = self.read_or_take_serialized_bytes(
+            1,
+            sample_states,
+            view_states,
+            instance_states,
+            take,
+            Some(max_bytes),
+            None,
+        )?;
+        if let Some(required) = too_small {
+            return Ok(BoundedSerialized::TooSmall { required });
+        }
+        results
+            .into_iter()
+            .next()
+            .map(|(data, info)| BoundedSerialized::Fit(data, info))
+            .ok_or(DdsError::NoData)
+    }
+
+    pub fn take_next_serialized_bounded(&self, max_bytes: usize) -> DdsResult<BoundedSerialized> {
+        self.bounded_single_serialized(
+            &[SampleStateKind::NOT_READ_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::ANY_INSTANCE_STATE],
+            true,
+            max_bytes,
+        )
+    }
+
+    pub fn read_next_serialized_bounded(&self, max_bytes: usize) -> DdsResult<BoundedSerialized> {
+        self.bounded_single_serialized(
+            &[SampleStateKind::NOT_READ_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::ANY_INSTANCE_STATE],
+            false,
+            max_bytes,
+        )
+    }
+
+    pub fn take_serialized_bounded(
+        &self,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+        max_bytes: usize,
+    ) -> DdsResult<BoundedSerialized> {
+        self.bounded_single_serialized(sample_states, view_states, instance_states, true, max_bytes)
+    }
+
+    pub fn read_serialized_bounded(
+        &self,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+        max_bytes: usize,
+    ) -> DdsResult<BoundedSerialized> {
+        self.bounded_single_serialized(
+            sample_states,
+            view_states,
+            instance_states,
+            false,
+            max_bytes,
+        )
     }
 
     fn read_or_take_serialized(
@@ -2611,6 +2796,7 @@ impl<Foo: DdsType> DataReader<Foo> {
         view_states: &[ViewStateKind],
         instance_states: &[InstanceStateKind],
         take: bool,
+        instance_handle: Option<InstanceHandle>,
     ) -> DdsResult<Vec<(Arc<[u8]>, SampleInfo)>> {
         self.read_or_take_serialized_bytes(
             max_samples,
@@ -2618,8 +2804,10 @@ impl<Foo: DdsType> DataReader<Foo> {
             view_states,
             instance_states,
             take,
+            None,
+            instance_handle,
         )
-        .map(|results| {
+        .map(|(results, _)| {
             results.into_iter().map(|(data, info)| (Arc::from(data.as_ref()), info)).collect()
         })
     }
@@ -2631,7 +2819,9 @@ impl<Foo: DdsType> DataReader<Foo> {
         view_states: &[ViewStateKind],
         instance_states: &[InstanceStateKind],
         take: bool,
-    ) -> DdsResult<Vec<(Bytes, SampleInfo)>> {
+        max_bytes: Option<usize>,
+        instance_handle: Option<InstanceHandle>,
+    ) -> DdsResult<(Vec<(Bytes, SampleInfo)>, Option<usize>)> {
         let profile = serialized_take_profile_enabled();
         let total_t0 = Instant::now();
         let precheck_t0 = Instant::now();
@@ -2639,6 +2829,15 @@ impl<Foo: DdsType> DataReader<Foo> {
 
         if max_samples == 0 {
             return Err(DdsError::BadParameter);
+        }
+
+        // Instance-scoped variants reject a nil handle, matching the typed
+        // read/take_instance path; an unknown (non-nil) handle simply yields no
+        // matching samples via the in-loop filter below.
+        if let Some(handle) = instance_handle {
+            if handle.is_nil() {
+                return Err(DdsError::BadParameter);
+            }
         }
 
         self.set_read_communication_status(false)?;
@@ -2671,6 +2870,15 @@ impl<Foo: DdsType> DataReader<Foo> {
         for change in changes.iter() {
             if remaining <= 0 {
                 break;
+            }
+
+            // Instance filter: skip changes belonging to a different instance,
+            // before any state check or cache removal (so `take` never consumes
+            // samples from other instances).
+            if let Some(target) = instance_handle {
+                if change.instance_handle() != target {
+                    continue;
+                }
             }
 
             let sample_state_t0 = Instant::now();
@@ -2717,6 +2925,12 @@ impl<Foo: DdsType> DataReader<Foo> {
             let serialized_data = change.data_bytes();
             if profile {
                 loop_data_bytes_us += elapsed_us(data_bytes_t0, Instant::now());
+            }
+
+            if let Some(cap) = max_bytes {
+                if has_valid_data && serialized_data.len() > cap {
+                    return Ok((Vec::new(), Some(serialized_data.len())));
+                }
             }
 
             let sample_info_t0 = Instant::now();
@@ -2806,7 +3020,7 @@ impl<Foo: DdsType> DataReader<Foo> {
                     elapsed_us(total_t0, Instant::now()),
                 );
             }
-            Ok(result)
+            Ok((result, None))
         }
     }
 

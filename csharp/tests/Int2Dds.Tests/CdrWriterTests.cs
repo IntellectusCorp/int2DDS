@@ -184,8 +184,10 @@ namespace Int2Dds.Tests
         {
             var w = new CdrWriter();
             w.WriteSeqHeader(5);
+            for (uint i = 0; i < 5; i++) w.WriteU32(i);
             var r = new CdrReader(w.ToBytes());
             Assert.Equal(5u, r.ReadSeqHeader());
+            for (uint i = 0; i < 5; i++) Assert.Equal(i, r.ReadU32());
         }
 
         [Fact]
@@ -202,7 +204,7 @@ namespace Int2Dds.Tests
         [Fact]
         public void EncapsulationHeader_Final_LittleEndian()
         {
-            var w = new CdrWriter(Extensibility.Final, littleEndian: true);
+            var w = new CdrWriter(Extensibility.Final, littleEndian: true, xcdr2: true);
             var bytes = w.ToBytes();
             // Encapsulation header: CDR2_LE = 0x0007 (big-endian encoded)
             Assert.True(bytes.Length >= 4);
@@ -215,7 +217,7 @@ namespace Int2Dds.Tests
         [Fact]
         public void EncapsulationHeader_Appendable_LittleEndian()
         {
-            var w = new CdrWriter(Extensibility.Appendable, littleEndian: true);
+            var w = new CdrWriter(Extensibility.Appendable, littleEndian: true, xcdr2: true);
             var bytes = w.ToBytes();
             Assert.Equal(0x00, bytes[0]);
             Assert.Equal(0x09, bytes[1]); // DCDR2_LE = 0x0009
@@ -224,7 +226,7 @@ namespace Int2Dds.Tests
         [Fact]
         public void EncapsulationHeader_Mutable_LittleEndian()
         {
-            var w = new CdrWriter(Extensibility.Mutable, littleEndian: true);
+            var w = new CdrWriter(Extensibility.Mutable, littleEndian: true, xcdr2: true);
             var bytes = w.ToBytes();
             Assert.Equal(0x00, bytes[0]);
             Assert.Equal(0x0B, bytes[1]); // PL_CDR2_LE = 0x000B

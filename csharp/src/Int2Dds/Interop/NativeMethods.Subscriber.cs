@@ -75,6 +75,12 @@ namespace Int2Dds.Interop
         internal static extern int int2dds_read_serialized_batch(IntPtr reader, int max_samples, out IntPtr seq_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_take_instance_serialized_batch(IntPtr reader, byte* handle, int max_samples, uint sample_state_mask, uint view_state_mask, uint instance_state_mask, out IntPtr seq_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_read_instance_serialized_batch(IntPtr reader, byte* handle, int max_samples, uint sample_state_mask, uint view_state_mask, uint instance_state_mask, out IntPtr seq_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern UIntPtr int2dds_sample_seq_length(IntPtr seq);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
@@ -118,5 +124,26 @@ namespace Int2Dds.Interop
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static unsafe extern int int2dds_datareader_get_requested_incompatible_qos_status(IntPtr reader, NativeRequestedIncompatibleQosStatus* status_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datareader_lookup_instance(IntPtr reader, byte* key, UIntPtr key_len, byte* handle_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datareader_get_key_value(IntPtr reader, byte* handle, byte* key_buf, UIntPtr key_capacity, out UIntPtr key_size_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_take_serialized_loaned(IntPtr reader, out byte* data_out, out UIntPtr actual_size_out, [MarshalAs(UnmanagedType.U1)] out bool valid_data_out, out IntPtr loan_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_return_serialized_loan(IntPtr loan);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datareader_get_guid(IntPtr reader, byte* guid_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datareader_has_data(IntPtr reader, [MarshalAs(UnmanagedType.U1)] out bool has_data_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datareader_get_requested_incompatible_type_status(IntPtr reader, NativeRequestedIncompatibleTypeStatus* status_out);
     }
 }

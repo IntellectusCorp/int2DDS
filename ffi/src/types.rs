@@ -13,20 +13,28 @@
 //! All handle types implement Send and Sync, making them safe to use
 //! across threads in both Rust and C code.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use int2dds::{
-    domain::domain_participant::DomainParticipant,
+    domain::{domain_participant::DomainParticipant, qos::DomainParticipantQos},
     infrastructure::{
         condition::Condition, guard_condition::GuardCondition, status_condition::StatusCondition,
         wait_set::WaitSet,
     },
-    publication::{data_writer::DataWriter, publisher::Publisher, qos::DataWriterQos},
+    publication::{
+        data_writer::DataWriter,
+        publisher::Publisher,
+        qos::{DataWriterQos, PublisherQos},
+    },
     subscription::{
-        data_reader::DataReader, qos::DataReaderQos, sample_info::SampleInfo,
+        data_reader::DataReader,
+        qos::{DataReaderQos, SubscriberQos},
+        query_condition::QueryCondition,
+        read_condition::ReadCondition,
+        sample_info::SampleInfo,
         subscriber::Subscriber,
     },
-    topic::{content_filtered_topic::ContentFilteredTopic, topic::Topic},
+    topic::{content_filtered_topic::ContentFilteredTopic, qos::TopicQos, topic::Topic},
 };
 
 use crate::data::Int2DdsData;
@@ -56,13 +64,13 @@ pub struct Int2DdsSubscriber {
 /// Opaque handle to a DataWriter
 pub struct Int2DdsDataWriter {
     pub(crate) inner: DataWriter<Int2DdsData>,
-    pub(crate) listener: Option<Arc<FfiDataWriterListener>>,
+    pub(crate) listener: RwLock<Option<Arc<FfiDataWriterListener>>>,
 }
 
 /// Opaque handle to a DataReader
 pub struct Int2DdsDataReader {
     pub(crate) inner: DataReader<Int2DdsData>,
-    pub(crate) listener: Option<Arc<FfiDataReaderListener>>,
+    pub(crate) listener: RwLock<Option<Arc<FfiDataReaderListener>>>,
 }
 
 /// Opaque handle to a Topic
@@ -74,6 +82,7 @@ pub struct Int2DdsTopic {
 /// Opaque handle to a ContentFilteredTopic
 pub struct Int2DdsContentFilteredTopic {
     pub(crate) inner: ContentFilteredTopic,
+    #[allow(dead_code)]
     pub(crate) type_name: String,
 }
 
@@ -93,6 +102,10 @@ pub struct Int2DdsGuardCondition {
 pub(crate) enum StatusConditionKind {
     Reader(StatusCondition<DataReaderQos>),
     Writer(StatusCondition<DataWriterQos>),
+    Participant(StatusCondition<DomainParticipantQos>),
+    Publisher(StatusCondition<PublisherQos>),
+    Subscriber(StatusCondition<SubscriberQos>),
+    Topic(StatusCondition<TopicQos>),
 }
 
 /// Opaque handle to a StatusCondition
@@ -105,6 +118,22 @@ pub struct Int2DdsStatusCondition {
 /// Generic condition handle for use with WaitSet
 pub struct Int2DdsCondition {
     pub(crate) inner: Arc<dyn Condition + Send + Sync>,
+}
+
+/// Concrete ReadCondition/QueryCondition variant.
+/// The generic Condition trait doesn't expose the state masks or query
+/// parameters, so we keep the concrete type alongside the trait object.
+pub(crate) enum ReadConditionKind {
+    Read(ReadCondition),
+    Query(QueryCondition),
+}
+
+/// Opaque handle to a ReadCondition or QueryCondition.
+/// `inner` is used by WaitSet (trait object); `kind` provides concrete access
+/// for the filtered read/take path and query-parameter mutation.
+pub struct Int2DdsReadCondition {
+    pub(crate) inner: Arc<dyn Condition + Send + Sync>,
+    pub(crate) kind: ReadConditionKind,
 }
 
 /// Sequence of conditions returned from WaitSet::wait
@@ -189,6 +218,8 @@ unsafe impl Send for Int2DdsStatusCondition {}
 unsafe impl Sync for Int2DdsStatusCondition {}
 unsafe impl Send for Int2DdsCondition {}
 unsafe impl Sync for Int2DdsCondition {}
+unsafe impl Send for Int2DdsReadCondition {}
+unsafe impl Sync for Int2DdsReadCondition {}
 unsafe impl Send for Int2DdsConditionSeq {}
 unsafe impl Sync for Int2DdsConditionSeq {}
 unsafe impl Send for Int2DdsSampleSeq {}

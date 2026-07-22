@@ -79,6 +79,28 @@ namespace Int2Dds.Conditions
         }
 
         /// <summary>
+        /// Attaches a <see cref="ReadCondition"/> (or <see cref="QueryCondition"/>) to this WaitSet.
+        /// </summary>
+        public void Attach(ReadCondition condition)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            if (condition == null) throw new ArgumentNullException(nameof(condition));
+            ReturnCodeHelper.CheckReturn(
+                NativeMethods.int2dds_waitset_attach_readcondition(_handle, condition.Handle));
+        }
+
+        /// <summary>
+        /// Detaches a <see cref="ReadCondition"/> (or <see cref="QueryCondition"/>) from this WaitSet.
+        /// </summary>
+        public void Detach(ReadCondition condition)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            if (condition == null) throw new ArgumentNullException(nameof(condition));
+            ReturnCodeHelper.CheckReturn(
+                NativeMethods.int2dds_waitset_detach_readcondition(_handle, condition.Handle));
+        }
+
+        /// <summary>
         /// Attaches a DataReader by its native handle.
         /// </summary>
         internal void AttachDataReader(IntPtr readerHandle)
@@ -163,7 +185,23 @@ namespace Int2Dds.Conditions
                 : -1;
 
             int ret = NativeMethods.int2dds_waitset_wait_ex(_handle, timeoutMs, out IntPtr seqHandle);
+            return CollectConditions(ret, seqHandle);
+        }
 
+        /// <summary>
+        /// Nanosecond-precision variant of <see cref="WaitEx"/>. Pass a negative
+        /// value for an infinite wait.
+        /// </summary>
+        public IReadOnlyList<Condition> WaitExNs(long timeoutNs)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+
+            int ret = NativeMethods.int2dds_waitset_wait_ex_ns(_handle, timeoutNs, out IntPtr seqHandle);
+            return CollectConditions(ret, seqHandle);
+        }
+
+        private IReadOnlyList<Condition> CollectConditions(int ret, IntPtr seqHandle)
+        {
             if (ret == ReturnCode.Timeout)
                 return Int2Dds.Internal.EmptyArrayHolder<Condition>.Value;
 

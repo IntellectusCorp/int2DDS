@@ -38,7 +38,7 @@ namespace Int2Dds.Core
 
         private readonly IntPtr _handle;
         private readonly Topic<T> _topic;
-        private readonly byte[] _buffer;
+        private byte[] _buffer;
         private IntPtr _listenerContextHandle;
         private bool _disposed;
 
@@ -52,8 +52,8 @@ namespace Int2Dds.Core
             _buffer = ArrayPool<byte>.Shared.Rent(DefaultBufferSize);
 
             // Always create a QoS handle so that the native layer receives the
-            // correct DataRepresentation default (XCDR1) even when the caller
-            // does not supply an explicit QoS object.
+            // correct DataRepresentation default even when the caller does not
+            // supply an explicit QoS object.
             IntPtr qosHandle = IntPtr.Zero;
             ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_create_default(out qosHandle));
             try
@@ -61,10 +61,11 @@ namespace Int2Dds.Core
                 if (qos != null)
                     ApplyReaderQos(qosHandle, qos);
 
-                // Ensure SEDP advertises the same encoding that C# actually uses.
+                // Advertise the core default (single source of truth) rather than
+                // a hardcoded value, so reader/writer stay compatible if it changes.
                 if (qos?.DataRepresentation == null)
                     ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_set_data_representation(
-                        qosHandle, (int)Qos.DataRepresentationKind.Xcdr1));
+                        qosHandle, NativeMethods.int2dds_default_data_representation()));
             }
             catch
             {
@@ -389,6 +390,89 @@ namespace Int2Dds.Core
         }
 
         /// <summary>
+        /// Looks up the instance handle for a stored serialized key. The key must be in the
+        /// serialized form the reader stored for the instance — i.e. the bytes returned by
+        /// <see cref="GetKeyValue"/> (or a sample's instance handle on the raw-serialized
+        /// path), not a freshly serialized key. Returns <see cref="InstanceHandle.Nil"/> if
+        /// the instance is unknown.
+        /// </summary>
+        public InstanceHandle LookupInstance(byte[] key)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+
+            if (key == null || key.Length == 0)
+                return InstanceHandle.Nil;
+
+            var handleBytes = new byte[16];
+            unsafe
+            {
+                fixed (byte* pKey = key)
+                fixed (byte* pHandle = handleBytes)
+                {
+                    ReturnCodeHelper.CheckReturn(
+                        NativeMethods.int2dds_datareader_lookup_instance(
+                            _handle, pKey, (UIntPtr)key.Length, pHandle));
+                }
+            }
+
+            return new InstanceHandle(handleBytes);
+        }
+
+        /// <summary>
+        /// Gets the serialized key bytes stored for an instance handle. Round-trips with
+        /// <see cref="LookupInstance"/>; on the raw-serialized path the stored key is the
+        /// 16-byte instance handle itself.
+        /// </summary>
+        public byte[] GetKeyValue(InstanceHandle handle)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+
+            var handleBytes = handle.ToByteArray();
+            var keyBuffer = new byte[256];
+
+            unsafe
+            {
+                fixed (byte* pHandle = handleBytes)
+                {
+                    UIntPtr keySize;
+                    fixed (byte* pKey = keyBuffer)
+                    {
+                        var ret = NativeMethods.int2dds_datareader_get_key_value(
+                            _handle, pHandle, pKey, (UIntPtr)keyBuffer.Length, out keySize);
+
+                        if (ret == ReturnCode.Ok)
+                        {
+                            var result = new byte[(int)keySize];
+                            Array.Copy(keyBuffer, result, (int)keySize);
+                            return result;
+                        }
+
+                        // Buffer too small — retry with required size.
+                        if ((int)keySize > keyBuffer.Length)
+                        {
+                            keyBuffer = new byte[(int)keySize];
+                        }
+                        else
+                        {
+                            ReturnCodeHelper.CheckReturn(ret);
+                        }
+                    }
+
+                    fixed (byte* pKey = keyBuffer)
+                    {
+                        ReturnCodeHelper.CheckReturn(
+                            NativeMethods.int2dds_datareader_get_key_value(
+                                _handle, pHandle, pKey, (UIntPtr)keyBuffer.Length, out keySize));
+
+                        var result = new byte[(int)keySize];
+                        Array.Copy(keyBuffer, result, (int)keySize);
+                        return result;
+                    }
+                }
+            }
+        }
+
+        /// <summary>
         /// Gets the requested deadline missed status.
         /// </summary>
         public RequestedDeadlineMissedStatus GetRequestedDeadlineMissedStatus()
@@ -423,6 +507,70 @@ namespace Int2Dds.Core
                     native.TotalCount,
                     native.TotalCountChange,
                     (int)native.LastPolicyId);
+            }
+        }
+
+        /// <summary>Gets the requested incompatible type status.</summary>
+        public RequestedIncompatibleTypeStatus GetRequestedIncompatibleTypeStatus()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            unsafe
+            {
+                NativeRequestedIncompatibleTypeStatus native;
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_datareader_get_requested_incompatible_type_status(_handle, &native));
+                return new RequestedIncompatibleTypeStatus(native.TotalCount, native.TotalCountChange);
+            }
+        }
+
+        /// <summary>Gets this DataReader's 16-byte GUID.</summary>
+        public unsafe byte[] GetGuid()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            var guid = new byte[16];
+            fixed (byte* p = guid)
+            {
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_get_guid(_handle, p));
+            }
+            return guid;
+        }
+
+        /// <summary>Returns whether the reader currently has any data available.</summary>
+        public bool HasData()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_has_data(_handle, out var hasData));
+            return hasData;
+        }
+
+        /// <summary>
+        /// Takes the next serialized sample via the zero-copy loan path, returning
+        /// a managed copy of the CDR bytes (or null for an invalid-data sample).
+        /// The native loan is returned before this method returns.
+        /// </summary>
+        public unsafe byte[] TakeSerializedLoaned()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+
+            byte* data;
+            UIntPtr size;
+            bool validData;
+            IntPtr loan;
+            int ret = NativeMethods.int2dds_take_serialized_loaned(_handle, out data, out size, out validData, out loan);
+            if (ret == ReturnCode.NoData) return null;
+            ReturnCodeHelper.CheckReturn(ret);
+
+            try
+            {
+                if (!validData || loan == IntPtr.Zero) return null;
+                var copy = new byte[(int)(ulong)size];
+                System.Runtime.InteropServices.Marshal.Copy((IntPtr)data, copy, 0, copy.Length);
+                return copy;
+            }
+            finally
+            {
+                if (loan != IntPtr.Zero)
+                    NativeMethods.int2dds_return_serialized_loan(loan);
             }
         }
 
@@ -509,6 +657,179 @@ namespace Int2Dds.Core
         }
 
         /// <summary>
+        /// Creates a ReadCondition filtering by sample/view/instance state masks.
+        /// Attach it to a WaitSet and pass it to
+        /// <see cref="TakeWithCondition"/>/<see cref="ReadWithCondition"/>.
+        /// </summary>
+        public ReadCondition CreateReadCondition(
+            uint sampleStates = Int2Dds.Conditions.SampleState.Any,
+            uint viewStates = Int2Dds.Conditions.ViewState.Any,
+            uint instanceStates = Int2Dds.Conditions.InstanceState.Any)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            ReturnCodeHelper.CheckReturn(
+                NativeMethods.int2dds_datareader_create_readcondition(
+                    _handle, sampleStates, viewStates, instanceStates, out var condHandle));
+            return new ReadCondition(condHandle);
+        }
+
+        /// <summary>
+        /// Creates a QueryCondition: state masks plus a SQL-92 content filter.
+        /// Content filtering requires the topic to carry field descriptors.
+        /// </summary>
+        public QueryCondition CreateQueryCondition(
+            string queryExpression,
+            string[] queryParameters = null,
+            uint sampleStates = Int2Dds.Conditions.SampleState.Any,
+            uint viewStates = Int2Dds.Conditions.ViewState.Any,
+            uint instanceStates = Int2Dds.Conditions.InstanceState.Any)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            if (queryExpression == null) throw new ArgumentNullException(nameof(queryExpression));
+            queryParameters ??= new string[0];
+
+            unsafe
+            {
+                var exprBytes = Encoding.UTF8.GetBytes(queryExpression + '\0');
+                var byteArrays = new byte[queryParameters.Length][];
+                var pins = new GCHandle[queryParameters.Length];
+                for (int i = 0; i < queryParameters.Length; i++)
+                {
+                    byteArrays[i] = Encoding.UTF8.GetBytes(queryParameters[i] + '\0');
+                    pins[i] = GCHandle.Alloc(byteArrays[i], GCHandleType.Pinned);
+                }
+                try
+                {
+                    var ptrs = new byte*[queryParameters.Length == 0 ? 1 : queryParameters.Length];
+                    for (int i = 0; i < queryParameters.Length; i++)
+                        ptrs[i] = (byte*)pins[i].AddrOfPinnedObject();
+                    fixed (byte* pExpr = exprBytes)
+                    fixed (byte** pParams = ptrs)
+                    {
+                        ReturnCodeHelper.CheckReturn(
+                            NativeMethods.int2dds_datareader_create_querycondition(
+                                _handle, sampleStates, viewStates, instanceStates,
+                                pExpr, pParams, (UIntPtr)queryParameters.Length, out var condHandle));
+                        return new QueryCondition(condHandle);
+                    }
+                }
+                finally
+                {
+                    foreach (var pin in pins)
+                        if (pin.IsAllocated) pin.Free();
+                }
+            }
+        }
+
+        /// <summary>
+        /// Takes samples matching a Read/QueryCondition (removed from the cache).
+        /// </summary>
+        public IReadOnlyList<(Sample<T> Sample, SampleInfo Info)> TakeWithCondition(
+            ReadCondition condition, int maxSamples = -1)
+        {
+            return ReadOrTakeWithCondition(condition, maxSamples, take: true);
+        }
+
+        /// <summary>
+        /// Reads samples matching a Read/QueryCondition (left in the cache).
+        /// </summary>
+        public IReadOnlyList<(Sample<T> Sample, SampleInfo Info)> ReadWithCondition(
+            ReadCondition condition, int maxSamples = -1)
+        {
+            return ReadOrTakeWithCondition(condition, maxSamples, take: false);
+        }
+
+        private IReadOnlyList<(Sample<T> Sample, SampleInfo Info)> ReadOrTakeWithCondition(
+            ReadCondition condition, int maxSamples, bool take)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            if (condition == null) throw new ArgumentNullException(nameof(condition));
+
+            IntPtr seqHandle;
+            var ret = take
+                ? NativeMethods.int2dds_datareader_take_w_readcondition(_handle, condition.Handle, maxSamples, out seqHandle)
+                : NativeMethods.int2dds_datareader_read_w_readcondition(_handle, condition.Handle, maxSamples, out seqHandle);
+
+            if (ret == ReturnCode.NoData)
+            {
+                if (seqHandle != IntPtr.Zero)
+                    NativeMethods.int2dds_sample_seq_delete(seqHandle);
+                return Int2Dds.Internal.EmptyArrayHolder<(Sample<T>, SampleInfo)>.Value;
+            }
+            ReturnCodeHelper.CheckReturn(ret);
+
+            try
+            {
+                return ReadSampleSequence(seqHandle);
+            }
+            finally
+            {
+                NativeMethods.int2dds_sample_seq_delete(seqHandle);
+            }
+        }
+
+        /// <summary>
+        /// Takes samples belonging to a single instance via the raw serialized
+        /// path. <paramref name="handle"/> is a 16-byte instance handle (from a
+        /// sample's <c>SampleInfo.InstanceHandle</c>). An unknown handle returns
+        /// an empty list. State masks default to "any" (0xFFFF).
+        /// </summary>
+        public IReadOnlyList<(Sample<T> Sample, SampleInfo Info)> TakeInstanceSerialized(
+            byte[] handle, int maxSamples = -1,
+            uint sampleStates = 0xFFFF, uint viewStates = 0xFFFF, uint instanceStates = 0xFFFF)
+        {
+            return ReadOrTakeInstanceSerialized(handle, maxSamples, sampleStates, viewStates, instanceStates, take: true);
+        }
+
+        /// <summary>
+        /// Reads samples belonging to a single instance via the raw serialized
+        /// path (samples remain in the cache).
+        /// </summary>
+        public IReadOnlyList<(Sample<T> Sample, SampleInfo Info)> ReadInstanceSerialized(
+            byte[] handle, int maxSamples = -1,
+            uint sampleStates = 0xFFFF, uint viewStates = 0xFFFF, uint instanceStates = 0xFFFF)
+        {
+            return ReadOrTakeInstanceSerialized(handle, maxSamples, sampleStates, viewStates, instanceStates, take: false);
+        }
+
+        private IReadOnlyList<(Sample<T> Sample, SampleInfo Info)> ReadOrTakeInstanceSerialized(
+            byte[] handle, int maxSamples, uint sampleStates, uint viewStates, uint instanceStates, bool take)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            if (handle == null) throw new ArgumentNullException(nameof(handle));
+            if (handle.Length != 16) throw new ArgumentException("instance handle must be 16 bytes", nameof(handle));
+
+            IntPtr seqHandle;
+            int ret;
+            unsafe
+            {
+                fixed (byte* pHandle = handle)
+                {
+                    ret = take
+                        ? NativeMethods.int2dds_take_instance_serialized_batch(_handle, pHandle, maxSamples, sampleStates, viewStates, instanceStates, out seqHandle)
+                        : NativeMethods.int2dds_read_instance_serialized_batch(_handle, pHandle, maxSamples, sampleStates, viewStates, instanceStates, out seqHandle);
+                }
+            }
+
+            if (ret == ReturnCode.NoData)
+            {
+                if (seqHandle != IntPtr.Zero)
+                    NativeMethods.int2dds_sample_seq_delete(seqHandle);
+                return Int2Dds.Internal.EmptyArrayHolder<(Sample<T>, SampleInfo)>.Value;
+            }
+            ReturnCodeHelper.CheckReturn(ret);
+
+            try
+            {
+                return ReadSampleSequence(seqHandle);
+            }
+            finally
+            {
+                NativeMethods.int2dds_sample_seq_delete(seqHandle);
+            }
+        }
+
+        /// <summary>
         /// Gets the StatusCondition associated with this DataReader.
         /// </summary>
         /// <returns>A StatusCondition for use with WaitSets.</returns>
@@ -520,6 +841,17 @@ namespace Int2Dds.Core
             return new StatusCondition(conditionHandle);
         }
 
+        /// <summary>
+        /// Gets the current status change bitmask of this DataReader.
+        /// </summary>
+        public uint GetStatusChanges()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            ReturnCodeHelper.CheckReturn(
+                NativeMethods.int2dds_datareader_get_status_changes(_handle, out var mask));
+            return mask;
+        }
+
         // -- Private helpers --------------------------------------------------
 
         private byte[] CopyBuffer(int length)
@@ -529,25 +861,40 @@ namespace Int2Dds.Core
             return result;
         }
 
+        private void GrowBuffer(int required)
+        {
+            var old = _buffer;
+            _buffer = ArrayPool<byte>.Shared.Rent(required);
+            ArrayPool<byte>.Shared.Return(old);
+        }
+
         private Sample<T>? TakeOneSample()
         {
             unsafe
             {
-                fixed (byte* pBuffer = _buffer)
+                while (true)
                 {
-                    var ret = NativeMethods.int2dds_take_serialized(
-                        _handle, pBuffer, (UIntPtr)_buffer.Length, out var actualSize, out var validData);
-
-                    if (ret == ReturnCode.NoData)
-                        return null;
-                    ReturnCodeHelper.CheckReturn(ret);
-
-                    if (validData)
+                    fixed (byte* pBuffer = _buffer)
                     {
-                        var data = s_deserializer(CopyBuffer((int)actualSize));
-                        return new Sample<T>(data, true);
+                        var ret = NativeMethods.int2dds_take_serialized(
+                            _handle, pBuffer, (UIntPtr)_buffer.Length, out var actualSize, out var validData);
+
+                        if (ret == ReturnCode.BufferTooSmall)
+                        {
+                            GrowBuffer((int)actualSize);
+                            continue;
+                        }
+                        if (ret == ReturnCode.NoData)
+                            return null;
+                        ReturnCodeHelper.CheckReturn(ret);
+
+                        if (validData)
+                        {
+                            var data = s_deserializer(CopyBuffer((int)actualSize));
+                            return new Sample<T>(data, true);
+                        }
+                        return new Sample<T>(default, false);
                     }
-                    return new Sample<T>(default, false);
                 }
             }
         }
@@ -556,21 +903,29 @@ namespace Int2Dds.Core
         {
             unsafe
             {
-                fixed (byte* pBuffer = _buffer)
+                while (true)
                 {
-                    var ret = NativeMethods.int2dds_read_serialized(
-                        _handle, pBuffer, (UIntPtr)_buffer.Length, out var actualSize, out var validData);
-
-                    if (ret == ReturnCode.NoData)
-                        return null;
-                    ReturnCodeHelper.CheckReturn(ret);
-
-                    if (validData)
+                    fixed (byte* pBuffer = _buffer)
                     {
-                        var data = s_deserializer(CopyBuffer((int)actualSize));
-                        return new Sample<T>(data, true);
+                        var ret = NativeMethods.int2dds_read_serialized(
+                            _handle, pBuffer, (UIntPtr)_buffer.Length, out var actualSize, out var validData);
+
+                        if (ret == ReturnCode.BufferTooSmall)
+                        {
+                            GrowBuffer((int)actualSize);
+                            continue;
+                        }
+                        if (ret == ReturnCode.NoData)
+                            return null;
+                        ReturnCodeHelper.CheckReturn(ret);
+
+                        if (validData)
+                        {
+                            var data = s_deserializer(CopyBuffer((int)actualSize));
+                            return new Sample<T>(data, true);
+                        }
+                        return new Sample<T>(default, false);
                     }
-                    return new Sample<T>(default, false);
                 }
             }
         }
@@ -579,23 +934,31 @@ namespace Int2Dds.Core
         {
             unsafe
             {
-                fixed (byte* pBuffer = _buffer)
+                while (true)
                 {
-                    NativeSampleInfo nativeInfo;
-                    var ret = NativeMethods.int2dds_take_serialized_w_info(
-                        _handle, pBuffer, (UIntPtr)_buffer.Length, out var actualSize, &nativeInfo);
-
-                    if (ret == ReturnCode.NoData)
-                        return null;
-                    ReturnCodeHelper.CheckReturn(ret);
-
-                    var info = ConvertSampleInfo(ref nativeInfo);
-                    if (nativeInfo.ValidData)
+                    fixed (byte* pBuffer = _buffer)
                     {
-                        var data = s_deserializer(CopyBuffer((int)actualSize));
-                        return (new Sample<T>(data, true), info);
+                        NativeSampleInfo nativeInfo;
+                        var ret = NativeMethods.int2dds_take_serialized_w_info(
+                            _handle, pBuffer, (UIntPtr)_buffer.Length, out var actualSize, &nativeInfo);
+
+                        if (ret == ReturnCode.BufferTooSmall)
+                        {
+                            GrowBuffer((int)actualSize);
+                            continue;
+                        }
+                        if (ret == ReturnCode.NoData)
+                            return null;
+                        ReturnCodeHelper.CheckReturn(ret);
+
+                        var info = ConvertSampleInfo(ref nativeInfo);
+                        if (nativeInfo.ValidData)
+                        {
+                            var data = s_deserializer(CopyBuffer((int)actualSize));
+                            return (new Sample<T>(data, true), info);
+                        }
+                        return (new Sample<T>(default, false), info);
                     }
-                    return (new Sample<T>(default, false), info);
                 }
             }
         }
@@ -604,23 +967,31 @@ namespace Int2Dds.Core
         {
             unsafe
             {
-                fixed (byte* pBuffer = _buffer)
+                while (true)
                 {
-                    NativeSampleInfo nativeInfo;
-                    var ret = NativeMethods.int2dds_read_serialized_w_info(
-                        _handle, pBuffer, (UIntPtr)_buffer.Length, out var actualSize, &nativeInfo);
-
-                    if (ret == ReturnCode.NoData)
-                        return null;
-                    ReturnCodeHelper.CheckReturn(ret);
-
-                    var info = ConvertSampleInfo(ref nativeInfo);
-                    if (nativeInfo.ValidData)
+                    fixed (byte* pBuffer = _buffer)
                     {
-                        var data = s_deserializer(CopyBuffer((int)actualSize));
-                        return (new Sample<T>(data, true), info);
+                        NativeSampleInfo nativeInfo;
+                        var ret = NativeMethods.int2dds_read_serialized_w_info(
+                            _handle, pBuffer, (UIntPtr)_buffer.Length, out var actualSize, &nativeInfo);
+
+                        if (ret == ReturnCode.BufferTooSmall)
+                        {
+                            GrowBuffer((int)actualSize);
+                            continue;
+                        }
+                        if (ret == ReturnCode.NoData)
+                            return null;
+                        ReturnCodeHelper.CheckReturn(ret);
+
+                        var info = ConvertSampleInfo(ref nativeInfo);
+                        if (nativeInfo.ValidData)
+                        {
+                            var data = s_deserializer(CopyBuffer((int)actualSize));
+                            return (new Sample<T>(data, true), info);
+                        }
+                        return (new Sample<T>(default, false), info);
                     }
-                    return (new Sample<T>(default, false), info);
                 }
             }
         }

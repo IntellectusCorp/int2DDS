@@ -17,6 +17,8 @@ namespace Int2Dds.Cdr
         private const int DefaultCapacity = 256;
         private const ushort EncapCdrBe = 0x0000;
         private const ushort EncapCdrLe = 0x0001;
+        private const ushort EncapPlCdrBe = 0x0002; // PL_CDR BE (Mutable, XCDR1)
+        private const ushort EncapPlCdrLe = 0x0003; // PL_CDR LE (Mutable, XCDR1)
         private const ushort EncapCdr2Be = 0x0006;
         private const ushort EncapCdr2Le = 0x0007;
         private const ushort EncapDcdr2Be = 0x0008;
@@ -24,6 +26,10 @@ namespace Int2Dds.Cdr
         private const ushort EncapPlCdr2Be = 0x000A;
         private const ushort EncapPlCdr2Le = 0x000B;
         private const uint MemberIdSentinel = 0x3F02;
+        private const ushort PidExtended = 0x3F01;    // PL_CDR v1 long-form member header marker
+        private const uint MaxShortMemberId = 0x3F00; // member ids above this need the long form
+        private const int MaxShortLength = 0xFFFF;    // content lengths above this need the long form
+        private const ushort MuFlag = 0x4000;         // must-understand bit in a PL_CDR pid
 
         private byte[] _buffer;
         private int _pos;
@@ -37,7 +43,7 @@ namespace Int2Dds.Cdr
         /// <param name="extensibility">Extensibility kind (Final, Appendable, Mutable).</param>
         /// <param name="littleEndian">True for little-endian data encoding.</param>
         /// <param name="xcdr2">True for XCDR2 (max alignment capped at 4).</param>
-        public CdrWriter(Extensibility extensibility = Extensibility.Appendable, bool littleEndian = true, bool xcdr2 = true)
+        public CdrWriter(Extensibility extensibility = Extensibility.Appendable, bool littleEndian = true, bool xcdr2 = false)
         {
             _littleEndian = littleEndian;
             _xcdr2 = xcdr2;
@@ -81,6 +87,11 @@ namespace Int2Dds.Cdr
                     _ => _littleEndian ? EncapDcdr2Le : EncapDcdr2Be,
                 };
             }
+            else if (extensibility == Extensibility.Mutable)
+            {
+                // XCDR1 mutable is PL_CDR (PID member headers), not PLAIN_CDR.
+                encapId = _littleEndian ? EncapPlCdrLe : EncapPlCdrBe;
+            }
             else
             {
                 encapId = _littleEndian ? EncapCdrLe : EncapCdrBe;
@@ -94,6 +105,16 @@ namespace Int2Dds.Cdr
             _buffer[_pos + 3] = 0;
             _pos += 4;
             _headerSize = 4;
+        }
+
+        // ---- Guards ---------------------------------------------------------
+
+        private void RequireXcdr2(string what)
+        {
+            if (!_xcdr2)
+                throw new InvalidOperationException(
+                    $"{what} is XCDR2-only; this writer is XCDR1. XCDR1 mutable types " +
+                    "use PL_CDR (PID member headers), not EMHEADER.");
         }
 
         // ---- Alignment ------------------------------------------------------
@@ -335,6 +356,7 @@ namespace Int2Dds.Cdr
         /// </summary>
         public void WriteEmheader(uint memberId, uint dataLength, bool mustUnderstand)
         {
+            RequireXcdr2("EMHEADER");
             if (memberId > 0x0FFFFFFFu)
                 throw new ArgumentOutOfRangeException(nameof(memberId), $"EMHEADER member_id exceeds 28 bits: 0x{memberId:X}");
             uint muBit = mustUnderstand ? 0x80000000u : 0;
@@ -349,6 +371,7 @@ namespace Int2Dds.Cdr
         /// </summary>
         public int EmheaderBegin(uint memberId, bool mustUnderstand)
         {
+            RequireXcdr2("EMHEADER");
             if (memberId > 0x0FFFFFFFu)
                 throw new ArgumentOutOfRangeException(nameof(memberId), $"EMHEADER member_id exceeds 28 bits: 0x{memberId:X}");
             uint muBit = mustUnderstand ? 0x80000000u : 0;
@@ -377,7 +400,79 @@ namespace Int2Dds.Cdr
         /// </summary>
         public void WriteSentinel()
         {
+            RequireXcdr2("Sentinel");
             WriteU32(MemberIdSentinel);
+        }
+
+        // ---- XCDR1 PL_CDR member headers (Mutable types under XCDR1) --------
+
+        /// <summary>
+        /// Begin a PL_CDR v1 member (XCDR1 mutable): 4-align and reserve the header.
+        /// Mirrors the Rust core's <c>write_member_with_v1</c>. Returns a token.
+        /// </summary>
+        public int MemberV1Begin(uint memberId)
+        {
+            if (memberId > 0x0FFFFFFFu)
+                throw new ArgumentOutOfRangeException(nameof(memberId), $"member_id exceeds 28 bits: 0x{memberId:X}");
+            Align(4);
+            int headerPos = _pos;
+            int reserve = memberId <= MaxShortMemberId ? 4 : 12;
+            EnsureCapacity(reserve);
+            _buffer.AsSpan(_pos, reserve).Clear();
+            _pos += reserve;
+            return headerPos;
+        }
+
+        /// <summary>Backpatch a PL_CDR v1 member header, promoting to long form if needed.</summary>
+        public void MemberV1Finalize(int headerPos, uint memberId, bool mustUnderstand)
+        {
+            ushort flags = mustUnderstand ? MuFlag : (ushort)0;
+            bool shortReserved = memberId <= MaxShortMemberId;
+            int contentStart = headerPos + (shortReserved ? 4 : 12);
+            int contentLen = _pos - contentStart;
+            if (shortReserved && contentLen <= MaxShortLength)
+            {
+                WriteU16At(headerPos, (ushort)(flags | (memberId & 0x3FFFu)));
+                WriteU16At(headerPos + 2, (ushort)contentLen);
+                return;
+            }
+            if (shortReserved)
+            {
+                // Content too large for the short form: make room for 8 more header bytes.
+                // Array.Copy documents correct handling of overlapping source/dest ranges.
+                EnsureCapacity(8);
+                Array.Copy(_buffer, headerPos + 4, _buffer, headerPos + 12, _pos - (headerPos + 4));
+                _buffer.AsSpan(headerPos + 4, 8).Clear();
+                _pos += 8;
+            }
+            WriteU16At(headerPos, (ushort)(flags | PidExtended));
+            WriteU16At(headerPos + 2, 8);
+            WriteU32At(headerPos + 4, memberId);
+            WriteU32At(headerPos + 8, (uint)contentLen);
+        }
+
+        /// <summary>Write the PL_CDR sentinel that terminates an XCDR1 mutable struct.</summary>
+        public void EndMutableStruct()
+        {
+            Align(4);
+            WriteU16((ushort)MemberIdSentinel);
+            WriteU16(0);
+        }
+
+        private void WriteU16At(int pos, ushort value)
+        {
+            if (_littleEndian)
+                BinaryPrimitives.WriteUInt16LittleEndian(_buffer.AsSpan(pos), value);
+            else
+                BinaryPrimitives.WriteUInt16BigEndian(_buffer.AsSpan(pos), value);
+        }
+
+        private void WriteU32At(int pos, uint value)
+        {
+            if (_littleEndian)
+                BinaryPrimitives.WriteUInt32LittleEndian(_buffer.AsSpan(pos), value);
+            else
+                BinaryPrimitives.WriteUInt32BigEndian(_buffer.AsSpan(pos), value);
         }
 
         // ---- Output ---------------------------------------------------------

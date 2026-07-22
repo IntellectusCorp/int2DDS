@@ -79,13 +79,17 @@ ffi.cdef("""
     typedef struct Int2DdsGuardCondition Int2DdsGuardCondition;
     typedef struct Int2DdsStatusCondition Int2DdsStatusCondition;
     typedef struct Int2DdsCondition Int2DdsCondition;
+    typedef struct Int2DdsReadCondition Int2DdsReadCondition;
     typedef struct Int2DdsConditionSeq Int2DdsConditionSeq;
+    typedef struct Int2DdsSampleSeq Int2DdsSampleSeq;
     typedef struct Int2DdsDataWriterQos Int2DdsDataWriterQos;
     typedef struct Int2DdsDataReaderQos Int2DdsDataReaderQos;
     typedef struct Int2DdsTopicQos Int2DdsTopicQos;
     typedef struct Int2DdsParticipantQos Int2DdsParticipantQos;
     typedef struct Int2DdsPublisherQos Int2DdsPublisherQos;
     typedef struct Int2DdsSubscriberQos Int2DdsSubscriberQos;
+    typedef struct Int2DdsSerializedLoan Int2DdsSerializedLoan;
+    typedef struct Int2DdsSerializedWriteLoan Int2DdsSerializedWriteLoan;
 
     typedef int32_t Int2DdsRet;
 
@@ -98,6 +102,27 @@ ffi.cdef("""
     );
     Int2DdsRet int2dds_domain_participant_factory_finalize(
         Int2DdsParticipantFactory *factory
+    );
+    Int2DdsRet int2dds_domain_participant_factory_lookup_participant(
+        const Int2DdsParticipantFactory *factory,
+        int32_t domain_id,
+        Int2DdsParticipant **participant_out
+    );
+    Int2DdsRet int2dds_domain_participant_factory_set_qos(
+        const Int2DdsParticipantFactory *factory,
+        bool autoenable_created_entities
+    );
+    Int2DdsRet int2dds_domain_participant_factory_get_qos(
+        const Int2DdsParticipantFactory *factory,
+        bool *autoenable_out
+    );
+    Int2DdsRet int2dds_domain_participant_factory_set_default_participant_qos(
+        const Int2DdsParticipantFactory *factory,
+        const Int2DdsParticipantQos *qos
+    );
+    Int2DdsRet int2dds_domain_participant_factory_get_default_participant_qos(
+        const Int2DdsParticipantFactory *factory,
+        Int2DdsParticipantQos **qos_out
     );
 
     /* DomainParticipant */
@@ -125,6 +150,31 @@ ffi.cdef("""
     Int2DdsRet int2dds_participant_delete_contained_entities(
         const Int2DdsParticipant *participant
     );
+    Int2DdsRet int2dds_participant_get_current_time(
+        const Int2DdsParticipant *participant,
+        int32_t *sec_out,
+        uint32_t *nanosec_out
+    );
+    Int2DdsRet int2dds_participant_contains_entity(
+        const Int2DdsParticipant *participant,
+        const uint8_t (*handle)[16],
+        bool *result_out
+    );
+    Int2DdsRet int2dds_participant_find_topic(
+        const Int2DdsParticipant *participant,
+        const char *topic_name,
+        const char *dds_type_name,
+        int32_t timeout_ms,
+        Int2DdsTopic **topic_out
+    );
+    Int2DdsRet int2dds_participant_set_qos(
+        const Int2DdsParticipant *participant,
+        const Int2DdsParticipantQos *qos
+    );
+    Int2DdsRet int2dds_participant_get_qos(
+        const Int2DdsParticipant *participant,
+        Int2DdsParticipantQos **qos_out
+    );
 
     /* Publisher */
     Int2DdsRet int2dds_create_publisher(
@@ -137,8 +187,20 @@ ffi.cdef("""
         Int2DdsPublisher **publisher_out
     );
     Int2DdsRet int2dds_delete_publisher(Int2DdsPublisher *publisher);
+    Int2DdsRet int2dds_publisher_get_instance_handle(
+        const Int2DdsPublisher *publisher,
+        uint8_t (*handle_out)[16]
+    );
     Int2DdsRet int2dds_publisher_delete_contained_entities(
         const Int2DdsPublisher *publisher
+    );
+    Int2DdsRet int2dds_publisher_set_qos(
+        const Int2DdsPublisher *publisher,
+        const Int2DdsPublisherQos *qos
+    );
+    Int2DdsRet int2dds_publisher_get_qos(
+        const Int2DdsPublisher *publisher,
+        Int2DdsPublisherQos **qos_out
     );
 
     /* Subscriber */
@@ -227,6 +289,21 @@ ffi.cdef("""
     Int2DdsRet int2dds_delete_contentfilteredtopic(
         Int2DdsContentFilteredTopic *cft
     );
+    Int2DdsRet int2dds_contentfilteredtopic_set_enabled(
+        Int2DdsContentFilteredTopic *cft,
+        bool enabled
+    );
+    Int2DdsRet int2dds_contentfilteredtopic_set_expression_parameters(
+        Int2DdsContentFilteredTopic *cft,
+        const char *const *expression_parameters,
+        size_t expression_parameters_count
+    );
+    Int2DdsRet int2dds_contentfilteredtopic_set_filter_expression(
+        Int2DdsContentFilteredTopic *cft,
+        const char *filter_expression,
+        const char *const *expression_parameters,
+        size_t expression_parameters_count
+    );
 
     /* DataReader with ContentFilteredTopic */
     Int2DdsRet int2dds_create_datareader_cft(
@@ -287,6 +364,30 @@ ffi.cdef("""
         const Int2DdsDataReader *reader,
         Int2DdsDataReaderQos **qos_out
     );
+    Int2DdsRet int2dds_datawriter_set_qos(
+        const Int2DdsDataWriter *writer,
+        const Int2DdsDataWriterQos *qos
+    );
+    Int2DdsRet int2dds_datareader_set_qos(
+        const Int2DdsDataReader *reader,
+        const Int2DdsDataReaderQos *qos
+    );
+    Int2DdsRet int2dds_subscriber_get_qos(
+        const Int2DdsSubscriber *subscriber,
+        Int2DdsSubscriberQos **qos_out
+    );
+    Int2DdsRet int2dds_subscriber_set_qos(
+        const Int2DdsSubscriber *subscriber,
+        const Int2DdsSubscriberQos *qos
+    );
+    Int2DdsRet int2dds_topic_get_qos(
+        const Int2DdsTopic *topic,
+        Int2DdsTopicQos **qos_out
+    );
+    Int2DdsRet int2dds_topic_set_qos(
+        const Int2DdsTopic *topic,
+        const Int2DdsTopicQos *qos
+    );
     Int2DdsRet int2dds_datawriter_qos_get_reliability(
         const Int2DdsDataWriterQos *qos, int32_t *kind_out, int64_t *max_blocking_time_ns_out
     );
@@ -340,6 +441,35 @@ ffi.cdef("""
         int32_t total_count;
         int32_t total_count_change;
     } Int2DdsSampleLostStatus;
+
+    typedef struct Int2DdsInconsistentTopicStatus {
+        int32_t total_count;
+        int32_t total_count_change;
+    } Int2DdsInconsistentTopicStatus;
+
+    Int2DdsRet int2dds_topic_get_inconsistent_topic_status(
+        const Int2DdsTopic *topic,
+        Int2DdsInconsistentTopicStatus *status_out
+    );
+
+    typedef struct Int2DdsRequestedIncompatibleTypeStatus {
+        int32_t total_count;
+        int32_t total_count_change;
+    } Int2DdsRequestedIncompatibleTypeStatus;
+
+    typedef struct Int2DdsOfferedIncompatibleTypeStatus {
+        int32_t total_count;
+        int32_t total_count_change;
+    } Int2DdsOfferedIncompatibleTypeStatus;
+
+    Int2DdsRet int2dds_datareader_get_requested_incompatible_type_status(
+        const Int2DdsDataReader *reader,
+        Int2DdsRequestedIncompatibleTypeStatus *status_out
+    );
+    Int2DdsRet int2dds_datawriter_get_offered_incompatible_type_status(
+        const Int2DdsDataWriter *writer,
+        Int2DdsOfferedIncompatibleTypeStatus *status_out
+    );
 
 
     /* Sample Rejected Status */
@@ -482,6 +612,19 @@ ffi.cdef("""
         Int2DdsRequestedIncompatibleQosStatus *status_out
     );
 
+    Int2DdsRet int2dds_datareader_lookup_instance(
+        const Int2DdsDataReader *reader,
+        const uint8_t *key,
+        size_t key_len,
+        uint8_t *handle_out
+    );
+    Int2DdsRet int2dds_datareader_get_key_value(
+        const Int2DdsDataReader *reader,
+        const uint8_t *handle,
+        uint8_t *key_buf,
+        size_t key_capacity,
+        size_t *key_size_out
+    );
     Int2DdsRet int2dds_take_serialized(
         const Int2DdsDataReader *reader,
         uint8_t *buffer,
@@ -495,6 +638,44 @@ ffi.cdef("""
         size_t buffer_capacity,
         size_t *actual_size_out,
         bool *valid_data_out
+    );
+
+    Int2DdsRet int2dds_take_serialized_loaned(
+        const Int2DdsDataReader *reader,
+        const uint8_t **data_out,
+        size_t *actual_size_out,
+        bool *valid_data_out,
+        Int2DdsSerializedLoan **loan_out
+    );
+    Int2DdsRet int2dds_return_serialized_loan(Int2DdsSerializedLoan *loan);
+
+    Int2DdsRet int2dds_prepare_serialized_write(
+        const Int2DdsDataWriter *writer,
+        size_t capacity,
+        uint8_t **data_out,
+        size_t *capacity_out,
+        Int2DdsSerializedWriteLoan **loan_out
+    );
+    Int2DdsRet int2dds_commit_serialized_write(
+        const Int2DdsDataWriter *writer,
+        Int2DdsSerializedWriteLoan *loan,
+        size_t actual_size,
+        const uint8_t *key,
+        size_t key_len
+    );
+    Int2DdsRet int2dds_abort_serialized_write(Int2DdsSerializedWriteLoan *loan);
+
+    Int2DdsRet int2dds_datareader_get_guid(
+        const Int2DdsDataReader *reader,
+        uint8_t (*guid_out)[16]
+    );
+    Int2DdsRet int2dds_datawriter_get_guid(
+        const Int2DdsDataWriter *writer,
+        uint8_t (*guid_out)[16]
+    );
+    Int2DdsRet int2dds_datareader_has_data(
+        const Int2DdsDataReader *reader,
+        bool *has_data_out
     );
 
     /* DataWriter QoS */
@@ -558,6 +739,8 @@ ffi.cdef("""
         Int2DdsDataWriterQos *qos,
         int32_t kind
     );
+    int32_t int2dds_default_data_representation(void);
+    int32_t int2dds_default_extensibility(void);
     Int2DdsRet int2dds_datawriter_qos_set_deadline(
         Int2DdsDataWriterQos *qos,
         int64_t period_ns
@@ -721,6 +904,34 @@ ffi.cdef("""
         Int2DdsParticipantQos *qos,
         uint8_t ttl
     );
+    Int2DdsRet int2dds_participant_qos_get_properties_with_prefix(
+        const Int2DdsParticipantQos *qos,
+        const char *prefix,
+        int32_t (*cb)(const char *name, const char *value, void *user_data),
+        void *user_data
+    );
+    Int2DdsRet int2dds_participant_qos_add_binary_property(
+        Int2DdsParticipantQos *qos,
+        const char *name,
+        const uint8_t *data,
+        size_t data_len,
+        bool propagate
+    );
+    Int2DdsRet int2dds_participant_qos_find_property(
+        const Int2DdsParticipantQos *qos,
+        const char *name,
+        char *out_buf,
+        size_t out_cap,
+        size_t *out_len
+    );
+    Int2DdsRet int2dds_participant_qos_remove_property(
+        Int2DdsParticipantQos *qos,
+        const char *name
+    );
+    Int2DdsRet int2dds_get_default_participant_qos(
+        const Int2DdsParticipantFactory *factory,
+        Int2DdsParticipantQos **qos_out
+    );
     Int2DdsRet int2dds_participant_qos_destroy(Int2DdsParticipantQos *qos);
 
     /* Environment-variable configuration helpers (process-wide, take effect
@@ -737,6 +948,11 @@ ffi.cdef("""
     Int2DdsRet int2dds_waitset_wait_ex(
         const Int2DdsWaitSet *waitset,
         int64_t timeout_ms,
+        Int2DdsConditionSeq **conditions_out
+    );
+    Int2DdsRet int2dds_waitset_wait_ex_ns(
+        const Int2DdsWaitSet *waitset,
+        int64_t timeout_ns,
         Int2DdsConditionSeq **conditions_out
     );
     Int2DdsRet int2dds_waitset_delete(Int2DdsWaitSet *waitset);
@@ -772,6 +988,14 @@ ffi.cdef("""
         const Int2DdsWaitSet *waitset,
         const Int2DdsDataWriter *writer
     );
+    Int2DdsRet int2dds_waitset_attach_readcondition(
+        const Int2DdsWaitSet *waitset,
+        const Int2DdsReadCondition *condition
+    );
+    Int2DdsRet int2dds_waitset_detach_readcondition(
+        const Int2DdsWaitSet *waitset,
+        const Int2DdsReadCondition *condition
+    );
 
     /* GuardCondition */
     Int2DdsRet int2dds_guard_condition_new(
@@ -796,6 +1020,46 @@ ffi.cdef("""
         const Int2DdsDataWriter *writer,
         Int2DdsStatusCondition **condition_out
     );
+    Int2DdsRet int2dds_participant_get_statuscondition(
+        const Int2DdsParticipant *participant,
+        Int2DdsStatusCondition **condition_out
+    );
+    Int2DdsRet int2dds_publisher_get_statuscondition(
+        const Int2DdsPublisher *publisher,
+        Int2DdsStatusCondition **condition_out
+    );
+    Int2DdsRet int2dds_subscriber_get_statuscondition(
+        const Int2DdsSubscriber *subscriber,
+        Int2DdsStatusCondition **condition_out
+    );
+    Int2DdsRet int2dds_topic_get_statuscondition(
+        const Int2DdsTopic *topic,
+        Int2DdsStatusCondition **condition_out
+    );
+    Int2DdsRet int2dds_datareader_get_status_changes(
+        const Int2DdsDataReader *reader,
+        uint32_t *mask_out
+    );
+    Int2DdsRet int2dds_datawriter_get_status_changes(
+        const Int2DdsDataWriter *writer,
+        uint32_t *mask_out
+    );
+    Int2DdsRet int2dds_participant_get_status_changes(
+        const Int2DdsParticipant *participant,
+        uint32_t *mask_out
+    );
+    Int2DdsRet int2dds_publisher_get_status_changes(
+        const Int2DdsPublisher *publisher,
+        uint32_t *mask_out
+    );
+    Int2DdsRet int2dds_subscriber_get_status_changes(
+        const Int2DdsSubscriber *subscriber,
+        uint32_t *mask_out
+    );
+    Int2DdsRet int2dds_topic_get_status_changes(
+        const Int2DdsTopic *topic,
+        uint32_t *mask_out
+    );
     Int2DdsRet int2dds_statuscondition_set_enabled_statuses(
         const Int2DdsStatusCondition *condition,
         uint32_t mask
@@ -809,6 +1073,47 @@ ffi.cdef("""
         bool *value_out
     );
     Int2DdsRet int2dds_statuscondition_delete(Int2DdsStatusCondition *condition);
+
+    /* ReadCondition / QueryCondition */
+    Int2DdsRet int2dds_datareader_create_readcondition(
+        const Int2DdsDataReader *reader,
+        uint32_t sample_state_mask,
+        uint32_t view_state_mask,
+        uint32_t instance_state_mask,
+        Int2DdsReadCondition **condition_out
+    );
+    Int2DdsRet int2dds_datareader_create_querycondition(
+        const Int2DdsDataReader *reader,
+        uint32_t sample_state_mask,
+        uint32_t view_state_mask,
+        uint32_t instance_state_mask,
+        const char *query_expression,
+        const char *const *query_parameters,
+        size_t query_parameters_count,
+        Int2DdsReadCondition **condition_out
+    );
+    Int2DdsRet int2dds_readcondition_get_trigger_value(
+        const Int2DdsReadCondition *condition,
+        bool *value_out
+    );
+    Int2DdsRet int2dds_querycondition_set_query_parameters(
+        const Int2DdsReadCondition *condition,
+        const char *const *query_parameters,
+        size_t query_parameters_count
+    );
+    Int2DdsRet int2dds_readcondition_delete(Int2DdsReadCondition *condition);
+    Int2DdsRet int2dds_datareader_take_w_readcondition(
+        const Int2DdsDataReader *reader,
+        const Int2DdsReadCondition *condition,
+        int32_t max_samples,
+        Int2DdsSampleSeq **seq_out
+    );
+    Int2DdsRet int2dds_datareader_read_w_readcondition(
+        const Int2DdsDataReader *reader,
+        const Int2DdsReadCondition *condition,
+        int32_t max_samples,
+        Int2DdsSampleSeq **seq_out
+    );
 
     /* ConditionSeq */
     Int2DdsRet int2dds_condition_seq_length(
@@ -985,6 +1290,49 @@ ffi.cdef("""
     Int2DdsRet int2dds_publication_data_take_type_object(const Int2DdsPublicationBuiltinData *p, Int2DdsTypeObject **out);
     Int2DdsRet int2dds_wait_for_type_object(const Int2DdsParticipant *participant, const char *topic_name, int32_t timeout_ms, Int2DdsTypeObject **type_obj_out, char *type_name_buf, uintptr_t type_name_buf_len, uintptr_t *out_len);
 
+    /* Discovered publication/subscription snapshot family */
+    typedef struct Int2DdsPublicationBuiltinTopicData Int2DdsPublicationBuiltinTopicData;
+    typedef struct Int2DdsPublicationBuiltinTopicDataSeq Int2DdsPublicationBuiltinTopicDataSeq;
+    typedef struct Int2DdsSubscriptionBuiltinTopicData Int2DdsSubscriptionBuiltinTopicData;
+    typedef struct Int2DdsSubscriptionBuiltinTopicDataSeq Int2DdsSubscriptionBuiltinTopicDataSeq;
+
+    Int2DdsRet int2dds_take_discovered_publications_snapshot(const Int2DdsParticipant *participant, int32_t timeout_ms, Int2DdsPublicationBuiltinTopicDataSeq **seq_out);
+    Int2DdsRet int2dds_publication_builtin_topic_data_seq_len(const Int2DdsPublicationBuiltinTopicDataSeq *seq, uintptr_t *count_out);
+    Int2DdsRet int2dds_publication_builtin_topic_data_seq_get(const Int2DdsPublicationBuiltinTopicDataSeq *seq, uintptr_t index, Int2DdsPublicationBuiltinTopicData **data_out);
+    Int2DdsRet int2dds_publication_builtin_topic_data_seq_destroy(Int2DdsPublicationBuiltinTopicDataSeq *seq);
+
+    Int2DdsRet int2dds_take_discovered_subscriptions_snapshot(const Int2DdsParticipant *participant, int32_t timeout_ms, Int2DdsSubscriptionBuiltinTopicDataSeq **seq_out);
+    Int2DdsRet int2dds_subscription_builtin_topic_data_seq_len(const Int2DdsSubscriptionBuiltinTopicDataSeq *seq, uintptr_t *count_out);
+    Int2DdsRet int2dds_subscription_builtin_topic_data_seq_get(const Int2DdsSubscriptionBuiltinTopicDataSeq *seq, uintptr_t index, Int2DdsSubscriptionBuiltinTopicData **data_out);
+    Int2DdsRet int2dds_subscription_builtin_topic_data_seq_destroy(Int2DdsSubscriptionBuiltinTopicDataSeq *seq);
+
+    Int2DdsRet int2dds_publication_builtin_topic_data_get_key(const Int2DdsPublicationBuiltinTopicData *data, uint8_t (*key_out)[12]);
+    Int2DdsRet int2dds_publication_builtin_topic_data_get_endpoint_guid(const Int2DdsPublicationBuiltinTopicData *data, uint8_t (*guid_out)[16]);
+    Int2DdsRet int2dds_publication_builtin_topic_data_get_participant_key(const Int2DdsPublicationBuiltinTopicData *data, uint8_t (*key_out)[12]);
+    Int2DdsRet int2dds_publication_builtin_topic_data_get_topic_name(const Int2DdsPublicationBuiltinTopicData *data, uint8_t *buf, uintptr_t capacity, uintptr_t *size_out);
+    Int2DdsRet int2dds_publication_builtin_topic_data_get_type_name(const Int2DdsPublicationBuiltinTopicData *data, uint8_t *buf, uintptr_t capacity, uintptr_t *size_out);
+    Int2DdsRet int2dds_publication_builtin_topic_data_get_reliability_kind(const Int2DdsPublicationBuiltinTopicData *data, int32_t *kind_out);
+    Int2DdsRet int2dds_publication_builtin_topic_data_get_durability_kind(const Int2DdsPublicationBuiltinTopicData *data, int32_t *kind_out);
+    Int2DdsRet int2dds_publication_builtin_topic_data_get_liveliness_kind(const Int2DdsPublicationBuiltinTopicData *data, int32_t *kind_out);
+    Int2DdsRet int2dds_publication_builtin_topic_data_get_liveliness_lease_duration(const Int2DdsPublicationBuiltinTopicData *data, int32_t *sec_out, uint32_t *nanosec_out);
+    Int2DdsRet int2dds_publication_builtin_topic_data_get_deadline(const Int2DdsPublicationBuiltinTopicData *data, int32_t *sec_out, uint32_t *nanosec_out);
+    Int2DdsRet int2dds_publication_builtin_topic_data_get_lifespan(const Int2DdsPublicationBuiltinTopicData *data, int32_t *sec_out, uint32_t *nanosec_out);
+    Int2DdsRet int2dds_publication_builtin_topic_data_get_user_data(const Int2DdsPublicationBuiltinTopicData *data, uint8_t *buf, uintptr_t capacity, uintptr_t *size_out);
+    Int2DdsRet int2dds_publication_builtin_topic_data_destroy(Int2DdsPublicationBuiltinTopicData *data);
+
+    Int2DdsRet int2dds_subscription_builtin_topic_data_get_key(const Int2DdsSubscriptionBuiltinTopicData *data, uint8_t (*key_out)[12]);
+    Int2DdsRet int2dds_subscription_builtin_topic_data_get_endpoint_guid(const Int2DdsSubscriptionBuiltinTopicData *data, uint8_t (*guid_out)[16]);
+    Int2DdsRet int2dds_subscription_builtin_topic_data_get_participant_key(const Int2DdsSubscriptionBuiltinTopicData *data, uint8_t (*key_out)[12]);
+    Int2DdsRet int2dds_subscription_builtin_topic_data_get_topic_name(const Int2DdsSubscriptionBuiltinTopicData *data, uint8_t *buf, uintptr_t capacity, uintptr_t *size_out);
+    Int2DdsRet int2dds_subscription_builtin_topic_data_get_type_name(const Int2DdsSubscriptionBuiltinTopicData *data, uint8_t *buf, uintptr_t capacity, uintptr_t *size_out);
+    Int2DdsRet int2dds_subscription_builtin_topic_data_get_reliability_kind(const Int2DdsSubscriptionBuiltinTopicData *data, int32_t *kind_out);
+    Int2DdsRet int2dds_subscription_builtin_topic_data_get_durability_kind(const Int2DdsSubscriptionBuiltinTopicData *data, int32_t *kind_out);
+    Int2DdsRet int2dds_subscription_builtin_topic_data_get_liveliness_kind(const Int2DdsSubscriptionBuiltinTopicData *data, int32_t *kind_out);
+    Int2DdsRet int2dds_subscription_builtin_topic_data_get_liveliness_lease_duration(const Int2DdsSubscriptionBuiltinTopicData *data, int32_t *sec_out, uint32_t *nanosec_out);
+    Int2DdsRet int2dds_subscription_builtin_topic_data_get_deadline(const Int2DdsSubscriptionBuiltinTopicData *data, int32_t *sec_out, uint32_t *nanosec_out);
+    Int2DdsRet int2dds_subscription_builtin_topic_data_get_user_data(const Int2DdsSubscriptionBuiltinTopicData *data, uint8_t *buf, uintptr_t capacity, uintptr_t *size_out);
+    Int2DdsRet int2dds_subscription_builtin_topic_data_destroy(Int2DdsSubscriptionBuiltinTopicData *data);
+
     /* TypeObject introspection */
     void int2dds_type_object_destroy(Int2DdsTypeObject *t);
     Int2DdsRet int2dds_type_object_extensibility(const Int2DdsTypeObject *t, int32_t *out);
@@ -1002,11 +1350,32 @@ ffi.cdef("""
     Int2DdsRet int2dds_type_info_add_sequence_field(Int2DdsTypeInfo *type_info, const char *field_name, int32_t element_type, uint32_t bound, int32_t flags);
     Int2DdsRet int2dds_type_info_add_array_field(Int2DdsTypeInfo *type_info, const char *field_name, int32_t element_type, uint32_t array_size, int32_t flags);
     Int2DdsRet int2dds_type_info_add_named_type_field(Int2DdsTypeInfo *type_info, const char *field_name, const char *type_hash_name, int32_t flags);
+    Int2DdsRet int2dds_type_info_add_nested_field(Int2DdsTypeInfo *type_info, const char *field_name, const Int2DdsTypeInfo *nested_type_info, int32_t flags);
+    Int2DdsRet int2dds_type_info_add_sequence_of_nested_field(Int2DdsTypeInfo *type_info, const char *field_name, const Int2DdsTypeInfo *element_type_info, uint32_t bound, int32_t flags);
+    Int2DdsRet int2dds_type_info_add_array_of_nested_field(Int2DdsTypeInfo *type_info, const char *field_name, const Int2DdsTypeInfo *element_type_info, uint32_t array_size, int32_t flags);
+    Int2DdsRet int2dds_type_info_create_enum(const char *type_name, uint16_t bit_bound, Int2DdsTypeInfo **out);
+    Int2DdsRet int2dds_type_info_add_enum_literal(Int2DdsTypeInfo *type_info, const char *literal_name, int32_t value, int32_t is_default);
     Int2DdsRet int2dds_type_info_add_sequence_of_named_field(Int2DdsTypeInfo *type_info, const char *field_name, const char *element_hash_name, uint32_t bound, int32_t flags);
     Int2DdsRet int2dds_type_info_add_array_of_named_field(Int2DdsTypeInfo *type_info, const char *field_name, const char *element_hash_name, uint32_t array_size, int32_t flags);
     void int2dds_type_info_destroy(Int2DdsTypeInfo *type_info);
     Int2DdsRet int2dds_type_info_to_type_object(const Int2DdsTypeInfo *type_info, Int2DdsTypeObject **out);
     Int2DdsRet int2dds_create_topic_with_type_info(const Int2DdsParticipant *participant, const char *topic_name, const Int2DdsTypeInfo *type_info, const Int2DdsTopicQos *qos, Int2DdsTopic **out);
+
+    /* Flat-sample typed field getters (raw CDR bytes + TypeObject, no handle) */
+    Int2DdsRet int2dds_dynamic_sample_get_bool(const uint8_t *bytes, uintptr_t len, const Int2DdsTypeObject *type_obj, const char *field_name, bool *out);
+    Int2DdsRet int2dds_dynamic_sample_get_i8(const uint8_t *bytes, uintptr_t len, const Int2DdsTypeObject *type_obj, const char *field_name, int8_t *out);
+    Int2DdsRet int2dds_dynamic_sample_get_u8(const uint8_t *bytes, uintptr_t len, const Int2DdsTypeObject *type_obj, const char *field_name, uint8_t *out);
+    Int2DdsRet int2dds_dynamic_sample_get_byte(const uint8_t *bytes, uintptr_t len, const Int2DdsTypeObject *type_obj, const char *field_name, uint8_t *out);
+    Int2DdsRet int2dds_dynamic_sample_get_char8(const uint8_t *bytes, uintptr_t len, const Int2DdsTypeObject *type_obj, const char *field_name, uint8_t *out);
+    Int2DdsRet int2dds_dynamic_sample_get_i16(const uint8_t *bytes, uintptr_t len, const Int2DdsTypeObject *type_obj, const char *field_name, int16_t *out);
+    Int2DdsRet int2dds_dynamic_sample_get_u16(const uint8_t *bytes, uintptr_t len, const Int2DdsTypeObject *type_obj, const char *field_name, uint16_t *out);
+    Int2DdsRet int2dds_dynamic_sample_get_i32(const uint8_t *bytes, uintptr_t len, const Int2DdsTypeObject *type_obj, const char *field_name, int32_t *out);
+    Int2DdsRet int2dds_dynamic_sample_get_u32(const uint8_t *bytes, uintptr_t len, const Int2DdsTypeObject *type_obj, const char *field_name, uint32_t *out);
+    Int2DdsRet int2dds_dynamic_sample_get_i64(const uint8_t *bytes, uintptr_t len, const Int2DdsTypeObject *type_obj, const char *field_name, int64_t *out);
+    Int2DdsRet int2dds_dynamic_sample_get_u64(const uint8_t *bytes, uintptr_t len, const Int2DdsTypeObject *type_obj, const char *field_name, uint64_t *out);
+    Int2DdsRet int2dds_dynamic_sample_get_f32(const uint8_t *bytes, uintptr_t len, const Int2DdsTypeObject *type_obj, const char *field_name, float *out);
+    Int2DdsRet int2dds_dynamic_sample_get_f64(const uint8_t *bytes, uintptr_t len, const Int2DdsTypeObject *type_obj, const char *field_name, double *out);
+    Int2DdsRet int2dds_dynamic_sample_get_string(const uint8_t *bytes, uintptr_t len, const Int2DdsTypeObject *type_obj, const char *field_name, char *out_buf, uintptr_t buf_cap, uintptr_t *out_len);
 
     /* DynamicData decoding (dotted/indexed field paths, e.g. "pos.x", "items[2]") */
     Int2DdsRet int2dds_dynamic_data_from_sample(const Int2DdsParticipant *participant, const uint8_t *bytes, uintptr_t len, const Int2DdsTypeObject *type_obj, Int2DdsDynamicData **out);
@@ -1051,6 +1420,54 @@ ffi.cdef("""
         int32_t absolute_generation_rank;
         bool valid_data;
     } Int2DdsSampleInfo;
+
+    /* SampleSeq (batch read/take results) */
+    size_t int2dds_sample_seq_length(const Int2DdsSampleSeq *seq);
+    Int2DdsRet int2dds_sample_seq_get_data(
+        const Int2DdsSampleSeq *seq,
+        size_t index,
+        uint8_t *buffer,
+        size_t buffer_capacity,
+        size_t *actual_size_out
+    );
+    Int2DdsRet int2dds_sample_seq_get_info(
+        const Int2DdsSampleSeq *seq,
+        size_t index,
+        Int2DdsSampleInfo *info_out
+    );
+    Int2DdsRet int2dds_sample_seq_delete(Int2DdsSampleSeq *seq);
+
+    /* Serialized batch read/take (all instances) */
+    Int2DdsRet int2dds_take_serialized_batch(
+        const Int2DdsDataReader *reader,
+        int32_t max_samples,
+        Int2DdsSampleSeq **seq_out
+    );
+    Int2DdsRet int2dds_read_serialized_batch(
+        const Int2DdsDataReader *reader,
+        int32_t max_samples,
+        Int2DdsSampleSeq **seq_out
+    );
+
+    /* Instance-scoped serialized batch read/take */
+    Int2DdsRet int2dds_take_instance_serialized_batch(
+        const Int2DdsDataReader *reader,
+        const uint8_t (*handle)[16],
+        int32_t max_samples,
+        uint32_t sample_state_mask,
+        uint32_t view_state_mask,
+        uint32_t instance_state_mask,
+        Int2DdsSampleSeq **seq_out
+    );
+    Int2DdsRet int2dds_read_instance_serialized_batch(
+        const Int2DdsDataReader *reader,
+        const uint8_t (*handle)[16],
+        int32_t max_samples,
+        uint32_t sample_state_mask,
+        uint32_t view_state_mask,
+        uint32_t instance_state_mask,
+        Int2DdsSampleSeq **seq_out
+    );
 
     /* XML type registry */
     Int2DdsRet int2dds_xml_type_registry_create(Int2DdsXmlTypeRegistry **out);

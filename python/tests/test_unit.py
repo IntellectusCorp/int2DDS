@@ -31,7 +31,6 @@ from int2dds.core.qos import (
     TimeBasedFilter, Deadline, Liveliness,
 )
 from int2dds.cdr import CdrReader, CdrWriter, Extensibility
-from int2dds.cdr.writer import CdrKeyWriter
 
 HANDLE_NIL = b"\x00" * 16
 
@@ -69,11 +68,6 @@ class KeyedMessage:
         r = CdrReader(data)
         return cls(id=r.read_u32(), value=r.read_string())
 
-    def _serialize_key(self) -> bytes:
-        kw = CdrKeyWriter()
-        kw.write_u32(self.id)
-        return kw.to_bytes()
-
 
 @dataclass
 class NoKeyMessage:
@@ -94,9 +88,6 @@ class NoKeyMessage:
     def _deserialize_cdr(cls, data: bytes) -> "NoKeyMessage":
         r = CdrReader(data)
         return cls(value=r.read_i32())
-
-    def _serialize_key(self) -> bytes:
-        return b""
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +128,6 @@ def run_all_tests():
         try:
             sample = KeyedMessage(id=1, value="hello")
             print(f"  Input:  KeyedMessage(id={sample.id}, value='{sample.value}')")
-            print(f"  Key:    {sample._serialize_key().hex()}")
 
             handle = writer.register_instance(sample)
 
@@ -161,8 +151,6 @@ def run_all_tests():
             sample2 = KeyedMessage(id=42, value="second")
             print(f"  Input1: KeyedMessage(id={sample1.id}, value='{sample1.value}')")
             print(f"  Input2: KeyedMessage(id={sample2.id}, value='{sample2.value}')")
-            print(f"  Key1:   {sample1._serialize_key().hex()}")
-            print(f"  Key2:   {sample2._serialize_key().hex()} (same key, different value)")
 
             handle1 = writer.register_instance(sample1)
             handle2 = writer.register_instance(sample2)
@@ -191,7 +179,7 @@ def run_all_tests():
             for s in samples:
                 h = writer.register_instance(s)
                 handles.append(h)
-                print(f"  id={s.id:3d} -> key={s._serialize_key().hex()} -> handle={fmt_handle(h)}")
+                print(f"  id={s.id:3d} -> handle={fmt_handle(h)}")
 
             assert handles[0] != handles[1], "id=100 vs id=200 should differ"
             assert handles[1] != handles[2], "id=200 vs id=300 should differ"
@@ -322,7 +310,6 @@ def run_all_tests():
         try:
             sample = NoKeyMessage(value=99)
             print(f"  Input: NoKeyMessage(value={sample.value})")
-            print(f"  Key:   '{sample._serialize_key().hex()}' (empty - no key fields)")
 
             handle = nokey_writer.register_instance(sample)
             print(f"  Handle: {fmt_handle(handle)}")
