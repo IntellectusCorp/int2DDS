@@ -22,8 +22,9 @@ _ENCAP_DCDR2_LE = 0x0009
 _ENCAP_PL_CDR2_BE = 0x000A
 _ENCAP_PL_CDR2_LE = 0x000B
 
-# Sentinel for mutable types
+# Sentinel / long-form marker for mutable types
 MEMBER_ID_SENTINEL = 0x3F02
+PID_EXTENDED = 0x3F01  # PL_CDR v1 long-form member header marker
 
 
 class CdrError(Exception):
@@ -411,3 +412,43 @@ class CdrReader:
         """Skip over a sentinel marker."""
         if self.is_sentinel():
             self._pos += 4
+
+    # -------------------------------------------------------------------------
+    # XCDR1 PL_CDR member headers (Mutable types under XCDR1)
+    # -------------------------------------------------------------------------
+
+    def read_parameter_header(self) -> tuple[str, int, int, bool]:
+        """
+        Read a PL_CDR v1 member header (XCDR1 mutable). Mirrors the Rust core's
+        ``read_parameter_header``.
+
+        Returns:
+            Tuple (kind, member_id, length, must_understand) where kind is one of
+            "short", "long", or "sentinel".
+        """
+        self._align(4)
+        if self._pos + 4 > len(self._buf):
+            raise CdrUnderflowError("PL_CDR member header extends beyond buffer")
+        fmt16 = "<H" if self._le else ">H"
+        pid = struct.unpack_from(fmt16, self._buf, self._pos)[0]
+        length = struct.unpack_from(fmt16, self._buf, self._pos + 2)[0]
+        raw_pid = pid & 0x3FFF
+
+        if raw_pid == (MEMBER_ID_SENTINEL & 0x3FFF):
+            self._pos += 4
+            return ("sentinel", 0, 0, False)
+
+        must_understand = bool(pid & 0x4000)
+
+        if raw_pid == (PID_EXTENDED & 0x3FFF):
+            self._pos += 4
+            if self._pos + 8 > len(self._buf):
+                raise CdrUnderflowError("PL_CDR long member header extends beyond buffer")
+            fmt32 = "<I" if self._le else ">I"
+            member_id = struct.unpack_from(fmt32, self._buf, self._pos)[0]
+            member_length = struct.unpack_from(fmt32, self._buf, self._pos + 4)[0]
+            self._pos += 8
+            return ("long", member_id, member_length, must_understand)
+
+        self._pos += 4
+        return ("short", raw_pid, length, must_understand)

@@ -1007,19 +1007,19 @@ impl<'a> CsGen<'a> {
                 self.line("w.DheaderFinalize(_dt);");
             }
             ExtensibilityKind::Mutable => {
-                self.line("var _dt = w.DheaderBegin();");
-                for (i, m) in s.members.iter().enumerate() {
-                    let member_id = m.member_id.unwrap_or(i as u32);
-                    let must_understand = if m.must_understand { "true" } else { "false" };
-                    self.line(&format!(
-                        "var _et{} = w.EmheaderBegin({}, {});",
-                        i, member_id, must_understand
-                    ));
-                    let accessor = cs_ident(&m.name);
-                    self.emit_write_field(&m.resolved_type, &accessor);
-                    self.line(&format!("w.EmheaderFinalize(_et{});", i));
-                }
-                self.line("w.DheaderFinalize(_dt);");
+                // XCDR2: DHEADER + EMHEADER per field. XCDR1: PL_CDR headers + sentinel.
+                self.line("if (w.IsXcdr2)");
+                self.line("{");
+                self.indent += 1;
+                self.emit_mutable_ser_xcdr2_cs(&s.members);
+                self.indent -= 1;
+                self.line("}");
+                self.line("else");
+                self.line("{");
+                self.indent += 1;
+                self.emit_mutable_ser_xcdr1_cs(&s.members);
+                self.indent -= 1;
+                self.line("}");
             }
         }
 
@@ -1108,6 +1108,66 @@ impl<'a> CsGen<'a> {
         }
     }
 
+    /// XCDR2 mutable serialize body: DHEADER + EMHEADER per field (no sentinel).
+    fn emit_mutable_ser_xcdr2_cs(&mut self, members: &[ResolvedMember]) {
+        self.line("var _dt = w.DheaderBegin();");
+        for (i, m) in members.iter().enumerate() {
+            let member_id = m.member_id.unwrap_or(i as u32);
+            let must_understand = if m.must_understand { "true" } else { "false" };
+            self.line(&format!(
+                "var _et{} = w.EmheaderBegin({}, {});",
+                i, member_id, must_understand
+            ));
+            let accessor = cs_ident(&m.name);
+            self.emit_write_field(&m.resolved_type, &accessor);
+            self.line(&format!("w.EmheaderFinalize(_et{});", i));
+        }
+        self.line("w.DheaderFinalize(_dt);");
+    }
+
+    /// XCDR1 mutable serialize body: PL_CDR member headers terminated by a sentinel.
+    fn emit_mutable_ser_xcdr1_cs(&mut self, members: &[ResolvedMember]) {
+        for (i, m) in members.iter().enumerate() {
+            let member_id = m.member_id.unwrap_or(i as u32);
+            let must_understand = if m.must_understand { "true" } else { "false" };
+            self.line(&format!("var _mt{} = w.MemberV1Begin({});", i, member_id));
+            let accessor = cs_ident(&m.name);
+            self.emit_write_field(&m.resolved_type, &accessor);
+            self.line(&format!(
+                "w.MemberV1Finalize(_mt{}, {}, {});",
+                i, member_id, must_understand
+            ));
+        }
+        self.line("w.EndMutableStruct();");
+    }
+
+    /// The `if (_mid == N) { <read> } ... else { r.Skip((int)_mlen); }` dispatch shared by
+    /// the XCDR2 (EMHEADER) and XCDR1 (PL_CDR) mutable deserialize loops.
+    fn emit_mutable_deser_dispatch_cs(&mut self, members: &[ResolvedMember]) {
+        let mut first = true;
+        for (i, m) in members.iter().enumerate() {
+            let member_id = m.member_id.unwrap_or(i as u32);
+            let prop_name = cs_ident(&m.name);
+            if first {
+                self.line(&format!("if (_mid == {})", member_id));
+                first = false;
+            } else {
+                self.line(&format!("else if (_mid == {})", member_id));
+            }
+            self.line("{");
+            self.indent += 1;
+            self.emit_read_field(&m.resolved_type, &prop_name, "obj");
+            self.indent -= 1;
+            self.line("}");
+        }
+        self.line("else");
+        self.line("{");
+        self.indent += 1;
+        self.line("r.Skip((int)_mlen);");
+        self.indent -= 1;
+        self.line("}");
+    }
+
     fn emit_deserialize_cdr(&mut self, s: &ResolvedStruct) {
         let class_name = naming::to_pascal_case(&s.name);
 
@@ -1133,39 +1193,35 @@ impl<'a> CsGen<'a> {
                 self.line("r.ReadDheaderEnd(_dSize, _dStart);");
             }
             ExtensibilityKind::Mutable => {
+                // XCDR2: DHEADER-bounded EMHEADER loop. XCDR1: PL_CDR headers until sentinel.
+                self.line("if (r.IsXcdr2)");
+                self.line("{");
+                self.indent += 1;
                 self.line("var (_dSize, _dStart) = r.ReadDheader();");
                 self.line("int _dEnd = _dStart + (int)_dSize;");
                 self.line("while (r.Position < _dEnd)");
                 self.line("{");
                 self.indent += 1;
                 self.line("var (_mid, _mlen, _mu) = r.ReadEmheader();");
-
-                let mut first = true;
-                for (i, m) in s.members.iter().enumerate() {
-                    let member_id = m.member_id.unwrap_or(i as u32);
-                    let prop_name = cs_ident(&m.name);
-                    if first {
-                        self.line(&format!("if (_mid == {})", member_id));
-                        first = false;
-                    } else {
-                        self.line(&format!("else if (_mid == {})", member_id));
-                    }
-                    self.line("{");
-                    self.indent += 1;
-                    self.emit_read_field(&m.resolved_type, &prop_name, "obj");
-                    self.indent -= 1;
-                    self.line("}");
-                }
-                self.line("else");
-                self.line("{");
-                self.indent += 1;
-                self.line("r.Skip((int)_mlen);");
-                self.indent -= 1;
-                self.line("}");
-
+                self.emit_mutable_deser_dispatch_cs(&s.members);
                 self.indent -= 1;
                 self.line("}");
                 self.line("r.ReadDheaderEnd(_dSize, _dStart);");
+                self.indent -= 1;
+                self.line("}");
+                self.line("else");
+                self.line("{");
+                self.indent += 1;
+                self.line("while (true)");
+                self.line("{");
+                self.indent += 1;
+                self.line("var (_mid, _mlen, _mu, _sentinel) = r.ReadParameterHeader();");
+                self.line("if (_sentinel) break;");
+                self.emit_mutable_deser_dispatch_cs(&s.members);
+                self.indent -= 1;
+                self.line("}");
+                self.indent -= 1;
+                self.line("}");
             }
         }
 
@@ -1205,39 +1261,35 @@ impl<'a> CsGen<'a> {
                 self.line("r.ReadDheaderEnd(_dSize, _dStart);");
             }
             ExtensibilityKind::Mutable => {
+                // XCDR2: DHEADER-bounded EMHEADER loop. XCDR1: PL_CDR headers until sentinel.
+                self.line("if (r.IsXcdr2)");
+                self.line("{");
+                self.indent += 1;
                 self.line("var (_dSize, _dStart) = r.ReadDheader();");
                 self.line("int _dEnd = _dStart + (int)_dSize;");
                 self.line("while (r.Position < _dEnd)");
                 self.line("{");
                 self.indent += 1;
                 self.line("var (_mid, _mlen, _mu) = r.ReadEmheader();");
-
-                let mut first = true;
-                for (i, m) in s.members.iter().enumerate() {
-                    let member_id = m.member_id.unwrap_or(i as u32);
-                    let prop_name = cs_ident(&m.name);
-                    if first {
-                        self.line(&format!("if (_mid == {})", member_id));
-                        first = false;
-                    } else {
-                        self.line(&format!("else if (_mid == {})", member_id));
-                    }
-                    self.line("{");
-                    self.indent += 1;
-                    self.emit_read_field(&m.resolved_type, &prop_name, "obj");
-                    self.indent -= 1;
-                    self.line("}");
-                }
-                self.line("else");
-                self.line("{");
-                self.indent += 1;
-                self.line("r.Skip((int)_mlen);");
-                self.indent -= 1;
-                self.line("}");
-
+                self.emit_mutable_deser_dispatch_cs(&s.members);
                 self.indent -= 1;
                 self.line("}");
                 self.line("r.ReadDheaderEnd(_dSize, _dStart);");
+                self.indent -= 1;
+                self.line("}");
+                self.line("else");
+                self.line("{");
+                self.indent += 1;
+                self.line("while (true)");
+                self.line("{");
+                self.indent += 1;
+                self.line("var (_mid, _mlen, _mu, _sentinel) = r.ReadParameterHeader();");
+                self.line("if (_sentinel) break;");
+                self.emit_mutable_deser_dispatch_cs(&s.members);
+                self.indent -= 1;
+                self.line("}");
+                self.indent -= 1;
+                self.line("}");
             }
         }
 
@@ -1267,19 +1319,18 @@ impl<'a> CsGen<'a> {
                 self.line("w.DheaderFinalize(_dt);");
             }
             ExtensibilityKind::Mutable => {
-                self.line("var _dt = w.DheaderBegin();");
-                for (i, m) in s.members.iter().enumerate() {
-                    let member_id = m.member_id.unwrap_or(i as u32);
-                    let must_understand = if m.must_understand { "true" } else { "false" };
-                    self.line(&format!(
-                        "var _et{} = w.EmheaderBegin({}, {});",
-                        i, member_id, must_understand
-                    ));
-                    let accessor = cs_ident(&m.name);
-                    self.emit_write_field(&m.resolved_type, &accessor);
-                    self.line(&format!("w.EmheaderFinalize(_et{});", i));
-                }
-                self.line("w.DheaderFinalize(_dt);");
+                self.line("if (w.IsXcdr2)");
+                self.line("{");
+                self.indent += 1;
+                self.emit_mutable_ser_xcdr2_cs(&s.members);
+                self.indent -= 1;
+                self.line("}");
+                self.line("else");
+                self.line("{");
+                self.indent += 1;
+                self.emit_mutable_ser_xcdr1_cs(&s.members);
+                self.indent -= 1;
+                self.line("}");
             }
         }
 

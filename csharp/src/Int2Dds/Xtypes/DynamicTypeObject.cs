@@ -229,9 +229,11 @@ namespace Int2Dds.Xtypes
             {
                 UIntPtr outLen;
                 int ret = NativeMethods.int2dds_dynamic_sample_get_string(pBytes, (UIntPtr)bytes.Length, _handle, pName, pOut, (UIntPtr)outBuf.Length, out outLen);
-                if (ret == ReturnCode.BufferTooSmall || (int)(ulong)outLen > outBuf.Length)
+                // The native copy needs one extra byte for the NUL terminator, so the
+                // required capacity is outLen + 1. Retry whenever that exceeds the buffer.
+                if (ret == ReturnCode.BufferTooSmall || (int)(ulong)outLen + 1 > outBuf.Length)
                 {
-                    outBuf = new byte[(int)(ulong)outLen];
+                    outBuf = new byte[(int)(ulong)outLen + 1];
                     fixed (byte* pOut2 = outBuf)
                     {
                         ret = NativeMethods.int2dds_dynamic_sample_get_string(pBytes, (UIntPtr)bytes.Length, _handle, pName, pOut2, (UIntPtr)outBuf.Length, out outLen);

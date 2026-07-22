@@ -24,6 +24,7 @@ namespace Int2Dds.Cdr
         private const ushort EncapPlCdr2Be = 0x000A;
         private const ushort EncapPlCdr2Le = 0x000B;
         private const uint MemberIdSentinel = 0x3F02;
+        private const uint PidExtended = 0x3F01; // PL_CDR v1 long-form member header marker
 
         private readonly byte[] _data;
         private int _pos;
@@ -104,6 +105,9 @@ namespace Int2Dds.Cdr
 
         /// <summary>Current read position in the buffer.</summary>
         public int Position => _pos;
+
+        /// <summary>Whether this reader decodes XCDR2 (vs XCDR1), inferred from the encapsulation id.</summary>
+        public bool IsXcdr2 => _xcdr2;
 
         // ---- Alignment ------------------------------------------------------
 
@@ -414,6 +418,52 @@ namespace Int2Dds.Cdr
         {
             EnsureRemaining(count);
             _pos += count;
+        }
+
+        // ---- XCDR1 PL_CDR member headers (Mutable types under XCDR1) --------
+
+        /// <summary>
+        /// Read a PL_CDR v1 member header (XCDR1 mutable). Mirrors the Rust core's
+        /// <c>read_parameter_header</c>. When <c>Sentinel</c> is true the struct is done.
+        /// </summary>
+        public (uint MemberId, uint Length, bool MustUnderstand, bool Sentinel) ReadParameterHeader()
+        {
+            Align(4);
+            if (_pos + 4 > _data.Length)
+                throw new CdrUnderflowException("PL_CDR member header extends beyond buffer.");
+            ushort pid = _littleEndian
+                ? BinaryPrimitives.ReadUInt16LittleEndian(_data.AsSpan(_pos))
+                : BinaryPrimitives.ReadUInt16BigEndian(_data.AsSpan(_pos));
+            ushort length = _littleEndian
+                ? BinaryPrimitives.ReadUInt16LittleEndian(_data.AsSpan(_pos + 2))
+                : BinaryPrimitives.ReadUInt16BigEndian(_data.AsSpan(_pos + 2));
+            uint rawPid = (uint)(pid & 0x3FFF);
+
+            if (rawPid == (MemberIdSentinel & 0x3FFF))
+            {
+                _pos += 4;
+                return (0, 0, false, true);
+            }
+
+            bool mustUnderstand = (pid & 0x4000) != 0;
+
+            if (rawPid == (PidExtended & 0x3FFF))
+            {
+                _pos += 4;
+                if (_pos + 8 > _data.Length)
+                    throw new CdrUnderflowException("PL_CDR long member header extends beyond buffer.");
+                uint memberId = _littleEndian
+                    ? BinaryPrimitives.ReadUInt32LittleEndian(_data.AsSpan(_pos))
+                    : BinaryPrimitives.ReadUInt32BigEndian(_data.AsSpan(_pos));
+                uint memberLength = _littleEndian
+                    ? BinaryPrimitives.ReadUInt32LittleEndian(_data.AsSpan(_pos + 4))
+                    : BinaryPrimitives.ReadUInt32BigEndian(_data.AsSpan(_pos + 4));
+                _pos += 8;
+                return (memberId, memberLength, mustUnderstand, false);
+            }
+
+            _pos += 4;
+            return (rawPid, length, mustUnderstand, false);
         }
     }
 }

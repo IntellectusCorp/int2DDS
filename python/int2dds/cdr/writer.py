@@ -24,6 +24,8 @@ class Extensibility(IntEnum):
 # Encapsulation IDs (big-endian in header)
 _ENCAP_CDR_BE = 0x0000
 _ENCAP_CDR_LE = 0x0001
+_ENCAP_PL_CDR_BE = 0x0002  # PL_CDR BE (Mutable, XCDR1)
+_ENCAP_PL_CDR_LE = 0x0003  # PL_CDR LE (Mutable, XCDR1)
 _ENCAP_CDR2_BE = 0x0006  # PLAINCDR2 BE (Final)
 _ENCAP_CDR2_LE = 0x0007  # PLAINCDR2 LE (Final)
 _ENCAP_DCDR2_BE = 0x0008  # DELIMITED_CDR2 BE (Appendable)
@@ -31,8 +33,12 @@ _ENCAP_DCDR2_LE = 0x0009  # DELIMITED_CDR2 LE (Appendable)
 _ENCAP_PL_CDR2_BE = 0x000A  # PL_CDR2 BE (Mutable)
 _ENCAP_PL_CDR2_LE = 0x000B  # PL_CDR2 LE (Mutable)
 
-# Sentinel for mutable types
+# Mutable member-header markers (shared by XCDR1 PL_CDR and XCDR2 EMHEADER paths)
 MEMBER_ID_SENTINEL = 0x3F02
+PID_EXTENDED = 0x3F01  # PL_CDR v1 long-form member header marker
+MAX_SHORT_MEMBER_ID = 0x3F00  # member ids above this need the long form
+MAX_SHORT_LENGTH = 0xFFFF  # content lengths above this need the long form
+_MU_FLAG = 0x4000  # must-understand bit in a PL_CDR pid
 
 
 class CdrWriter:
@@ -83,6 +89,9 @@ class CdrWriter:
                 encap_id = _ENCAP_DCDR2_LE if self._le else _ENCAP_DCDR2_BE
             else:  # MUTABLE
                 encap_id = _ENCAP_PL_CDR2_LE if self._le else _ENCAP_PL_CDR2_BE
+        elif self._extensibility == Extensibility.MUTABLE:
+            # XCDR1 mutable is PL_CDR (PID member headers), not PLAIN_CDR.
+            encap_id = _ENCAP_PL_CDR_LE if self._le else _ENCAP_PL_CDR_BE
         else:
             encap_id = _ENCAP_CDR_LE if self._le else _ENCAP_CDR_BE
 
@@ -334,6 +343,68 @@ class CdrWriter:
         """Write a sentinel marker (end of mutable struct fields)."""
         self._require_xcdr2("Sentinel")
         self.write_u32(MEMBER_ID_SENTINEL)
+
+    # -------------------------------------------------------------------------
+    # XCDR1 PL_CDR member headers (Mutable types under XCDR1)
+    # -------------------------------------------------------------------------
+
+    @contextmanager
+    def member_v1(self, member_id: int, must_understand: bool = False) -> Iterator[None]:
+        """
+        Context manager for a PL_CDR v1 member (XCDR1 mutable). Mirrors the Rust
+        core's ``write_member_with_v1``: a 4-byte short header when the id and
+        content fit, otherwise a 12-byte long (PID_EXTENDED) header.
+
+        Example:
+            >>> with writer.member_v1(member_id=0):
+            ...     writer.write_u32(field_value)
+        """
+        token = self.write_member_v1_begin(member_id)
+        yield
+        self.write_member_v1_finalize(token, member_id, must_understand)
+
+    def write_member_v1_begin(self, member_id: int) -> int:
+        """Begin a PL_CDR v1 member: 4-align and reserve the header. Returns a token."""
+        if member_id > 0x0FFFFFFF:
+            raise ValueError(f"member_id exceeds 28 bits: 0x{member_id:X}")
+        self._align(4)
+        header_pos = len(self._buf)
+        if member_id <= MAX_SHORT_MEMBER_ID:
+            self._buf.extend(b"\x00\x00\x00\x00")
+        else:
+            self._buf.extend(b"\x00" * 12)
+        return header_pos
+
+    def write_member_v1_finalize(
+        self, header_pos: int, member_id: int, must_understand: bool = False
+    ) -> None:
+        """Backpatch a PL_CDR v1 member header, promoting to long form if needed."""
+        flags = _MU_FLAG if must_understand else 0
+        fmt16 = "<H" if self._le else ">H"
+        fmt32 = "<I" if self._le else ">I"
+        short_reserved = member_id <= MAX_SHORT_MEMBER_ID
+        content_start = header_pos + (4 if short_reserved else 12)
+        content_len = len(self._buf) - content_start
+        if short_reserved and content_len <= MAX_SHORT_LENGTH:
+            pid = flags | (member_id & 0x3FFF)
+            struct.pack_into(fmt16, self._buf, header_pos, pid)
+            struct.pack_into(fmt16, self._buf, header_pos + 2, content_len)
+            return
+        if short_reserved:
+            # Content too large for the short form: make room for 8 more header bytes.
+            self._buf[header_pos + 4 : header_pos + 4] = b"\x00" * 8
+        pid_ext = flags | PID_EXTENDED
+        struct.pack_into(fmt16, self._buf, header_pos, pid_ext)
+        struct.pack_into(fmt16, self._buf, header_pos + 2, 8)
+        struct.pack_into(fmt32, self._buf, header_pos + 4, member_id)
+        struct.pack_into(fmt32, self._buf, header_pos + 8, content_len)
+
+    def end_mutable_struct(self) -> None:
+        """Write the PL_CDR sentinel that terminates an XCDR1 mutable struct."""
+        self._align(4)
+        fmt16 = "<H" if self._le else ">H"
+        self._buf.extend(struct.pack(fmt16, MEMBER_ID_SENTINEL))
+        self._buf.extend(struct.pack(fmt16, 0))
 
     # -------------------------------------------------------------------------
     # Output
