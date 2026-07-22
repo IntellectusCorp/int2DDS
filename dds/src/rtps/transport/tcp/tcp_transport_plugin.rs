@@ -1,8 +1,8 @@
 //! Sync facade over the async tcp stack.
 //!
 //! Owns a dedicated runtime and bundles the inbound `TcpMuxListener`, the
-//! outbound `TcpSender`, and the three crossbeam channels (discovery / user
-//! data / dead peer) that bridge async tasks back to the sync DDS layer.
+//! outbound `TcpSender`, and the three channels (discovery / user data / dead
+//! peer) that bridge async tasks back to the sync DDS layer.
 //!
 //! The `TransportPlugin` trait is sync. Construction runs inside
 //! `runtime.block_on(...)` because the listener / sender constructors call
@@ -12,7 +12,7 @@ use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 
-use crossbeam_channel::bounded;
+use flume::bounded;
 use log::{debug, info};
 
 use crate::rtps::common::guid::GuidPrefix;
@@ -26,12 +26,12 @@ use crate::rtps::transport::tcp::tcp_sender::TcpSender;
 use crate::rtps::transport::tcp::tls::TlsConfig;
 use crate::rtps::transport::{TcpConfig, TransportType};
 
-/// Crossbeam capacity for discovery + dead-peer channels.
-const CHANNEL_BUFFER_SIZE: usize = 512;
+/// Capacity of inbound discovery channels.
+const DISCOVERY_CHANNEL_CAPACITY: usize = 512;
 
-/// Crossbeam capacity for the inbound user_data channel. Sized to absorb
-/// short consumer stalls under bursty fragmented workloads.
-const USER_CHANNEL_CAPACITY: usize = 1024;
+/// Capacity of the inbound user_data channel. Single-slot so a full channel
+/// blocks the router at once, pushing backpressure onto the TCP window.
+const USER_CHANNEL_CAPACITY: usize = 1;
 
 // ── TcpTransportPlugin ──────────────────────────────────────────────────
 
@@ -67,8 +67,8 @@ pub(crate) struct TcpTransportPlugin {
     mux_listener: Mutex<Option<TcpMuxListener>>,
 
     /// Take-once receivers handed out via `take_*_source()`.
-    discovery_rx: Mutex<Option<crossbeam_channel::Receiver<IncomingMessage>>>,
-    user_data_rx: Mutex<Option<crossbeam_channel::Receiver<IncomingMessage>>>,
+    discovery_rx: Mutex<Option<flume::Receiver<IncomingMessage>>>,
+    user_data_rx: Mutex<Option<flume::Receiver<IncomingMessage>>>,
 }
 
 impl TcpTransportPlugin {
@@ -122,8 +122,8 @@ impl TcpTransportPlugin {
             ));
         }
 
-        // Crossbeam bridges async → sync.
-        let (discovery_tx, discovery_rx) = bounded::<IncomingMessage>(CHANNEL_BUFFER_SIZE);
+        // Bridge async → sync.
+        let (discovery_tx, discovery_rx) = bounded::<IncomingMessage>(DISCOVERY_CHANNEL_CAPACITY);
         let (user_data_tx, user_data_rx) = bounded::<IncomingMessage>(USER_CHANNEL_CAPACITY);
 
         let worker_threads = tcp_config.async_workers.unwrap_or_else(default_worker_count);

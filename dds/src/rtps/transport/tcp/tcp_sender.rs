@@ -738,17 +738,17 @@ mod tests {
     use crate::rtps::transport::plugin::IncomingMessage;
     use crate::rtps::transport::tcp::connection_registry::{TcpSocketTuning, BACKOFF_BASE};
     use crate::rtps::transport::tcp::tcp_mux_listener::TcpMuxListener;
-    use crossbeam_channel::bounded;
+    use flume::bounded;
     use std::time::Instant;
 
     /// Helper: build the crossbeam channels needed by `ConnectionRegistry::new` /
     /// `TcpMuxListener::bind_and_spawn`, returning the receivers so tests
     /// can observe routed RTPS frames.
     fn make_channels() -> (
-        crossbeam_channel::Sender<IncomingMessage>,
-        crossbeam_channel::Receiver<IncomingMessage>,
-        crossbeam_channel::Sender<IncomingMessage>,
-        crossbeam_channel::Receiver<IncomingMessage>,
+        flume::Sender<IncomingMessage>,
+        flume::Receiver<IncomingMessage>,
+        flume::Sender<IncomingMessage>,
+        flume::Receiver<IncomingMessage>,
     ) {
         let (d_tx, d_rx) = bounded(64);
         let (u_tx, u_rx) = bounded(64);
@@ -757,7 +757,7 @@ mod tests {
 
     /// Poll a crossbeam receiver from async code without blocking a worker.
     /// Returns `Some(msg)` if received before `deadline`, else `None`.
-    async fn wait_for_recv<T>(rx: &crossbeam_channel::Receiver<T>, deadline: Instant) -> Option<T> {
+    async fn wait_for_recv<T>(rx: &flume::Receiver<T>, deadline: Instant) -> Option<T> {
         while Instant::now() < deadline {
             if let Ok(msg) = rx.try_recv() {
                 return Some(msg);
@@ -773,7 +773,7 @@ mod tests {
         participant_id: u32,
         guid_prefix: GuidPrefix,
         listener_port: u16,
-    ) -> (Arc<TcpSender>, crossbeam_channel::Receiver<IncomingMessage>) {
+    ) -> (Arc<TcpSender>, flume::Receiver<IncomingMessage>) {
         let (d_tx, d_rx, u_tx, _u_rx) = make_channels();
         let shared = Arc::new(ConnectionRegistry::new(
             0,
