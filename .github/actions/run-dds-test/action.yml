@@ -24,57 +24,84 @@ runs:
     - name: Run Interoperability test for ${{ inputs.dds-name }} (${{ inputs.role }})
       run: |
         source .venv/bin/activate
+
+        OUT="$GITHUB_WORKSPACE/case_artifacts/${{ inputs.dds-name }}_${{ inputs.role }}"
+        REPORT="$GITHUB_WORKSPACE/junit_report_${{ inputs.dds-name }}_${{ inputs.role }}.xml"
+        mkdir -p "$OUT"
+
         cd executables
         chmod +x ./${{ inputs.executable-pattern }}
         chmod +x ./int2DDS_shape_main_linux
 
-        # Start tshark if enabled
         if [ "${{ inputs.dump-packet }}" = "true" ]; then
           echo "Installing tshark..."
           sudo apt-get update -qq
           sudo apt-get install -y tshark
           sudo tshark --version
-
-          # Start packet capture with verbose output for debugging
-          echo "Starting tshark on any interface, capturing UDP traffic..."
-          sudo tshark -i any -f 'udp' -w /tmp/tshark_${{ inputs.dds-name }}_${{ inputs.role }}.pcap &
-          TSHARK_PID=$!
-
-          # Check if tshark is actually running
-          if ps -p $TSHARK_PID > /dev/null; then
-            echo "tshark process is running (PID: $TSHARK_PID)"
-          else
-            echo "ERROR: tshark process failed to start or died"
-          fi
         fi
 
-        # Run the interoperability test
         if [ "${{ inputs.role }}" = "publisher" ]; then
           echo "Testing Publisher ${{ inputs.dds-name }} --- Subscriber int2dds"
-          python3 ../interoperability_report.py -P ./${{ inputs.executable-pattern }} -S ./int2DDS_shape_main_linux -o=../junit_report_${{ inputs.dds-name }}_${{ inputs.role }}.xml
+          PUB="./${{ inputs.executable-pattern }}"
+          SUB="./int2DDS_shape_main_linux"
         else
           echo "Testing Publisher int2dds --- Subscriber ${{ inputs.dds-name }}"
-          python3 ../interoperability_report.py -P ./int2DDS_shape_main_linux -S ./${{ inputs.executable-pattern }} -o=../junit_report_${{ inputs.dds-name }}_${{ inputs.role }}.xml
+          PUB="./int2DDS_shape_main_linux"
+          SUB="./${{ inputs.executable-pattern }}"
         fi
 
-        # Stop tshark if it was started
-        if [ "${{ inputs.dump-packet }}" = "true" ]; then
-          echo "Stopping tshark..."
-          if ps -p $TSHARK_PID > /dev/null; then
-            sudo kill -TERM $TSHARK_PID 2>/dev/null || true
+        # Test case names come from the dictionaries defined in the upstream test_suite file.
+        # Read with ast instead of importing so this does not depend on the runner's imports.
+        CASES=$(python3 -c "
+        import ast
+        names = []
+        for node in ast.parse(open('../test_suite.py').read()).body:
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Dict):
+                names += [k.value for k in node.value.keys if isinstance(k, ast.Constant)]
+        print(' '.join(dict.fromkeys(names)))
+        ")
+        echo "Running $(echo $CASES | wc -w) test cases one at a time"
+
+        # Uploaded together with the per-case files so the artifact root stays at OUT
+        # even when only one case produces output.
+        echo "$CASES" | tr ' ' '\n' > "$OUT/cases.txt"
+
+        for tc in $CASES; do
+          CASE_DIR="$OUT/$tc"
+          mkdir -p "$CASE_DIR"
+
+          TSHARK_PID=""
+          if [ "${{ inputs.dump-packet }}" = "true" ]; then
+            PCAP="$CASE_DIR/capture.pcap"
+            sudo tshark -i any -f 'udp' -q -w "$PCAP" &
+            TSHARK_PID=$!
+
+            # The pcap header is written once the capture is live. Waiting for it instead
+            # of sleeping a fixed amount keeps discovery packets out of the startup gap.
+            for _ in $(seq 100); do
+              [ -s "$PCAP" ] && break
+              sleep 0.05
+            done
+            [ -s "$PCAP" ] || echo "::warning::tshark did not start capturing for $tc"
           fi
 
-          # Check if pcap file was created in /tmp
-          cd /tmp
-          ls -alh
-          if [ -f "/tmp/tshark_${{ inputs.dds-name }}_${{ inputs.role }}.pcap" ]; then
-            echo "pcap file created successfully:"
-            ls -la /tmp/tshark_${{ inputs.dds-name }}_${{ inputs.role }}.pcap
-            sudo chmod 644 /tmp/tshark_${{ inputs.dds-name }}_${{ inputs.role }}.pcap
-          else
-            echo "ERROR: pcap file not found in /tmp"
+          python3 ../interoperability_report.py -P "$PUB" -S "$SUB" -t "$tc" -o "$REPORT" \
+            || echo "::warning::interoperability_report.py exited non-zero on $tc"
+
+          if [ -n "$TSHARK_PID" ]; then
+            sudo kill -TERM "$TSHARK_PID" 2>/dev/null || true
+            wait "$TSHARK_PID" 2>/dev/null || true
           fi
-        fi
+
+          mv ./*.log "$CASE_DIR/" 2>/dev/null || true
+        done
+
+        # Each -t invocation appends its own testsuite element. Merge them back into one
+        # so the downstream xlsx/html report sees the same shape as a whole-suite run.
+        python3 "$GITHUB_WORKSPACE/.github/scripts/collapse_junit.py" "$REPORT"
+
+        sudo chown -R "$(id -u):$(id -g)" "$OUT"
+        du -sh "$OUT"
       shell: bash
     - name: Upload test report
       if: always()
@@ -87,10 +114,14 @@ runs:
       uses: actions/upload-artifact@v4
       with:
         name: logs_${{ inputs.dds-name }}_${{ inputs.role }}
-        path: ./executables/*.log
+        path: |
+          case_artifacts/${{ inputs.dds-name }}_${{ inputs.role }}/cases.txt
+          case_artifacts/${{ inputs.dds-name }}_${{ inputs.role }}/**/*.log
     - name: Upload tshark capture
       if: inputs.dump-packet == 'true'
       uses: actions/upload-artifact@v4
       with:
         name: tshark_${{ inputs.dds-name }}_${{ inputs.role }}
-        path: /tmp/tshark_${{ inputs.dds-name }}_${{ inputs.role }}.pcap
+        path: |
+          case_artifacts/${{ inputs.dds-name }}_${{ inputs.role }}/cases.txt
+          case_artifacts/${{ inputs.dds-name }}_${{ inputs.role }}/**/*.pcap
