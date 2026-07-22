@@ -29,7 +29,7 @@ namespace Int2Dds.Tests
 
         public AdShape() { }
 
-        public byte[] SerializeCdr() => SerializeCdr(true);
+        public byte[] SerializeCdr() => SerializeCdr(false);
 
         public byte[] SerializeCdr(bool xcdr2)
         {
@@ -42,13 +42,6 @@ namespace Int2Dds.Tests
             foreach (var b in Payload)
                 w.WriteU8(b);
             w.DheaderFinalize(token);
-            return w.ToBytes();
-        }
-
-        public byte[] SerializeKey()
-        {
-            var w = new CdrKeyWriter();
-            w.WriteString(Color);
             return w.ToBytes();
         }
     }

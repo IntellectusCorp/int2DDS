@@ -12,7 +12,7 @@ it through the dynamic FFI without any compile-time IDL.
 
 from __future__ import annotations
 
-from int2dds._ffi import ffi, lib
+from int2dds._ffi import CData, ffi, lib
 from int2dds.exceptions import check_ret
 from int2dds.types.dynamic import DynamicTypeSupport, TypeObject, _cstr, _read_string
 
@@ -20,7 +20,7 @@ from int2dds.types.dynamic import DynamicTypeSupport, TypeObject, _cstr, _read_s
 class XmlTypeRegistry:
     """Holds types parsed from one or more XML files, keyed by fully-qualified name."""
 
-    def __init__(self, handle: ffi.CData | None = None) -> None:
+    def __init__(self, handle: CData | None = None) -> None:
         if handle is None:
             out = ffi.new("Int2DdsXmlTypeRegistry **")
             check_ret(lib.int2dds_xml_type_registry_create(out))

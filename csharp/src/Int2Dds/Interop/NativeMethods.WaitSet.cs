@@ -15,6 +15,9 @@ namespace Int2Dds.Interop
         internal static extern int int2dds_waitset_wait_ex(IntPtr waitset, long timeout_ms, out IntPtr conditions_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_waitset_wait_ex_ns(IntPtr waitset, long timeout_ns, out IntPtr conditions_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_waitset_delete(IntPtr waitset);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
@@ -40,6 +43,12 @@ namespace Int2Dds.Interop
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_waitset_detach_datawriter(IntPtr waitset, IntPtr writer);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_waitset_attach_readcondition(IntPtr waitset, IntPtr condition);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_waitset_detach_readcondition(IntPtr waitset, IntPtr condition);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_condition_seq_length(IntPtr seq, out UIntPtr count_out);

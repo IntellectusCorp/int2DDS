@@ -6,8 +6,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Generic, TypeVar
 
-from int2dds._ffi import ffi, lib
+from int2dds._ffi import CData, ffi, lib
 from int2dds.cdr.writer import Extensibility
+from int2dds.core.conditions import StatusCondition
 from int2dds.exceptions import check_ret
 
 if TYPE_CHECKING:
@@ -16,6 +17,54 @@ if TYPE_CHECKING:
     from int2dds.types.base import DdsType
 
 T = TypeVar("T", bound="DdsType")
+
+
+def _build_cstr_array(strings: list[str]):
+    """Build a ``char *[]`` from a list of str; returns (array, [buffers]).
+
+    The buffer list must be kept alive by the caller for the duration of the call.
+    """
+    bufs = [ffi.new("char[]", s.encode()) for s in strings]
+    arr = ffi.new("char *[]", bufs) if bufs else ffi.NULL
+    return arr, bufs
+
+
+def _build_nested_type_info(cls):
+    """Build a native Int2DdsTypeInfo for a nested generated class (struct or enum),
+    dispatching on the descriptor the generator emitted. Returns a handle the caller owns.
+
+    - Enum: ``_dds_enum_info = (bit_bound, ((name, value, is_default), ...))``
+    - Struct: recurse over ``_dds_type_info_fields``.
+
+    Enum literal names come from the descriptor (canonical PascalCase), so the built
+    TypeObject byte-matches the Rust derive regardless of the Python member naming.
+    """
+    enum_info = getattr(cls, "_dds_enum_info", None)
+    if enum_info is not None:
+        bit_bound, literals = enum_info
+        name_c = ffi.new("char[]", getattr(cls, "_dds_type_name", cls.__name__).encode())
+        ti_ptr = ffi.new("Int2DdsTypeInfo **")
+        check_ret(lib.int2dds_type_info_create_enum(name_c, bit_bound, ti_ptr))
+        ti = ti_ptr[0]
+        try:
+            for lit_name, value, is_default in literals:
+                lname_c = ffi.new("char[]", lit_name.encode())
+                check_ret(
+                    lib.int2dds_type_info_add_enum_literal(
+                        ti, lname_c, value, 1 if is_default else 0
+                    )
+                )
+        except Exception:
+            lib.int2dds_type_info_destroy(ti)
+            raise
+        return ti
+
+    nested_ext = getattr(cls, "_extensibility", Extensibility(lib.int2dds_default_extensibility()))
+    return _build_type_info(
+        getattr(cls, "_dds_type_name", cls.__name__),
+        nested_ext,
+        getattr(cls, "_dds_type_info_fields", []),
+    )
 
 
 def _build_type_info(type_name: str, extensibility: Extensibility, fields: list):
@@ -46,10 +95,82 @@ def _build_type_info(type_name: str, extensibility: Extensibility, fields: list)
                 check_ret(
                     lib.int2dds_type_info_add_array_field(ti, fname_c, type_const, size, flags)
                 )
+            elif op == "nested":
+                # `type_const` holds the nested generated class (struct/enum/bitmask). Build its
+                # own type_info and reference it by content-hash so composite keys resolve.
+                nested_ti = _build_nested_type_info(type_const)
+                try:
+                    check_ret(
+                        lib.int2dds_type_info_add_nested_field(ti, fname_c, nested_ti, flags)
+                    )
+                finally:
+                    lib.int2dds_type_info_destroy(nested_ti)
+            elif op == "seq_nested":
+                # `type_const` holds the element class; `size` is the sequence bound.
+                elem_ti = _build_nested_type_info(type_const)
+                try:
+                    check_ret(
+                        lib.int2dds_type_info_add_sequence_of_nested_field(
+                            ti, fname_c, elem_ti, size, flags
+                        )
+                    )
+                finally:
+                    lib.int2dds_type_info_destroy(elem_ti)
+            elif op == "arr_nested":
+                # `type_const` holds the element class; `size` is the array length.
+                elem_ti = _build_nested_type_info(type_const)
+                try:
+                    check_ret(
+                        lib.int2dds_type_info_add_array_of_nested_field(
+                            ti, fname_c, elem_ti, size, flags
+                        )
+                    )
+                finally:
+                    lib.int2dds_type_info_destroy(elem_ti)
     except Exception:
         lib.int2dds_type_info_destroy(ti)
         raise
     return ti
+
+
+def _apply_topic_qos(handle: CData, qos: "TopicQos") -> None:
+    """Apply TopicQos policies onto a native topic QoS handle.
+
+    Shared by topic creation and set_qos. All TopicQos policies are optional and
+    applied only when set.
+    """
+    if qos.reliability is not None:
+        check_ret(lib.int2dds_topic_qos_set_reliability(
+            handle, qos.reliability._kind_int, qos.reliability._max_blocking_time_ns))
+    if qos.durability is not None:
+        check_ret(lib.int2dds_topic_qos_set_durability(handle, qos.durability._kind_int))
+    if qos.history is not None:
+        check_ret(lib.int2dds_topic_qos_set_history(
+            handle, qos.history._kind_int, qos.history.depth))
+    if qos.deadline is not None:
+        check_ret(lib.int2dds_topic_qos_set_deadline(handle, qos.deadline._period_ns))
+    if qos.liveliness is not None:
+        check_ret(lib.int2dds_topic_qos_set_liveliness(
+            handle, qos.liveliness._kind_int, qos.liveliness._lease_duration_ns))
+    if qos.destination_order is not None:
+        check_ret(lib.int2dds_topic_qos_set_destination_order(
+            handle, qos.destination_order._kind_int))
+    if qos.resource_limits is not None:
+        check_ret(lib.int2dds_topic_qos_set_resource_limits(
+            handle,
+            qos.resource_limits.max_samples,
+            qos.resource_limits.max_instances,
+            qos.resource_limits.max_samples_per_instance))
+    if qos.transport_priority is not None:
+        check_ret(lib.int2dds_topic_qos_set_transport_priority(
+            handle, qos.transport_priority.value))
+    if qos.lifespan is not None:
+        check_ret(lib.int2dds_topic_qos_set_lifespan(handle, qos.lifespan._duration_ns))
+    if qos.ownership is not None:
+        check_ret(lib.int2dds_topic_qos_set_ownership(handle, qos.ownership._kind_int))
+    if qos.data_representation is not None:
+        check_ret(lib.int2dds_topic_qos_set_data_representation(
+            handle, qos.data_representation._kind_int))
 
 
 class Topic(Generic[T]):
@@ -82,7 +203,7 @@ class Topic(Generic[T]):
         # Get type metadata from the type class
         self._type_name: str = getattr(type_class, "_dds_type_name", type_class.__name__)
         extensibility: Extensibility = getattr(
-            type_class, "_extensibility", Extensibility.APPENDABLE
+            type_class, "_extensibility", Extensibility(lib.int2dds_default_extensibility())
         )
         has_key: bool = getattr(type_class, "_has_key", False)
 
@@ -96,42 +217,7 @@ class Topic(Generic[T]):
             qos_handle_ptr = ffi.new("Int2DdsTopicQos **")
             check_ret(lib.int2dds_topic_qos_create_default(qos_handle_ptr))
             qos_handle = qos_handle_ptr[0]
-            if qos.reliability is not None:
-                check_ret(lib.int2dds_topic_qos_set_reliability(
-                    qos_handle, qos.reliability._kind_int, qos.reliability._max_blocking_time_ns))
-            if qos.durability is not None:
-                check_ret(lib.int2dds_topic_qos_set_durability(
-                    qos_handle, qos.durability._kind_int))
-            if qos.history is not None:
-                check_ret(lib.int2dds_topic_qos_set_history(
-                    qos_handle, qos.history._kind_int, qos.history.depth))
-            if qos.deadline is not None:
-                check_ret(lib.int2dds_topic_qos_set_deadline(
-                    qos_handle, qos.deadline._period_ns))
-            if qos.liveliness is not None:
-                check_ret(lib.int2dds_topic_qos_set_liveliness(
-                    qos_handle, qos.liveliness._kind_int, qos.liveliness._lease_duration_ns))
-            if qos.destination_order is not None:
-                check_ret(lib.int2dds_topic_qos_set_destination_order(
-                    qos_handle, qos.destination_order._kind_int))
-            if qos.resource_limits is not None:
-                check_ret(lib.int2dds_topic_qos_set_resource_limits(
-                    qos_handle,
-                    qos.resource_limits.max_samples,
-                    qos.resource_limits.max_instances,
-                    qos.resource_limits.max_samples_per_instance))
-            if qos.transport_priority is not None:
-                check_ret(lib.int2dds_topic_qos_set_transport_priority(
-                    qos_handle, qos.transport_priority.value))
-            if qos.lifespan is not None:
-                check_ret(lib.int2dds_topic_qos_set_lifespan(
-                    qos_handle, qos.lifespan._duration_ns))
-            if qos.ownership is not None:
-                check_ret(lib.int2dds_topic_qos_set_ownership(
-                    qos_handle, qos.ownership._kind_int))
-            if qos.data_representation is not None:
-                check_ret(lib.int2dds_topic_qos_set_data_representation(
-                    qos_handle, qos.data_representation._kind_int))
+            _apply_topic_qos(qos_handle, qos)
             qos_ptr = qos_handle
 
         topic_ptr = ffi.new("Int2DdsTopic **")
@@ -270,6 +356,29 @@ class Topic(Generic[T]):
         if qos_handle is not None:
             lib.int2dds_topic_qos_destroy(qos_handle)
 
+    @classmethod
+    def _from_found_handle(
+        cls,
+        participant: DomainParticipant,
+        handle,
+        type_class: type[T],
+        topic_name: str,
+    ) -> "Topic[T]":
+        """Wrap a native handle returned by ``find_topic`` without re-creating it.
+
+        The native topic already carries its type registration and (if keyed)
+        field descriptors from when it was originally created; this only attaches
+        the Python-side ``type_class`` that drives binding serialization.
+        """
+        obj = object.__new__(cls)
+        obj._participant = participant
+        obj._name = topic_name
+        obj._type_class = type_class
+        obj._type_name = getattr(type_class, "_dds_type_name", type_class.__name__)
+        obj._handle = handle
+        obj._closed = False
+        return obj
+
     @property
     def name(self) -> str:
         """Get the topic name."""
@@ -284,6 +393,51 @@ class Topic(Generic[T]):
     def type_class(self) -> type[T]:
         """Get the Python type class."""
         return self._type_class
+
+    def get_inconsistent_topic_status(self) -> dict:
+        """Get the inconsistent topic status.
+
+        Reports how many times a remote topic with the same name but an
+        incompatible type was discovered. Reading the status resets its
+        ``total_count_change``.
+
+        Returns:
+            dict with total_count, total_count_change
+        """
+        status = ffi.new("Int2DdsInconsistentTopicStatus *")
+        check_ret(lib.int2dds_topic_get_inconsistent_topic_status(self._handle, status))
+        return {
+            "total_count": status.total_count,
+            "total_count_change": status.total_count_change,
+        }
+
+    def get_statuscondition(self) -> StatusCondition:
+        """Get the StatusCondition associated with this topic."""
+        cond_ptr = ffi.new("Int2DdsStatusCondition **")
+        check_ret(lib.int2dds_topic_get_statuscondition(self._handle, cond_ptr))
+        return StatusCondition(cond_ptr[0], owner=self)
+
+    def get_status_changes(self) -> int:
+        """Get the current status change bitmask of this topic."""
+        mask_out = ffi.new("uint32_t *")
+        check_ret(lib.int2dds_topic_get_status_changes(self._handle, mask_out))
+        return mask_out[0]
+
+    def set_qos(self, qos: "TopicQos") -> None:
+        """Set this topic's QoS.
+
+        The given policies are merged onto the topic's current QoS (fetched as the
+        base), then applied. Changing an immutable policy to a different value is
+        rejected by the core.
+        """
+        qos_ptr = ffi.new("Int2DdsTopicQos **")
+        check_ret(lib.int2dds_topic_get_qos(self._handle, qos_ptr))
+        handle = qos_ptr[0]
+        try:
+            _apply_topic_qos(handle, qos)
+            check_ret(lib.int2dds_topic_set_qos(self._handle, handle))
+        finally:
+            lib.int2dds_topic_qos_destroy(handle)
 
     def close(self) -> None:
         """Delete the topic."""
@@ -378,6 +532,25 @@ class ContentFilteredTopic(Generic[T]):
     @property
     def type_class(self) -> type[T]:
         return self._type_class
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Enable or disable filtering at runtime."""
+        check_ret(lib.int2dds_contentfilteredtopic_set_enabled(self._handle, enabled))
+
+    def set_expression_parameters(self, parameters: list[str]) -> None:
+        """Replace the filter's bound parameters."""
+        params_arr, _bufs = _build_cstr_array(parameters)
+        check_ret(lib.int2dds_contentfilteredtopic_set_expression_parameters(
+            self._handle, params_arr, len(parameters)))
+
+    def set_filter_expression(self, expression: str, parameters: list[str] | None = None) -> None:
+        """Replace both the filter expression and its bound parameters."""
+        parameters = parameters or []
+        expr_c = ffi.new("char[]", expression.encode())
+        params_arr, _bufs = _build_cstr_array(parameters)
+        check_ret(lib.int2dds_contentfilteredtopic_set_filter_expression(
+            self._handle, expr_c, params_arr, len(parameters)))
+        self._filter_expression = expression
 
     def close(self) -> None:
         if not self._closed and self._handle is not None:

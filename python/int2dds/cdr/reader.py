@@ -22,8 +22,9 @@ _ENCAP_DCDR2_LE = 0x0009
 _ENCAP_PL_CDR2_BE = 0x000A
 _ENCAP_PL_CDR2_LE = 0x000B
 
-# Sentinel for mutable types
+# Sentinel / long-form marker for mutable types
 MEMBER_ID_SENTINEL = 0x3F02
+PID_EXTENDED = 0x3F01  # PL_CDR v1 long-form member header marker
 
 
 class CdrError(Exception):
@@ -102,7 +103,7 @@ class CdrReader:
         cls,
         data: bytes | bytearray | memoryview,
         little_endian: bool = True,
-        xcdr2: bool = True,
+        xcdr2: bool = False,
     ) -> CdrReader:
         """
         Create a reader without encapsulation header.
@@ -412,113 +413,42 @@ class CdrReader:
         if self.is_sentinel():
             self._pos += 4
 
+    # -------------------------------------------------------------------------
+    # XCDR1 PL_CDR member headers (Mutable types under XCDR1)
+    # -------------------------------------------------------------------------
 
-class CdrKeyReader:
-    """
-    Specialized CDR reader for key fields.
+    def read_parameter_header(self) -> tuple[str, int, int, bool]:
+        """
+        Read a PL_CDR v1 member header (XCDR1 mutable). Mirrors the Rust core's
+        ``read_parameter_header``.
 
-    Key data uses big-endian, XCDR2, and no encapsulation header.
-    """
-
-    __slots__ = ("_buf", "_pos")
-
-    def __init__(self, data: bytes | bytearray | memoryview) -> None:
-        self._buf = memoryview(data) if not isinstance(data, memoryview) else data
-        self._pos = 0
-
-    def _ensure(self, n: int) -> None:
-        if self._pos + n > len(self._buf):
-            raise CdrUnderflowError(
-                f"Need {n} bytes but only {len(self._buf) - self._pos} remaining"
-            )
-
-    def _align(self, alignment: int) -> None:
-        actual = min(alignment, 4)
-        padding = (actual - (self._pos % actual)) % actual
-        self._pos += padding
-
-    def read_bool(self) -> bool:
-        self._ensure(1)
-        val = self._buf[self._pos] != 0
-        self._pos += 1
-        return val
-
-    def read_u8(self) -> int:
-        self._ensure(1)
-        val = self._buf[self._pos]
-        self._pos += 1
-        return val
-
-    def read_i8(self) -> int:
-        self._ensure(1)
-        val = struct.unpack_from("b", self._buf, self._pos)[0]
-        self._pos += 1
-        return val
-
-    def read_u16(self) -> int:
-        self._align(2)
-        self._ensure(2)
-        val = struct.unpack_from(">H", self._buf, self._pos)[0]
-        self._pos += 2
-        return val
-
-    def read_i16(self) -> int:
-        self._align(2)
-        self._ensure(2)
-        val = struct.unpack_from(">h", self._buf, self._pos)[0]
-        self._pos += 2
-        return val
-
-    def read_u32(self) -> int:
+        Returns:
+            Tuple (kind, member_id, length, must_understand) where kind is one of
+            "short", "long", or "sentinel".
+        """
         self._align(4)
-        self._ensure(4)
-        val = struct.unpack_from(">I", self._buf, self._pos)[0]
+        if self._pos + 4 > len(self._buf):
+            raise CdrUnderflowError("PL_CDR member header extends beyond buffer")
+        fmt16 = "<H" if self._le else ">H"
+        pid = struct.unpack_from(fmt16, self._buf, self._pos)[0]
+        length = struct.unpack_from(fmt16, self._buf, self._pos + 2)[0]
+        raw_pid = pid & 0x3FFF
+
+        if raw_pid == (MEMBER_ID_SENTINEL & 0x3FFF):
+            self._pos += 4
+            return ("sentinel", 0, 0, False)
+
+        must_understand = bool(pid & 0x4000)
+
+        if raw_pid == (PID_EXTENDED & 0x3FFF):
+            self._pos += 4
+            if self._pos + 8 > len(self._buf):
+                raise CdrUnderflowError("PL_CDR long member header extends beyond buffer")
+            fmt32 = "<I" if self._le else ">I"
+            member_id = struct.unpack_from(fmt32, self._buf, self._pos)[0]
+            member_length = struct.unpack_from(fmt32, self._buf, self._pos + 4)[0]
+            self._pos += 8
+            return ("long", member_id, member_length, must_understand)
+
         self._pos += 4
-        return val
-
-    def read_i32(self) -> int:
-        self._align(4)
-        self._ensure(4)
-        val = struct.unpack_from(">i", self._buf, self._pos)[0]
-        self._pos += 4
-        return val
-
-    def read_u64(self) -> int:
-        self._align(4)
-        self._ensure(8)
-        val = struct.unpack_from(">Q", self._buf, self._pos)[0]
-        self._pos += 8
-        return val
-
-    def read_i64(self) -> int:
-        self._align(4)
-        self._ensure(8)
-        val = struct.unpack_from(">q", self._buf, self._pos)[0]
-        self._pos += 8
-        return val
-
-    def read_f32(self) -> float:
-        self._align(4)
-        self._ensure(4)
-        val = struct.unpack_from(">f", self._buf, self._pos)[0]
-        self._pos += 4
-        return val
-
-    def read_f64(self) -> float:
-        self._align(4)
-        self._ensure(8)
-        val = struct.unpack_from(">d", self._buf, self._pos)[0]
-        self._pos += 8
-        return val
-
-    def read_string(self) -> str:
-        length = self.read_u32()
-        if length == 0:
-            return ""
-        self._ensure(length)
-        data = bytes(self._buf[self._pos : self._pos + length - 1])
-        self._pos += length
-        return data.decode("utf-8")
-
-    def read_enum(self) -> int:
-        return self.read_i32()
+        return ("short", raw_pid, length, must_understand)

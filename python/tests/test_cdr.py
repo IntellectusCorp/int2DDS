@@ -124,7 +124,7 @@ class TestCdrExtensibility:
         assert r.read_string() == "test"
 
     def test_appendable_extensibility(self):
-        w = CdrWriter(extensibility=Extensibility.APPENDABLE)
+        w = CdrWriter(extensibility=Extensibility.APPENDABLE, xcdr2=True)
         with w.dheader():
             w.write_u32(42)
             w.write_string("test")
@@ -137,7 +137,7 @@ class TestCdrExtensibility:
         assert r.read_string() == "test"
 
     def test_mutable_extensibility(self):
-        w = CdrWriter(extensibility=Extensibility.MUTABLE)
+        w = CdrWriter(extensibility=Extensibility.MUTABLE, xcdr2=True)
         with w.dheader():
             with w.emheader(member_id=0):
                 w.write_u32(42)

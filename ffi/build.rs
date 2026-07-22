@@ -6,9 +6,26 @@ fn main() {
     let package_name = env::var("CARGO_PKG_NAME").unwrap();
     let output_file = PathBuf::from(&crate_dir).join("include").join(format!("{}.h", package_name));
 
+    // Emit a portable deprecation attribute so C consumers get a compiler
+    // warning when they call a deprecated entry point. cbindgen does not emit
+    // anything for #[deprecated] unless `deprecated_with_note` is set.
+    let mut config = cbindgen::Config::default();
+    config.after_includes = Some(
+        "\n#if defined(__GNUC__) || defined(__clang__)\n\
+         #define INT2DDS_DEPRECATED(msg) __attribute__((deprecated(msg)))\n\
+         #elif defined(_MSC_VER)\n\
+         #define INT2DDS_DEPRECATED(msg) __declspec(deprecated(msg))\n\
+         #else\n\
+         #define INT2DDS_DEPRECATED(msg)\n\
+         #endif"
+            .to_string(),
+    );
+    config.function.deprecated_with_note = Some("INT2DDS_DEPRECATED({})".to_string());
+
     // Generate C header file using cbindgen
     cbindgen::Builder::new()
         .with_crate(crate_dir)
+        .with_config(config)
         .with_language(cbindgen::Language::C)
         .with_include_guard("INT2DDS_FFI_H")
         .with_documentation(true)

@@ -549,13 +549,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         data_representation: &[DataRepresentationId],
         extensibility: crate::serialize::xcdr::ExtensibilityKind,
     ) -> DdsResult<SerializationFormat> {
-        let supported = if data_representation.is_empty() {
-            &[DataRepresentationId::XcdrDataRepresentation][..]
-        } else {
-            data_representation
-        };
-
-        for representation in supported {
+        for representation in data_representation {
             match representation {
                 DataRepresentationId::XcdrDataRepresentation => {
                     return Ok(SerializationFormat::Cdr);
@@ -805,7 +799,10 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         let format = {
             let qos = self.qos.load();
             let extensibility = self.type_support.get_extensibility_kind();
-            Self::resolve_serialization_format(&qos.data_representation.value, extensibility)?
+            Self::resolve_serialization_format(
+                qos.data_representation.effective_ids(),
+                extensibility,
+            )?
         };
 
         let key_info = if self.type_support.is_compute_key_provided() {
@@ -861,7 +858,10 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         let format = {
             let qos = self.qos.load();
             let extensibility = self.type_support.get_extensibility_kind();
-            Self::resolve_serialization_format(&qos.data_representation.value, extensibility)?
+            Self::resolve_serialization_format(
+                qos.data_representation.effective_ids(),
+                extensibility,
+            )?
         };
 
         let key_info = if self.type_support.is_compute_key_provided() {
@@ -918,14 +918,10 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         self.is_enabled()?;
         Self::validate_timestamp(&timestamp)?;
 
-        let key_info = match serialized_key {
-            Some(key_bytes) if !key_bytes.is_empty() => {
-                let key_data: SerializedData = Arc::from(key_bytes);
-                let computed_handle = Self::compute_instance_handle_from_key(key_bytes);
-                Some((key_data, computed_handle))
-            }
-            _ => None,
-        };
+        // Key and handle are derived canonically from the sample; any caller-
+        // supplied key is ignored (bindings no longer pre-serialize the key).
+        let _ = serialized_key;
+        let key_info = self.serialized_key_info(serialized_data)?;
 
         let (instance_handle, _) =
             self.resolve_write_instance(key_info, InstanceHandle::NIL, timestamp)?;
@@ -973,14 +969,14 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         self.is_enabled()?;
         Self::validate_timestamp(&timestamp)?;
 
-        let key_info = match serialized_key {
-            Some(key_bytes) if !key_bytes.is_empty() => {
-                let key_data: SerializedData = Arc::from(key_bytes);
-                let computed_handle = Self::compute_instance_handle_from_key(key_bytes);
-                Some((key_data, computed_handle))
-            }
-            _ => None,
-        };
+        // Expose the caller-written bytes to derive key+handle canonically from
+        // that sample. Any caller-supplied key is ignored. `reset` clears the
+        // buffer length (bytes stay in capacity), so re-expose them afterwards.
+        let _ = serialized_key;
+        unsafe {
+            loan.change.data_mut().set_len(actual_size);
+        }
+        let key_info = self.serialized_key_info(loan.change.data_mut())?;
 
         let (instance_handle, _) =
             self.resolve_write_instance(key_info, InstanceHandle::NIL, timestamp)?;
@@ -1012,114 +1008,130 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
     /// Compute an InstanceHandle from raw key bytes.
     /// If key_bytes fits in 16 bytes, it is used directly as the KeyHash.
     /// Otherwise, MD5 hash is computed.
-    fn compute_instance_handle_from_key(key_bytes: &[u8]) -> InstanceHandle {
-        if key_bytes.is_empty() {
-            return InstanceHandle::NIL;
-        }
-        let mut hash = [0u8; 16];
-        if key_bytes.len() <= 16 {
-            hash[..key_bytes.len()].copy_from_slice(key_bytes);
-        } else {
-            let digest = md5::compute(key_bytes);
-            hash.copy_from_slice(&digest.0);
-        }
-        InstanceHandle::new(hash)
+    /// Derive the canonical serialized key CDR and InstanceHandle from a full
+    /// serialized sample via the type support — the spec RTPS KeyHash projection
+    /// (§9.6.4.8, member-id order, nested @key recursion, max-size raw/MD5
+    /// threshold) that native-Rust/derive and the dynamic path also produce. A
+    /// no-key type (or a raw topic without a full TypeObject) yields an empty key
+    /// and NIL handle. This replaces the former flat actual-length hashing so the
+    /// serialized write/register/lookup handles match the wire KeyHash.
+    fn key_info_from_serialized_sample(
+        &self,
+        sample: &[u8],
+    ) -> DdsResult<(SerializedData, InstanceHandle)> {
+        let boxed = self.type_support.deserialize(sample, None)?;
+        let key = self.type_support.serialize_key(&*boxed)?;
+        let handle = self.type_support.compute_key(&*boxed);
+        Ok((key, handle))
     }
 
-    /// Register an instance using raw serialized key bytes.
-    pub fn register_instance_serialized(&self, key: &[u8]) -> DdsResult<InstanceHandle> {
+    /// `Some((canonical key CDR, handle))` when this sample carries a key, else
+    /// `None` (no-key topic, or no full TypeObject on a raw keyed topic).
+    fn serialized_key_info(
+        &self,
+        sample: &[u8],
+    ) -> DdsResult<Option<(SerializedData, InstanceHandle)>> {
+        if sample.is_empty() || !self.type_support.is_compute_key_provided() {
+            return Ok(None);
+        }
+        let (key, handle) = self.key_info_from_serialized_sample(sample)?;
+        if key.is_empty() {
+            // is_compute_key_provided() is true but the key machinery produced nothing —
+            // a keyed topic whose key cannot be computed (e.g. a raw topic without a full
+            // TypeObject). Surface it instead of silently returning NIL, so keyed
+            // register/dispose/unregister/lookup fail loudly rather than acting on a bogus
+            // NIL instance.
+            return Err(DdsError::PreconditionNotMet);
+        }
+        Ok(Some((key, handle)))
+    }
+
+    /// Register an instance from a full serialized sample.
+    pub fn register_instance_serialized(&self, sample: &[u8]) -> DdsResult<InstanceHandle> {
         let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
-        self.register_instance_serialized_w_timestamp(key, timestamp)
+        self.register_instance_serialized_w_timestamp(sample, timestamp)
     }
 
-    /// Register an instance using raw serialized key bytes with explicit timestamp.
+    /// Register an instance from a full serialized sample with explicit timestamp.
     pub fn register_instance_serialized_w_timestamp(
         &self,
-        key: &[u8],
+        sample: &[u8],
         timestamp: Time,
     ) -> DdsResult<InstanceHandle> {
         self.is_enabled()?;
-
-        if key.is_empty() {
-            return Ok(InstanceHandle::NIL);
-        }
-
         Self::validate_timestamp(&timestamp)?;
 
-        let key_data: SerializedData = Arc::from(key);
-        let handle = Self::compute_instance_handle_from_key(key);
+        let (key_data, handle) = match self.serialized_key_info(sample)? {
+            Some(info) => info,
+            None => return Ok(InstanceHandle::NIL),
+        };
 
         self.register_instance_inner(key_data, handle, timestamp)
     }
 
-    /// Dispose an instance using raw serialized key bytes.
-    pub fn dispose_serialized(&self, key: &[u8], handle: InstanceHandle) -> DdsResult<()> {
+    /// Dispose an instance from a full serialized sample.
+    pub fn dispose_serialized(&self, sample: &[u8], handle: InstanceHandle) -> DdsResult<()> {
         let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
-        self.dispose_serialized_w_timestamp(key, handle, timestamp)
+        self.dispose_serialized_w_timestamp(sample, handle, timestamp)
     }
 
-    /// Dispose an instance using raw serialized key bytes with explicit timestamp.
+    /// Dispose an instance from a full serialized sample with explicit timestamp.
     pub fn dispose_serialized_w_timestamp(
         &self,
-        key: &[u8],
+        sample: &[u8],
         handle: InstanceHandle,
         timestamp: Time,
     ) -> DdsResult<()> {
         self.is_enabled()?;
-
-        if key.is_empty() {
-            return Ok(());
-        }
-
         Self::validate_timestamp(&timestamp)?;
 
-        let serialized_key: SerializedData = Arc::from(key);
-        let computed_handle = Self::compute_instance_handle_from_key(key);
+        let (serialized_key, computed_handle) = match self.serialized_key_info(sample)? {
+            Some(info) => info,
+            None => return Ok(()),
+        };
         let (serialized_key, resolved_handle) =
             self.resolve_dispose_key(serialized_key, computed_handle, handle)?;
 
         self.dispose_inner(serialized_key, resolved_handle, timestamp, None)
     }
 
-    /// Unregister an instance using raw serialized key bytes.
+    /// Unregister an instance from a full serialized sample.
     pub fn unregister_instance_serialized(
         &self,
-        key: &[u8],
+        sample: &[u8],
         handle: InstanceHandle,
     ) -> DdsResult<()> {
         let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
-        self.unregister_instance_serialized_w_timestamp(key, handle, timestamp)
+        self.unregister_instance_serialized_w_timestamp(sample, handle, timestamp)
     }
 
-    /// Unregister an instance using raw serialized key bytes with explicit timestamp.
+    /// Unregister an instance from a full serialized sample with explicit timestamp.
     pub fn unregister_instance_serialized_w_timestamp(
         &self,
-        key: &[u8],
+        sample: &[u8],
         handle: InstanceHandle,
         timestamp: Time,
     ) -> DdsResult<()> {
         self.is_enabled()?;
-
-        if key.is_empty() {
-            return Ok(());
-        }
-
         Self::validate_timestamp(&timestamp)?;
 
-        let serialized_key: SerializedData = Arc::from(key);
+        let serialized_key = match self.serialized_key_info(sample)? {
+            Some((key, _)) => key,
+            None => return Ok(()),
+        };
         let (serialized_key, resolved_handle) =
             self.resolve_unregister_key(serialized_key, handle)?;
 
         self.unregister_instance_inner(serialized_key, resolved_handle, timestamp, None)
     }
 
-    /// Lookup an instance handle from raw serialized key bytes.
-    pub fn lookup_instance_serialized(&self, key: &[u8]) -> DdsResult<InstanceHandle> {
-        if key.is_empty() {
-            return Ok(InstanceHandle::NIL);
-        }
+    /// Lookup an instance handle from a full serialized sample.
+    pub fn lookup_instance_serialized(&self, sample: &[u8]) -> DdsResult<InstanceHandle> {
+        let serialized_key = match self.serialized_key_info(sample)? {
+            Some((key, _)) => key,
+            None => return Ok(InstanceHandle::NIL),
+        };
 
-        let serialized_key: SerializedData = Arc::from(key);
         let key_instances =
             self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
@@ -1841,7 +1853,10 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         let format = {
             let qos = self.qos.load();
             let extensibility = self.type_support.get_extensibility_kind();
-            Self::resolve_serialization_format(&qos.data_representation.value, extensibility)?
+            Self::resolve_serialization_format(
+                qos.data_representation.effective_ids(),
+                extensibility,
+            )?
         };
         match format {
             SerializationFormat::Cdr => {
