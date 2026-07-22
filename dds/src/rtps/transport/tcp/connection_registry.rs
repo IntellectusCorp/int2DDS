@@ -569,9 +569,12 @@ mod tests {
         let sock = socket2::SockRef::from(&tcp);
         assert!(tcp.nodelay().unwrap(), "nodelay must be set");
         assert!(sock.keepalive().unwrap(), "keepalive must be enabled");
-        assert_eq!(sock.keepalive_time().unwrap(), Duration::from_secs(11));
+        // The time/interval/retries getters exist only where the OS can read
+        // the values back; on Windows the keepalive params are write-only, so
+        // there it verifies keepalive is enabled and nothing further.
         #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
         {
+            assert_eq!(sock.keepalive_time().unwrap(), Duration::from_secs(11));
             assert_eq!(sock.keepalive_interval().unwrap(), Duration::from_secs(3));
             assert_eq!(sock.keepalive_retries().unwrap(), 4);
         }
