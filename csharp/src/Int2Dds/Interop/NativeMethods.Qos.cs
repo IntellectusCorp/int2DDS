@@ -23,6 +23,12 @@ namespace Int2Dds.Interop
         internal static extern int int2dds_datawriter_qos_set_data_representation(IntPtr qos, int kind);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_default_data_representation();
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_default_extensibility();
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_datawriter_qos_set_ownership(IntPtr qos, int kind);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
@@ -241,6 +247,22 @@ namespace Int2Dds.Interop
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_participant_qos_set_multicast_ttl(IntPtr qos, byte ttl);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_participant_qos_add_binary_property(IntPtr qos, byte* name, byte* data, UIntPtr data_len, [MarshalAs(UnmanagedType.I1)] bool propagate);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_participant_qos_find_property(IntPtr qos, byte* name, byte* out_buf, UIntPtr out_cap, out UIntPtr out_len);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_participant_qos_remove_property(IntPtr qos, byte* name);
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        internal unsafe delegate int ParticipantPropertyCallback(byte* name, byte* value, IntPtr userData);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_participant_qos_get_properties_with_prefix(
+            IntPtr qos, byte* prefix, ParticipantPropertyCallback cb, IntPtr userData);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_participant_qos_destroy(IntPtr qos);

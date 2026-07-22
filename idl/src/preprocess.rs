@@ -17,11 +17,23 @@ pub fn load_with_includes(
     root: &Path,
     include_dirs: &[PathBuf],
 ) -> std::io::Result<(String, Vec<String>)> {
+    let (source, missing, _loaded) = load_with_includes_ex(root, include_dirs)?;
+    Ok((source, missing))
+}
+
+/// Like [`load_with_includes`] but also returns every file loaded, in dependency
+/// order (dependencies before dependents, root last). The CLI uses this to map
+/// each `#include`d type to the output module its own file will be emitted into.
+pub fn load_with_includes_ex(
+    root: &Path,
+    include_dirs: &[PathBuf],
+) -> std::io::Result<(String, Vec<String>, Vec<PathBuf>)> {
     let mut visited = HashSet::new();
     let mut out = String::new();
     let mut missing = Vec::new();
-    load_recursive(root, include_dirs, &mut visited, &mut out, &mut missing)?;
-    Ok((out, missing))
+    let mut loaded = Vec::new();
+    load_recursive(root, include_dirs, &mut visited, &mut out, &mut missing, &mut loaded)?;
+    Ok((out, missing, loaded))
 }
 
 fn load_recursive(
@@ -30,6 +42,7 @@ fn load_recursive(
     visited: &mut HashSet<PathBuf>,
     out: &mut String,
     missing: &mut Vec<String>,
+    loaded: &mut Vec<PathBuf>,
 ) -> std::io::Result<()> {
     let key = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
     if !visited.insert(key) {
@@ -41,13 +54,14 @@ fn load_recursive(
 
     for inc in source.lines().filter_map(parse_include) {
         match resolve_include(inc, base_dir, include_dirs) {
-            Some(path) => load_recursive(&path, include_dirs, visited, out, missing)?,
+            Some(path) => load_recursive(&path, include_dirs, visited, out, missing, loaded)?,
             None => missing.push(inc.to_string()),
         }
     }
 
     out.push_str(&source);
     out.push('\n');
+    loaded.push(file.to_path_buf());
     Ok(())
 }
 

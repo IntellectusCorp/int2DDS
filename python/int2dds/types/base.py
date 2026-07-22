@@ -24,7 +24,6 @@ class DdsType(Protocol):
     - _has_key: Whether the type has key fields
     - _serialize_cdr(): Serialize to CDR bytes
     - _deserialize_cdr(): Class method to deserialize from CDR bytes
-    - _serialize_key(): Serialize key fields (if _has_key is True)
 
     Example (IDL-generated):
         @dataclass
