@@ -6,10 +6,11 @@
 
 use int2dds::infrastructure::qos_policy::QosPolicyId;
 use int2dds::infrastructure::status::{
-    LivelinessChangedStatus, LivelinessLostStatus, OfferedDeadlineMissedStatus,
-    OfferedIncompatibleQosStatus, OfferedIncompatibleTypeStatus, PublicationMatchedStatus,
-    RequestedDeadlineMissedStatus, RequestedIncompatibleQosStatus, RequestedIncompatibleTypeStatus,
-    SampleLostStatus, SampleRejectedStatus, SampleRejectedStatusKind, SubscriptionMatchedStatus,
+    InconsistentTopicStatus, LivelinessChangedStatus, LivelinessLostStatus,
+    OfferedDeadlineMissedStatus, OfferedIncompatibleQosStatus, OfferedIncompatibleTypeStatus,
+    PublicationMatchedStatus, RequestedDeadlineMissedStatus, RequestedIncompatibleQosStatus,
+    RequestedIncompatibleTypeStatus, SampleLostStatus, SampleRejectedStatus,
+    SampleRejectedStatusKind, SubscriptionMatchedStatus,
 };
 
 // ============================================================================
@@ -194,6 +195,22 @@ impl From<&SampleRejectedStatus> for Int2DdsSampleRejectedStatus {
             last_reason: status.last_reason().into(),
             last_instance_handle: *status.last_instance_handle().value(),
         }
+    }
+}
+
+/// C-compatible inconsistent topic status
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct Int2DdsInconsistentTopicStatus {
+    /// Total cumulative count of inconsistent topics detected
+    pub total_count: i32,
+    /// Change in total_count since last access
+    pub total_count_change: i32,
+}
+
+impl From<&InconsistentTopicStatus> for Int2DdsInconsistentTopicStatus {
+    fn from(status: &InconsistentTopicStatus) -> Self {
+        Self { total_count: status.total_count(), total_count_change: status.total_count_change() }
     }
 }
 

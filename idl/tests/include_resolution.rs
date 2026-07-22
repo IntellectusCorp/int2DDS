@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use int2dds_idl::{parser, preprocess, resolver};
+use int2dds_idl::{codegen, naming, parser, preprocess, resolver};
 
 fn unique_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("int2dds_idl_inc_{}_{}", tag, std::process::id()));
@@ -88,6 +88,73 @@ module sensor_msgs { module msg {
         &model.structs[0].members[0].resolved_type,
         int2dds_idl::types::ResolvedType::Struct(n) if n.ends_with("Header")
     ));
+
+    fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn test_cross_file_nested_key_codegen() {
+    // A `@key` field whose type is a struct from an `#include`d file must produce
+    // working Python and C#: the imported type is referenced by its leaf name
+    // (import in Python; shared namespace in C#) and resolves for (de)serialization.
+    let root = unique_dir("xkey");
+    fs::create_dir_all(&root).unwrap();
+    let header = root.join("header.idl");
+    fs::write(
+        &header,
+        "module dep { module msg {
+            @final struct Header { uint32 stamp; uint32 seq; };
+        }; };\n",
+    )
+    .unwrap();
+    let msg = root.join("msg.idl");
+    fs::write(
+        &msg,
+        r#"#include "header.idl"
+module app { module msg {
+  @final struct Msg { @key dep::msg::Header header; long x; };
+}; };
+"#,
+    )
+    .unwrap();
+
+    // Mirror the CLI pipeline: full TU resolves the cross-file ref; only the root
+    // file's types are emitted; imported defs are retained for key recursion.
+    let (merged, _m) = preprocess::load_with_includes(&msg, std::slice::from_ref(&root)).unwrap();
+    let all_defs = parser::parse_idl(&merged).unwrap();
+    let root_defs = parser::parse_idl(&fs::read_to_string(&msg).unwrap()).unwrap();
+    let mut model = resolver::resolve_scoped(&root_defs, all_defs).unwrap();
+
+    // Map the imported type to the module its own file is emitted into (as the CLI
+    // does): every name declared in header.idl -> `header`.
+    let hdr_defs = parser::parse_idl(&fs::read_to_string(&header).unwrap()).unwrap();
+    for q in resolver::declared_qualified_names(&hdr_defs).unwrap() {
+        let leaf = q.rsplit("::").next().unwrap_or(&q).to_string();
+        model.imported.modules.entry(leaf).or_insert_with(|| "header".to_string());
+        model.imported.modules.insert(q, "header".to_string());
+    }
+    assert_eq!(naming::idl_to_output_name("header.idl"), "header");
+
+    let py = codegen::python::generate(
+        &model,
+        "msg.idl",
+        &codegen::python::PythonOptions { int2dds_module: "int2dds".to_string() },
+    );
+    // Import emitted and leaf-named references resolve the imported nested type.
+    assert!(py.contains("from header import Header"), "missing import:\n{py}");
+    assert!(py.contains("field(default_factory=lambda: Header())"), "{py}");
+    assert!(py.contains("Header._deserialize_cdr_inline(r)"), "{py}");
+    assert!(!py.contains("dep::msg::Header"), "leaked qualified name:\n{py}");
+
+    let cs = codegen::csharp::generate(
+        &model,
+        "msg.idl",
+        &codegen::csharp::CSharpOptions { namespace: "GeneratedTypes".to_string() },
+    );
+    // Shared namespace resolves the leaf name for the imported nested type.
+    assert!(cs.contains("public Header Header"), "{cs}");
+    assert!(cs.contains("Header.DeserializeCdrInline(r)"), "{cs}");
+    assert!(!cs.contains("Dep::msg::Header"), "leaked qualified name:\n{cs}");
 
     fs::remove_dir_all(&root).ok();
 }

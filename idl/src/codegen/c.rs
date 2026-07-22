@@ -1466,10 +1466,149 @@ impl<'a> CGen<'a> {
         }
     }
 
-    fn emit_type_info_field(&mut self, m: &ResolvedMember) {
+    /// Resolve a struct by qualified or leaf name across the local model and imported
+    /// (`#include`d) types, mirroring the C#/Python generators' `find_struct`.
+    fn find_struct(&self, name: &str) -> Option<&ResolvedStruct> {
+        let simple = name.rsplit("::").next().unwrap_or(name);
+        self.model
+            .structs
+            .iter()
+            .chain(self.model.imported.structs.iter())
+            .find(|s| s.name == simple)
+    }
+
+    /// True when `name` resolves to a struct (local or imported), not an enum, bitmask,
+    /// bitset, union, or externally-declared type. Only such types have a generated
+    /// `{Name}_type_info()` builder to reference by content-hash.
+    fn is_model_struct(&self, name: &str) -> bool {
+        self.find_struct(name).is_some()
+    }
+
+    /// All members including inherited ones (ancestors first), matching the C#/Python
+    /// `collect_all_members` so the type_info metadata (and thus KeyHash) covers base
+    /// `@key` members.
+    fn collect_all_members(&self, s: &ResolvedStruct) -> Vec<ResolvedMember> {
+        let mut all = Vec::new();
+        if let Some(base_name) = &s.base_type {
+            if let Some(base) = self.find_struct(base_name) {
+                all.extend(self.collect_all_members(base));
+            }
+        }
+        all.extend(s.members.clone());
+        all
+    }
+
+    /// The nested in-model struct this member would reference via a content-hash
+    /// `{Name}_type_info()` call, if any — the same edges `try_emit_nested_ti` follows.
+    fn nested_struct_target(m: &ResolvedMember) -> Option<&str> {
+        match &m.resolved_type {
+            ResolvedType::Struct(sname) if !m.is_external => Some(sname.as_str()),
+            ResolvedType::Sequence { element, .. } | ResolvedType::Array { element, .. } => {
+                match element.as_ref() {
+                    ResolvedType::Struct(ename) => Some(ename.as_str()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// True when the content-hash nested edges out of `from` can reach `target`
+    /// (including `from == target`). Carries its own `visited` set so this walk cannot
+    /// itself loop forever on the very cyclic input it guards against.
+    fn nested_reaches(
+        &self,
+        from: &str,
+        target: &str,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        let from_simple = from.rsplit("::").next().unwrap_or(from);
+        let target_simple = target.rsplit("::").next().unwrap_or(target);
+        if from_simple == target_simple {
+            return true;
+        }
+        if !visited.insert(from_simple.to_string()) {
+            return false;
+        }
+        let Some(s) = self.find_struct(from_simple) else {
+            return false;
+        };
+        for m in self.collect_all_members(s) {
+            if let Some(next) = Self::nested_struct_target(&m) {
+                if self.nested_reaches(next, target_simple, visited) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// If `m` is (or is a sequence/array of) an in-model, non-@external nested struct,
+    /// emit its content-hash type_info field — build the nested `{Name}_type_info()`, add
+    /// it via the matching `*_nested_field` builder (content-hash CompleteTypeId, so the
+    /// runtime resolves the full definition and recurses into @key members, matching derive
+    /// and the C#/Python bindings), then destroy it — and return true. Otherwise return
+    /// false so the caller falls back to the name-hash / scalar paths.
+    fn try_emit_nested_ti(&mut self, m: &ResolvedMember, flags: &str, owner: &str) -> bool {
+        let name = &m.name;
+        let var = format!("_nti_{}", name);
+        let (nested_name, add_stmt) = match &m.resolved_type {
+            ResolvedType::Struct(sname) if !m.is_external && self.is_model_struct(sname) => (
+                sname,
+                format!(
+                    "int2dds_type_info_add_nested_field(ti, \"{}\", {}, {});",
+                    name, var, flags
+                ),
+            ),
+            ResolvedType::Sequence { element, bound } => match element.as_ref() {
+                ResolvedType::Struct(ename) if self.is_model_struct(ename) => (
+                    ename,
+                    format!(
+                        "int2dds_type_info_add_sequence_of_nested_field(ti, \"{}\", {}, {}, {});",
+                        name,
+                        var,
+                        bound.unwrap_or(0),
+                        flags
+                    ),
+                ),
+                _ => return false,
+            },
+            ResolvedType::Array { element, size } => match element.as_ref() {
+                ResolvedType::Struct(ename) if self.is_model_struct(ename) => (
+                    ename,
+                    format!(
+                        "int2dds_type_info_add_array_of_nested_field(ti, \"{}\", {}, {}, {});",
+                        name, var, size, flags
+                    ),
+                ),
+                _ => return false,
+            },
+            _ => return false,
+        };
+        // Cycle guard: emitting `{nested}_type_info()` inside `{owner}_type_info()` must not
+        // close a call-graph cycle (self- or mutual recursion), or the generated C recurses
+        // forever. Fall back to the name-hash path for the cyclic edge.
+        let mut visited = std::collections::HashSet::new();
+        if self.nested_reaches(nested_name, owner, &mut visited) {
+            return false;
+        }
+        let simple = nested_name.rsplit("::").next().unwrap_or(nested_name);
+        self.raw("    {\n");
+        self.raw(&format!("        Int2DdsTypeInfo *{} = {}_type_info();\n", var, simple));
+        self.raw(&format!("        {}\n", add_stmt));
+        self.raw(&format!("        int2dds_type_info_destroy({});\n", var));
+        self.raw("    }\n");
+        true
+    }
+
+    fn emit_type_info_field(&mut self, m: &ResolvedMember, owner: &str) {
         let name = &m.name;
         let ty = &m.resolved_type;
         let flags = Self::member_flags_literal(m);
+
+        if self.try_emit_nested_ti(m, &flags, owner) {
+            return;
+        }
 
         match ty {
             ResolvedType::Sequence { element, bound }
@@ -1571,8 +1710,9 @@ impl<'a> CGen<'a> {
             s.qualified_name, ext_int
         ));
 
-        for m in &s.members {
-            self.emit_type_info_field(m);
+        let members = self.collect_all_members(s);
+        for m in &members {
+            self.emit_type_info_field(m, &s.name);
         }
 
         self.raw("    return ti;\n}\n");

@@ -1032,14 +1032,17 @@ impl super::ParsedBuiltinTopicData {
             });
         }
 
-        // DataRepresentation (only if explicitly set)
+        // DataRepresentation: advertise the effective representation so the wire
+        // reflects the resolved default (empty QoS list → default) and matches
+        // what the endpoint actually serializes.
         if let Some(data_representation) = &self.data_representation {
-            if !data_representation.value.is_empty() {
-                parameters.push(PlCdrParameter {
-                    id: ParameterId::PidDataRepresentation,
-                    value: ParameterValue::DataRepresentation(data_representation.clone()),
-                });
-            }
+            use crate::infrastructure::qos_policy::DataRepresentationQosPolicy;
+            parameters.push(PlCdrParameter {
+                id: ParameterId::PidDataRepresentation,
+                value: ParameterValue::DataRepresentation(DataRepresentationQosPolicy {
+                    value: data_representation.effective_ids().to_vec(),
+                }),
+            });
         }
 
         // TypeInformation (DDS-XTypes): prefer the enriched (sizes + deps) form when present.

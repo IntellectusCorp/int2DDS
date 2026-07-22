@@ -92,6 +92,118 @@ pub unsafe extern "C" fn int2dds_datawriter_get_statuscondition(
     INT2DDS_RET_OK
 }
 
+/// Get the StatusCondition from a DomainParticipant
+///
+/// # Safety
+/// - `participant` must be a valid participant
+/// - `condition_out` must be a valid pointer to a null pointer
+/// - The returned condition must be freed with `int2dds_statuscondition_delete`
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_participant_get_statuscondition(
+    participant: *const Int2DdsParticipant,
+    condition_out: *mut *mut Int2DdsStatusCondition,
+) -> Int2DdsRet {
+    check_null!(participant);
+    check_null!(condition_out);
+
+    let participant_ref = &*participant;
+    let status_condition = match participant_ref.inner.get_statuscondition() {
+        Ok(cond) => cond,
+        Err(e) => return dds_error_to_code(&e),
+    };
+
+    let kind = StatusConditionKind::Participant(status_condition.clone());
+    let condition_handle =
+        Box::new(Int2DdsStatusCondition { inner: status_condition.into(), kind });
+    *condition_out = Box::into_raw(condition_handle);
+
+    INT2DDS_RET_OK
+}
+
+/// Get the StatusCondition from a Publisher
+///
+/// # Safety
+/// - `publisher` must be a valid publisher
+/// - `condition_out` must be a valid pointer to a null pointer
+/// - The returned condition must be freed with `int2dds_statuscondition_delete`
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publisher_get_statuscondition(
+    publisher: *const Int2DdsPublisher,
+    condition_out: *mut *mut Int2DdsStatusCondition,
+) -> Int2DdsRet {
+    check_null!(publisher);
+    check_null!(condition_out);
+
+    let publisher_ref = &*publisher;
+    let status_condition = match publisher_ref.inner.get_statuscondition() {
+        Ok(cond) => cond,
+        Err(e) => return dds_error_to_code(&e),
+    };
+
+    let kind = StatusConditionKind::Publisher(status_condition.clone());
+    let condition_handle =
+        Box::new(Int2DdsStatusCondition { inner: status_condition.into(), kind });
+    *condition_out = Box::into_raw(condition_handle);
+
+    INT2DDS_RET_OK
+}
+
+/// Get the StatusCondition from a Subscriber
+///
+/// # Safety
+/// - `subscriber` must be a valid subscriber
+/// - `condition_out` must be a valid pointer to a null pointer
+/// - The returned condition must be freed with `int2dds_statuscondition_delete`
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscriber_get_statuscondition(
+    subscriber: *const Int2DdsSubscriber,
+    condition_out: *mut *mut Int2DdsStatusCondition,
+) -> Int2DdsRet {
+    check_null!(subscriber);
+    check_null!(condition_out);
+
+    let subscriber_ref = &*subscriber;
+    let status_condition = match subscriber_ref.inner.get_statuscondition() {
+        Ok(cond) => cond,
+        Err(e) => return dds_error_to_code(&e),
+    };
+
+    let kind = StatusConditionKind::Subscriber(status_condition.clone());
+    let condition_handle =
+        Box::new(Int2DdsStatusCondition { inner: status_condition.into(), kind });
+    *condition_out = Box::into_raw(condition_handle);
+
+    INT2DDS_RET_OK
+}
+
+/// Get the StatusCondition from a Topic
+///
+/// # Safety
+/// - `topic` must be a valid topic
+/// - `condition_out` must be a valid pointer to a null pointer
+/// - The returned condition must be freed with `int2dds_statuscondition_delete`
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_topic_get_statuscondition(
+    topic: *const Int2DdsTopic,
+    condition_out: *mut *mut Int2DdsStatusCondition,
+) -> Int2DdsRet {
+    check_null!(topic);
+    check_null!(condition_out);
+
+    let topic_ref = &*topic;
+    let status_condition = match topic_ref.inner.get_statuscondition() {
+        Ok(cond) => cond,
+        Err(e) => return dds_error_to_code(&e),
+    };
+
+    let kind = StatusConditionKind::Topic(status_condition.clone());
+    let condition_handle =
+        Box::new(Int2DdsStatusCondition { inner: status_condition.into(), kind });
+    *condition_out = Box::into_raw(condition_handle);
+
+    INT2DDS_RET_OK
+}
+
 /// Get the current status change bitmask from a DataReader.
 ///
 /// # Safety
@@ -140,6 +252,94 @@ pub unsafe extern "C" fn int2dds_datawriter_get_status_changes(
     }
 }
 
+/// Get the current status change bitmask from a DomainParticipant.
+///
+/// # Safety
+/// - `participant` must be a valid participant
+/// - `mask_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_participant_get_status_changes(
+    participant: *const Int2DdsParticipant,
+    mask_out: *mut u32,
+) -> Int2DdsRet {
+    check_null!(participant);
+    check_null!(mask_out);
+
+    match (*participant).inner.get_status_changes() {
+        Ok(mask) => {
+            *mask_out = mask.bits();
+            INT2DDS_RET_OK
+        }
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
+/// Get the current status change bitmask from a Publisher.
+///
+/// # Safety
+/// - `publisher` must be a valid publisher
+/// - `mask_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publisher_get_status_changes(
+    publisher: *const Int2DdsPublisher,
+    mask_out: *mut u32,
+) -> Int2DdsRet {
+    check_null!(publisher);
+    check_null!(mask_out);
+
+    match (*publisher).inner.get_status_changes() {
+        Ok(mask) => {
+            *mask_out = mask.bits();
+            INT2DDS_RET_OK
+        }
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
+/// Get the current status change bitmask from a Subscriber.
+///
+/// # Safety
+/// - `subscriber` must be a valid subscriber
+/// - `mask_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscriber_get_status_changes(
+    subscriber: *const Int2DdsSubscriber,
+    mask_out: *mut u32,
+) -> Int2DdsRet {
+    check_null!(subscriber);
+    check_null!(mask_out);
+
+    match (*subscriber).inner.get_status_changes() {
+        Ok(mask) => {
+            *mask_out = mask.bits();
+            INT2DDS_RET_OK
+        }
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
+/// Get the current status change bitmask from a Topic.
+///
+/// # Safety
+/// - `topic` must be a valid topic
+/// - `mask_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_topic_get_status_changes(
+    topic: *const Int2DdsTopic,
+    mask_out: *mut u32,
+) -> Int2DdsRet {
+    check_null!(topic);
+    check_null!(mask_out);
+
+    match (*topic).inner.get_status_changes() {
+        Ok(mask) => {
+            *mask_out = mask.bits();
+            INT2DDS_RET_OK
+        }
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
 /// Set the enabled statuses for a StatusCondition
 ///
 /// Only the statuses in the mask will trigger the condition.
@@ -159,6 +359,10 @@ pub unsafe extern "C" fn int2dds_statuscondition_set_enabled_statuses(
     let result = match &condition_ref.kind {
         StatusConditionKind::Reader(sc) => sc.set_enabled_statuses(status_mask),
         StatusConditionKind::Writer(sc) => sc.set_enabled_statuses(status_mask),
+        StatusConditionKind::Participant(sc) => sc.set_enabled_statuses(status_mask),
+        StatusConditionKind::Publisher(sc) => sc.set_enabled_statuses(status_mask),
+        StatusConditionKind::Subscriber(sc) => sc.set_enabled_statuses(status_mask),
+        StatusConditionKind::Topic(sc) => sc.set_enabled_statuses(status_mask),
     };
 
     match result {
@@ -184,6 +388,10 @@ pub unsafe extern "C" fn int2dds_statuscondition_get_enabled_statuses(
     let result = match &condition_ref.kind {
         StatusConditionKind::Reader(sc) => sc.get_enabled_statuses(),
         StatusConditionKind::Writer(sc) => sc.get_enabled_statuses(),
+        StatusConditionKind::Participant(sc) => sc.get_enabled_statuses(),
+        StatusConditionKind::Publisher(sc) => sc.get_enabled_statuses(),
+        StatusConditionKind::Subscriber(sc) => sc.get_enabled_statuses(),
+        StatusConditionKind::Topic(sc) => sc.get_enabled_statuses(),
     };
 
     match result {
