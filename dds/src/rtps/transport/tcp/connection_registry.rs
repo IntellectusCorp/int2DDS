@@ -4,7 +4,7 @@
 //! see the same connection state. `ConnectionRegistry` is that single source of truth:
 //! held in an `Arc`, it keeps one `ConnectionEntry` per connection (state,
 //! remote addr, writer inbox, cancel token) and routes inbound frames via
-//! `dispatch` — RTPS data to the DDS layer through the crossbeam senders,
+//! `dispatch` — RTPS data to the DDS layer through the channel senders,
 //! control frames to their handlers. A connection is torn down by firing its
 //! `CancellationToken`.
 
@@ -86,8 +86,6 @@ pub(crate) struct ConnectionEntry {
     pub(crate) direction: ConnectionDirection,
     pub(crate) bound_logical_port: Option<u16>,
     pub(crate) remote_guid_prefix: Option<GuidPrefix>,
-    /// writer inbox: pushing a frame here sends it on this connection.
-    pub(crate) writer_tx: mpsc::Sender<Vec<u8>>,
     /// Child token for the actor pair; cancelling it tears the pair down.
     pub(crate) cancel: CancellationToken,
     pub(crate) pending_ack: Option<Arc<Mutex<Option<oneshot::Sender<ControlMsg>>>>>,
@@ -320,7 +318,6 @@ impl ConnectionRegistry {
     pub(crate) fn register_inbound_connection(
         &self,
         remote_addr: SocketAddr,
-        writer_tx: mpsc::Sender<Vec<u8>>,
         cancel: CancellationToken,
     ) -> ConnectionId {
         let conn_id = self.next_conn_id.fetch_add(1, Ordering::SeqCst);
@@ -332,7 +329,6 @@ impl ConnectionRegistry {
                 direction: ConnectionDirection::Inbound,
                 bound_logical_port: None,
                 remote_guid_prefix: None,
-                writer_tx,
                 cancel,
                 // Inbound connections never await outbound responses — slot stays None.
                 pending_ack: None,
@@ -353,7 +349,6 @@ impl ConnectionRegistry {
     pub(crate) fn register_outbound_control_connection(
         &self,
         remote_addr: SocketAddr,
-        writer_tx: mpsc::Sender<Vec<u8>>,
         cancel: CancellationToken,
         pending_ack: Arc<Mutex<Option<oneshot::Sender<ControlMsg>>>>,
     ) -> ConnectionId {
@@ -368,7 +363,6 @@ impl ConnectionRegistry {
                 direction: ConnectionDirection::Outbound,
                 bound_logical_port: None,
                 remote_guid_prefix: Some(synthetic_guid),
-                writer_tx,
                 cancel,
                 pending_ack: Some(pending_ack),
             },
@@ -388,13 +382,12 @@ impl ConnectionRegistry {
     /// Register an outbound **data** connection that has just completed the
     /// PORT_BIND handshake. Starts in `Active` state with `bound_logical_port`
     /// already set, so `dispatch` routes inbound RTPS data straight to the
-    /// crossbeam channels. No `pending_ack` — data connections don't expect
+    /// inbound channels. No `pending_ack` — data connections don't expect
     /// control responses.
     pub(crate) fn register_outbound_data_connection(
         &self,
         remote_addr: SocketAddr,
         logical_port: u16,
-        writer_tx: mpsc::Sender<Vec<u8>>,
         cancel: CancellationToken,
     ) -> ConnectionId {
         let conn_id = self.next_conn_id.fetch_add(1, Ordering::SeqCst);
@@ -408,7 +401,6 @@ impl ConnectionRegistry {
                 direction: ConnectionDirection::Outbound,
                 bound_logical_port: Some(logical_port),
                 remote_guid_prefix: Some(synthetic_guid),
-                writer_tx,
                 cancel,
                 pending_ack: None,
             },
@@ -545,6 +537,69 @@ mod tests {
         assert!(group.has_data_conns());
     }
 
+    /// The tuning reaches the socket.
+    ///
+    /// Every timeout that lets a dead peer be noticed is a kernel setting, so if
+    /// these silently fail to apply there is nothing of ours left to observe: the
+    /// connection would just hang on the OS defaults (~15 min for unacked data,
+    /// keepalive off) and look healthy. What the kernel then does with them is
+    /// its own business — an expiry surfaces as an ordinary read/write error.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn socket_tuning_is_applied_to_the_stream() {
+        let tuning = TcpSocketTuning {
+            nodelay: true,
+            so_rcvbuf: None,
+            so_sndbuf: None,
+            unacked_timeout: Some(Duration::from_secs(7)),
+            keepalive: Some(KeepaliveParams {
+                time: Duration::from_secs(11),
+                interval: Duration::from_secs(3),
+                retries: 4,
+            }),
+        };
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept = tokio::spawn(async move { listener.accept().await.unwrap() });
+        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let _accepted = accept.await.unwrap();
+
+        apply_socket_tuning(&tcp, &tuning);
+
+        let sock = socket2::SockRef::from(&tcp);
+        assert!(tcp.nodelay().unwrap(), "nodelay must be set");
+        assert!(sock.keepalive().unwrap(), "keepalive must be enabled");
+        assert_eq!(sock.keepalive_time().unwrap(), Duration::from_secs(11));
+        #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+        {
+            assert_eq!(sock.keepalive_interval().unwrap(), Duration::from_secs(3));
+            assert_eq!(sock.keepalive_retries().unwrap(), 4);
+        }
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        assert_eq!(sock.tcp_user_timeout().unwrap(), Some(Duration::from_secs(7)));
+    }
+
+    /// `None` leaves the OS defaults alone rather than applying a zero.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn default_tuning_leaves_keepalive_off() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept = tokio::spawn(async move { listener.accept().await.unwrap() });
+        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let _accepted = accept.await.unwrap();
+
+        apply_socket_tuning(&tcp, &TcpSocketTuning::default());
+
+        let sock = socket2::SockRef::from(&tcp);
+        assert!(!sock.keepalive().unwrap(), "default tuning must not enable keepalive");
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        assert_eq!(
+            sock.tcp_user_timeout().unwrap(),
+            None,
+            "unacked timeout must be left at the OS default",
+        );
+    }
+
     /// Removing a control connection purges its pending PORT_RESERVE cookies
     /// (reserved but never bound), without touching another peer's cookies.
     #[test]
@@ -557,10 +612,8 @@ mod tests {
             ConnectionRegistry::new(0, 0, [0u8; 12], TcpSocketTuning::default(), d_tx, u_tx);
 
         let addr: SocketAddr = "127.0.0.1:7400".parse().unwrap();
-        let (tx, _rx) = mpsc::channel::<Vec<u8>>(8);
         let conn_id = shared.register_outbound_control_connection(
             addr,
-            tx,
             CancellationToken::new(),
             Arc::new(Mutex::new(None)),
         );
