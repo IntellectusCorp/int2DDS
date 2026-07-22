@@ -844,6 +844,14 @@ impl WlpLogic {
             {
                 writer_proxy.mark_change_received(writer_sn, None);
 
+                // Advance the acknack bitmap base so the received message gets acknowledged.
+                if writer_proxy.expected_sn() == SequenceNumber::UNKNOWN {
+                    writer_proxy.set_expected_sn(writer_sn);
+                }
+                if writer_sn == writer_proxy.expected_sn() {
+                    writer_proxy.increment_expected_sn();
+                }
+
                 // 3. Update Liveliness timer
                 self.update_remote_participant_liveliness(participant_message_data)?;
             }
