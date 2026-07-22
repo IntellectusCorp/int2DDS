@@ -2,11 +2,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     config::types::qos_policy::{
-        DataRepresentationQosPolicy, DestinationOrderQosPolicy, DurabilityQosPolicy,
-        DurabilityServiceQosPolicy, GroupDataQosPolicy, HistoryQosPolicy, LivelinessQosPolicy,
-        OwnershipQosPolicy, PartitionQosPolicy, PresentationQosPolicy, PropertyQosPolicy,
-        ReaderReliabilityExtensionQosPolicy, ReliabilityQosPolicy, TopicDataQosPolicy,
-        TypeConsistencyEnforcementQosPolicy, UserDataQosPolicy,
+        DataFragQosPolicy, DataRepresentationQosPolicy, DestinationOrderQosPolicy,
+        DurabilityQosPolicy, DurabilityServiceQosPolicy, GroupDataQosPolicy, HistoryQosPolicy,
+        LivelinessQosPolicy, OwnershipQosPolicy, PartitionQosPolicy, PresentationQosPolicy,
+        PropertyQosPolicy, ReaderReliabilityExtensionQosPolicy, ReliabilityQosPolicy,
+        TopicDataQosPolicy, TypeConsistencyEnforcementQosPolicy, UserDataQosPolicy,
         WriterReliabilityExtensionQosPolicy, DEFAULT_MAX_BLOCKING_TIME,
     },
     domain,
@@ -62,6 +62,8 @@ pub(crate) struct DataWriterQos {
     pub(crate) data_representation: Option<DataRepresentationQosPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) writer_reliability_extension: Option<WriterReliabilityExtensionQosPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) data_frag: Option<DataFragQosPolicy>,
 }
 
 impl MergeQos for DataWriterQos {
@@ -91,6 +93,7 @@ impl MergeQos for DataWriterQos {
                 .writer_reliability_extension
                 .clone()
                 .or(base.writer_reliability_extension.clone()),
+            data_frag: self.data_frag.clone().or(base.data_frag.clone()),
         }
     }
 }
@@ -189,6 +192,10 @@ impl From<DataWriterQos> for publication::qos::DataWriterQos {
             qos.writer_reliability_extension = writer_reliability_extension.into();
         }
 
+        if let Some(data_frag) = external.data_frag {
+            qos.data_frag = data_frag.into();
+        }
+
         qos
     }
 }
@@ -214,6 +221,7 @@ impl From<publication::qos::DataWriterQos> for DataWriterQos {
             writer_data_lifecycle: Some(internal.writer_data_lifecycle),
             data_representation: Some(internal.data_representation.into()),
             writer_reliability_extension: Some(internal.writer_reliability_extension.into()),
+            data_frag: Some(internal.data_frag.into()),
         }
     }
 }

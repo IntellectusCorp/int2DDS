@@ -56,7 +56,7 @@ use speedy::{Readable, Writable};
 
 use crate::{
     core::{
-        error::DdsResult,
+        error::{DdsError, DdsResult},
         time::Duration,
         types::{deserialize_i32_or_unlimited, serialize_i32_or_unlimited, LENGTH_UNLIMITED},
     },
@@ -112,6 +112,7 @@ const TYPECONSISTENCYENFORCEMENT_QOS_POLICY_NAME: &str = "TypeConsistencyEnforce
 const WRITER_RELIABILITY_EXTENSION_QOS_POLICY_NAME: &str = "WriterReliabilityExtension";
 const READER_RELIABILITY_EXTENSION_QOS_POLICY_NAME: &str = "ReaderReliabilityExtension";
 const PROPERTY_QOS_POLICY_NAME: &str = "Property";
+const DATA_FRAG_QOS_POLICY_NAME: &str = "DataFrag";
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash, Readable, Writable)]
 pub enum QosPolicyId {
@@ -1805,6 +1806,19 @@ impl QosPolicy for ResourceLimitsQosPolicy {
     }
 }
 
+impl ResourceLimitsQosPolicy {
+    // max_samples must be at least max_samples_per_instance; LENGTH_UNLIMITED means unbounded
+    pub(crate) fn is_consistent(&self) -> DdsResult<()> {
+        if self.max_samples != LENGTH_UNLIMITED
+            && (self.max_samples_per_instance == LENGTH_UNLIMITED
+                || self.max_samples < self.max_samples_per_instance)
+        {
+            return Err(DdsError::InconsistentPolicy);
+        }
+        Ok(())
+    }
+}
+
 /// Configures parameters for Transient/Persistent durability service.
 ///
 /// This QoS policy is required when using `Transient` or `Persistent` durability.
@@ -2260,6 +2274,53 @@ impl QosPolicy for WriterReliabilityExtensionQosPolicy {
     }
 }
 
+/// int2DDS extension: per-writer RTPS DATA_FRAG fragment size. Writer-local,
+/// not propagated over the wire. Default `max_size: 65000`.
+#[derive(DdsType, Copy, Eq)]
+#[dds_type(crate_path = "crate", no_default)]
+pub struct DataFragQosPolicy {
+    /// Max serialized payload bytes per DATA_FRAG fragment. Range 1..=65000.
+    pub max_size: i32,
+}
+
+impl DataFragQosPolicy {
+    pub const MAX: i32 = 65000;
+    pub const DEFAULT_SIZE: i32 = 65000;
+
+    /// Validated size: clamp `> MAX` to MAX, fall back `<= 0` to DEFAULT_SIZE.
+    pub fn effective_max_size(&self) -> i32 {
+        if self.max_size > Self::MAX {
+            log::warn!(
+                "DataFrag max_size={} exceeds max {}, clamping to {}",
+                self.max_size,
+                Self::MAX,
+                Self::MAX
+            );
+            Self::MAX
+        } else if self.max_size > 0 {
+            self.max_size
+        } else {
+            Self::DEFAULT_SIZE
+        }
+    }
+}
+
+impl Default for DataFragQosPolicy {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl ConstDefault for DataFragQosPolicy {
+    const DEFAULT: Self = Self { max_size: 65000 };
+}
+
+impl QosPolicy for DataFragQosPolicy {
+    fn name(&self) -> &str {
+        DATA_FRAG_QOS_POLICY_NAME
+    }
+}
+
 /// Extension to ReliabilityQosPolicy for int2DDS-specific reader reliability options.
 /// This policy provides additional control over reliable communication behavior.
 ///
@@ -2300,6 +2361,28 @@ impl ConstDefault for ReaderReliabilityExtensionQosPolicy {
 impl QosPolicy for ReaderReliabilityExtensionQosPolicy {
     fn name(&self) -> &str {
         READER_RELIABILITY_EXTENSION_QOS_POLICY_NAME
+    }
+}
+
+#[cfg(test)]
+mod data_frag_tests {
+    use super::*;
+
+    #[test]
+    fn data_frag_clamps_above_max() {
+        let p = DataFragQosPolicy { max_size: 70000 };
+        assert_eq!(p.effective_max_size(), 65000);
+    }
+
+    #[test]
+    fn data_frag_nonpositive_falls_back_to_default() {
+        assert_eq!(DataFragQosPolicy { max_size: 0 }.effective_max_size(), 65000);
+        assert_eq!(DataFragQosPolicy { max_size: -5 }.effective_max_size(), 65000);
+    }
+
+    #[test]
+    fn data_frag_valid_value_passes_through() {
+        assert_eq!(DataFragQosPolicy { max_size: 1344 }.effective_max_size(), 1344);
     }
 }
 

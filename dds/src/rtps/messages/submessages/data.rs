@@ -249,3 +249,35 @@ impl<C: Context> Writable<C> for Data<'_> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rtps::common::entity_kind::EntityKind;
+    use crate::rtps::messages::submessage_header_flag::{SubmessageFlagType, SubmessageHeaderFlag};
+    use crate::rtps::messages::submessage_id::SubmessageId;
+    use speedy::Endianness;
+
+    #[test]
+    fn inline_qos_coherent_set_survives_data_roundtrip() {
+        let reader_id = EntityId::new([0x01, 0x00, 0x00], EntityKind::USER_DEFINED_READER_NO_KEY);
+        let writer_id = EntityId::new([0x02, 0x00, 0x00], EntityKind::USER_DEFINED_WRITER_NO_KEY);
+        let coherent = SequenceNumber::new(1, 3);
+
+        let mut data = Data::new(reader_id, writer_id, SequenceNumber::new(0, 7));
+        let mut param_list = ParameterList::default();
+        param_list.set_coherent_set(coherent);
+        data.set_inline_qos_list(param_list);
+
+        let buffer = data.write_to_vec_with_ctx(Endianness::LittleEndian).unwrap();
+
+        let mut flag = SubmessageHeaderFlag::new();
+        flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::DATA);
+        flag.add_flag(SubmessageFlagType::InlineQosFlag, SubmessageId::DATA);
+        let header = SubmessageHeader::new(SubmessageId::DATA, flag.flag, buffer.len() as u16);
+
+        let parsed = Data::deserialize(&Bytes::from(buffer), &header).unwrap();
+        let inline = parsed.inline_qos().unwrap();
+        assert_eq!(inline.get_coherent_set(), Some(coherent));
+    }
+}

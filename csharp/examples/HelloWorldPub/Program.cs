@@ -17,6 +17,10 @@ namespace HelloWorldPub
             Console.WriteLine("=== HelloWorld Publisher (C#) ===");
             Console.WriteLine($"QoS: {(reliable ? "RELIABLE" : "BEST_EFFORT")}");
 
+            // Run until Ctrl-C, then clean up gracefully (matches the Rust example).
+            using var stop = new ManualResetEventSlim(false);
+            Console.CancelKeyPress += (_, e) => { e.Cancel = true; stop.Set(); };
+
             using var dp = new DomainParticipant(domainId: domainId, name: "CSharpPublisher");
             Console.WriteLine($"Created participant on domain {dp.DomainId}");
 
@@ -40,22 +44,27 @@ namespace HelloWorldPub
             using var waitset = new WaitSet();
             waitset.Attach(statusCondition);
 
-            while (writer.MatchedReaders == 0)
+            while (writer.MatchedReaders == 0 && !stop.IsSet)
             {
                 try { waitset.Wait(TimeSpan.FromSeconds(1)); }
                 catch { /* timeout, retry */ }
             }
 
+            if (stop.IsSet)
+            {
+                return;
+            }
+
             Console.WriteLine($"Matched {writer.MatchedReaders} reader(s)");
 
-            // Publish samples
+            // Publish samples until Ctrl-C
             uint i = 0;
-            while (true)
+            while (!stop.IsSet)
             {
                 var sample = new HelloWorld { Index = i, Message = $"Hello from C#! ({i})" };
                 writer.Write(sample);
                 Console.WriteLine($"Published: index={sample.Index}, message='{sample.Message}'");
-                Thread.Sleep(1000);
+                stop.Wait(TimeSpan.FromSeconds(1));
                 i++;
             }
         }
