@@ -126,14 +126,9 @@ impl<'a> RustGen<'a> {
         }
     }
 
-    /// Whether a type contains a map that is emitted as `HashMap` (i.e. a non-float key).
-    /// Float-key maps are emitted as `Vec<(K, V)>` and need no `HashMap` import.
     fn type_uses_map(ty: &ResolvedType) -> bool {
         match ty {
-            ResolvedType::Map { key, value, .. } => {
-                !matches!(**key, ResolvedType::F32 | ResolvedType::F64)
-                    || Self::type_uses_map(value)
-            }
+            ResolvedType::Map { .. } => true,
             ResolvedType::Sequence { element, .. } | ResolvedType::Array { element, .. } => {
                 Self::type_uses_map(element)
             }
@@ -517,13 +512,9 @@ impl<'a> RustGen<'a> {
                 format!("[{}; {}]", self.type_to_rust(element), size)
             }
             ResolvedType::Map { key, value, .. } => {
-                // A floating-point key does not implement Eq + Hash, so HashMap would not
-                // compile. Fall back to an insertion-ordered Vec of pairs (spec §7.2.4.2.5).
-                if matches!(**key, ResolvedType::F32 | ResolvedType::F64) {
-                    format!("Vec<({}, {})>", self.type_to_rust(key), self.type_to_rust(value))
-                } else {
-                    format!("HashMap<{}, {}>", self.type_to_rust(key), self.type_to_rust(value))
-                }
+                // Floating-point keys are rejected by the resolver (spec §7.2.4.2.5), so
+                // every map that reaches codegen has an Eq + Hash key.
+                format!("HashMap<{}, {}>", self.type_to_rust(key), self.type_to_rust(value))
             }
             ResolvedType::Struct(name) | ResolvedType::Enum(name) => {
                 if self.is_external(name) {
@@ -903,29 +894,6 @@ mod tests {
         let code = generate(&model, "Config.idl", &RustOptions::default());
 
         assert!(code.contains("pub fallback: Option<Box<Config>>,"), "got:\n{}", code);
-    }
-
-    #[test]
-    fn test_map_float_key_uses_vec() {
-        // Spec §7.2.4.2.5: a floating-point key type does not implement Eq + Hash,
-        // so the map maps to Vec<(K, V)> rather than HashMap (which would not compile).
-        let defs = parse_idl(
-            r#"
-            struct M {
-                map<double, long> by_val;
-                map<float, string> by_f;
-            };
-            "#,
-        )
-        .unwrap();
-        let model = resolve(defs).unwrap();
-        let code = generate(&model, "M.idl", &RustOptions::default());
-
-        assert!(code.contains("pub by_val: Vec<(f64, i32)>,"), "got:\n{}", code);
-        assert!(code.contains("pub by_f: Vec<(f32, String)>,"), "got:\n{}", code);
-        assert!(!code.contains("HashMap<f64"), "float key must not use HashMap:\n{}", code);
-        // Only float-key maps present -> no HashMap emitted -> no HashMap import.
-        assert!(!code.contains("use std::collections::HashMap;"), "unused import:\n{}", code);
     }
 
     #[test]

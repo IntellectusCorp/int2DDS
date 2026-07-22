@@ -482,11 +482,21 @@ impl Resolver {
                 element: Box::new(self.resolve_type_spec(elem)?),
                 size: *size,
             }),
-            TypeSpec::Map(key, value, bound) => Ok(ResolvedType::Map {
-                key: Box::new(self.resolve_type_spec(key)?),
-                value: Box::new(self.resolve_type_spec(value)?),
-                bound: *bound,
-            }),
+            TypeSpec::Map(key, value, bound) => {
+                let resolved_key = self.resolve_type_spec(key)?;
+                // A floating-point key has neither Eq nor Hash, so it cannot back a Rust
+                // map; reject it rather than emit non-compiling code (spec §7.2.4.2.5).
+                if matches!(resolved_key, ResolvedType::F32 | ResolvedType::F64) {
+                    return Err(ResolveError {
+                        message: "floating-point map key is not supported".to_string(),
+                    });
+                }
+                Ok(ResolvedType::Map {
+                    key: Box::new(resolved_key),
+                    value: Box::new(self.resolve_type_spec(value)?),
+                    bound: *bound,
+                })
+            }
             TypeSpec::Named(name) => {
                 // OMG IDL 4.2 integer type aliases
                 match name.as_str() {
