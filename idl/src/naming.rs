@@ -1,60 +1,78 @@
 //! Name conversion utilities for IDL code generation.
 
+/// Split an identifier into its constituent words.
+///
+/// Word boundaries (spec §7.1.1):
+/// - an underscore separates words (and is dropped);
+/// - a lowercase/digit -> uppercase transition starts a new word;
+/// - within a run of uppercase letters followed by a lowercase letter, the final
+///   uppercase letter starts a new word ("HTTPServer" -> "HTTP", "Server").
+fn split_words(name: &str) -> Vec<String> {
+    let chars: Vec<char> = name.chars().collect();
+    let mut words = Vec::new();
+    let mut cur = String::new();
+
+    for i in 0..chars.len() {
+        let c = chars[i];
+        if c == '_' {
+            if !cur.is_empty() {
+                words.push(std::mem::take(&mut cur));
+            }
+            continue;
+        }
+        if cur.is_empty() {
+            cur.push(c);
+            continue;
+        }
+        let prev = chars[i - 1];
+        if (prev.is_lowercase() || prev.is_ascii_digit()) && c.is_uppercase() {
+            // lower/digit -> upper: new word
+            words.push(std::mem::take(&mut cur));
+            cur.push(c);
+        } else if c.is_lowercase() && prev.is_uppercase() && i >= 2 && chars[i - 2].is_uppercase() {
+            // run of uppercase then lowercase: the last uppercase starts a new word
+            let last = cur.pop().unwrap();
+            if !cur.is_empty() {
+                words.push(std::mem::take(&mut cur));
+            }
+            cur.push(last);
+            cur.push(c);
+        } else {
+            cur.push(c);
+        }
+    }
+    if !cur.is_empty() {
+        words.push(cur);
+    }
+    words
+}
+
 /// Convert to PascalCase for Rust type names.
 /// "hello_world" -> "HelloWorld"
 /// "SENSOR_KIND" -> "SensorKind"
 /// "SensorData" -> "SensorData" (already PascalCase)
+/// "HTTPServer" -> "HttpServer"
 pub fn to_pascal_case(name: &str) -> String {
-    if name.contains('_') {
-        name.split('_')
-            .filter(|s| !s.is_empty())
-            .map(|part| {
-                let lower = part.to_lowercase();
-                let mut chars = lower.chars();
-                match chars.next() {
-                    Some(c) => c.to_uppercase().to_string() + chars.as_str(),
-                    None => String::new(),
-                }
-            })
-            .collect()
-    } else if name.chars().all(|c| c.is_uppercase() || c.is_ascii_digit()) {
-        // ALL_CAPS -> Allcaps
-        let lower = name.to_lowercase();
-        let mut chars = lower.chars();
-        match chars.next() {
-            Some(c) => c.to_uppercase().to_string() + chars.as_str(),
-            None => String::new(),
-        }
-    } else {
-        // Already PascalCase or camelCase - ensure first char is uppercase
-        let mut chars = name.chars();
-        match chars.next() {
-            Some(c) => c.to_uppercase().to_string() + chars.as_str(),
-            None => String::new(),
-        }
-    }
+    split_words(name)
+        .iter()
+        .map(|word| {
+            let lower = word.to_lowercase();
+            let mut chars = lower.chars();
+            match chars.next() {
+                Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
 }
 
 /// Convert to snake_case for Rust field/module names.
 /// "HelloWorld" -> "hello_world"
 /// "SensorData" -> "sensor_data"
 /// "sensor_id" -> "sensor_id" (already snake_case)
+/// "HTTPServer" -> "http_server"
 pub fn to_snake_case(name: &str) -> String {
-    let mut result = String::new();
-    let mut prev_upper = false;
-    for (i, c) in name.chars().enumerate() {
-        if c.is_uppercase() {
-            if i > 0 && !prev_upper {
-                result.push('_');
-            }
-            result.push(c.to_lowercase().next().unwrap());
-            prev_upper = true;
-        } else {
-            prev_upper = false;
-            result.push(c);
-        }
-    }
-    result
+    split_words(name).iter().map(|w| w.to_lowercase()).collect::<Vec<_>>().join("_")
 }
 
 /// Convert to SCREAMING_SNAKE_CASE for C enum prefixes.
@@ -191,6 +209,9 @@ pub fn escape_keyword(name: &str, lang: TargetLang) -> String {
 
     if kw_list.contains(&name) {
         match lang {
+            // `self`, `Self`, `super` and `crate` cannot be written as raw identifiers
+            // (`r#self` etc. do not compile), so fall back to a trailing underscore.
+            TargetLang::Rust if keywords::RUST_NON_RAW.contains(&name) => format!("{}_", name),
             TargetLang::Rust => format!("r#{}", name),
             TargetLang::C => format!("{}_", name),
             TargetLang::CSharp => format!("@{}", name),
@@ -218,6 +239,17 @@ mod tests {
         assert_eq!(to_snake_case("HelloWorld"), "hello_world");
         assert_eq!(to_snake_case("SensorData"), "sensor_data");
         assert_eq!(to_snake_case("sensor_id"), "sensor_id");
+    }
+
+    #[test]
+    fn test_acronym_word_boundary() {
+        // Spec §7.1.1: a run of uppercase letters followed by a lowercase letter is a
+        // word that ends before the final uppercase letter. Acronyms map as one word.
+        assert_eq!(to_pascal_case("HTTPServer"), "HttpServer");
+        assert_eq!(to_snake_case("HTTPServer"), "http_server");
+        assert_eq!(to_pascal_case("id"), "Id");
+        assert_eq!(to_snake_case("fooBar"), "foo_bar");
+        assert_eq!(to_pascal_case("fooBar"), "FooBar");
     }
 
     #[test]
@@ -315,6 +347,16 @@ mod tests {
         assert_eq!(escape_keyword("async", TargetLang::Rust), "r#async");
         assert_eq!(escape_keyword("gen", TargetLang::Rust), "r#gen");
         assert_eq!(escape_keyword("index", TargetLang::Rust), "index");
+    }
+
+    #[test]
+    fn test_escape_rust_non_raw_keywords() {
+        // `self`, `Self`, `super`, `crate` cannot be written as raw identifiers in Rust,
+        // so they must be escaped with a trailing underscore, not `r#` (spec §7.1.2).
+        assert_eq!(escape_keyword("self", TargetLang::Rust), "self_");
+        assert_eq!(escape_keyword("Self", TargetLang::Rust), "Self_");
+        assert_eq!(escape_keyword("super", TargetLang::Rust), "super_");
+        assert_eq!(escape_keyword("crate", TargetLang::Rust), "crate_");
     }
 
     #[test]
