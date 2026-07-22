@@ -116,7 +116,7 @@ impl DiscoveryUnicastListeningTask {
 
     fn listen_channel(
         &mut self,
-        rx: &crossbeam_channel::Receiver<crate::rtps::transport::plugin::IncomingMessage>,
+        rx: &flume::Receiver<crate::rtps::transport::plugin::IncomingMessage>,
     ) -> std::io::Result<()> {
         info!("start discovery unicast listening (Channel)");
 
@@ -134,13 +134,13 @@ impl DiscoveryUnicastListeningTask {
                     }
                     let _ = self.process_rtps_message(Bytes::from(msg.data), msg.source);
                 }
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                Err(flume::RecvTimeoutError::Timeout) => {
                     if participant.is_terminated() {
                         debug!("Detected global termination flag, discovery unicast channel listening terminating...");
                         return Ok(());
                     }
                 }
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                Err(flume::RecvTimeoutError::Disconnected) => {
                     info!("[DiscoveryUnicast] Channel disconnected, stopping listener");
                     return Ok(());
                 }

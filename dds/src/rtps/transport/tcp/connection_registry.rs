@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::Sender;
 use dashmap::DashMap;
+use flume::Sender;
 use log::{debug, warn};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -549,7 +549,7 @@ mod tests {
     /// (reserved but never bound), without touching another peer's cookies.
     #[test]
     fn remove_control_connection_purges_pending_cookies() {
-        use crossbeam_channel::bounded;
+        use flume::bounded;
 
         let (d_tx, _d_rx) = bounded(8);
         let (u_tx, _u_rx) = bounded(8);

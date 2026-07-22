@@ -42,8 +42,8 @@ impl TcpMuxListener {
         domain_id: u32,
         participant_id: u32,
         local_guid_prefix: GuidPrefix,
-        discovery_tx: crossbeam_channel::Sender<IncomingMessage>,
-        user_data_tx: crossbeam_channel::Sender<IncomingMessage>,
+        discovery_tx: flume::Sender<IncomingMessage>,
+        user_data_tx: flume::Sender<IncomingMessage>,
         tls_config: Option<Arc<TlsConfig>>,
         tuning: TcpSocketTuning,
     ) -> io::Result<Self> {
@@ -229,7 +229,7 @@ mod tests {
         encode_locator, ControlMsg, ERR_CODE_MISSING_LOCATOR, MSG_ERROR, MSG_PEER_HELLO,
         MSG_PEER_HELLO_ACK,
     };
-    use crossbeam_channel::bounded;
+    use flume::bounded;
     use socket2::{Domain, SockAddr, Socket, Type};
     use std::time::{Duration, Instant};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -238,10 +238,10 @@ mod tests {
     /// Helper: build the four channels needed by `bind_and_spawn`, returning
     /// the receivers so tests can assert on routed messages if needed.
     fn make_channels() -> (
-        crossbeam_channel::Sender<IncomingMessage>,
-        crossbeam_channel::Receiver<IncomingMessage>,
-        crossbeam_channel::Sender<IncomingMessage>,
-        crossbeam_channel::Receiver<IncomingMessage>,
+        flume::Sender<IncomingMessage>,
+        flume::Receiver<IncomingMessage>,
+        flume::Sender<IncomingMessage>,
+        flume::Receiver<IncomingMessage>,
     ) {
         let (d_tx, d_rx) = bounded(64);
         let (u_tx, u_rx) = bounded(64);
