@@ -12,6 +12,17 @@ namespace Int2Dds.Interop
         /// <summary>UTF-8 bytes with a trailing NUL, ready to <c>fixed</c> and pass as <c>const char*</c>.</summary>
         internal static byte[] ToCStr(string s) => Encoding.UTF8.GetBytes((s ?? string.Empty) + '\0');
 
+        /// <summary>Decode a NUL-terminated UTF-8 <c>const char*</c>; empty string for null.</summary>
+        internal static unsafe string FromCStr(byte* p)
+        {
+            if (p == null) return string.Empty;
+            int len = 0;
+            while (p[len] != 0) len++;
+            var bytes = new byte[len];
+            for (int i = 0; i < len; i++) bytes[i] = p[i];
+            return Encoding.UTF8.GetString(bytes);
+        }
+
         internal unsafe delegate int BufferReader(byte* buf, UIntPtr cap, out UIntPtr outLen);
 
         /// <summary>

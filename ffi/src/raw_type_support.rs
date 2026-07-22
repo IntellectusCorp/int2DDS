@@ -16,30 +16,10 @@ use int2dds::{
     serialize::cdr::ExtensibilityKind,
     topic::sql::ast::Parameter,
     topic::type_support::{FieldAccessor, SerializationFormat, TypeSupport},
-    xtypes::{TypeIdentifier, TypeObject},
+    xtypes::{
+        deserialize_dynamic_data, DynamicTypeSupport, TypeIdentifier, TypeObject, TypeRegistry,
+    },
 };
-
-/// CDR field type for key extraction
-#[derive(Clone, Debug)]
-pub enum KeyFieldType {
-    String,
-    Int32,
-    UInt32,
-    Int16,
-    UInt16,
-    Int64,
-    UInt64,
-    Int8,
-    UInt8,
-    Bool,
-}
-
-/// Key field descriptor
-#[derive(Clone, Debug)]
-pub struct KeyFieldInfo {
-    pub field_index: usize,
-    pub field_type: KeyFieldType,
-}
 
 /// Lightweight TypeSupport for raw bytes FFI path.
 ///
@@ -51,8 +31,14 @@ pub struct RawTypeSupport {
     has_key: bool,
     type_identifier: Option<TypeIdentifier>,
     type_object: Option<TypeObject>,
-    key_fields: Vec<KeyFieldInfo>,
     all_fields: Option<Arc<Vec<crate::data::CdrFieldDescriptor>>>,
+    /// Canonical key machinery derived from a full TypeObject. When present,
+    /// `compute_key` deserializes the sample into a `DynamicData` and delegates to
+    /// the shared Rust key path (`serialize_key_cdr`), matching native-Rust/derive
+    /// InstanceHandles for every key shape — including composite, float, and nested
+    /// members. It is the sole key path: a raw topic without a full TypeObject
+    /// yields a NIL InstanceHandle rather than a non-conformant approximation.
+    dynamic_key_support: Option<Arc<DynamicTypeSupport>>,
 }
 
 impl RawTypeSupport {
@@ -63,8 +49,8 @@ impl RawTypeSupport {
             has_key: false,
             type_identifier: None,
             type_object: None,
-            key_fields: Vec::new(),
             all_fields: None,
+            dynamic_key_support: None,
         }
     }
 
@@ -79,8 +65,8 @@ impl RawTypeSupport {
             has_key,
             type_identifier: None,
             type_object: None,
-            key_fields: Vec::new(),
             all_fields: None,
+            dynamic_key_support: None,
         }
     }
 
@@ -95,89 +81,62 @@ impl RawTypeSupport {
         type_identifier: TypeIdentifier,
         type_object: TypeObject,
     ) -> Self {
+        Self::with_type_info_and_deps(
+            type_name,
+            extensibility,
+            has_key,
+            type_identifier,
+            type_object,
+            Vec::new(),
+        )
+    }
+
+    /// Like [`with_type_info`](Self::with_type_info), but with a dependency closure of
+    /// nested `TypeObject`s so the canonical key machinery can resolve composite
+    /// (nested-struct) key members. Each dependency is registered under its own
+    /// content-hash `CompleteTypeId` — the same identifier the parent member references
+    /// and the derive macro emits — so `serialize_key_cdr` recurses into nested keys
+    /// exactly like native Rust.
+    pub fn with_type_info_and_deps(
+        type_name: String,
+        extensibility: ExtensibilityKind,
+        has_key: bool,
+        type_identifier: TypeIdentifier,
+        type_object: TypeObject,
+        dependencies: Vec<(TypeIdentifier, TypeObject)>,
+    ) -> Self {
+        // Build the canonical key machinery from the full TypeObject so keyed
+        // topics created via the type_info path (C# generated types, Python
+        // `_dds_type_info_fields`) compute the same InstanceHandle as native Rust.
+        let dynamic_key_support = if has_key {
+            if dependencies.is_empty() {
+                DynamicTypeSupport::from_type_object(type_object.clone()).ok().map(Arc::new)
+            } else {
+                let mut registry = TypeRegistry::new();
+                for (id, obj) in &dependencies {
+                    registry.register_type_object_with_id(id, obj.clone());
+                }
+                DynamicTypeSupport::from_type_object_with_registry(type_object.clone(), &registry)
+                    .ok()
+                    .map(Arc::new)
+            }
+        } else {
+            None
+        };
         Self {
             type_name,
             extensibility,
             has_key,
             type_identifier: Some(type_identifier),
             type_object: Some(type_object),
-            key_fields: Vec::new(),
             all_fields: None,
+            dynamic_key_support,
         }
-    }
-
-    /// Set key field metadata for compute_key() support.
-    /// Called from FFI when Python binding provides key field info.
-    pub fn set_key_fields(&mut self, fields: Vec<KeyFieldInfo>) {
-        self.key_fields = fields;
     }
 
     /// Set all field descriptors for get_field_value() / has_field() support.
     pub fn set_all_fields(&mut self, fields: Vec<crate::data::CdrFieldDescriptor>) {
         self.all_fields = Some(Arc::new(fields));
-    }
-
-    /// Extract key bytes from CDR-serialized data using key field metadata.
-    /// Parses CDR fields sequentially, collecting only key field values.
-    fn extract_key_from_cdr(&self, cdr_bytes: &[u8]) -> Vec<u8> {
-        if cdr_bytes.len() < 4 {
-            return Vec::new();
-        }
-
-        // Skip 4-byte CDR encapsulation header
-        let encoding_id = u16::from_be_bytes([cdr_bytes[0], cdr_bytes[1]]);
-        let is_xcdr2 = matches!(encoding_id, 0x0006 | 0x0007 | 0x0008 | 0x0009 | 0x000A | 0x000B);
-        let mut pos = 4;
-
-        // Skip DHEADER (4 bytes) for Appendable/Mutable XCDR2
-        if is_xcdr2
-            && matches!(
-                self.extensibility,
-                ExtensibilityKind::Appendable | ExtensibilityKind::Mutable
-            )
-        {
-            if pos + 4 <= cdr_bytes.len() {
-                pos += 4;
-            }
-        }
-
-        let mut key_bytes = Vec::new();
-        let data = cdr_bytes;
-
-        // Parse fields sequentially, collecting key field values
-        for (idx, field_info) in self.key_fields.iter().enumerate() {
-            // Skip non-key fields up to this field index
-            // For now, we only support the first field being a key (common case: color)
-            // A full implementation would need all field types to skip correctly
-            if field_info.field_index == 0 && idx == 0 {
-                match &field_info.field_type {
-                    KeyFieldType::String => {
-                        if pos + 4 <= data.len() {
-                            let str_len = u32::from_le_bytes([
-                                data[pos],
-                                data[pos + 1],
-                                data[pos + 2],
-                                data[pos + 3],
-                            ]) as usize;
-                            pos += 4;
-                            if pos + str_len <= data.len() {
-                                // Include length + string bytes (with null terminator) for key hash
-                                key_bytes.extend_from_slice(&(str_len as u32).to_be_bytes());
-                                key_bytes.extend_from_slice(&data[pos..pos + str_len]);
-                            }
-                        }
-                    }
-                    KeyFieldType::Int32 | KeyFieldType::UInt32 => {
-                        if pos + 4 <= data.len() {
-                            key_bytes.extend_from_slice(&data[pos..pos + 4]);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        key_bytes
     }
 }
 
@@ -217,7 +176,7 @@ impl TypeSupport for RawTypeSupport {
     ) -> DdsResult<Box<dyn Any>> {
         // Store CDR bytes and field metadata when configured (Python binding).
         // Otherwise return empty Int2DdsData (existing behavior for C/C# bindings).
-        let need_bytes = !self.key_fields.is_empty() || self.all_fields.is_some();
+        let need_bytes = self.all_fields.is_some() || self.dynamic_key_support.is_some();
         Ok(Box::new(crate::data::Int2DdsData {
             cdr_bytes: if need_bytes { Some(data.to_vec()) } else { None },
             field_descriptors: self.all_fields.clone(),
@@ -225,20 +184,51 @@ impl TypeSupport for RawTypeSupport {
         }))
     }
 
-    fn serialize_key(&self, _data: &dyn Any) -> DdsResult<SerializedData> {
+    fn serialize_key(&self, data: &dyn Any) -> DdsResult<SerializedData> {
+        // Canonical RTPS KeyHash CDR (headerless, big-endian, §9.6.4.8) derived
+        // from the full sample bytes via the shared DynamicData key machinery —
+        // the same projection `compute_key` hashes and native Rust/derive emit.
+        // No full TypeObject (name-only keyed topic) => empty key.
+        let int2dds_data = match data.downcast_ref::<crate::data::Int2DdsData>() {
+            Some(d) => d,
+            None => return Ok(Arc::from(Vec::new())),
+        };
+        let cdr_bytes = match &int2dds_data.cdr_bytes {
+            Some(b) => b,
+            None => return Ok(Arc::from(Vec::new())),
+        };
+        if let Some(dts) = &self.dynamic_key_support {
+            if let Ok(dyn_data) = deserialize_dynamic_data(cdr_bytes, dts.dynamic_type()) {
+                return dts.serialize_key(&dyn_data);
+            }
+        }
         Ok(Arc::from(Vec::new()))
     }
 
-    fn deserialize_key(&self, _serialized_key: &[u8]) -> DdsResult<Box<dyn Any + Send + Sync>> {
-        Err(DdsError::Error("RawTypeSupport: use take_serialized() for key access".to_string()))
+    fn deserialize_key(&self, serialized_key: &[u8]) -> DdsResult<Box<dyn Any + Send + Sync>> {
+        // Reconstruct the key as DynamicData via the canonical key machinery so the wire
+        // serializedKey path (serialize_key_payload) works on the raw FFI path, which has
+        // no typed value — e.g. dispose/unregister from stored key bytes. A keyed raw topic
+        // always carries this (creation is rejected otherwise, see topic.rs); the guard is
+        // defensive against a keyed topic that reached here without a full TypeObject.
+        match &self.dynamic_key_support {
+            Some(dts) => dts.deserialize_key(serialized_key),
+            None => Err(DdsError::PreconditionNotMet),
+        }
+    }
+
+    fn serialize_key_payload(
+        &self,
+        data: &dyn Any,
+        format: &SerializationFormat,
+    ) -> DdsResult<SerializedData> {
+        match &self.dynamic_key_support {
+            Some(dts) => dts.serialize_key_payload(data, format),
+            None => Err(DdsError::PreconditionNotMet),
+        }
     }
 
     fn compute_key(&self, data: &dyn Any) -> InstanceHandle {
-        // No key fields configured — preserve existing behavior (C/C# bindings)
-        if self.key_fields.is_empty() {
-            return InstanceHandle::NIL;
-        }
-
         let int2dds_data = match data.downcast_ref::<crate::data::Int2DdsData>() {
             Some(d) => d,
             None => return InstanceHandle::NIL,
@@ -249,13 +239,18 @@ impl TypeSupport for RawTypeSupport {
             None => return InstanceHandle::NIL,
         };
 
-        let key_bytes = self.extract_key_from_cdr(cdr_bytes);
-        if key_bytes.is_empty() {
-            return InstanceHandle::NIL;
+        // Raw FFI path key computation goes exclusively through the shared
+        // DynamicData key machinery — the spec-compliant RTPS KeyHash projection
+        // (§9.6.4.8) that native Rust/derive and the dynamic path also use. When no
+        // full TypeObject is available (name-only keyed topic) the handle is NIL
+        // rather than a non-conformant flat-parser approximation.
+        if let Some(dts) = &self.dynamic_key_support {
+            if let Ok(dyn_data) = deserialize_dynamic_data(cdr_bytes, dts.dynamic_type()) {
+                return dts.compute_key(&dyn_data);
+            }
         }
 
-        let hash = md5::compute(&key_bytes);
-        InstanceHandle::new(hash.0)
+        InstanceHandle::NIL
     }
 
     fn is_compute_key_provided(&self) -> bool {

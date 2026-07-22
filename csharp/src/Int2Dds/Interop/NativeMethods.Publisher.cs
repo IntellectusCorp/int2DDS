@@ -22,6 +22,9 @@ namespace Int2Dds.Interop
         internal static extern int int2dds_publisher_get_qos(IntPtr publisher, out IntPtr qos_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_publisher_get_instance_handle(IntPtr publisher, byte* handle_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_delete_publisher(IntPtr publisher);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
@@ -97,5 +100,20 @@ namespace Int2Dds.Interop
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static unsafe extern int int2dds_datawriter_get_offered_incompatible_qos_status(IntPtr writer, NativeOfferedIncompatibleQosStatus* status_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_prepare_serialized_write(IntPtr writer, UIntPtr capacity, out byte* data_out, out UIntPtr capacity_out, out IntPtr loan_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_commit_serialized_write(IntPtr writer, IntPtr loan, UIntPtr actual_size, byte* key, UIntPtr key_len);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_abort_serialized_write(IntPtr loan);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datawriter_get_guid(IntPtr writer, byte* guid_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datawriter_get_offered_incompatible_type_status(IntPtr writer, NativeOfferedIncompatibleTypeStatus* status_out);
     }
 }

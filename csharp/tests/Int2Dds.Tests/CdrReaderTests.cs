@@ -52,7 +52,7 @@ namespace Int2Dds.Tests
         [Fact]
         public void Appendable_DheaderRoundTrip()
         {
-            var w = new CdrWriter(Extensibility.Appendable);
+            var w = new CdrWriter(Extensibility.Appendable, xcdr2: true);
             var token = w.DheaderBegin();
             w.WriteU32(42);
             w.WriteString("hello");
@@ -70,7 +70,7 @@ namespace Int2Dds.Tests
         [Fact]
         public void Mutable_EmheaderAndSentinel_RoundTrip()
         {
-            var w = new CdrWriter(Extensibility.Mutable);
+            var w = new CdrWriter(Extensibility.Mutable, xcdr2: true);
             var token = w.DheaderBegin();
 
             // Write member 0: a single u32

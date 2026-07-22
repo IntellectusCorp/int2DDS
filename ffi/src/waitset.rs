@@ -53,6 +53,9 @@ pub unsafe extern "C" fn int2dds_waitset_new(waitset_out: *mut *mut Int2DdsWaitS
 /// - INT2DDS_RET_OK if conditions were triggered
 /// - INT2DDS_RET_TIMEOUT if the timeout expired
 /// - INT2DDS_RET_ERROR for other errors
+#[deprecated(
+    note = "discards triggered conditions; use int2dds_waitset_wait_ex (ms) or int2dds_waitset_wait_ex_ns (ns)"
+)]
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_waitset_wait(
     waitset: *const Int2DdsWaitSet,
@@ -68,39 +71,6 @@ pub unsafe extern "C" fn int2dds_waitset_wait(
         Duration {
             sec: (timeout_ms / 1000) as i32,
             nanosec: ((timeout_ms % 1000) * 1_000_000) as u32,
-        }
-    };
-
-    match waitset_ref.inner.wait(duration) {
-        Ok(_conditions) => INT2DDS_RET_OK,
-        Err(e) => dds_error_to_code(&e),
-    }
-}
-
-/// Wait for conditions to be triggered, with nanosecond timeout resolution.
-///
-/// Identical to `int2dds_waitset_wait` but the timeout is given in nanoseconds so
-/// sub-millisecond waits are honored. Additive: the millisecond entry point is
-/// unchanged.
-///
-/// # Safety
-/// - `waitset` must be a valid waitset
-/// - `timeout_ns` is the timeout in nanoseconds, or -1 for infinite
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_waitset_wait_ns(
-    waitset: *const Int2DdsWaitSet,
-    timeout_ns: i64,
-) -> Int2DdsRet {
-    check_null!(waitset);
-
-    let waitset_ref = &*waitset;
-
-    let duration = if timeout_ns < 0 {
-        Duration::infinite()
-    } else {
-        Duration {
-            sec: (timeout_ns / 1_000_000_000) as i32,
-            nanosec: (timeout_ns % 1_000_000_000) as u32,
         }
     };
 
@@ -139,6 +109,52 @@ pub unsafe extern "C" fn int2dds_waitset_wait_ex(
         Duration {
             sec: (timeout_ms / 1000) as i32,
             nanosec: ((timeout_ms % 1000) * 1_000_000) as u32,
+        }
+    };
+
+    match waitset_ref.inner.wait(duration) {
+        Ok(conditions) => {
+            let seq = Box::new(Int2DdsConditionSeq { conditions });
+            *conditions_out = Box::into_raw(seq);
+            INT2DDS_RET_OK
+        }
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
+/// Wait for conditions to be triggered and return them, with nanosecond timeout resolution.
+///
+/// Combines `int2dds_waitset_wait_ex` (returns triggered conditions) with
+/// nanosecond timeout precision, so no capability is lost when migrating off the
+/// deprecated `int2dds_waitset_wait` entry point.
+///
+/// # Safety
+/// - `waitset` must be a valid waitset
+/// - `timeout_ns` is the timeout in nanoseconds, or -1 for infinite
+/// - `conditions_out` must be a valid pointer to a null pointer
+/// - The returned condition sequence must be freed with `int2dds_condition_seq_delete`
+///
+/// Returns:
+/// - INT2DDS_RET_OK if conditions were triggered
+/// - INT2DDS_RET_TIMEOUT if the timeout expired
+/// - INT2DDS_RET_ERROR for other errors
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_waitset_wait_ex_ns(
+    waitset: *const Int2DdsWaitSet,
+    timeout_ns: i64,
+    conditions_out: *mut *mut Int2DdsConditionSeq,
+) -> Int2DdsRet {
+    check_null!(waitset);
+    check_null!(conditions_out);
+
+    let waitset_ref = &*waitset;
+
+    let duration = if timeout_ns < 0 {
+        Duration::infinite()
+    } else {
+        Duration {
+            sec: (timeout_ns / 1_000_000_000) as i32,
+            nanosec: (timeout_ns % 1_000_000_000) as u32,
         }
     };
 
@@ -353,6 +369,50 @@ pub unsafe extern "C" fn int2dds_waitset_detach_condition(
     }
 }
 
+/// Attach a Read/QueryCondition to the WaitSet
+///
+/// # Safety
+/// - `waitset` must be a valid waitset
+/// - `condition` must be a valid read condition
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_waitset_attach_readcondition(
+    waitset: *const Int2DdsWaitSet,
+    condition: *const Int2DdsReadCondition,
+) -> Int2DdsRet {
+    check_null!(waitset);
+    check_null!(condition);
+
+    let waitset_ref = &*waitset;
+    let condition_ref = &*condition;
+
+    match waitset_ref.inner.attach_condition(condition_ref.inner.clone()) {
+        Ok(()) => INT2DDS_RET_OK,
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
+/// Detach a Read/QueryCondition from the WaitSet
+///
+/// # Safety
+/// - `waitset` must be a valid waitset
+/// - `condition` must be a valid read condition that was previously attached
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_waitset_detach_readcondition(
+    waitset: *const Int2DdsWaitSet,
+    condition: *const Int2DdsReadCondition,
+) -> Int2DdsRet {
+    check_null!(waitset);
+    check_null!(condition);
+
+    let waitset_ref = &*waitset;
+    let condition_ref = &*condition;
+
+    match waitset_ref.inner.detach_condition(condition_ref.inner.clone()) {
+        Ok(()) => INT2DDS_RET_OK,
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
 /// Attach a DataReader's status condition to the WaitSet
 ///
 /// This allows waiting for data to arrive on a DataReader.
@@ -540,8 +600,10 @@ mod tests {
 
             // Wait with short timeout (should timeout)
             let timeout_ms = 100; // 100ms
-            let ret = int2dds_waitset_wait(waitset, timeout_ms);
+            let mut conditions: *mut Int2DdsConditionSeq = ptr::null_mut();
+            let ret = int2dds_waitset_wait_ex(waitset, timeout_ms, &mut conditions as *mut _);
             assert_eq!(ret, INT2DDS_RET_TIMEOUT);
+            assert!(conditions.is_null());
 
             int2dds_waitset_delete(waitset);
         }

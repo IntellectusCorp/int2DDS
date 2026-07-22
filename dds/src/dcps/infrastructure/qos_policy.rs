@@ -2048,15 +2048,32 @@ pub struct DataRepresentationQosPolicy {
     pub value: Vec<DataRepresentationId>,
 }
 
+pub(crate) const DEFAULT_DATA_REPRESENTATION: [DataRepresentationId; 1] =
+    [<DataRepresentationId as ConstDefault>::DEFAULT];
+
+impl DataRepresentationQosPolicy {
+    /// Resolves the effective representation ids, treating an empty list (the
+    /// heap-free `ConstDefault` sentinel) as [`DEFAULT_DATA_REPRESENTATION`] per
+    /// DDS-XTypes. Every consumer that needs to interpret an empty policy must
+    /// go through this so the default lives in exactly one place.
+    pub(crate) fn effective_ids(&self) -> &[DataRepresentationId] {
+        if self.value.is_empty() {
+            &DEFAULT_DATA_REPRESENTATION
+        } else {
+            &self.value
+        }
+    }
+}
+
 impl Default for DataRepresentationQosPolicy {
     fn default() -> Self {
-        Self { value: vec![DataRepresentationId::XcdrDataRepresentation] }
+        Self { value: DEFAULT_DATA_REPRESENTATION.to_vec() }
     }
 }
 
 impl ConstDefault for DataRepresentationQosPolicy {
-    // Note: Rust const context doesn't support heap allocation,
-    // so DEFAULT is empty. Compatibility check treats empty as XCDR1.
+    // Rust const context doesn't support heap allocation, so DEFAULT is empty.
+    // `effective_ids()` resolves empty to DEFAULT_DATA_REPRESENTATION.
     const DEFAULT: Self = Self { value: Vec::new() };
 }
 
