@@ -430,6 +430,11 @@ mod tests {
         // satisfy the pure-TCP initial-peers requirement with a dummy peer.
         let mut cfg = TcpConfig::default();
         cfg.initial_peers = vec!["127.0.0.1:7400".parse().unwrap()];
+        // Bind an ephemeral port rather than the domain-derived fixed port: the
+        // latter lingers in TIME_WAIT and makes back-to-back suite runs fail with
+        // AddrInUse. The tests below check against the *actual* listener port, so
+        // the ephemeral choice is transparent to them.
+        cfg.bind_port = Some(0);
         TcpTransportPlugin::new(
             domain,
             0,
