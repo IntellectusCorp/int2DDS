@@ -275,8 +275,9 @@ int2dds_subscriber_qos_destroy()
 ```c
 // WaitSet
 int2dds_waitset_new()                       // Create waitset
-int2dds_waitset_wait()                      // Wait for conditions
-int2dds_waitset_wait_ex()                   // Wait and return triggered conditions
+int2dds_waitset_wait()                      // [deprecated] discards conditions; use wait_ex/wait_ex_ns
+int2dds_waitset_wait_ex()                    // Wait and return triggered conditions (ms)
+int2dds_waitset_wait_ex_ns()                 // Wait and return triggered conditions (ns)
 int2dds_waitset_attach_condition()          // Attach status condition
 int2dds_waitset_detach_condition()          // Detach status condition
 int2dds_waitset_attach_guard_condition()    // Attach guard condition

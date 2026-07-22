@@ -92,13 +92,13 @@ impl Lexer {
         }
 
         if is_hex {
-            let val = i32::from_str_radix(&result[2..], 16).unwrap_or(0);
+            let val = i128::from_str_radix(&result[2..], 16).unwrap_or(0);
             (TokenType::IntegerValue, Parameter::IntegerValue(val))
         } else if is_float {
             let val = result.parse::<f64>().unwrap_or(0.0);
             (TokenType::FloatValue, Parameter::FloatValue(val))
         } else {
-            let val = result.parse::<i32>().unwrap_or(0);
+            let val = result.parse::<i128>().unwrap_or(0);
             (TokenType::IntegerValue, Parameter::IntegerValue(val))
         }
     }
@@ -379,5 +379,16 @@ mod tests {
         assert_eq!(tokens[5].token_type, TokenType::Identifier); // x
         assert_eq!(tokens[6].token_type, TokenType::Greater);
         assert_eq!(tokens[7].token_type, TokenType::IntegerValue);
+    }
+
+    #[test]
+    fn test_integer_literal_exceeds_i32_range() {
+        // A CFT bound above i32::MAX (e.g. `seq > 3000000000`) must tokenize at
+        // full 64-bit width. Under the old i32 parse it fell through to
+        // unwrap_or(0), silently comparing against 0.
+        let mut lexer = Lexer::new("seq > 3000000000".to_string());
+        let tokens = lexer.tokenize();
+        assert_eq!(tokens[2].token_type, TokenType::IntegerValue);
+        assert_eq!(tokens[2].value, Parameter::IntegerValue(3_000_000_000));
     }
 }

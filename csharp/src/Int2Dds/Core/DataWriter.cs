@@ -34,11 +34,17 @@ namespace Int2Dds.Core
             IDataWriterListener listener = null, uint statusMask = 0)
         {
             _topic = topic;
-            _xcdr2 = qos?.DataRepresentation?.Kind == Qos.DataRepresentationKind.Xcdr2;
+
+            // Effective representation = caller's choice, else the core default
+            // (single source of truth in the Rust core, not hardcoded here).
+            int effectiveRepr = qos?.DataRepresentation != null
+                ? (int)qos.DataRepresentation.Kind
+                : NativeMethods.int2dds_default_data_representation();
+            _xcdr2 = effectiveRepr == (int)Qos.DataRepresentationKind.Xcdr2;
 
             // Always create a QoS handle so that the native layer receives the
-            // correct DataRepresentation default (XCDR1) even when the caller
-            // does not supply an explicit QoS object.
+            // correct DataRepresentation default even when the caller does not
+            // supply an explicit QoS object.
             IntPtr qosHandle = IntPtr.Zero;
             ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_create_default(out qosHandle));
             try
@@ -49,7 +55,7 @@ namespace Int2Dds.Core
                 // Ensure SEDP advertises the same encoding that C# actually uses.
                 if (qos?.DataRepresentation == null)
                     ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_set_data_representation(
-                        qosHandle, (int)Qos.DataRepresentationKind.Xcdr1));
+                        qosHandle, effectiveRepr));
             }
             catch
             {
@@ -165,7 +171,7 @@ namespace Int2Dds.Core
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
             var data = sample.SerializeCdr(_xcdr2);
-            var key = s_hasKey ? sample.SerializeKey() : null;
+            byte[] key = null;
 
             unsafe
             {
@@ -191,7 +197,7 @@ namespace Int2Dds.Core
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
             var data = sample.SerializeCdr(_xcdr2);
-            var key = s_hasKey ? sample.SerializeKey() : null;
+            byte[] key = null;
 
             var epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
             var elapsed = timestamp.ToUniversalTime() - epoch;
@@ -220,7 +226,7 @@ namespace Int2Dds.Core
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
-            var key = s_hasKey ? sample.SerializeKey() : null;
+            var key = s_hasKey ? sample.SerializeCdr(_xcdr2) : null;
             if (key == null || key.Length == 0)
                 return InstanceHandle.Nil;
 
@@ -247,7 +253,7 @@ namespace Int2Dds.Core
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
-            var key = s_hasKey ? sample.SerializeKey() : null;
+            var key = s_hasKey ? sample.SerializeCdr(_xcdr2) : null;
             if (key == null || key.Length == 0)
                 return;
 
@@ -272,7 +278,7 @@ namespace Int2Dds.Core
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
-            var key = s_hasKey ? sample.SerializeKey() : null;
+            var key = s_hasKey ? sample.SerializeCdr(_xcdr2) : null;
             if (key == null || key.Length == 0)
                 return;
 
@@ -297,7 +303,7 @@ namespace Int2Dds.Core
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
-            var key = s_hasKey ? sample.SerializeKey() : null;
+            var key = s_hasKey ? sample.SerializeCdr(_xcdr2) : null;
             if (key == null || key.Length == 0)
                 return InstanceHandle.Nil;
 
@@ -427,6 +433,64 @@ namespace Int2Dds.Core
             }
         }
 
+        /// <summary>Gets the offered incompatible type status.</summary>
+        public OfferedIncompatibleTypeStatus GetOfferedIncompatibleTypeStatus()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            unsafe
+            {
+                NativeOfferedIncompatibleTypeStatus native;
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_datawriter_get_offered_incompatible_type_status(_handle, &native));
+                return new OfferedIncompatibleTypeStatus(native.TotalCount, native.TotalCountChange);
+            }
+        }
+
+        /// <summary>Gets this DataWriter's 16-byte GUID.</summary>
+        public unsafe byte[] GetGuid()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            var guid = new byte[16];
+            fixed (byte* p = guid)
+            {
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_get_guid(_handle, p));
+            }
+            return guid;
+        }
+
+        /// <summary>
+        /// Writes pre-serialized CDR bytes through the zero-copy staging path
+        /// (prepare a native buffer, copy into it, then commit). Aborts the loan
+        /// on failure.
+        /// </summary>
+        public unsafe void WriteSerializedStaged(byte[] data, byte[] key = null)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            if (data == null) throw new ArgumentNullException(nameof(data));
+
+            byte* buffer;
+            UIntPtr capacity;
+            IntPtr loan;
+            ReturnCodeHelper.CheckReturn(
+                NativeMethods.int2dds_prepare_serialized_write(_handle, (UIntPtr)data.Length, out buffer, out capacity, out loan));
+            try
+            {
+                System.Runtime.InteropServices.Marshal.Copy(data, 0, (IntPtr)buffer, data.Length);
+                fixed (byte* pKey = key)
+                {
+                    ReturnCodeHelper.CheckReturn(
+                        NativeMethods.int2dds_commit_serialized_write(
+                            _handle, loan, (UIntPtr)data.Length,
+                            pKey, key != null ? (UIntPtr)key.Length : UIntPtr.Zero));
+                }
+            }
+            catch
+            {
+                NativeMethods.int2dds_abort_serialized_write(loan);
+                throw;
+            }
+        }
+
         /// <summary>
         /// Gets the current QoS policies of this DataWriter.
         /// </summary>
@@ -513,6 +577,17 @@ namespace Int2Dds.Core
             ReturnCodeHelper.CheckReturn(
                 NativeMethods.int2dds_datawriter_get_statuscondition(_handle, out var conditionHandle));
             return new StatusCondition(conditionHandle);
+        }
+
+        /// <summary>
+        /// Gets the current status change bitmask of this DataWriter.
+        /// </summary>
+        public uint GetStatusChanges()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            ReturnCodeHelper.CheckReturn(
+                NativeMethods.int2dds_datawriter_get_status_changes(_handle, out var mask));
+            return mask;
         }
 
         private static void ApplyWriterQos(IntPtr qosHandle, DataWriterQos qos)

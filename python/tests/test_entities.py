@@ -14,7 +14,6 @@ import sys
 import pytest
 
 from int2dds.cdr import CdrReader, CdrWriter, Extensibility
-from int2dds.cdr.writer import CdrKeyWriter
 
 # Skip all tests if FFI library is not available
 try:
@@ -48,7 +47,7 @@ class TestMessage:
     value: int = 0
     text: str = ""
 
-    def _serialize_cdr(self, xcdr2: bool = True) -> bytes:
+    def _serialize_cdr(self, xcdr2: bool = False) -> bytes:
         w = CdrWriter(extensibility=self._extensibility)
         w.write_i32(self.value)
         w.write_string(self.text)
@@ -85,7 +84,7 @@ class AllPrimitives:
     char_val: str = ""      # char
     text: str = ""          # string
 
-    def _serialize_cdr(self, xcdr2: bool = True) -> bytes:
+    def _serialize_cdr(self, xcdr2: bool = False) -> bytes:
         w = CdrWriter(extensibility=self._extensibility)
         w.write_bool(self.flag)
         w.write_u8(self.byte_val)
@@ -138,7 +137,7 @@ class ArrayType:
 
     values: list[int] = field(default_factory=lambda: [0] * ARRAY_SIZE)  # u32[5]
 
-    def _serialize_cdr(self, xcdr2: bool = True) -> bytes:
+    def _serialize_cdr(self, xcdr2: bool = False) -> bytes:
         w = CdrWriter(extensibility=self._extensibility)
         assert len(self.values) == ARRAY_SIZE, "Array size mismatch"
         for v in self.values:
@@ -165,7 +164,7 @@ class SequenceType:
 
     items: list[int] = field(default_factory=list)  # unbounded sequence of u32
 
-    def _serialize_cdr(self, xcdr2: bool = True) -> bytes:
+    def _serialize_cdr(self, xcdr2: bool = False) -> bytes:
         w = CdrWriter(extensibility=self._extensibility)
         w.write_seq_header(len(self.items))
         for v in self.items:
@@ -214,7 +213,7 @@ class EnumMessage:
     color: Color = Color.RED
     status: StatusKind = StatusKind.UNKNOWN
 
-    def _serialize_cdr(self, xcdr2: bool = True) -> bytes:
+    def _serialize_cdr(self, xcdr2: bool = False) -> bytes:
         w = CdrWriter(extensibility=self._extensibility)
         w.write_i32(self.id)
         w.write_enum(int(self.color))
@@ -246,7 +245,7 @@ class InnerStruct:
     y: int = 0       # i32
     name: str = ""   # string
 
-    def _serialize_cdr(self, xcdr2: bool = True) -> bytes:
+    def _serialize_cdr(self, xcdr2: bool = False) -> bytes:
         w = CdrWriter(extensibility=self._extensibility)
         w.write_i32(self.x)
         w.write_i32(self.y)
@@ -278,7 +277,7 @@ class NestedType:
     id: int = 0                                              # i32
     inner: InnerStruct = field(default_factory=InnerStruct)  # nested struct
 
-    def _serialize_cdr(self, xcdr2: bool = True) -> bytes:
+    def _serialize_cdr(self, xcdr2: bool = False) -> bytes:
         w = CdrWriter(extensibility=self._extensibility)
         w.write_i32(self.id)
         # Nested struct: write fields without encap header
@@ -308,7 +307,7 @@ class KeyedType:
     sensor_id: int = 0    # @key u32
     value: float = 0.0    # f64
 
-    def _serialize_cdr(self, xcdr2: bool = True) -> bytes:
+    def _serialize_cdr(self, xcdr2: bool = False) -> bytes:
         w = CdrWriter(extensibility=self._extensibility)
         w.write_u32(self.sensor_id)
         w.write_f64(self.value)
@@ -318,11 +317,6 @@ class KeyedType:
     def _deserialize_cdr(cls, data: bytes) -> "KeyedType":
         r = CdrReader(data)
         return cls(sensor_id=r.read_u32(), value=r.read_f64())
-
-    def _serialize_key(self) -> bytes:
-        w = CdrKeyWriter()
-        w.write_u32(self.sensor_id)
-        return w.to_bytes()
 
 
 @dataclass
@@ -336,7 +330,7 @@ class AppendableMsg:
     id: int = 0      # i32
     value: float = 0.0  # f64
 
-    def _serialize_cdr(self, xcdr2: bool = True) -> bytes:
+    def _serialize_cdr(self, xcdr2: bool = False) -> bytes:
         w = CdrWriter(extensibility=self._extensibility)
         with w.dheader():
             w.write_i32(self.id)
@@ -367,7 +361,7 @@ class MutableMsg:
     id: int = 0         # member_id=0, i32
     value: float = 0.0  # member_id=1, f64
 
-    def _serialize_cdr(self, xcdr2: bool = True) -> bytes:
+    def _serialize_cdr(self, xcdr2: bool = False) -> bytes:
         w = CdrWriter(extensibility=self._extensibility)
         with w.dheader():
             with w.emheader(member_id=0):
@@ -413,6 +407,18 @@ class TestDomainParticipant:
     def test_context_manager(self, domain_id: int):
         with DomainParticipant(domain_id=domain_id) as dp:
             assert dp.domain_id == domain_id
+
+    def test_participant_set_get_qos(self, domain_id: int):
+        from int2dds.core.qos import ParticipantQos, Property
+
+        with DomainParticipant(domain_id=domain_id) as dp:
+            prop = Property()
+            prop.add("vendor.us.int2.participant_qos", "live", True)
+            dp.set_qos(ParticipantQos(property=prop))
+
+            got = dp.get_qos()
+            entries = {name: value for name, value, _ in got.property.entries}
+            assert entries.get("vendor.us.int2.participant_qos") == "live"
 
     def test_create_publisher(self, domain_id: int):
         with DomainParticipant(domain_id=domain_id) as dp:

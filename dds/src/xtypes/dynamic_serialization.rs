@@ -1063,6 +1063,256 @@ fn deserialize_struct_cdr(
     Ok(DynamicData::with_values(dynamic_type.clone(), values))
 }
 
+/// Collect a struct's key members in canonical (member_id) order.
+///
+/// Returns an empty vec for non-struct or keyless types.
+fn key_members_ordered(dynamic_type: &DynamicType) -> Vec<&MemberDescriptor> {
+    match dynamic_type.as_struct() {
+        Some(struct_desc) => {
+            let mut members: Vec<&MemberDescriptor> =
+                struct_desc.members().iter().filter(|m| m.is_key).collect();
+            members.sort_by_key(|m| m.member_id);
+            members
+        }
+        None => Vec::new(),
+    }
+}
+
+/// True when the sole key member is a `String`. The derive path (`is_unbounded_string`
+/// in `key_methods.rs`) and the field-descriptor raw path (`CdrFieldType::String`) both
+/// MD5-hash such keys regardless of any `bound`, since neither observes the bound at
+/// this point. The dynamic path matches them so all keyed paths agree. `WString` keys
+/// are not hashed (they stay in the ≤16 raw rule), matching derive.
+fn is_single_string_key(members: &[&MemberDescriptor]) -> bool {
+    members.len() == 1
+        && matches!(resolved_kind(&members[0].member_type), DynamicTypeKind::String { .. })
+}
+
+/// Serialize the key members of `data` as canonical RTPS KeyHash CDR:
+/// big-endian, member_id order, no encapsulation header — byte-identical to the
+/// derive-generated `serialize_key`.
+///
+/// Returns `(key_cdr, single_unbounded_string)`; the bool selects the
+/// InstanceHandle rule at the call site (`from_key_cdr_hashed` vs `from_key_cdr`).
+pub fn serialize_key_cdr(data: &DynamicData) -> DdsResult<(Vec<u8>, bool)> {
+    let members = key_members_ordered(data.dynamic_type());
+    if members.is_empty() {
+        return Ok((Vec::new(), false));
+    }
+    let single_unbounded_string = is_single_string_key(&members);
+
+    // Per RTPS KeyHash spec (DDSI-RTPS 9.6.4.8 step 4): PLAIN_CDR2 big-endian
+    // (max alignment 4), no encapsulation header, Final => no DHEADER. Write the
+    // 4-byte header so the alignment math is relative to it, then strip it.
+    let mut serializer = Xcdr2Serializer::with_capacity(false, ExtensibilityKind::Final, 64);
+    serializer.write_encapsulation_header().map_err(cdr_error)?;
+    let mut nested = serialize_key_holder_struct;
+    for member in &members {
+        let value = member_value_or_default(data, member).ok_or_else(|| {
+            DdsError::Error(format!("Missing key member value for '{}'", member.name))
+        })?;
+        serialize_value_xcdr2(&mut serializer, &value, &member.member_type, &mut nested)?;
+    }
+
+    let mut bytes = serializer.into_bytes();
+    bytes.drain(..4);
+    if single_unbounded_string {
+        while bytes.len() > 1 && bytes[bytes.len() - 1] == 0 && bytes[bytes.len() - 2] == 0 {
+            bytes.pop();
+        }
+    }
+    Ok((bytes, single_unbounded_string))
+}
+
+/// Deserialize a canonical headerless big-endian key CDR (as produced by
+/// [`serialize_key_cdr`]) back into a `DynamicData` holding only the key members.
+pub fn deserialize_key_cdr(
+    bytes: &[u8],
+    dynamic_type: &Arc<DynamicType>,
+) -> DdsResult<DynamicData> {
+    let mut deserializer = Xcdr2Deserializer::new_without_header(bytes, false);
+    deserialize_key_holder_struct(&mut deserializer, dynamic_type)
+}
+
+/// Projecting nested-struct serializer for the key holder: when the struct has
+/// `@key` members, write only those (member_id order); otherwise write all
+/// members. This is the recursive key projection required by RTPS KeyHash
+/// (DDSI-RTPS 9.6.4.8 step 1/3).
+fn serialize_key_holder_struct(
+    serializer: &mut Xcdr2Serializer,
+    data: &DynamicData,
+) -> DdsResult<()> {
+    let members = key_members_ordered(data.dynamic_type());
+    if members.is_empty() {
+        // Nested aggregated type with no @key members: keep all members, but the
+        // key holder is FINAL (no DHEADER) regardless of the type's own
+        // extensibility, recursing each nested aggregate as its own FINAL holder.
+        let struct_desc = data
+            .dynamic_type()
+            .as_struct()
+            .ok_or_else(|| DdsError::Error("Expected struct type".to_string()))?;
+        let mut nested = serialize_key_holder_struct;
+        return serialize_members_xcdr2_inline(serializer, data, struct_desc, &mut nested);
+    }
+    let mut nested = serialize_key_holder_struct;
+    for member in &members {
+        let value = member_value_or_default(data, member).ok_or_else(|| {
+            DdsError::Error(format!("Missing key member value for '{}'", member.name))
+        })?;
+        serialize_value_xcdr2(serializer, &value, &member.member_type, &mut nested)?;
+    }
+    Ok(())
+}
+
+/// Read side of [`serialize_key_holder_struct`]: reconstruct only the projected
+/// key members from a key-holder CDR stream.
+fn deserialize_key_holder_struct(
+    deserializer: &mut Xcdr2Deserializer,
+    dynamic_type: &Arc<DynamicType>,
+) -> DdsResult<DynamicData> {
+    let members = key_members_ordered(dynamic_type);
+    if members.is_empty() {
+        // No @key members: read all members inline as FINAL (no DHEADER),
+        // mirroring the serialize side, recursing key-holder into nested members.
+        let struct_desc = dynamic_type
+            .as_struct()
+            .ok_or_else(|| DdsError::Error("Expected struct type".to_string()))?;
+        let mut values = HashMap::new();
+        for member in struct_desc.members() {
+            if member.is_optional {
+                let present = deserializer.deserialize_bool().map_err(cdr_error)?;
+                if present {
+                    let value = deserialize_key_holder_value(deserializer, &member.member_type)?;
+                    values.insert(member.name.clone(), value);
+                }
+            } else {
+                let value = deserialize_key_holder_value(deserializer, &member.member_type)?;
+                values.insert(member.name.clone(), value);
+            }
+        }
+        return Ok(DynamicData::with_values(dynamic_type.clone(), values));
+    }
+    let mut values = HashMap::new();
+    for member in &members {
+        let value = deserialize_key_holder_value(deserializer, &member.member_type)?;
+        values.insert(member.name.clone(), value);
+    }
+    Ok(DynamicData::with_values(dynamic_type.clone(), values))
+}
+
+fn deserialize_key_holder_value(
+    deserializer: &mut Xcdr2Deserializer,
+    kind: &DynamicTypeKind,
+) -> DdsResult<DynamicValue> {
+    // A nested struct key member is itself projected to its key holder.
+    if let DynamicTypeKind::TypeRef(inner) = kind {
+        if matches!(inner.kind(), DynamicTypeKind::Struct(_)) {
+            let nested = deserialize_key_holder_struct(deserializer, inner)?;
+            return Ok(DynamicValue::Struct(Box::new(nested)));
+        }
+    }
+    // A fixed array projects element-wise (FINAL, no framing), recursing into
+    // struct elements as their own key holders.
+    if let DynamicTypeKind::Array { element_type, dimensions } = kind {
+        let count = checked_array_len(dimensions)?;
+        let mut items = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            items.push(deserialize_key_holder_value(deserializer, element_type)?);
+        }
+        return Ok(DynamicValue::Array(items));
+    }
+    deserialize_value_xcdr2(deserializer, kind)
+}
+
+/// Maximum PLAIN_CDR2 (max alignment 4) serialized size of the key holder of
+/// `dynamic_type`, per RTPS KeyHash step 5. `None` means the key holder has an
+/// unbounded maximum size, so the KeyHash is always the MD5 of the actual stream.
+pub fn key_holder_max_size(dynamic_type: &DynamicType) -> Option<usize> {
+    let members = key_members_ordered(dynamic_type);
+    if members.is_empty() {
+        // No @key members: the whole aggregated type is the key holder.
+        return dynamic_type
+            .as_struct()
+            .and_then(|d| accumulate_members_max_size(d.members().iter().map(|m| &m.member_type)));
+    }
+    accumulate_members_max_size(members.iter().map(|m| &m.member_type))
+}
+
+fn accumulate_members_max_size<'a, I>(member_types: I) -> Option<usize>
+where
+    I: Iterator<Item = &'a DynamicTypeKind>,
+{
+    let mut pos = 0usize;
+    for kind in member_types {
+        let (align, size) = type_kind_max_size(kind)?;
+        pos = align_up(pos, align);
+        pos = pos.checked_add(size)?;
+    }
+    Some(pos)
+}
+
+/// `(alignment, maximum serialized size)` of a single member's contribution to the
+/// key holder, or `None` if that member has no finite maximum (=> MD5 the holder).
+fn type_kind_max_size(kind: &DynamicTypeKind) -> Option<(usize, usize)> {
+    match resolved_kind(kind) {
+        DynamicTypeKind::Primitive(p) => {
+            let s = p.size();
+            Some((s.min(4), s))
+        }
+        DynamicTypeKind::Enum(_) => Some((4, 4)),
+        DynamicTypeKind::String { bound: Some(n) } => Some((4, 4 + *n as usize + 1)),
+        DynamicTypeKind::WString { bound: Some(n) } => Some((4, 4 + 2 * (*n as usize + 1))),
+        DynamicTypeKind::Struct(desc) => {
+            // Nested key holder: project to its own @key members (member_id order),
+            // or keep all members when it has none.
+            let mut key_members: Vec<&MemberDescriptor> =
+                desc.members().iter().filter(|m| m.is_key).collect();
+            let size = if key_members.is_empty() {
+                accumulate_members_max_size(desc.members().iter().map(|m| &m.member_type))?
+            } else {
+                key_members.sort_by_key(|m| m.member_id);
+                accumulate_members_max_size(key_members.iter().map(|m| &m.member_type))?
+            };
+            Some((4, size))
+        }
+        // Fixed array of finite-size elements: `N` packed (max-align-4) elements.
+        DynamicTypeKind::Array { element_type, dimensions } => {
+            let (elem_align, elem_size) = type_kind_max_size(element_type)?;
+            let count: usize = dimensions.iter().map(|d| *d as usize).product();
+            if count == 0 {
+                return Some((elem_align, 0));
+            }
+            let stride = align_up(elem_size, elem_align);
+            let size = stride.checked_mul(count - 1)?.checked_add(elem_size)?;
+            Some((elem_align, size))
+        }
+        // Bounded sequence: `u32` length prefix (align 4) then up to `bound` packed
+        // (max-align-4) elements. Unbounded elements collapse the whole holder to MD5.
+        DynamicTypeKind::Sequence { element_type, bound: Some(n) } => {
+            let (elem_align, elem_size) = type_kind_max_size(element_type)?;
+            let n = *n as usize;
+            let size = if n == 0 {
+                4
+            } else {
+                let stride = align_up(elem_size, elem_align);
+                4usize.checked_add(stride.checked_mul(n - 1)?)?.checked_add(elem_size)?
+            };
+            Some((4, size))
+        }
+        // Unbounded string/wstring, unbounded sequences, maps, and anything else
+        // with no finite maximum serialized size => hash the actual bytes.
+        _ => None,
+    }
+}
+
+fn align_up(pos: usize, align: usize) -> usize {
+    if align <= 1 {
+        pos
+    } else {
+        (pos + align - 1) & !(align - 1)
+    }
+}
+
 fn serialize_xcdr(
     data: &DynamicData,
     extensibility: ExtensibilityKind,
