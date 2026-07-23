@@ -86,6 +86,102 @@ namespace Int2Dds.Discovery
             }
         }
 
+        /// <summary>The 16-byte endpoint GUID of the discovered reader.</summary>
+        public unsafe byte[] EndpointGuid
+        {
+            get
+            {
+                if (_disposed) throw new ObjectDisposedException(GetType().Name);
+                var guid = new byte[16];
+                fixed (byte* p = guid)
+                {
+                    ReturnCodeHelper.CheckReturn(
+                        NativeMethods.int2dds_subscription_builtin_topic_data_get_endpoint_guid(_handle, p));
+                }
+                return guid;
+            }
+        }
+
+        /// <summary>Reliability kind: 0 = BEST_EFFORT, 1 = RELIABLE.</summary>
+        public int ReliabilityKind
+        {
+            get
+            {
+                if (_disposed) throw new ObjectDisposedException(GetType().Name);
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_subscription_builtin_topic_data_get_reliability_kind(_handle, out var kind));
+                return kind;
+            }
+        }
+
+        /// <summary>Durability kind: 0 = VOLATILE, 1 = TRANSIENT_LOCAL, 2 = TRANSIENT, 3 = PERSISTENT.</summary>
+        public int DurabilityKind
+        {
+            get
+            {
+                if (_disposed) throw new ObjectDisposedException(GetType().Name);
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_subscription_builtin_topic_data_get_durability_kind(_handle, out var kind));
+                return kind;
+            }
+        }
+
+        /// <summary>Liveliness kind: 0 = AUTOMATIC, 1 = MANUAL_BY_PARTICIPANT, 2 = MANUAL_BY_TOPIC.</summary>
+        public int LivelinessKind
+        {
+            get
+            {
+                if (_disposed) throw new ObjectDisposedException(GetType().Name);
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_subscription_builtin_topic_data_get_liveliness_kind(_handle, out var kind));
+                return kind;
+            }
+        }
+
+        /// <summary>Liveliness lease duration; <c>null</c> means infinite.</summary>
+        public TimeSpan? LivelinessLeaseDuration
+        {
+            get
+            {
+                if (_disposed) throw new ObjectDisposedException(GetType().Name);
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_subscription_builtin_topic_data_get_liveliness_lease_duration(_handle, out var sec, out var nanosec));
+                return PublicationBuiltinTopicData.DurationToTimeSpan(sec, nanosec);
+            }
+        }
+
+        /// <summary>Deadline period; <c>null</c> means infinite.</summary>
+        public TimeSpan? Deadline
+        {
+            get
+            {
+                if (_disposed) throw new ObjectDisposedException(GetType().Name);
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_subscription_builtin_topic_data_get_deadline(_handle, out var sec, out var nanosec));
+                return PublicationBuiltinTopicData.DurationToTimeSpan(sec, nanosec);
+            }
+        }
+
+        /// <summary>The reader's user_data bytes (possibly empty).</summary>
+        public unsafe byte[] UserData
+        {
+            get
+            {
+                if (_disposed) throw new ObjectDisposedException(GetType().Name);
+                UIntPtr size;
+                NativeMethods.int2dds_subscription_builtin_topic_data_get_user_data(_handle, null, UIntPtr.Zero, out size);
+                int len = (int)(uint)size;
+                if (len == 0) return new byte[0];
+                var buf = new byte[len];
+                fixed (byte* p = buf)
+                {
+                    ReturnCodeHelper.CheckReturn(
+                        NativeMethods.int2dds_subscription_builtin_topic_data_get_user_data(_handle, p, (UIntPtr)len, out size));
+                }
+                return buf;
+            }
+        }
+
         public void Dispose()
         {
             if (_disposed) return;

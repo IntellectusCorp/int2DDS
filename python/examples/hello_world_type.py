@@ -10,7 +10,6 @@ from enum import IntEnum, IntFlag
 from typing import ClassVar
 
 from int2dds.cdr import CdrReader, CdrWriter, Extensibility
-from int2dds.cdr.writer import CdrKeyWriter
 
 
 @dataclass
@@ -29,7 +28,7 @@ class HelloWorld:
     index: int = 0
     message: str = ""
 
-    def _serialize_cdr(self, xcdr2: bool = True) -> bytes:
+    def _serialize_cdr(self, xcdr2: bool = False) -> bytes:
         """Serialize to CDR bytes with encapsulation header."""
         w = CdrWriter(extensibility=self._extensibility, xcdr2=xcdr2)
         if w._xcdr2:
@@ -78,8 +77,5 @@ class HelloWorld:
             message = r.read_string()
         return cls(index, message)
 
-    def _serialize_key(self) -> bytes:
-        """Serialize key fields only (big-endian, no encapsulation)."""
-        return b""
 
 

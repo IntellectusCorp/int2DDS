@@ -425,3 +425,29 @@ impl ParsedBuiltinTopicData {
         ]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::infrastructure::qos_policy::{DataRepresentationId, DataRepresentationQosPolicy};
+
+    // B1: an endpoint whose DataRepresentation QoS is left unset (empty list)
+    // must still advertise the resolved default on the wire, so peers observe
+    // the same representation the endpoint actually serializes with.
+    #[test]
+    fn empty_data_representation_advertises_resolved_default() {
+        let parsed = ParsedBuiltinTopicData {
+            data_representation: Some(DataRepresentationQosPolicy { value: Vec::new() }),
+            ..Default::default()
+        };
+
+        let bytes = parsed.to_serialized_data();
+        let back =
+            ParsedBuiltinTopicData::from_serialized_data(&bytes[..]).expect("round-trip parse");
+
+        assert_eq!(
+            back.data_representation.expect("PidDataRepresentation present").value,
+            vec![DataRepresentationId::XcdrDataRepresentation],
+        );
+    }
+}

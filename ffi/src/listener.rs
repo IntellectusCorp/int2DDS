@@ -14,6 +14,7 @@
 
 use std::ffi::c_void;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::{Arc, Weak};
 
 use crate::data::Int2DdsData;
 use int2dds::infrastructure::status::{
@@ -171,14 +172,14 @@ unsafe impl Sync for Int2DdsDataWriterListener {}
 /// Bridges Rust listener callbacks to C function pointers
 pub struct FfiDataReaderListener {
     pub(crate) callbacks: Int2DdsDataReaderListener,
-    pub(crate) reader_handle: *mut Int2DdsDataReader,
+    pub(crate) reader_handle: Weak<Int2DdsDataReader>,
 }
 
 impl FfiDataReaderListener {
     /// Create new FFI DataReader listener
     pub fn new(
         callbacks: Int2DdsDataReaderListener,
-        reader_handle: *mut Int2DdsDataReader,
+        reader_handle: Weak<Int2DdsDataReader>,
     ) -> Self {
         Self { callbacks, reader_handle }
     }
@@ -193,11 +194,13 @@ impl DataReaderListener for FfiDataReaderListener {
 
     fn on_data_available(&self, _reader: &DataReader<Int2DdsData>) {
         if let Some(callback) = self.callbacks.on_data_available {
-            let reader_handle = self.reader_handle;
-            let user_context = self.callbacks.user_context;
-            invoke_callback(AssertUnwindSafe(move || unsafe {
-                callback(reader_handle, user_context);
-            }));
+            if let Some(strong) = self.reader_handle.upgrade() {
+                let reader_handle = Arc::as_ptr(&strong) as *mut Int2DdsDataReader;
+                let user_context = self.callbacks.user_context;
+                invoke_callback(AssertUnwindSafe(move || unsafe {
+                    callback(reader_handle, user_context);
+                }));
+            }
         }
     }
 
@@ -207,23 +210,27 @@ impl DataReaderListener for FfiDataReaderListener {
         status: &SubscriptionMatchedStatus,
     ) {
         if let Some(callback) = self.callbacks.on_subscription_matched {
-            let ffi_status: Int2DdsSubscriptionMatchedStatus = status.into();
-            let reader_handle = self.reader_handle;
-            let user_context = self.callbacks.user_context;
-            invoke_callback(AssertUnwindSafe(move || unsafe {
-                callback(reader_handle, &ffi_status as *const _, user_context);
-            }));
+            if let Some(strong) = self.reader_handle.upgrade() {
+                let reader_handle = Arc::as_ptr(&strong) as *mut Int2DdsDataReader;
+                let ffi_status: Int2DdsSubscriptionMatchedStatus = status.into();
+                let user_context = self.callbacks.user_context;
+                invoke_callback(AssertUnwindSafe(move || unsafe {
+                    callback(reader_handle, &ffi_status as *const _, user_context);
+                }));
+            }
         }
     }
 
     fn on_sample_rejected(&self, _reader: &DataReader<Int2DdsData>, status: &SampleRejectedStatus) {
         if let Some(callback) = self.callbacks.on_sample_rejected {
-            let ffi_status: Int2DdsSampleRejectedStatus = status.into();
-            let reader_handle = self.reader_handle;
-            let user_context = self.callbacks.user_context;
-            invoke_callback(AssertUnwindSafe(move || unsafe {
-                callback(reader_handle, &ffi_status as *const _, user_context);
-            }));
+            if let Some(strong) = self.reader_handle.upgrade() {
+                let reader_handle = Arc::as_ptr(&strong) as *mut Int2DdsDataReader;
+                let ffi_status: Int2DdsSampleRejectedStatus = status.into();
+                let user_context = self.callbacks.user_context;
+                invoke_callback(AssertUnwindSafe(move || unsafe {
+                    callback(reader_handle, &ffi_status as *const _, user_context);
+                }));
+            }
         }
     }
 
@@ -233,12 +240,14 @@ impl DataReaderListener for FfiDataReaderListener {
         status: &LivelinessChangedStatus,
     ) {
         if let Some(callback) = self.callbacks.on_liveliness_changed {
-            let ffi_status: Int2DdsLivelinessChangedStatus = status.into();
-            let reader_handle = self.reader_handle;
-            let user_context = self.callbacks.user_context;
-            invoke_callback(AssertUnwindSafe(move || unsafe {
-                callback(reader_handle, &ffi_status as *const _, user_context);
-            }));
+            if let Some(strong) = self.reader_handle.upgrade() {
+                let reader_handle = Arc::as_ptr(&strong) as *mut Int2DdsDataReader;
+                let ffi_status: Int2DdsLivelinessChangedStatus = status.into();
+                let user_context = self.callbacks.user_context;
+                invoke_callback(AssertUnwindSafe(move || unsafe {
+                    callback(reader_handle, &ffi_status as *const _, user_context);
+                }));
+            }
         }
     }
 
@@ -248,12 +257,14 @@ impl DataReaderListener for FfiDataReaderListener {
         status: &RequestedDeadlineMissedStatus,
     ) {
         if let Some(callback) = self.callbacks.on_requested_deadline_missed {
-            let ffi_status: Int2DdsRequestedDeadlineMissedStatus = status.into();
-            let reader_handle = self.reader_handle;
-            let user_context = self.callbacks.user_context;
-            invoke_callback(AssertUnwindSafe(move || unsafe {
-                callback(reader_handle, &ffi_status as *const _, user_context);
-            }));
+            if let Some(strong) = self.reader_handle.upgrade() {
+                let reader_handle = Arc::as_ptr(&strong) as *mut Int2DdsDataReader;
+                let ffi_status: Int2DdsRequestedDeadlineMissedStatus = status.into();
+                let user_context = self.callbacks.user_context;
+                invoke_callback(AssertUnwindSafe(move || unsafe {
+                    callback(reader_handle, &ffi_status as *const _, user_context);
+                }));
+            }
         }
     }
 
@@ -263,23 +274,27 @@ impl DataReaderListener for FfiDataReaderListener {
         status: &RequestedIncompatibleQosStatus,
     ) {
         if let Some(callback) = self.callbacks.on_requested_incompatible_qos {
-            let ffi_status: Int2DdsRequestedIncompatibleQosStatus = status.into();
-            let reader_handle = self.reader_handle;
-            let user_context = self.callbacks.user_context;
-            invoke_callback(AssertUnwindSafe(move || unsafe {
-                callback(reader_handle, &ffi_status as *const _, user_context);
-            }));
+            if let Some(strong) = self.reader_handle.upgrade() {
+                let reader_handle = Arc::as_ptr(&strong) as *mut Int2DdsDataReader;
+                let ffi_status: Int2DdsRequestedIncompatibleQosStatus = status.into();
+                let user_context = self.callbacks.user_context;
+                invoke_callback(AssertUnwindSafe(move || unsafe {
+                    callback(reader_handle, &ffi_status as *const _, user_context);
+                }));
+            }
         }
     }
 
     fn on_sample_lost(&self, _reader: &DataReader<Int2DdsData>, status: &SampleLostStatus) {
         if let Some(callback) = self.callbacks.on_sample_lost {
-            let ffi_status: Int2DdsSampleLostStatus = status.into();
-            let reader_handle = self.reader_handle;
-            let user_context = self.callbacks.user_context;
-            invoke_callback(AssertUnwindSafe(move || unsafe {
-                callback(reader_handle, &ffi_status as *const _, user_context);
-            }));
+            if let Some(strong) = self.reader_handle.upgrade() {
+                let reader_handle = Arc::as_ptr(&strong) as *mut Int2DdsDataReader;
+                let ffi_status: Int2DdsSampleLostStatus = status.into();
+                let user_context = self.callbacks.user_context;
+                invoke_callback(AssertUnwindSafe(move || unsafe {
+                    callback(reader_handle, &ffi_status as *const _, user_context);
+                }));
+            }
         }
     }
 }
@@ -288,14 +303,14 @@ impl DataReaderListener for FfiDataReaderListener {
 /// Bridges Rust listener callbacks to C function pointers
 pub struct FfiDataWriterListener {
     pub(crate) callbacks: Int2DdsDataWriterListener,
-    pub(crate) writer_handle: *mut Int2DdsDataWriter,
+    pub(crate) writer_handle: Weak<Int2DdsDataWriter>,
 }
 
 impl FfiDataWriterListener {
     /// Create new FFI DataWriter listener
     pub fn new(
         callbacks: Int2DdsDataWriterListener,
-        writer_handle: *mut Int2DdsDataWriter,
+        writer_handle: Weak<Int2DdsDataWriter>,
     ) -> Self {
         Self { callbacks, writer_handle }
     }
@@ -314,12 +329,14 @@ impl DataWriterListener for FfiDataWriterListener {
         status: &PublicationMatchedStatus,
     ) {
         if let Some(callback) = self.callbacks.on_publication_matched {
-            let ffi_status: Int2DdsPublicationMatchedStatus = status.into();
-            let writer_handle = self.writer_handle;
-            let user_context = self.callbacks.user_context;
-            invoke_callback(AssertUnwindSafe(move || unsafe {
-                callback(writer_handle, &ffi_status as *const _, user_context);
-            }));
+            if let Some(strong) = self.writer_handle.upgrade() {
+                let writer_handle = Arc::as_ptr(&strong) as *mut Int2DdsDataWriter;
+                let ffi_status: Int2DdsPublicationMatchedStatus = status.into();
+                let user_context = self.callbacks.user_context;
+                invoke_callback(AssertUnwindSafe(move || unsafe {
+                    callback(writer_handle, &ffi_status as *const _, user_context);
+                }));
+            }
         }
     }
 
@@ -329,12 +346,14 @@ impl DataWriterListener for FfiDataWriterListener {
         status: &OfferedDeadlineMissedStatus,
     ) {
         if let Some(callback) = self.callbacks.on_offered_deadline_missed {
-            let ffi_status: Int2DdsOfferedDeadlineMissedStatus = status.into();
-            let writer_handle = self.writer_handle;
-            let user_context = self.callbacks.user_context;
-            invoke_callback(AssertUnwindSafe(move || unsafe {
-                callback(writer_handle, &ffi_status as *const _, user_context);
-            }));
+            if let Some(strong) = self.writer_handle.upgrade() {
+                let writer_handle = Arc::as_ptr(&strong) as *mut Int2DdsDataWriter;
+                let ffi_status: Int2DdsOfferedDeadlineMissedStatus = status.into();
+                let user_context = self.callbacks.user_context;
+                invoke_callback(AssertUnwindSafe(move || unsafe {
+                    callback(writer_handle, &ffi_status as *const _, user_context);
+                }));
+            }
         }
     }
 
@@ -344,23 +363,27 @@ impl DataWriterListener for FfiDataWriterListener {
         status: &OfferedIncompatibleQosStatus,
     ) {
         if let Some(callback) = self.callbacks.on_offered_incompatible_qos {
-            let ffi_status: Int2DdsOfferedIncompatibleQosStatus = status.into();
-            let writer_handle = self.writer_handle;
-            let user_context = self.callbacks.user_context;
-            invoke_callback(AssertUnwindSafe(move || unsafe {
-                callback(writer_handle, &ffi_status as *const _, user_context);
-            }));
+            if let Some(strong) = self.writer_handle.upgrade() {
+                let writer_handle = Arc::as_ptr(&strong) as *mut Int2DdsDataWriter;
+                let ffi_status: Int2DdsOfferedIncompatibleQosStatus = status.into();
+                let user_context = self.callbacks.user_context;
+                invoke_callback(AssertUnwindSafe(move || unsafe {
+                    callback(writer_handle, &ffi_status as *const _, user_context);
+                }));
+            }
         }
     }
 
     fn on_liveliness_lost(&self, _writer: &DataWriter<Int2DdsData>, status: &LivelinessLostStatus) {
         if let Some(callback) = self.callbacks.on_liveliness_lost {
-            let ffi_status: Int2DdsLivelinessLostStatus = status.into();
-            let writer_handle = self.writer_handle;
-            let user_context = self.callbacks.user_context;
-            invoke_callback(AssertUnwindSafe(move || unsafe {
-                callback(writer_handle, &ffi_status as *const _, user_context);
-            }));
+            if let Some(strong) = self.writer_handle.upgrade() {
+                let writer_handle = Arc::as_ptr(&strong) as *mut Int2DdsDataWriter;
+                let ffi_status: Int2DdsLivelinessLostStatus = status.into();
+                let user_context = self.callbacks.user_context;
+                invoke_callback(AssertUnwindSafe(move || unsafe {
+                    callback(writer_handle, &ffi_status as *const _, user_context);
+                }));
+            }
         }
     }
 }
@@ -413,7 +436,7 @@ mod tests {
             user_context: std::ptr::null_mut(),
         };
 
-        let reader_handle = std::ptr::null_mut();
+        let reader_handle: Weak<Int2DdsDataReader> = Weak::new();
 
         let ffi_listener = FfiDataReaderListener::new(listener, reader_handle);
 
