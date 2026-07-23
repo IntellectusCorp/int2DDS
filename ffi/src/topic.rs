@@ -175,7 +175,7 @@ pub unsafe extern "C" fn int2dds_create_topic_keyed(
     }
     // Create RawTypeSupport
     let type_support =
-        Arc::new(RawTypeSupport::new_with_key(dds_type_name_str.to_string(), ext_kind, has_key));
+        Arc::new(RawTypeSupport::new_with_key(dds_type_name_str.to_string(), ext_kind, false));
 
     // Register the RawTypeSupport with the participant
     ffi_try!(participant_ref
@@ -266,7 +266,7 @@ pub unsafe extern "C" fn int2dds_create_topic_with_profile(
     }
     // Create RawTypeSupport
     let type_support =
-        Arc::new(RawTypeSupport::new_with_key(dds_type_name_str.to_string(), ext_kind, has_key));
+        Arc::new(RawTypeSupport::new_with_key(dds_type_name_str.to_string(), ext_kind, false));
 
     // Register the RawTypeSupport with the participant
     ffi_try!(participant_ref
@@ -750,11 +750,13 @@ pub unsafe extern "C" fn int2dds_contentfilteredtopic_set_enabled(
 
 /// Create a Topic with key field metadata for compute_key() support.
 ///
-/// Deprecated flat key-field path. Canonical instance keys require a full TypeObject
-/// (use int2dds_create_topic_with_type_info / int2dds_create_topic_with_field_descriptors);
-/// the flat CdrFieldType key parser has been removed. With field_count == 0 this behaves
-/// exactly like int2dds_create_topic_keyed; with field_count > 0 it returns
-/// INT2DDS_RET_UNSUPPORTED rather than silently computing NIL instance handles.
+/// Deprecated flat key-field path. Canonical instance keys require a full TypeObject, so a
+/// keyed topic must be created via int2dds_create_topic_with_type_info or
+/// int2dds_create_topic_with_field_descriptors; the flat CdrFieldType key parser has been
+/// removed. This function therefore returns INT2DDS_RET_UNSUPPORTED whenever has_key is true
+/// (for any field_count), and also when field_count > 0, rather than silently computing NIL
+/// instance handles. With has_key false and field_count == 0 it creates a keyless topic,
+/// equivalent to int2dds_create_topic_keyed.
 ///
 /// # Safety
 /// - Same as int2dds_create_topic_keyed
@@ -809,8 +811,7 @@ pub unsafe extern "C" fn int2dds_create_topic_keyed_with_key_fields(
     if has_key {
         return INT2DDS_RET_UNSUPPORTED;
     }
-    let type_support =
-        RawTypeSupport::new_with_key(dds_type_name_str.to_string(), ext_kind, has_key);
+    let type_support = RawTypeSupport::new_with_key(dds_type_name_str.to_string(), ext_kind, false);
 
     // Register the RawTypeSupport with the participant
     ffi_try!(participant_ref
@@ -895,7 +896,7 @@ pub unsafe extern "C" fn int2dds_create_topic_with_field_descriptors(
             return INT2DDS_RET_UNSUPPORTED;
         }
         let type_support =
-            RawTypeSupport::new_with_key(dds_type_name_str.to_string(), ext_kind, has_key);
+            RawTypeSupport::new_with_key(dds_type_name_str.to_string(), ext_kind, false);
         return finalize_topic(
             participant_ref,
             topic_name_str,
