@@ -33,7 +33,7 @@ impl ConnectionRegistry {
     /// Called from `reader_task` for every frame read off the wire. Reads the
     /// connection's state, then delegates to the per-state handler. Handlers may
     /// push response frames into `writer_tx` (control acks, errors) or push
-    /// RTPS data into the crossbeam channels (active state).
+    /// RTPS data into the inbound channels (active state).
     #[allow(clippy::unused_async)]
     pub(crate) async fn dispatch(
         &self,
@@ -54,7 +54,7 @@ impl ConnectionRegistry {
                 self.handle_control_frame(conn_id, &payload, writer_tx);
             }
             ConnectionState::Active => {
-                self.handle_active_frame(conn_id, payload);
+                self.handle_active_frame(conn_id, payload).await;
             }
         }
     }
@@ -267,17 +267,23 @@ impl ConnectionRegistry {
         false
     }
 
-    fn handle_active_frame(&self, conn_id: ConnectionId, payload: Vec<u8>) {
+    async fn handle_active_frame(&self, conn_id: ConnectionId, payload: Vec<u8>) {
         if matches!(classify_frame(&payload), TcpFrameKind::RtpsData) {
             let remote_addr = match self.connections.get(&conn_id).map(|c| c.remote_addr) {
                 Some(a) => a,
                 None => return,
             };
-            self.route_rtps_data(conn_id, payload, remote_addr);
+            self.route_rtps_data(conn_id, payload, remote_addr).await;
         }
     }
 
-    fn route_rtps_data(&self, conn_id: ConnectionId, payload: Vec<u8>, remote_addr: SocketAddr) {
+    async fn route_rtps_data(
+        &self,
+        conn_id: ConnectionId,
+        payload: Vec<u8>,
+        remote_addr: SocketAddr,
+    ) {
+        // Guard dropped before any await so it never spans the channel send.
         let logical_port = match self.connections.get(&conn_id).and_then(|c| c.bound_logical_port) {
             Some(p) => p,
             None => return,
@@ -286,6 +292,7 @@ impl ConnectionRegistry {
         let msg = IncomingMessage { data: payload, source: remote_addr };
 
         if PortManager::is_discovery_unicast_port_logically(self.domain_id, logical_port) {
+            // Discovery: drop on a full channel rather than backpressure.
             if let Err(e) = self.discovery_tx.try_send(msg) {
                 warn!(
                     "TcpMuxListener [{}]: Failed to route discovery: {:?}",
@@ -294,7 +301,10 @@ impl ConnectionRegistry {
                 );
             }
         } else if PortManager::is_user_unicast_port_logically(self.domain_id, logical_port) {
-            if let Err(e) = self.user_data_tx.try_send(msg) {
+            // User data: backpressure instead of dropping. A full channel makes
+            // the reader stop reading → the socket fills → the TCP window closes
+            // → the blocking sender is paced to the consumer's rate.
+            if let Err(e) = self.user_data_tx.send_async(msg).await {
                 warn!(
                     "TcpMuxListener [{}]: Failed to route user data: {:?}",
                     TransportErrorCode::TcpChannelFull,
