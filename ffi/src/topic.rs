@@ -61,6 +61,24 @@ unsafe fn finalize_topic(
     INT2DDS_RET_OK
 }
 
+/// Map the raw-path FFI `extensibility` code to an `ExtensibilityKind`.
+///
+/// `-1` selects the library default via the single source of truth
+/// (`int2dds_default_extensibility`, currently Appendable); `0`/`1`/`2` map to
+/// Final/Appendable/Mutable. Any other value yields `None`, which callers translate
+/// to `INT2DDS_RET_INVALID_ARGUMENT`. Resolving `-1` through
+/// `int2dds_default_extensibility` keeps the raw path aligned with the Python/C#
+/// bindings, which already fall back to that same default when a type omits one.
+pub(crate) fn resolve_extensibility(code: i32) -> Option<ExtensibilityKind> {
+    let code = if code == -1 { crate::qos::int2dds_default_extensibility() } else { code };
+    match code {
+        0 => Some(ExtensibilityKind::Final),
+        1 => Some(ExtensibilityKind::Appendable),
+        2 => Some(ExtensibilityKind::Mutable),
+        _ => None,
+    }
+}
+
 /// Map a `create_topic_with_field_descriptors` field-type code (scalar-only, and a
 /// distinct encoding from the `INT2DDS_FIELD_*` constants) to its CDR descriptor type
 /// and XTypes `TypeIdentifier`. Returns `None` for unsupported codes.
@@ -94,7 +112,9 @@ fn field_descriptor_type(
 /// - `participant` must be a valid participant
 /// - `topic_name` must be a valid null-terminated C string
 /// - `dds_type_name` must be a valid null-terminated C string (DDS registration name)
-/// - `extensibility`: 0 = Final, 1 = Appendable, 2 = Mutable
+/// - `extensibility`: -1 = library default (Appendable per spec; frames a DHEADER, so
+///   pass an explicit value or use the type-info path for a Final remote),
+///   0 = Final, 1 = Appendable, 2 = Mutable
 /// - `qos` can be null for default QoS
 /// - `topic_out` must be a valid pointer to a null pointer
 /// - The returned topic must be freed with `int2dds_delete_topic`
@@ -128,7 +148,9 @@ pub unsafe extern "C" fn int2dds_create_topic(
 /// - `participant` must be a valid participant
 /// - `topic_name` must be a valid null-terminated C string
 /// - `dds_type_name` must be a valid null-terminated C string (DDS registration name)
-/// - `extensibility`: 0 = Final, 1 = Appendable, 2 = Mutable
+/// - `extensibility`: -1 = library default (Appendable per spec; frames a DHEADER, so
+///   pass an explicit value or use the type-info path for a Final remote),
+///   0 = Final, 1 = Appendable, 2 = Mutable
 /// - `has_key`: whether the data type has key fields
 /// - `qos` can be null for default QoS
 /// - `topic_out` must be a valid pointer to a null pointer
@@ -160,11 +182,9 @@ pub unsafe extern "C" fn int2dds_create_topic_keyed(
         Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
-    let ext_kind = match extensibility {
-        0 => ExtensibilityKind::Final,
-        1 => ExtensibilityKind::Appendable,
-        2 => ExtensibilityKind::Mutable,
-        _ => return INT2DDS_RET_INVALID_ARGUMENT,
+    let ext_kind = match resolve_extensibility(extensibility) {
+        Some(k) => k,
+        None => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
     // Keyed topics require a full TypeObject to compute a spec-conformant KeyHash; the
@@ -213,7 +233,9 @@ pub unsafe extern "C" fn int2dds_create_topic_keyed(
 /// - `participant` must be a valid participant
 /// - `topic_name` must be a valid null-terminated C string
 /// - `dds_type_name` must be a valid null-terminated C string (DDS registration name)
-/// - `extensibility`: 0 = Final, 1 = Appendable, 2 = Mutable
+/// - `extensibility`: -1 = library default (Appendable per spec; frames a DHEADER, so
+///   pass an explicit value or use the type-info path for a Final remote),
+///   0 = Final, 1 = Appendable, 2 = Mutable
 /// - `has_key`: whether the data type has key fields
 /// - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
 /// - `topic_out` must be a valid pointer to a null pointer
@@ -251,11 +273,9 @@ pub unsafe extern "C" fn int2dds_create_topic_with_profile(
         Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
-    let ext_kind = match extensibility {
-        0 => ExtensibilityKind::Final,
-        1 => ExtensibilityKind::Appendable,
-        2 => ExtensibilityKind::Mutable,
-        _ => return INT2DDS_RET_INVALID_ARGUMENT,
+    let ext_kind = match resolve_extensibility(extensibility) {
+        Some(k) => k,
+        None => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
     // Keyed topics require a full TypeObject to compute a spec-conformant KeyHash; the
@@ -798,11 +818,9 @@ pub unsafe extern "C" fn int2dds_create_topic_keyed_with_key_fields(
         Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
-    let ext_kind = match extensibility {
-        0 => ExtensibilityKind::Final,
-        1 => ExtensibilityKind::Appendable,
-        2 => ExtensibilityKind::Mutable,
-        _ => return INT2DDS_RET_INVALID_ARGUMENT,
+    let ext_kind = match resolve_extensibility(extensibility) {
+        Some(k) => k,
+        None => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
     // Name-only keyed topic (field_count == 0): equivalent to int2dds_create_topic_keyed.
@@ -879,11 +897,9 @@ pub unsafe extern "C" fn int2dds_create_topic_with_field_descriptors(
         Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
-    let ext_kind = match extensibility {
-        0 => ExtensibilityKind::Final,
-        1 => ExtensibilityKind::Appendable,
-        2 => ExtensibilityKind::Mutable,
-        _ => return INT2DDS_RET_INVALID_ARGUMENT,
+    let ext_kind = match resolve_extensibility(extensibility) {
+        Some(k) => k,
+        None => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
     // No field structure provided: keep the prior name-only behavior (advertise no type
