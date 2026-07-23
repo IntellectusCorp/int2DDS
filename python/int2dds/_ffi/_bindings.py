@@ -397,6 +397,9 @@ ffi.cdef("""
     Int2DdsRet int2dds_datawriter_qos_get_history(
         const Int2DdsDataWriterQos *qos, int32_t *kind_out, int32_t *depth_out
     );
+    Int2DdsRet int2dds_datawriter_qos_get_data_frag(
+        const Int2DdsDataWriterQos *qos, int32_t *value_out
+    );
     Int2DdsRet int2dds_datareader_qos_get_reliability(
         const Int2DdsDataReaderQos *qos, int32_t *kind_out, int64_t *max_blocking_time_ns_out
     );
@@ -942,6 +945,8 @@ ffi.cdef("""
        at next DomainParticipant creation). */
     Int2DdsRet int2dds_env_set_multicast_ttl(uint8_t ttl);
     Int2DdsRet int2dds_env_get_multicast_ttl(uint8_t *ttl_out, bool *has_value_out);
+    Int2DdsRet int2dds_env_set_qos_profile(const char *path);
+    Int2DdsRet int2dds_env_set_default_qos_profile(const char *profile);
 
     /* WaitSet */
     Int2DdsRet int2dds_waitset_new(Int2DdsWaitSet **waitset_out);

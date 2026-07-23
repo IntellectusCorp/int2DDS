@@ -42,25 +42,28 @@ namespace Int2Dds.Core
                 : NativeMethods.int2dds_default_data_representation();
             _xcdr2 = effectiveRepr == (int)Qos.DataRepresentationKind.Xcdr2;
 
-            // Always create a QoS handle so that the native layer receives the
-            // correct DataRepresentation default even when the caller does not
-            // supply an explicit QoS object.
+            // With an explicit QoS, build a handle and apply it (Specific). With
+            // no QoS, pass NULL so the native layer engages QosKind::Default — the
+            // QoS-profile / spec-default resolution chain — instead of overriding
+            // it with a bare default handle.
             IntPtr qosHandle = IntPtr.Zero;
-            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_create_default(out qosHandle));
-            try
+            if (qos != null)
             {
-                if (qos != null)
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_create_default(out qosHandle));
+                try
+                {
                     ApplyWriterQos(qosHandle, qos);
 
-                // Ensure SEDP advertises the same encoding that C# actually uses.
-                if (qos?.DataRepresentation == null)
-                    ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_set_data_representation(
-                        qosHandle, effectiveRepr));
-            }
-            catch
-            {
-                NativeMethods.int2dds_datawriter_qos_destroy(qosHandle);
-                throw;
+                    // Ensure SEDP advertises the same encoding that C# actually uses.
+                    if (qos.DataRepresentation == null)
+                        ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_set_data_representation(
+                            qosHandle, effectiveRepr));
+                }
+                catch
+                {
+                    NativeMethods.int2dds_datawriter_qos_destroy(qosHandle);
+                    throw;
+                }
             }
 
             try
@@ -93,7 +96,8 @@ namespace Int2Dds.Core
             }
             finally
             {
-                NativeMethods.int2dds_datawriter_qos_destroy(qosHandle);
+                if (qosHandle != IntPtr.Zero)
+                    NativeMethods.int2dds_datawriter_qos_destroy(qosHandle);
             }
         }
 
@@ -660,6 +664,10 @@ namespace Int2Dds.Core
             if (qos.Liveliness != null)
                 ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_set_liveliness(
                     qosHandle, (int)qos.Liveliness.Kind, qos.Liveliness.LeaseDurationNs));
+
+            if (qos.DataFrag != null)
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_set_data_frag(
+                    qosHandle, qos.DataFrag.Value));
         }
 
         private static DataWriterQos ReadWriterQos(IntPtr h)
@@ -678,6 +686,7 @@ namespace Int2Dds.Core
             NativeMethods.int2dds_datawriter_qos_get_transport_priority(h, out var transPri);
             NativeMethods.int2dds_datawriter_qos_get_latency_budget(h, out var latNs);
             NativeMethods.int2dds_datawriter_qos_get_writer_data_lifecycle(h, out var autoDispose);
+            NativeMethods.int2dds_datawriter_qos_get_data_frag(h, out var dataFrag);
 
             return new DataWriterQos
             {
@@ -695,6 +704,7 @@ namespace Int2Dds.Core
                 TransportPriority = new TransportPriority(transPri),
                 LatencyBudget = new LatencyBudget(TimeSpan.FromTicks(latNs / 100)),
                 WriterDataLifecycle = new WriterDataLifecycle(autoDispose),
+                DataFrag = dataFrag,
             };
         }
 
