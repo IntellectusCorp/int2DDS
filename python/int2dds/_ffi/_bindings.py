@@ -704,6 +704,10 @@ ffi.cdef("""
         Int2DdsDataWriterQos *qos,
         int32_t value
     );
+    Int2DdsRet int2dds_datawriter_qos_set_data_frag(
+        Int2DdsDataWriterQos *qos,
+        int32_t value
+    );
     Int2DdsRet int2dds_datawriter_qos_set_resource_limits(
         Int2DdsDataWriterQos *qos,
         int32_t max_samples,
