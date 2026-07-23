@@ -72,7 +72,7 @@ impl UserMulticastListeningTask {
 
     fn listen_channel(
         &mut self,
-        rx: &crossbeam_channel::Receiver<crate::rtps::transport::plugin::IncomingMessage>,
+        rx: &flume::Receiver<crate::rtps::transport::plugin::IncomingMessage>,
     ) -> std::io::Result<()> {
         info!("start user multicast listening (Channel)");
 

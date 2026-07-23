@@ -1,7 +1,11 @@
 pub mod cdr;
 pub mod core;
+pub mod key_holder;
 pub mod pl_cdr;
 pub use core::xcdr;
+pub use key_holder::{
+    align_up as key_holder_align_up, KeyHolder, KeyHolderAccessor, KeyHolderFallback,
+};
 
 #[doc(hidden)]
 #[macro_export]

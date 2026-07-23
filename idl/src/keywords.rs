@@ -12,6 +12,11 @@ pub const RUST: &[&str] = &[
     "override", "priv", "typeof", "unsized", "virtual", "yield", "try", "union", "gen",
 ];
 
+/// Rust keywords that cannot be written as raw identifiers (`r#self` etc. do not compile).
+/// These are escaped with a trailing underscore instead.
+#[rustfmt::skip]
+pub const RUST_NON_RAW: &[&str] = &["self", "Self", "super", "crate"];
+
 #[rustfmt::skip]
 pub const C: &[&str] = &[
     "auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else",

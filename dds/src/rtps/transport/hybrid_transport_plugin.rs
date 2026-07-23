@@ -6,7 +6,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Mutex;
 use std::thread;
 
-use crossbeam_channel::{bounded, Receiver};
+use flume::{bounded, Receiver};
 use log::{debug, info, warn};
 
 use crate::rtps::common::guid::GuidPrefix;
@@ -292,7 +292,7 @@ impl TransportPlugin for HybridTransportPlugin {
 fn merge_udp_and_channel(
     mut udp_listener: UdpListener,
     channel_source: Option<MessageSource>,
-    tx: crossbeam_channel::Sender<IncomingMessage>,
+    tx: flume::Sender<IncomingMessage>,
 ) {
     use mio::{Events, Interest, Poll, Token};
     use std::time::Duration;
@@ -348,10 +348,7 @@ fn merge_udp_and_channel(
 }
 
 /// Forward messages from one channel to another.
-fn forward_channel(
-    rx: crossbeam_channel::Receiver<IncomingMessage>,
-    tx: crossbeam_channel::Sender<IncomingMessage>,
-) {
+fn forward_channel(rx: flume::Receiver<IncomingMessage>, tx: flume::Sender<IncomingMessage>) {
     while let Ok(msg) = rx.recv() {
         if tx.try_send(msg).is_err() {
             return;

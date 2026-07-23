@@ -96,6 +96,43 @@ namespace Int2Dds.Core
         internal IntPtr Handle => _handle;
 
         /// <summary>
+        /// Gets this publisher's 16-byte instance handle.
+        /// </summary>
+        public unsafe byte[] GetInstanceHandle()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            var handle = new byte[16];
+            fixed (byte* p = handle)
+            {
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_publisher_get_instance_handle(_handle, p));
+            }
+            return handle;
+        }
+
+        /// <summary>
+        /// Gets the StatusCondition associated with this publisher.
+        /// </summary>
+        public Int2Dds.Conditions.StatusCondition GetStatusCondition()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            ReturnCodeHelper.CheckReturn(
+                NativeMethods.int2dds_publisher_get_statuscondition(_handle, out var conditionHandle));
+            return new Int2Dds.Conditions.StatusCondition(conditionHandle);
+        }
+
+        /// <summary>
+        /// Gets the current status change bitmask of this publisher.
+        /// </summary>
+        public uint GetStatusChanges()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            ReturnCodeHelper.CheckReturn(
+                NativeMethods.int2dds_publisher_get_status_changes(_handle, out var mask));
+            return mask;
+        }
+
+        /// <summary>
         /// Creates a DataWriter for the given topic.
         /// </summary>
         /// <typeparam name="T">The DDS data type.</typeparam>

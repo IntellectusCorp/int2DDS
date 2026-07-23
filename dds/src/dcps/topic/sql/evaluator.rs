@@ -498,6 +498,26 @@ mod tests {
         }
     }
 
+    #[derive(DdsType)]
+    struct WideData {
+        pub seq: i64,
+    }
+
+    #[test]
+    fn test_int64_filter_full_width_comparison() {
+        let eval = |seq: i64| {
+            let data = WideData { seq };
+            let mut lexer = Lexer::new("seq > 3000000000".to_string());
+            let tokens = lexer.tokenize();
+            let mut parser = Parser::new(tokens);
+            let expression = parser.parse_expression(false).unwrap();
+            expression.evaluate(&data, &["".to_string()]).unwrap()
+        };
+
+        assert!(eval(3_000_000_001), "value above the bound must pass");
+        assert!(!eval(2_999_999_999), "value below the bound must be filtered");
+    }
+
     #[test]
     fn test_simple_equal_comparison() {
         let test_data = TestData::new(1, "Alice", 85.5, 'A', true);

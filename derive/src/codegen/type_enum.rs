@@ -113,6 +113,32 @@ pub fn derive_enum_impl(
         }
     };
 
+    // KeyHolder (RTPS KeyHash projection): a C-style enum is a leaf with a
+    // discriminant-sized maximum; a union has no finite maximum (=> always MD5).
+    let (key_holder_max, key_holder_align) = if is_enum {
+        let size = (disc_type.bit_bound() / 8) as usize;
+        let align = size.min(4);
+        (quote! { Some(#size) }, quote! { #align })
+    } else {
+        (quote! { None }, quote! { 4 })
+    };
+    let key_holder_impl = quote! {
+        impl #crate_path::serialize::KeyHolder for #name {
+            fn serialize_key_holder(&self, serializer: &mut #crate_path::serialize::xcdr::Xcdr2Serializer) -> #crate_path::serialize::xcdr::XcdrResult<()> {
+                #crate_path::serialize::xcdr::XcdrSerialize::serialize_xcdr(self, serializer)
+            }
+            fn deserialize_key_holder(deserializer: &mut #crate_path::serialize::xcdr::Xcdr2Deserializer) -> #crate_path::serialize::xcdr::XcdrResult<Self> {
+                #crate_path::serialize::xcdr::XcdrDeserialize::deserialize_xcdr(deserializer)
+            }
+            fn key_holder_max_size() -> Option<usize> {
+                #key_holder_max
+            }
+            fn key_holder_align() -> usize {
+                #key_holder_align
+            }
+        }
+    };
+
     quote! {
         #type_support_struct
         #type_support_impl
@@ -123,6 +149,7 @@ pub fn derive_enum_impl(
         #xcdr_deserialize_impl
         #xcdr_members_impls
         #has_type_object_impl
+        #key_holder_impl
         #additional_derives
     }
 }

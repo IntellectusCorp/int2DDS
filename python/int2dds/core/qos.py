@@ -175,7 +175,7 @@ class ReaderDataLifecycle:
 
 @dataclass
 class DataRepresentation:
-    kind: Literal["XCDR1", "XCDR2"] = "XCDR2"
+    kind: Literal["XCDR1", "XCDR2"] = "XCDR1"
 
     @property
     def _kind_int(self) -> int:
@@ -238,9 +238,13 @@ class Property:
     as a convenience.
     """
     entries: list[tuple[str, str, bool]] = field(default_factory=list)
+    binary_entries: list[tuple[str, bytes, bool]] = field(default_factory=list)
 
     def add(self, name: str, value: str, propagate: bool = True) -> None:
         self.entries.append((name, value, propagate))
+
+    def add_binary(self, name: str, data: bytes, propagate: bool = True) -> None:
+        self.binary_entries.append((name, bytes(data), propagate))
 
     def set_multicast_ttl(self, ttl: int) -> None:
         if not 0 <= ttl <= 255:
@@ -257,9 +261,9 @@ class Property:
 
 @dataclass
 class DataWriterQos:
-    reliability: Reliability = field(default_factory=lambda: Reliability("RELIABLE"))
-    durability: Durability = field(default_factory=lambda: Durability("VOLATILE"))
-    history: History = field(default_factory=History)
+    reliability: Reliability | None = None
+    durability: Durability | None = None
+    history: History | None = None
     ownership: Ownership | None = None
     ownership_strength: OwnershipStrength | None = None
     resource_limits: ResourceLimits | None = None
@@ -276,9 +280,9 @@ class DataWriterQos:
 
 @dataclass
 class DataReaderQos:
-    reliability: Reliability = field(default_factory=lambda: Reliability("BEST_EFFORT"))
-    durability: Durability = field(default_factory=lambda: Durability("VOLATILE"))
-    history: History = field(default_factory=History)
+    reliability: Reliability | None = None
+    durability: Durability | None = None
+    history: History | None = None
     ownership: Ownership | None = None
     resource_limits: ResourceLimits | None = None
     destination_order: DestinationOrder | None = None

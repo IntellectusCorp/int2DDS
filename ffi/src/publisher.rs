@@ -13,7 +13,7 @@
 //! directly via `int2dds_write_serialized`.
 
 use std::ffi::CStr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use int2dds::{
     common::instance_handle::InstanceHandle,
@@ -192,6 +192,26 @@ pub unsafe extern "C" fn int2dds_publisher_get_qos(
     INT2DDS_RET_OK
 }
 
+/// Get the 16-byte instance handle of a Publisher.
+///
+/// # Safety
+/// - `publisher` must be a valid publisher
+/// - `handle_out` must point to a 16-byte buffer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publisher_get_instance_handle(
+    publisher: *const Int2DdsPublisher,
+    handle_out: *mut [u8; 16],
+) -> Int2DdsRet {
+    check_null!(publisher);
+    check_null!(handle_out);
+
+    let publisher_ref = &*publisher;
+    let handle = ffi_try!(publisher_ref.inner.get_instance_handle());
+    *handle_out = *handle.value();
+
+    INT2DDS_RET_OK
+}
+
 /// Set QoS on a DataWriter
 ///
 /// Applies new QoS policies to an existing DataWriter. Some policies can only
@@ -275,29 +295,30 @@ pub unsafe extern "C" fn int2dds_delete_publisher(publisher: *mut Int2DdsPublish
         return INT2DDS_RET_NULL_POINTER;
     }
 
-    let publisher_ref = &*publisher;
-    if Arc::strong_count(&publisher_ref.inner) != 1 {
+    let publisher_box = Box::from_raw(publisher);
+    if Arc::strong_count(&publisher_box.inner) != 1 {
+        let _ = Box::into_raw(publisher_box);
         return INT2DDS_RET_PRECONDITION_NOT_MET;
     }
 
-    // Destructure Box to move Arc out
-    let Int2DdsPublisher { inner: publisher_arc } = *Box::from_raw(publisher);
+    let publisher_obj = (*publisher_box.inner).clone();
 
-    // Try to unwrap Arc without cloning (succeeds if this is the only reference)
-    let publisher_obj = match Arc::try_unwrap(publisher_arc) {
-        Ok(p) => p,
-        Err(_arc) => return INT2DDS_RET_PRECONDITION_NOT_MET,
-    };
-
-    // Get the participant to delete the publisher
     let participant = match publisher_obj.get_participant() {
         Ok(p) => p,
-        Err(e) => return dds_error_to_code(&e),
+        Err(e) => {
+            let _ = Box::into_raw(publisher_box);
+            return dds_error_to_code(&e);
+        }
     };
 
+    // On failure the publisher is not deleted; restore the caller's handle
+    // (into_raw) instead of leaving it freed. The Box drops (frees) only on success.
     match participant.delete_publisher(publisher_obj) {
         Ok(()) => INT2DDS_RET_OK,
-        Err(e) => dds_error_to_code(&e),
+        Err(e) => {
+            let _ = Box::into_raw(publisher_box);
+            dds_error_to_code(&e)
+        }
     }
 }
 
@@ -338,9 +359,9 @@ pub unsafe extern "C" fn int2dds_create_datawriter(
         StatusMask::default()
     ));
 
-    let writer_handle = Box::new(Int2DdsDataWriter { inner: writer, listener: None });
+    let writer_handle = Arc::new(Int2DdsDataWriter { inner: writer, listener: RwLock::new(None) });
 
-    *writer_out = Box::into_raw(writer_handle);
+    *writer_out = Arc::into_raw(writer_handle) as *mut Int2DdsDataWriter;
 
     INT2DDS_RET_OK
 }
@@ -388,13 +409,12 @@ pub unsafe extern "C" fn int2dds_create_datawriter_with_listener(
     ));
 
     // Create writer_handle with the actual writer
-    let mut writer_handle = Box::new(Int2DdsDataWriter { inner: writer, listener: None });
+    let writer_handle = Arc::new(Int2DdsDataWriter { inner: writer, listener: RwLock::new(None) });
 
     // If listener is provided, set it now
     if !listener.is_null() {
-        let writer_ptr = &mut *writer_handle as *mut Int2DdsDataWriter;
-        let ffi_listener = FfiDataWriterListener::new(*listener, writer_ptr);
-        let listener_arc = Arc::new(ffi_listener);
+        let weak = Arc::downgrade(&writer_handle);
+        let listener_arc = Arc::new(FfiDataWriterListener::new(*listener, weak));
 
         // Set the listener on the writer
         let listener_clone = listener_arc.clone()
@@ -407,7 +427,7 @@ pub unsafe extern "C" fn int2dds_create_datawriter_with_listener(
             .inner
             .set_listener(Some(listener_clone), StatusMask::from_bits_truncate(mask)));
 
-        writer_handle.listener = Some(listener_arc.clone());
+        *writer_handle.listener.write().unwrap() = Some(listener_arc.clone());
 
         // Check if matching already occurred before the listener was set.
         // This handles the race condition where SEDP matching completes between
@@ -428,7 +448,7 @@ pub unsafe extern "C" fn int2dds_create_datawriter_with_listener(
         }
     }
 
-    *writer_out = Box::into_raw(writer_handle);
+    *writer_out = Arc::into_raw(writer_handle) as *mut Int2DdsDataWriter;
 
     INT2DDS_RET_OK
 }
@@ -468,9 +488,9 @@ pub unsafe extern "C" fn int2dds_create_datawriter_with_profile(
         StatusMask::default()
     ));
 
-    let writer_handle = Box::new(Int2DdsDataWriter { inner: writer, listener: None });
+    let writer_handle = Arc::new(Int2DdsDataWriter { inner: writer, listener: RwLock::new(None) });
 
-    *writer_out = Box::into_raw(writer_handle);
+    *writer_out = Arc::into_raw(writer_handle) as *mut Int2DdsDataWriter;
 
     INT2DDS_RET_OK
 }
@@ -517,13 +537,12 @@ pub unsafe extern "C" fn int2dds_create_datawriter_with_profile_and_listener(
     ));
 
     // Create writer_handle with the actual writer
-    let mut writer_handle = Box::new(Int2DdsDataWriter { inner: writer, listener: None });
+    let writer_handle = Arc::new(Int2DdsDataWriter { inner: writer, listener: RwLock::new(None) });
 
     // If listener is provided, set it now
     if !listener.is_null() {
-        let writer_ptr = &mut *writer_handle as *mut Int2DdsDataWriter;
-        let ffi_listener = FfiDataWriterListener::new(*listener, writer_ptr);
-        let listener_arc = Arc::new(ffi_listener);
+        let weak = Arc::downgrade(&writer_handle);
+        let listener_arc = Arc::new(FfiDataWriterListener::new(*listener, weak));
 
         // Set the listener on the writer
         let listener_clone = listener_arc.clone()
@@ -536,7 +555,7 @@ pub unsafe extern "C" fn int2dds_create_datawriter_with_profile_and_listener(
             .inner
             .set_listener(Some(listener_clone), StatusMask::from_bits_truncate(mask)));
 
-        writer_handle.listener = Some(listener_arc.clone());
+        *writer_handle.listener.write().unwrap() = Some(listener_arc.clone());
 
         // Check if matching already occurred before the listener was set.
         if mask & crate::status_condition::INT2DDS_STATUS_PUBLICATION_MATCHED != 0 {
@@ -555,7 +574,7 @@ pub unsafe extern "C" fn int2dds_create_datawriter_with_profile_and_listener(
         }
     }
 
-    *writer_out = Box::into_raw(writer_handle);
+    *writer_out = Arc::into_raw(writer_handle) as *mut Int2DdsDataWriter;
 
     INT2DDS_RET_OK
 }
@@ -575,18 +594,18 @@ pub unsafe extern "C" fn int2dds_datawriter_set_listener(
 ) -> Int2DdsRet {
     check_null!(writer);
 
-    let writer_ref = &mut *writer;
+    // No early return is allowed between from_raw and into_raw below, or the
+    // caller's strong reference would be dropped and later delete double-frees.
+    let writer_arc = Arc::from_raw(writer as *const Int2DdsDataWriter);
 
-    // Create new listener wrapper if provided
     let listener_arc = if !listener.is_null() {
-        let ffi_listener = FfiDataWriterListener::new(*listener, writer);
-        Some(Arc::new(ffi_listener))
+        let weak = Arc::downgrade(&writer_arc);
+        Some(Arc::new(FfiDataWriterListener::new(*listener, weak)))
     } else {
         None
     };
 
-    // Set listener on the inner writer
-    let result = writer_ref.inner.set_listener(
+    let result = writer_arc.inner.set_listener(
         listener_arc.clone().map(|l| {
             l as Arc<
                 dyn int2dds::publication::data_writer_listener::DataWriterListener<
@@ -597,8 +616,9 @@ pub unsafe extern "C" fn int2dds_datawriter_set_listener(
         StatusMask::from_bits_truncate(mask),
     );
 
-    // Update the stored listener
-    writer_ref.listener = listener_arc;
+    *writer_arc.listener.write().unwrap() = listener_arc;
+
+    let _ = Arc::into_raw(writer_arc);
 
     match result {
         Ok(()) => INT2DDS_RET_OK,
@@ -623,7 +643,7 @@ pub unsafe extern "C" fn int2dds_datawriter_get_listener(
     let writer_ref = &*writer;
 
     // Return the stored listener callbacks
-    if let Some(listener_arc) = &writer_ref.listener {
+    if let Some(listener_arc) = writer_ref.listener.read().unwrap().as_ref() {
         // Copy the callbacks struct
         *listener_out = listener_arc.callbacks;
         INT2DDS_RET_OK
@@ -645,18 +665,29 @@ pub unsafe extern "C" fn int2dds_delete_datawriter(writer: *mut Int2DdsDataWrite
         return INT2DDS_RET_NULL_POINTER;
     }
 
-    let writer_box = Box::from_raw(writer);
-    let writer_obj = writer_box.inner;
+    // Reclaim the caller's strong reference; the writer is freed only once this
+    // Arc and any callback that upgraded its Weak are dropped.
+    let writer_arc = Arc::from_raw(writer as *const Int2DdsDataWriter);
+    let writer_obj = writer_arc.inner.clone();
 
-    // Get the publisher to delete the writer
+    let _ = writer_obj.set_listener(None, StatusMask::default());
+
     let publisher = match writer_obj.get_publisher() {
         Ok(p) => p,
-        Err(e) => return dds_error_to_code(&e),
+        Err(e) => {
+            let _ = Arc::into_raw(writer_arc);
+            return dds_error_to_code(&e);
+        }
     };
 
+    // On failure the writer is not deleted; hand the caller's strong reference
+    // back (into_raw) so the handle stays valid instead of being freed.
     match publisher.delete_datawriter(writer_obj) {
         Ok(()) => INT2DDS_RET_OK,
-        Err(e) => dds_error_to_code(&e),
+        Err(e) => {
+            let _ = Arc::into_raw(writer_arc);
+            dds_error_to_code(&e)
+        }
     }
 }
 
@@ -819,8 +850,9 @@ pub unsafe extern "C" fn int2dds_publisher_delete_contained_entities(
 /// - `writer`: A valid datawriter
 /// - `data`: Pointer to the CDR-serialized byte buffer
 /// - `data_len`: Length of the serialized data in bytes
-/// - `key`: Pointer to the serialized key bytes (can be null if no key)
-/// - `key_len`: Length of the key bytes
+/// - `key`: Ignored, retained for ABI compatibility. The instance key and KeyHash are
+///   derived canonically from `data` (the full serialized sample); pass null/0.
+/// - `key_len`: Ignored, retained for ABI compatibility
 ///
 /// # Safety
 /// - `writer` must be a valid datawriter
@@ -882,6 +914,19 @@ pub unsafe extern "C" fn int2dds_prepare_serialized_write(
     INT2DDS_RET_OK
 }
 
+/// Commit a staged serialized write.
+///
+/// # Ownership
+/// On success the loan is consumed and `loan` is freed — do not use or abort it.
+/// On failure the loan handle is left valid: the caller must release it with
+/// `int2dds_abort_serialized_write` (or discard it after a subsequent successful
+/// path). This makes the common binding idiom (`commit`; on error `abort`)
+/// memory-safe rather than a double-free.
+///
+/// # Safety
+/// - `writer` must be a valid datawriter
+/// - `loan` must be a valid loan from `int2dds_prepare_serialized_write` that has
+///   not already been committed or aborted
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_commit_serialized_write(
     writer: *const Int2DdsDataWriter,
@@ -897,7 +942,11 @@ pub unsafe extern "C" fn int2dds_commit_serialized_write(
     let mut loan_box = Box::from_raw(loan);
     let loan_inner = match loan_box.inner.take() {
         Some(loan_inner) => loan_inner,
-        None => ffi_bail!("serialized write loan already consumed"),
+        None => {
+            // Already consumed: keep the handle valid so a following abort frees it once.
+            let _ = Box::into_raw(loan_box);
+            ffi_bail!("serialized write loan already consumed");
+        }
     };
 
     let serialized_key = if key.is_null() || key_len == 0 {
@@ -908,7 +957,13 @@ pub unsafe extern "C" fn int2dds_commit_serialized_write(
 
     match writer_ref.inner.commit_serialized_write(loan_inner, actual_size, serialized_key) {
         Ok(()) => INT2DDS_RET_OK,
-        Err(e) => dds_error_to_code(&e),
+        Err(e) => {
+            // Write failed. The loan buffer was consumed by the core, so `inner` is
+            // already None; restore the handle so the caller's abort frees the (now
+            // empty) loan box exactly once instead of double-freeing it.
+            let _ = Box::into_raw(loan_box);
+            dds_error_to_code(&e)
+        }
     }
 }
 
@@ -931,8 +986,9 @@ pub unsafe extern "C" fn int2dds_abort_serialized_write(
 /// - `writer`: A valid datawriter
 /// - `data`: Pointer to the CDR-serialized byte buffer
 /// - `data_len`: Length of the serialized data in bytes
-/// - `key`: Pointer to the serialized key bytes (can be null if no key)
-/// - `key_len`: Length of the key bytes
+/// - `key`: Ignored, retained for ABI compatibility. The instance key and KeyHash are
+///   derived canonically from `data` (the full serialized sample); pass null/0.
+/// - `key_len`: Ignored, retained for ABI compatibility
 /// - `timestamp_sec`: Seconds component of the source timestamp
 /// - `timestamp_nanosec`: Nanoseconds component of the source timestamp
 ///
@@ -1036,7 +1092,9 @@ unsafe fn handle_from_c(handle_ptr: *const [u8; 16]) -> InstanceHandle {
     }
 }
 
-/// Register an instance with serialized key bytes
+/// Register an instance from the full serialized sample. The canonical KeyHash is
+/// derived from the sample by the core (matching the wire); `key`/`key_len` carry
+/// the serialized sample bytes.
 ///
 /// # Safety
 /// - `writer` must be a valid datawriter
@@ -1054,15 +1112,19 @@ pub unsafe extern "C" fn int2dds_datawriter_register_instance(
     check_null!(handle_out);
 
     let writer_ref = &*writer;
-    let key_bytes = std::slice::from_raw_parts(key, key_len);
+    let sample_bytes = std::slice::from_raw_parts(key, key_len);
 
-    let handle = ffi_try!(writer_ref.inner.register_instance_serialized(key_bytes));
+    let handle = ffi_try!(writer_ref.inner.register_instance_serialized(sample_bytes));
     *handle_out = *handle.value();
 
     INT2DDS_RET_OK
 }
 
-/// Dispose an instance with serialized key bytes
+/// Dispose an instance from the full serialized sample. `key`/`key_len` carry the
+/// serialized sample bytes (not a pre-serialized key); the core derives the canonical
+/// KeyHash from them. A keyed topic must have been created with a full TypeObject
+/// (int2dds_create_topic_with_type_info / _with_field_descriptors), otherwise this
+/// returns INT2DDS_RET_PRECONDITION_NOT_MET.
 ///
 /// # Safety
 /// - `writer` must be a valid datawriter
@@ -1087,7 +1149,11 @@ pub unsafe extern "C" fn int2dds_datawriter_dispose(
     INT2DDS_RET_OK
 }
 
-/// Unregister an instance with serialized key bytes
+/// Unregister an instance from the full serialized sample. `key`/`key_len` carry the
+/// serialized sample bytes (not a pre-serialized key); the core derives the canonical
+/// KeyHash from them. A keyed topic must have been created with a full TypeObject
+/// (int2dds_create_topic_with_type_info / _with_field_descriptors), otherwise this
+/// returns INT2DDS_RET_PRECONDITION_NOT_MET.
 ///
 /// # Safety
 /// - `writer` must be a valid datawriter
@@ -1112,7 +1178,11 @@ pub unsafe extern "C" fn int2dds_datawriter_unregister_instance(
     INT2DDS_RET_OK
 }
 
-/// Lookup an instance handle from serialized key bytes
+/// Lookup an instance handle from the full serialized sample. `key`/`key_len` carry the
+/// serialized sample bytes (not a pre-serialized key); the core derives the canonical
+/// KeyHash from them. A keyed topic must have been created with a full TypeObject
+/// (int2dds_create_topic_with_type_info / _with_field_descriptors), otherwise this
+/// returns INT2DDS_RET_PRECONDITION_NOT_MET.
 ///
 /// # Safety
 /// - `writer` must be a valid datawriter
