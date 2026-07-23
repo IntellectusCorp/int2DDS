@@ -30,12 +30,13 @@ use crate::{
     infrastructure::qos_kind::QosKind,
     infrastructure::qos_policy::{
         DataFragQosPolicy, DataRepresentationQosPolicy, DeadlineQosPolicy,
-        DestinationOrderQosPolicy, DurabilityQosPolicy, DurabilityServiceQosPolicy,
-        EntityFactoryQosPolicy, GroupDataQosPolicy, HistoryQosPolicy, LatencyBudgetQosPolicy,
-        LifespanQosPolicy, LivelinessQosPolicy, OwnershipQosPolicy, OwnershipStrengthQosPolicy,
-        PartitionQosPolicy, PresentationQosPolicy, Qos, ReliabilityQosPolicy,
-        ReliabilityQosPolicyKind, ResourceLimitsQosPolicy, TransportPriorityQosPolicy,
-        UserDataQosPolicy, WriterDataLifecycleQosPolicy, WriterReliabilityExtensionQosPolicy,
+        DestinationOrderQosPolicy, DurabilityQosPolicy, DurabilityQosPolicyKind,
+        DurabilityServiceQosPolicy, EntityFactoryQosPolicy, GroupDataQosPolicy, HistoryQosPolicy,
+        LatencyBudgetQosPolicy, LifespanQosPolicy, LivelinessQosPolicy, OwnershipQosPolicy,
+        OwnershipStrengthQosPolicy, PartitionQosPolicy, PresentationQosPolicy, Qos,
+        ReliabilityQosPolicy, ReliabilityQosPolicyKind, ResourceLimitsQosPolicy,
+        TransportPriorityQosPolicy, UserDataQosPolicy, WriterDataLifecycleQosPolicy,
+        WriterReliabilityExtensionQosPolicy,
     },
 };
 use const_default::ConstDefault;
@@ -125,6 +126,8 @@ impl Qos for DataWriterQos {
         if self.latency_budget != LatencyBudgetQosPolicy::default()
             // || self.liveliness != LivelinessQosPolicy::default()
             || self.transport_priority != TransportPriorityQosPolicy::default()
+            || self.durability.kind == DurabilityQosPolicyKind::Transient
+            || self.durability.kind == DurabilityQosPolicyKind::Persistent
         // || self.lifespan != LifespanQosPolicy::default()
         // || self.ownership != OwnershipQosPolicy::default()
         // || self.ownership_strength != OwnershipStrengthQosPolicy::default()
