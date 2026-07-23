@@ -107,7 +107,7 @@ impl DiscoveryMulticastListeningTask {
 
     fn listen_channel(
         &mut self,
-        rx: &crossbeam_channel::Receiver<crate::rtps::transport::plugin::IncomingMessage>,
+        rx: &flume::Receiver<crate::rtps::transport::plugin::IncomingMessage>,
     ) -> std::io::Result<()> {
         info!("start discovery multicast listening (Channel)");
 
@@ -122,7 +122,7 @@ impl DiscoveryMulticastListeningTask {
                     }
                     self.process_rtps_message(Bytes::from(msg.data), msg.source);
                 }
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                Err(flume::RecvTimeoutError::Timeout) => {
                     let spdp_logic =
                         self.spdp_logic.as_ref().as_ref().expect("SpdpLogic is not initialized");
                     if let Ok(true) = spdp_logic.is_participant_terminated() {
@@ -130,7 +130,7 @@ impl DiscoveryMulticastListeningTask {
                         return Ok(());
                     }
                 }
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                Err(flume::RecvTimeoutError::Disconnected) => {
                     info!("[DiscoveryMulticast] Channel disconnected, stopping listener");
                     return Ok(());
                 }
