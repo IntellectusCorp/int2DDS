@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::rtps::transport::tcp::connection_tasks::{inbox_capacity, spawn_connection_tasks};
+use crate::rtps::transport::tcp::connection_tasks::{inbox_capacity, spawn_tasks};
 use crate::rtps::transport::tcp::stream::wrap_plain;
 use crate::rtps::transport::tcp::tls::{accept_tls_async, TlsConfig};
 use crate::rtps::{
@@ -42,8 +42,8 @@ impl TcpMuxListener {
         domain_id: u32,
         participant_id: u32,
         local_guid_prefix: GuidPrefix,
-        discovery_tx: crossbeam_channel::Sender<IncomingMessage>,
-        user_data_tx: crossbeam_channel::Sender<IncomingMessage>,
+        discovery_tx: flume::Sender<IncomingMessage>,
+        user_data_tx: flume::Sender<IncomingMessage>,
         tls_config: Option<Arc<TlsConfig>>,
         tuning: TcpSocketTuning,
     ) -> io::Result<Self> {
@@ -204,18 +204,16 @@ async fn handshake_and_register_task(
         None => wrap_plain(tcp),
     };
 
-    // Channel created here, NOT inside spawn_connection_tasks — so we can register
-    // the entry (with tx) before the reader task starts polling.
+    // An inbound connection is already established, and its writer task owns the
+    // write half outright (it writes handshake/control acks; the send path never
+    // targets an inbound connection). Split the stream straight into halves.
+    let (read_half, write_half) = stream.into_split();
+
+    // Register the entry before the reader task starts polling.
     let (tx, rx) = mpsc::channel::<Vec<u8>>(inbox_capacity());
     let conn_cancel = parent_cancel.child_token();
-
-    let conn_id = shared.register_inbound_connection(addr, tx.clone(), conn_cancel.clone());
-
-    // Inbound connections only receive from the wire and write protocol
-    // acks via the writer_tx inbox. The user-data send path never targets
-    // an inbound connection, so the returned `SharedWriteHalf` is dropped
-    // here — only the writer_task uses it.
-    let _ = spawn_connection_tasks(stream, conn_id, shared.clone(), conn_cancel, tx, rx);
+    let conn_id = shared.register_inbound_connection(addr, conn_cancel.clone());
+    spawn_tasks(read_half, conn_id, shared.clone(), conn_cancel, tx, rx, write_half);
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -229,7 +227,7 @@ mod tests {
         encode_locator, ControlMsg, ERR_CODE_MISSING_LOCATOR, MSG_ERROR, MSG_PEER_HELLO,
         MSG_PEER_HELLO_ACK,
     };
-    use crossbeam_channel::bounded;
+    use flume::bounded;
     use socket2::{Domain, SockAddr, Socket, Type};
     use std::time::{Duration, Instant};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -238,10 +236,10 @@ mod tests {
     /// Helper: build the four channels needed by `bind_and_spawn`, returning
     /// the receivers so tests can assert on routed messages if needed.
     fn make_channels() -> (
-        crossbeam_channel::Sender<IncomingMessage>,
-        crossbeam_channel::Receiver<IncomingMessage>,
-        crossbeam_channel::Sender<IncomingMessage>,
-        crossbeam_channel::Receiver<IncomingMessage>,
+        flume::Sender<IncomingMessage>,
+        flume::Receiver<IncomingMessage>,
+        flume::Sender<IncomingMessage>,
+        flume::Receiver<IncomingMessage>,
     ) {
         let (d_tx, d_rx) = bounded(64);
         let (u_tx, u_rx) = bounded(64);

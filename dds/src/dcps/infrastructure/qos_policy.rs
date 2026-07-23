@@ -868,8 +868,12 @@ pub const PROP_TCP_CONNECT_TIMEOUT_MS: &str = "int2dds.transport.TCPv4.connect_t
 /// BIND handshake response timeout, milliseconds. Default `5000`.
 pub const PROP_TCP_BIND_TIMEOUT_MS: &str = "int2dds.transport.TCPv4.bind_timeout_ms";
 /// Max time (ms) unacknowledged data may stay outstanding before the OS drops
-/// the connection, so a dead link surfaces as a write error instead of blocking
-/// the sender ~indefinitely. Default `5000`; `0` uses the OS default.
+/// the connection (`TCP_USER_TIMEOUT`), so a dead link surfaces as a write error
+/// instead of blocking the sender ~indefinitely. When keepalive is also set,
+/// `TCP_USER_TIMEOUT` bounds the keepalive sequence too, so keep this aligned
+/// with the keepalive schedule
+/// (`keepalive_interval + keepalive_timeout * keepalive_max_misses`).
+/// Default `25000`. `0` uses the OS default (no bound).
 pub const PROP_TCP_UNACKED_TIMEOUT_MS: &str = "int2dds.transport.TCPv4.unacked_timeout_ms";
 /// OS keepalive idle time before the first probe (`TCP_KEEPIDLE`), ms. Default `10000`.
 pub const PROP_TCP_KEEPALIVE_INTERVAL_MS: &str = "int2dds.transport.TCPv4.keepalive_interval_ms";
@@ -883,6 +887,18 @@ pub const PROP_TCP_SO_RCVBUF: &str = "int2dds.transport.TCPv4.so_rcvbuf";
 pub const PROP_TCP_SO_SNDBUF: &str = "int2dds.transport.TCPv4.so_sndbuf";
 /// Tokio worker thread count for the TCP runtime.
 pub const PROP_TCP_ASYNC_WORKERS: &str = "int2dds.transport.TCPv4.async_workers";
+/// User-data wire-write deadline, milliseconds. A send waits up to this long for
+/// the previous frame to reach the socket, then drops the frame rather than
+/// delay sends to other peers. `-1` blocks until it completes (no pre-wire drop,
+/// congestion isolation off); `0` is a try-lock (take the lock if free, else drop
+/// at once, isolation off). Default `1000` — generous by design; lower it to
+/// trade flow-control fidelity for tighter HOL isolation.
+pub const PROP_TCP_SEND_DEADLINE_MS: &str = "int2dds.transport.TCPv4.send_deadline_ms";
+/// Consecutive send-deadline misses before a connection is marked congested and
+/// its writes drop to the short probe deadline, isolating a slow/stalled peer
+/// from the fan-out. Min 1. Default `1`.
+pub const PROP_TCP_CONGESTION_MISS_THRESHOLD: &str =
+    "int2dds.transport.TCPv4.congestion_miss_threshold";
 
 /// Generic name/value extension channel for QoS-driven configuration.
 ///
