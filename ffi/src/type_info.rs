@@ -512,11 +512,9 @@ pub unsafe extern "C" fn int2dds_type_info_create(
 
     let name_str = cstr_arg!(type_name);
 
-    let ext_kind = match extensibility {
-        0 => ExtensibilityKind::Final,
-        1 => ExtensibilityKind::Appendable,
-        2 => ExtensibilityKind::Mutable,
-        _ => return INT2DDS_RET_INVALID_ARGUMENT,
+    let ext_kind = match crate::topic::resolve_extensibility(extensibility) {
+        Some(k) => k,
+        None => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
     let ti = Box::new(Int2DdsTypeInfo::new(name_str.to_string(), ext_kind));

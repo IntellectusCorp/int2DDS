@@ -117,4 +117,11 @@ static inline Int2DdsTypeInfo* HelloWorld_type_info(void) {
     return ti;
 }
 
+static inline Int2DdsRet HelloWorld_create_topic(const Int2DdsParticipant *participant, const char *topic_name, const Int2DdsTopicQos *qos, Int2DdsTopic **topic_out) {
+    Int2DdsTypeInfo *ti = HelloWorld_type_info();
+    Int2DdsRet ret = int2dds_create_topic_with_type_info(participant, topic_name, ti, qos, topic_out);
+    int2dds_type_info_destroy(ti);
+    return ret;
+}
+
 #endif /* HELLO_WORLD_IDL_H */

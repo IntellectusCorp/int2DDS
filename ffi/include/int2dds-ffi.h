@@ -1847,6 +1847,33 @@ Int2DdsRet int2dds_env_set_multicast_ttl(uint8_t ttl);
 Int2DdsRet int2dds_env_get_multicast_ttl(uint8_t *ttl_out, bool *has_value_out);
 
 /**
+ * Sets the QoS profile file path(s) to auto-load, via the `DDS_QOS_PROFILE`
+ * environment variable. The `DomainParticipantFactory` singleton auto-loads
+ * these when it first initializes (on the first participant creation); the
+ * `*_QOS_DEFAULT` resolution then draws QoS from the selected default profile.
+ *
+ * Multiple paths may be joined with `,` (also `;` on Windows / `:` on Unix).
+ *
+ * # Safety
+ * - `path` must be a valid, null-terminated UTF-8 C string.
+ * - Call before the first `DomainParticipant` is created so the factory
+ *   singleton picks it up when it initializes.
+ */
+Int2DdsRet int2dds_env_set_qos_profile(const char *path);
+
+/**
+ * Selects the default QoS profile (`"Library::Profile"`) via the
+ * `DDS_DEFAULT_QOS_PROFILE` environment variable. The `*_QOS_DEFAULT`
+ * resolution reads this at entity-creation time, so `NULL`-QoS creators
+ * (participant/publisher/writer with default QoS) draw from this profile.
+ *
+ * # Safety
+ * - `profile` must be a valid, null-terminated UTF-8 C string
+ *   (e.g. `"HelloWorldDataFrag::Reliable"`).
+ */
+Int2DdsRet int2dds_env_set_default_qos_profile(const char *profile);
+
+/**
  * Copy the calling thread's last error message (UTF-8, NUL-terminated) into `buf`.
  * Returns the full message byte length, excluding the NUL.
  *
@@ -2582,6 +2609,16 @@ Int2DdsRet int2dds_datawriter_qos_set_ownership_strength(struct Int2DdsDataWrite
                                                          int32_t value);
 
 /**
+ * Set the DataFrag QoS (per-writer RTPS DATA_FRAG fragment size, in bytes) for
+ * DataWriter. Values `> 65000` are clamped and `<= 0` falls back to the 65000
+ * default at write time.
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ */
+Int2DdsRet int2dds_datawriter_qos_set_data_frag(struct Int2DdsDataWriterQos *qos, int32_t value);
+
+/**
  * Set resource limits QoS for DataWriter
  *
  * # Safety
@@ -2680,6 +2717,12 @@ Int2DdsRet int2dds_datawriter_qos_get_ownership(const struct Int2DdsDataWriterQo
  */
 Int2DdsRet int2dds_datawriter_qos_get_ownership_strength(const struct Int2DdsDataWriterQos *qos,
                                                          int32_t *value_out);
+
+/**
+ * Get the DataFrag QoS (fragment size, in bytes) from a DataWriter QoS handle.
+ */
+Int2DdsRet int2dds_datawriter_qos_get_data_frag(const struct Int2DdsDataWriterQos *qos,
+                                                int32_t *value_out);
 
 /**
  * Get resource limits from DataWriter QoS handle
@@ -4176,7 +4219,9 @@ Int2DdsRet int2dds_datareader_wait_for_historical_data(const struct Int2DdsDataR
  * - `participant` must be a valid participant
  * - `topic_name` must be a valid null-terminated C string
  * - `dds_type_name` must be a valid null-terminated C string (DDS registration name)
- * - `extensibility`: 0 = Final, 1 = Appendable, 2 = Mutable
+ * - `extensibility`: -1 = library default (Appendable per spec; frames a DHEADER, so
+ *   pass an explicit value or use the type-info path for a Final remote),
+ *   0 = Final, 1 = Appendable, 2 = Mutable
  * - `qos` can be null for default QoS
  * - `topic_out` must be a valid pointer to a null pointer
  * - The returned topic must be freed with `int2dds_delete_topic`
@@ -4199,7 +4244,9 @@ Int2DdsRet int2dds_create_topic(const struct Int2DdsParticipant *participant,
  * - `participant` must be a valid participant
  * - `topic_name` must be a valid null-terminated C string
  * - `dds_type_name` must be a valid null-terminated C string (DDS registration name)
- * - `extensibility`: 0 = Final, 1 = Appendable, 2 = Mutable
+ * - `extensibility`: -1 = library default (Appendable per spec; frames a DHEADER, so
+ *   pass an explicit value or use the type-info path for a Final remote),
+ *   0 = Final, 1 = Appendable, 2 = Mutable
  * - `has_key`: whether the data type has key fields
  * - `qos` can be null for default QoS
  * - `topic_out` must be a valid pointer to a null pointer
@@ -4222,7 +4269,9 @@ Int2DdsRet int2dds_create_topic_keyed(const struct Int2DdsParticipant *participa
  * - `participant` must be a valid participant
  * - `topic_name` must be a valid null-terminated C string
  * - `dds_type_name` must be a valid null-terminated C string (DDS registration name)
- * - `extensibility`: 0 = Final, 1 = Appendable, 2 = Mutable
+ * - `extensibility`: -1 = library default (Appendable per spec; frames a DHEADER, so
+ *   pass an explicit value or use the type-info path for a Final remote),
+ *   0 = Final, 1 = Appendable, 2 = Mutable
  * - `has_key`: whether the data type has key fields
  * - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
  * - `topic_out` must be a valid pointer to a null pointer
@@ -4386,11 +4435,13 @@ Int2DdsRet int2dds_contentfilteredtopic_set_enabled(struct Int2DdsContentFiltere
 /**
  * Create a Topic with key field metadata for compute_key() support.
  *
- * Deprecated flat key-field path. Canonical instance keys require a full TypeObject
- * (use int2dds_create_topic_with_type_info / int2dds_create_topic_with_field_descriptors);
- * the flat CdrFieldType key parser has been removed. With field_count == 0 this behaves
- * exactly like int2dds_create_topic_keyed; with field_count > 0 it returns
- * INT2DDS_RET_UNSUPPORTED rather than silently computing NIL instance handles.
+ * Deprecated flat key-field path. Canonical instance keys require a full TypeObject, so a
+ * keyed topic must be created via int2dds_create_topic_with_type_info or
+ * int2dds_create_topic_with_field_descriptors; the flat CdrFieldType key parser has been
+ * removed. This function therefore returns INT2DDS_RET_UNSUPPORTED whenever has_key is true
+ * (for any field_count), and also when field_count > 0, rather than silently computing NIL
+ * instance handles. With has_key false and field_count == 0 it creates a keyless topic,
+ * equivalent to int2dds_create_topic_keyed.
  *
  * # Safety
  * - Same as int2dds_create_topic_keyed

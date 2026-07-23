@@ -200,7 +200,9 @@ fn builtin_topic_key_to_bytes(value: &[i32; 3]) -> [u8; 12] {
 
 /// Copy a Rust string into a caller-provided C buffer as null-terminated UTF-8.
 /// Returns the required size (including null terminator) in `size_out`.
-/// If `capacity` is too small, copies up to `capacity - 1` bytes plus null.
+/// A NULL `buf` or zero `capacity` is a size query and returns OK with `size_out` set.
+/// If `capacity` is nonzero but too small, returns `INT2DDS_RET_BUFFER_TOO_SMALL`
+/// without copying (never emits a partially-truncated, invalid-UTF-8 string).
 unsafe fn copy_string_to_c(
     s: &str,
     buf: *mut u8,
@@ -214,9 +216,11 @@ unsafe fn copy_string_to_c(
     if buf.is_null() || capacity == 0 {
         return INT2DDS_RET_OK;
     }
-    let copy_len = std::cmp::min(s.len(), capacity - 1);
-    std::ptr::copy_nonoverlapping(s.as_ptr(), buf, copy_len);
-    *buf.add(copy_len) = 0; // null terminator
+    if capacity < needed {
+        return INT2DDS_RET_BUFFER_TOO_SMALL;
+    }
+    std::ptr::copy_nonoverlapping(s.as_ptr(), buf, s.len());
+    *buf.add(s.len()) = 0; // null terminator
     INT2DDS_RET_OK
 }
 

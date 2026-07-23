@@ -469,6 +469,10 @@ impl<'a> CGen<'a> {
 
         // type_info builder (for DDS-XTypes discovery)
         self.emit_type_info_fn(s);
+        self.raw("\n");
+
+        // create_topic helper (extensibility carried by the type, no arg)
+        self.emit_create_topic_fn(s);
     }
 
     fn emit_struct_typedef(&mut self, s: &ResolvedStruct) {
@@ -1716,6 +1720,25 @@ impl<'a> CGen<'a> {
         }
 
         self.raw("    return ti;\n}\n");
+    }
+
+    /// Emit a `{Name}_create_topic` convenience wrapper. Extensibility is carried by the
+    /// type through `{Name}_type_info()`, so C callers create a topic without passing an
+    /// extensibility argument — parity with the Python/C# bindings, where extensibility is
+    /// a property of the type rather than a `create_topic` parameter. Works for keyed types
+    /// too, since the type-info path derives the key from the TypeObject. Requires
+    /// `int2dds-ffi.h` (same prerequisite as `{Name}_type_info`).
+    fn emit_create_topic_fn(&mut self, s: &ResolvedStruct) {
+        self.raw(&format!(
+            "static inline Int2DdsRet {}_create_topic(const Int2DdsParticipant *participant, const char *topic_name, const Int2DdsTopicQos *qos, Int2DdsTopic **topic_out) {{\n",
+            s.name
+        ));
+        self.raw(&format!("    Int2DdsTypeInfo *ti = {}_type_info();\n", s.name));
+        self.raw(
+            "    Int2DdsRet ret = int2dds_create_topic_with_type_info(participant, topic_name, ti, qos, topic_out);\n",
+        );
+        self.raw("    int2dds_type_info_destroy(ti);\n");
+        self.raw("    return ret;\n}\n");
     }
 
     // ---- Memory Management (Pointer mode) ----
