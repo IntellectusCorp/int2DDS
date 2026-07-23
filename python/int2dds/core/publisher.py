@@ -77,6 +77,8 @@ def _apply_datawriter_qos(handle: CData, qos: "DataWriterQos") -> None:
     if qos.liveliness is not None:
         check_ret(lib.int2dds_datawriter_qos_set_liveliness(
             handle, qos.liveliness._kind_int, qos.liveliness._lease_duration_ns))
+    if qos.data_frag is not None:
+        check_ret(lib.int2dds_datawriter_qos_set_data_frag(handle, qos.data_frag))
 
 
 class Publisher:
@@ -309,6 +311,8 @@ class DataWriter(Generic[T]):
             hist_kind = ffi.new("int32_t *")
             depth = ffi.new("int32_t *")
             check_ret(lib.int2dds_datawriter_qos_get_history(handle, hist_kind, depth))
+            frag = ffi.new("int32_t *")
+            check_ret(lib.int2dds_datawriter_qos_get_data_frag(handle, frag))
         finally:
             lib.int2dds_datawriter_qos_destroy(handle)
 
@@ -319,6 +323,7 @@ class DataWriter(Generic[T]):
             ),
             durability=Durability(kind=DurabilityKind(dur_kind[0]).name),
             history=History(kind=HistoryKind(hist_kind[0]).name, depth=depth[0]),
+            data_frag=frag[0],
         )
 
     def set_qos(self, qos: "DataWriterQos") -> None:

@@ -276,6 +276,7 @@ class DataWriterQos:
     data_representation: DataRepresentation | None = None
     deadline: Deadline | None = None
     liveliness: Liveliness | None = None
+    data_frag: int | None = None  # DATA_FRAG max fragment size (bytes)
 
 
 @dataclass

@@ -117,7 +117,7 @@ pub unsafe extern "C" fn int2dds_publication_data_destroy(p: *mut Int2DdsPublica
 
 /// Helper: copy a Rust &str into a caller-supplied C buffer.
 /// Writes required length (without the NUL) into *out_len and returns
-/// DYNAMIC_DECODE_ERROR if the supplied buffer is too small.
+/// BUFFER_TOO_SMALL if the supplied buffer is too small.
 pub(crate) unsafe fn copy_str_to_c(
     s: &str,
     buf: *mut c_char,
@@ -462,14 +462,7 @@ pub unsafe extern "C" fn int2dds_type_object_member_name(
         Some(m) => m,
         None => return INT2DDS_RET_INVALID_ARGUMENT,
     };
-    let name = m.detail.name.as_bytes();
-    *out_len = name.len();
-    if buf_len < name.len() + 1 {
-        return INT2DDS_RET_DYNAMIC_DECODE_ERROR;
-    }
-    std::ptr::copy_nonoverlapping(name.as_ptr() as *const c_char, buf, name.len());
-    *buf.add(name.len()) = 0;
-    INT2DDS_RET_OK
+    copy_str_to_c(&m.detail.name, buf, buf_len, out_len)
 }
 
 /// Find a member index by name.
