@@ -71,7 +71,7 @@ pub(crate) enum MessageSource {
     /// Channel-based receiving.
     /// Used when the transport internally demultiplexes a single byte stream
     /// into per-logical-port streams (TCP single-port mux).
-    Channel { rx: crossbeam_channel::Receiver<IncomingMessage> },
+    Channel { rx: flume::Receiver<IncomingMessage> },
 }
 
 /// Transport plugin trait — the only interface RTPS logic depends on.
