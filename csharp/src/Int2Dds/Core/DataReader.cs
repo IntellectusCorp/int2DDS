@@ -51,26 +51,29 @@ namespace Int2Dds.Core
             _topic = topic;
             _buffer = ArrayPool<byte>.Shared.Rent(DefaultBufferSize);
 
-            // Always create a QoS handle so that the native layer receives the
-            // correct DataRepresentation default even when the caller does not
-            // supply an explicit QoS object.
+            // With an explicit QoS, build a handle and apply it (Specific). With
+            // no QoS, pass NULL so the native layer engages QosKind::Default — the
+            // QoS-profile / spec-default resolution chain — instead of overriding
+            // it with a bare default handle.
             IntPtr qosHandle = IntPtr.Zero;
-            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_create_default(out qosHandle));
-            try
+            if (qos != null)
             {
-                if (qos != null)
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_create_default(out qosHandle));
+                try
+                {
                     ApplyReaderQos(qosHandle, qos);
 
-                // Advertise the core default (single source of truth) rather than
-                // a hardcoded value, so reader/writer stay compatible if it changes.
-                if (qos?.DataRepresentation == null)
-                    ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_set_data_representation(
-                        qosHandle, NativeMethods.int2dds_default_data_representation()));
-            }
-            catch
-            {
-                NativeMethods.int2dds_datareader_qos_destroy(qosHandle);
-                throw;
+                    // Advertise the core default (single source of truth) rather than
+                    // a hardcoded value, so reader/writer stay compatible if it changes.
+                    if (qos.DataRepresentation == null)
+                        ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_set_data_representation(
+                            qosHandle, NativeMethods.int2dds_default_data_representation()));
+                }
+                catch
+                {
+                    NativeMethods.int2dds_datareader_qos_destroy(qosHandle);
+                    throw;
+                }
             }
 
             try
@@ -103,7 +106,8 @@ namespace Int2Dds.Core
             }
             finally
             {
-                NativeMethods.int2dds_datareader_qos_destroy(qosHandle);
+                if (qosHandle != IntPtr.Zero)
+                    NativeMethods.int2dds_datareader_qos_destroy(qosHandle);
             }
         }
 
