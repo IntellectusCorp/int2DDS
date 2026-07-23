@@ -99,6 +99,12 @@ namespace Int2Dds.Core
                 if (qosHandle != IntPtr.Zero)
                     NativeMethods.int2dds_datawriter_qos_destroy(qosHandle);
             }
+
+            // With no explicit QoS the effective representation was resolved by the
+            // native QoS-profile / spec-default chain; re-read it so C#'s serialization
+            // matches what SEDP advertises (a profile may select XCDR2).
+            if (qos == null)
+                _xcdr2 = ResolveEffectiveXcdr2();
         }
 
         /// <summary>
@@ -109,7 +115,6 @@ namespace Int2Dds.Core
             IDataWriterListener listener = null, uint statusMask = 0)
         {
             _topic = topic;
-            _xcdr2 = false;
 
             unsafe
             {
@@ -140,6 +145,25 @@ namespace Int2Dds.Core
                                 publisher.Handle, topic.Handle, pQos, out _handle));
                     }
                 }
+            }
+
+            _xcdr2 = ResolveEffectiveXcdr2();
+        }
+
+        // Re-read the data representation the native writer actually resolved (from a
+        // QoS profile or the spec default) so client-side CDR serialization matches what
+        // SEDP advertises — a profile may select XCDR2 even when the library default is XCDR1.
+        private bool ResolveEffectiveXcdr2()
+        {
+            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_get_qos(_handle, out var qosHandle));
+            try
+            {
+                NativeMethods.int2dds_datawriter_qos_get_data_representation(qosHandle, out var reprKind);
+                return reprKind == (int)Qos.DataRepresentationKind.Xcdr2;
+            }
+            finally
+            {
+                NativeMethods.int2dds_datawriter_qos_destroy(qosHandle);
             }
         }
 
