@@ -30,9 +30,9 @@ use crate::{
     infrastructure::qos_kind::QosKind,
     infrastructure::qos_policy::{
         DataRepresentationQosPolicy, DeadlineQosPolicy, DestinationOrderQosPolicy,
-        DurabilityQosPolicy, EntityFactoryQosPolicy, GroupDataQosPolicy, HistoryQosPolicy,
-        LatencyBudgetQosPolicy, LivelinessQosPolicy, OwnershipQosPolicy, PartitionQosPolicy,
-        PresentationQosPolicy, Qos, ReaderDataLifecycleQosPolicy,
+        DurabilityQosPolicy, DurabilityQosPolicyKind, EntityFactoryQosPolicy, GroupDataQosPolicy,
+        HistoryQosPolicy, LatencyBudgetQosPolicy, LivelinessQosPolicy, OwnershipQosPolicy,
+        PartitionQosPolicy, PresentationQosPolicy, Qos, ReaderDataLifecycleQosPolicy,
         ReaderReliabilityExtensionQosPolicy, ReliabilityQosPolicy, ReliabilityQosPolicyKind,
         ResourceLimitsQosPolicy, TimeBasedFilterQosPolicy, TypeConsistencyEnforcementQosPolicy,
         UserDataQosPolicy,
@@ -116,8 +116,8 @@ impl Qos for DataReaderQos {
         if self.latency_budget != LatencyBudgetQosPolicy::default()
         // user_data is kept supported for ROS 2 / cross-vendor interoperability (intentionally not rejected)
         // || self.user_data != UserDataQosPolicy::default()
-        // || self.durability.kind == DurabilityQosPolicyKind::Transient
-        // || self.durability.kind == DurabilityQosPolicyKind::Persistent
+            || self.durability.kind == DurabilityQosPolicyKind::Transient
+            || self.durability.kind == DurabilityQosPolicyKind::Persistent
         // || self.liveliness != LivelinessQosPolicy::default()
         // || self.ownership != OwnershipQosPolicy::default()
         // time_based_filter is now implemented, so it is supported (no longer unsupported)
