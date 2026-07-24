@@ -125,6 +125,8 @@ impl Qos for DataWriterQos {
         if self.latency_budget != LatencyBudgetQosPolicy::default()
             // || self.liveliness != LivelinessQosPolicy::default()
             || self.transport_priority != TransportPriorityQosPolicy::default()
+        // || self.durability.kind == DurabilityQosPolicyKind::Transient
+        // || self.durability.kind == DurabilityQosPolicyKind::Persistent
         // || self.lifespan != LifespanQosPolicy::default()
         // || self.ownership != OwnershipQosPolicy::default()
         // || self.ownership_strength != OwnershipStrengthQosPolicy::default()

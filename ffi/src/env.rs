@@ -7,6 +7,9 @@
 //! All setters mutate the *current process* environment and must be called
 //! before the first `DomainParticipant` is created in order to take effect.
 
+use std::ffi::CStr;
+use std::os::raw::c_char;
+
 use super::error::*;
 
 /// Sets the IPv4 multicast TTL fallback via the `INT2DDS_MULTICAST_TTL`
@@ -51,6 +54,47 @@ pub unsafe extern "C" fn int2dds_env_get_multicast_ttl(
             *has_value_out = false;
         }
     }
+    INT2DDS_RET_OK
+}
+
+/// Sets the QoS profile file path(s) to auto-load, via the `DDS_QOS_PROFILE`
+/// environment variable. The `DomainParticipantFactory` singleton auto-loads
+/// these when it first initializes (on the first participant creation); the
+/// `*_QOS_DEFAULT` resolution then draws QoS from the selected default profile.
+///
+/// Multiple paths may be joined with `,` (also `;` on Windows / `:` on Unix).
+///
+/// # Safety
+/// - `path` must be a valid, null-terminated UTF-8 C string.
+/// - Call before the first `DomainParticipant` is created so the factory
+///   singleton picks it up when it initializes.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_env_set_qos_profile(path: *const c_char) -> Int2DdsRet {
+    check_null!(path);
+    let path_str = match CStr::from_ptr(path).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+    int2dds::common::env::set_qos_profile(path_str);
+    INT2DDS_RET_OK
+}
+
+/// Selects the default QoS profile (`"Library::Profile"`) via the
+/// `DDS_DEFAULT_QOS_PROFILE` environment variable. The `*_QOS_DEFAULT`
+/// resolution reads this at entity-creation time, so `NULL`-QoS creators
+/// (participant/publisher/writer with default QoS) draw from this profile.
+///
+/// # Safety
+/// - `profile` must be a valid, null-terminated UTF-8 C string
+///   (e.g. `"HelloWorldDataFrag::Reliable"`).
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_env_set_default_qos_profile(profile: *const c_char) -> Int2DdsRet {
+    check_null!(profile);
+    let profile_str = match CStr::from_ptr(profile).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+    int2dds::common::env::set_default_qos_profile(profile_str);
     INT2DDS_RET_OK
 }
 

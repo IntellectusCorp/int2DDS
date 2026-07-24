@@ -1,4 +1,5 @@
 using System;
+using System.Text;
 using Int2Dds.Exceptions;
 using Int2Dds.Interop;
 
@@ -45,6 +46,43 @@ namespace Int2Dds.Core
             ReturnCodeHelper.CheckReturn(
                 NativeMethods.int2dds_env_get_multicast_ttl(out var ttl, out var hasValue));
             return hasValue ? ttl : (byte?)null;
+        }
+
+        /// <summary>
+        /// Sets the QoS profile file path(s) to auto-load via <c>DDS_QOS_PROFILE</c>.
+        /// The <see cref="DomainParticipantFactory"/> auto-loads these when the first
+        /// participant is created; the default-QoS resolution then draws from the
+        /// selected default profile. Call before creating the first participant.
+        /// Multiple paths may be joined with <c>,</c> (also <c>;</c> on Windows).
+        /// </summary>
+        public static void SetQosProfile(string path)
+        {
+            unsafe
+            {
+                var bytes = Encoding.UTF8.GetBytes(path + '\0');
+                fixed (byte* p = bytes)
+                {
+                    ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_env_set_qos_profile(p));
+                }
+            }
+        }
+
+        /// <summary>
+        /// Selects the default QoS profile (<c>"Library::Profile"</c>) via
+        /// <c>DDS_DEFAULT_QOS_PROFILE</c>. The <c>*_QOS_DEFAULT</c> resolution reads
+        /// this at entity-creation time, so participants/publishers/writers created
+        /// with default QoS draw from this profile (e.g. <c>"HelloWorldDataFrag::Reliable"</c>).
+        /// </summary>
+        public static void SetDefaultQosProfile(string profile)
+        {
+            unsafe
+            {
+                var bytes = Encoding.UTF8.GetBytes(profile + '\0');
+                fixed (byte* p = bytes)
+                {
+                    ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_env_set_default_qos_profile(p));
+                }
+            }
         }
     }
 }

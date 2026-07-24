@@ -840,7 +840,7 @@ pub unsafe extern "C" fn int2dds_datareader_get_key_value(
     *key_size_out = key_data.len();
 
     if key_data.len() > key_capacity {
-        return INT2DDS_RET_ERROR;
+        return INT2DDS_RET_BUFFER_TOO_SMALL;
     }
 
     std::ptr::copy_nonoverlapping(key_data.as_ptr(), key_buf, key_data.len());

@@ -35,6 +35,9 @@ namespace Int2Dds.Interop
         internal static extern int int2dds_datawriter_qos_set_ownership_strength(IntPtr qos, int value);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datawriter_qos_set_data_frag(IntPtr qos, int value);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_datawriter_qos_set_resource_limits(IntPtr qos, int max_samples, int max_instances, int max_per_instance);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
@@ -77,6 +80,9 @@ namespace Int2Dds.Interop
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_datawriter_qos_get_ownership_strength(IntPtr qos, out int value);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datawriter_qos_get_data_frag(IntPtr qos, out int value);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_datawriter_qos_get_resource_limits(IntPtr qos, out int max_samples, out int max_instances, out int max_per_instance);
