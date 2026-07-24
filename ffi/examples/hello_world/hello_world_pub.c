@@ -81,10 +81,9 @@ int main(int argc, char* argv[]) {
         goto cleanup;
     }
 
-    /* Create topic with extensibility (1 = APPENDABLE) */
-    ret = int2dds_create_topic(participant, "hello_world_topic", "HelloWorld",
-                               1,  /* APPENDABLE (default extensibility) */
-                               NULL, &topic);
+    /* Create topic — extensibility is carried by the type via HelloWorld_type_info(),
+       so no extensibility argument is passed (parity with the Rust/Python/C# examples). */
+    ret = HelloWorld_create_topic(participant, "hello_world_topic", NULL, &topic);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create topic: %d\n", ret);
         goto cleanup;
