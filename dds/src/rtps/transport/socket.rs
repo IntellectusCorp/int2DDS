@@ -169,8 +169,8 @@ impl Socket {
         }
 
         // loopback-only multicast egress when opted in.
-        if crate::common::env::get_use_loopback_interface() {
-            log::debug!("USE_LOOPBACK: forcing multicast interface IP to 127.0.0.1");
+        if crate::common::env::get_force_loopback_multicast() {
+            log::debug!("FORCE_LOOPBACK_MULTICAST: forcing multicast interface IP to 127.0.0.1");
             return "127.0.0.1".to_string();
         }
 
