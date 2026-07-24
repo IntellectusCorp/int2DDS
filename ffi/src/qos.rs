@@ -275,6 +275,25 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_set_ownership_strength(
     INT2DDS_RET_OK
 }
 
+/// Set the DataFrag QoS (per-writer RTPS DATA_FRAG fragment size, in bytes) for
+/// DataWriter. Values `> 65000` are clamped and `<= 0` falls back to the 65000
+/// default at write time.
+///
+/// # Safety
+/// - `qos` must be a valid QoS handle
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_qos_set_data_frag(
+    qos: *mut Int2DdsDataWriterQos,
+    value: i32,
+) -> Int2DdsRet {
+    check_null!(qos);
+
+    let qos_ref = &mut *qos;
+    qos_ref.inner.data_frag.max_size = value;
+
+    INT2DDS_RET_OK
+}
+
 /// Set resource limits QoS for DataWriter
 ///
 /// # Safety
@@ -506,6 +525,18 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_get_ownership_strength(
     check_null!(qos);
     check_null!(value_out);
     *value_out = (*qos).inner.ownership_strength.value;
+    INT2DDS_RET_OK
+}
+
+/// Get the DataFrag QoS (fragment size, in bytes) from a DataWriter QoS handle.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_qos_get_data_frag(
+    qos: *const Int2DdsDataWriterQos,
+    value_out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(value_out);
+    *value_out = (*qos).inner.data_frag.max_size;
     INT2DDS_RET_OK
 }
 

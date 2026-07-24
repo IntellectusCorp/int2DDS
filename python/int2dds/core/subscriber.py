@@ -24,7 +24,6 @@ from int2dds.core.listeners import (
 )
 from int2dds.exceptions import (
     INT2DDS_RET_BUFFER_TOO_SMALL,
-    INT2DDS_RET_ERROR,
     INT2DDS_RET_NO_DATA,
     INT2DDS_RET_OK,
     check_ret,
@@ -705,7 +704,7 @@ class DataReader(Generic[T]):
             )
             if ret == INT2DDS_RET_OK:
                 return bytes(ffi.buffer(key_buf, size_out[0]))
-            if ret == INT2DDS_RET_ERROR and size_out[0] > capacity:
+            if ret == INT2DDS_RET_BUFFER_TOO_SMALL and size_out[0] > capacity:
                 capacity = size_out[0]
                 continue
             check_ret(ret)
