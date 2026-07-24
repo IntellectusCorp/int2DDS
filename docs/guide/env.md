@@ -13,6 +13,7 @@ This document describes the environment variables available in int2dds.
 | `INT2DDS_NETWORK_INTERFACE`          | Network interface name                     | auto                    |
 | `INT2DDS_NETWORK_IP`                 | Network IP address                         | auto                    |
 | `INT2DDS_USE_LOOPBACK_INTERFACE`     | Enable loopback interface                  | false                   |
+| `INT2DDS_FORCE_LOOPBACK_MULTICAST`   | Force multicast egress via 127.0.0.1       | false                   |
 | `INT2DDS_UDP_SOCKET_BUFFER`          | UDP socket buffer size (bytes)             | OS default              |
 | `INT2DDS_SHM_BUFFER_SIZE`            | Shared-memory ring buffer size (bytes)     | 1048576 (1MB)           |
 | `INT2DDS_MULTICAST_TTL`              | IPv4 multicast TTL fallback (0-255)        | 1                       |
@@ -207,6 +208,35 @@ cargo run --example hello_world_pub
 ```bash
 # Linux/macOS - Environment variable
 export INT2DDS_USE_LOOPBACK_INTERFACE=true
+
+cargo run --example hello_world_pub
+```
+
+### INT2DDS_FORCE_LOOPBACK_MULTICAST
+
+Forces multicast egress to go out through the loopback interface (127.0.0.1) instead of the interface
+resolved from the OS routing table. Intended for local-only testing, where every participant runs on the
+same host and multicast traffic must not leave the machine.
+
+#### Interaction with Other Settings
+
+- When int2DDS-feature provides the working IP, this setting is ignored. The feature-specified NIC takes full control of the network interface selection.
+- Use together with `INT2DDS_USE_LOOPBACK_INTERFACE=true`. The multicast group is joined on each working IP, so 127.0.0.1 must be in the working IP list for the loopback-sent multicast to be received.
+
+#### Configuration
+
+```powershell
+# Windows PowerShell - Environment variable
+$env:INT2DDS_USE_LOOPBACK_INTERFACE = "true"
+$env:INT2DDS_FORCE_LOOPBACK_MULTICAST = "true"
+
+cargo run --example hello_world_pub
+```
+
+```bash
+# Linux/macOS - Environment variable
+export INT2DDS_USE_LOOPBACK_INTERFACE=true
+export INT2DDS_FORCE_LOOPBACK_MULTICAST=true
 
 cargo run --example hello_world_pub
 ```

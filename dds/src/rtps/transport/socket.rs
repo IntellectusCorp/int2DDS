@@ -168,6 +168,12 @@ impl Socket {
             return self.working_ips.ips[0].clone();
         }
 
+        // loopback-only multicast egress when opted in.
+        if crate::common::env::get_force_loopback_multicast() {
+            log::debug!("FORCE_LOOPBACK_MULTICAST: forcing multicast interface IP to 127.0.0.1");
+            return "127.0.0.1".to_string();
+        }
+
         // Probe the OS routing table by connecting to a public address.
         // Resolve the default outgoing IP via 0.0.0.0 bind & connect
         if let Ok(addr) = std::net::UdpSocket::bind("0.0.0.0:0")

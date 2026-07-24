@@ -338,6 +338,7 @@ int2DDS supports various environment variables for configuration:
 - `INT2DDS_FILE_LOG_LEVEL`: File log level (error, warn, info, debug, trace)
 - `INT2DDS_UDP_SOCKET_BUFFER`: UDP socket buffer size (bytes), increase up to 8388608(8MB) for large payloads
 - `INT2DDS_USE_LOOPBACK_INTERFACE`: Enable loopback interface for endpoint communication
+- `INT2DDS_FORCE_LOOPBACK_MULTICAST`: Force multicast egress through the loopback interface (127.0.0.1) for local-only testing, use together with `INT2DDS_USE_LOOPBACK_INTERFACE`
 - `INT2DDS_MULTICAST_TTL`: IPv4 multicast TTL fallback (0-255), used when `PropertyQosPolicy` has no `int2dds.transport.UDPv4.multicast_ttl` entry (default: 1)
 - `INT2DDS_INITIAL_PEERS`: Initial peer list for unicast (format: "ip:port,ip:port,...")
 
