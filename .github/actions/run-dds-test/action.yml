@@ -33,6 +33,10 @@ runs:
         chmod +x ./${{ inputs.executable-pattern }}
         chmod +x ./int2DDS_shape_main_linux
 
+        # Expand the glob to the actual executable path once, so it is not passed as a
+        # literal (with '*') to the python runner.
+        DDS_EXE=$(ls ./${{ inputs.executable-pattern }} | head -n1)
+
         if [ "${{ inputs.dump-packet }}" = "true" ]; then
           echo "Installing tshark..."
           sudo apt-get update -qq
@@ -42,12 +46,12 @@ runs:
 
         if [ "${{ inputs.role }}" = "publisher" ]; then
           echo "Testing Publisher ${{ inputs.dds-name }} --- Subscriber int2dds"
-          PUB="./${{ inputs.executable-pattern }}"
+          PUB="$DDS_EXE"
           SUB="./int2DDS_shape_main_linux"
         else
           echo "Testing Publisher int2dds --- Subscriber ${{ inputs.dds-name }}"
           PUB="./int2DDS_shape_main_linux"
-          SUB="./${{ inputs.executable-pattern }}"
+          SUB="$DDS_EXE"
         fi
 
         # Test case names come from the dictionaries defined in the upstream test_suite file.
