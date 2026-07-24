@@ -37,6 +37,7 @@ pub fn init_from_env() {
     // - INT2DDS_NETWORK_INTERFACE: Set network interface name to use (e.g., eth0, wlan0) - Default: automatic selection
     // - INT2DDS_NETWORK_IP: Set network IP address directly (e.g., 192.168.1.100) - Default: automatic selection
     // - INT2DDS_USE_LOOPBACK_INTERFACE: Enable loopback interface for discovery and endpoint communication (true, false) - Default: false
+    // - INT2DDS_FORCE_LOOPBACK_MULTICAST: Force multicast egress through the loopback interface (127.0.0.1) for local-only testing (true, false) - Default: false
     // - INT2DDS_UDP_SOCKET_BUFFER: Set UDP socket buffer size (bytes) - Default: OS default
     // - INT2DDS_SHM_BUFFER_SIZE: Set shared memory buffer size (bytes) - Default: 1048576 (1MB)
 
@@ -198,6 +199,19 @@ pub fn get_use_loopback_interface() -> bool {
 pub fn set_use_loopback_interface(enabled: bool) {
     log::info!("Environment variable set: INT2DDS_USE_LOOPBACK_INTERFACE = {}", enabled);
     unsafe { std::env::set_var("INT2DDS_USE_LOOPBACK_INTERFACE", enabled.to_string()) };
+}
+
+/// Get the force loopback multicast setting from environment variable
+pub fn get_force_loopback_multicast() -> bool {
+    std::env::var("INT2DDS_FORCE_LOOPBACK_MULTICAST")
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false)
+}
+
+/// Set the force loopback multicast via environment variable
+pub fn set_force_loopback_multicast(enabled: bool) {
+    log::info!("Environment variable set: INT2DDS_FORCE_LOOPBACK_MULTICAST = {}", enabled);
+    unsafe { std::env::set_var("INT2DDS_FORCE_LOOPBACK_MULTICAST", enabled.to_string()) };
 }
 
 /// Set the UDP socket buffer size via environment variable
