@@ -66,13 +66,22 @@ runs:
         # even when only one case produces output.
         echo "$CASES" | tr ' ' '\n' > "$OUT/cases.txt"
 
+        TOTAL=$(echo $CASES | wc -w)
+        INDEX=0
+
         for tc in $CASES; do
+          INDEX=$((INDEX + 1))
           CASE_DIR="$OUT/$tc"
           mkdir -p "$CASE_DIR"
+          STARTED=$SECONDS
+          echo "[$INDEX/$TOTAL] $tc"
 
           TSHARK_PID=""
           if [ "${{ inputs.dump-packet }}" = "true" ]; then
-            PCAP="$CASE_DIR/capture.pcap"
+            # tshark hands the capture to dumpcap, which drops privileges and cannot write
+            # into the runner workspace. Capture under /tmp and move the file afterwards.
+            PCAP="/tmp/capture_$tc.pcap"
+            rm -f "$PCAP"
             sudo tshark -i any -f 'udp' -q -w "$PCAP" &
             TSHARK_PID=$!
 
@@ -91,9 +100,11 @@ runs:
           if [ -n "$TSHARK_PID" ]; then
             sudo kill -TERM "$TSHARK_PID" 2>/dev/null || true
             wait "$TSHARK_PID" 2>/dev/null || true
+            sudo mv "$PCAP" "$CASE_DIR/capture.pcap" 2>/dev/null || true
           fi
 
           mv ./*.log "$CASE_DIR/" 2>/dev/null || true
+          echo "[$INDEX/$TOTAL] $tc done in $((SECONDS - STARTED))s"
         done
 
         # Each -t invocation appends its own testsuite element. Merge them back into one
