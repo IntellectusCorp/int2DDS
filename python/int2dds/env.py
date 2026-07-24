@@ -57,4 +57,37 @@ def get_multicast_ttl() -> int | None:
     return int(ttl_p[0]) if has_p[0] else None
 
 
-__all__ = ["set_multicast_ttl", "get_multicast_ttl"]
+def set_qos_profile(path: str) -> None:
+    """Set the QoS profile file path(s) to auto-load via ``DDS_QOS_PROFILE``.
+
+    The ``DomainParticipantFactory`` auto-loads these when the first participant
+    is created, and the default-QoS resolution then draws from the selected
+    default profile. Call *before* creating the first participant. Multiple paths
+    may be joined with ``,`` (also ``;`` on Windows / ``:`` on Unix).
+    """
+    _check(
+        lib.int2dds_env_set_qos_profile(path.encode("utf-8")),
+        "int2dds_env_set_qos_profile",
+    )
+
+
+def set_default_qos_profile(profile: str) -> None:
+    """Select the default QoS profile (``"Library::Profile"``) via
+    ``DDS_DEFAULT_QOS_PROFILE``.
+
+    The ``*_QOS_DEFAULT`` resolution reads this at entity-creation time, so
+    default-QoS participants/publishers/writers draw from this profile (e.g.
+    ``"HelloWorldDataFrag::Reliable"``).
+    """
+    _check(
+        lib.int2dds_env_set_default_qos_profile(profile.encode("utf-8")),
+        "int2dds_env_set_default_qos_profile",
+    )
+
+
+__all__ = [
+    "set_multicast_ttl",
+    "get_multicast_ttl",
+    "set_qos_profile",
+    "set_default_qos_profile",
+]
