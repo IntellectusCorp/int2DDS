@@ -77,6 +77,9 @@ pub(crate) fn call_participant_gate() -> DdsResult<()> {
         let code = if v == 0 {
             1
         } else {
+            // SAFETY: v is nonzero here and was stored by the matching setter as
+            // `f as usize` from a valid ParticipantGateFn, so transmuting back to
+            // ParticipantGateFn is sound.
             let f: ParticipantGateFn = unsafe { std::mem::transmute(v) };
             f()
         };
@@ -101,6 +104,9 @@ pub(crate) fn call_resolve_ip() -> Option<String> {
         use std::sync::atomic::Ordering;
         let v = slots::RESOLVE_IP.load(Ordering::SeqCst);
         if v != 0 {
+            // SAFETY: v is nonzero here and was stored by the matching setter as
+            // `f as usize` from a valid ResolveIpFn, so transmuting back to
+            // ResolveIpFn is sound.
             let f: ResolveIpFn = unsafe { std::mem::transmute(v) };
             let mut buffer = [0 as std::os::raw::c_char; 64];
             let ret = f(buffer.as_mut_ptr(), buffer.len());
@@ -122,6 +128,9 @@ pub(crate) fn call_extended_discovery_init(socket: &Socket) -> std::io::Result<(
         use std::sync::atomic::Ordering;
         let v = slots::DISCOVERY_INIT.load(Ordering::SeqCst);
         if v != 0 {
+            // SAFETY: v is nonzero here and was stored by the matching setter as
+            // `f as usize` from a valid DiscoveryInitFn, so transmuting back to
+            // DiscoveryInitFn is sound.
             let f: DiscoveryInitFn = unsafe { std::mem::transmute(v) };
             let ret = f(socket_to_raw(socket));
             if ret != 0 {
@@ -148,6 +157,9 @@ pub(crate) fn call_extended_discovery_send(
         use std::sync::atomic::Ordering;
         let v = slots::DISCOVERY_SEND.load(Ordering::SeqCst);
         if v != 0 {
+            // SAFETY: v is nonzero here and was stored by the matching setter as
+            // `f as usize` from a valid DiscoverySendFn, so transmuting back to
+            // DiscoverySendFn is sound.
             let f: DiscoverySendFn = unsafe { std::mem::transmute(v) };
             let ret = f(socket_to_raw(socket), port, data.as_ptr(), data.len(), domain_id);
             if ret != 0 {
@@ -168,6 +180,9 @@ pub(crate) fn call_heartbeat_period(default_period: f64) -> f64 {
         use std::sync::atomic::Ordering;
         let v = slots::HEARTBEAT_PERIOD.load(Ordering::SeqCst);
         if v != 0 {
+            // SAFETY: v is nonzero here and was stored by the matching setter as
+            // `f as usize` from a valid HeartbeatPeriodFn, so transmuting back to
+            // HeartbeatPeriodFn is sound.
             let f: HeartbeatPeriodFn = unsafe { std::mem::transmute(v) };
             return f(default_period);
         }
