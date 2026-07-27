@@ -246,15 +246,6 @@ class DataWriter(Generic[T]):
             _apply_datawriter_qos(self._qos_handle, qos)
             qos_ptr = self._qos_handle
 
-        # Effective representation = caller's choice, else the core default
-        # (single source of truth in the Rust core, not hardcoded here).
-        if qos is not None and qos.data_representation is not None:
-            effective_repr = qos.data_representation._kind_int
-        else:
-            effective_repr = lib.int2dds_default_data_representation()
-        # INT2DDS_QOS_DATA_REPR_XCDR2 == 2
-        self._xcdr2 = (effective_repr == 2)
-
         writer_ptr = ffi.new("Int2DdsDataWriter **")
 
         if profile is not None:
@@ -282,6 +273,21 @@ class DataWriter(Generic[T]):
 
         self._handle = writer_ptr[0]
 
+        # The native layer may resolve the data representation from a QoS profile or
+        # the spec default; re-read it from the created writer so client-side CDR
+        # serialization matches what SEDP advertises — a profile may select XCDR2
+        # even when the library default is XCDR1 (mirrors the C# binding).
+        wqos_ptr = ffi.new("Int2DdsDataWriterQos **")
+        check_ret(lib.int2dds_datawriter_get_qos(self._handle, wqos_ptr))
+        wqos_handle = wqos_ptr[0]
+        try:
+            repr_out = ffi.new("int32_t *")
+            check_ret(lib.int2dds_datawriter_qos_get_data_representation(wqos_handle, repr_out))
+            # INT2DDS_QOS_DATA_REPR_XCDR2 == 2
+            self._xcdr2 = (repr_out[0] == 2)
+        finally:
+            lib.int2dds_datawriter_qos_destroy(wqos_handle)
+
         # Clean up QoS handle after use
         if self._qos_handle is not None:
             lib.int2dds_datawriter_qos_destroy(self._qos_handle)
@@ -295,7 +301,7 @@ class DataWriter(Generic[T]):
     def get_qos(self) -> "DataWriterQos":
         """Return the effective QoS (reliability, durability, history) in force."""
         from int2dds.core.qos import (
-            DataWriterQos, Reliability, Durability, History,
+            DataWriterQos, Reliability, Durability, History, ResourceLimits,
             ReliabilityKind, DurabilityKind, HistoryKind,
         )
 
@@ -313,6 +319,11 @@ class DataWriter(Generic[T]):
             check_ret(lib.int2dds_datawriter_qos_get_history(handle, hist_kind, depth))
             frag = ffi.new("int32_t *")
             check_ret(lib.int2dds_datawriter_qos_get_data_frag(handle, frag))
+            max_samples = ffi.new("int32_t *")
+            max_instances = ffi.new("int32_t *")
+            max_per_instance = ffi.new("int32_t *")
+            check_ret(lib.int2dds_datawriter_qos_get_resource_limits(
+                handle, max_samples, max_instances, max_per_instance))
         finally:
             lib.int2dds_datawriter_qos_destroy(handle)
 
@@ -323,6 +334,11 @@ class DataWriter(Generic[T]):
             ),
             durability=Durability(kind=DurabilityKind(dur_kind[0]).name),
             history=History(kind=HistoryKind(hist_kind[0]).name, depth=depth[0]),
+            resource_limits=ResourceLimits(
+                max_samples=max_samples[0],
+                max_instances=max_instances[0],
+                max_samples_per_instance=max_per_instance[0],
+            ),
             data_frag=frag[0],
         )
 
