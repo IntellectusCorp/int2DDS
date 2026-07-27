@@ -400,6 +400,13 @@ ffi.cdef("""
     Int2DdsRet int2dds_datawriter_qos_get_data_frag(
         const Int2DdsDataWriterQos *qos, int32_t *value_out
     );
+    Int2DdsRet int2dds_datawriter_qos_get_resource_limits(
+        const Int2DdsDataWriterQos *qos,
+        int32_t *max_samples_out, int32_t *max_instances_out, int32_t *max_per_instance_out
+    );
+    Int2DdsRet int2dds_datawriter_qos_get_data_representation(
+        const Int2DdsDataWriterQos *qos, int32_t *kind_out
+    );
     Int2DdsRet int2dds_datareader_qos_get_reliability(
         const Int2DdsDataReaderQos *qos, int32_t *kind_out, int64_t *max_blocking_time_ns_out
     );
@@ -408,6 +415,10 @@ ffi.cdef("""
     );
     Int2DdsRet int2dds_datareader_qos_get_history(
         const Int2DdsDataReaderQos *qos, int32_t *kind_out, int32_t *depth_out
+    );
+    Int2DdsRet int2dds_datareader_qos_get_resource_limits(
+        const Int2DdsDataReaderQos *qos,
+        int32_t *max_samples_out, int32_t *max_instances_out, int32_t *max_per_instance_out
     );
 
     Int2DdsRet int2dds_get_publication_matched_status(
