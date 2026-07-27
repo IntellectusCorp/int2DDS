@@ -12,7 +12,7 @@ use int2dds::common::builtin::topic::publication_builtin_topic_data::Publication
 use int2dds::xtypes::{
     deserialize_dynamic_data, CompleteStructType, CompleteTypeObject, DynamicData,
     DynamicTypeSupport, DynamicValue, ExtensibilityKind, FromDynamicValue, TypeIdentifier,
-    TypeObject,
+    TypeObject, TypeRegistry,
 };
 use std::ffi::CStr;
 use std::os::raw::c_char;
@@ -79,13 +79,25 @@ fn type_identifier_to_kind(id: &TypeIdentifier) -> Option<i32> {
 /// Opaque handle wrapping a discovered TypeObject.
 pub struct Int2DdsTypeObject {
     pub(crate) inner: TypeObject,
+    /// Nested-type dependency closure (content-hash id -> TypeObject) so the flat decode
+    /// path resolves array/sequence/struct-of-nested members via a TypeRegistry.
+    pub(crate) deps: Vec<(TypeIdentifier, TypeObject)>,
 }
 
 impl Int2DdsTypeObject {
-    /// Construct an Int2DdsTypeObject from a raw `TypeObject`.
+    /// Construct an Int2DdsTypeObject from a raw `TypeObject` (no nested dependencies).
     #[doc(hidden)]
     pub fn from_type_object(to: TypeObject) -> Self {
-        Int2DdsTypeObject { inner: to }
+        Int2DdsTypeObject { inner: to, deps: Vec::new() }
+    }
+
+    /// Construct with a nested-type dependency closure for registry-backed flat decode.
+    #[doc(hidden)]
+    pub fn from_type_object_with_deps(
+        to: TypeObject,
+        deps: Vec<(TypeIdentifier, TypeObject)>,
+    ) -> Self {
+        Int2DdsTypeObject { inner: to, deps }
     }
 
     /// Return a reference to the inner CompleteStructType, or None if the
@@ -176,7 +188,7 @@ pub unsafe extern "C" fn int2dds_publication_data_take_type_object(
         Some(t) => t.clone(),
         None => return INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND,
     };
-    let h = Box::new(Int2DdsTypeObject { inner: to });
+    let h = Box::new(Int2DdsTypeObject { inner: to, deps: Vec::new() });
     *out = Box::into_raw(h);
     INT2DDS_RET_OK
 }
@@ -582,8 +594,19 @@ pub unsafe extern "C" fn int2dds_create_topic_with_type_object(
 }
 
 fn decode_flat(bytes: &[u8], type_obj: &Int2DdsTypeObject) -> Result<DynamicData, Int2DdsRet> {
-    let support = DynamicTypeSupport::from_type_object(type_obj.inner.clone())
-        .map_err(|_| INT2DDS_RET_DYNAMIC_UNSUPPORTED_TYPE)?;
+    let support = if type_obj.deps.is_empty() {
+        DynamicTypeSupport::from_type_object(type_obj.inner.clone())
+            .map_err(|_| INT2DDS_RET_DYNAMIC_UNSUPPORTED_TYPE)?
+    } else {
+        // Register the nested dependency closure so array/sequence/struct-of-nested members
+        // resolve. Mirrors RawTypeSupport::with_type_info_and_deps (raw_type_support.rs).
+        let mut registry = TypeRegistry::new();
+        for (id, obj) in &type_obj.deps {
+            registry.register_type_object_with_id(id, obj.clone());
+        }
+        DynamicTypeSupport::from_type_object_with_registry(type_obj.inner.clone(), &registry)
+            .map_err(|_| INT2DDS_RET_DYNAMIC_UNSUPPORTED_TYPE)?
+    };
     deserialize_dynamic_data(bytes, support.dynamic_type())
         .map_err(|_| INT2DDS_RET_DYNAMIC_DECODE_ERROR)
 }
@@ -1292,7 +1315,7 @@ mod tests {
         let flags = TypeFlag::new(ExtensibilityKind::Mutable, false, false);
         let st = CompleteStructType::new(flags, "T".to_string(), None);
         let to = TypeObject::Complete(CompleteTypeObject::Struct(st));
-        let handle = Box::into_raw(Box::new(Int2DdsTypeObject { inner: to }));
+        let handle = Box::into_raw(Box::new(Int2DdsTypeObject { inner: to, deps: Vec::new() }));
 
         let mut ext: i32 = -1;
         let ret = unsafe { int2dds_type_object_extensibility(handle, &mut ext) };
@@ -1321,7 +1344,7 @@ mod tests {
             ));
         }
         let to = TypeObject::Complete(CompleteTypeObject::Struct(st));
-        let handle = Box::into_raw(Box::new(Int2DdsTypeObject { inner: to }));
+        let handle = Box::into_raw(Box::new(Int2DdsTypeObject { inner: to, deps: Vec::new() }));
 
         let mut count: u32 = 0;
         let ret = unsafe { int2dds_type_object_member_count(handle, &mut count) };
@@ -1352,7 +1375,7 @@ mod tests {
             st.add_member(CompleteStructMember::new(*id, mf, ty.clone(), name.to_string()));
         }
         let to = TypeObject::Complete(CompleteTypeObject::Struct(st));
-        let h = Box::into_raw(Box::new(Int2DdsTypeObject { inner: to }));
+        let h = Box::into_raw(Box::new(Int2DdsTypeObject { inner: to, deps: Vec::new() }));
 
         let mut count = 0u32;
         assert_eq!(unsafe { int2dds_type_object_member_count(h, &mut count) }, INT2DDS_RET_OK);
@@ -1418,7 +1441,7 @@ mod tests {
     fn type_object_of<T: HasTypeObject>() -> *mut Int2DdsTypeObject {
         let cto: XtCompleteTypeObject = T::complete_type_object();
         let to = TypeObject::Complete(cto);
-        Box::into_raw(Box::new(Int2DdsTypeObject { inner: to }))
+        Box::into_raw(Box::new(Int2DdsTypeObject { inner: to, deps: Vec::new() }))
     }
 
     #[derive(DdsType)]
@@ -1453,6 +1476,71 @@ mod tests {
             int2dds_dynamic_sample_get_i32(bytes.as_ptr(), bytes.len(), h, c.as_ptr(), &mut out)
         };
         (r, out)
+    }
+
+    fn flat_f64(h: *const Int2DdsTypeObject, bytes: &[u8], field: &str) -> (Int2DdsRet, f64) {
+        let c = std::ffi::CString::new(field).unwrap();
+        let mut out = 0f64;
+        let r = unsafe {
+            int2dds_dynamic_sample_get_f64(bytes.as_ptr(), bytes.len(), h, c.as_ptr(), &mut out)
+        };
+        (r, out)
+    }
+
+    // The read-path fix: to_type_object carries the nested dependency closure, and decode_flat
+    // registers it so `sequence<Nested>` element fields resolve via indexed/dotted paths. The
+    // control (no deps) reproduces the pre-fix failure, proving the closure is what enables it.
+    #[test]
+    fn dynamic_sample_sequence_of_nested_struct() {
+        use crate::type_info::Int2DdsTypeInfo;
+
+        #[derive(DdsType)]
+        #[dds_type(crate_path = "int2dds", extensibility = "Final")]
+        struct ElemPt {
+            x: f64,
+            y: f64,
+        }
+        #[derive(DdsType)]
+        #[dds_type(crate_path = "int2dds", extensibility = "Final")]
+        struct SeqOfPt {
+            pts: Vec<ElemPt>,
+        }
+
+        let v = SeqOfPt { pts: vec![ElemPt { x: 1.5, y: 2.5 }, ElemPt { x: 3.5, y: 4.5 }] };
+        let bytes = serialize_with_header(&v, CdrExtKind::Final);
+
+        // Build via the FFI type_info path (mirrors the generated C / rmw): element type_info,
+        // then a sequence-of-nested field on the container.
+        let mut elem = Int2DdsTypeInfo::new("ElemPt".to_string(), CdrExtKind::Final);
+        elem.push_field("x".to_string(), TypeIdentifier::Float64, 0);
+        elem.push_field("y".to_string(), TypeIdentifier::Float64, 0);
+        let mut cont = Int2DdsTypeInfo::new("SeqOfPt".to_string(), CdrExtKind::Final);
+        cont.push_sequence_of_nested_field("pts".to_string(), &elem, 0, 0);
+
+        let to = cont.build_type_object();
+        let deps = cont.dependency_closure();
+        assert!(!deps.is_empty(), "sequence-of-nested must carry a dependency closure");
+
+        // With the closure: nested element fields resolve.
+        let h = Box::into_raw(Box::new(Int2DdsTypeObject::from_type_object_with_deps(
+            to.clone(),
+            deps,
+        )));
+        assert_eq!(flat_f64(h, &bytes, "pts[0].x"), (INT2DDS_RET_OK, 1.5));
+        assert_eq!(flat_f64(h, &bytes, "pts[0].y"), (INT2DDS_RET_OK, 2.5));
+        assert_eq!(flat_f64(h, &bytes, "pts[1].x"), (INT2DDS_RET_OK, 3.5));
+        assert_eq!(flat_f64(h, &bytes, "pts[1].y"), (INT2DDS_RET_OK, 4.5));
+
+        // Control: without the closure the nested element cannot resolve (pre-fix behavior).
+        let h_nodeps = Box::into_raw(Box::new(Int2DdsTypeObject::from_type_object(to)));
+        assert_ne!(
+            flat_f64(h_nodeps, &bytes, "pts[0].x").0,
+            INT2DDS_RET_OK,
+            "without the dependency closure the nested element must NOT resolve (control)"
+        );
+
+        unsafe { int2dds_type_object_destroy(h) };
+        unsafe { int2dds_type_object_destroy(h_nodeps) };
     }
 
     #[test]
