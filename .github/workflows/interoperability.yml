@@ -188,6 +188,12 @@ jobs:
         continue-on-error: true
       - name: Install junitparser
         run: pip install junitparser
+      - name: Checkout scripts
+        uses: actions/checkout@v4
+        with:
+          path: repo
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
       - name: Merge reports
         run: |
           cd reports
@@ -195,6 +201,24 @@ jobs:
           ls -la *.xml
           mv junit_interoperability_report.xml ../
           cd ..
+      - name: Summarize failures
+        run: |
+          python3 repo/.github/scripts/summarize_failures.py \
+            junit_interoperability_report.xml failures.txt summary.txt
+          echo "=== new failures vs baseline ==="
+          if [ -f repo/.github/interop_known_failures.txt ]; then
+            comm -23 failures.txt <(sort repo/.github/interop_known_failures.txt) \
+              | tee new_failures.txt
+          else
+            echo "no baseline committed yet"
+          fi
+      - name: Upload failure summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: failure_summary
+          path: |
+            failures.txt
+            summary.txt
       - name: Create test logs archive
         run: |
           if [ -d "./logs" ] && [ "$(ls -A ./logs)" ]; then
