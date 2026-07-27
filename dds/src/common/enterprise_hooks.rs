@@ -1,10 +1,8 @@
-//! Static enterprise hook seams.
+//! Static enterprise hook seams (`enterprise-hooks` feature).
 //!
-//! The open core exposes a fixed set of named C-ABI seams. With the
-//! `enterprise-hooks` feature off (default) every `call_*` below runs the
-//! core's own fallback with zero overhead. With it on, the enterprise build
-//! registers a hook per seam through the `__int2dds_hook_set_*` symbols and
-//! `call_*` dispatches to it.
+//! With the feature off (default) every `call_*` runs the core's own fallback
+//! with zero overhead; with it on, the enterprise build registers a hook per
+//! seam via the `__int2dds_hook_set_*` symbols and `call_*` dispatches to it.
 
 use socket2::Socket;
 
@@ -68,8 +66,8 @@ fn socket_to_raw(socket: &Socket) -> usize {
     socket.as_raw_fd() as usize
 }
 
-/// Seam 1: participant-creation gate. Fail-closed under the feature (feature on
-/// but nothing registered => deny), matching the previous `factory-hook`.
+/// Participant-creation gate. Fail-closed under the feature: feature on but
+/// nothing registered denies.
 #[inline]
 pub(crate) fn call_participant_gate() -> DdsResult<()> {
     #[cfg(feature = "enterprise-hooks")]
@@ -95,7 +93,7 @@ pub(crate) fn call_participant_gate() -> DdsResult<()> {
     }
 }
 
-/// Seam 2: resolve the local working IP. `None` => core uses its own default.
+/// Resolve the local working IP. `None` means the core uses its own default.
 #[inline]
 pub(crate) fn call_resolve_ip() -> Option<String> {
     #[cfg(feature = "enterprise-hooks")]
@@ -115,10 +113,10 @@ pub(crate) fn call_resolve_ip() -> Option<String> {
     None
 }
 
-/// Seam 3: initialise extended discovery on a freshly created socket.
+/// Initialise extended discovery on a freshly created socket.
 #[inline]
 #[cfg_attr(not(feature = "enterprise-hooks"), allow(unused_variables))]
-pub(crate) fn call_discovery_init(socket: &Socket) -> std::io::Result<()> {
+pub(crate) fn call_extended_discovery_init(socket: &Socket) -> std::io::Result<()> {
     #[cfg(feature = "enterprise-hooks")]
     {
         use std::sync::atomic::Ordering;
@@ -128,7 +126,7 @@ pub(crate) fn call_discovery_init(socket: &Socket) -> std::io::Result<()> {
             let ret = f(socket_to_raw(socket));
             if ret != 0 {
                 return Err(std::io::Error::other(format!(
-                    "discovery_init hook failed (code {ret})"
+                    "extended_discovery_init hook failed (code {ret})"
                 )));
             }
         }
@@ -136,10 +134,10 @@ pub(crate) fn call_discovery_init(socket: &Socket) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Seam 4: extended-discovery multicast send (hot path).
+/// Extended-discovery multicast send (hot path).
 #[inline]
 #[cfg_attr(not(feature = "enterprise-hooks"), allow(unused_variables))]
-pub(crate) fn call_discovery_send(
+pub(crate) fn call_extended_discovery_send(
     socket: &Socket,
     port: u16,
     data: &[u8],
@@ -154,7 +152,7 @@ pub(crate) fn call_discovery_send(
             let ret = f(socket_to_raw(socket), port, data.as_ptr(), data.len(), domain_id);
             if ret != 0 {
                 return Err(std::io::Error::other(format!(
-                    "discovery_send hook failed (code {ret})"
+                    "extended_discovery_send hook failed (code {ret})"
                 )));
             }
         }
@@ -162,7 +160,7 @@ pub(crate) fn call_discovery_send(
     Ok(())
 }
 
-/// Seam 5: adjust the builtin-endpoint heartbeat period.
+/// Adjust the builtin-endpoint heartbeat period.
 #[inline]
 pub(crate) fn call_heartbeat_period(default_period: f64) -> f64 {
     #[cfg(feature = "enterprise-hooks")]
@@ -230,11 +228,11 @@ mod tests {
     }
 
     #[test]
-    fn discovery_init_dispatches() {
+    fn extended_discovery_init_dispatches() {
         use socket2::{Domain, Protocol, Type};
         slots::__int2dds_hook_set_discovery_init(mark_init);
         let s = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
-        assert!(call_discovery_init(&s).is_ok());
+        assert!(call_extended_discovery_init(&s).is_ok());
         assert!(INIT_CALLED.load(Ordering::SeqCst));
     }
 

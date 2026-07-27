@@ -68,7 +68,7 @@ impl Socket {
         // Check if user specified which network to use via env variable
         let is_network_specified = get_network_interface().is_some() || get_network_ip().is_some();
 
-        if let Ok(Some(ip)) = crate::common::int2dds_feature_ffi::get_working_ip() {
+        if let Some(ip) = crate::common::enterprise_hooks::call_resolve_ip() {
             // int2DDS-feature enabled
             if is_network_specified {
                 log::debug!("Using int2DDS-feature specified IP: {}", ip);

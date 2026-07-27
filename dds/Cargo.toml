@@ -15,9 +15,7 @@ readme = "../README.md"
 
 [features]
 default = []
-# Optional create_participant factory hook; off by default.
-factory-hook = []
-# Static enterprise hook seams; off by default. Supersedes `factory-hook`.
+# Static enterprise hook seams; off by default.
 enterprise-hooks = []
 
 [dependencies]
@@ -46,7 +44,6 @@ roxmltree = "0.20"
 clap = { version = "4.5", features = ["derive"] }
 dashmap = "5.5"
 arc-swap = "1.7"
-libloading = "0.8"
 
 num_cpus = "1.0"
 tokio = { version = "1", features = ["full"] }
