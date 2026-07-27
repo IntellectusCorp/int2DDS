@@ -493,12 +493,13 @@ pub unsafe extern "C" fn int2dds_type_object_find_member(
 }
 
 use int2dds::common::instance_handle::InstanceHandle;
+use int2dds::infrastructure::qos_kind::QosKind;
 use int2dds::infrastructure::status::StatusMask;
-use int2dds::publication::{data_writer::DataWriter, qos::DataWriterQos};
+use int2dds::publication::data_writer::DataWriter;
 use int2dds::serialize::cdr::ExtensibilityKind as CdrExtensibilityKind;
+use int2dds::subscription::data_reader::DataReader;
 use int2dds::subscription::sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind};
-use int2dds::subscription::{data_reader::DataReader, qos::DataReaderQos};
-use int2dds::topic::{qos::TopicQos, TypeSupport};
+use int2dds::topic::TypeSupport;
 
 use crate::data::Int2DdsData;
 use crate::qos::{Int2DdsDataReaderQos, Int2DdsDataWriterQos, Int2DdsTopicQos};
@@ -561,7 +562,10 @@ pub unsafe extern "C" fn int2dds_create_topic_with_type_object(
 
     ffi_try!(p.inner.register_type_support(type_support as Arc<dyn TypeSupport>, type_name_str));
 
-    let topic_qos = if qos.is_null() { TopicQos::default() } else { (*qos).inner.clone() };
+    // NULL qos → default sentinel (engages the QoS-profile fallback chain).
+    // Non-NULL → use as-is. Mirrors the typed create_topic FFI.
+    let topic_qos =
+        if qos.is_null() { QosKind::Default } else { QosKind::Specific((*qos).inner.clone()) };
 
     let topic = ffi_try!(p.inner.create_topic::<Int2DdsData>(
         topic_name_str,
@@ -957,7 +961,10 @@ pub unsafe extern "C" fn int2dds_create_topic_dynamic(
     };
     let support = (*type_support).inner.clone();
     let type_name = support.get_type_name().to_string();
-    let topic_qos = if qos.is_null() { TopicQos::default() } else { (*qos).inner.clone() };
+    // NULL qos → default sentinel (engages the QoS-profile fallback chain).
+    // Non-NULL → use as-is. Mirrors the typed create_topic FFI.
+    let topic_qos =
+        if qos.is_null() { QosKind::Default } else { QosKind::Specific((*qos).inner.clone()) };
 
     let topic = ffi_try!(p.inner.create_topic_dynamic(
         topic_name_str,
@@ -985,7 +992,10 @@ pub unsafe extern "C" fn int2dds_create_datawriter_dynamic(
     check_null!(out);
 
     let support = (*type_support).inner.clone();
-    let writer_qos = if qos.is_null() { DataWriterQos::default() } else { (*qos).inner.clone() };
+    // NULL qos → default sentinel (engages the QoS-profile fallback chain).
+    // Non-NULL → use as-is. Mirrors the typed create_datawriter FFI.
+    let writer_qos =
+        if qos.is_null() { QosKind::Default } else { QosKind::Specific((*qos).inner.clone()) };
     let writer = ffi_try!((*publisher).inner.create_datawriter_dynamic(
         (*topic).inner.as_ref(),
         support,
@@ -1012,7 +1022,10 @@ pub unsafe extern "C" fn int2dds_create_datareader_dynamic(
     check_null!(out);
 
     let support = (*type_support).inner.clone();
-    let reader_qos = if qos.is_null() { DataReaderQos::default() } else { (*qos).inner.clone() };
+    // NULL qos → default sentinel (engages the QoS-profile fallback chain).
+    // Non-NULL → use as-is. Mirrors the typed create_datareader FFI.
+    let reader_qos =
+        if qos.is_null() { QosKind::Default } else { QosKind::Specific((*qos).inner.clone()) };
     let reader = ffi_try!((*subscriber).inner.create_datareader_dynamic(
         (*topic).inner.as_ref(),
         support,
@@ -1038,6 +1051,57 @@ pub unsafe extern "C" fn int2dds_dynamic_reader_destroy(r: *mut Int2DdsDynamicDa
     if !r.is_null() {
         drop(Box::from_raw(r));
     }
+}
+
+/// Get the effective QoS of a dynamic DataWriter.
+///
+/// A dynamic writer handle is `Int2DdsDynamicDataWriter`, a different type from the
+/// typed `Int2DdsDataWriter`, so `int2dds_datawriter_get_qos` cannot be used on it.
+/// The QoS handle written to `qos_out` is the *same* `Int2DdsDataWriterQos` type the
+/// typed path returns, so every `int2dds_datawriter_qos_get_*` accessor applies.
+/// The caller owns it and must release it with `int2dds_datawriter_qos_destroy`.
+///
+/// # Safety
+///
+/// `writer` must be a valid handle from `int2dds_create_datawriter_dynamic` and
+/// `qos_out` must point to writable storage for one pointer.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_dynamic_writer_get_qos(
+    writer: *const Int2DdsDynamicDataWriter,
+    qos_out: *mut *mut Int2DdsDataWriterQos,
+) -> Int2DdsRet {
+    check_null!(writer);
+    check_null!(qos_out);
+
+    let qos = ffi_try!((*writer).inner.get_qos());
+    *qos_out = Box::into_raw(Box::new(Int2DdsDataWriterQos { inner: qos }));
+
+    INT2DDS_RET_OK
+}
+
+/// Get the effective QoS of a dynamic DataReader.
+///
+/// Counterpart to `int2dds_dynamic_writer_get_qos`. The handle written to `qos_out`
+/// is the same `Int2DdsDataReaderQos` type the typed path returns, so every
+/// `int2dds_datareader_qos_get_*` accessor applies. The caller owns it and must
+/// release it with `int2dds_datareader_qos_destroy`.
+///
+/// # Safety
+///
+/// `reader` must be a valid handle from `int2dds_create_datareader_dynamic` and
+/// `qos_out` must point to writable storage for one pointer.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_dynamic_reader_get_qos(
+    reader: *const Int2DdsDynamicDataReader,
+    qos_out: *mut *mut Int2DdsDataReaderQos,
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(qos_out);
+
+    let qos = ffi_try!((*reader).inner.get_qos());
+    *qos_out = Box::into_raw(Box::new(Int2DdsDataReaderQos { inner: qos }));
+
+    INT2DDS_RET_OK
 }
 
 /// Current number of DataReaders matched to this dynamic writer.
