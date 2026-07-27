@@ -253,21 +253,13 @@ impl Subscriber {
     /// * The QoS policies are inconsistent
     /// * The DCPS bridge is not initialized
     /// * The topic description type is unsupported
-    pub fn create_datareader<Foo: DdsType>(
-        &self,
-        topic_description: &dyn TopicDescription,
-        qos: impl Into<QosKind<DataReaderQos>>,
-        listener: Option<Arc<dyn DataReaderListener<Foo = Foo>>>,
-        mask: StatusMask,
-    ) -> DdsResult<DataReader<Foo>> {
-        if self.is_builtin {
-            return Err(DdsError::PreconditionNotMet);
-        }
-        self.is_deleted()?;
-
-        // Resolution chain for QosKind::Default: registered default → configured
-        // default profile → spec default. QosKind::Specific is used as-is.
-        let qos = match qos.into() {
+    /// Resolution chain for `QosKind::Default`: registered default → configured
+    /// default profile → spec default. `QosKind::Specific` is used as-is.
+    ///
+    /// Shared by `create_datareader` and `create_datareader_dynamic` so both entry
+    /// points resolve the default sentinel identically.
+    fn resolve_datareader_qos(&self, qos: QosKind<DataReaderQos>) -> DataReaderQos {
+        match qos {
             QosKind::Specific(q) => q,
             QosKind::Default => {
                 if let Some(registered) =
@@ -282,7 +274,22 @@ impl Subscriber {
                     DataReaderQos::default()
                 }
             }
-        };
+        }
+    }
+
+    pub fn create_datareader<Foo: DdsType>(
+        &self,
+        topic_description: &dyn TopicDescription,
+        qos: impl Into<QosKind<DataReaderQos>>,
+        listener: Option<Arc<dyn DataReaderListener<Foo = Foo>>>,
+        mask: StatusMask,
+    ) -> DdsResult<DataReader<Foo>> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
+        self.is_deleted()?;
+
+        let qos = self.resolve_datareader_qos(qos.into());
 
         let type_support =
             self.get_participant()?.find_typesupport(topic_description.get_type_name());
@@ -475,7 +482,7 @@ impl Subscriber {
         &self,
         topic_description: &dyn TopicDescription,
         type_support: Arc<crate::xtypes::DynamicTypeSupport>,
-        qos: DataReaderQos,
+        qos: impl Into<QosKind<DataReaderQos>>,
         listener: Option<Arc<dyn DataReaderListener<Foo = crate::xtypes::DynamicData>>>,
         mask: StatusMask,
     ) -> DdsResult<DataReader<crate::xtypes::DynamicData>> {
@@ -483,6 +490,12 @@ impl Subscriber {
             return Err(DdsError::PreconditionNotMet);
         }
         self.is_deleted()?;
+
+        // Same default-resolution chain as the typed create_datareader: a caller that
+        // wants the QoS profile applied passes DATAREADER_QOS_DEFAULT. Passing a
+        // concrete DataReaderQos still means "use exactly this" via the blanket
+        // From<T> for QosKind<T>, so existing callers are unaffected.
+        let qos = self.resolve_datareader_qos(qos.into());
 
         self.create_datareader_impl(type_support, topic_description, qos, listener, mask)
     }

@@ -1586,6 +1586,39 @@ void int2dds_dynamic_writer_destroy(struct Int2DdsDynamicDataWriter *w);
 void int2dds_dynamic_reader_destroy(struct Int2DdsDynamicDataReader *r);
 
 /**
+ * Get the effective QoS of a dynamic DataWriter.
+ *
+ * A dynamic writer handle is `Int2DdsDynamicDataWriter`, a different type from the
+ * typed `Int2DdsDataWriter`, so `int2dds_datawriter_get_qos` cannot be used on it.
+ * The QoS handle written to `qos_out` is the *same* `Int2DdsDataWriterQos` type the
+ * typed path returns, so every `int2dds_datawriter_qos_get_*` accessor applies.
+ * The caller owns it and must release it with `int2dds_datawriter_qos_destroy`.
+ *
+ * # Safety
+ *
+ * `writer` must be a valid handle from `int2dds_create_datawriter_dynamic` and
+ * `qos_out` must point to writable storage for one pointer.
+ */
+Int2DdsRet int2dds_dynamic_writer_get_qos(const struct Int2DdsDynamicDataWriter *writer,
+                                          struct Int2DdsDataWriterQos **qos_out);
+
+/**
+ * Get the effective QoS of a dynamic DataReader.
+ *
+ * Counterpart to `int2dds_dynamic_writer_get_qos`. The handle written to `qos_out`
+ * is the same `Int2DdsDataReaderQos` type the typed path returns, so every
+ * `int2dds_datareader_qos_get_*` accessor applies. The caller owns it and must
+ * release it with `int2dds_datareader_qos_destroy`.
+ *
+ * # Safety
+ *
+ * `reader` must be a valid handle from `int2dds_create_datareader_dynamic` and
+ * `qos_out` must point to writable storage for one pointer.
+ */
+Int2DdsRet int2dds_dynamic_reader_get_qos(const struct Int2DdsDynamicDataReader *reader,
+                                          struct Int2DdsDataReaderQos **qos_out);
+
+/**
  * Current number of DataReaders matched to this dynamic writer.
  */
 Int2DdsRet int2dds_dynamic_writer_publication_matched_count(const struct Int2DdsDynamicDataWriter *writer,
