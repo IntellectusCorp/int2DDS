@@ -68,14 +68,14 @@ int main(int argc, char* argv[]) {
     }
 
     /* Create participant */
-    ret = int2dds_create_participant(factory, "hello_world_publisher", domain_id, &participant);
+    ret = int2dds_create_participant(factory, domain_id, NULL, &participant);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create participant: %d\n", ret);
         goto cleanup;
     }
 
     /* Create publisher */
-    ret = int2dds_create_publisher(participant, &publisher);
+    ret = int2dds_create_publisher(participant, NULL, &publisher);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create publisher: %d\n", ret);
         goto cleanup;
@@ -107,8 +107,8 @@ int main(int argc, char* argv[]) {
         goto cleanup;
     }
 
-    /* Create DataWriter */
-    ret = int2dds_create_datawriter(publisher, topic, qos, &writer);
+    /* Create DataWriter (no listener) */
+    ret = int2dds_create_datawriter(publisher, topic, qos, NULL, 0, &writer);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create datawriter: %d\n", ret);
         goto cleanup;
@@ -136,15 +136,14 @@ int main(int argc, char* argv[]) {
         goto cleanup;
     }
 
-    ret = int2dds_waitset_attach_condition(waitset, condition);
+    ret = int2dds_waitset_attach_statuscondition(waitset, condition);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to attach condition to waitset: %d\n", ret);
         goto cleanup;
     }
 
     /* Loop until a subscriber actually matches; the finite timeout keeps Ctrl-C responsive */
-    int32_t total_count = 0;
-    int32_t current_count = 0;
+    struct Int2DdsPublicationMatchedStatus matched = {0};
     do {
         struct Int2DdsConditionSeq *triggered = NULL;
         ret = int2dds_waitset_wait_ex(waitset, -1, &triggered);
@@ -157,14 +156,14 @@ int main(int argc, char* argv[]) {
             goto cleanup;
         }
 
-        ret = int2dds_get_publication_matched_status(writer, &total_count, &current_count);
+        ret = int2dds_datawriter_get_publication_matched_status(writer, &matched);
         if (ret != INT2DDS_RET_OK) {
             fprintf(stderr, "Failed to get publication matched status: %d\n", ret);
             goto cleanup;
         }
-    } while (current_count <= 0);
+    } while (matched.current_count <= 0);
 
-    printf("Subscriber matched! (total: %d, current: %d)\n", total_count, current_count);
+    printf("Subscriber matched! (total: %d, current: %d)\n", matched.total_count, matched.current_count);
     printf("Starting to send messages...\n\n");
 
     /* Publish messages using IDL-generated serialization */
@@ -187,7 +186,7 @@ int main(int argc, char* argv[]) {
         }
 
         /* Write serialized bytes (no key for HelloWorld) */
-        ret = int2dds_write_serialized(writer, buf, serialized_len, NULL, 0);
+        ret = int2dds_datawriter_write_serialized(writer, buf, serialized_len, NULL, 0);
         if (ret != INT2DDS_RET_OK) {
             fprintf(stderr, "Failed to write: %d\n", ret);
         } else {
@@ -200,7 +199,7 @@ int main(int argc, char* argv[]) {
 cleanup:
     if (waitset) {
         if (condition) {
-            int2dds_waitset_detach_condition(waitset, condition);
+            int2dds_waitset_detach_statuscondition(waitset, condition);
         }
         int2dds_waitset_delete(waitset);
     }

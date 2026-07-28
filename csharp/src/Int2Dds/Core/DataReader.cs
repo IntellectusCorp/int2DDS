@@ -78,16 +78,16 @@ namespace Int2Dds.Core
 
             try
             {
-                if (listener != null)
+                unsafe
                 {
-                    unsafe
+                    if (listener != null)
                     {
                         var (nativeListener, contextHandle) = ListenerRegistry.CreateReaderListener(listener, this);
                         _listenerContextHandle = contextHandle;
                         try
                         {
                             ReturnCodeHelper.CheckReturn(
-                                NativeMethods.int2dds_create_datareader_with_listener(
+                                NativeMethods.int2dds_create_datareader(
                                     subscriber.Handle, topic.Handle, qosHandle, &nativeListener, statusMask, out _handle));
                         }
                         catch
@@ -97,11 +97,12 @@ namespace Int2Dds.Core
                             throw;
                         }
                     }
-                }
-                else
-                {
-                    ReturnCodeHelper.CheckReturn(
-                        NativeMethods.int2dds_create_datareader(subscriber.Handle, topic.Handle, qosHandle, out _handle));
+                    else
+                    {
+                        ReturnCodeHelper.CheckReturn(
+                            NativeMethods.int2dds_create_datareader(
+                                subscriber.Handle, topic.Handle, qosHandle, null, 0, out _handle));
+                    }
                 }
             }
             finally
@@ -133,7 +134,7 @@ namespace Int2Dds.Core
                         try
                         {
                             ReturnCodeHelper.CheckReturn(
-                                NativeMethods.int2dds_create_datareader_with_profile_and_listener(
+                                NativeMethods.int2dds_create_datareader_with_profile(
                                     subscriber.Handle, topic.Handle, pQos, &nativeListener, statusMask, out _handle));
                         }
                         catch
@@ -147,7 +148,7 @@ namespace Int2Dds.Core
                     {
                         ReturnCodeHelper.CheckReturn(
                             NativeMethods.int2dds_create_datareader_with_profile(
-                                subscriber.Handle, topic.Handle, pQos, out _handle));
+                                subscriber.Handle, topic.Handle, pQos, null, 0, out _handle));
                     }
                 }
             }
@@ -273,7 +274,7 @@ namespace Int2Dds.Core
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
-            var ret = NativeMethods.int2dds_take_serialized_batch(_handle, maxSamples, out var seqHandle);
+            var ret = NativeMethods.int2dds_datareader_take_serialized_batch(_handle, maxSamples, out var seqHandle);
             if (ret == ReturnCode.NoData)
                 return Int2Dds.Internal.EmptyArrayHolder<(Sample<T>, SampleInfo)>.Value;
             ReturnCodeHelper.CheckReturn(ret);
@@ -298,7 +299,7 @@ namespace Int2Dds.Core
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
-            var ret = NativeMethods.int2dds_read_serialized_batch(_handle, maxSamples, out var seqHandle);
+            var ret = NativeMethods.int2dds_datareader_read_serialized_batch(_handle, maxSamples, out var seqHandle);
             if (ret == ReturnCode.NoData)
                 return Int2Dds.Internal.EmptyArrayHolder<(Sample<T>, SampleInfo)>.Value;
             ReturnCodeHelper.CheckReturn(ret);
@@ -331,9 +332,13 @@ namespace Int2Dds.Core
         public (int totalCount, int currentCount) GetSubscriptionMatchedStatus()
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
-            ReturnCodeHelper.CheckReturn(
-                NativeMethods.int2dds_get_subscription_matched_status(_handle, out var total, out var current));
-            return (total, current);
+            unsafe
+            {
+                NativeSubscriptionMatchedStatus native;
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_datareader_get_subscription_matched_status(_handle, &native));
+                return (native.TotalCount, native.CurrentCount);
+            }
         }
 
         /// <summary>
@@ -560,7 +565,7 @@ namespace Int2Dds.Core
             UIntPtr size;
             bool validData;
             IntPtr loan;
-            int ret = NativeMethods.int2dds_take_serialized_loaned(_handle, out data, out size, out validData, out loan);
+            int ret = NativeMethods.int2dds_datareader_take_serialized_loaned(_handle, out data, out size, out validData, out loan);
             if (ret == ReturnCode.NoData) return null;
             ReturnCodeHelper.CheckReturn(ret);
 
@@ -574,7 +579,7 @@ namespace Int2Dds.Core
             finally
             {
                 if (loan != IntPtr.Zero)
-                    NativeMethods.int2dds_return_serialized_loan(loan);
+                    NativeMethods.int2dds_datareader_return_serialized_loan(loan);
             }
         }
 
@@ -751,8 +756,8 @@ namespace Int2Dds.Core
 
             IntPtr seqHandle;
             var ret = take
-                ? NativeMethods.int2dds_datareader_take_w_readcondition(_handle, condition.Handle, maxSamples, out seqHandle)
-                : NativeMethods.int2dds_datareader_read_w_readcondition(_handle, condition.Handle, maxSamples, out seqHandle);
+                ? NativeMethods.int2dds_datareader_take_serialized_batch_w_readcondition(_handle, condition.Handle, maxSamples, out seqHandle)
+                : NativeMethods.int2dds_datareader_read_serialized_batch_w_readcondition(_handle, condition.Handle, maxSamples, out seqHandle);
 
             if (ret == ReturnCode.NoData)
             {
@@ -810,8 +815,8 @@ namespace Int2Dds.Core
                 fixed (byte* pHandle = handle)
                 {
                     ret = take
-                        ? NativeMethods.int2dds_take_instance_serialized_batch(_handle, pHandle, maxSamples, sampleStates, viewStates, instanceStates, out seqHandle)
-                        : NativeMethods.int2dds_read_instance_serialized_batch(_handle, pHandle, maxSamples, sampleStates, viewStates, instanceStates, out seqHandle);
+                        ? NativeMethods.int2dds_datareader_take_instance_serialized_batch(_handle, pHandle, maxSamples, sampleStates, viewStates, instanceStates, out seqHandle)
+                        : NativeMethods.int2dds_datareader_read_instance_serialized_batch(_handle, pHandle, maxSamples, sampleStates, viewStates, instanceStates, out seqHandle);
                 }
             }
 
@@ -880,7 +885,7 @@ namespace Int2Dds.Core
                 {
                     fixed (byte* pBuffer = _buffer)
                     {
-                        var ret = NativeMethods.int2dds_take_serialized(
+                        var ret = NativeMethods.int2dds_datareader_take_serialized(
                             _handle, pBuffer, (UIntPtr)_buffer.Length, out var actualSize, out var validData);
 
                         if (ret == ReturnCode.BufferTooSmall)
@@ -911,7 +916,7 @@ namespace Int2Dds.Core
                 {
                     fixed (byte* pBuffer = _buffer)
                     {
-                        var ret = NativeMethods.int2dds_read_serialized(
+                        var ret = NativeMethods.int2dds_datareader_read_serialized(
                             _handle, pBuffer, (UIntPtr)_buffer.Length, out var actualSize, out var validData);
 
                         if (ret == ReturnCode.BufferTooSmall)
@@ -943,7 +948,7 @@ namespace Int2Dds.Core
                     fixed (byte* pBuffer = _buffer)
                     {
                         NativeSampleInfo nativeInfo;
-                        var ret = NativeMethods.int2dds_take_serialized_w_info(
+                        var ret = NativeMethods.int2dds_datareader_take_serialized_w_info(
                             _handle, pBuffer, (UIntPtr)_buffer.Length, out var actualSize, &nativeInfo);
 
                         if (ret == ReturnCode.BufferTooSmall)
@@ -976,7 +981,7 @@ namespace Int2Dds.Core
                     fixed (byte* pBuffer = _buffer)
                     {
                         NativeSampleInfo nativeInfo;
-                        var ret = NativeMethods.int2dds_read_serialized_w_info(
+                        var ret = NativeMethods.int2dds_datareader_read_serialized_w_info(
                             _handle, pBuffer, (UIntPtr)_buffer.Length, out var actualSize, &nativeInfo);
 
                         if (ret == ReturnCode.BufferTooSmall)
