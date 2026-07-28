@@ -2779,8 +2779,9 @@ impl DomainParticipant {
         Ok(obj.clone())
     }
 
-    /// Resolve the TypeObject for `topic_name`
-    fn discovered_type_object(&self, topic_name: &str) -> DdsResult<crate::xtypes::TypeObject> {
+    /// Resolve the TypeObject for `topic_name`. Triggers a TypeLookup fetch and
+    /// returns `PreconditionNotMet` while the reply is pending; retry until Ok.
+    pub fn discovered_type_object(&self, topic_name: &str) -> DdsResult<crate::xtypes::TypeObject> {
         let rtps_participant = self.get_rtps_participant()?;
 
         // Inline TypeObject advertised by a remote publication/subscription. The

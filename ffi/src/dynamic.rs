@@ -251,6 +251,11 @@ pub unsafe extern "C" fn int2dds_participant_wait_for_type_object(
     check_null!(type_name_buf);
     check_null!(out_len);
 
+    let topic_str = match CStr::from_ptr(topic_name).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
     let mut builtin: *mut Int2DdsSubscriber = std::ptr::null_mut();
     let r = int2dds_participant_get_builtin_subscriber(participant, &mut builtin);
     if r != INT2DDS_RET_OK {
@@ -286,27 +291,29 @@ pub unsafe extern "C" fn int2dds_participant_wait_for_type_object(
             break r;
         }
 
-        let mut to: *mut Int2DdsTypeObject = std::ptr::null_mut();
-        let rt = crate::discovery::int2dds_publication_builtin_topic_data_take_type_object(
-            pdata, &mut to,
-        );
-        if rt == INT2DDS_RET_OK {
-            let r2 = copy_str_to_c(
-                &(*pdata).inner.type_name(),
-                type_name_buf,
-                type_name_buf_len,
-                out_len,
-            );
-            drop(Box::from_raw(pdata));
-            if r2 != INT2DDS_RET_OK {
-                int2dds_type_object_destroy(to);
-                break r2;
+        // SEDP no longer carries inline TypeObjects; discovered_type_object()
+        // triggers the on-demand TypeLookup fetch and errors until the reply lands.
+        match (*participant).inner.discovered_type_object(topic_str) {
+            Ok(obj) => {
+                let r2 = copy_str_to_c(
+                    &(*pdata).inner.type_name(),
+                    type_name_buf,
+                    type_name_buf_len,
+                    out_len,
+                );
+                drop(Box::from_raw(pdata));
+                if r2 != INT2DDS_RET_OK {
+                    break r2;
+                }
+                let h = Box::new(Int2DdsTypeObject { inner: obj, deps: Vec::new() });
+                *type_obj_out = Box::into_raw(h);
+                break INT2DDS_RET_OK;
             }
-            *type_obj_out = to;
-            break INT2DDS_RET_OK;
+            Err(_) => {
+                drop(Box::from_raw(pdata));
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
         }
-        drop(Box::from_raw(pdata));
-        // No type_object on this publication — keep waiting.
     };
 
     // Drop the builtin subscriber handle wrapper (decrements Arc; underlying
