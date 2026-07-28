@@ -1094,6 +1094,10 @@ namespace Int2Dds.Core
                 ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_set_destination_order(
                     qosHandle, (int)qos.DestinationOrder.Kind));
 
+            if (qos.LifespanReference != null)
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_set_lifespan_reference(
+                    qosHandle, (int)qos.LifespanReference.Kind));
+
             if (qos.TimeBasedFilter != null)
                 ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_set_time_based_filter(
                     qosHandle, qos.TimeBasedFilter.MinimumSeparationNs));
@@ -1140,6 +1144,7 @@ namespace Int2Dds.Core
             NativeMethods.int2dds_datareader_qos_get_ownership(h, out var ownKind);
             NativeMethods.int2dds_datareader_qos_get_resource_limits(h, out var maxS, out var maxI, out var maxPI);
             NativeMethods.int2dds_datareader_qos_get_destination_order(h, out var destKind);
+            NativeMethods.int2dds_datareader_qos_get_lifespan_reference(h, out var lifespanRefKind);
             NativeMethods.int2dds_datareader_qos_get_deadline(h, out var deadlineNs);
             NativeMethods.int2dds_datareader_qos_get_liveliness(h, out var liveKind, out var liveNs);
             NativeMethods.int2dds_datareader_qos_get_data_representation(h, out var reprKind);
@@ -1155,6 +1160,7 @@ namespace Int2Dds.Core
                 Ownership = new Ownership((OwnershipKind)ownKind),
                 ResourceLimits = new ResourceLimits(maxS, maxI, maxPI),
                 DestinationOrder = new DestinationOrder((DestinationOrderKind)destKind),
+                LifespanReference = new LifespanReference((LifespanReferenceKind)lifespanRefKind),
                 Deadline = new Deadline(TimeSpan.FromTicks(deadlineNs / 100)),
                 Liveliness = new Liveliness((LivelinessKind)liveKind, TimeSpan.FromTicks(liveNs / 100)),
                 DataRepresentation = new DataRepresentation((DataRepresentationKind)reprKind),

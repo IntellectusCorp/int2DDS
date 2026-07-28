@@ -790,6 +790,10 @@ ffi.cdef("""
         Int2DdsDataReaderQos *qos,
         int32_t kind
     );
+    Int2DdsRet int2dds_datareader_qos_set_lifespan_reference(
+        Int2DdsDataReaderQos *qos,
+        int32_t kind
+    );
     Int2DdsRet int2dds_datareader_qos_set_time_based_filter(
         Int2DdsDataReaderQos *qos,
         int64_t minimum_separation_ns

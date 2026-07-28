@@ -36,6 +36,11 @@ class DestinationOrderKind(IntEnum):
     BY_SOURCE = 1
 
 
+class LifespanReferenceKind(IntEnum):
+    BY_SOURCE = 0
+    BY_RECEPTION = 1
+
+
 class LivelinessKind(IntEnum):
     AUTOMATIC = 0
     MANUAL_BY_PARTICIPANT = 1
@@ -129,6 +134,19 @@ class DestinationOrder:
     @property
     def _kind_int(self) -> int:
         return DestinationOrderKind.BY_SOURCE if self.kind == "BY_SOURCE" else DestinationOrderKind.BY_RECEPTION
+
+
+@dataclass
+class LifespanReference:
+    kind: Literal["BY_SOURCE", "BY_RECEPTION"] = "BY_SOURCE"
+
+    @property
+    def _kind_int(self) -> int:
+        return (
+            LifespanReferenceKind.BY_RECEPTION
+            if self.kind == "BY_RECEPTION"
+            else LifespanReferenceKind.BY_SOURCE
+        )
 
 
 @dataclass
@@ -287,6 +305,7 @@ class DataReaderQos:
     ownership: Ownership | None = None
     resource_limits: ResourceLimits | None = None
     destination_order: DestinationOrder | None = None
+    lifespan_reference: LifespanReference | None = None
     time_based_filter: TimeBasedFilter | None = None
     latency_budget: LatencyBudget | None = None
     user_data: UserData | None = None

@@ -80,6 +80,9 @@ def _apply_datareader_qos(handle: CData, qos: "DataReaderQos") -> None:
     if qos.destination_order is not None:
         check_ret(lib.int2dds_datareader_qos_set_destination_order(
             handle, qos.destination_order._kind_int))
+    if qos.lifespan_reference is not None:
+        check_ret(lib.int2dds_datareader_qos_set_lifespan_reference(
+            handle, qos.lifespan_reference._kind_int))
     if qos.time_based_filter is not None:
         check_ret(lib.int2dds_datareader_qos_set_time_based_filter(
             handle, qos.time_based_filter._minimum_separation_ns))
