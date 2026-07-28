@@ -400,6 +400,9 @@ ffi.cdef("""
     Int2DdsRet int2dds_datawriter_qos_get_data_frag(
         const Int2DdsDataWriterQos *qos, int32_t *value_out
     );
+    Int2DdsRet int2dds_datawriter_qos_get_lifespan(
+        const Int2DdsDataWriterQos *qos, int64_t *duration_ns_out
+    );
     Int2DdsRet int2dds_datareader_qos_get_reliability(
         const Int2DdsDataReaderQos *qos, int32_t *kind_out, int64_t *max_blocking_time_ns_out
     );
@@ -408,6 +411,9 @@ ffi.cdef("""
     );
     Int2DdsRet int2dds_datareader_qos_get_history(
         const Int2DdsDataReaderQos *qos, int32_t *kind_out, int32_t *depth_out
+    );
+    Int2DdsRet int2dds_datareader_qos_get_lifespan_reference(
+        const Int2DdsDataReaderQos *qos, int32_t *kind_out
     );
 
     Int2DdsRet int2dds_get_publication_matched_status(

@@ -715,8 +715,8 @@ class DataReader(Generic[T]):
     def get_qos(self) -> "DataReaderQos":
         """Return the effective QoS (reliability, durability, history) in force."""
         from int2dds.core.qos import (
-            DataReaderQos, Reliability, Durability, History,
-            ReliabilityKind, DurabilityKind, HistoryKind,
+            DataReaderQos, Reliability, Durability, History, LifespanReference,
+            ReliabilityKind, DurabilityKind, HistoryKind, LifespanReferenceKind,
         )
 
         qos_ptr = ffi.new("Int2DdsDataReaderQos **")
@@ -731,6 +731,8 @@ class DataReader(Generic[T]):
             hist_kind = ffi.new("int32_t *")
             depth = ffi.new("int32_t *")
             check_ret(lib.int2dds_datareader_qos_get_history(handle, hist_kind, depth))
+            lifespan_ref_kind = ffi.new("int32_t *")
+            check_ret(lib.int2dds_datareader_qos_get_lifespan_reference(handle, lifespan_ref_kind))
         finally:
             lib.int2dds_datareader_qos_destroy(handle)
 
@@ -741,6 +743,8 @@ class DataReader(Generic[T]):
             ),
             durability=Durability(kind=DurabilityKind(dur_kind[0]).name),
             history=History(kind=HistoryKind(hist_kind[0]).name, depth=depth[0]),
+            lifespan_reference=LifespanReference(
+                kind=LifespanReferenceKind(lifespan_ref_kind[0]).name),
         )
 
     def set_qos(self, qos: "DataReaderQos") -> None:
