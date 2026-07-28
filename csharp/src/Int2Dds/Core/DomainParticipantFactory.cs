@@ -99,7 +99,7 @@ namespace Int2Dds.Core
         public ParticipantQos GetResolvedDefaultParticipantQos()
         {
             ReturnCodeHelper.CheckReturn(
-                NativeMethods.int2dds_get_default_participant_qos(Handle, out var qosHandle));
+                NativeMethods.int2dds_domain_participant_factory_get_default_participant_qos(Handle, out var qosHandle));
             try
             {
                 return DomainParticipant.ReadParticipantQos(qosHandle);

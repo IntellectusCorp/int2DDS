@@ -26,29 +26,14 @@ namespace Int2Dds.Core
         /// Creates a new DomainParticipant in the specified domain.
         /// </summary>
         /// <param name="domainId">The DDS domain to join (default 0).</param>
-        /// <param name="name">Optional name for the participant.</param>
+        /// <param name="name">Optional label kept for API compatibility (not sent to the core).</param>
         public DomainParticipant(int domainId = 0, string? name = null)
         {
             _domainId = domainId;
             var factory = DomainParticipantFactory.Instance;
 
-            unsafe
-            {
-                if (name != null)
-                {
-                    var nameBytes = Encoding.UTF8.GetBytes(name + '\0');
-                    fixed (byte* p = nameBytes)
-                    {
-                        ReturnCodeHelper.CheckReturn(
-                            NativeMethods.int2dds_create_participant(factory.Handle, p, domainId, out _handle));
-                    }
-                }
-                else
-                {
-                    ReturnCodeHelper.CheckReturn(
-                        NativeMethods.int2dds_create_participant(factory.Handle, null, domainId, out _handle));
-                }
-            }
+            ReturnCodeHelper.CheckReturn(
+                NativeMethods.int2dds_create_participant(factory.Handle, domainId, IntPtr.Zero, out _handle));
         }
 
         /// <summary>
@@ -56,7 +41,7 @@ namespace Int2Dds.Core
         /// </summary>
         /// <param name="domainId">The DDS domain to join.</param>
         /// <param name="qosPath">QoS profile path (e.g. "MyLibrary::MyProfile").</param>
-        /// <param name="name">Optional name for the participant.</param>
+        /// <param name="name">Optional label kept for API compatibility (not sent to the core).</param>
         public DomainParticipant(int domainId, string qosPath, string? name = null)
         {
             _domainId = domainId;
@@ -67,20 +52,8 @@ namespace Int2Dds.Core
                 var qosPathBytes = Encoding.UTF8.GetBytes(qosPath + '\0');
                 fixed (byte* pQos = qosPathBytes)
                 {
-                    if (name != null)
-                    {
-                        var nameBytes = Encoding.UTF8.GetBytes(name + '\0');
-                        fixed (byte* p = nameBytes)
-                        {
-                            ReturnCodeHelper.CheckReturn(
-                                NativeMethods.int2dds_create_participant_with_profile(factory.Handle, p, domainId, pQos, out _handle));
-                        }
-                    }
-                    else
-                    {
-                        ReturnCodeHelper.CheckReturn(
-                            NativeMethods.int2dds_create_participant_with_profile(factory.Handle, null, domainId, pQos, out _handle));
-                    }
+                    ReturnCodeHelper.CheckReturn(
+                        NativeMethods.int2dds_create_participant_with_profile(factory.Handle, domainId, pQos, out _handle));
                 }
             }
         }
@@ -90,7 +63,7 @@ namespace Int2Dds.Core
         /// </summary>
         /// <param name="domainId">The DDS domain to join.</param>
         /// <param name="qos">Participant QoS (e.g. multicast TTL via PropertyQosPolicy).</param>
-        /// <param name="name">Optional name for the participant.</param>
+        /// <param name="name">Optional label kept for API compatibility (not sent to the core).</param>
         public DomainParticipant(int domainId, ParticipantQos qos, string? name = null)
         {
             if (qos == null) throw new ArgumentNullException(nameof(qos));
@@ -100,23 +73,8 @@ namespace Int2Dds.Core
             var qosHandle = BuildNativeQos(qos);
             try
             {
-                unsafe
-                {
-                    if (name != null)
-                    {
-                        var nameBytes = Encoding.UTF8.GetBytes(name + '\0');
-                        fixed (byte* p = nameBytes)
-                        {
-                            ReturnCodeHelper.CheckReturn(
-                                NativeMethods.int2dds_create_participant_with_qos(factory.Handle, p, domainId, qosHandle, out _handle));
-                        }
-                    }
-                    else
-                    {
-                        ReturnCodeHelper.CheckReturn(
-                            NativeMethods.int2dds_create_participant_with_qos(factory.Handle, null, domainId, qosHandle, out _handle));
-                    }
-                }
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_create_participant(factory.Handle, domainId, qosHandle, out _handle));
             }
             finally
             {
@@ -420,11 +378,11 @@ namespace Int2Dds.Core
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
             ReturnCodeHelper.CheckReturn(
-                NativeMethods.int2dds_take_discovered_publications_snapshot(_handle, timeoutMs, out var seq));
+                NativeMethods.int2dds_participant_take_discovered_publications_snapshot(_handle, timeoutMs, out var seq));
             try
             {
                 ReturnCodeHelper.CheckReturn(
-                    NativeMethods.int2dds_publication_builtin_topic_data_seq_len(seq, out var count));
+                    NativeMethods.int2dds_publication_builtin_topic_data_seq_length(seq, out var count));
                 var result = new PublicationBuiltinTopicData[(int)(uint)count];
                 for (uint i = 0; i < (uint)count; i++)
                 {
@@ -436,7 +394,7 @@ namespace Int2Dds.Core
             }
             finally
             {
-                NativeMethods.int2dds_publication_builtin_topic_data_seq_destroy(seq);
+                NativeMethods.int2dds_publication_builtin_topic_data_seq_delete(seq);
             }
         }
 
@@ -451,11 +409,11 @@ namespace Int2Dds.Core
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
             ReturnCodeHelper.CheckReturn(
-                NativeMethods.int2dds_take_discovered_subscriptions_snapshot(_handle, timeoutMs, out var seq));
+                NativeMethods.int2dds_participant_take_discovered_subscriptions_snapshot(_handle, timeoutMs, out var seq));
             try
             {
                 ReturnCodeHelper.CheckReturn(
-                    NativeMethods.int2dds_subscription_builtin_topic_data_seq_len(seq, out var count));
+                    NativeMethods.int2dds_subscription_builtin_topic_data_seq_length(seq, out var count));
                 var result = new SubscriptionBuiltinTopicData[(int)(uint)count];
                 for (uint i = 0; i < (uint)count; i++)
                 {
@@ -467,7 +425,7 @@ namespace Int2Dds.Core
             }
             finally
             {
-                NativeMethods.int2dds_subscription_builtin_topic_data_seq_destroy(seq);
+                NativeMethods.int2dds_subscription_builtin_topic_data_seq_delete(seq);
             }
         }
 

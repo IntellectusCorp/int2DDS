@@ -26,31 +26,32 @@ use super::{error::*, qos::Int2DdsParticipantQos, types::*};
 /// Create a DomainParticipant
 ///
 /// # Safety
-/// - `name` must be a valid null-terminated C string or null
+/// - `qos` can be null for the default QoS (engages the core resolution chain:
+///   registered default → configured default profile → spec default); a non-null
+///   handle is cloned internally and remains owned by the caller
 /// - `participant_out` must be a valid pointer to a null pointer
 /// - The returned participant must be freed with `int2dds_delete_participant`
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_create_participant(
     _factory: *const Int2DdsParticipantFactory,
-    name: *const std::os::raw::c_char,
     domain_id: i32,
+    qos: *const Int2DdsParticipantQos,
     participant_out: *mut *mut Int2DdsParticipant,
 ) -> Int2DdsRet {
     check_null!(participant_out);
 
-    // Name is optional for now (not used in current implementation)
-    // Just validate UTF-8 without allocating String
-    if !name.is_null() && CStr::from_ptr(name).to_str().is_err() {
-        return INT2DDS_RET_INVALID_ARGUMENT;
-    }
-
     let factory = DomainParticipantFactory::get_instance();
 
-    // Pass the default sentinel so the core resolution chain (registered
-    // default → configured default profile → spec default) is engaged.
+    // NULL qos → default sentinel (engages profile fallback). Non-NULL → use as-is.
+    let participant_qos = if qos.is_null() {
+        int2dds::infrastructure::qos_kind::QosKind::Default
+    } else {
+        int2dds::infrastructure::qos_kind::QosKind::Specific((*qos).inner.clone())
+    };
+
     let participant = ffi_try!(factory.create_participant(
         domain_id,
-        int2dds::domain::qos::PARTICIPANT_QOS_DEFAULT,
+        participant_qos,
         None,
         StatusMask::default()
     ));
@@ -65,24 +66,18 @@ pub unsafe extern "C" fn int2dds_create_participant(
 /// Create a DomainParticipant using a QoS profile path
 ///
 /// # Safety
-/// - `name` must be a valid null-terminated C string or null
 /// - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
 /// - `participant_out` must be a valid pointer to a null pointer
 /// - The returned participant must be freed with `int2dds_delete_participant`
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_create_participant_with_profile(
     _factory: *const Int2DdsParticipantFactory,
-    name: *const std::os::raw::c_char,
     domain_id: i32,
     qos_path: *const std::os::raw::c_char,
     participant_out: *mut *mut Int2DdsParticipant,
 ) -> Int2DdsRet {
     check_null!(qos_path);
     check_null!(participant_out);
-
-    if !name.is_null() && CStr::from_ptr(name).to_str().is_err() {
-        return INT2DDS_RET_INVALID_ARGUMENT;
-    }
 
     let qos_path_str = match CStr::from_ptr(qos_path).to_str() {
         Ok(s) => s,
@@ -101,73 +96,6 @@ pub unsafe extern "C" fn int2dds_create_participant_with_profile(
     let participant_handle = Box::new(Int2DdsParticipant { inner: Arc::new(participant) });
 
     *participant_out = Box::into_raw(participant_handle);
-
-    INT2DDS_RET_OK
-}
-
-/// Create a DomainParticipant with the given QoS handle.
-///
-/// The handle is cloned internally; the caller still owns `qos` and must
-/// destroy it with `int2dds_participant_qos_destroy`.
-///
-/// # Safety
-/// - `name` must be a valid null-terminated C string or null
-/// - `qos` must be a valid QoS handle created by
-///   `int2dds_participant_qos_create_default`
-/// - `participant_out` must be a valid pointer to a null pointer
-/// - The returned participant must be freed with `int2dds_delete_participant`
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_create_participant_with_qos(
-    _factory: *const Int2DdsParticipantFactory,
-    name: *const std::os::raw::c_char,
-    domain_id: i32,
-    qos: *const Int2DdsParticipantQos,
-    participant_out: *mut *mut Int2DdsParticipant,
-) -> Int2DdsRet {
-    check_null!(qos);
-    check_null!(participant_out);
-
-    if !name.is_null() && CStr::from_ptr(name).to_str().is_err() {
-        return INT2DDS_RET_INVALID_ARGUMENT;
-    }
-
-    let factory = DomainParticipantFactory::get_instance();
-    let qos_ref = &*qos;
-
-    let participant = ffi_try!(factory.create_participant(
-        domain_id,
-        qos_ref.inner.clone(),
-        None,
-        StatusMask::default()
-    ));
-
-    let participant_handle = Box::new(Int2DdsParticipant { inner: Arc::new(participant) });
-
-    *participant_out = Box::into_raw(participant_handle);
-
-    INT2DDS_RET_OK
-}
-
-/// Get the resolved default DomainParticipant QoS (registered default ->
-/// configured default profile -> spec default), so callers can modify it (e.g.
-/// set user_data) and pass it to `int2dds_create_participant_with_qos` without
-/// losing the configured transport/discovery defaults that the bare
-/// `int2dds_create_participant` resolution chain applies.
-///
-/// # Safety
-/// - `qos_out` must be a valid pointer to a null pointer
-/// - The returned QoS must be freed with `int2dds_participant_qos_destroy`
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_get_default_participant_qos(
-    _factory: *const Int2DdsParticipantFactory,
-    qos_out: *mut *mut Int2DdsParticipantQos,
-) -> Int2DdsRet {
-    check_null!(qos_out);
-
-    let factory = DomainParticipantFactory::get_instance();
-    let qos = ffi_try!(factory.get_default_participant_qos());
-    let handle = Box::new(Int2DdsParticipantQos { inner: qos });
-    *qos_out = Box::into_raw(handle);
 
     INT2DDS_RET_OK
 }
@@ -424,8 +352,8 @@ mod tests {
             let domain_id = 0;
             let ret = int2dds_create_participant(
                 factory,
-                ptr::null(),
                 domain_id,
+                ptr::null(),
                 &mut participant as *mut _,
             );
             assert_eq!(ret, INT2DDS_RET_OK);
@@ -457,8 +385,8 @@ mod tests {
             let domain_id = 1;
             let ret = int2dds_create_participant(
                 factory,
-                ptr::null(),
                 domain_id,
+                ptr::null(),
                 &mut participant as *mut _,
             );
             assert_eq!(ret, INT2DDS_RET_OK);
@@ -491,7 +419,7 @@ mod tests {
 
             let mut participant: *mut Int2DdsParticipant = ptr::null_mut();
             assert_eq!(
-                int2dds_create_participant(factory, ptr::null(), 2, &mut participant as *mut _),
+                int2dds_create_participant(factory, 2, ptr::null(), &mut participant as *mut _),
                 INT2DDS_RET_OK
             );
 

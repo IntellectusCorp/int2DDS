@@ -110,23 +110,6 @@ impl Int2DdsTypeObject {
     }
 }
 
-/// Opaque handle wrapping a discovered PublicationBuiltinTopicData sample.
-/// Owned by the caller; destroy via `int2dds_publication_data_destroy`.
-pub struct Int2DdsPublicationBuiltinData {
-    pub(crate) inner: PublicationBuiltinTopicData,
-}
-
-unsafe impl Send for Int2DdsPublicationBuiltinData {}
-unsafe impl Sync for Int2DdsPublicationBuiltinData {}
-
-/// Destroy a publication builtin data handle. Safe to call with null.
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_publication_data_destroy(p: *mut Int2DdsPublicationBuiltinData) {
-    if !p.is_null() {
-        drop(Box::from_raw(p));
-    }
-}
-
 /// Helper: copy a Rust &str into a caller-supplied C buffer.
 /// Writes required length (without the NUL) into *out_len and returns
 /// BUFFER_TOO_SMALL if the supplied buffer is too small.
@@ -148,54 +131,9 @@ pub(crate) unsafe fn copy_str_to_c(
     INT2DDS_RET_OK
 }
 
-/// Copy the topic name of a discovered publication into `buf`.
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_publication_data_topic_name(
-    p: *const Int2DdsPublicationBuiltinData,
-    buf: *mut c_char,
-    buf_len: usize,
-    out_len: *mut usize,
-) -> Int2DdsRet {
-    check_null!(p);
-    let name = (*p).inner.topic_name();
-    copy_str_to_c(&name, buf, buf_len, out_len)
-}
-
-/// Copy the type name of a discovered publication into `buf`.
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_publication_data_type_name(
-    p: *const Int2DdsPublicationBuiltinData,
-    buf: *mut c_char,
-    buf_len: usize,
-    out_len: *mut usize,
-) -> Int2DdsRet {
-    check_null!(p);
-    let name = (*p).inner.type_name();
-    copy_str_to_c(&name, buf, buf_len, out_len)
-}
-
-/// Take a clone of the TypeObject embedded in a publication discovery sample.
-/// Caller owns the returned handle and must destroy it via `int2dds_type_object_destroy`.
-/// Returns DYNAMIC_FIELD_NOT_FOUND if the publication did not carry a TypeObject.
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_publication_data_take_type_object(
-    p: *const Int2DdsPublicationBuiltinData,
-    out: *mut *mut Int2DdsTypeObject,
-) -> Int2DdsRet {
-    check_null!(p);
-    check_null!(out);
-    let to = match (*p).inner.type_object() {
-        Some(t) => t.clone(),
-        None => return INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND,
-    };
-    let h = Box::new(Int2DdsTypeObject { inner: to, deps: Vec::new() });
-    *out = Box::into_raw(h);
-    INT2DDS_RET_OK
-}
-
 /// Get the builtin subscriber for discovery topics.
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_get_builtin_subscriber(
+pub unsafe extern "C" fn int2dds_participant_get_builtin_subscriber(
     participant: *const Int2DdsParticipant,
     out: *mut *mut Int2DdsSubscriber,
 ) -> Int2DdsRet {
@@ -210,13 +148,14 @@ pub unsafe extern "C" fn int2dds_get_builtin_subscriber(
 
 /// Take one DCPSPublication discovery sample, optionally filtered by topic
 /// name. Blocks up to `timeout_ms` milliseconds (negative = infinite). Returns
-/// DYNAMIC_TIMEOUT on no match.
+/// DYNAMIC_TIMEOUT on no match. Destroy the result via
+/// `int2dds_publication_builtin_topic_data_destroy`.
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_take_publication_data(
+pub unsafe extern "C" fn int2dds_subscriber_take_publication_data(
     builtin_sub: *const Int2DdsSubscriber,
     topic_name_filter: *const c_char,
     timeout_ms: i32,
-    out: *mut *mut Int2DdsPublicationBuiltinData,
+    out: *mut *mut crate::discovery::Int2DdsPublicationBuiltinTopicData,
 ) -> Int2DdsRet {
     use int2dds::core::time::Duration;
     use int2dds::infrastructure::status::StatusMask;
@@ -266,7 +205,9 @@ pub unsafe extern "C" fn int2dds_take_publication_data(
                             continue;
                         }
                     }
-                    let h = Box::new(Int2DdsPublicationBuiltinData { inner: data });
+                    let h = Box::new(crate::discovery::Int2DdsPublicationBuiltinTopicData {
+                        inner: data,
+                    });
                     *out = Box::into_raw(h);
                     return INT2DDS_RET_OK;
                 }
@@ -295,7 +236,7 @@ pub unsafe extern "C" fn int2dds_take_publication_data(
 /// High-level helper: wait until a publication for `topic_name` is discovered
 /// AND its TypeObject is present, then return the TypeObject and type name.
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_wait_for_type_object(
+pub unsafe extern "C" fn int2dds_participant_wait_for_type_object(
     participant: *const Int2DdsParticipant,
     topic_name: *const c_char,
     timeout_ms: i32,
@@ -311,7 +252,7 @@ pub unsafe extern "C" fn int2dds_wait_for_type_object(
     check_null!(out_len);
 
     let mut builtin: *mut Int2DdsSubscriber = std::ptr::null_mut();
-    let r = int2dds_get_builtin_subscriber(participant, &mut builtin);
+    let r = int2dds_participant_get_builtin_subscriber(participant, &mut builtin);
     if r != INT2DDS_RET_OK {
         return r;
     }
@@ -334,8 +275,10 @@ pub unsafe extern "C" fn int2dds_wait_for_type_object(
             }
         };
 
-        let mut pdata: *mut Int2DdsPublicationBuiltinData = std::ptr::null_mut();
-        let r = int2dds_take_publication_data(builtin, topic_name, remaining_ms, &mut pdata);
+        let mut pdata: *mut crate::discovery::Int2DdsPublicationBuiltinTopicData =
+            std::ptr::null_mut();
+        let r =
+            int2dds_subscriber_take_publication_data(builtin, topic_name, remaining_ms, &mut pdata);
         if r == INT2DDS_RET_DYNAMIC_TIMEOUT {
             break INT2DDS_RET_DYNAMIC_TIMEOUT;
         }
@@ -344,15 +287,17 @@ pub unsafe extern "C" fn int2dds_wait_for_type_object(
         }
 
         let mut to: *mut Int2DdsTypeObject = std::ptr::null_mut();
-        let rt = int2dds_publication_data_take_type_object(pdata, &mut to);
+        let rt = crate::discovery::int2dds_publication_builtin_topic_data_take_type_object(
+            pdata, &mut to,
+        );
         if rt == INT2DDS_RET_OK {
-            let r2 = int2dds_publication_data_type_name(
-                pdata,
+            let r2 = copy_str_to_c(
+                &(*pdata).inner.type_name(),
                 type_name_buf,
                 type_name_buf_len,
                 out_len,
             );
-            int2dds_publication_data_destroy(pdata);
+            drop(Box::from_raw(pdata));
             if r2 != INT2DDS_RET_OK {
                 int2dds_type_object_destroy(to);
                 break r2;
@@ -360,7 +305,7 @@ pub unsafe extern "C" fn int2dds_wait_for_type_object(
             *type_obj_out = to;
             break INT2DDS_RET_OK;
         }
-        int2dds_publication_data_destroy(pdata);
+        drop(Box::from_raw(pdata));
         // No type_object on this publication — keep waiting.
     };
 
