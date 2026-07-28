@@ -26,7 +26,5 @@ namespace Int2Dds.Interop
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_domain_participant_factory_get_default_participant_qos(IntPtr factory, out IntPtr qos_out);
 
-        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern int int2dds_get_default_participant_qos(IntPtr factory, out IntPtr qos_out);
     }
 }

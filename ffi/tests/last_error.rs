@@ -28,7 +28,7 @@ fn error_message_propagates_through_ffi() {
         assert_eq!(int2dds_domain_participant_factory_get_instance(&mut factory), INT2DDS_RET_OK);
         let mut participant = ptr::null_mut();
         assert_eq!(
-            int2dds_create_participant(factory, ptr::null(), 71, &mut participant),
+            int2dds_create_participant(factory, 71, ptr::null(), &mut participant),
             INT2DDS_RET_OK
         );
 

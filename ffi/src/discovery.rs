@@ -309,7 +309,7 @@ pub unsafe extern "C" fn int2dds_datareader_get_matched_publications(
 
 /// Collect a snapshot of discovered publications via the builtin DCPSPublication reader.
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_take_discovered_publications_snapshot(
+pub unsafe extern "C" fn int2dds_participant_take_discovered_publications_snapshot(
     participant: *const Int2DdsParticipant,
     timeout_ms: i32,
     seq_out: *mut *mut Int2DdsPublicationBuiltinTopicDataSeq,
@@ -328,7 +328,7 @@ pub unsafe extern "C" fn int2dds_take_discovered_publications_snapshot(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_seq_len(
+pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_seq_length(
     seq: *const Int2DdsPublicationBuiltinTopicDataSeq,
     count_out: *mut usize,
 ) -> Int2DdsRet {
@@ -355,7 +355,7 @@ pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_seq_get(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_seq_destroy(
+pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_seq_delete(
     seq: *mut Int2DdsPublicationBuiltinTopicDataSeq,
 ) -> Int2DdsRet {
     check_null!(seq);
@@ -365,7 +365,7 @@ pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_seq_destroy(
 
 /// Collect a snapshot of discovered subscriptions via the builtin DCPSSubscription reader.
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_take_discovered_subscriptions_snapshot(
+pub unsafe extern "C" fn int2dds_participant_take_discovered_subscriptions_snapshot(
     participant: *const Int2DdsParticipant,
     timeout_ms: i32,
     seq_out: *mut *mut Int2DdsSubscriptionBuiltinTopicDataSeq,
@@ -384,7 +384,7 @@ pub unsafe extern "C" fn int2dds_take_discovered_subscriptions_snapshot(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_seq_len(
+pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_seq_length(
     seq: *const Int2DdsSubscriptionBuiltinTopicDataSeq,
     count_out: *mut usize,
 ) -> Int2DdsRet {
@@ -411,7 +411,7 @@ pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_seq_get(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_seq_destroy(
+pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_seq_delete(
     seq: *mut Int2DdsSubscriptionBuiltinTopicDataSeq,
 ) -> Int2DdsRet {
     check_null!(seq);
@@ -618,6 +618,25 @@ pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_type_name(
 
     let data_ref = &*data;
     copy_string_to_c(&data_ref.inner.type_name(), buf, capacity, size_out)
+}
+
+/// Take a clone of the TypeObject embedded in a PublicationBuiltinTopicData.
+/// Caller owns the returned handle and must destroy it via `int2dds_type_object_destroy`.
+/// Returns DYNAMIC_FIELD_NOT_FOUND if the publication did not carry a TypeObject.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_take_type_object(
+    data: *const Int2DdsPublicationBuiltinTopicData,
+    out: *mut *mut crate::dynamic::Int2DdsTypeObject,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(out);
+    let to = match (*data).inner.type_object() {
+        Some(t) => t.clone(),
+        None => return INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND,
+    };
+    let h = Box::new(crate::dynamic::Int2DdsTypeObject { inner: to, deps: Vec::new() });
+    *out = Box::into_raw(h);
+    INT2DDS_RET_OK
 }
 
 /// Get the reliability kind from a PublicationBuiltinTopicData.

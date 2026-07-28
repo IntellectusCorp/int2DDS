@@ -871,9 +871,9 @@ pub unsafe extern "C" fn int2dds_type_info_to_type_object(
     check_null!(out);
     let to = (*type_info).build_type_object();
     let deps = (*type_info).dependency_closure();
-    *out = Box::into_raw(Box::new(
-        crate::dynamic::Int2DdsTypeObject::from_type_object_with_deps(to, deps),
-    ));
+    *out = Box::into_raw(Box::new(crate::dynamic::Int2DdsTypeObject::from_type_object_with_deps(
+        to, deps,
+    )));
     INT2DDS_RET_OK
 }
 
