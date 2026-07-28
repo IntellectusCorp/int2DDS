@@ -68,16 +68,16 @@ namespace Int2Dds.Core
 
             try
             {
-                if (listener != null)
+                unsafe
                 {
-                    unsafe
+                    if (listener != null)
                     {
                         var (nativeListener, contextHandle) = ListenerRegistry.CreateWriterListener(listener, this);
                         _listenerContextHandle = contextHandle;
                         try
                         {
                             ReturnCodeHelper.CheckReturn(
-                                NativeMethods.int2dds_create_datawriter_with_listener(
+                                NativeMethods.int2dds_create_datawriter(
                                     publisher.Handle, topic.Handle, qosHandle, &nativeListener, statusMask, out _handle));
                         }
                         catch
@@ -87,11 +87,12 @@ namespace Int2Dds.Core
                             throw;
                         }
                     }
-                }
-                else
-                {
-                    ReturnCodeHelper.CheckReturn(
-                        NativeMethods.int2dds_create_datawriter(publisher.Handle, topic.Handle, qosHandle, out _handle));
+                    else
+                    {
+                        ReturnCodeHelper.CheckReturn(
+                            NativeMethods.int2dds_create_datawriter(
+                                publisher.Handle, topic.Handle, qosHandle, null, 0, out _handle));
+                    }
                 }
             }
             finally
@@ -128,7 +129,7 @@ namespace Int2Dds.Core
                         try
                         {
                             ReturnCodeHelper.CheckReturn(
-                                NativeMethods.int2dds_create_datawriter_with_profile_and_listener(
+                                NativeMethods.int2dds_create_datawriter_with_profile(
                                     publisher.Handle, topic.Handle, pQos, &nativeListener, statusMask, out _handle));
                         }
                         catch
@@ -142,7 +143,7 @@ namespace Int2Dds.Core
                     {
                         ReturnCodeHelper.CheckReturn(
                             NativeMethods.int2dds_create_datawriter_with_profile(
-                                publisher.Handle, topic.Handle, pQos, out _handle));
+                                publisher.Handle, topic.Handle, pQos, null, 0, out _handle));
                     }
                 }
             }
@@ -207,7 +208,7 @@ namespace Int2Dds.Core
                 fixed (byte* pKey = key)
                 {
                     ReturnCodeHelper.CheckReturn(
-                        NativeMethods.int2dds_write_serialized(
+                        NativeMethods.int2dds_datawriter_write_serialized(
                             _handle,
                             pData, (UIntPtr)data.Length,
                             pKey, key != null ? (UIntPtr)key.Length : UIntPtr.Zero));
@@ -238,7 +239,7 @@ namespace Int2Dds.Core
                 fixed (byte* pKey = key)
                 {
                     ReturnCodeHelper.CheckReturn(
-                        NativeMethods.int2dds_write_serialized_w_timestamp(
+                        NativeMethods.int2dds_datawriter_write_serialized_w_timestamp(
                             _handle,
                             pData, (UIntPtr)data.Length,
                             pKey, key != null ? (UIntPtr)key.Length : UIntPtr.Zero,
@@ -419,9 +420,13 @@ namespace Int2Dds.Core
         public (int totalCount, int currentCount) GetPublicationMatchedStatus()
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
-            ReturnCodeHelper.CheckReturn(
-                NativeMethods.int2dds_get_publication_matched_status(_handle, out var total, out var current));
-            return (total, current);
+            unsafe
+            {
+                NativePublicationMatchedStatus native;
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_datawriter_get_publication_matched_status(_handle, &native));
+                return (native.TotalCount, native.CurrentCount);
+            }
         }
 
         public LivelinessLostStatus GetLivelinessLostStatus()
@@ -500,21 +505,21 @@ namespace Int2Dds.Core
             UIntPtr capacity;
             IntPtr loan;
             ReturnCodeHelper.CheckReturn(
-                NativeMethods.int2dds_prepare_serialized_write(_handle, (UIntPtr)data.Length, out buffer, out capacity, out loan));
+                NativeMethods.int2dds_datawriter_prepare_serialized_write(_handle, (UIntPtr)data.Length, out buffer, out capacity, out loan));
             try
             {
                 System.Runtime.InteropServices.Marshal.Copy(data, 0, (IntPtr)buffer, data.Length);
                 fixed (byte* pKey = key)
                 {
                     ReturnCodeHelper.CheckReturn(
-                        NativeMethods.int2dds_commit_serialized_write(
+                        NativeMethods.int2dds_datawriter_commit_serialized_write(
                             _handle, loan, (UIntPtr)data.Length,
                             pKey, key != null ? (UIntPtr)key.Length : UIntPtr.Zero));
                 }
             }
             catch
             {
-                NativeMethods.int2dds_abort_serialized_write(loan);
+                NativeMethods.int2dds_datawriter_abort_serialized_write(loan);
                 throw;
             }
         }

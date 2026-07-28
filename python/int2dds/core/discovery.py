@@ -125,12 +125,12 @@ def take_discovered_publications(
     long to wait for the builtin reader to settle (0 = no wait).
     """
     seq_out = ffi.new("Int2DdsPublicationBuiltinTopicDataSeq **")
-    check_ret(lib.int2dds_take_discovered_publications_snapshot(
+    check_ret(lib.int2dds_participant_take_discovered_publications_snapshot(
         participant._handle, timeout_ms, seq_out))
     seq = seq_out[0]
     try:
         count_out = ffi.new("uintptr_t *")
-        check_ret(lib.int2dds_publication_builtin_topic_data_seq_len(seq, count_out))
+        check_ret(lib.int2dds_publication_builtin_topic_data_seq_length(seq, count_out))
         result = []
         for i in range(count_out[0]):
             item_out = ffi.new("Int2DdsPublicationBuiltinTopicData **")
@@ -142,7 +142,7 @@ def take_discovered_publications(
                 lib.int2dds_publication_builtin_topic_data_destroy(item)
         return result
     finally:
-        lib.int2dds_publication_builtin_topic_data_seq_destroy(seq)
+        lib.int2dds_publication_builtin_topic_data_seq_delete(seq)
 
 
 def take_discovered_subscriptions(
@@ -154,12 +154,12 @@ def take_discovered_subscriptions(
     long to wait for the builtin reader to settle (0 = no wait).
     """
     seq_out = ffi.new("Int2DdsSubscriptionBuiltinTopicDataSeq **")
-    check_ret(lib.int2dds_take_discovered_subscriptions_snapshot(
+    check_ret(lib.int2dds_participant_take_discovered_subscriptions_snapshot(
         participant._handle, timeout_ms, seq_out))
     seq = seq_out[0]
     try:
         count_out = ffi.new("uintptr_t *")
-        check_ret(lib.int2dds_subscription_builtin_topic_data_seq_len(seq, count_out))
+        check_ret(lib.int2dds_subscription_builtin_topic_data_seq_length(seq, count_out))
         result = []
         for i in range(count_out[0]):
             item_out = ffi.new("Int2DdsSubscriptionBuiltinTopicData **")
@@ -171,4 +171,4 @@ def take_discovered_subscriptions(
                 lib.int2dds_subscription_builtin_topic_data_destroy(item)
         return result
     finally:
-        lib.int2dds_subscription_builtin_topic_data_seq_destroy(seq)
+        lib.int2dds_subscription_builtin_topic_data_seq_delete(seq)

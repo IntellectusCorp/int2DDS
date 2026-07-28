@@ -128,13 +128,6 @@ ffi.cdef("""
     /* DomainParticipant */
     Int2DdsRet int2dds_create_participant(
         const Int2DdsParticipantFactory *factory,
-        const char *name,
-        int32_t domain_id,
-        Int2DdsParticipant **participant_out
-    );
-    Int2DdsRet int2dds_create_participant_with_qos(
-        const Int2DdsParticipantFactory *factory,
-        const char *name,
         int32_t domain_id,
         const Int2DdsParticipantQos *qos,
         Int2DdsParticipant **participant_out
@@ -179,10 +172,6 @@ ffi.cdef("""
     /* Publisher */
     Int2DdsRet int2dds_create_publisher(
         const Int2DdsParticipant *participant,
-        Int2DdsPublisher **publisher_out
-    );
-    Int2DdsRet int2dds_create_publisher_with_qos(
-        const Int2DdsParticipant *participant,
         const Int2DdsPublisherQos *qos,
         Int2DdsPublisher **publisher_out
     );
@@ -206,14 +195,14 @@ ffi.cdef("""
     /* Subscriber */
     Int2DdsRet int2dds_create_subscriber(
         const Int2DdsParticipant *participant,
-        Int2DdsSubscriber **subscriber_out
-    );
-    Int2DdsRet int2dds_create_subscriber_with_qos(
-        const Int2DdsParticipant *participant,
         const Int2DdsSubscriberQos *qos,
         Int2DdsSubscriber **subscriber_out
     );
     Int2DdsRet int2dds_delete_subscriber(Int2DdsSubscriber *subscriber);
+    Int2DdsRet int2dds_subscriber_get_instance_handle(
+        const Int2DdsSubscriber *subscriber,
+        uint8_t (*handle_out)[16]
+    );
     Int2DdsRet int2dds_subscriber_delete_contained_entities(
         const Int2DdsSubscriber *subscriber
     );
@@ -227,37 +216,14 @@ ffi.cdef("""
         const Int2DdsTopicQos *qos,
         Int2DdsTopic **topic_out
     );
-    Int2DdsRet int2dds_create_topic_keyed(
-        const Int2DdsParticipant *participant,
-        const char *topic_name,
-        const char *dds_type_name,
-        int32_t extensibility,
-        bool has_key,
-        const Int2DdsTopicQos *qos,
-        Int2DdsTopic **topic_out
-    );
     Int2DdsRet int2dds_delete_topic(Int2DdsTopic *topic);
 
-    /* Topic with key field metadata */
-    Int2DdsRet int2dds_create_topic_keyed_with_key_fields(
-        const Int2DdsParticipant *participant,
-        const char *topic_name,
-        const char *dds_type_name,
-        int32_t extensibility,
-        bool has_key,
-        const Int2DdsTopicQos *qos,
-        const uint32_t *field_indices,
-        const uint32_t *field_types,
-        size_t field_count,
-        Int2DdsTopic **topic_out
-    );
     /* Topic with full field descriptors for CFT reader-side filtering */
     Int2DdsRet int2dds_create_topic_with_field_descriptors(
         const Int2DdsParticipant *participant,
         const char *topic_name,
         const char *dds_type_name,
         int32_t extensibility,
-        bool has_key,
         const Int2DdsTopicQos *qos,
         const char **field_names,
         const uint32_t *field_types,
@@ -305,21 +271,7 @@ ffi.cdef("""
         size_t expression_parameters_count
     );
 
-    /* DataReader with ContentFilteredTopic */
-    Int2DdsRet int2dds_create_datareader_cft(
-        const Int2DdsSubscriber *subscriber,
-        const Int2DdsContentFilteredTopic *cft,
-        const Int2DdsDataReaderQos *qos,
-        Int2DdsDataReader **reader_out
-    );
-
     /* DataWriter */
-    Int2DdsRet int2dds_create_datawriter(
-        const Int2DdsPublisher *publisher,
-        const Int2DdsTopic *topic,
-        const Int2DdsDataWriterQos *qos,
-        Int2DdsDataWriter **writer_out
-    );
     Int2DdsRet int2dds_delete_datawriter(Int2DdsDataWriter *writer);
 
     /* Creation from a named QoS profile ("Library::Profile") */
@@ -338,21 +290,8 @@ ffi.cdef("""
         const char *topic_name,
         const char *dds_type_name,
         int32_t extensibility,
-        bool has_key,
         const char *qos_path,
         Int2DdsTopic **topic_out
-    );
-    Int2DdsRet int2dds_create_datawriter_with_profile(
-        const Int2DdsPublisher *publisher,
-        const Int2DdsTopic *topic,
-        const char *qos_path,
-        Int2DdsDataWriter **writer_out
-    );
-    Int2DdsRet int2dds_create_datareader_with_profile(
-        const Int2DdsSubscriber *subscriber,
-        const Int2DdsTopic *topic,
-        const char *qos_path,
-        Int2DdsDataReader **reader_out
     );
 
     /* Effective QoS query */
@@ -421,11 +360,6 @@ ffi.cdef("""
         int32_t *max_samples_out, int32_t *max_instances_out, int32_t *max_per_instance_out
     );
 
-    Int2DdsRet int2dds_get_publication_matched_status(
-        const Int2DdsDataWriter *writer,
-        int32_t *total_count_out,
-        int32_t *current_count_out
-    );
     typedef struct Int2DdsOfferedDeadlineMissedStatus {
         int32_t total_count;
         int32_t total_count_change;
@@ -558,7 +492,7 @@ ffi.cdef("""
         Int2DdsOfferedIncompatibleQosStatus *status_out
     );
 
-    Int2DdsRet int2dds_write_serialized(
+    Int2DdsRet int2dds_datawriter_write_serialized(
         const Int2DdsDataWriter *writer,
         const uint8_t *data,
         size_t data_len,
@@ -591,18 +525,7 @@ ffi.cdef("""
         uint8_t handle_out[16]
     );
     /* DataReader */
-    Int2DdsRet int2dds_create_datareader(
-        const Int2DdsSubscriber *subscriber,
-        const Int2DdsTopic *topic,
-        const Int2DdsDataReaderQos *qos,
-        Int2DdsDataReader **reader_out
-    );
     Int2DdsRet int2dds_delete_datareader(Int2DdsDataReader *reader);
-    Int2DdsRet int2dds_get_subscription_matched_status(
-        const Int2DdsDataReader *reader,
-        int32_t *total_count_out,
-        int32_t *current_count_out
-    );
 
     /* --- Reader Status Getters --- */
     Int2DdsRet int2dds_datareader_get_liveliness_changed_status(
@@ -639,14 +562,14 @@ ffi.cdef("""
         size_t key_capacity,
         size_t *key_size_out
     );
-    Int2DdsRet int2dds_take_serialized(
+    Int2DdsRet int2dds_datareader_take_serialized(
         const Int2DdsDataReader *reader,
         uint8_t *buffer,
         size_t buffer_capacity,
         size_t *actual_size_out,
         bool *valid_data_out
     );
-    Int2DdsRet int2dds_read_serialized(
+    Int2DdsRet int2dds_datareader_read_serialized(
         const Int2DdsDataReader *reader,
         uint8_t *buffer,
         size_t buffer_capacity,
@@ -654,30 +577,30 @@ ffi.cdef("""
         bool *valid_data_out
     );
 
-    Int2DdsRet int2dds_take_serialized_loaned(
+    Int2DdsRet int2dds_datareader_take_serialized_loaned(
         const Int2DdsDataReader *reader,
         const uint8_t **data_out,
         size_t *actual_size_out,
         bool *valid_data_out,
         Int2DdsSerializedLoan **loan_out
     );
-    Int2DdsRet int2dds_return_serialized_loan(Int2DdsSerializedLoan *loan);
+    Int2DdsRet int2dds_datareader_return_serialized_loan(Int2DdsSerializedLoan *loan);
 
-    Int2DdsRet int2dds_prepare_serialized_write(
+    Int2DdsRet int2dds_datawriter_prepare_serialized_write(
         const Int2DdsDataWriter *writer,
         size_t capacity,
         uint8_t **data_out,
         size_t *capacity_out,
         Int2DdsSerializedWriteLoan **loan_out
     );
-    Int2DdsRet int2dds_commit_serialized_write(
+    Int2DdsRet int2dds_datawriter_commit_serialized_write(
         const Int2DdsDataWriter *writer,
         Int2DdsSerializedWriteLoan *loan,
         size_t actual_size,
         const uint8_t *key,
         size_t key_len
     );
-    Int2DdsRet int2dds_abort_serialized_write(Int2DdsSerializedWriteLoan *loan);
+    Int2DdsRet int2dds_datawriter_abort_serialized_write(Int2DdsSerializedWriteLoan *loan);
 
     Int2DdsRet int2dds_datareader_get_guid(
         const Int2DdsDataReader *reader,
@@ -946,10 +869,6 @@ ffi.cdef("""
         Int2DdsParticipantQos *qos,
         const char *name
     );
-    Int2DdsRet int2dds_get_default_participant_qos(
-        const Int2DdsParticipantFactory *factory,
-        Int2DdsParticipantQos **qos_out
-    );
     Int2DdsRet int2dds_participant_qos_destroy(Int2DdsParticipantQos *qos);
 
     /* Environment-variable configuration helpers (process-wide, take effect
@@ -961,10 +880,6 @@ ffi.cdef("""
 
     /* WaitSet */
     Int2DdsRet int2dds_waitset_new(Int2DdsWaitSet **waitset_out);
-    Int2DdsRet int2dds_waitset_wait(
-        const Int2DdsWaitSet *waitset,
-        int64_t timeout_ms
-    );
     Int2DdsRet int2dds_waitset_wait_ex(
         const Int2DdsWaitSet *waitset,
         int64_t timeout_ms,
@@ -976,37 +891,21 @@ ffi.cdef("""
         Int2DdsConditionSeq **conditions_out
     );
     Int2DdsRet int2dds_waitset_delete(Int2DdsWaitSet *waitset);
-    Int2DdsRet int2dds_waitset_attach_guard_condition(
+    Int2DdsRet int2dds_waitset_attach_guardcondition(
         const Int2DdsWaitSet *waitset,
         const Int2DdsGuardCondition *condition
     );
-    Int2DdsRet int2dds_waitset_detach_guard_condition(
+    Int2DdsRet int2dds_waitset_detach_guardcondition(
         const Int2DdsWaitSet *waitset,
         const Int2DdsGuardCondition *condition
     );
-    Int2DdsRet int2dds_waitset_attach_condition(
+    Int2DdsRet int2dds_waitset_attach_statuscondition(
         const Int2DdsWaitSet *waitset,
         const Int2DdsStatusCondition *condition
     );
-    Int2DdsRet int2dds_waitset_detach_condition(
+    Int2DdsRet int2dds_waitset_detach_statuscondition(
         const Int2DdsWaitSet *waitset,
         const Int2DdsStatusCondition *condition
-    );
-    Int2DdsRet int2dds_waitset_attach_datareader(
-        const Int2DdsWaitSet *waitset,
-        const Int2DdsDataReader *reader
-    );
-    Int2DdsRet int2dds_waitset_detach_datareader(
-        const Int2DdsWaitSet *waitset,
-        const Int2DdsDataReader *reader
-    );
-    Int2DdsRet int2dds_waitset_attach_datawriter(
-        const Int2DdsWaitSet *waitset,
-        const Int2DdsDataWriter *writer
-    );
-    Int2DdsRet int2dds_waitset_detach_datawriter(
-        const Int2DdsWaitSet *waitset,
-        const Int2DdsDataWriter *writer
     );
     Int2DdsRet int2dds_waitset_attach_readcondition(
         const Int2DdsWaitSet *waitset,
@@ -1018,18 +917,18 @@ ffi.cdef("""
     );
 
     /* GuardCondition */
-    Int2DdsRet int2dds_guard_condition_new(
+    Int2DdsRet int2dds_guardcondition_new(
         Int2DdsGuardCondition **condition_out
     );
-    Int2DdsRet int2dds_guard_condition_set_trigger_value(
+    Int2DdsRet int2dds_guardcondition_set_trigger_value(
         const Int2DdsGuardCondition *condition,
         bool value
     );
-    Int2DdsRet int2dds_guard_condition_get_trigger_value(
+    Int2DdsRet int2dds_guardcondition_get_trigger_value(
         const Int2DdsGuardCondition *condition,
         bool *value_out
     );
-    Int2DdsRet int2dds_guard_condition_delete(Int2DdsGuardCondition *condition);
+    Int2DdsRet int2dds_guardcondition_delete(Int2DdsGuardCondition *condition);
 
     /* StatusCondition */
     Int2DdsRet int2dds_datareader_get_statuscondition(
@@ -1122,13 +1021,13 @@ ffi.cdef("""
         size_t query_parameters_count
     );
     Int2DdsRet int2dds_readcondition_delete(Int2DdsReadCondition *condition);
-    Int2DdsRet int2dds_datareader_take_w_readcondition(
+    Int2DdsRet int2dds_datareader_take_serialized_batch_w_readcondition(
         const Int2DdsDataReader *reader,
         const Int2DdsReadCondition *condition,
         int32_t max_samples,
         Int2DdsSampleSeq **seq_out
     );
-    Int2DdsRet int2dds_datareader_read_w_readcondition(
+    Int2DdsRet int2dds_datareader_read_serialized_batch_w_readcondition(
         const Int2DdsDataReader *reader,
         const Int2DdsReadCondition *condition,
         int32_t max_samples,
@@ -1169,6 +1068,14 @@ ffi.cdef("""
         uint8_t last_publication_handle[16];
     } Int2DdsSubscriptionMatchedStatus;
 
+    Int2DdsRet int2dds_datawriter_get_publication_matched_status(
+        const Int2DdsDataWriter *writer,
+        Int2DdsPublicationMatchedStatus *status_out
+    );
+    Int2DdsRet int2dds_datareader_get_subscription_matched_status(
+        const Int2DdsDataReader *reader,
+        Int2DdsSubscriptionMatchedStatus *status_out
+    );
 
     /* User context for callbacks */
     typedef void *Int2DdsUserContext;
@@ -1249,11 +1156,19 @@ ffi.cdef("""
         Int2DdsUserContext user_context;
     } Int2DdsDataReaderListener;
 
-    /* DataWriter with Listener */
-    Int2DdsRet int2dds_create_datawriter_with_listener(
+    /* DataWriter */
+    Int2DdsRet int2dds_create_datawriter(
         const Int2DdsPublisher *publisher,
         const Int2DdsTopic *topic,
         const Int2DdsDataWriterQos *qos,
+        const Int2DdsDataWriterListener *listener,
+        uint32_t mask,
+        Int2DdsDataWriter **writer_out
+    );
+    Int2DdsRet int2dds_create_datawriter_with_profile(
+        const Int2DdsPublisher *publisher,
+        const Int2DdsTopic *topic,
+        const char *qos_path,
         const Int2DdsDataWriterListener *listener,
         uint32_t mask,
         Int2DdsDataWriter **writer_out
@@ -1264,11 +1179,19 @@ ffi.cdef("""
         uint32_t mask
     );
 
-    /* DataReader with Listener */
-    Int2DdsRet int2dds_create_datareader_with_listener(
+    /* DataReader */
+    Int2DdsRet int2dds_create_datareader(
         const Int2DdsSubscriber *subscriber,
         const Int2DdsTopic *topic,
         const Int2DdsDataReaderQos *qos,
+        const Int2DdsDataReaderListener *listener,
+        uint32_t mask,
+        Int2DdsDataReader **reader_out
+    );
+    Int2DdsRet int2dds_create_datareader_with_profile(
+        const Int2DdsSubscriber *subscriber,
+        const Int2DdsTopic *topic,
+        const char *qos_path,
         const Int2DdsDataReaderListener *listener,
         uint32_t mask,
         Int2DdsDataReader **reader_out
@@ -1279,8 +1202,8 @@ ffi.cdef("""
         uint32_t mask
     );
 
-    /* DataReader with ContentFilteredTopic and Listener */
-    Int2DdsRet int2dds_create_datareader_cft_with_listener(
+    /* DataReader with ContentFilteredTopic */
+    Int2DdsRet int2dds_create_datareader_cft(
         const Int2DdsSubscriber *subscriber,
         const Int2DdsContentFilteredTopic *cft,
         const Int2DdsDataReaderQos *qos,
@@ -1291,7 +1214,6 @@ ffi.cdef("""
 
     /* === Dynamic types: TypeObject introspection + DynamicData decoding === */
     typedef struct Int2DdsTypeObject Int2DdsTypeObject;
-    typedef struct Int2DdsPublicationBuiltinData Int2DdsPublicationBuiltinData;
     typedef struct Int2DdsTypeInfo Int2DdsTypeInfo;
     typedef struct Int2DdsDynamicData Int2DdsDynamicData;
 
@@ -1301,30 +1223,27 @@ ffi.cdef("""
         int32_t flags;
     } Int2DdsMemberInfo;
 
-    /* Discovery */
-    Int2DdsRet int2dds_get_builtin_subscriber(const Int2DdsParticipant *participant, Int2DdsSubscriber **out);
-    Int2DdsRet int2dds_take_publication_data(const Int2DdsSubscriber *builtin_sub, const char *topic_name_filter, int32_t timeout_ms, Int2DdsPublicationBuiltinData **out);
-    void int2dds_publication_data_destroy(Int2DdsPublicationBuiltinData *p);
-    Int2DdsRet int2dds_publication_data_topic_name(const Int2DdsPublicationBuiltinData *p, char *buf, uintptr_t buf_len, uintptr_t *out_len);
-    Int2DdsRet int2dds_publication_data_type_name(const Int2DdsPublicationBuiltinData *p, char *buf, uintptr_t buf_len, uintptr_t *out_len);
-    Int2DdsRet int2dds_publication_data_take_type_object(const Int2DdsPublicationBuiltinData *p, Int2DdsTypeObject **out);
-    Int2DdsRet int2dds_wait_for_type_object(const Int2DdsParticipant *participant, const char *topic_name, int32_t timeout_ms, Int2DdsTypeObject **type_obj_out, char *type_name_buf, uintptr_t type_name_buf_len, uintptr_t *out_len);
-
-    /* Discovered publication/subscription snapshot family */
+    /* Discovered publication/subscription builtin data family */
     typedef struct Int2DdsPublicationBuiltinTopicData Int2DdsPublicationBuiltinTopicData;
     typedef struct Int2DdsPublicationBuiltinTopicDataSeq Int2DdsPublicationBuiltinTopicDataSeq;
     typedef struct Int2DdsSubscriptionBuiltinTopicData Int2DdsSubscriptionBuiltinTopicData;
     typedef struct Int2DdsSubscriptionBuiltinTopicDataSeq Int2DdsSubscriptionBuiltinTopicDataSeq;
 
-    Int2DdsRet int2dds_take_discovered_publications_snapshot(const Int2DdsParticipant *participant, int32_t timeout_ms, Int2DdsPublicationBuiltinTopicDataSeq **seq_out);
-    Int2DdsRet int2dds_publication_builtin_topic_data_seq_len(const Int2DdsPublicationBuiltinTopicDataSeq *seq, uintptr_t *count_out);
-    Int2DdsRet int2dds_publication_builtin_topic_data_seq_get(const Int2DdsPublicationBuiltinTopicDataSeq *seq, uintptr_t index, Int2DdsPublicationBuiltinTopicData **data_out);
-    Int2DdsRet int2dds_publication_builtin_topic_data_seq_destroy(Int2DdsPublicationBuiltinTopicDataSeq *seq);
+    /* Discovery */
+    Int2DdsRet int2dds_participant_get_builtin_subscriber(const Int2DdsParticipant *participant, Int2DdsSubscriber **out);
+    Int2DdsRet int2dds_subscriber_take_publication_data(const Int2DdsSubscriber *builtin_sub, const char *topic_name_filter, int32_t timeout_ms, Int2DdsPublicationBuiltinTopicData **out);
+    Int2DdsRet int2dds_publication_builtin_topic_data_take_type_object(const Int2DdsPublicationBuiltinTopicData *data, Int2DdsTypeObject **out);
+    Int2DdsRet int2dds_participant_wait_for_type_object(const Int2DdsParticipant *participant, const char *topic_name, int32_t timeout_ms, Int2DdsTypeObject **type_obj_out, char *type_name_buf, uintptr_t type_name_buf_len, uintptr_t *out_len);
 
-    Int2DdsRet int2dds_take_discovered_subscriptions_snapshot(const Int2DdsParticipant *participant, int32_t timeout_ms, Int2DdsSubscriptionBuiltinTopicDataSeq **seq_out);
-    Int2DdsRet int2dds_subscription_builtin_topic_data_seq_len(const Int2DdsSubscriptionBuiltinTopicDataSeq *seq, uintptr_t *count_out);
+    Int2DdsRet int2dds_participant_take_discovered_publications_snapshot(const Int2DdsParticipant *participant, int32_t timeout_ms, Int2DdsPublicationBuiltinTopicDataSeq **seq_out);
+    Int2DdsRet int2dds_publication_builtin_topic_data_seq_length(const Int2DdsPublicationBuiltinTopicDataSeq *seq, uintptr_t *count_out);
+    Int2DdsRet int2dds_publication_builtin_topic_data_seq_get(const Int2DdsPublicationBuiltinTopicDataSeq *seq, uintptr_t index, Int2DdsPublicationBuiltinTopicData **data_out);
+    Int2DdsRet int2dds_publication_builtin_topic_data_seq_delete(Int2DdsPublicationBuiltinTopicDataSeq *seq);
+
+    Int2DdsRet int2dds_participant_take_discovered_subscriptions_snapshot(const Int2DdsParticipant *participant, int32_t timeout_ms, Int2DdsSubscriptionBuiltinTopicDataSeq **seq_out);
+    Int2DdsRet int2dds_subscription_builtin_topic_data_seq_length(const Int2DdsSubscriptionBuiltinTopicDataSeq *seq, uintptr_t *count_out);
     Int2DdsRet int2dds_subscription_builtin_topic_data_seq_get(const Int2DdsSubscriptionBuiltinTopicDataSeq *seq, uintptr_t index, Int2DdsSubscriptionBuiltinTopicData **data_out);
-    Int2DdsRet int2dds_subscription_builtin_topic_data_seq_destroy(Int2DdsSubscriptionBuiltinTopicDataSeq *seq);
+    Int2DdsRet int2dds_subscription_builtin_topic_data_seq_delete(Int2DdsSubscriptionBuiltinTopicDataSeq *seq);
 
     Int2DdsRet int2dds_publication_builtin_topic_data_get_key(const Int2DdsPublicationBuiltinTopicData *data, uint8_t (*key_out)[12]);
     Int2DdsRet int2dds_publication_builtin_topic_data_get_endpoint_guid(const Int2DdsPublicationBuiltinTopicData *data, uint8_t (*guid_out)[16]);
@@ -1458,19 +1377,19 @@ ffi.cdef("""
     Int2DdsRet int2dds_sample_seq_delete(Int2DdsSampleSeq *seq);
 
     /* Serialized batch read/take (all instances) */
-    Int2DdsRet int2dds_take_serialized_batch(
+    Int2DdsRet int2dds_datareader_take_serialized_batch(
         const Int2DdsDataReader *reader,
         int32_t max_samples,
         Int2DdsSampleSeq **seq_out
     );
-    Int2DdsRet int2dds_read_serialized_batch(
+    Int2DdsRet int2dds_datareader_read_serialized_batch(
         const Int2DdsDataReader *reader,
         int32_t max_samples,
         Int2DdsSampleSeq **seq_out
     );
 
     /* Instance-scoped serialized batch read/take */
-    Int2DdsRet int2dds_take_instance_serialized_batch(
+    Int2DdsRet int2dds_datareader_take_instance_serialized_batch(
         const Int2DdsDataReader *reader,
         const uint8_t (*handle)[16],
         int32_t max_samples,
@@ -1479,7 +1398,7 @@ ffi.cdef("""
         uint32_t instance_state_mask,
         Int2DdsSampleSeq **seq_out
     );
-    Int2DdsRet int2dds_read_instance_serialized_batch(
+    Int2DdsRet int2dds_datareader_read_instance_serialized_batch(
         const Int2DdsDataReader *reader,
         const uint8_t (*handle)[16],
         int32_t max_samples,
@@ -1591,8 +1510,8 @@ ffi.cdef("""
 ffi.cdef("""
     typedef struct Int2DdsConfiguredParticipant Int2DdsConfiguredParticipant;
 
-    Int2DdsRet int2dds_load_profiles(const Int2DdsParticipantFactory *factory, const char *const *paths, size_t count);
-    Int2DdsRet int2dds_get_dynamic_type_support(const Int2DdsParticipantFactory *factory, const char *type_name, Int2DdsDynamicTypeSupport **out);
+    Int2DdsRet int2dds_load_profiles(const char *const *paths, size_t count);
+    Int2DdsRet int2dds_get_dynamic_type_support(const char *type_name, Int2DdsDynamicTypeSupport **out);
     Int2DdsRet int2dds_create_participant_from_config(const Int2DdsParticipantFactory *factory, const char *path, Int2DdsConfiguredParticipant **out);
     Int2DdsRet int2dds_configured_participant_get_datawriter(const Int2DdsConfiguredParticipant *configured, const char *name, Int2DdsDynamicDataWriter **out);
     Int2DdsRet int2dds_configured_participant_get_datareader(const Int2DdsConfiguredParticipant *configured, const char *name, Int2DdsDynamicDataReader **out);
