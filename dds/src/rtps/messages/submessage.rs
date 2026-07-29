@@ -23,12 +23,12 @@ use crate::rtps::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Submessage {
+pub(crate) struct Submessage<'a> {
     pub(crate) header: SubmessageHeader,
-    pub(crate) body: SubmessageBody,
+    pub(crate) body: SubmessageBody<'a>,
 }
 
-impl Submessage {
+impl Submessage<'static> {
     pub(crate) fn read_from_buffer(
         message_receiver: &mut MessageReceiver,
         all_submessages_bytes: &mut Bytes,
@@ -55,16 +55,29 @@ impl Submessage {
         let submessage_len = submessage_header.submessage_length() as usize;
 
         let actual_body = if submessage_len == 0 {
-            all_submessages_bytes.len() - 4 // Everything except the header
+            all_submessages_bytes.len().saturating_sub(4) // Everything except the header
         } else {
             submessage_len
         };
 
-        let mut curr_submessage_bytes = all_submessages_bytes.split_to(4 + actual_body);
+        // Bounds check to prevent panic
+        let required_len = 4 + actual_body;
+        if all_submessages_bytes.len() < required_len {
+            return Err(RtpsError::new(
+                RtpsErrorCode::InvalidSubmessageBody,
+                format!(
+                    "Submessage length {} exceeds available bytes {}",
+                    required_len,
+                    all_submessages_bytes.len()
+                ),
+            ));
+        }
+
+        let mut curr_submessage_bytes = all_submessages_bytes.split_to(required_len);
         // Handle RTPS 2.5 case where submessageLength == 0 - end
 
         // Separate header and body from current submessage
-        let mut submessage_body_bytes = curr_submessage_bytes.split_off(4);
+        let submessage_body_bytes = curr_submessage_bytes.split_off(4);
 
         let submessage_body = match submessage_header.submessage_id() {
             SubmessageId::ACKNACK => {
@@ -101,7 +114,7 @@ impl Submessage {
                     submessage_header.endianness_flag().ok_or_else(|| {
                         RtpsError::new(RtpsErrorCode::UnsupportedSubmessageType, None)
                     })?,
-                    &mut submessage_body_bytes,
+                    &submessage_body_bytes,
                 )
                 .map_err(map_speedy_err)?;
                 // Change in state of Receiver
@@ -127,7 +140,7 @@ impl Submessage {
                     submessage_header.endianness_flag().ok_or_else(|| {
                         RtpsError::new(RtpsErrorCode::UnsupportedSubmessageType, None)
                     })?,
-                    &mut submessage_body_bytes,
+                    &submessage_body_bytes,
                 )
                 .map_err(map_speedy_err)?;
                 // Change in state of Receiver
@@ -139,7 +152,7 @@ impl Submessage {
                     submessage_header.endianness_flag().ok_or_else(|| {
                         RtpsError::new(RtpsErrorCode::UnsupportedSubmessageType, None)
                     })?,
-                    &mut submessage_body_bytes,
+                    &submessage_body_bytes,
                 )
                 .map_err(map_speedy_err)?;
                 // Change in state of Receiver
@@ -170,7 +183,7 @@ impl Submessage {
     }
 }
 
-impl<C: Context> Writable<C> for Submessage {
+impl<C: Context> Writable<C> for Submessage<'_> {
     fn write_to<T: ?Sized + Writer<C>>(&self, writer: &mut T) -> Result<(), C::Error> {
         let Submessage { header, body, .. } = self;
         writer.write_value(header)?;

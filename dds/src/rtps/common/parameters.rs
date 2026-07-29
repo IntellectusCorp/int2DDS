@@ -4,6 +4,7 @@
 //! for encoding QoS policies, discovery information, and inline QoS in DATA messages.
 //! Parameters use a type-length-value (TLV) encoding scheme.
 
+use smallvec::SmallVec;
 use speedy::{Context, Readable, Reader, Writable, Writer};
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
@@ -13,6 +14,7 @@ use crate::{
         DataRepresentationQosPolicy, DestinationOrderQosPolicy, DurabilityQosPolicy,
         DurabilityServiceQosPolicy, HistoryQosPolicy, LivelinessQosPolicy, OwnershipQosPolicy,
         PresentationQosPolicy, ReliabilityQosPolicy, ResourceLimitsQosPolicy,
+        TypeConsistencyEnforcementQosPolicy,
     },
     rtps::{
         builtin::data::content_filtered_topic::{ContentFilterInfo, ContentFilterProperty},
@@ -23,6 +25,7 @@ use crate::{
             types::{Count, GroupInfo, ProtocolVersion, VendorId},
         },
     },
+    xtypes::{TypeIdentifier, TypeInformation, TypeObject, TypeObjectV1},
 };
 
 // pub type ParameterId = i16;
@@ -99,6 +102,7 @@ pub enum ParameterId {
     PidSecureWriterGroupInfo = 0x0066,
     PidKeyHash = 0x0070,
     PidStatusInfo = 0x0071,
+    PidTypeObject = 0x0072,
 
     /* From table 9.25 of DDS-RTPS 2.5 - Deprecated */
     PidPersistence = 0x0003,
@@ -123,6 +127,11 @@ pub enum ParameterId {
 
     PidDataRepresentation = 0x0073,
 
+    /* DDS-XTypes 1.3 */
+    PidTypeIdV1 = 0x0069,
+    PidTypeInformation = 0x0075,
+    PidTypeConsistencyEnforcement = 0x0074,
+
     UNKNOWN = 0xffff,
 }
 
@@ -142,11 +151,15 @@ pub struct Parameter {
     // Multiple of 4
     length: i16,
     // [u8, length]
-    value: Vec<u8>,
+    value: SmallVec<[u8; 16]>,
 }
 
 impl Parameter {
-    pub fn new(parameter_id: ParameterId, value: Vec<u8>) -> Self {
+    pub fn new<V>(parameter_id: ParameterId, value: V) -> Self
+    where
+        V: Into<SmallVec<[u8; 16]>>,
+    {
+        let value = value.into();
         Self { parameter_id, length: value.len() as i16, value }
     }
     pub fn parameter_id(&self) -> ParameterId {
@@ -161,11 +174,13 @@ impl Parameter {
 }
 
 impl<'a, C: Context> Readable<'a, C> for Parameter {
+    #[allow(clippy::needless_maybe_sized)]
     fn read_from<T: ?Sized + Reader<'a, C>>(reader: &mut T) -> Result<Self, C::Error> {
         let parameter_id = reader.read_u16()?;
         let length = reader.read_u16()? as i16;
         let mut value: Vec<u8> = vec![0u8; length as usize];
         reader.read_bytes(&mut value)?;
+        let value = SmallVec::from_vec(value);
 
         for pid in ParameterId::iter() {
             if pid as u16 == parameter_id {
@@ -181,7 +196,7 @@ impl<C: Context> Writable<C> for Parameter {
     #[inline]
     fn write_to<T: ?Sized + Writer<C>>(&self, writer: &mut T) -> Result<(), C::Error> {
         let length = self.value.len();
-        let pad = if length % 4 != 0 { 4 - (length % 4) } else { 0 };
+        let pad = if !length.is_multiple_of(4) { 4 - (length % 4) } else { 0 };
 
         //#[repr(u16)] does not work.
         writer.write_value(&(self.parameter_id as u16))?;
@@ -198,11 +213,11 @@ impl<C: Context> Writable<C> for Parameter {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ParameterList {
-    parameter: Vec<Parameter>,
+    parameter: SmallVec<[Parameter; 4]>,
 }
 impl ParameterList {
-    pub fn parameters(&self) -> Vec<Parameter> {
-        self.parameter.clone()
+    pub fn parameters(&self) -> &[Parameter] {
+        &self.parameter
     }
 
     pub fn add_parameter(&mut self, param: Parameter) {
@@ -244,8 +259,9 @@ impl ParameterList {
 }
 
 impl<'a, C: Context> Readable<'a, C> for ParameterList {
+    #[allow(clippy::needless_maybe_sized)]
     fn read_from<T: ?Sized + Reader<'a, C>>(reader: &mut T) -> Result<Self, C::Error> {
-        let mut parameter = Vec::new();
+        let mut parameter: SmallVec<[Parameter; 4]> = SmallVec::new();
         loop {
             let param = Parameter::read_from(reader)?;
 
@@ -302,6 +318,24 @@ impl StatusInfo {
         self.0.to_be_bytes()
     }
 }
+impl std::fmt::Display for StatusInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0 == 0 {
+            return write!(f, "NONE");
+        }
+        let mut parts: Vec<&str> = Vec::new();
+        if self.disposed() {
+            parts.push("DISPOSED");
+        }
+        if self.unregistered() {
+            parts.push("UNREGISTERED");
+        }
+        if self.filtered() {
+            parts.push("FILTERED");
+        }
+        write!(f, "{}", parts.join("|"))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Readable, Writable)]
 pub struct Property {
@@ -318,6 +352,7 @@ pub enum ParameterValue<'a> {
     ExpectsInlineQos(bool),
     ParticipantLeaseDuration(RtpsDuration),
     ParticipantGuid(Guid),
+    EndpointGuid(Guid),
     BuiltinEndpointSet(u32),
     EntityName(String),
     UserData(&'a [u8]),
@@ -347,6 +382,11 @@ pub enum ParameterValue<'a> {
     Lifespan(RtpsDuration),
     DurabilityService(DurabilityServiceQosPolicy),
     DataRepresentation(DataRepresentationQosPolicy),
+    TypeInformation(TypeInformation),
+    TypeIdentifierV1(TypeIdentifier),
+    TypeConsistencyEnforcement(TypeConsistencyEnforcementQosPolicy),
+    TypeObject(TypeObject),
+    TypeObjectV1(TypeObjectV1),
     KeyHash([u8; 16]),
     StatusInfo(StatusInfo),
     MaxSerializedSize(u32),

@@ -1,21 +1,18 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use mio::{Events, Poll, Token, Waker};
 
 use crate::rtps::common::entity_id::EntityId;
-use crate::rtps::common::guid::Guid;
 use crate::rtps::common::rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult};
-use crate::rtps::entities::history::cache_change::CacheChange;
 use crate::rtps::entities::participant::Participant;
 use crate::rtps::logic::sedp_logic::SedpLogic;
 use crate::rtps::logic::spdp_logic::SpdpLogic;
 use crate::rtps::logic::user_logic::UserLogic;
 use crate::rtps::task::sending_handler::MessageType;
 use crate::rtps::transport::socket::MAX_EVENTS;
-use crate::rtps::transport::{Transport, TransportSender};
 
 pub(crate) struct SendingTask {
-    participant: Arc<Participant>,
+    participant: Weak<Participant>,
     spdp_logic: Arc<Option<SpdpLogic>>,
     sedp_logic: Arc<Option<SedpLogic>>,
     user_logic: Arc<Option<UserLogic>>,
@@ -25,43 +22,22 @@ pub(crate) struct SendingTask {
 }
 
 impl SendingTask {
-    pub(crate) fn new(
-        participant: Arc<Participant>,
-        udp_sender: Option<Arc<TransportSender>>,
-        tcp_sender: Option<Arc<TransportSender>>,
-    ) -> Self {
-        // For waker token, use UDP port if available, otherwise TCP port
-        let port = if let Some(ref sender) = udp_sender {
-            sender.port()
-        } else if let Some(ref sender) = tcp_sender {
-            sender.port()
-        } else {
-            panic!("At least one sender (UDP or TCP) must be provided");
-        };
-
-        // Get initial peers from environment for TCP/Hybrid discovery
-        let initial_peers = crate::common::env::get_initial_peers();
-        if !initial_peers.is_empty() {
-            log::info!("[SendingTask] Initial peers loaded: {:?}", initial_peers);
-        }
-
-        // let (sedp_logic, spdp_logic, user_logic) = (
-        //     SedpLogic::new(participant.clone(), udp_sender.clone()),
-        //     SpdpLogic::new(
-        //         participant.clone(),
-        //         udp_sender.clone(),
-        //         tcp_sender.clone(),
-        //         initial_peers, // Pass initial peers for TCP discovery
-        //     ),
-        //     UserLogic::new(participant.clone(), udp_sender.clone(), tcp_sender.clone()),
-        // );
+    pub(crate) fn new(participant: Arc<Participant>, port: u16) -> Self {
         let (spdp_logic, sedp_logic, user_logic) = participant.get_logics();
         let poll = Poll::new().unwrap();
         let events = Events::with_capacity(MAX_EVENTS);
         let sending_token = Token(port as usize);
 
         let waker = Arc::new(Waker::new(poll.registry(), sending_token).unwrap());
-        Self { participant, sedp_logic, spdp_logic, user_logic, poll, events, waker }
+        Self {
+            participant: Arc::downgrade(&participant),
+            sedp_logic,
+            spdp_logic,
+            user_logic,
+            poll,
+            events,
+            waker,
+        }
     }
 
     pub(crate) fn waker(&self) -> Arc<Waker> {
@@ -69,55 +45,71 @@ impl SendingTask {
     }
 
     pub(crate) fn create_worker_task(&self, message: MessageType) -> RtpsResult<()> {
+        let participant = self.participant.upgrade().ok_or_else(|| {
+            RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped")
+        })?;
         let mut spdp_logic = self
             .spdp_logic
             .as_ref()
             .as_ref()
-            .ok_or(RtpsError::new(RtpsErrorCode::DataNotSet, "SpdpLogic is not initialized"))?
+            .ok_or_else(|| {
+                RtpsError::new(RtpsErrorCode::DataNotSet, "SpdpLogic is not initialized")
+            })?
             .clone();
-        let sedp_logic = self
-            .sedp_logic
-            .as_ref()
-            .as_ref()
-            .ok_or(RtpsError::new(RtpsErrorCode::DataNotSet, "SedpLogic is not initialized"))?;
-        let user_logic = self
-            .user_logic
-            .as_ref()
-            .as_ref()
-            .ok_or(RtpsError::new(RtpsErrorCode::DataNotSet, "UserLogic is not initialized"))?;
+        let sedp_logic = self.sedp_logic.as_ref().as_ref().ok_or_else(|| {
+            RtpsError::new(RtpsErrorCode::DataNotSet, "SedpLogic is not initialized")
+        })?;
+        let user_logic = self.user_logic.as_ref().as_ref().ok_or_else(|| {
+            RtpsError::new(RtpsErrorCode::DataNotSet, "UserLogic is not initialized")
+        })?;
 
         match message {
-            MessageType::SpdpMulticast(start_time, duration, domain_id, data) => {
-                spdp_logic.send_spdp_multicast(start_time, duration, domain_id, data);
-                Ok(())
-            }
-
-            MessageType::Sedp(duration, spdp_discovered_participant_data, data) => {
-                sedp_logic.send_sedp_message(duration, spdp_discovered_participant_data, data);
-                Ok(())
-            }
-
-            MessageType::SedpSpdp(start_time, duration, spdp_discovered_participant_data, data) => {
-                sedp_logic.send_sedp_spdp_message(
-                    start_time,
-                    duration,
-                    spdp_discovered_participant_data,
-                    data,
-                )
-            }
-            MessageType::P2p(start_time, duration, participant_message_data) => {
-                if let Some(wlp_logic) = self.participant.wlp_logic() {
+            MessageType::P2pData(start_time, duration, participant_message_data) => {
+                if let Some(wlp_logic) = participant.wlp_logic() {
                     wlp_logic.send_participant_message_data(
                         start_time,
                         duration,
                         participant_message_data,
-                    );
+                    )?;
                 }
+
                 Ok(())
             }
 
-            MessageType::SedpPublication(start_time, duration, guid_prefix) => {
-                sedp_logic.send_sedp_heartbeat_message(
+            MessageType::P2pHeartbeat(target_guid_prefix) => {
+                if let Some(wlp_logic) = participant.wlp_logic() {
+                    wlp_logic.send_liveliness_heartbeat(false, false, None, target_guid_prefix)?;
+                }
+
+                Ok(())
+            }
+
+            MessageType::PeriodicParticipantDataMulticast(
+                start_time,
+                duration,
+                domain_id,
+                data,
+            ) => {
+                spdp_logic.send_periodic_participant_data_multicast(
+                    start_time, duration, domain_id, data,
+                )?;
+                Ok(())
+            }
+
+            MessageType::PeriodicParticipantDataUnicast(
+                start_time,
+                duration,
+                spdp_discovered_participant_data,
+                data,
+            ) => sedp_logic.send_periodic_participant_data_unicast(
+                start_time,
+                duration,
+                spdp_discovered_participant_data,
+                data,
+            ),
+
+            MessageType::PeriodicPublicationHeartbeat(start_time, duration, guid_prefix) => {
+                sedp_logic.send_sedp_periodic_heartbeat_message(
                     start_time,
                     duration,
                     guid_prefix,
@@ -126,8 +118,8 @@ impl SendingTask {
                 Ok(())
             }
 
-            MessageType::SedpSubscription(start_time, duration, guid_prefix) => {
-                sedp_logic.send_sedp_heartbeat_message(
+            MessageType::PeriodicSubscriptionHeartbeat(start_time, duration, guid_prefix) => {
+                sedp_logic.send_sedp_periodic_heartbeat_message(
                     start_time,
                     duration,
                     guid_prefix,
@@ -136,22 +128,26 @@ impl SendingTask {
                 Ok(())
             }
 
-            MessageType::SedpTopic(start_time, duration, guid_prefix) => {
-                sedp_logic.send_sedp_heartbeat_message(
-                    start_time,
-                    duration,
-                    guid_prefix,
-                    EntityId::SEDP_BUILTIN_TOPICS_WRITER,
-                )?;
+            // MessageType::PeriodicSedpTopicHeartbeat(start_time, duration, guid_prefix) => {
+            //     sedp_logic.send_sedp_periodic_heartbeat_message(
+            //         start_time,
+            //         duration,
+            //         guid_prefix,
+            //         EntityId::SEDP_BUILTIN_TOPICS_WRITER,
+            //     )?;
+            //     Ok(())
+            // }
+
+            // MessageType::SedpTerminateEndpoint(builtin_writer_guid, cache_change) => {
+            //     sedp_logic.send_endpoint_termination_message(builtin_writer_guid, cache_change)?;
+            //     Ok(())
+            // }
+            MessageType::UserHeartbeatToAll(entity_id) => {
+                user_logic.send_heartbeat_to_anonymous_matched_readers(entity_id)?;
                 Ok(())
             }
 
-            MessageType::SendHeartbeatMessageToAll(entity_id) => {
-                user_logic.send_heartbeat_message_to_all_reader_proxies(entity_id)?;
-                Ok(())
-            }
-
-            MessageType::SendHeartbeatMessageToOne(
+            MessageType::UserHeartbeatToOne(
                 writer_entity_id,
                 remote_reader_guid,
                 is_preemptive,
@@ -164,19 +160,21 @@ impl SendingTask {
                 Ok(())
             }
 
-            MessageType::SendUnsentChanges(writer_entity_id) => {
-                user_logic.send_unsent_changes(writer_entity_id)?;
-                Ok(())
-            }
-
-            MessageType::SendRequestedChanges(writer_entity_id, remote_reader_guid) => {
+            // MessageType::UserUnsentChanges(writer_entity_id) => {
+            //     user_logic.send_unsent_changes(writer_entity_id)?;
+            //     Ok(())
+            // }
+            MessageType::UserRequestedChanges(writer_entity_id, remote_reader_guid) => {
                 user_logic.send_requested_changes(writer_entity_id, remote_reader_guid)?;
                 Ok(())
             }
 
-            MessageType::SedpTerminateEndpoint(builtin_writer_guid, cache_change) => {
-                let sedp_logic = sedp_logic;
-                sedp_logic.send_endpoint_termination_message(builtin_writer_guid, cache_change)?;
+            MessageType::UserAcknack(reader_id, remote_writer_guid, final_flag, is_preemptive) => {
+                if is_preemptive {
+                    user_logic.send_preemptive_acknack(reader_id, remote_writer_guid)?;
+                } else {
+                    user_logic.send_acknack(reader_id, remote_writer_guid, final_flag)?;
+                }
                 Ok(())
             }
 
@@ -189,47 +187,28 @@ impl SendingTask {
                 }
                 Ok(())
             }
-
-            MessageType::OnSpdpMessageArrival(participant_proxy_data) => {
-                spdp_logic.handle_multicast_spdp_message(participant_proxy_data.clone());
-                spdp_logic.handle_participant_liveliness(participant_proxy_data);
-                Ok(())
-            }
-
-            MessageType::SendPreemptiveAcknack(reader_id, remote_writer_guid) => {
-                user_logic.send_preemptive_acknack(reader_id, remote_writer_guid)?;
-                Ok(())
-            }
         }
-    }
-
-    pub(crate) fn sync_sedp_terminate_endpoint_task(
-        &self,
-        builtin_writer_guid: Guid,
-        cache_change: Arc<CacheChange>,
-    ) {
-        let sedp_logic = self.sedp_logic.as_ref().as_ref().expect("SedpLogic is not initialized");
-        let _ = sedp_logic.send_endpoint_termination_message(builtin_writer_guid, cache_change);
-    }
-
-    pub(crate) fn sync_spdp_terminate_participant_task(&self) {
-        let spdp_logic = self.spdp_logic.as_ref().as_ref().expect("SpdpLogic is not initialized");
-        spdp_logic.send_participant_termination_message_multicast();
-        let sedp_logic = self.sedp_logic.as_ref().as_ref().expect("SedpLogic is not initialized");
-        sedp_logic.send_participant_termination_message_unicast();
     }
 
     pub(crate) fn event_loop(&mut self, queue: Arc<Mutex<Vec<MessageType>>>) -> RtpsResult<()> {
         log::info!("start sending task thread");
 
+        let participant = self.participant.upgrade().ok_or_else(|| {
+            RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped")
+        })?;
+
         loop {
-            if let Err(e) =
-                self.poll.poll(&mut self.events, Some(core::time::Duration::from_secs(1)))
-            {
-                return Err(RtpsError::new(RtpsErrorCode::Io, format!("poll error: {}", e)));
+            match self.poll.poll(&mut self.events, Some(core::time::Duration::from_secs(1))) {
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                    log::warn!("Poll interrupted in sending task, continuing: {}", e);
+                }
+                Err(e) => {
+                    return Err(RtpsError::new(RtpsErrorCode::Io, format!("poll error: {}", e)));
+                }
+                Ok(()) => {}
             }
 
-            if self.participant.is_terminated() {
+            if participant.is_terminated() {
                 log::debug!("Detected global termination flag, exiting sending handler loop");
                 return Ok(());
             }

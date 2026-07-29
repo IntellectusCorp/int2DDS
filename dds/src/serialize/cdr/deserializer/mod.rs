@@ -9,7 +9,8 @@ use super::CdrError;
 use crate::serialize::core::endianness_from_bool;
 use crate::serialize::{align_position_with_header_offset, DeserializerReader};
 
-/// CDR deserializer
+/// Deprecated. Use `cdr::CdrDeserializer` (re-export of `xcdr1::CdrDeserializer`).
+#[allow(dead_code)]
 pub struct CdrDeserializer<'a> {
     pub(super) endianness: Endianness,
     pub(super) data: &'a [u8],
@@ -43,9 +44,10 @@ impl<'a> CdrDeserializer<'a> {
         Self { endianness: endianness_from_bool(little_endian), data, position: 0 }
     }
 
-    /// Align position to boundary (accounting for removed header)
+    /// Align position to boundary
+    /// CDR alignment is relative to data start (after encapsulation header)
     pub(super) fn align(&mut self, alignment: usize) {
-        align_position_with_header_offset(&mut self.position, alignment, 4);
+        align_position_with_header_offset(&mut self.position, alignment, 0);
     }
 
     /// Check if enough data is available
@@ -66,8 +68,8 @@ impl<'a> DeserializerReader for CdrDeserializer<'a> {
         self.check_available(size)
     }
 
-    fn get_data(&self) -> &[u8] {
-        self.data
+    fn copy_bytes_at(&self, offset: usize, out: &mut [u8]) {
+        out.copy_from_slice(&self.data[offset..offset + out.len()]);
     }
 
     fn get_position(&self) -> usize {
@@ -85,4 +87,40 @@ impl<'a> DeserializerReader for CdrDeserializer<'a> {
     fn align(&mut self, alignment: usize) {
         self.align(alignment);
     }
+}
+
+#[cfg(test)]
+#[allow(unused_imports)]
+mod cdr_error_tests {
+    use crate::{
+        dcps::topic::type_support::{DdsType, FieldAccessor},
+        serialize::{
+            cdr::{
+                CdrDeserialize, CdrDeserializer, CdrSerialize, CdrSerializer, ExtensibilityKind,
+                XcdrDeserialize, XcdrDeserializer, XcdrSerialize, XcdrSerializer,
+            },
+            BufferManager, DeserializerReader, WChar, WString,
+        },
+    };
+    use std::collections::HashMap;
+    #[test]
+    fn test_cdr_insufficient_data() {
+        // Empty data should fail
+        let result = CdrDeserializer::new(&[]);
+        assert!(result.is_err());
+
+        // Only 2 bytes (incomplete header)
+        let result = CdrDeserializer::new(&[0x00, 0x01]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cdr_invalid_encapsulation() {
+        // Invalid encapsulation identifier
+        let data = [0xFF, 0xFF, 0x00, 0x00];
+        let result = CdrDeserializer::new(&data);
+        assert!(result.is_err());
+    }
+
+    // Tuple Struct Tests
 }

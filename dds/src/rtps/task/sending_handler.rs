@@ -1,12 +1,14 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread;
 use std::time::{Duration as StdDuration, Instant};
 
 use log::{debug, error};
 use mio::Waker;
 
-use crate::rtps::builtin::data::participant_message_data::ParticipantMessageData;
+use crate::rtps::builtin::data::participant_message_data::{
+    ParticipantMessageData, ParticipantMessageDataKind,
+};
 use crate::rtps::builtin::data::spdp_discovered_participant_data::SPDPDiscoveredParticipantData;
 use crate::rtps::common::entity_id::EntityId;
 use crate::rtps::common::guid::{Guid, GuidPrefix};
@@ -14,41 +16,37 @@ use crate::rtps::common::rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult}
 use crate::rtps::common::sequence::SequenceNumber;
 use crate::rtps::common::types::DomainId;
 use crate::rtps::entities::entity::Entity;
-use crate::rtps::entities::history::cache_change::CacheChange;
 use crate::rtps::entities::participant::Participant;
 use crate::rtps::logic::wlp_logic::WlpLogic;
 use crate::rtps::task::sending_task::SendingTask;
-use crate::rtps::transport::TransportSender;
 
 #[derive(Debug, Clone)]
 pub(crate) enum MessageType {
-    //SPDP
-    SpdpMulticast(Option<Instant>, StdDuration, DomainId, Option<Arc<Vec<u8>>>),
-    OnSpdpMessageArrival(SPDPDiscoveredParticipantData),
+    // WLP
+    P2pData(Option<Instant>, StdDuration, Arc<ParticipantMessageData>),
+    P2pHeartbeat(Option<GuidPrefix>),
 
-    //SEDP
-    #[allow(dead_code)]
-    Sedp(StdDuration, Arc<SPDPDiscoveredParticipantData>, Option<Arc<Vec<u8>>>),
-    SedpSpdp(
+    // Discovery traffic
+    PeriodicParticipantDataMulticast(Option<Instant>, StdDuration, DomainId, Option<Arc<Vec<u8>>>),
+    PeriodicParticipantDataUnicast(
         Option<Instant>,
         StdDuration,
         Arc<SPDPDiscoveredParticipantData>,
         Option<Arc<Vec<u8>>>,
     ),
-    SedpPublication(Option<Instant>, StdDuration, Arc<GuidPrefix>),
-    SedpSubscription(Option<Instant>, StdDuration, Arc<GuidPrefix>),
-    SedpTopic(Option<Instant>, StdDuration, Arc<GuidPrefix>),
-    SedpTerminateEndpoint(Guid, Arc<CacheChange>),
+    PeriodicPublicationHeartbeat(Option<Instant>, StdDuration, Arc<GuidPrefix>),
+    PeriodicSubscriptionHeartbeat(Option<Instant>, StdDuration, Arc<GuidPrefix>),
+    // PeriodicSedpTopicHeartbeat(Option<Instant>, StdDuration, Arc<GuidPrefix>),
+    // Not used anymore since asynchronous sending can cause participant to be already removed
+    // when the task is executed, so now sent synchronously via SendingTask method
+    // SedpTerminateEndpoint(Guid, Arc<CacheChange>),
 
-    // WLP
-    P2p(Option<Instant>, StdDuration, Arc<ParticipantMessageData>),
-
-    //user data
-    SendHeartbeatMessageToOne(EntityId, Guid, bool),
-    SendHeartbeatMessageToAll(EntityId),
-    SendUnsentChanges(EntityId),
-    SendRequestedChanges(EntityId, Guid),
-    SendPreemptiveAcknack(EntityId, Guid),
+    // User traffic
+    UserHeartbeatToOne(EntityId, Guid, bool),
+    UserHeartbeatToAll(EntityId),
+    // UserUnsentChanges(EntityId),
+    UserRequestedChanges(EntityId, Guid),
+    UserAcknack(EntityId, Guid, bool, bool), // reader_entity_id, remote_writer_guid, final_flag, is_preemptive
     OnUserCacheChangeRemoval(bool, SequenceNumber, EntityId),
 }
 
@@ -56,9 +54,11 @@ pub(crate) static INSTANCE: OnceLock<Mutex<HashMap<Guid, Arc<SendingHandler>>>> 
 
 pub(crate) struct SendingHandler {
     // Immutable fields - no lock needed
-    participant: Arc<Participant>,
-    udp_sender: Option<Arc<TransportSender>>,
-    tcp_sender: Option<Arc<TransportSender>>,
+    participant: Weak<Participant>,
+    /// Listener port, used only to seed the mio `Waker` token for the event
+    /// loop. Sending itself is delegated to the logics (which hold the transport),
+    /// so the handler needs no transport reference.
+    port: Option<u16>,
 
     // Mutable fields - use interior mutability
     sending_task: Mutex<Option<Arc<Mutex<SendingTask>>>>,
@@ -72,15 +72,10 @@ pub(crate) struct SendingHandler {
 }
 
 impl SendingHandler {
-    fn new(
-        participant: Arc<Participant>,
-        udp_sender: Option<Arc<TransportSender>>,
-        tcp_sender: Option<Arc<TransportSender>>,
-    ) -> Self {
+    fn new(participant: Arc<Participant>, port: Option<u16>) -> Self {
         Self {
-            participant: participant.clone(),
-            udp_sender,
-            tcp_sender,
+            participant: Arc::downgrade(&participant),
+            port,
             sending_task: Mutex::new(None),
             sending_thread_join_handle: Mutex::new(None),
             waker: Mutex::new(None),
@@ -90,8 +85,7 @@ impl SendingHandler {
 
     pub(crate) fn get_instance(
         participant: Arc<Participant>,
-        udp_sender: Option<Arc<TransportSender>>,
-        tcp_sender: Option<Arc<TransportSender>>,
+        port: Option<u16>,
     ) -> Arc<SendingHandler> {
         let map_mutex = INSTANCE.get_or_init(|| Mutex::new(HashMap::new()));
 
@@ -103,7 +97,7 @@ impl SendingHandler {
             panic!("Failed to acquire sending handler map lock");
         }
 
-        let new_handler = SendingHandler::new(participant.clone(), udp_sender, tcp_sender);
+        let new_handler = SendingHandler::new(participant.clone(), port);
         new_handler.spawn_event_loop();
         let handler_arc = Arc::new(new_handler);
 
@@ -130,10 +124,11 @@ impl SendingHandler {
     fn spawn_event_loop(&self) {
         let mut sending_task_guard = self.sending_task.lock().expect("Failed to lock sending_task");
         if sending_task_guard.is_none() {
+            let port = self.port.expect("port must be set before spawning event loop");
+
             let sending_task = SendingTask::new(
-                self.participant.clone(),
-                self.udp_sender.clone(),
-                self.tcp_sender.clone(),
+                self.participant.upgrade().expect("Participant already dropped"),
+                port,
             );
             let waker = sending_task.waker();
             *sending_task_guard = Some(Arc::new(Mutex::new(sending_task)));
@@ -153,19 +148,29 @@ impl SendingHandler {
                 Some(sending_task) => {
                     let sending_task_clone = sending_task.clone();
                     let message_queue_clone = self.message_queue.clone();
+                    let participant_guid =
+                        self.participant.upgrade().expect("Participant already dropped").guid();
                     let handle = thread::Builder::new()
                         .name("sending task thread".to_string())
                         .spawn(move || {
                             // Register thread name for monitoring
                             {
                                 use crate::rtps::task::thread_monitor::ThreadMonitor;
-                                ThreadMonitor::register_current_thread_name("sending task thread");
+                                ThreadMonitor::register_current_thread_name_with_guid_prefix(
+                                    "sending task thread",
+                                    participant_guid.prefix(),
+                                );
                             }
 
                             if let Err(e) =
                                 sending_task_clone.lock().unwrap().event_loop(message_queue_clone)
                             {
                                 error!("Sending task event loop terminated with error: {:?}", e);
+                            }
+                            // Cleanup thread from registry before exit
+                            {
+                                use crate::rtps::task::thread_monitor::ThreadMonitor;
+                                ThreadMonitor::remove_map_guard();
                             }
                             debug!("sending task thread finished");
                         })
@@ -197,22 +202,22 @@ impl SendingHandler {
     pub(crate) fn push_message_and_wake(&self, message: MessageType) {
         match self.message_queue.lock() {
             Ok(mut queue_guard) => {
-                // Deduplication: skip if SendUnsentChanges for same EntityId already exists
-                if let MessageType::SendUnsentChanges(entity_id) = &message {
-                    if queue_guard.iter().any(
-                        |m| matches!(m, MessageType::SendUnsentChanges(eid) if eid == entity_id),
-                    ) {
-                        return; // Already queued, no need to add duplicate
-                    }
-                }
+                // // Deduplication: skip if SendUnsentChanges for same EntityId already exists
+                // if let MessageType::UserUnsentChanges(entity_id) = &message {
+                //     if queue_guard.iter().any(
+                //         |m| matches!(m, MessageType::UserUnsentChanges(eid) if eid == entity_id),
+                //     ) {
+                //         return; // Already queued, no need to add duplicate
+                //     }
+                // }
                 queue_guard.push(message);
             }
             Err(e) => {
                 error!("Failed to acquire message queue lock (poisoned): {}", e);
                 // If the lock is poisoned, try to get a new instance and retry once
-                if let Some(handler) =
-                    SendingHandler::get_instance_by_participant_guid(self.participant.guid())
-                {
+                if let Some(handler) = SendingHandler::get_instance_by_participant_guid(
+                    self.participant.upgrade().expect("Participant already dropped").guid(),
+                ) {
                     handler.push_message_and_wake(message);
                     return; // Early return to avoid double wake
                 }
@@ -221,23 +226,18 @@ impl SendingHandler {
         self.wake_event_loop();
     }
 
-    // Add message to message queue
-    pub(crate) fn push_message(&self, message: MessageType) {
-        match self.message_queue.lock() {
-            Ok(mut queue_guard) => {
-                queue_guard.push(message);
-            }
-            Err(e) => {
-                error!("Failed to acquire message queue lock: {}", e);
-                self.push_message_and_wake(message);
-            }
-        }
-    }
-
-    /// Allows direct access to SendingTask when synchronous transmission is needed instead of event loop
-    pub(crate) fn get_sending_task(&self) -> Option<Arc<Mutex<SendingTask>>> {
-        self.sending_task.lock().ok()?.clone()
-    }
+    // // Add message to message queue
+    // pub(crate) fn push_message(&self, message: MessageType) {
+    //     match self.message_queue.lock() {
+    //         Ok(mut queue_guard) => {
+    //             queue_guard.push(message);
+    //         }
+    //         Err(e) => {
+    //             error!("Failed to acquire message queue lock: {}", e);
+    //             self.push_message_and_wake(message);
+    //         }
+    //     }
+    // }
 
     pub(crate) fn join_sending_thread(&self) -> RtpsResult<()> {
         let mut handle_guard = self.sending_thread_join_handle.lock().map_err(|e| {
@@ -250,6 +250,21 @@ impl SendingHandler {
         if let Some(handle) = handle_guard.take() {
             handle.join().map_err(|_| RtpsError::new(RtpsErrorCode::ThreadJoinError, None))?;
         }
+
+        // Clear sending_task to release Poll and Waker file descriptors
+        if let Ok(mut task_guard) = self.sending_task.lock() {
+            *task_guard = None;
+        }
+
+        // Clear waker reference
+        if let Ok(mut waker_guard) = self.waker.lock() {
+            *waker_guard = None;
+        }
+
+        if let Ok(mut queue) = self.message_queue.lock() {
+            queue.clear();
+        }
+
         Ok(())
     }
 
@@ -262,12 +277,16 @@ impl SendingHandler {
     }
 
     pub(crate) fn wlp_logic(&self) -> Option<WlpLogic> {
-        self.participant.wlp_logic()
+        self.participant.upgrade().expect("Participant already dropped").wlp_logic()
     }
 
-    pub(crate) fn cancel_p2p_messages(&self) {
+    // Remove only entries of this kind; other kinds keep running.
+    pub(crate) fn cancel_p2p_messages_by_kind(&self, kind: ParticipantMessageDataKind) {
         if let Ok(mut queue) = self.message_queue.lock() {
-            queue.retain(|msg| !matches!(msg, MessageType::P2p(_, _, _)));
+            queue.retain(|msg| match msg {
+                MessageType::P2pData(_, _, pmd) => pmd.kind() != kind,
+                _ => true,
+            });
         }
     }
 }

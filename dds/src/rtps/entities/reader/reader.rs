@@ -21,7 +21,9 @@ use crate::{
     infrastructure::history_cache::HistoryCache,
     rtps::{
         common::{
-            guid::Guid, rtps_error_code::RtpsResult, sequence::SequenceNumber, time::RtpsDuration,
+            guid::{Guid, GuidPrefix},
+            rtps_error_code::RtpsResult,
+            time::RtpsDuration,
         },
         entities::{
             endpoint::Endpoint,
@@ -42,15 +44,11 @@ pub(crate) trait Reader: Entity + Endpoint + Debug + Any {
     fn matched_writers_guids(&self) -> Vec<Guid>;
     fn on_change(&self, change: Arc<CacheChange>);
 
-    fn get_next_sequence_number(&self) -> SequenceNumber;
-
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
     fn set_datareader_cache(
         &mut self,
-        datareader_cache: Weak<
-            Mutex<dyn HistoryCache<CacheChangeInputType = Arc<Mutex<CacheChange>>> + Send + Sync>,
-        >,
+        datareader_cache: Weak<Mutex<dyn HistoryCache + Send + Sync>>,
     ) -> RtpsResult<()>;
     fn set_subscription_builtin_topic_data(
         &self,
@@ -63,4 +61,13 @@ pub(crate) trait Reader: Entity + Endpoint + Debug + Any {
         &self,
         writer_guid: Guid,
     ) -> RtpsResult<PublicationBuiltinTopicData>;
+
+    fn remove_matched_writer_and_update_status(&self, writer_guid: Guid) -> RtpsResult<bool>;
+
+    // Remove all matched writers whose GUID prefix equals `prefix` (e.g. on remote
+    // participant termination). Returns the number of writers removed.
+    fn remove_all_matched_writers_with_prefix_and_update_status(
+        &self,
+        prefix: GuidPrefix,
+    ) -> RtpsResult<usize>;
 }

@@ -42,6 +42,15 @@ impl SequenceNumber {
         result += 1;
         result
     }
+
+    pub fn previous(&self) -> Self {
+        SequenceNumber::from_i64(self.to_i64() - 1)
+    }
+}
+impl std::fmt::Display for SequenceNumber {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_i64())
+    }
 }
 
 impl AddAssign<u32> for SequenceNumber {
@@ -82,7 +91,7 @@ impl Ord for SequenceNumber {
 
 impl Clone for SequenceNumber {
     fn clone(&self) -> Self {
-        Self { high: self.high, low: self.low }
+        *self
     }
 }
 
@@ -112,8 +121,8 @@ impl<'a, C: Context> Readable<'a, C> for SequenceNumberSet {
         let num_bits: u32 = reader.read_value()?;
         let num_of_longs: usize = num_bits.div_ceil(32) as usize;
         let mut bitmap = [0_i32; 8];
-        for i in 0..num_of_longs {
-            bitmap[i] = reader.read_value()?;
+        for item in bitmap.iter_mut().take(num_of_longs) {
+            *item = reader.read_value()?;
         }
         Ok(Self { bitmap_base, bitmap, num_bits })
     }
@@ -124,8 +133,8 @@ impl<C: Context> Writable<C> for SequenceNumberSet {
         writer.write_value(&self.bitmap_base)?;
         writer.write_u32(self.num_bits)?;
         let num_of_longs: usize = self.num_bits.div_ceil(32) as usize;
-        for i in 0..(num_of_longs) {
-            writer.write_i32(self.bitmap[i])?;
+        for item in self.bitmap.iter().take(num_of_longs) {
+            writer.write_i32(*item)?;
         }
         Ok(())
     }
@@ -141,8 +150,8 @@ impl<'a, C: Context> Readable<'a, C> for FragmentNumberSet {
         let num_bits: u32 = reader.read_value()?;
         let num_of_longs: usize = num_bits.div_ceil(32) as usize;
         let mut bitmap = [0_i32; 8];
-        for i in 0..num_of_longs {
-            bitmap[i] = reader.read_value()?;
+        for item in bitmap.iter_mut().take(num_of_longs) {
+            *item = reader.read_value()?;
         }
         Ok(Self { bitmap_base, bitmap, num_bits })
     }
@@ -281,20 +290,34 @@ impl<T: SetNumberType> NumberSet<T> {
     // Iterate over each bit in the bitmap and collect the numbers that are set
     pub fn extract_numbers(&self) -> Vec<T> {
         let mut numbers: Vec<T> = Vec::with_capacity(256);
+        let num_of_longs = self.num_bits.div_ceil(32) as usize;
 
-        for (idx, num) in self.bitmap.iter().enumerate() {
+        for (idx, num) in self.bitmap.iter().take(num_of_longs).enumerate() {
             if *num == 0 {
                 continue;
             }
             for i in (0..32).rev() {
+                // Global bit position across the entire bitmap (0-based)
+                let bit_position = (idx * 32) + (31 - i);
+
+                // Don't process beyond num_bits
+                if bit_position >= self.num_bits as usize {
+                    break;
+                }
                 if ((num >> i) & 1) == 1 {
-                    let offset = (idx * 32) + (31 - i);
-                    numbers.push(self.bitmap_base.wrapping_add(offset as u32));
+                    numbers.push(self.bitmap_base.wrapping_add(bit_position as u32));
                 }
             }
         }
 
         numbers
+    }
+}
+impl<T: SetNumberType + std::fmt::Display> std::fmt::Display for NumberSet<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let list =
+            self.extract_numbers().iter().map(|n| n.to_string()).collect::<Vec<_>>().join(",");
+        write!(f, "base={},[{}]", self.bitmap_base, list)
     }
 }
 
@@ -309,7 +332,7 @@ mod tests {
             vec![SequenceNumber::new(0, 2), SequenceNumber::new(0, 3)],
         );
 
-        assert_eq!(sns.bitmap, [1610612736, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(sns.bitmap, [0x60000000, 0, 0, 0, 0, 0, 0, 0]); // 0110 0000 ... → position 1, 2 set
         assert_eq!(sns.num_bits, 3);
     }
 
@@ -317,8 +340,8 @@ mod tests {
     fn test_sns_extract_numbers() {
         let sns = SequenceNumberSet {
             bitmap_base: SequenceNumber::new(0, 1),
-            bitmap: [1610612736, 0, 0, 0, 0, 0, 0, 0],
-            num_bits: 1,
+            bitmap: [0x60000000, 0, 0, 0, 0, 0, 0, 0],
+            num_bits: 3,
         };
 
         assert_eq!(
@@ -328,10 +351,23 @@ mod tests {
     }
 
     #[test]
+    fn test_sns_extract_numbers_should_respect_num_bits() {
+        let sns = SequenceNumberSet {
+            bitmap_base: SequenceNumber::new(0, 1),
+            bitmap: [0x60000000, 0, 0, 0, 0, 0, 0, 0],
+            num_bits: 1, // num_bits: 1 → only position 0 is valid, position 0 is not set
+        };
+
+        // extract_numbers should return empty
+        let empty: Vec<SequenceNumber> = vec![];
+        assert_eq!(sns.extract_numbers(), empty);
+    }
+
+    #[test]
     fn test_fns_from_numbers() {
         let fns = FragmentNumberSet::from_vec(1, vec![2, 3]);
 
-        assert_eq!(fns.bitmap, [1610612736, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(fns.bitmap, [0x60000000, 0, 0, 0, 0, 0, 0, 0]);
         assert_eq!(fns.num_bits, 3);
     }
 
@@ -339,7 +375,7 @@ mod tests {
     fn test_fns_extract_numbers() {
         let fns = FragmentNumberSet {
             bitmap_base: 1,
-            bitmap: [1610612736, 0, 0, 0, 0, 0, 0, 0],
+            bitmap: [0x60000000, 0, 0, 0, 0, 0, 0, 0],
             num_bits: 3,
         };
 

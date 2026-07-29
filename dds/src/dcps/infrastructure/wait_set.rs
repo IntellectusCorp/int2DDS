@@ -3,8 +3,11 @@
 //! # Example
 //!
 //! ```no_run
-//! # use int2dds::dcps::domain::DomainParticipantFactory;
+//! # use int2dds::domain::domain_participant_factory::DomainParticipantFactory;
 //! # use int2dds::infrastructure::wait_set::WaitSet;
+//! # use int2dds::domain::qos::DomainParticipantQos;
+//! # use int2dds::topic::qos::TopicQos;
+//! # use int2dds::subscription::qos::{SubscriberQos, DataReaderQos};
 //! # use int2dds::infrastructure::status::StatusMask;
 //! # use int2dds::core::time::Duration;
 //! # use int2dds::topic::type_support::DdsType;
@@ -12,23 +15,23 @@
 //! # use int2dds::subscription::sample_info::ViewStateKind;
 //! # use int2dds::subscription::sample_info::InstanceStateKind;
 //! # use int2dds::core::types::LENGTH_UNLIMITED;
-//! # #[derive(Clone, DdsType)]
+//! # #[derive(DdsType)]
 //! # struct MyData { id: u32 }
 //! # let factory = DomainParticipantFactory::get_instance();
-//! # let participant = factory.create_participant(0, Default::default(), None, Default::default())?;
-//! # let topic = participant.create_topic::<MyData>("MyTopic", "MyData", Default::default(), None, Default::default())?;
-//! # let subscriber = participant.create_subscriber(Default::default(), None, Default::default())?;
-//! # let reader = subscriber.create_datareader::<MyData>(&topic, Default::default(), None, Default::default())?;
+//! # let participant = factory.create_participant(0, DomainParticipantQos::default(), None, StatusMask::default()).unwrap();
+//! # let topic = participant.create_topic::<MyData>("MyTopic", "MyData", TopicQos::default(), None, StatusMask::default()).unwrap();
+//! # let subscriber = participant.create_subscriber(SubscriberQos::default(), None, StatusMask::default()).unwrap();
+//! # let reader = subscriber.create_datareader::<MyData>(&topic, DataReaderQos::default(), None, StatusMask::default()).unwrap();
 //! let mut wait_set = WaitSet::new();
 //!
 //! // Attach a condition for data availability
-//! let mut condition = reader.get_statuscondition()?.clone();
-//! condition.set_enabled_statuses(StatusMask::DATA_AVAILABLE)?;
-//! wait_set.attach_condition(condition)?;
+//! let mut condition = reader.get_statuscondition().unwrap().clone();
+//! condition.set_enabled_statuses(StatusMask::DATA_AVAILABLE).unwrap();
+//! wait_set.attach_condition(condition).unwrap();
 //!
 //! // Wait indefinitely for data
 //! loop {
-//!     let triggered = wait_set.wait(Duration::infinite())?;
+//!     let triggered = wait_set.wait(Duration::infinite()).unwrap();
 //!     println!("Condition triggered, {} conditions active", triggered.len());
 //!
 //!     // Read the available data
@@ -37,7 +40,7 @@
 //!         &[SampleStateKind::ANY_SAMPLE_STATE],
 //!         &[ViewStateKind::ANY_VIEW_STATE],
 //!         &[InstanceStateKind::ANY_INSTANCE_STATE]
-//!     )?;
+//!     ).unwrap();
 //!
 //!     for sample in samples {
 //!         println!("Received data: {:?}", sample.data());
@@ -55,7 +58,7 @@ use crate::{
         error::{DdsError, DdsResult},
         time::Duration,
     },
-    infrastructure::condition::Condition,
+    infrastructure::{condition::Condition, guard_condition::GuardCondition},
     rtps::common::time::RtpsDuration,
 };
 
@@ -130,14 +133,19 @@ impl WaitSet {
             .lock()
             .map_err(|e| DdsError::Error(format!("Failed to lock conditions: {}", e)))?;
 
-        // Check for duplicate conditions
+        // Check for duplicate condition handles. GuardCondition debug output only reflects
+        // trigger state, so distinct guard conditions can look identical while representing
+        // different waitable entities.
         for existing_condition in conditions.iter() {
-            if Arc::ptr_eq(existing_condition, &new_condition) || {
-                std::ptr::eq(
+            if Arc::ptr_eq(existing_condition, &new_condition)
+                || std::ptr::eq(
                     existing_condition.as_ref() as *const dyn Condition as *const (),
                     new_condition.as_ref() as *const dyn Condition as *const (),
-                ) || format!("{:?}", existing_condition) == format!("{:?}", new_condition)
-            } {
+                )
+                || (!existing_condition.as_any().is::<GuardCondition>()
+                    && !new_condition.as_any().is::<GuardCondition>()
+                    && format!("{:?}", existing_condition) == format!("{:?}", new_condition))
+            {
                 debug!("[WaitSet-{}] Condition already attached, skipping", self.instance_id);
                 return Ok(());
             }
@@ -182,15 +190,17 @@ impl WaitSet {
             .lock()
             .map_err(|e| DdsError::Error(format!("Failed to lock conditions: {}", e)))?;
 
-        // Try Arc::ptr_eq first, then use StatusCondition's PartialEq if failed
+        // Remove only the same condition handle. GuardCondition debug output is not a stable
+        // identity because two false guard conditions print the same.
         let pos = conditions.iter().position(|c| {
-            Arc::ptr_eq(c, &remove_condition) || {
-                // Compare with StatusCondition PartialEq
-                std::ptr::eq(
+            Arc::ptr_eq(c, &remove_condition)
+                || std::ptr::eq(
                     c.as_ref() as *const dyn Condition as *const (),
                     remove_condition.as_ref() as *const dyn Condition as *const (),
-                ) || format!("{:?}", c) == format!("{:?}", remove_condition)
-            }
+                )
+                || (!c.as_any().is::<GuardCondition>()
+                    && !remove_condition.as_any().is::<GuardCondition>()
+                    && format!("{:?}", c) == format!("{:?}", remove_condition))
         });
 
         if let Some(pos) = pos {
@@ -273,22 +283,21 @@ impl WaitSet {
 
         // condvar-based waiting loop
         loop {
-            if self.trigger_flag.load(Ordering::Acquire) {
+            if self.trigger_flag.swap(false, Ordering::AcqRel) {
                 debug!("[WaitSet-{}] trigger_flag detected, checking conditions", self.instance_id);
-
-                // Reset trigger_flag
-                self.trigger_flag.store(false, Ordering::Release);
 
                 // Check conditions
                 let triggered_conditions = self.check_triggered_conditions()?;
                 if !triggered_conditions.is_empty() {
-                    info!(
+                    debug!(
                         "[WaitSet-{}] Conditions triggered during wait: {} conditions",
                         self.instance_id,
                         triggered_conditions.len()
                     );
                     return Ok(triggered_conditions);
                 }
+                // A wake-up can be stale if the condition was cleared before we checked it.
+                // After consuming the flag, fall through to the normal wait/timeout path.
             }
 
             let conditions = self
@@ -296,6 +305,7 @@ impl WaitSet {
                 .lock()
                 .map_err(|e| DdsError::Error(format!("Failed to lock conditions: {}", e)))?;
 
+            // trigger_flag is false, wait for notification
             match deadline {
                 None => {
                     let _conditions = self.condvar.wait(conditions).map_err(|e| {
@@ -316,7 +326,14 @@ impl WaitSet {
                 }
             };
 
-            // Final check if timeout exists
+            // After waking, check trigger_flag first before checking timeout
+            // This handles the race condition where notification was sent
+            // between trigger_flag check and condvar.wait() entry
+            if self.trigger_flag.load(Ordering::Acquire) {
+                continue;
+            }
+
+            // Only return timeout if trigger_flag is still false
             if let Some(deadline_time) = deadline {
                 if Instant::now() >= deadline_time {
                     debug!("[WaitSet-{}] Wait timeout reached", self.instance_id);
@@ -379,17 +396,13 @@ impl WaitSet {
 
     pub(crate) fn get_notify(&self) -> Arc<dyn Fn() + Send + Sync> {
         let condvar = self.condvar.clone();
-        let waiting_count = self.waiting_count.clone();
         let trigger_flag = self.trigger_flag.clone();
         let instance_id = self.instance_id;
 
         Arc::new(move || {
-            let waiting_threads = waiting_count.load(Ordering::Acquire);
-            if waiting_threads > 0 {
-                debug!("[WaitSet-{}] Notifying {} waiting threads", instance_id, waiting_threads);
-                condvar.notify_all();
-            }
             trigger_flag.store(true, Ordering::Release);
+            debug!("[WaitSet-{}] Notifying waiting threads", instance_id);
+            condvar.notify_all();
         })
     }
 }
@@ -401,21 +414,20 @@ mod tests {
         core::{error::DdsError, time::Duration},
         domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
         infrastructure::{
-            qos_policy::{ReliabilityQosPolicy, ReliabilityQosPolicyKind},
+            qos_policy::{
+                HistoryQosPolicy, HistoryQosPolicyKind, ReliabilityQosPolicy,
+                ReliabilityQosPolicyKind,
+            },
             status::StatusMask,
             wait_set::WaitSet,
         },
         publication::qos::{DataWriterQos, PublisherQos},
-        subscription::{
-            qos::{DataReaderQos, SubscriberQos},
-            sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind},
-        },
+        subscription::qos::{DataReaderQos, SubscriberQos},
+        test_utils::unique_domain_id,
         topic::qos::TopicQos,
         DdsType,
     };
-    use speedy::{Readable, Writable};
-
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     #[dds_type(crate_path = "crate")]
     struct HelloWorldType {
         index: u32,
@@ -424,21 +436,9 @@ mod tests {
 
     #[test]
     fn test_waitset_matching() {
-        let _ = env_logger::builder()
-            .filter_module("int2dds::dds::infrastructure::wait_set", log::LevelFilter::Debug)
-            .filter_level(log::LevelFilter::Error)
-            .try_init();
-        let domain_id = 13;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
-        let participant_sub = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let participant_pub = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -447,7 +447,7 @@ mod tests {
             )
             .unwrap();
 
-        let topic_sub = participant_sub
+        let topic = participant
             .create_topic::<HelloWorldType>(
                 "topic",
                 "HelloWorld",
@@ -457,34 +457,24 @@ mod tests {
             )
             .unwrap();
 
-        let topic_pub = participant_pub
-            .create_topic::<HelloWorldType>(
-                "topic",
-                "HelloWorld",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = participant_sub
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
         let reader = subscriber
             .create_datareader::<HelloWorldType>(
-                &topic_sub,
+                &topic,
                 DataReaderQos::default(),
                 None,
                 StatusMask::default(),
             )
             .unwrap();
 
-        let publisher = participant_pub
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
         let _writer = publisher
             .create_datawriter::<HelloWorldType>(
-                &topic_pub,
+                &topic,
                 DataWriterQos::default(),
                 None,
                 StatusMask::default(),
@@ -492,20 +482,21 @@ mod tests {
             .unwrap();
 
         // std::thread::sleep(std::time::Duration::from_secs(2));
-        let mut condition = reader.get_statuscondition().unwrap().clone();
+        let condition = reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition).unwrap();
-        wait_set.wait(Duration::infinite()).unwrap();
+        let res = wait_set.wait(Duration::from_seconds(10));
+
+        assert!(res.is_ok());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_waitset_timeout() {
-        let _ = env_logger::builder()
-            .filter_module("int2dds::dds::infrastructure::wait_set", log::LevelFilter::Debug)
-            .filter_level(log::LevelFilter::Error)
-            .try_init();
-        let domain_id = 31;
+        let domain_id = unique_domain_id();
         let participant_qos = DomainParticipantQos::default();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
@@ -532,7 +523,7 @@ mod tests {
             .unwrap();
 
         // std::thread::sleep(std::time::Duration::from_secs(2));
-        let mut condition = reader.get_statuscondition().unwrap().clone();
+        let condition = reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition).unwrap();
@@ -540,26 +531,16 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), DdsError::Timeout);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_waitset_multiple_status_conditions_different_entities_1() {
-        let _ = env_logger::builder()
-            .filter_module("int2dds::dds::infrastructure::wait_set", log::LevelFilter::Debug)
-            .filter_level(log::LevelFilter::Error)
-            .try_init();
-
-        let domain_id = 23;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
-        let participant_sub = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let participant_pub = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -568,7 +549,7 @@ mod tests {
             )
             .unwrap();
 
-        let topic_sub = participant_sub
+        let topic = participant
             .create_topic::<HelloWorldType>(
                 "topic",
                 "HelloWorld",
@@ -578,45 +559,41 @@ mod tests {
             )
             .unwrap();
 
-        let topic_pub = participant_pub
-            .create_topic::<HelloWorldType>(
-                "topic",
-                "HelloWorld",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = participant_sub
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let reader = subscriber
-            .create_datareader::<HelloWorldType>(
-                &topic_sub,
-                DataReaderQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datareader::<HelloWorldType>(&topic, reader_qos, None, StatusMask::default())
             .unwrap();
 
-        let publisher = participant_pub
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let writer = publisher
-            .create_datawriter::<HelloWorldType>(
-                &topic_pub,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorldType>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
         // Set StatusConditions with different status masks (using only actually implemented statuses)
-        let mut condition1 = reader.get_statuscondition().unwrap().clone();
+        let condition1 = reader.get_statuscondition().unwrap().clone();
         condition1.set_enabled_statuses(StatusMask::DATA_AVAILABLE).unwrap(); // trigger X
 
-        let mut condition2 = writer.get_statuscondition().unwrap().clone();
+        let condition2 = writer.get_statuscondition().unwrap().clone();
         condition2.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap(); // trigger O
 
         // Add multiple StatusConditions to WaitSet
@@ -630,26 +607,16 @@ mod tests {
 
         let result = wait_set.wait(Duration::from_seconds(5));
         assert!(result.is_ok());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_waitset_multiple_status_conditions_different_entities_2() {
-        let _ = env_logger::builder()
-            .filter_module("int2dds::dds::infrastructure::wait_set", log::LevelFilter::Debug)
-            .filter_level(log::LevelFilter::Error)
-            .try_init();
-
-        let domain_id = 23;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
-        let participant_sub = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let participant_pub = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -658,7 +625,7 @@ mod tests {
             )
             .unwrap();
 
-        let topic_sub = participant_sub
+        let topic = participant
             .create_topic::<HelloWorldType>(
                 "topic",
                 "HelloWorld",
@@ -668,34 +635,24 @@ mod tests {
             )
             .unwrap();
 
-        let topic_pub = participant_pub
-            .create_topic::<HelloWorldType>(
-                "topic",
-                "HelloWorld",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = participant_sub
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
         let reader = subscriber
             .create_datareader::<HelloWorldType>(
-                &topic_sub,
+                &topic,
                 DataReaderQos::default(),
                 None,
                 StatusMask::default(),
             )
             .unwrap();
 
-        let publisher = participant_pub
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
         let writer = publisher
             .create_datawriter::<HelloWorldType>(
-                &topic_pub,
+                &topic,
                 DataWriterQos::default(),
                 None,
                 StatusMask::default(),
@@ -703,10 +660,10 @@ mod tests {
             .unwrap();
 
         // Set StatusConditions with different status masks (using only actually implemented statuses)
-        let mut condition1 = reader.get_statuscondition().unwrap().clone();
+        let condition1 = reader.get_statuscondition().unwrap().clone();
         condition1.set_enabled_statuses(StatusMask::DATA_AVAILABLE).unwrap(); // trigger O
 
-        let mut condition2 = writer.get_statuscondition().unwrap().clone();
+        let condition2 = writer.get_statuscondition().unwrap().clone();
         condition2.set_enabled_statuses(StatusMask::OFFERED_INCOMPATIBLE_QOS).unwrap(); // trigger X
 
         // Add multiple StatusConditions to WaitSet
@@ -729,26 +686,16 @@ mod tests {
 
         let result = wait_set.wait(Duration::from_seconds(10));
         assert!(result.is_ok());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_waitset_status_condition_multiple_masks() {
-        let _ = env_logger::builder()
-            .filter_module("int2dds::dds::infrastructure::wait_set", log::LevelFilter::Debug)
-            .filter_level(log::LevelFilter::Error)
-            .try_init();
-
-        let domain_id = 33;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
-        let participant_sub = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let participant_pub = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -757,7 +704,7 @@ mod tests {
             )
             .unwrap();
 
-        let topic_sub = participant_sub
+        let topic = participant
             .create_topic::<HelloWorldType>(
                 "topic",
                 "HelloWorld",
@@ -767,34 +714,24 @@ mod tests {
             )
             .unwrap();
 
-        let topic_pub = participant_pub
-            .create_topic::<HelloWorldType>(
-                "topic",
-                "HelloWorld",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = participant_sub
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
         let reader = subscriber
             .create_datareader::<HelloWorldType>(
-                &topic_sub,
+                &topic,
                 DataReaderQos::default(),
                 None,
                 StatusMask::default(),
             )
             .unwrap();
 
-        let publisher = participant_pub
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
         let _writer = publisher
             .create_datawriter::<HelloWorldType>(
-                &topic_pub,
+                &topic,
                 DataWriterQos::default(),
                 None,
                 StatusMask::default(),
@@ -802,7 +739,7 @@ mod tests {
             .unwrap();
 
         // Set mask combining multiple statuses (using only actually implemented statuses)
-        let mut condition = reader.get_statuscondition().unwrap().clone();
+        let condition = reader.get_statuscondition().unwrap().clone();
         let combined_mask = StatusMask::SUBSCRIPTION_MATCHED
             | StatusMask::REQUESTED_INCOMPATIBLE_QOS
             | StatusMask::DATA_AVAILABLE;
@@ -819,18 +756,17 @@ mod tests {
 
         let result = wait_set.wait(Duration::from_seconds(20));
         assert!(result.is_ok());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_waitset_reuse_functionality() {
-        let _ = env_logger::builder()
-            .filter_module("int2dds::dds::infrastructure::wait_set", log::LevelFilter::Debug)
-            .filter_level(log::LevelFilter::Error)
-            .try_init();
-
-        let domain_id = 34;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
-        let participant_sub1 = factory
+
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -839,34 +775,7 @@ mod tests {
             )
             .unwrap();
 
-        let participant_sub2 = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let participant_pub = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let topic_sub1 = participant_sub1
-            .create_topic::<HelloWorldType>(
-                "reuse_topic",
-                "HelloWorldReuse",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let topic_sub2 = participant_sub2
+        let topic = participant
             .create_topic::<HelloWorldType>(
                 "reuse_topic",
                 "HelloWorldReuse",
@@ -876,29 +785,19 @@ mod tests {
             )
             .unwrap();
 
-        let topic_pub = participant_pub
-            .create_topic::<HelloWorldType>(
-                "reuse_topic",
-                "HelloWorldReuse",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber1 = participant_sub1
+        let subscriber1 = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let subscriber2 = participant_sub2
+        let subscriber2 = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let publisher = participant_pub
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
         let reader1 = subscriber1
             .create_datareader::<HelloWorldType>(
-                &topic_sub1,
+                &topic,
                 DataReaderQos::default(),
                 None,
                 StatusMask::default(),
@@ -907,7 +806,7 @@ mod tests {
 
         let reader2 = subscriber2
             .create_datareader::<HelloWorldType>(
-                &topic_sub2,
+                &topic,
                 DataReaderQos {
                     reliability: ReliabilityQosPolicy {
                         kind: ReliabilityQosPolicyKind::Reliable,
@@ -922,7 +821,7 @@ mod tests {
 
         let _writer = publisher
             .create_datawriter::<HelloWorldType>(
-                &topic_pub,
+                &topic,
                 DataWriterQos {
                     reliability: ReliabilityQosPolicy {
                         kind: ReliabilityQosPolicyKind::BestEffort,
@@ -938,7 +837,7 @@ mod tests {
         let wait_set = WaitSet::new();
 
         // First use: reader1's condition
-        let mut condition1 = reader1.get_statuscondition().unwrap().clone();
+        let condition1 = reader1.get_statuscondition().unwrap().clone();
         condition1.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition1.clone()).unwrap();
 
@@ -951,7 +850,7 @@ mod tests {
         assert_eq!(wait_set.get_conditions().unwrap().len(), 0);
 
         // Second use: reuse with reader2's condition (using actually implemented status)
-        let mut condition2 = reader2.get_statuscondition().unwrap().clone();
+        let condition2 = reader2.get_statuscondition().unwrap().clone();
         condition2.set_enabled_statuses(StatusMask::REQUESTED_INCOMPATIBLE_QOS).unwrap();
         wait_set.attach_condition(condition2.clone()).unwrap();
 
@@ -960,16 +859,14 @@ mod tests {
         assert!(result2.is_ok());
         // Check final state
         assert_eq!(wait_set.get_conditions().unwrap().len(), 1);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_waitset_duplicate_condition_attach() {
-        let _ = env_logger::builder()
-            .filter_module("int2dds::dds::infrastructure::wait_set", log::LevelFilter::Debug)
-            .filter_level(log::LevelFilter::Error)
-            .try_init();
-
-        let domain_id = 35;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
             .create_participant(
@@ -1003,7 +900,7 @@ mod tests {
             )
             .unwrap();
 
-        let mut condition = reader.get_statuscondition().unwrap().clone();
+        let condition = reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
 
         let wait_set = WaitSet::new();
@@ -1018,16 +915,14 @@ mod tests {
 
         wait_set.attach_condition(condition.clone()).unwrap();
         assert_eq!(wait_set.get_conditions().unwrap().len(), 1);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_waitset_detach_nonexistent_condition() {
-        let _ = env_logger::builder()
-            .filter_module("int2dds::dds::infrastructure::wait_set", log::LevelFilter::Debug)
-            .filter_level(log::LevelFilter::Error)
-            .try_init();
-
-        let domain_id = 36;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
             .create_participant(
@@ -1051,7 +946,6 @@ mod tests {
         let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-
         let reader = subscriber
             .create_datareader::<HelloWorldType>(
                 &topic,
@@ -1061,7 +955,7 @@ mod tests {
             )
             .unwrap();
 
-        let mut condition = reader.get_statuscondition().unwrap().clone();
+        let condition = reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
 
         let wait_set = WaitSet::new();
@@ -1082,438 +976,8 @@ mod tests {
         let result = wait_set.detach_condition(condition);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), DdsError::PreconditionNotMet);
-    }
 
-    #[test]
-    fn test_waitset_with_readcondition() {
-        let _ = env_logger::builder()
-            .filter_module("int2dds::dds", log::LevelFilter::Debug)
-            .filter_level(log::LevelFilter::Info)
-            .try_init();
-
-        let domain_id = 57;
-        let factory = DomainParticipantFactory::get_instance();
-        let participant_sub = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let participant_pub = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let topic_sub = participant_sub
-            .create_topic::<HelloWorldType>(
-                "read_topic",
-                "HelloWorld",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let topic_pub = participant_pub
-            .create_topic::<HelloWorldType>(
-                "read_topic",
-                "HelloWorld",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = participant_sub
-            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
-            .unwrap();
-        let reader = subscriber
-            .create_datareader::<HelloWorldType>(
-                &topic_sub,
-                DataReaderQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let publisher = participant_pub
-            .create_publisher(PublisherQos::default(), None, StatusMask::default())
-            .unwrap();
-        let writer = publisher
-            .create_datawriter::<HelloWorldType>(
-                &topic_pub,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let mut condition = writer.get_statuscondition().unwrap().clone();
-        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap(); // trigger O
-
-        let wait_set = WaitSet::new();
-        wait_set.attach_condition(condition.clone()).unwrap();
-        wait_set.wait(Duration::from_seconds(10)).unwrap();
-        wait_set.detach_condition(condition).unwrap();
-
-        // Create ReadCondition: NOT_READ samples only
-        let read_condition = reader
-            .create_readcondition(
-                &[SampleStateKind::NOT_READ_SAMPLE_STATE],
-                &[ViewStateKind::ANY_VIEW_STATE],
-                &[InstanceStateKind::ANY_INSTANCE_STATE],
-            )
-            .unwrap();
-
-        // Connect ReadCondition to WaitSet
-        wait_set.attach_condition(read_condition.clone()).unwrap();
-
-        writer
-            .write(
-                &HelloWorldType { index: 0, message: "hello world!".to_string() },
-                InstanceHandle::NIL,
-            )
-            .unwrap();
-        writer
-            .write(
-                &HelloWorldType { index: 1, message: "hello world!".to_string() },
-                InstanceHandle::NIL,
-            )
-            .unwrap();
-
-        // Wait for data arrival
-        let result = wait_set.wait(Duration::from_seconds(10));
-        assert!(result.is_ok());
-
-        if result.is_ok() {
-            let active_conditions = result.unwrap();
-
-            // Check activated conditions
-            for _condition in active_conditions {
-                let samples = reader.read_w_condition(10, read_condition.clone()).unwrap();
-                assert!(!samples.is_empty());
-
-                for sample in samples.iter() {
-                    if sample.sample_info().valid_data {
-                        log::info!("Received: {:?}", sample.data());
-                    }
-                }
-            }
-        }
-
-        assert_eq!(read_condition.get_trigger_value(), Ok(false));
-    }
-
-    #[test]
-    fn test_waitset_with_querycondition() {
-        let _ = env_logger::builder()
-            .filter_module("int2dds::dds", log::LevelFilter::Debug)
-            .filter_level(log::LevelFilter::Info)
-            .try_init();
-
-        let domain_id = 67;
-        let factory = DomainParticipantFactory::get_instance();
-        let participant_sub = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let participant_pub = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let topic_sub = participant_sub
-            .create_topic::<HelloWorldType>(
-                "query_topic",
-                "HelloWorld",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let topic_pub = participant_pub
-            .create_topic::<HelloWorldType>(
-                "query_topic",
-                "HelloWorld",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = participant_sub
-            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
-            .unwrap();
-        let reader = subscriber
-            .create_datareader::<HelloWorldType>(
-                &topic_sub,
-                DataReaderQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let publisher = participant_pub
-            .create_publisher(PublisherQos::default(), None, StatusMask::default())
-            .unwrap();
-        let writer = publisher
-            .create_datawriter::<HelloWorldType>(
-                &topic_pub,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let mut condition = writer.get_statuscondition().unwrap().clone();
-        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap(); // trigger O
-
-        let wait_set = WaitSet::new();
-        wait_set.attach_condition(condition.clone()).unwrap();
-        wait_set.wait(Duration::from_seconds(10)).unwrap();
-        wait_set.detach_condition(condition).unwrap();
-
-        // Create QueryCondition: samples where id > 100 only
-        let query_condition = reader
-            .create_querycondition(
-                &[SampleStateKind::NOT_READ_SAMPLE_STATE],
-                &[ViewStateKind::ANY_VIEW_STATE],
-                &[InstanceStateKind::ALIVE_INSTANCE_STATE],
-                "index > %0",            // query expression
-                vec!["100".to_string()], // query parameters
-            )
-            .unwrap();
-
-        // Connect QueryCondition to WaitSet
-        wait_set.attach_condition(query_condition.clone()).unwrap();
-
-        writer
-            .write(
-                &HelloWorldType { index: 0, message: "hello world!".to_string() },
-                InstanceHandle::NIL,
-            )
-            .unwrap();
-        writer
-            .write(
-                &HelloWorldType { index: 100, message: "hello world!".to_string() },
-                InstanceHandle::NIL,
-            )
-            .unwrap();
-        writer
-            .write(
-                &HelloWorldType { index: 200, message: "hello world!".to_string() },
-                InstanceHandle::NIL,
-            )
-            .unwrap();
-
-        // Wait for data arrival that satisfies condition
-        let result = wait_set.wait(Duration::from_seconds(5));
-        assert!(result.is_ok());
-
-        if result.is_ok() {
-            let active_conditions = result.unwrap();
-
-            // Check activated conditions
-            for _condition in active_conditions {
-                let samples = reader.read_w_condition(10, query_condition.clone()).unwrap();
-                assert_eq!(samples.len(), 1);
-
-                for sample in samples.iter() {
-                    if sample.sample_info().valid_data {
-                        log::info!("Received: {:?}", sample.data());
-                    }
-                }
-            }
-        }
-
-        assert_eq!(query_condition.get_trigger_value(), Ok(false));
-    }
-
-    #[test]
-    fn test_waitset_with_querycondition_order_by() {
-        let _ = env_logger::builder()
-            .filter_module("int2dds::dds", log::LevelFilter::Debug)
-            .filter_level(log::LevelFilter::Info)
-            .try_init();
-
-        let domain_id = 77;
-        let factory = DomainParticipantFactory::get_instance();
-        let participant_sub = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let participant_pub = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let topic_sub = participant_sub
-            .create_topic::<HelloWorldType>(
-                "order_topic",
-                "HelloWorld",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let topic_pub = participant_pub
-            .create_topic::<HelloWorldType>(
-                "order_topic",
-                "HelloWorld",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = participant_sub
-            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
-            .unwrap();
-        let reader = subscriber
-            .create_datareader::<HelloWorldType>(
-                &topic_sub,
-                DataReaderQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let publisher = participant_pub
-            .create_publisher(PublisherQos::default(), None, StatusMask::default())
-            .unwrap();
-        let writer = publisher
-            .create_datawriter::<HelloWorldType>(
-                &topic_pub,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        // Wait for matching
-        let mut condition = writer.get_statuscondition().unwrap().clone();
-        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
-        let wait_set = WaitSet::new();
-        wait_set.attach_condition(condition.clone()).unwrap();
-        wait_set.wait(Duration::from_seconds(10)).unwrap();
-        wait_set.detach_condition(condition).unwrap();
-
-        // Create QueryCondition for ORDER BY test: index > 0 ORDER BY message, index
-        let query_condition = reader
-            .create_querycondition(
-                &[SampleStateKind::NOT_READ_SAMPLE_STATE],
-                &[ViewStateKind::ANY_VIEW_STATE],
-                &[InstanceStateKind::ALIVE_INSTANCE_STATE],
-                "index > %0 ORDER BY message, index",
-                vec!["0".to_string()], // index > 0 (all samples)
-            )
-            .unwrap();
-
-        // Connect QueryCondition to WaitSet
-        wait_set.attach_condition(query_condition.clone()).unwrap();
-
-        // Send various data in order (for checking sort results)
-        writer
-            .write(
-                &HelloWorldType { index: 300, message: "charlie".to_string() },
-                InstanceHandle::NIL,
-            )
-            .unwrap();
-        writer
-            .write(
-                &HelloWorldType { index: 100, message: "alpha".to_string() },
-                InstanceHandle::NIL,
-            )
-            .unwrap();
-        writer
-            .write(&HelloWorldType { index: 200, message: "beta".to_string() }, InstanceHandle::NIL)
-            .unwrap();
-        writer
-            .write(
-                &HelloWorldType { index: 150, message: "alpha".to_string() },
-                InstanceHandle::NIL,
-            )
-            .unwrap();
-        writer
-            .write(&HelloWorldType { index: 50, message: "beta".to_string() }, InstanceHandle::NIL)
-            .unwrap();
-
-        // Wait for data arrival
-        let result = wait_set.wait(Duration::from_seconds(10));
-        assert!(result.is_ok());
-        std::thread::sleep(std::time::Duration::from_secs(10));
-
-        if result.is_ok() {
-            let active_conditions = result.unwrap();
-
-            for _condition in active_conditions {
-                let samples = reader.read_w_condition(10, query_condition.clone()).unwrap();
-                assert_eq!(samples.len(), 5);
-
-                log::info!("=== ORDER BY Test Results ===");
-                log::info!("Expected order: ORDER BY message, index");
-                log::info!("Should be: alpha(100), alpha(150), beta(50), beta(200), charlie(300)");
-
-                // Check ORDER BY message, index results
-                let expected_order = vec![
-                    (100, "alpha"),   // message: alpha, index: 100
-                    (150, "alpha"),   // message: alpha, index: 150
-                    (50, "beta"),     // message: beta, index: 50
-                    (200, "beta"),    // message: beta, index: 200
-                    (300, "charlie"), // message: charlie, index: 300
-                ];
-
-                for (i, sample) in samples.iter().enumerate() {
-                    if sample.sample_info().valid_data {
-                        let data = sample.data().unwrap();
-                        let (expected_index, expected_message) = expected_order[i];
-
-                        log::info!(
-                            "Sample {}: index={}, message='{}' (expected: index={}, message='{}')",
-                            i + 1,
-                            data.index,
-                            data.message,
-                            expected_index,
-                            expected_message
-                        );
-
-                        // Verify ORDER BY sorting is correct
-                        assert_eq!(data.index, expected_index, "Index mismatch at position {}", i);
-                        assert_eq!(
-                            data.message, expected_message,
-                            "Message mismatch at position {}",
-                            i
-                        );
-                    }
-                }
-            }
-        }
-
-        assert_eq!(query_condition.get_trigger_value(), Ok(false));
-        log::info!("=== ORDER BY Test Completed Successfully ===");
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 }

@@ -49,6 +49,7 @@ pub struct QueryCondition {
     query_parameters: Arc<Mutex<Vec<String>>>,
     pub(crate) parsed_expression: Expression,
     datareader: Option<Weak<dyn DataReaderInternal<Qos = DataReaderQos>>>,
+    #[allow(clippy::type_complexity)]
     waitset_callback: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
 }
 
@@ -174,5 +175,437 @@ impl QueryCondition {
 impl From<QueryCondition> for Arc<dyn ReadConditionTrait> {
     fn from(val: QueryCondition) -> Self {
         Arc::new(val)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        common::instance_handle::InstanceHandle,
+        core::time::Duration,
+        domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
+        infrastructure::{
+            qos_policy::{
+                HistoryQosPolicy, HistoryQosPolicyKind, ReliabilityQosPolicy,
+                ReliabilityQosPolicyKind,
+            },
+            status::StatusMask,
+            wait_set::WaitSet,
+        },
+        publication::qos::{DataWriterQos, PublisherQos},
+        subscription::{
+            qos::{DataReaderQos, SubscriberQos},
+            sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind},
+        },
+        test_utils::unique_domain_id,
+        topic::qos::TopicQos,
+        DdsType,
+    };
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "crate")]
+    struct HelloWorldType {
+        index: u32,
+        message: String,
+    }
+
+    #[test]
+    fn test_waitset_with_querycondition_order_by() {
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic = participant
+            .create_topic::<HelloWorldType>(
+                "order_topic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let reader = subscriber
+            .create_datareader::<HelloWorldType>(&topic, reader_qos, None, StatusMask::default())
+            .unwrap();
+
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let writer = publisher
+            .create_datawriter::<HelloWorldType>(&topic, writer_qos, None, StatusMask::default())
+            .unwrap();
+
+        // Wait for matching
+        let condition = reader.get_statuscondition().unwrap().clone();
+        condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
+        let wait_set = WaitSet::new();
+        wait_set.attach_condition(condition.clone()).unwrap();
+        wait_set.wait(Duration::from_seconds(10)).unwrap();
+        wait_set.detach_condition(condition).unwrap();
+
+        // Create QueryCondition for ORDER BY test: index > 0 ORDER BY message, index
+        let query_condition = reader
+            .create_querycondition(
+                &[SampleStateKind::NOT_READ_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ALIVE_INSTANCE_STATE],
+                "index > %0 ORDER BY message, index",
+                vec!["0".to_string()], // index > 0 (all samples)
+            )
+            .unwrap();
+
+        // Send various data in order (for checking sort results)
+        writer
+            .write(
+                &HelloWorldType { index: 300, message: "charlie".to_string() },
+                InstanceHandle::NIL,
+            )
+            .unwrap();
+        writer
+            .write(
+                &HelloWorldType { index: 100, message: "alpha".to_string() },
+                InstanceHandle::NIL,
+            )
+            .unwrap();
+        writer
+            .write(&HelloWorldType { index: 200, message: "beta".to_string() }, InstanceHandle::NIL)
+            .unwrap();
+        writer
+            .write(
+                &HelloWorldType { index: 150, message: "alpha".to_string() },
+                InstanceHandle::NIL,
+            )
+            .unwrap();
+        writer
+            .write(&HelloWorldType { index: 50, message: "beta".to_string() }, InstanceHandle::NIL)
+            .unwrap();
+
+        // Wait for all data to be acknowledged by reader
+        writer.wait_for_acknowledgments(Duration::from_seconds(10)).unwrap();
+        // Delay to ensure data is in reader cache
+        std::thread::sleep(std::time::Duration::from_secs(1));
+
+        // Read samples with QueryCondition
+        let samples = reader.read_w_condition(10, query_condition.clone()).unwrap();
+        assert_eq!(samples.len(), 5);
+
+        log::info!("=== ORDER BY Test Results ===");
+        log::info!("Expected order: ORDER BY message, index");
+        log::info!("Should be: alpha(100), alpha(150), beta(50), beta(200), charlie(300)");
+
+        // Check ORDER BY message, index results
+        let expected_order = vec![
+            (100, "alpha"),   // message: alpha, index: 100
+            (150, "alpha"),   // message: alpha, index: 150
+            (50, "beta"),     // message: beta, index: 50
+            (200, "beta"),    // message: beta, index: 200
+            (300, "charlie"), // message: charlie, index: 300
+        ];
+
+        for (i, sample) in samples.iter().enumerate() {
+            if sample.sample_info().valid_data {
+                let data = sample.data().unwrap();
+                let (expected_index, expected_message) = expected_order[i];
+
+                log::info!(
+                    "Sample {}: index={}, message='{}' (expected: index={}, message='{}')",
+                    i + 1,
+                    data.index,
+                    data.message,
+                    expected_index,
+                    expected_message
+                );
+
+                // Verify ORDER BY sorting is correct
+                assert_eq!(data.index, expected_index, "Index mismatch at position {}", i);
+                assert_eq!(data.message, expected_message, "Message mismatch at position {}", i);
+            }
+        }
+
+        assert_eq!(query_condition.get_trigger_value(), Ok(false));
+        log::info!("=== ORDER BY Test Completed Successfully ===");
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn test_waitset_with_querycondition() {
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic = participant
+            .create_topic::<HelloWorldType>(
+                "query_topic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let reader = subscriber
+            .create_datareader::<HelloWorldType>(&topic, reader_qos, None, StatusMask::default())
+            .unwrap();
+
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let writer = publisher
+            .create_datawriter::<HelloWorldType>(&topic, writer_qos, None, StatusMask::default())
+            .unwrap();
+
+        let condition = writer.get_statuscondition().unwrap().clone();
+        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
+
+        let wait_set = WaitSet::new();
+        wait_set.attach_condition(condition.clone()).unwrap();
+        wait_set.wait(Duration::from_seconds(10)).unwrap();
+        wait_set.detach_condition(condition).unwrap();
+
+        // Create QueryCondition: samples where index > 100 only
+        let query_condition = reader
+            .create_querycondition(
+                &[SampleStateKind::NOT_READ_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ALIVE_INSTANCE_STATE],
+                "index > %0",
+                vec!["100".to_string()],
+            )
+            .unwrap();
+
+        // Connect QueryCondition to WaitSet
+        wait_set.attach_condition(query_condition.clone()).unwrap();
+
+        writer
+            .write(
+                &HelloWorldType { index: 0, message: "hello world!".to_string() },
+                InstanceHandle::NIL,
+            )
+            .unwrap();
+        writer
+            .write(
+                &HelloWorldType { index: 100, message: "hello world!".to_string() },
+                InstanceHandle::NIL,
+            )
+            .unwrap();
+        writer
+            .write(
+                &HelloWorldType { index: 200, message: "hello world!".to_string() },
+                InstanceHandle::NIL,
+            )
+            .unwrap();
+
+        // Wait for all data to be acknowledged by reader
+        writer.wait_for_acknowledgments(Duration::from_seconds(10)).unwrap();
+        // Delay to ensure data is in reader cache
+        std::thread::sleep(std::time::Duration::from_secs(1));
+
+        let samples = reader.read_w_condition(10, query_condition.clone()).unwrap();
+        assert_eq!(samples.len(), 1); // Only index: 200 matches (index > 100)
+
+        for sample in samples.iter() {
+            if sample.sample_info().valid_data {
+                log::info!("Received: {:?}", sample.data());
+            }
+        }
+
+        assert_eq!(query_condition.get_trigger_value(), Ok(false));
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "crate")]
+    struct Inner {
+        x: i32,
+        y: i32,
+    }
+
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "crate")]
+    struct Outer {
+        inner: Inner,
+        label: String,
+    }
+
+    #[test]
+    fn test_querycondition_nested_struct_field() {
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic = participant
+            .create_topic::<Outer>(
+                "nested_query_topic",
+                "Outer",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let rdr_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let reader = subscriber
+            .create_datareader::<Outer>(&topic, rdr_qos, None, StatusMask::default())
+            .unwrap();
+
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let wtr_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let writer = publisher
+            .create_datawriter::<Outer>(&topic, wtr_qos, None, StatusMask::default())
+            .unwrap();
+
+        // Wait for matching
+        let condition = reader.get_statuscondition().unwrap().clone();
+        condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
+        let wait_set = WaitSet::new();
+        wait_set.attach_condition(condition.clone()).unwrap();
+        wait_set.wait(Duration::from_seconds(10)).unwrap();
+        wait_set.detach_condition(condition).unwrap();
+
+        // Filter on nested field: inner.x > 50
+        let qc = reader
+            .create_querycondition(
+                &[SampleStateKind::NOT_READ_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ALIVE_INSTANCE_STATE],
+                "inner.x > %0",
+                vec!["50".to_string()],
+            )
+            .unwrap();
+
+        writer
+            .write(
+                &Outer { inner: Inner { x: 10, y: 1 }, label: "a".to_string() },
+                InstanceHandle::NIL,
+            )
+            .unwrap();
+        writer
+            .write(
+                &Outer { inner: Inner { x: 100, y: 2 }, label: "b".to_string() },
+                InstanceHandle::NIL,
+            )
+            .unwrap();
+        writer
+            .write(
+                &Outer { inner: Inner { x: 30, y: 3 }, label: "c".to_string() },
+                InstanceHandle::NIL,
+            )
+            .unwrap();
+        writer
+            .write(
+                &Outer { inner: Inner { x: 200, y: 4 }, label: "d".to_string() },
+                InstanceHandle::NIL,
+            )
+            .unwrap();
+
+        writer.wait_for_acknowledgments(Duration::from_seconds(10)).unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+
+        // Only inner.x > 50 should match: x=100 ("b") and x=200 ("d")
+        let samples = reader.take_w_condition(10, qc).unwrap();
+        assert_eq!(samples.len(), 2);
+
+        let data0 = samples[0].data().unwrap();
+        let data1 = samples[1].data().unwrap();
+        assert_eq!(data0.inner.x, 100);
+        assert_eq!(data0.label, "b");
+        assert_eq!(data1.inner.x, 200);
+        assert_eq!(data1.label, "d");
+
+        // Non-matching samples (x=10, x=30) should still be in cache
+        let remaining = reader
+            .take(
+                10,
+                &[SampleStateKind::NOT_READ_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ALIVE_INSTANCE_STATE],
+            )
+            .unwrap();
+        assert_eq!(remaining.len(), 2);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 }

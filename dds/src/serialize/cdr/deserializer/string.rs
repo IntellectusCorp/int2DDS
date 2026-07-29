@@ -67,14 +67,11 @@ impl<'a> CdrDeserializer<'a> {
         let length = self.read_u32()? as usize;
 
         self.align(2);
-        let mut utf16_chars = Vec::with_capacity(length);
+        let mut utf16_chars = Vec::with_capacity(self.checked_capacity(length, 2)?);
 
         for _ in 0..length {
             utf16_chars.push(self.read_u16()?);
         }
-
-        // Align to 4-byte boundary after reading all UTF-16 code units
-        self.align(4);
 
         String::from_utf16(&utf16_chars).map_err(|_| CdrError::InvalidWideCharacter)
     }
@@ -90,19 +87,17 @@ impl<'a> CdrDeserializer<'a> {
 
         self.check_available(length)?;
 
-        // String data (including null terminator)
-        let string_data = &self.data[self.position..self.position + length];
+        // String data (including null terminator). Borrowed on the contiguous
+        // path (no copy); only chained input gathers into an owned buffer.
+        let string_data = self.input.bytes(self.position, length);
         self.position += length;
 
         // Remove null terminator if present
         let string_bytes = if string_data.last() == Some(&0) {
             &string_data[..string_data.len() - 1]
         } else {
-            string_data
+            &string_data[..]
         };
-
-        // Align to 4-byte boundary after reading string data (CDR spec requirement)
-        self.align(4);
 
         // Optimized: validate UTF-8 without copying, then convert to String
         let result =
@@ -174,11 +169,10 @@ impl<'a> Xcdr2Deserializer<'a> {
     pub fn deserialize_wstring16(&mut self) -> Result<String, CdrError> {
         let length = self.read_u32()? as usize;
         self.align(2);
-        let mut utf16_chars = Vec::with_capacity(length);
+        let mut utf16_chars = Vec::with_capacity(self.checked_capacity(length, 2)?);
         for _ in 0..length {
             utf16_chars.push(self.read_u16()?);
         }
-        self.align(4);
         String::from_utf16(&utf16_chars).map_err(|_| CdrError::InvalidWideCharacter)
     }
 
@@ -196,9 +190,64 @@ impl<'a> Xcdr2Deserializer<'a> {
         } else {
             string_data
         };
-        self.align(4);
         let result =
             std::str::from_utf8(string_bytes).map_err(|_| CdrError::InvalidString)?.to_string();
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+#[allow(unused_imports)]
+mod try_construct_string_tests {
+    use crate::{
+        dcps::topic::type_support::{DdsType, FieldAccessor},
+        serialize::{
+            cdr::{
+                CdrDeserialize, CdrDeserializer, CdrSerialize, CdrSerializer, ExtensibilityKind,
+                XcdrDeserialize, XcdrDeserializer, XcdrSerialize, XcdrSerializer,
+            },
+            BufferManager, DeserializerReader, WChar, WString,
+        },
+    };
+    use std::collections::HashMap;
+    fn encode_cdr<T: CdrSerialize>(value: &T) -> Vec<u8> {
+        let mut serializer = CdrSerializer::new(true);
+        serializer.write_encapsulation_header().unwrap();
+        value.serialize_cdr(&mut serializer).unwrap();
+        serializer.into_bytes()
+    }
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "int2dds", extensibility = "Final")]
+    struct TcWireString {
+        pub s: String,
+    }
+
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "int2dds", extensibility = "Final")]
+    struct TcStringTrim {
+        #[dds(bound = 5, try_construct = "trim")]
+        pub s: String,
+    }
+
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "int2dds", extensibility = "Final")]
+    struct TcStringUseDefault {
+        #[dds(bound = 5, try_construct = "use_default")]
+        pub s: String,
+    }
+    #[test]
+    fn test_try_construct_string_trim() {
+        let bytes = encode_cdr(&TcWireString { s: "Hello World!".to_string() });
+        let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+        let result = TcStringTrim::deserialize_cdr(&mut deserializer).unwrap();
+        assert_eq!(result.s, "Hello");
+    }
+
+    #[test]
+    fn test_try_construct_string_use_default() {
+        let bytes = encode_cdr(&TcWireString { s: "Hello World!".to_string() });
+        let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+        let result = TcStringUseDefault::deserialize_cdr(&mut deserializer).unwrap();
+        assert!(result.s.is_empty());
     }
 }

@@ -24,7 +24,7 @@ use crate::rtps::{
 pub(crate) struct SubmessageCreator;
 
 impl SubmessageCreator {
-    pub(crate) fn create_info_ts_submessage(timestamp: DateTime<Utc>) -> Submessage {
+    pub(crate) fn create_info_ts_submessage(timestamp: DateTime<Utc>) -> Submessage<'static> {
         let mut info_ts_header_flag = SubmessageHeaderFlag::new();
         info_ts_header_flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::INFO_TS);
         let info_ts_data = InfoTimestamp::new(timestamp);
@@ -39,7 +39,7 @@ impl SubmessageCreator {
         }
     }
 
-    pub(crate) fn create_info_dst_submessage(prefix: GuidPrefix) -> Submessage {
+    pub(crate) fn create_info_dst_submessage(prefix: GuidPrefix) -> Submessage<'static> {
         let mut info_dst_header_flag = SubmessageHeaderFlag::new();
         info_dst_header_flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::INFO_DST);
         let info_dst_data = InfoDestination::new(prefix);
@@ -55,14 +55,14 @@ impl SubmessageCreator {
     }
 
     pub(crate) fn create_heartbeat_submessage(
-        heartbeat_count: i32,
+        heartbeat_count: u32,
         reader_entity_id: EntityId,
         writer_entity_id: EntityId,
         first_sn: SequenceNumber,
         last_sn: SequenceNumber,
         final_flag: bool,
         liveliness_flag: bool,
-    ) -> Result<Submessage, Box<dyn std::error::Error>> {
+    ) -> Result<Submessage<'static>, Box<dyn std::error::Error>> {
         let mut data_header_flag = SubmessageHeaderFlag::new();
         data_header_flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::HEARTBEAT);
         if liveliness_flag {
@@ -89,10 +89,10 @@ impl SubmessageCreator {
         reader_entity_id: EntityId,
         writer_entity_id: EntityId,
         missing_changes: Vec<SequenceNumber>,
-        acknack_count: i32,
+        acknack_count: u32,
         bitmap_base: SequenceNumber,
         is_preemptive: bool,
-    ) -> Result<Submessage, Box<dyn std::error::Error>> {
+    ) -> Result<Submessage<'static>, Box<dyn std::error::Error>> {
         let mut data_header_flag = SubmessageHeaderFlag::new();
         data_header_flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::ACKNACK);
 
@@ -127,7 +127,7 @@ impl SubmessageCreator {
         reader_entity_id: EntityId,
         writer_entity_id: EntityId,
         gap_list: &mut Vec<SequenceNumber>,
-    ) -> Result<Submessage, Box<dyn std::error::Error>> {
+    ) -> Result<Submessage<'static>, Box<dyn std::error::Error>> {
         if gap_list.is_empty() {
             return Err(Box::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -163,7 +163,7 @@ impl SubmessageCreator {
         writer_entity_id: EntityId,
         gap_start: SequenceNumber,
         gap_end: SequenceNumber,
-    ) -> Result<Submessage, Box<dyn std::error::Error>> {
+    ) -> Result<Submessage<'static>, Box<dyn std::error::Error>> {
         let mut data_header_flag = SubmessageHeaderFlag::new();
         data_header_flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::GAP);
 
@@ -194,8 +194,8 @@ impl SubmessageCreator {
         writer_entity_id: EntityId,
         writer_sn: SequenceNumber,
         fragment_number_state: FragmentNumberSet,
-        nackfrag_count: i32,
-    ) -> Result<Submessage, Box<dyn std::error::Error>> {
+        nackfrag_count: u32,
+    ) -> Result<Submessage<'static>, Box<dyn std::error::Error>> {
         let mut nackfrag_header_flag = SubmessageHeaderFlag::new();
         nackfrag_header_flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::NACK_FRAG);
 
@@ -224,19 +224,20 @@ impl SubmessageCreator {
     ) -> (SequenceNumber, SequenceNumberSet) {
         let gap_start = gap_list[0];
         let mut bitmap_base = gap_start + 1;
-        let mut sn_after_base: Vec<SequenceNumber> = Vec::new();
+        let mut sn_after_base: Vec<SequenceNumber> =
+            Vec::with_capacity(gap_list.len().saturating_sub(1).min(256));
         let mut processed = 0;
 
-        for i in 1..gap_list.len() {
-            if gap_list[i] == bitmap_base {
+        for (i, sn) in gap_list.iter().enumerate().skip(1) {
+            if *sn == bitmap_base {
                 // RTPS 2.5 - 8.3.8.4.5
                 // The set of sequence numbers identify in the range gapStart <= sequence_number <= gapList.base -1
                 bitmap_base += 1;
                 processed = i;
             } else {
                 // Bitmap base can handle up to the range of 256 sequence numbers
-                if gap_list[i] <= bitmap_base + 255 {
-                    sn_after_base.push(gap_list[i]);
+                if *sn <= bitmap_base + 255 {
+                    sn_after_base.push(*sn);
                     processed = i;
                 } else {
                     break;
@@ -363,4 +364,119 @@ mod tests {
         assert_eq!(res[2].1.bitmap_base(), SequenceNumber::new(0, 516));
         assert!(res[2].1.extract_numbers().is_empty());
     }
+
+    // fn calculate_acknack_sns_from_vec(
+    //     missing_changes: &mut Vec<SequenceNumber>,
+    // ) -> SequenceNumberSet {
+    //     // Current ACKNACK logic (from create_acknack_submessage)
+    //     // NOTE: This does NOT handle 256-bit limit like GAP does
+    //     if missing_changes.is_empty() {
+    //         SequenceNumberSet::new_empty_with_base(SequenceNumber::new(0, 1))
+    //     } else {
+    //         let base_sn = missing_changes[0];
+    //         let result = SequenceNumberSet::from_vec(base_sn, missing_changes.clone());
+    //         missing_changes.clear(); // Current logic consumes all at once (no remaining)
+    //         result
+    //     }
+    // }
+
+    // #[test]
+    // fn test_calculate_acknack_sns_from_vec_empty_sns() {
+    //     let mut missing_changes = vec![SequenceNumber::new(0, 1)];
+
+    //     let sns = calculate_acknack_sns_from_vec(&mut missing_changes);
+
+    //     // Expected: same as GAP test
+    //     assert_eq!(sns.bitmap_base(), SequenceNumber::new(0, 2));
+    //     assert!(sns.extract_numbers().is_empty());
+    // }
+
+    // #[test]
+    // fn test_calculate_acknack_sns_from_vec_sparse_sns() {
+    //     let mut missing_changes =
+    //         vec![SequenceNumber::new(0, 1), SequenceNumber::new(0, 5), SequenceNumber::new(0, 8)];
+
+    //     let sns = calculate_acknack_sns_from_vec(&mut missing_changes);
+
+    //     // Expected: same as GAP test
+    //     assert_eq!(sns.bitmap_base(), SequenceNumber::new(0, 2));
+    //     assert_eq!(
+    //         sns.extract_numbers(),
+    //         vec![SequenceNumber::new(0, 5), SequenceNumber::new(0, 8),]
+    //     );
+    // }
+
+    // #[test]
+    // fn test_calculate_acknack_sns_from_vec_continuous_with_sparse() {
+    //     let mut missing_changes = vec![
+    //         SequenceNumber::new(0, 1),
+    //         SequenceNumber::new(0, 2),
+    //         SequenceNumber::new(0, 3),
+    //         SequenceNumber::new(0, 4),
+    //         SequenceNumber::new(0, 7),
+    //         SequenceNumber::new(0, 10),
+    //     ];
+
+    //     let sns = calculate_acknack_sns_from_vec(&mut missing_changes);
+
+    //     // Expected: same as GAP test
+    //     assert_eq!(sns.bitmap_base(), SequenceNumber::new(0, 5));
+    //     assert_eq!(
+    //         sns.extract_numbers(),
+    //         vec![SequenceNumber::new(0, 7), SequenceNumber::new(0, 10),]
+    //     );
+    // }
+
+    // #[test]
+    // fn test_calculate_acknack_sns_from_vec_continuous_with_sparse_over_256() {
+    //     let mut missing_changes = vec![
+    //         SequenceNumber::new(0, 1),
+    //         SequenceNumber::new(0, 2),
+    //         SequenceNumber::new(0, 3),
+    //         SequenceNumber::new(0, 4),
+    //         SequenceNumber::new(0, 7),
+    //         SequenceNumber::new(0, 260), // bitmap_base = 5, 5 + 255 = 260
+    //         SequenceNumber::new(0, 261), // this is over 256
+    //     ];
+
+    //     let sns = calculate_acknack_sns_from_vec(&mut missing_changes);
+
+    //     // Expected: same as GAP test
+    //     assert_eq!(sns.bitmap_base(), SequenceNumber::new(0, 5));
+    //     assert_eq!(
+    //         sns.extract_numbers(),
+    //         vec![SequenceNumber::new(0, 7), SequenceNumber::new(0, 260),]
+    //     );
+    //     assert!(missing_changes == vec![SequenceNumber::new(0, 261)]);
+    // }
+
+    // #[test]
+    // fn test_calculate_acknack_sns_from_vec_sparse_with_3_msgs() {
+    //     let mut missing_changes = vec![
+    //         SequenceNumber::new(0, 1), // bitmap_base = 2, 2 + 255 = 257 so below is over 256
+    //         SequenceNumber::new(0, 258), // bitmap_base = 259, 259 + 255 = 514 so below is over 256
+    //         SequenceNumber::new(0, 515),
+    //     ];
+
+    //     let mut res: Vec<SequenceNumberSet> = Vec::new();
+
+    //     while !missing_changes.is_empty() {
+    //         res.push(calculate_acknack_sns_from_vec(&mut missing_changes));
+    //     }
+
+    //     // Expected: same as GAP test - should make 3 rtps acknack messages
+    //     assert_eq!(res.len(), 3);
+
+    //     // ACKNACK 1
+    //     assert_eq!(res[0].bitmap_base(), SequenceNumber::new(0, 2));
+    //     assert!(res[0].extract_numbers().is_empty());
+
+    //     // ACKNACK 2
+    //     assert_eq!(res[1].bitmap_base(), SequenceNumber::new(0, 259));
+    //     assert!(res[1].extract_numbers().is_empty());
+
+    //     // ACKNACK 3
+    //     assert_eq!(res[2].bitmap_base(), SequenceNumber::new(0, 516));
+    //     assert!(res[2].extract_numbers().is_empty());
+    // }
 }

@@ -10,7 +10,7 @@ use crate::{
             locator::Locator,
             sequence::SequenceNumber,
         },
-        entities::history::{history_cache::HistoryCache, writer_history::WriterHistoryCache},
+        entities::history::writer_history::WriterHistoryCache,
     },
 };
 
@@ -92,16 +92,13 @@ impl ReaderLocator {
 
     pub(crate) fn next_unsent_change(&self, history_cache: &WriterHistoryCache) -> SequenceNumber {
         history_cache
-            .get_changes()
-            .iter()
-            .filter(|change| change.sequence_number() > self.highest_sent_change_sn)
+            .next_change_after(self.highest_sent_change_sn)
             .map(|change| change.sequence_number())
-            .min()
             .unwrap_or(SequenceNumber::UNKNOWN)
     }
 
-    pub(crate) fn requested_changes(&self) -> Vec<SequenceNumber> {
-        self.requested_changes.clone()
+    pub(crate) fn requested_changes(&self) -> &[SequenceNumber] {
+        &self.requested_changes
     }
 
     pub(crate) fn requested_changes_set(&mut self, req_seq_num_set: Vec<SequenceNumber>) {
@@ -118,8 +115,8 @@ impl ReaderLocator {
         self.remote_entity_id
     }
 
-    pub(crate) fn subscription_builtin_topic_data(&self) -> SubscriptionBuiltinTopicData {
-        self.subscription_builtin_topic_data.clone()
+    pub(crate) fn subscription_builtin_topic_data(&self) -> &SubscriptionBuiltinTopicData {
+        &self.subscription_builtin_topic_data
     }
 
     pub(crate) fn set_subscription_builtin_topic_data(

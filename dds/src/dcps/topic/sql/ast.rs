@@ -88,6 +88,7 @@ pub(crate) struct Token {
 }
 
 #[derive(Debug, PartialEq, Clone)]
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum Expression {
     // ContentFilteredTopic
     FilterExpression(Box<Condition>), // Condition
@@ -96,11 +97,11 @@ pub(crate) enum Expression {
         select: SelectClause,
         from: FromClause,
         where_clause: Option<WhereClause>,
-    }, // SelectFrom {Where } ‘;’
+    }, // SelectFrom {Where } ';'
     // QueryReadCondition
     QueryExpression {
         condition: Option<Box<Condition>>,
-        order_by: Option<Vec<String>>, // ORDER BY field1, field2 }, // {Condition}{‘ORDER BY’ (FIELDNAME // ‘,’) }
+        order_by: Option<Vec<String>>, // ORDER BY field1, field2 }, // {Condition}{'ORDER BY' (FIELDNAME // ',') }
     },
 }
 
@@ -156,6 +157,7 @@ pub(crate) enum Selection {
 }
 
 #[derive(Debug, PartialEq, Clone)]
+#[allow(clippy::enum_variant_names)]
 // NaturalJoin ::= 'INNER NATURAL JOIN'
 //             |    'NATURAL JOIN'
 //             |    'NATURAL INNER JOIN'
@@ -221,7 +223,7 @@ pub(crate) struct Range {
 
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub enum Parameter {
-    IntegerValue(i32),
+    IntegerValue(i128),
     CharValue(char),
     FloatValue(f64),
     String(String),
@@ -275,7 +277,7 @@ impl Parameter {
                     .ok_or(DdsError::Error(format!("Parameter at index {:?} not found", param)))?;
                 // TODO: Add EnumeratedValue support for enum type resolution
                 // Currently only supports basic types (int, float, char, string)
-                if let Ok(int_val) = val.parse::<i32>() {
+                if let Ok(int_val) = val.parse::<i128>() {
                     Ok(Parameter::IntegerValue(int_val))
                 } else if let Ok(float_val) = val.parse::<f64>() {
                     Ok(Parameter::FloatValue(float_val))

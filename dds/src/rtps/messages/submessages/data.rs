@@ -6,11 +6,11 @@
 
 use bytes::Bytes;
 use speedy::{Context, Error, Readable, Writable, Writer};
-use std::{io, sync::Arc};
+use std::io;
 
 use crate::rtps::common::{
     parameters::ParameterList, rtps_error_code::RtpsResult, sequence::SequenceNumber,
-    types::SerializedData,
+    types::SubmessagePayload,
 };
 use crate::rtps::{
     common::{
@@ -19,20 +19,29 @@ use crate::rtps::{
     },
     messages::submessage_header::SubmessageHeader,
 };
-use crate::serialize::pl_cdr::InlineQosParser;
+use crate::serialize::pl_cdr::{InlineQosParameters, InlineQosParser};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Data {
+pub(crate) struct Data<'a> {
     extra_flags: u16,
     pub reader_id: EntityId,
     pub writer_id: EntityId,
     pub writer_sn: SequenceNumber,
     inline_qos: Option<ParameterList>,
-    serialized_data: SerializedData,
+    serialized_data: SubmessagePayload<'a>,
     octets_to_inline_qos: u16,
 }
 
-impl Data {
+impl<'a> Data<'a> {
+    fn alignment_padding(payload_len: usize) -> u16 {
+        let rem = payload_len % 4;
+        if rem == 0 {
+            0
+        } else {
+            (4 - rem) as u16
+        }
+    }
+
     pub(crate) fn new(reader_id: EntityId, writer_id: EntityId, writer_sn: SequenceNumber) -> Self {
         Self {
             extra_flags: 0,
@@ -40,7 +49,7 @@ impl Data {
             writer_id,
             writer_sn,
             inline_qos: None,
-            serialized_data: Arc::from(vec![]),
+            serialized_data: SubmessagePayload::default(),
             octets_to_inline_qos: 16,
         }
     }
@@ -49,12 +58,17 @@ impl Data {
         self.inline_qos.clone()
     }
 
-    pub(crate) fn serialized_data(&self) -> SerializedData {
-        self.serialized_data.clone()
+    pub(crate) fn serialized_data(&self) -> Bytes {
+        // Returns a refcount-bumped `Bytes` so receivers can retain the payload
+        // beyond the lifetime of this submessage without copying the data.
+        match &self.serialized_data {
+            SubmessagePayload::Owned(data) => data.clone(),
+            SubmessagePayload::Borrowed(data) => Bytes::copy_from_slice(data),
+        }
     }
 
     pub(crate) fn octets_to_next_header(&self) -> u16 {
-        2  /* extra_flags */
+        let payload_len = 2  /* extra_flags */
          + 2  /* octets_to_inline_qos */
          + 4  /* reader_id */
          + 4  /* writer_id */
@@ -65,7 +79,9 @@ impl Data {
             },
             None => 0,
          }  /* inline_qos */
-         + self.serialized_data.len() as u16
+         + self.serialized_data.len() as u16;
+
+        payload_len + Self::alignment_padding(payload_len as usize)
     }
 
     /// Set inline QoS parameter list for DATA submessage and calculate size
@@ -73,7 +89,7 @@ impl Data {
         self.inline_qos = Some(param_list);
     }
 
-    pub(crate) fn add_serialized_data(&mut self, serialized_data: SerializedData) {
+    pub(crate) fn add_serialized_data(&mut self, serialized_data: SubmessagePayload<'a>) {
         self.serialized_data = serialized_data;
     }
 
@@ -166,12 +182,34 @@ impl Data {
             None
         };
 
-        let serialized_data: Arc<[u8]> = if data_flag || key_flag {
+        let serialized_data: SubmessagePayload<'static> = if data_flag || key_flag {
             let start_pos = cursor.position() as usize;
-            Arc::from(&buffer[start_pos..])
+            // Zero-copy slice of the original Bytes buffer (refcount bump only).
+            SubmessagePayload::Owned(buffer.slice(start_pos..))
         } else {
-            Arc::new([])
+            SubmessagePayload::Owned(Bytes::new())
         };
+
+        // Validate flag combinations
+        let status_info = inline_qos.as_ref().and_then(|pl| pl.get_status_info());
+        let has_lifecycle = status_info
+            .map(|status_info| status_info.disposed() || status_info.unregistered())
+            .unwrap_or(false);
+        let can_have_key = status_info
+            .map(|si| si.disposed() || si.unregistered() || si.filtered())
+            .unwrap_or(false);
+        if data_flag && has_lifecycle {
+            return Err(RtpsError::new(
+                RtpsErrorCode::InvalidSubmessageHeader,
+                "DataFlag set with dispose/unregister StatusInfo",
+            ));
+        }
+        if key_flag && !can_have_key {
+            return Err(RtpsError::new(
+                RtpsErrorCode::InvalidSubmessageHeader,
+                "KeyFlag set without dispose/unregister/filtered StatusInfo",
+            ));
+        }
 
         Ok(Self {
             reader_id,
@@ -185,7 +223,7 @@ impl Data {
     }
 }
 
-impl<C: Context> Writable<C> for Data {
+impl<C: Context> Writable<C> for Data<'_> {
     fn write_to<T: ?Sized + Writer<C>>(&self, writer: &mut T) -> Result<(), C::Error> {
         writer.write_u16(self.extra_flags)?;
         writer.write_u16(self.octets_to_inline_qos)?;
@@ -195,8 +233,51 @@ impl<C: Context> Writable<C> for Data {
         if let Some(ref inline_qos_list) = self.inline_qos {
             writer.write_value(inline_qos_list)?;
         }
-        writer.write_bytes(&self.serialized_data)?;
+        writer.write_bytes(self.serialized_data.as_slice())?;
+        let padding = Self::alignment_padding(
+            2 + 2
+                + 4
+                + 4
+                + 8
+                + self.inline_qos.as_ref().map(|q| q.length() as usize).unwrap_or(0)
+                + self.serialized_data.len(),
+        );
+        if padding > 0 {
+            writer.write_bytes(&vec![0u8; padding as usize])?;
+        }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rtps::common::entity_kind::EntityKind;
+    use crate::rtps::messages::submessage_header_flag::{SubmessageFlagType, SubmessageHeaderFlag};
+    use crate::rtps::messages::submessage_id::SubmessageId;
+    use speedy::Endianness;
+
+    #[test]
+    fn inline_qos_coherent_set_survives_data_roundtrip() {
+        let reader_id = EntityId::new([0x01, 0x00, 0x00], EntityKind::USER_DEFINED_READER_NO_KEY);
+        let writer_id = EntityId::new([0x02, 0x00, 0x00], EntityKind::USER_DEFINED_WRITER_NO_KEY);
+        let coherent = SequenceNumber::new(1, 3);
+
+        let mut data = Data::new(reader_id, writer_id, SequenceNumber::new(0, 7));
+        let mut param_list = ParameterList::default();
+        param_list.set_coherent_set(coherent);
+        data.set_inline_qos_list(param_list);
+
+        let buffer = data.write_to_vec_with_ctx(Endianness::LittleEndian).unwrap();
+
+        let mut flag = SubmessageHeaderFlag::new();
+        flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::DATA);
+        flag.add_flag(SubmessageFlagType::InlineQosFlag, SubmessageId::DATA);
+        let header = SubmessageHeader::new(SubmessageId::DATA, flag.flag, buffer.len() as u16);
+
+        let parsed = Data::deserialize(&Bytes::from(buffer), &header).unwrap();
+        let inline = parsed.inline_qos().unwrap();
+        assert_eq!(inline.get_coherent_set(), Some(coherent));
     }
 }

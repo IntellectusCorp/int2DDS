@@ -13,12 +13,37 @@ pub struct InstanceHandle {
     value: KeyHash,
     is_defined: bool,
 }
+impl std::fmt::Display for InstanceHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if !self.is_defined {
+            return write!(f, "<undefined>");
+        }
+        for b in &self.value {
+            write!(f, "{:02x}", b)?;
+        }
+        Ok(())
+    }
+}
 
 impl InstanceHandle {
     pub const NIL: Self = Self { value: [0; 16], is_defined: false };
 
     pub fn new(value: KeyHash) -> Self {
         Self { value, is_defined: true }
+    }
+
+    pub fn from_key_cdr(key_cdr: &[u8]) -> Self {
+        let mut value = [0u8; 16];
+        if key_cdr.len() <= 16 {
+            value[..key_cdr.len()].copy_from_slice(key_cdr);
+        } else {
+            value = md5::compute(key_cdr).0;
+        }
+        Self::new(value)
+    }
+
+    pub fn from_key_cdr_hashed(key_cdr: &[u8]) -> Self {
+        Self::new(md5::compute(key_cdr).0)
     }
 
     pub fn value(&self) -> &[u8; 16] {
@@ -32,6 +57,7 @@ impl InstanceHandle {
         Self { value: v, is_defined: true }
     }
 
+    #[allow(clippy::wrong_self_convention)]
     pub(crate) fn to_guid(&self) -> Guid {
         let mut prefix = [0u8; 12];
         prefix.copy_from_slice(&self.value[..12]);

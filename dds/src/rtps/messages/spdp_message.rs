@@ -1,11 +1,10 @@
 use chrono::Utc;
-use std::{net::Ipv4Addr, str::FromStr, sync::Arc};
+use std::sync::Arc;
 
 use crate::{
     rtps::{
         common::{
             entity_id::EntityId,
-            locator::Locator,
             parameters::{ParameterId, ParameterList},
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
             sequence::SequenceNumber,
@@ -22,14 +21,13 @@ use crate::{
             submessage_id::SubmessageId,
             submessages::{data::Data, info::InfoTimestamp},
         },
-        transport::{get_transport_type, port_manager::PortManager, TransportType},
     },
-    serialize::pl_cdr::{discovery_helpers, RtpsMessageBuilder},
+    serialize::pl_cdr::{discovery_helpers, InlineQosParameters, RtpsMessageBuilder},
 };
 
 #[derive(Debug, Clone)]
 pub(crate) struct SpdpMessage {
-    rtps_message: Arc<RtpsMessage>,
+    rtps_message: Arc<RtpsMessage<'static>>,
 }
 
 impl SpdpMessage {
@@ -51,7 +49,7 @@ impl SpdpMessage {
         Ok(Self { rtps_message: Arc::new(rtps_message) })
     }
 
-    fn create_info_ts_submessage() -> Submessage {
+    fn create_info_ts_submessage() -> Submessage<'static> {
         let mut info_ts_header_flag = SubmessageHeaderFlag::new();
         info_ts_header_flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::INFO_TS);
         let info_ts_data = InfoTimestamp::new(Utc::now());
@@ -70,10 +68,18 @@ impl SpdpMessage {
         participant: Arc<Participant>,
         sequence_number: SequenceNumber,
         inline_qos_list: Option<ParameterList>,
-    ) -> RtpsResult<Submessage> {
+    ) -> RtpsResult<Submessage<'static>> {
+        let is_status_info = inline_qos_list
+            .as_ref()
+            .and_then(|pl| pl.get_status_info())
+            .map(|status_info| status_info.disposed() || status_info.unregistered())
+            .unwrap_or(false);
+
         let mut data_header_flag = SubmessageHeaderFlag::new();
         data_header_flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::DATA);
-        data_header_flag.add_flag(SubmessageFlagType::DataFlag, SubmessageId::DATA);
+        if !is_status_info {
+            data_header_flag.add_flag(SubmessageFlagType::DataFlag, SubmessageId::DATA);
+        }
 
         let mut data = Data::new(
             EntityId::SPDP_BUILTIN_PARTICIPANT_READER,
@@ -86,10 +92,14 @@ impl SpdpMessage {
             data.set_inline_qos_list(inline_qos_list);
         }
 
-        data.add_serialized_data(Self::create_serialized_data(participant)?);
+        if !is_status_info {
+            data.add_serialized_data(SubmessagePayload::Owned(Self::create_serialized_data(
+                participant,
+            )?));
+        }
         let length = data.octets_to_next_header();
 
-        let submessage_body: SubmessageBody = SubmessageBody::Data(data);
+        let submessage_body: SubmessageBody<'static> = SubmessageBody::Data(data);
 
         let data_submessage = Submessage {
             header: SubmessageHeader::new(SubmessageId::DATA, data_header_flag.flag, length),
@@ -98,165 +108,57 @@ impl SpdpMessage {
         Ok(data_submessage)
     }
 
-    fn create_serialized_data(participant: Arc<Participant>) -> RtpsResult<SerializedData> {
+    fn create_serialized_data(participant: Arc<Participant>) -> RtpsResult<bytes::Bytes> {
         let domain_id = participant.domain_id();
         let participant_guid = participant.guid();
+        let local_participant_proxy_data = participant.local_participant_proxy_data();
 
-        let (vendor_id, entity_name) = {
-            let local_participant_proxy_data = participant.local_participant_proxy_data();
-            (
-                local_participant_proxy_data.vendor_id(),
-                Some(local_participant_proxy_data.entity_name().to_string()),
-            )
-        };
+        let vendor_id = local_participant_proxy_data.vendor_id();
+        let entity_name = Some(local_participant_proxy_data.entity_name().to_string());
 
-        let mut locators = Vec::new();
+        // Use pre-computed locators from local_participant_proxy_data
+        let mut locators = Vec::with_capacity(
+            local_participant_proxy_data.metatraffic_unicast_locator_list().len()
+                + local_participant_proxy_data.default_unicast_locator_list().len(),
+        );
 
-        // Get transport type from environment variable
-        let transport_type = get_transport_type();
-        let participant_ip = Ipv4Addr::from_str(&participant.working_ip()).unwrap();
+        for locator in local_participant_proxy_data.metatraffic_unicast_locator_list() {
+            locators.push((
+                ParameterId::PidMetatrafficUnicastLocator,
+                locator.kind(),
+                locator.port(),
+                locator.address,
+            ));
+        }
 
-        // Create locators based on transport type
-        match transport_type {
-            TransportType::TCP => {
-                // Use TCP locators for TCP transport
-                let metatraffic = Locator::from_tcp_v4(
-                    participant_ip,
-                    PortManager::get_discovery_traffic_unicast_port(
-                        participant.domain_id(),
-                        participant.participant_id(),
-                    ) as u32,
-                );
-                let default = Locator::from_tcp_v4(
-                    participant_ip,
-                    PortManager::get_user_traffic_unicast_port(
-                        participant.domain_id(),
-                        participant.participant_id(),
-                    ) as u32,
-                );
-                locators.push((
-                    ParameterId::PidMetatrafficUnicastLocator,
-                    metatraffic.kind(),
-                    metatraffic.port(),
-                    metatraffic.address,
-                ));
-                locators.push((
-                    ParameterId::PidDefaultUnicastLocator,
-                    default.kind(),
-                    default.port(),
-                    default.address,
-                ));
-            }
-            TransportType::UDP => {
-                // Use UDP locators for UDP transport (default)
-                let metatraffic = Locator::from_ip_v4_addr_and_port(
-                    &participant_ip,
-                    PortManager::get_discovery_traffic_unicast_port(
-                        participant.domain_id(),
-                        participant.participant_id(),
-                    ) as u32,
-                );
-                let default = Locator::from_ip_v4_addr_and_port(
-                    &participant_ip,
-                    PortManager::get_user_traffic_unicast_port(
-                        participant.domain_id(),
-                        participant.participant_id(),
-                    ) as u32,
-                );
-                locators.push((
-                    ParameterId::PidMetatrafficUnicastLocator,
-                    metatraffic.kind(),
-                    metatraffic.port(),
-                    metatraffic.address,
-                ));
-                locators.push((
-                    ParameterId::PidDefaultUnicastLocator,
-                    default.kind(),
-                    default.port(),
-                    default.address,
-                ));
-            }
-            TransportType::Hybrid => {
-                // Hybrid mode: Include BOTH UDP and TCP locators
-                // UDP locators
-                let udp_metatraffic = Locator::from_ip_v4_addr_and_port(
-                    &participant_ip,
-                    PortManager::get_discovery_traffic_unicast_port(
-                        participant.domain_id(),
-                        participant.participant_id(),
-                    ) as u32,
-                );
-                let udp_default = Locator::from_ip_v4_addr_and_port(
-                    &participant_ip,
-                    PortManager::get_user_traffic_unicast_port(
-                        participant.domain_id(),
-                        participant.participant_id(),
-                    ) as u32,
-                );
-
-                // TCP locators
-                let tcp_metatraffic = Locator::from_tcp_v4(
-                    participant_ip,
-                    PortManager::get_discovery_traffic_unicast_port(
-                        participant.domain_id(),
-                        participant.participant_id(),
-                    ) as u32,
-                );
-                let tcp_default = Locator::from_tcp_v4(
-                    participant_ip,
-                    PortManager::get_user_traffic_unicast_port(
-                        participant.domain_id(),
-                        participant.participant_id(),
-                    ) as u32,
-                );
-
-                // Add all four locators (UDP + TCP)
-                locators.push((
-                    ParameterId::PidMetatrafficUnicastLocator,
-                    udp_metatraffic.kind(),
-                    udp_metatraffic.port(),
-                    udp_metatraffic.address,
-                ));
-                locators.push((
-                    ParameterId::PidDefaultUnicastLocator,
-                    udp_default.kind(),
-                    udp_default.port(),
-                    udp_default.address,
-                ));
-                locators.push((
-                    ParameterId::PidMetatrafficUnicastLocator,
-                    tcp_metatraffic.kind(),
-                    tcp_metatraffic.port(),
-                    tcp_metatraffic.address,
-                ));
-                locators.push((
-                    ParameterId::PidDefaultUnicastLocator,
-                    tcp_default.kind(),
-                    tcp_default.port(),
-                    tcp_default.address,
-                ));
-            }
+        for locator in local_participant_proxy_data.default_unicast_locator_list() {
+            locators.push((
+                ParameterId::PidDefaultUnicastLocator,
+                locator.kind(),
+                locator.port(),
+                locator.address,
+            ));
         }
 
         match discovery_helpers::create_spdp_participant_message(
-            domain_id as u32,
+            domain_id,
             participant_guid,
             vendor_id,
             entity_name,
             locators,
         ) {
-            Ok(bytes) => Ok(Arc::from(bytes)),
+            Ok(bytes) => Ok(bytes::Bytes::from(bytes)),
             Err(e) => {
                 log::error!("Error creating SPDP serialized data: {}", e);
 
                 // Fallback to simple builder if discovery_helpers fails
                 match RtpsMessageBuilder::build_spdp_participant_data(
-                    domain_id as u32,
+                    domain_id,
                     participant_guid,
                     vendor_id,
                     true,
                 ) {
-                    Ok(bytes) => Ok(Arc::from(bytes)),
+                    Ok(bytes) => Ok(bytes::Bytes::from(bytes)),
                     Err(fallback_err) => Err(RtpsError::new(
                         RtpsErrorCode::SerializationError,
                         format!("Fallback SPDP creation also failed: {}", fallback_err),
@@ -266,7 +168,7 @@ impl SpdpMessage {
         }
     }
 
-    pub(crate) fn rtps_message(&self) -> Arc<RtpsMessage> {
+    pub(crate) fn rtps_message(&self) -> Arc<RtpsMessage<'static>> {
         self.rtps_message.clone()
     }
 }

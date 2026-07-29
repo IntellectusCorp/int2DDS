@@ -19,7 +19,7 @@
 //! ```no_run
 //! use int2dds::topic::type_support::DdsType;
 //!
-//! #[derive(DdsType, Clone)]
+//! #[derive(DdsType)]
 //! #[dds_type(crate_path = "int2dds")]
 //! struct MyData {
 //!     #[dds(key)]
@@ -40,6 +40,7 @@ use crate::{
     domain::domain_participant::DomainParticipant,
     rtps::common::types::SerializedData,
     topic::sql::ast::Parameter,
+    xtypes::{TypeIdentifier, TypeObject},
 };
 
 pub use int2dds_derive::DdsType;
@@ -56,6 +57,7 @@ pub enum SerializationFormat {
 
 pub trait DdsType: 'static + Send + Sync + Clone + Debug {
     type TypeSupport: TypeSupport + Default;
+    type FieldAccessor: FieldAccessor + Default;
 
     fn get_type_support() -> Arc<Self::TypeSupport> {
         Arc::new(Self::TypeSupport::default())
@@ -67,11 +69,11 @@ pub trait DdsType: 'static + Send + Sync + Clone + Debug {
 
     // Convenient type-safe methods
     fn serialize(&self) -> DdsResult<SerializedData> {
-        Self::TypeSupport::default().serialize(self as &dyn Any)
+        Self::TypeSupport::default().serialize(self as &dyn Any, None)
     }
 
     fn deserialize(data: &[u8]) -> DdsResult<Self> {
-        let any_box = Self::TypeSupport::default().deserialize(data)?;
+        let any_box = Self::TypeSupport::default().deserialize(data, None)?;
         any_box
             .downcast::<Self>()
             .map(|boxed| *boxed)
@@ -79,39 +81,95 @@ pub trait DdsType: 'static + Send + Sync + Clone + Debug {
     }
 
     fn get_field_value(&self, field_path: &str) -> DdsResult<Parameter> {
-        Self::TypeSupport::default().get_field_value(self as &dyn Any, field_path)
+        Self::FieldAccessor::default().get_field_value(self as &dyn Any, field_path)
     }
 
     fn has_field(&self, field_path: &str) -> DdsResult<bool> {
-        Ok(Self::TypeSupport::default().has_field(field_path))
+        Ok(Self::FieldAccessor::default().has_field(field_path))
     }
+}
+
+pub trait FieldAccessor: Send + Sync + 'static {
+    fn get_field_value(&self, data: &dyn Any, field_path: &str) -> DdsResult<Parameter>;
+    fn has_field(&self, field_path: &str) -> bool;
 }
 
 pub trait TypeSupport: Send + Sync + 'static {
     fn type_id(&self) -> TypeId;
     fn get_type_name(&self) -> &str;
-    fn get_field_value(&self, data: &dyn Any, field_path: &str) -> DdsResult<Parameter>;
-    fn has_field(&self, field_path: &str) -> bool;
 
-    // Default serialization (CDR format)
-    fn serialize(&self, data: &dyn Any) -> DdsResult<SerializedData>;
-    fn deserialize(&self, data: &[u8]) -> DdsResult<Box<dyn Any>>;
-
-    // Format-specific serialization (CDR or XCDR)
-    fn serialize_with_format(
+    // Serialization with optional format override.
+    // When format is None, the implementation uses its own default behavior.
+    fn serialize(
         &self,
         data: &dyn Any,
-        format: &SerializationFormat,
+        format: Option<&SerializationFormat>,
     ) -> DdsResult<SerializedData>;
-    fn deserialize_with_format(
+    fn deserialize(
         &self,
         data: &[u8],
-        format: &SerializationFormat,
+        format: Option<&SerializationFormat>,
     ) -> DdsResult<Box<dyn Any>>;
+
+    // Deserialize from non-contiguous fragment chunks (scatter-gather receive
+    // path). Default materializes the chunks into a contiguous buffer and
+    // delegates to `deserialize`; the derive macro overrides this to read classic
+    // CDR directly across chunks. Slice order is fragment order.
+    fn deserialize_chained(
+        &self,
+        chunks: &[bytes::Bytes],
+        format: Option<&SerializationFormat>,
+    ) -> DdsResult<Box<dyn Any>> {
+        let total: usize = chunks.iter().map(|c| c.len()).sum();
+        let mut buf = Vec::with_capacity(total);
+        for c in chunks {
+            buf.extend_from_slice(c);
+        }
+        self.deserialize(&buf, format)
+    }
+
+    /// Serialize into an existing buffer, reusing its capacity.
+    /// The buffer is cleared and filled with serialized data (including encapsulation header).
+    /// Default implementation delegates to `serialize()` (no buffer reuse).
+    /// Derive macro generates an optimized version that reuses the buffer's capacity.
+    fn serialize_into(
+        &self,
+        data: &dyn Any,
+        buffer: &mut Vec<u8>,
+        format: Option<&SerializationFormat>,
+    ) -> DdsResult<()> {
+        let serialized = self.serialize(data, format)?;
+        buffer.clear();
+        buffer.extend_from_slice(&serialized);
+        Ok(())
+    }
 
     // Key handling
     fn serialize_key(&self, data: &dyn Any) -> DdsResult<SerializedData>;
     fn deserialize_key(&self, serialized_key: &[u8]) -> DdsResult<Box<dyn Any + Send + Sync>>;
+
+    // Decode a wire serializedKey (K-flag SerializedPayload, with encapsulation header)
+    // into the key value. Default strips the 4-byte header and decodes big-endian;
+    // generated impls override to read endianness from the header.
+    fn deserialize_key_payload(&self, payload: &[u8]) -> DdsResult<Box<dyn Any + Send + Sync>> {
+        let body = if payload.len() >= 4 { &payload[4..] } else { payload };
+        self.deserialize_key(body)
+    }
+
+    // Encode the key as a wire serializedKey (K-flag SerializedPayload, with a
+    // 4-byte encapsulation header) in the given representation. Default emits XCDR1
+    // CDR_BE; generated impls override to honor XCDR2.
+    fn serialize_key_payload(
+        &self,
+        data: &dyn Any,
+        _format: &SerializationFormat,
+    ) -> DdsResult<SerializedData> {
+        let key = self.serialize_key(data)?;
+        let mut payload = Vec::with_capacity(key.len() + 4);
+        payload.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // CDR_BE, no options
+        payload.extend_from_slice(&key);
+        Ok(std::sync::Arc::from(payload))
+    }
     fn compute_key(&self, data: &dyn Any) -> InstanceHandle;
     fn is_compute_key_provided(&self) -> bool;
     fn get_extensibility_kind(&self) -> crate::serialize::xcdr::ExtensibilityKind;
@@ -121,7 +179,7 @@ pub trait TypeSupport: Send + Sync + 'static {
         data: &dyn Any,
     ) -> DdsResult<(SerializedData, SerializedData)> {
         let key_data = self.serialize_key(data)?;
-        let full_data = self.serialize(data)?;
+        let full_data = self.serialize(data, None)?;
         Ok((key_data, full_data))
     }
 
@@ -129,6 +187,27 @@ pub trait TypeSupport: Send + Sync + 'static {
     // Todo:()
     fn get_serialized_size_bound(&self) -> Option<usize> {
         None
+    }
+
+    /// Get the TypeIdentifier for this type (DDS-XTypes).
+    /// Returns None if the type does not support XTypes.
+    fn get_type_identifier(&self) -> Option<TypeIdentifier> {
+        None
+    }
+
+    /// Get the TypeObject for this type (DDS-XTypes).
+    /// Returns None if the type does not support XTypes.
+    fn get_type_object(&self) -> Option<TypeObject> {
+        None
+    }
+
+    /// Get this type's `TypeObject` plus the transitive
+    /// closure of every nested composite it references.
+    fn get_type_object_closure(&self) -> Vec<(TypeIdentifier, TypeObject)> {
+        match (self.get_type_identifier(), self.get_type_object()) {
+            (Some(id), Some(obj)) => vec![(id, obj)],
+            _ => Vec::new(),
+        }
     }
 
     fn register_type(
@@ -144,503 +223,269 @@ pub trait TypeSupport: Send + Sync + 'static {
     }
 }
 
-#[cfg(test)]
-mod tests {
+/// Autoref specialization helper for dot-notation nested field access.
+///
+/// Allows derive macro generated code to delegate field access into nested struct
+/// fields without knowing at macro expansion time whether a field type implements
+/// `DdsType`. Uses the autoref specialization pattern:
+/// - If `T: DdsType`, inherent methods on `NestedAccessor<T>` are resolved first.
+/// - Otherwise, auto-ref finds the fallback trait impl on `&NestedAccessor<T>`.
+pub mod nested_access {
     use super::*;
-    use log::debug;
-    use speedy::{Readable, Writable};
 
-    #[derive(DdsType, Readable, Writable)]
-    #[dds_type(crate_path = "crate")]
-    struct HelloWorldType {
-        index: u32,
-        message: String,
+    pub struct NestedAccessor<T>(pub core::marker::PhantomData<T>);
+
+    /// Fallback for types that do NOT implement DdsType.
+    pub trait NestedAccessFallback {
+        fn nested_has_field(&self, _rest: &str) -> bool {
+            false
+        }
+        fn nested_get_field_value(&self, _data: &dyn Any, rest: &str) -> DdsResult<Parameter> {
+            Err(DdsError::Error(format!("Type has no nested field '{}'", rest)))
+        }
     }
 
-    #[test]
-    #[ignore]
-    fn test_manual_type_registration() {
-        // let _ = env_logger::builder().filter_level(log::LevelFilter::Debug).try_init();
+    impl<T> NestedAccessFallback for NestedAccessor<T> {}
 
-        // Verify we can get the type support directly from DdsType
-        let type_support = HelloWorldType::get_type_support();
-        assert_eq!(type_support.get_type_name(), "HelloWorldType");
+    /// Preferred path for types that DO implement DdsType.
+    impl<T: DdsType> NestedAccessor<T> {
+        pub fn nested_has_field(&self, rest: &str) -> bool {
+            T::FieldAccessor::default().has_field(rest)
+        }
 
-        // Create test data
-        let hello = HelloWorldType { index: 123, message: "Test message".to_string() };
-
-        // Serialize
-        let serialized = hello.serialize().unwrap();
-
-        // Test direct type deserialization
-        let result = HelloWorldType::deserialize(&serialized);
-        assert!(result.is_ok());
-
-        let deserialized_hello = result.unwrap();
-        assert_eq!(deserialized_hello.index, 123);
-        assert_eq!(deserialized_hello.message, "Test message");
+        pub fn nested_get_field_value(&self, data: &dyn Any, rest: &str) -> DdsResult<Parameter> {
+            T::FieldAccessor::default().get_field_value(data, rest)
+        }
     }
+}
 
-    #[test]
-    #[ignore]
-    fn test_serialize_deserialize_symmetry() {
-        // let _ = env_logger::builder().filter_level(log::LevelFilter::Debug).try_init();
-        // Test 1: Simple data
-        let data1 = HelloWorldType { index: 42, message: "Hello, DDS!".to_string() };
-
-        // Serialize using instance method
-        let serialized1 = data1.serialize().unwrap();
-
-        // Deserialize using static method
-        let deserialized1 = HelloWorldType::deserialize(&serialized1).unwrap();
-
-        // Verify symmetry
-        assert_eq!(data1.index, deserialized1.index);
-        assert_eq!(data1.message, deserialized1.message);
-
-        // Test 2: Empty string
-        let data2 = HelloWorldType { index: 0, message: "".to_string() };
-
-        let serialized3 = data2.serialize().unwrap();
-        let deserialized3 = HelloWorldType::deserialize(&serialized3).unwrap();
-
-        assert_eq!(data2.index, deserialized3.index);
-        assert_eq!(data2.message, deserialized3.message);
-
-        // Test 3: Large data
-        let data3 = HelloWorldType { index: u32::MAX, message: "A".repeat(1000) };
-
-        let serialized4 = data3.serialize().unwrap();
-        let deserialized4 = HelloWorldType::deserialize(&serialized4).unwrap();
-
-        assert_eq!(data3.index, deserialized4.index);
-        assert_eq!(data3.message, deserialized4.message);
-    }
-
-    #[derive(DdsType, Readable, Writable)]
-    #[dds_type(crate_path = "crate")]
-    struct UnifiedHelloWorldType {
+#[cfg(test)]
+#[allow(unused_imports)]
+mod keyhash_tests {
+    use super::*;
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "int2dds", extensibility = "Final")]
+    struct SingleU32Key {
         #[dds(key)]
-        index: u32,
-        message: String,
+        pub id: u32,
+        pub data: f64,
     }
 
     #[test]
-    #[ignore]
-    fn test_unified_cdr_xcdr_serialization() {
-        // let _ = env_logger::builder().filter_level(log::LevelFilter::Debug).try_init();
-        use crate::serialize::xcdr::ExtensibilityKind;
+    fn test_keyhash_u32_big_endian() {
+        use crate::dcps::topic::type_support::TypeSupport;
 
-        let test_data =
-            UnifiedHelloWorldType { index: 42, message: "Unified CDR/XCDR Test".to_string() };
+        let value = SingleU32Key { id: 42, data: 1.0 };
+        let type_support = SingleU32Key::get_type_support();
+        let key_bytes = type_support.serialize_key(&value).unwrap();
 
-        let type_support = UnifiedHelloWorldType::get_type_support();
+        assert_eq!(&*key_bytes, &[0x00, 0x00, 0x00, 0x2A]);
 
-        // Test CDR serialization (default)
-        let cdr_serialized = type_support.serialize(&test_data as &dyn std::any::Any).unwrap();
-        debug!("CDR serialized data: {:02X?}", &cdr_serialized[..8]);
-
-        // Test XCDR serialization (Final extensibility)
-        let xcdr_format = SerializationFormat::Xcdr {
-            extensibility_kind: ExtensibilityKind::Final,
-            use_delimiters: false,
-        };
-        let xcdr_serialized = type_support
-            .serialize_with_format(&test_data as &dyn std::any::Any, &xcdr_format)
-            .unwrap();
-        debug!("XCDR serialized data: {:02X?}", &xcdr_serialized[..8]);
-
-        // Header validation
-        assert_eq!(cdr_serialized[0], 0x00);
-        assert_eq!(cdr_serialized[1], 0x01); // CDR LE
-
-        assert_eq!(xcdr_serialized[0], 0x00);
-        assert_eq!(xcdr_serialized[1], 0x07); // XCDR2 LE
-
-        // Deserialization test
-        let cdr_deserialized_any = type_support.deserialize(&cdr_serialized).unwrap();
-        let cdr_deserialized = cdr_deserialized_any.downcast::<UnifiedHelloWorldType>().unwrap();
-        assert_eq!(cdr_deserialized.index, test_data.index);
-        assert_eq!(cdr_deserialized.message, test_data.message);
-
-        let xcdr_deserialized_any =
-            type_support.deserialize_with_format(&xcdr_serialized, &xcdr_format).unwrap();
-        let xcdr_deserialized = xcdr_deserialized_any.downcast::<UnifiedHelloWorldType>().unwrap();
-        assert_eq!(xcdr_deserialized.index, test_data.index);
-        assert_eq!(xcdr_deserialized.message, test_data.message);
-
-        debug!("✓ Unified CDR/XCDR test passed!");
+        let instance_handle = type_support.compute_key(&value);
+        let handle_bytes = instance_handle.value();
+        let mut expected = [0u8; 16];
+        expected[..4].copy_from_slice(&[0x00, 0x00, 0x00, 0x2A]);
+        assert_eq!(handle_bytes, &expected);
     }
 
-    #[derive(DdsType, Readable, Writable)]
-    #[dds_type(crate_path = "crate")]
-    struct UnifiedPaddingTestType {
-        small: u8,
-        medium: u16,
-        large: u64,
-        tiny: u8,
-        big: u32,
-        text: String,
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "int2dds", extensibility = "Final")]
+    struct MultiKeyStruct {
+        #[dds(key)]
+        pub a: u16,
+        #[dds(key)]
+        pub b: u32,
+        pub c: f64,
     }
 
     #[test]
-    #[ignore]
-    fn test_xcdr_extensibility_modes() {
-        // let _ = env_logger::builder().filter_level(log::LevelFilter::Debug).try_init();
-        use crate::serialize::xcdr::ExtensibilityKind;
+    fn test_keyhash_multi_key_big_endian_order() {
+        use crate::dcps::topic::type_support::TypeSupport;
 
-        let test_data = UnifiedPaddingTestType {
-            small: 0xAB,
-            medium: 0x1234,
-            large: 0x123456789ABCDEF0,
-            tiny: 0xCD,
-            big: 0x87654321,
-            text: "Ext Test".to_string(),
-        };
+        let value = MultiKeyStruct { a: 1, b: 2, c: 99.0 };
+        let type_support = MultiKeyStruct::get_type_support();
+        let key_bytes = type_support.serialize_key(&value).unwrap();
 
-        let type_support = UnifiedPaddingTestType::get_type_support();
+        assert_eq!(&*key_bytes, &[0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,]);
+    }
 
-        // XCDR extensibility mode test (currently only Final is supported)
-        let extensibility_modes = [
-            ("Final", ExtensibilityKind::Final, false),
-            // TODO: Appendable and Mutable need additional implementation
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "int2dds", extensibility = "Final")]
+    struct LargeKeyStruct {
+        #[dds(key)]
+        pub a: u64,
+        #[dds(key)]
+        pub b: u64,
+        #[dds(key)]
+        pub c: u64,
+    }
+
+    #[test]
+    fn test_keyhash_large_key_uses_md5() {
+        use crate::dcps::topic::type_support::TypeSupport;
+
+        let value = LargeKeyStruct { a: 1, b: 2, c: 3 };
+        let type_support = LargeKeyStruct::get_type_support();
+        let key_bytes = type_support.serialize_key(&value).unwrap();
+
+        assert_eq!(key_bytes.len(), 24);
+
+        let instance_handle = type_support.compute_key(&value);
+        let expected_md5 = md5::compute(&*key_bytes);
+        assert_eq!(instance_handle.value(), &expected_md5.0);
+    }
+
+    // ============================================================================
+    // LC 6/7 EMHEADER Optimization Tests
+    // ============================================================================
+}
+
+#[cfg(test)]
+#[allow(unused_imports)]
+mod key_payload_tests {
+    // Dispose/unregister samples carry the key as a K-flag SerializedPayload (CDR
+    // with a 4-byte encapsulation header), not the headerless KeyHash bytes.
+    // deserialize_key_payload reads representation/endianness from the wire header.
+    use super::*;
+    use std::any::Any;
+
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+    struct KeyedShape {
+        #[dds(key)]
+        color: String,
+        x: i32,
+    }
+
+    #[test]
+    fn deserialize_key_payload_roundtrip_big_endian() {
+        let ts = KeyedShape::get_type_support();
+        let shape = KeyedShape { color: "BLUE".to_string(), x: 7 };
+
+        // serialize_key is headerless big-endian; wrap it as a wire serializedKey.
+        let key = ts.serialize_key(&shape as &dyn Any).unwrap();
+        let mut payload = vec![0x00, 0x00, 0x00, 0x00]; // CDR_BE encapsulation header
+        payload.extend_from_slice(&key);
+
+        let decoded = ts.deserialize_key_payload(&payload).unwrap();
+        let decoded = decoded.downcast_ref::<KeyedShape>().unwrap();
+        assert_eq!(decoded.color, "BLUE");
+    }
+
+    #[test]
+    fn deserialize_key_payload_xcdr2_delimited_le_wire() {
+        // CoreDX-style dispose serializedKey for "BLUE" under XCDR2: DELIMITED_CDR2_LE
+        // header (0x0009), single struct DHEADER, then the key members.
+        let ts = KeyedShape::get_type_support();
+        let payload: &[u8] = &[
+            0x00, 0x09, 0x00, 0x00, // DELIMITED_CDR2_LE encapsulation header
+            0x09, 0x00, 0x00, 0x00, // DHEADER: object size = 9 bytes
+            0x05, 0x00, 0x00, 0x00, // string length 5 (little-endian)
+            0x42, 0x4c, 0x55, 0x45, 0x00, // "BLUE\0"
         ];
 
-        for (mode_name, extensibility_kind, use_delimiters) in extensibility_modes.iter() {
-            let format = SerializationFormat::Xcdr {
-                extensibility_kind: *extensibility_kind,
-                use_delimiters: *use_delimiters,
-            };
-
-            let serialized = type_support
-                .serialize_with_format(&test_data as &dyn std::any::Any, &format)
-                .unwrap();
-            let deserialized_any =
-                type_support.deserialize_with_format(&serialized, &format).unwrap();
-            let deserialized = deserialized_any.downcast::<UnifiedPaddingTestType>().unwrap();
-
-            assert_eq!(deserialized.small, test_data.small, "Failed for {}", mode_name);
-            assert_eq!(deserialized.medium, test_data.medium, "Failed for {}", mode_name);
-            assert_eq!(deserialized.large, test_data.large, "Failed for {}", mode_name);
-            assert_eq!(deserialized.tiny, test_data.tiny, "Failed for {}", mode_name);
-            assert_eq!(deserialized.big, test_data.big, "Failed for {}", mode_name);
-            assert_eq!(deserialized.text, test_data.text, "Failed for {}", mode_name);
-
-            debug!("✓ XCDR {} extensibility test passed", mode_name);
-        }
-    }
-
-    #[derive(DdsType, Readable, Writable)]
-    #[dds_type(crate_path = "crate")]
-    struct SimpleArrayTest {
-        data: [u8; 4],
-    }
-
-    #[derive(DdsType, Readable, Writable)]
-    #[dds_type(crate_path = "crate")]
-    struct MixedArrayTest {
-        id: u32,
-        bytes: [u8; 2],
-        name: String,
+        let decoded = ts.deserialize_key_payload(payload).unwrap();
+        let decoded = decoded.downcast_ref::<KeyedShape>().unwrap();
+        assert_eq!(decoded.color, "BLUE");
     }
 
     #[test]
-    #[ignore]
-    fn test_simple_array_compilation() {
-        // let _ = env_logger::builder().filter_level(log::LevelFilter::Debug).try_init();
-        debug!("=== Simple [u8; N] array compilation test ===");
+    fn deserialize_key_payload_little_endian_wire() {
+        // Cyclone/OpenDDS XCDR1 dispose serializedKey for "BLUE": CDR_LE header,
+        // little-endian string length 5, then "BLUE\0".
+        let ts = KeyedShape::get_type_support();
+        let payload: &[u8] = &[
+            0x00, 0x01, 0x00, 0x03, // CDR_LE encapsulation header
+            0x05, 0x00, 0x00, 0x00, // string length 5 (little-endian)
+            0x42, 0x4c, 0x55, 0x45, 0x00, // "BLUE\0"
+        ];
 
-        // 1. Test struct creation capability
-        let simple = SimpleArrayTest { data: [0xAA, 0xBB, 0xCC, 0xDD] };
-        debug!("✓ SimpleArrayTest created successfully: {:?}", simple);
-
-        let mixed = MixedArrayTest { id: 12345, bytes: [0x11, 0x22], name: "test".to_string() };
-        debug!("✓ MixedArrayTest created successfully: {:?}", mixed);
-
-        // 2. Verify DdsType trait method calls
-        debug!("\n2. Checking TypeSupport...");
-        let simple_type_support = SimpleArrayTest::get_type_support();
-        debug!("✓ SimpleArrayTest TypeSupport: {}", simple_type_support.get_type_name());
-
-        let mixed_type_support = MixedArrayTest::get_type_support();
-        debug!("✓ MixedArrayTest TypeSupport: {}", mixed_type_support.get_type_name());
-    }
-
-    #[derive(DdsType, Readable, Writable)]
-    #[dds_type(crate_path = "crate")]
-    struct ArrayTestType {
-        id: u32,
-        data: [u8; 4], // Fixed size array test
-        name: String,
+        let decoded = ts.deserialize_key_payload(payload).unwrap();
+        let decoded = decoded.downcast_ref::<KeyedShape>().unwrap();
+        assert_eq!(decoded.color, "BLUE");
     }
 
     #[test]
-    #[ignore]
-    fn test_u8_array_support() {
-        // let _ = env_logger::builder().filter_level(log::LevelFilter::Debug).try_init();
-        debug!("=== Testing [u8; N] Array Support ===");
-
-        let test_data = ArrayTestType {
-            id: 12345,
-            data: [0xAA, 0xBB, 0xCC, 0xDD],
-            name: "ArrayTest".to_string(),
+    fn serialize_key_payload_xcdr2_appendable_roundtrips() {
+        use crate::serialize::xcdr::ExtensibilityKind;
+        let ts = KeyedShape::get_type_support();
+        let shape = KeyedShape { color: "BLUE".to_string(), x: 7 };
+        let format = SerializationFormat::Xcdr {
+            extensibility_kind: ExtensibilityKind::Appendable,
+            use_delimiters: true,
         };
 
-        debug!(
-            "Original data: id={}, data={:02X?}, name={}",
-            test_data.id, test_data.data, test_data.name
-        );
+        let payload = ts.serialize_key_payload(&shape as &dyn Any, &format).unwrap();
+        // Appendable XCDR2 -> DELIMITED_CDR2_LE encapsulation id (0x0009).
+        assert_eq!(payload[1], 0x09);
 
-        // Attempt serialization
-        match test_data.serialize() {
-            Ok(serialized) => {
-                debug!("✓ Serialization successful: {} bytes", serialized.len());
-                debug!(
-                    "  Serialized bytes: {:02X?}",
-                    &serialized.as_ref()[..std::cmp::min(serialized.len(), 32)]
-                );
-
-                // Attempt deserialization
-                match ArrayTestType::deserialize(&serialized) {
-                    Ok(deserialized) => {
-                        debug!("✓ Deserialization successful");
-                        debug!(
-                            "Deserialized data: id={}, data={:02X?}, name={}",
-                            deserialized.id, deserialized.data, deserialized.name
-                        );
-
-                        // Data integrity verification
-                        assert_eq!(deserialized.id, test_data.id, "ID mismatch!");
-                        assert_eq!(deserialized.data, test_data.data, "Array data mismatch!");
-                        assert_eq!(deserialized.name, test_data.name, "Name mismatch!");
-
-                        debug!("✓ All data integrity checks passed!");
-                    }
-                    Err(e) => {
-                        debug!("✗ Deserialization failed: {:?}", e);
-                        panic!("Deserialization should succeed");
-                    }
-                }
-            }
-            Err(e) => {
-                debug!("✗ Serialization failed: {:?}", e);
-                panic!("Serialization should succeed");
-            }
-        }
-
-        debug!("=== [u8; N] Array Test Complete ===");
+        let decoded = ts.deserialize_key_payload(&payload).unwrap();
+        assert_eq!(decoded.downcast_ref::<KeyedShape>().unwrap().color, "BLUE");
     }
 
     #[test]
-    #[ignore]
-    fn test_rtps_key_hash_calculation() {
-        // let _ = env_logger::builder().filter_level(log::LevelFilter::Debug).try_init();
-
-        debug!("=== Testing RTPS KeyHash Calculation ===");
-
-        // Test with a type that has a key
-        let data1 = UnifiedHelloWorldType { index: 12345, message: "Test message".to_string() };
-
-        let type_support = UnifiedHelloWorldType::get_type_support();
-        let instance_handle1 = type_support.compute_key(&data1 as &dyn std::any::Any);
-
-        debug!("Key value: {}", data1.index);
-        debug!("Computed InstanceHandle: {:02X?}", instance_handle1.value());
-
-        // Different instance with the same key value
-        let data2 = UnifiedHelloWorldType {
-            index: 12345, // Same key
-            message: "Different message".to_string(),
+    fn raw_key_transcode_matches_typed_xcdr2_wire() {
+        // The raw-bytes dispose path has no typed value, so it transcodes the stored
+        // big-endian key: deserialize_key -> serialize_key_payload. The result must be
+        // byte-identical to the typed path that serializes the value directly.
+        use crate::serialize::xcdr::ExtensibilityKind;
+        let ts = KeyedShape::get_type_support();
+        let shape = KeyedShape { color: "BLUE".to_string(), x: 7 };
+        let format = SerializationFormat::Xcdr {
+            extensibility_kind: ExtensibilityKind::Appendable,
+            use_delimiters: true,
         };
 
-        let instance_handle2 = type_support.compute_key(&data2 as &dyn std::any::Any);
+        let typed_wire = ts.serialize_key_payload(&shape as &dyn Any, &format).unwrap();
 
-        // Same keys should produce the same instance handle
-        assert_eq!(
-            instance_handle1, instance_handle2,
-            "Same keys should produce same instance handles"
-        );
+        let be_key = ts.serialize_key(&shape as &dyn Any).unwrap();
+        let value = ts.deserialize_key(&be_key).unwrap();
+        let transcoded_wire = ts.serialize_key_payload(&*value, &format).unwrap();
 
-        // Test with a different key value
-        let data3 = UnifiedHelloWorldType {
-            index: 67890, // Different key
-            message: "Another message".to_string(),
-        };
-
-        let instance_handle3 = type_support.compute_key(&data3 as &dyn std::any::Any);
-
-        // Different keys should produce different instance handles
-        assert_ne!(
-            instance_handle1, instance_handle3,
-            "Different keys should produce different instance handles"
-        );
-
-        debug!("✓ Key consistency test passed");
-
-        // RTPS standard format test
-        let test_value = 0x12345678u32;
-        let test_data =
-            UnifiedHelloWorldType { index: test_value, message: "Format test".to_string() };
-
-        let test_handle = type_support.compute_key(&test_data as &dyn std::any::Any);
-
-        debug!("Test key value: 0x{:08X}", test_value);
-        debug!("RTPS KeyHash: {:02X?}", test_handle.value());
-
-        // u32 key is serialized as CDR BE, so it should be [0x12, 0x34, 0x56, 0x78, ...]
-        assert_eq!(test_handle.value()[0], 0x12);
-        assert_eq!(test_handle.value()[1], 0x34);
-        assert_eq!(test_handle.value()[2], 0x56);
-        assert_eq!(test_handle.value()[3], 0x78);
-
-        // The rest should be zero-padded
-        for i in 4..16 {
-            assert_eq!(test_handle.value()[i], 0x00, "Padding byte at index {} should be zero", i);
-        }
-
-        debug!("✓ RTPS KeyHash format test passed");
-
-        // Key serialization test
-        match type_support.serialize_key(&test_data as &dyn std::any::Any) {
-            Ok(serialized_key) => {
-                debug!("Serialized key: {:02X?}", serialized_key.as_ref());
-                debug!("Serialized key size: {} bytes", serialized_key.len());
-
-                // u32 key should be serialized as CDR Big-Endian to 4 bytes
-                assert_eq!(serialized_key.len(), 4, "u32 key should serialize to 4 bytes");
-                assert_eq!(
-                    serialized_key.as_ref(),
-                    &[0x12, 0x34, 0x56, 0x78],
-                    "CDR BE serialization should match expected bytes"
-                );
-            }
-            Err(e) => {
-                panic!("Key serialization failed: {:?}", e);
-            }
-        }
-
-        debug!("✓ Key serialization test passed");
-        debug!("=== RTPS KeyHash Calculation Test Complete ===");
-    }
-
-    #[derive(DdsType, Readable, Writable)]
-    #[dds_type(crate_path = "crate")]
-    struct CharacterTestType {
-        ascii_char: char, // Latin-1 character (8-bit)
-        id: u32,
-        name: String,
+        assert_eq!(&*typed_wire, &*transcoded_wire);
     }
 
     #[test]
-    #[ignore]
-    fn test_char_serialization() {
-        // let _ = env_logger::builder().filter_level(log::LevelFilter::Debug).try_init();
-        debug!("=== Testing char Serialization Support ===");
+    fn serialize_key_payload_xcdr1_is_cdr_be() {
+        let ts = KeyedShape::get_type_support();
+        let shape = KeyedShape { color: "BLUE".to_string(), x: 7 };
 
-        let test_data = CharacterTestType {
-            ascii_char: 'A', // Character within Latin-1 range
-            id: 12345,
-            name: "CharTest".to_string(),
-        };
+        let payload =
+            ts.serialize_key_payload(&shape as &dyn Any, &SerializationFormat::Cdr).unwrap();
+        // XCDR1 -> CDR_BE encapsulation header (0x0000).
+        assert_eq!(&payload[..2], &[0x00, 0x00]);
 
-        debug!(
-            "Original data: ascii_char='{}' (0x{:02X}), id={}, name={}",
-            test_data.ascii_char, test_data.ascii_char as u32, test_data.id, test_data.name
-        );
-
-        // Serialization test
-        match test_data.serialize() {
-            Ok(serialized) => {
-                debug!("✓ Serialization successful: {} bytes", serialized.len());
-                debug!(
-                    "  Serialized bytes: {:02X?}",
-                    &serialized.as_ref()[..std::cmp::min(serialized.len(), 32)]
-                );
-
-                // Deserialization test
-                match CharacterTestType::deserialize(&serialized) {
-                    Ok(deserialized) => {
-                        debug!("✓ Deserialization successful");
-                        debug!(
-                            "Deserialized data: ascii_char='{}' (0x{:02X}), id={}, name={}",
-                            deserialized.ascii_char,
-                            deserialized.ascii_char as u32,
-                            deserialized.id,
-                            deserialized.name
-                        );
-
-                        // Data integrity verification
-                        assert_eq!(
-                            deserialized.ascii_char, test_data.ascii_char,
-                            "ASCII char mismatch!"
-                        );
-                        assert_eq!(deserialized.id, test_data.id, "ID mismatch!");
-                        assert_eq!(deserialized.name, test_data.name, "Name mismatch!");
-
-                        debug!("✓ All character data integrity checks passed!");
-                    }
-                    Err(e) => {
-                        debug!("✗ Deserialization failed: {:?}", e);
-                        panic!("Character deserialization should succeed");
-                    }
-                }
-            }
-            Err(e) => {
-                debug!("✗ Serialization failed: {:?}", e);
-                panic!("Character serialization should succeed");
-            }
-        }
-
-        debug!("=== char Serialization Test Complete ===");
+        let decoded = ts.deserialize_key_payload(&payload).unwrap();
+        assert_eq!(decoded.downcast_ref::<KeyedShape>().unwrap().color, "BLUE");
     }
 
-    #[derive(DdsType, Readable, Writable)]
-    #[dds_type(crate_path = "crate")]
-    struct DataPacket {
-        id: u32,
-        payload: Vec<u8>,
-        timestamp: u64,
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+    struct MixedAlignKey {
+        #[dds(key)]
+        a: u32,
+        #[dds(key)]
+        b: u64,
     }
 
     #[test]
-    #[ignore]
-    fn test_vec_u8_serialization() {
-        // let _ = env_logger::builder().filter_level(log::LevelFilter::Debug).try_init();
-        debug!("=== Testing Vec<u8> Serialization Support ===");
+    fn serialize_key_payload_xcdr1_reencodes_8byte_alignment() {
+        // A u32 followed by a u64: XCDR1 (8-byte max alignment) and the KeyHash body
+        // (max-align-4) place `b` at different offsets. The XCDR1 wire serializedKey must
+        // re-encode with 8-byte alignment so the CDR_BE header agrees with the body;
+        // otherwise a header-honoring reader (this crate's own deserialize_key_payload, and
+        // any spec-compliant peer) misparses `b`. Round-tripping proves header/body agree.
+        let ts = MixedAlignKey::get_type_support();
+        let key = MixedAlignKey { a: 1, b: 2 };
 
-        let test_data = DataPacket {
-            id: 42,
-            payload: vec![0x01, 0x02, 0x03, 0x04, 0xFF, 0xAB, 0xCD, 0xEF],
-            timestamp: 1234567890,
-        };
+        let payload =
+            ts.serialize_key_payload(&key as &dyn Any, &SerializationFormat::Cdr).unwrap();
+        // CDR_BE header (4) + u32 a @0 (4) + 4 pad + u64 b @8 (8) = 20 bytes.
+        assert_eq!(&payload[..2], &[0x00, 0x00], "expected CDR_BE encapsulation id");
+        assert_eq!(payload.len(), 20, "u64 key member must be 8-byte aligned under XCDR1");
 
-        debug!(
-            "Original data: id={}, payload={:02X?}, timestamp={}",
-            test_data.id, test_data.payload, test_data.timestamp
-        );
-
-        let serialized = test_data.serialize().unwrap();
-        debug!("✓ Serialization successful: {} bytes", serialized.len());
-
-        let deserialized = DataPacket::deserialize(&serialized).unwrap();
-        debug!("✓ Deserialization successful");
-
-        assert_eq!(deserialized.id, test_data.id);
-        assert_eq!(deserialized.payload, test_data.payload);
-        assert_eq!(deserialized.timestamp, test_data.timestamp);
-        debug!("✓ All Vec<u8> data integrity checks passed!");
-
-        // Test empty vector
-        let empty_data = DataPacket { id: 100, payload: vec![], timestamp: 9876543210 };
-
-        let empty_serialized = empty_data.serialize().unwrap();
-        let empty_deserialized = DataPacket::deserialize(&empty_serialized).unwrap();
-
-        assert_eq!(empty_deserialized.id, empty_data.id);
-        assert_eq!(empty_deserialized.payload, empty_data.payload);
-        assert_eq!(empty_deserialized.timestamp, empty_data.timestamp);
-        debug!("✓ Empty Vec<u8> test passed!");
-
-        debug!("=== Vec<u8> Serialization Test Complete ===");
+        let decoded = ts.deserialize_key_payload(&payload).unwrap();
+        let decoded = decoded.downcast_ref::<MixedAlignKey>().unwrap();
+        assert_eq!((decoded.a, decoded.b), (1, 2));
     }
 }

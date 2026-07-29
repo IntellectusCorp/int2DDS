@@ -4,11 +4,12 @@
 //! builtin vs user-defined, reader vs writer, and keyed vs keyless. The EntityKind
 //! is the last byte of an EntityId as defined in Table 9.1 of the RTPS specification.
 
-use speedy::{Readable, Writable};
+use crate::dcps::topic::type_support::DdsType;
 
 // Table 9.1 - entityKind octet of an EntityId_t
 // #[repr(u8)] setting does not work and causes padding, changed to this approach
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Readable, Writable, Hash)]
+#[derive(DdsType, PartialEq, Copy, Eq, PartialOrd, Ord, Hash)]
+#[dds_type(crate_path = "crate", no_partialeq)]
 pub struct EntityKind(pub u8);
 impl EntityKind {
     pub const UNKNOWN_USER_DEFINED: Self = Self(0x00);
@@ -56,6 +57,11 @@ impl EntityKind {
 
     pub fn is_with_key(&self) -> bool {
         (self.0 & 0x0F) == 0x02 || (self.0 & 0x0F) == 0x07
+    }
+}
+impl std::fmt::Display for EntityKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:02x}", self.0)
     }
 }
 impl TryFrom<u8> for EntityKind {

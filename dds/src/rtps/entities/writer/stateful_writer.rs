@@ -5,7 +5,7 @@ use std::{
     fmt::Debug,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, Weak,
     },
     thread,
 };
@@ -22,33 +22,39 @@ use crate::{
     },
     core::time::Duration as DcpsDuration,
     infrastructure::{
-        qos_policy::{LivelinessQosPolicy, QosPolicyId, ReliabilityQosPolicyKind},
+        qos_policy::{
+            LivelinessQosPolicy, QosPolicyId, ReliabilityQosPolicyKind,
+            WriterReliabilityExtensionQosPolicy,
+        },
         status::{
-            OfferedIncompatibleQosStatus, PublicationMatchedStatus, QosPolicyCount, StatusInfo,
-            StatusKind,
+            OfferedIncompatibleQosStatus, OfferedIncompatibleTypeStatus, PublicationMatchedStatus,
+            QosPolicyCount, StatusInfo, StatusKind,
         },
     },
     rtps::{
         common::{
             entity_id::EntityId,
-            guid::Guid,
+            guid::{Guid, GuidPrefix},
             locator::Locator,
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
             sequence::SequenceNumber,
             time::{RtpsDuration, RtpsTime},
-            types::{ChangeKind, SerializedData, TopicKind},
+            types::{ChangeKind, TopicKind},
         },
         entities::{
             endpoint::Endpoint,
             entity::Entity,
-            history::{cache_change::CacheChange, writer_history::WriterHistoryCache},
+            history::{
+                cache_change::CacheChange, history_cache::HistoryCache as _,
+                writer_history::WriterHistoryCache,
+            },
         },
-        task::{
-            sending_handler::{MessageType, SendingHandler},
-            timer_handler::TimerHandler,
-        },
+        task::sending_handler::{MessageType, SendingHandler},
     },
+    utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
 };
+
+use crate::rtps::entities::participant::Participant;
 
 use super::{reader_proxy::ReaderProxy, Writer};
 
@@ -60,25 +66,31 @@ pub(crate) struct StatefulWriter {
     unicast_locator_list: Vec<Locator>,
     multicast_locator_list: Vec<Locator>,
     endpoint_id: EntityId,
-    push_mode: bool,
-    nack_suppression_duration: RtpsDuration,
-    nack_response_delay: RtpsDuration,
-    preemptive_heartbeat_delay: RtpsDuration,
     last_change_sequence_number: Arc<Mutex<SequenceNumber>>,
-    heartbeat_period: RtpsDuration,
+    periodic_heartbeat_timer_id: TimerId,
     data_max_size_serialized: i32,
     matched_readers: Arc<Mutex<Vec<ReaderProxy>>>,
     writer_cache: Arc<Mutex<WriterHistoryCache>>,
-    heartbeat_count: Arc<Mutex<i32>>,
+    heartbeat_count: Arc<Mutex<u32>>,
+    #[allow(clippy::type_complexity)]
     callback:
         Arc<Mutex<Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>>>,
+    // Invoked with the minimum sequence number acked by all reliable readers when it advances
+    all_acked_callback: Arc<Mutex<Option<Arc<dyn Fn(SequenceNumber) + Send + Sync>>>>,
+    // Mirrors all_acked_callback presence for a lock-free check on the write hot path
+    all_acked_callback_set: Arc<AtomicBool>,
+    last_acked_notify_sn: Arc<Mutex<SequenceNumber>>,
     publication_builtin_topic_data: Arc<Mutex<PublicationBuiltinTopicData>>,
-    heartbeat_thread_started: Arc<AtomicBool>,
+    heartbeat_timer_running: Arc<AtomicBool>,
     publication_matched_status: Arc<Mutex<PublicationMatchedStatus>>,
     offered_incompatible_qos_status: Arc<Mutex<OfferedIncompatibleQosStatus>>,
+    offered_incompatible_type_status: Arc<Mutex<OfferedIncompatibleTypeStatus>>,
+    writer_reliability_extension: WriterReliabilityExtensionQosPolicy,
 }
 
 impl StatefulWriter {
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::type_complexity)]
     pub(crate) fn new(
         guid: Guid,
         unicast_locator_list: Vec<Locator>,
@@ -86,19 +98,13 @@ impl StatefulWriter {
         reliability_level: ReliabilityQosPolicyKind,
         topic_kind: TopicKind,
         endpoint_id: EntityId,
-        push_mode: bool,
-        heartbeat_period: RtpsDuration,
         data_max_size_serialized: i32,
         callback: Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>,
         publication_builtin_topic_data: PublicationBuiltinTopicData,
-        participant_guid: Guid,
+        participant: Weak<Participant>,
     ) -> Self {
-        // in:attribute_values
-        // 8.4.7.1.1 & 8.4.7.1.2 & 8.4.7.2.1
-
-        let nack_response_delay = RtpsDuration::new(0, 200 * 1000 * 1000); // 200 milliseconds
-        let nack_suppression_duration = RtpsDuration::new(0, 0);
-        let preemptive_heartbeat_delay = RtpsDuration::new(0, 10 * 1000 * 1000);
+        let writer_reliability_extension =
+            *publication_builtin_topic_data.writer_reliability_extension();
 
         Self {
             guid,
@@ -107,27 +113,55 @@ impl StatefulWriter {
             reliability_level,
             topic_kind,
             endpoint_id,
-            push_mode,
-            nack_response_delay,
-            nack_suppression_duration,
-            preemptive_heartbeat_delay,
-            last_change_sequence_number: Arc::new(Mutex::new(SequenceNumber::new(0, 0))), // Assuming SequenceNumber has a new method
-            heartbeat_period,
+            last_change_sequence_number: Arc::new(Mutex::new(SequenceNumber::new(0, 0))),
+            periodic_heartbeat_timer_id: TimerId::PeriodicHeartbeat { entity_id: guid.entity_id() },
             data_max_size_serialized,
             matched_readers: Arc::new(Mutex::new(Vec::new())),
-            writer_cache: Arc::new(Mutex::new(WriterHistoryCache::new(
-                participant_guid,
-                endpoint_id,
-            ))),
+            writer_cache: Arc::new(Mutex::new(WriterHistoryCache::new(participant, endpoint_id))),
             heartbeat_count: Arc::new(Mutex::new(1)),
             callback: Arc::new(Mutex::new(callback)),
+            all_acked_callback: Arc::new(Mutex::new(None)),
+            all_acked_callback_set: Arc::new(AtomicBool::new(false)),
+            last_acked_notify_sn: Arc::new(Mutex::new(SequenceNumber::new(0, 0))),
             publication_builtin_topic_data: Arc::new(Mutex::new(publication_builtin_topic_data)),
-            heartbeat_thread_started: Arc::new(AtomicBool::new(false)),
+            heartbeat_timer_running: Arc::new(AtomicBool::new(false)),
             publication_matched_status: Arc::new(Mutex::new(PublicationMatchedStatus::default())),
             offered_incompatible_qos_status: Arc::new(Mutex::new(
                 OfferedIncompatibleQosStatus::default(),
             )),
+            offered_incompatible_type_status: Arc::new(Mutex::new(
+                OfferedIncompatibleTypeStatus::default(),
+            )),
+            writer_reliability_extension,
         }
+    }
+
+    pub(crate) fn reader_proxies(&self) -> Arc<Mutex<Vec<ReaderProxy>>> {
+        self.matched_readers.clone()
+    }
+
+    pub(crate) fn initial_heartbeat_delay(&self) -> RtpsDuration {
+        RtpsDuration::from(self.writer_reliability_extension.initial_heartbeat_delay)
+    }
+
+    pub(crate) fn periodic_heartbeat_timer_id(&self) -> TimerId {
+        self.periodic_heartbeat_timer_id
+    }
+
+    pub(crate) fn heartbeat_timer_running(&self) -> bool {
+        self.heartbeat_timer_running.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn disable_piggyback_heartbeat(&self) -> bool {
+        self.writer_reliability_extension.disable_piggyback_heartbeat
+    }
+
+    pub(crate) fn publication_builtin_topic_data(&self) -> RtpsResult<PublicationBuiltinTopicData> {
+        Ok(self
+            .publication_builtin_topic_data
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?
+            .clone())
     }
 
     pub(crate) fn matched_reader_add(&self, a_reader_proxy: ReaderProxy) {
@@ -139,17 +173,6 @@ impl StatefulWriter {
                 error!("Failed to acquire matched_readers lock: {}", e);
             }
         }
-
-        // Start heartbeat timer only when not a built-in discovery reader
-        // let entity_kind = reader_guid.entity_id().entity_kind();
-        // if !entity_kind.is_built_in() {
-        //     // self.start_heartbeat_timer_in_thread();
-        // } else {
-        //     debug!(
-        //         "Skipping heartbeat timer for discovery reader (EntityKind {}): {:?}",
-        //         entity_kind.0, reader_guid
-        //     );
-        // }
     }
 
     pub(crate) fn matched_reader_remove(&self, a_reader_proxy: ReaderProxy) {
@@ -176,71 +199,86 @@ impl StatefulWriter {
         }
     }
 
-    pub(crate) fn reader_proxies(&self) -> Arc<Mutex<Vec<ReaderProxy>>> {
-        self.matched_readers.clone()
-    }
-
-    pub(crate) fn preemptive_heartbeat_delay(&self) -> RtpsDuration {
-        self.preemptive_heartbeat_delay
-    }
-
-    pub(crate) fn update_to_sent(
+    /// Register periodic heartbeat timer after a delay (one-shot delay, then periodic)
+    pub(crate) fn register_periodic_heartbeat_timer_after_delay(
         &self,
-        reader_proxy: ReaderProxy,
-        sequence_number: SequenceNumber,
-    ) {
-        match self.matched_readers.lock() {
-            Ok(mut matched_readers) => {
-                matched_readers.iter_mut().for_each(|proxy| {
-                    if proxy.remote_reader_guid() == reader_proxy.remote_reader_guid() {
-                        proxy.set_highest_sent_change_sn(sequence_number);
+        delay: RtpsDuration,
+    ) -> RtpsResult<()> {
+        let guid_prefix = self.guid.prefix();
+        let guid = self.guid;
+        let heartbeat_period = self.heartbeat_period().to_std_duration();
+        let timer_id = self.periodic_heartbeat_timer_id();
+        let heartbeat_timer_running = Arc::clone(&self.heartbeat_timer_running);
+        let delay_timer_id = TimerId::PeriodicHeartbeatDelay { entity_id: self.guid.entity_id() };
+
+        // Clone Arcs for the callback to check is_acked_by_all
+        let matched_readers = Arc::clone(&self.matched_readers);
+        let writer_cache = Arc::clone(&self.writer_cache);
+
+        if let Ok(handler) = TimerHandler::get_instance(guid_prefix).lock() {
+            handler.add_timer(
+                delay_timer_id,
+                delay.to_std_duration(),
+                false, // one-shot
+                move || {
+                    // Do not trigger periodic heartbeat timer if all readers have acked the all changes
+                    if Self::is_acked_by_all_impl(&writer_cache, &matched_readers) {
+                        debug!("All readers have acknowledged, not registering periodic heartbeat timer.");
+                        return;
                     }
-                });
-            }
-            Err(e) => {
-                error!("Failed to acquire matched_readers lock: {}", e);
-            }
+
+                    Self::register_periodic_heartbeat_timer_impl(
+                        guid_prefix,
+                        guid,
+                        heartbeat_period,
+                        timer_id,
+                        heartbeat_timer_running.clone(),
+                    );
+                },
+            );
+        } else {
+            log::error!("Failed to acquire timer handler lock for heartbeat timer");
         }
+
+        Ok(())
     }
 
-    pub(crate) fn publication_builtin_topic_data(&self) -> RtpsResult<PublicationBuiltinTopicData> {
-        Ok(self
-            .publication_builtin_topic_data
-            .lock()
-            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?
-            .clone())
+    /// Start heartbeat timer (wrapper for instance method)
+    pub(crate) fn register_periodic_heartbeat_timer(&self) {
+        Self::register_periodic_heartbeat_timer_impl(
+            self.guid.prefix(),
+            self.guid,
+            self.heartbeat_period().to_std_duration(),
+            self.periodic_heartbeat_timer_id(),
+            Arc::clone(&self.heartbeat_timer_running),
+        );
     }
 
-    /// Start heartbeat timer in a separate thread (thread-safe approach)
-    pub(crate) fn start_heartbeat_timer(&self, timer_handler: Arc<Mutex<TimerHandler>>) {
-        if self
-            .heartbeat_thread_started
+    /// Internal static method to register periodic heartbeat timer
+    fn register_periodic_heartbeat_timer_impl(
+        guid_prefix: GuidPrefix,
+        guid: Guid,
+        heartbeat_period: std::time::Duration,
+        timer_id: TimerId,
+        heartbeat_timer_running: Arc<AtomicBool>,
+    ) {
+        // CAS check - if already running, skip
+        if heartbeat_timer_running
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
+            debug!("Tried to run a new heartbeat timer but there is already one");
             return;
         }
 
-        let guid = self.guid;
-        let heartbeat_period = self.heartbeat_period;
-        let writer_cache = Arc::clone(&self.writer_cache);
-        let heartbeat_count = self.heartbeat_count.clone();
-
-        // Generate unique timer ID for this writer's heartbeat
-        let timer_id = format!("heartbeat_writer_{:?}", guid.entity_id().entity_key);
-
-        if let Ok(timer_handler) = timer_handler.lock() {
-            timer_handler.add_timer(
+        if let Ok(handler) = TimerHandler::get_instance(guid_prefix).lock() {
+            debug!("Adding a new heartbeat timer");
+            handler.add_timer(
                 timer_id,
-                heartbeat_period.to_std_duration(),
+                heartbeat_period,
                 true, // repeating timer
-                {
-                    let writer_cache = writer_cache.clone();
-                    let heartbeat_count = heartbeat_count.clone();
-                    move || {
-                        // Send heartbeat
-                        Self::send_heartbeat_to_readers(guid);
-                    }
+                move || {
+                    Self::send_heartbeat_to_readers(guid);
                 },
             );
         } else {
@@ -248,10 +286,30 @@ impl StatefulWriter {
         }
     }
 
+    pub(crate) fn compare_and_set_heartbeat_timer_running(
+        &self,
+        expected: bool,
+        new: bool,
+    ) -> RtpsResult<bool> {
+        Ok(self
+            .heartbeat_timer_running
+            .compare_exchange(expected, new, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok())
+    }
+
+    fn send_heartbeat_to_readers(writer_guid: Guid) {
+        if let Some(handler) = SendingHandler::get_instance_by_participant_guid(Guid::new(
+            writer_guid.prefix(),
+            EntityId::PARTICIPANT,
+        )) {
+            handler.push_message_and_wake(MessageType::UserHeartbeatToAll(writer_guid.entity_id()));
+        }
+    }
+
     pub(crate) fn increase_heartbeat_count(&self) {
         match self.heartbeat_count.lock() {
             Ok(mut heartbeat_count) => {
-                *heartbeat_count += 1;
+                *heartbeat_count = heartbeat_count.wrapping_add(1);
             }
             Err(e) => {
                 error!("Failed to acquire heartbeat_count lock: {}", e);
@@ -259,7 +317,7 @@ impl StatefulWriter {
         }
     }
 
-    pub(crate) fn heartbeat_count(&self) -> i32 {
+    pub(crate) fn heartbeat_count(&self) -> u32 {
         match self.heartbeat_count.lock() {
             Ok(heartbeat_count) => *heartbeat_count,
             Err(e) => {
@@ -269,28 +327,62 @@ impl StatefulWriter {
         }
     }
 
-    fn send_heartbeat_to_readers(writer_guid: Guid) {
-        if let Some(handler) = SendingHandler::get_instance_by_participant_guid(Guid::new(
-            writer_guid.prefix(),
-            EntityId::PARTICIPANT,
-        )) {
-            handler.push_message(MessageType::SendHeartbeatMessageToAll(writer_guid.entity_id()));
+    /// Check if all readers have acked the latest change
+    /// This ensures all samples written are acknowledged since ack status is cumulative
+    pub(crate) fn is_acked_by_all(&self) -> RtpsResult<bool> {
+        Ok(Self::is_acked_by_all_impl(&self.writer_cache, &self.matched_readers))
+    }
+
+    /// Stop heartbeat timer if all readers have acknowledged the latest change.
+    /// Returns true if heartbeat was stopped, false otherwise.
+    pub(crate) fn stop_heartbeat_if_acked_by_all(&self) -> RtpsResult<bool> {
+        if !self.heartbeat_timer_running() || !self.is_acked_by_all()? {
+            return Ok(false);
         }
+
+        debug!(
+            "All readers have acknowledged up to the latest sequence number, stopping heartbeat."
+        );
+        self.compare_and_set_heartbeat_timer_running(true, false)?;
+
+        if let Ok(locked_timer_handler) = TimerHandler::get_instance(self.guid().prefix()).lock() {
+            locked_timer_handler.remove_timer(self.periodic_heartbeat_timer_id());
+        }
+
+        Ok(true)
     }
 
     /// Check if all readers have acked a specific change
-    /// Late joining volatile reader's ack status should not be considered here,
-    /// but there's no problem because when matched_reader_add is called in SEDP, existing caches are already added in acked state
-    pub(crate) fn is_acked_by_all(&self, a_change_seq_num: SequenceNumber) -> bool {
-        match self.matched_readers.lock() {
-            Ok(matched_readers) => {
-                let reliable_matched_readers: Vec<&ReaderProxy> = matched_readers
-                    .iter()
-                    .filter(|proxy| proxy.subscription_builtin_topic_data().is_reliable())
-                    .collect();
-                reliable_matched_readers
-                    .iter()
-                    .all(|proxy| proxy.max_acked_sn() >= a_change_seq_num)
+    pub(crate) fn is_change_acked_by_all(&self, a_change_seq_num: SequenceNumber) -> bool {
+        Self::is_change_acked_by_all_impl(&self.matched_readers, a_change_seq_num)
+    }
+
+    fn is_acked_by_all_impl(
+        writer_cache: &Arc<Mutex<WriterHistoryCache>>,
+        matched_readers: &Arc<Mutex<Vec<ReaderProxy>>>,
+    ) -> bool {
+        let cache = match writer_cache.lock() {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+
+        let latest_sn = match cache.get_seq_num_max() {
+            Some(sn) => sn,
+            None => return true,
+        };
+
+        drop(cache);
+
+        Self::is_change_acked_by_all_impl(matched_readers, latest_sn)
+    }
+
+    fn is_change_acked_by_all_impl(
+        matched_readers: &Arc<Mutex<Vec<ReaderProxy>>>,
+        seq_num: SequenceNumber,
+    ) -> bool {
+        match matched_readers.lock() {
+            Ok(readers) => {
+                readers.iter().filter(|p| p.is_reliable()).all(|p| p.max_acked_sn() >= seq_num)
             }
             Err(e) => {
                 error!("Failed to acquire matched_readers lock: {}", e);
@@ -299,7 +391,6 @@ impl StatefulWriter {
         }
     }
 
-    /// Update acknowledged changes of a specific reader
     pub(crate) fn update_reader_acked_changes(
         &self,
         reader_guid: Guid,
@@ -324,29 +415,87 @@ impl StatefulWriter {
         }
     }
 
-    /// Return the lowest sequence number received by all readers
-    pub(crate) fn get_min_acked_sequence_number(&self) -> SequenceNumber {
-        match self.matched_readers.lock() {
-            Ok(readers) => {
-                if readers.is_empty() {
-                    return SequenceNumber::new(0, 0);
-                }
+    // Ok(Some) is the floor over matched reliable readers; Ok(None) means none are
+    // matched. Best-effort readers never send ACKNACK, so they are excluded to avoid
+    // pinning the minimum at 0. Err keeps the lock failure distinct from "no readers".
+    pub(crate) fn get_min_acked_sequence_number(&self) -> RtpsResult<Option<SequenceNumber>> {
+        let readers = self
+            .matched_readers
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+        Ok(readers.iter().filter(|p| p.is_reliable()).map(|p| p.max_acked_sn()).min())
+    }
 
-                // Lowest sequence number received by all readers
-                let mut min_acked = SequenceNumber::new(0, 0);
-                for reader_proxy in readers.iter() {
-                    let highest_acked = reader_proxy.max_acked_sn();
-                    if min_acked == SequenceNumber::new(0, 0) || highest_acked < min_acked {
-                        min_acked = highest_acked;
-                    }
-                }
-                min_acked
+    pub(crate) fn set_all_acked_callback(&self, f: Arc<dyn Fn(SequenceNumber) + Send + Sync>) {
+        match self.all_acked_callback.lock() {
+            Ok(mut callback) => {
+                callback.replace(f);
+                self.all_acked_callback_set.store(true, Ordering::Release);
             }
             Err(e) => {
-                error!("Failed to acquire matched_readers lock: {}", e);
-                SequenceNumber::new(0, 0)
+                error!("Failed to lock all_acked_callback: {:?}", e);
             }
         }
+    }
+
+    // Non-blocking RTPS transmit queue length for debug logging.
+    pub(crate) fn rtps_cache_len(&self) -> String {
+        match self.writer_cache.try_lock() {
+            Ok(cache) => cache.len().to_string(),
+            Err(_) => "busy".to_string(),
+        }
+    }
+
+    // Invokes the all-acked callback when the minimum acked sequence number advances.
+    // Must not be called while holding the matched_readers lock.
+    pub(crate) fn process_acked_changes(&self) {
+        if !self.all_acked_callback_set.load(Ordering::Acquire) {
+            return;
+        }
+
+        let callback = match self.all_acked_callback.lock() {
+            Ok(callback) => match callback.as_ref() {
+                Some(callback) => callback.clone(),
+                None => return,
+            },
+            Err(e) => {
+                error!("Failed to lock all_acked_callback: {:?}", e);
+                return;
+            }
+        };
+
+        let min_acked = match self.get_min_acked_sequence_number() {
+            Ok(Some(min)) => min,
+            Ok(None) => match self.writer_cache.lock() {
+                // With no reliable reader to wait on, everything already transmitted is removable:
+                // fall back to the highest sequence number that entered the transmit queue. A lock
+                // failure stays an error so unacked samples are never purged by mistake.
+                Ok(cache) => cache.highest_sn(),
+                Err(e) => {
+                    error!("Failed to lock writer_cache: {:?}", e);
+                    return;
+                }
+            },
+            Err(e) => {
+                error!("Failed to read min acked sequence number: {:?}", e);
+                return;
+            }
+        };
+
+        match self.last_acked_notify_sn.lock() {
+            Ok(mut last_notified) => {
+                if min_acked <= *last_notified {
+                    return;
+                }
+                *last_notified = min_acked;
+            }
+            Err(e) => {
+                error!("Failed to lock last_acked_notify_sn: {:?}", e);
+                return;
+            }
+        }
+
+        callback(min_acked);
     }
 
     pub(crate) fn update_publication_matched_status(
@@ -417,11 +566,30 @@ impl StatefulWriter {
             }
         }
     }
+
+    pub(crate) fn update_offered_incompatible_type_status(&self) {
+        match self.offered_incompatible_type_status.lock() {
+            Ok(mut offered_incompatible_type_status) => {
+                offered_incompatible_type_status.total_count += 1;
+                offered_incompatible_type_status.total_count_change += 1;
+
+                self.update_status(
+                    StatusKind::OFFERED_INCOMPATIBLE_TYPE,
+                    Some(Arc::new(offered_incompatible_type_status.clone())),
+                );
+
+                offered_incompatible_type_status.total_count_change = 0;
+            }
+            Err(e) => {
+                log::error!("Failed to lock offered_incompatible_type_status: {:?}", e);
+            }
+        }
+    }
 }
 
 impl Debug for StatefulWriter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "StatefulWriter: {:?}", self.guid)
+        write!(f, "StatefulWriter: {}", self.guid)
     }
 }
 
@@ -433,7 +601,7 @@ impl Writer for StatefulWriter {
     fn new_change(
         &self,
         kind: ChangeKind,
-        data: SerializedData,
+        data: Vec<u8>,
         // inline_qos: ParameterList,
         handle: InstanceHandle,
         source_timestamp: Option<RtpsTime>,
@@ -473,12 +641,54 @@ impl Writer for StatefulWriter {
         }
     }
 
+    fn new_change_with_rpc_callback(
+        &self,
+        kind: ChangeKind,
+        handle: InstanceHandle,
+        source_timestamp: Option<RtpsTime>,
+        data_fn: Box<dyn FnOnce(Guid, SequenceNumber) -> Vec<u8> + '_>,
+    ) -> CacheChange {
+        let last_change_sequence_number = match self.last_change_sequence_number.lock() {
+            Ok(mut last_change_sequence_number) => {
+                *last_change_sequence_number += 1;
+                *last_change_sequence_number
+            }
+            Err(e) => {
+                error!("Failed to acquire last_change_sequence_number lock: {}", e);
+                SequenceNumber::UNKNOWN
+            }
+        };
+
+        let data = data_fn(self.guid, last_change_sequence_number);
+
+        if data.len() > self.data_max_size_serialized as usize {
+            CacheChange::create_fragmented(
+                kind,
+                self.guid,
+                handle,
+                last_change_sequence_number,
+                &data,
+                source_timestamp,
+                self.data_max_size_serialized as usize,
+            )
+        } else {
+            CacheChange::new(
+                kind,
+                self.guid,
+                handle,
+                last_change_sequence_number,
+                data,
+                source_timestamp,
+            )
+        }
+    }
+
     fn data_max_size_serialized(&self) -> i32 {
         self.data_max_size_serialized
     }
 
     fn heartbeat_period(&self) -> RtpsDuration {
-        self.heartbeat_period
+        RtpsDuration::from(self.writer_reliability_extension.heartbeat_period)
     }
 
     fn last_change_sequence_number(&self) -> SequenceNumber {
@@ -492,15 +702,28 @@ impl Writer for StatefulWriter {
     }
 
     fn nack_response_delay(&self) -> RtpsDuration {
-        self.nack_response_delay
+        RtpsDuration::from(self.writer_reliability_extension.nack_response_delay)
     }
 
     fn nack_suppression_duration(&self) -> RtpsDuration {
-        self.nack_suppression_duration
+        RtpsDuration::from(self.writer_reliability_extension.nack_suppression_duration)
+    }
+
+    fn allocate_sequence_number(&self) -> SequenceNumber {
+        match self.last_change_sequence_number.lock() {
+            Ok(mut seq) => {
+                *seq += 1;
+                *seq
+            }
+            Err(e) => {
+                error!("Failed to acquire last_change_sequence_number lock: {}", e);
+                SequenceNumber::UNKNOWN
+            }
+        }
     }
 
     fn push_mode(&self) -> bool {
-        self.push_mode
+        self.writer_reliability_extension.push_mode
     }
 
     fn wait_for_all_acked(&self, max_wait: DcpsDuration) -> bool {
@@ -508,7 +731,7 @@ impl Writer for StatefulWriter {
 
         loop {
             let last_written_cache_sn = self.last_change_sequence_number();
-            let is_acked_by_all = self.is_acked_by_all(last_written_cache_sn);
+            let is_acked_by_all = self.is_change_acked_by_all(last_written_cache_sn);
 
             if is_acked_by_all {
                 return true;
@@ -605,10 +828,82 @@ impl Writer for StatefulWriter {
         reader_guid: Guid,
     ) -> RtpsResult<SubscriptionBuiltinTopicData> {
         if let Some(reader) = self.matched_reader_lookup(reader_guid) {
-            Ok(reader.subscription_builtin_topic_data())
+            Ok(reader.subscription_builtin_topic_data().clone())
         } else {
             Err(RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, ""))
         }
+    }
+
+    fn remove_matched_reader_and_update_status(&self, reader_guid: Guid) -> RtpsResult<bool> {
+        let mut proxies = self
+            .matched_readers
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+        // Find the index of the reader to remove
+        let Some(idx) = proxies.iter().position(|proxy| proxy.remote_reader_guid() == reader_guid)
+        else {
+            debug!("Reader proxy with guid {} not found in matched readers", reader_guid);
+            return Ok(false);
+        };
+
+        // Remove the reader proxy from the list
+        proxies.swap_remove(idx);
+        drop(proxies);
+
+        // Update publication matched status
+        self.update_publication_matched_status(-1, InstanceHandle::from_guid(&reader_guid));
+
+        debug!("Removed reader proxy with guid {} from matched readers", reader_guid);
+
+        // A reliable reader leaving can advance the ack floor over the remaining readers.
+        debug!("[history-strict] trigger=unmatch-single");
+        self.process_acked_changes();
+        debug!("[history-strict] after unmatch-single rtps_len={}", self.rtps_cache_len());
+
+        Ok(true)
+    }
+
+    fn remove_all_matched_readers_with_prefix_and_update_status(
+        &self,
+        prefix: GuidPrefix,
+    ) -> RtpsResult<usize> {
+        let mut reader_proxies = self
+            .matched_readers
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+        debug!(
+            "Before unmatching with reader, this writer had {:?} matched readers",
+            reader_proxies.len()
+        );
+        for reader_proxy in reader_proxies.iter() {
+            if reader_proxy.remote_reader_guid().prefix() == prefix {
+                self.update_publication_matched_status(
+                    -1,
+                    InstanceHandle::from_guid(&reader_proxy.remote_reader_guid()),
+                );
+            }
+        }
+        let len_before = reader_proxies.len();
+        reader_proxies.retain(|reader_proxy| reader_proxy.remote_reader_guid().prefix() != prefix);
+        let removed = len_before - reader_proxies.len();
+
+        debug!(
+            "Removed all unmatched reader proxies from unmatched participant: {}",
+            Guid::guid_prefix_to_string(&prefix)
+        );
+        debug!("Current number of matched reader: {:?}", reader_proxies.len());
+        drop(reader_proxies);
+
+        // Removed readers can advance the ack floor; recompute once the lock is released.
+        if removed > 0 {
+            debug!("[history-strict] trigger=unmatch-bulk");
+            self.process_acked_changes();
+            debug!("[history-strict] after unmatch-bulk rtps_len={}", self.rtps_cache_len());
+        }
+
+        Ok(removed)
     }
 }
 
@@ -676,7 +971,7 @@ mod tests {
         rtps::{
             common::{
                 entity_id::EntityId, entity_kind::EntityKind, guid::Guid, sequence::SequenceNumber,
-                time::RtpsDuration, types::TopicKind,
+                types::TopicKind,
             },
             entities::writer::reader_proxy::ReaderProxy,
         },
@@ -694,12 +989,10 @@ mod tests {
             ReliabilityQosPolicyKind::Reliable,
             TopicKind::NoKey,
             EntityId::new([0, 0, 1], EntityKind::USER_DEFINED_WRITER_NO_KEY),
-            true,
-            RtpsDuration::new(2, 0),
             65000,
             None,
             PublicationBuiltinTopicData::default(),
-            Guid::new([0; 12], EntityId::PARTICIPANT),
+            Weak::new(),
         );
 
         let remote_reader_guid =
@@ -727,6 +1020,7 @@ mod tests {
                 &SubscriberQos::default(),
                 &TopicQos::default(),
             ),
+            SequenceNumber::new(0, 0),
         );
 
         // Reader initially hasn't acked anything
@@ -766,12 +1060,10 @@ mod tests {
             ReliabilityQosPolicyKind::Reliable,
             TopicKind::NoKey,
             EntityId::new([0, 0, 1], EntityKind::USER_DEFINED_WRITER_NO_KEY),
-            true,
-            RtpsDuration::new(2, 0),
             65000,
             None,
             PublicationBuiltinTopicData::default(),
-            Guid::new([0; 12], EntityId::PARTICIPANT),
+            Weak::new(),
         );
 
         let remote_reader_guid =
@@ -799,6 +1091,7 @@ mod tests {
                 &SubscriberQos::default(),
                 &TopicQos::default(),
             ),
+            SequenceNumber::new(0, 0),
         );
 
         stateful_writer.matched_reader_add(reader_proxy);

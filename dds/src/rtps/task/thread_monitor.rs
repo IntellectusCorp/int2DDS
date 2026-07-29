@@ -11,16 +11,20 @@ use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(not(target_os = "linux"))]
 use std::thread;
 use std::time::{Duration, SystemTime};
 
 use log::{debug, error};
 
+use crate::rtps::common::guid::{Guid, GuidPrefix};
+use crate::rtps::entities::entity::Entity;
 use crate::rtps::entities::participant::Participant;
-use crate::rtps::task::timer_handler::TimerHandler;
+use crate::utils::timer::{timer_handler::TimerHandler, timer_id::TimerId};
 
-// Global thread registry for all platforms
-static THREAD_REGISTRY: OnceLock<Mutex<HashMap<u32, String>>> = OnceLock::new();
+// Global thread registry: Guid -> (TID -> thread name)
+static THREAD_REGISTRY: OnceLock<Mutex<HashMap<GuidPrefix, HashMap<u32, String>>>> =
+    OnceLock::new();
 
 pub(crate) struct ThreadMonitor {
     participant: Arc<Participant>,
@@ -50,13 +54,13 @@ impl ThreadMonitor {
 
         debug!("Starting thread monitoring with 10 second interval");
 
-        let timer_handler = TimerHandler::get_instance(self.participant.clone());
+        let timer_handler = TimerHandler::get_instance(self.participant.guid().prefix());
         let log_file_path = self.log_file_path.clone();
 
         match timer_handler.lock() {
             Ok(handler) => {
                 handler.add_timer(
-                    "thread_monitoring_timer".to_string(),
+                    TimerId::ThreadMonitoring,
                     Duration::from_secs(10),
                     true, // repeating
                     move || {
@@ -78,10 +82,12 @@ impl ThreadMonitor {
 
         debug!("Stopping thread monitoring");
 
-        let timer_handler = TimerHandler::get_instance(self.participant.clone());
+        let timer_handler = TimerHandler::get_instance(self.participant.guid().prefix());
+        Self::remove_threads_by_guid_prefix(&self.participant.guid().prefix());
+
         match timer_handler.lock() {
             Ok(handler) => {
-                handler.remove_timer("thread_monitoring_timer".to_string());
+                handler.remove_timer(TimerId::ThreadMonitoring);
                 debug!("Thread monitoring timer removed successfully");
             }
             Err(e) => {
@@ -128,7 +134,7 @@ impl ThreadMonitor {
 
         #[cfg(target_os = "macos")]
         {
-            return Self::get_macos_process_threads();
+            Self::get_macos_process_threads()
         }
 
         #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
@@ -159,27 +165,24 @@ impl ThreadMonitor {
                         let comm_path = format!("/proc/self/task/{}/comm", tid);
                         let stat_path = format!("/proc/self/task/{}/stat", tid);
 
-                        let mut thread_name = "unknown".to_string();
                         let mut thread_state = "unknown".to_string();
                         let mut cpu_usage = "unknown".to_string();
 
-                        // First try to get thread name from registry
-                        if let Some(registry_name) = Self::get_thread_name_from_registry(tid) {
-                            thread_name = registry_name;
-                        } else {
-                            // Fallback: Get thread name from comm file (this contains the actual Rust thread name)
-                            if let Ok(comm) = std::fs::read_to_string(&comm_path) {
+                        // First try to get thread name from registry, then fallback to comm file
+                        let thread_name =
+                            if let Some(registry_name) = Self::get_thread_name_from_registry(tid) {
+                                registry_name
+                            } else if let Ok(comm) = std::fs::read_to_string(&comm_path) {
                                 let comm_name = comm.trim().to_string();
                                 if comm_name.is_empty() || comm_name == "int2dds" {
                                     // If comm file shows process name or empty, show as thread_TID
-                                    thread_name = format!("thread_{}", tid);
+                                    format!("thread_{}", tid)
                                 } else {
-                                    thread_name = comm_name;
+                                    comm_name
                                 }
                             } else {
-                                thread_name = format!("thread_{}", tid);
-                            }
-                        }
+                                format!("thread_{}", tid)
+                            };
 
                         // Get thread state and additional info from status file
                         if let Ok(status) = std::fs::read_to_string(&status_path) {
@@ -464,7 +467,6 @@ impl ThreadMonitor {
             ("sending", "sending_task"),
             ("timer", "timer_handler"),
             ("discovery", "discovery_task"),
-            ("background", "background_service"),
             ("multicast", "multicast_listener"),
             ("unicast", "unicast_listener"),
             ("user", "user_traffic"),
@@ -540,6 +542,7 @@ impl ThreadMonitor {
         let mut thread_count = 0;
 
         // Try ps with thread-specific flags
+        #[allow(clippy::needless_borrow)]
         match std::process::Command::new("ps")
             .args(&["-M", "-o", "pid,tid,comm,state,time", "-p", &pid.to_string()])
             .output()
@@ -600,6 +603,7 @@ impl ThreadMonitor {
         let mut thread_count = 0;
 
         // Try ps with more detailed format to get thread names
+        #[allow(clippy::needless_borrow)]
         match std::process::Command::new("ps")
             .args(&["-M", "-o", "pid,tid,comm,state,time", "-p", &pid.to_string()])
             .output()
@@ -718,14 +722,57 @@ impl ThreadMonitor {
         &self.log_file_path
     }
 
-    /// Register current thread TID in registry (all platforms)
-    pub(crate) fn register_current_thread_name(name: &str) {
+    /// Remove current thread from registry (all platforms)
+    pub(crate) fn remove_map_guard() {
+        let tid = Self::get_current_thread_id();
+        if let Some(registry) = THREAD_REGISTRY.get() {
+            if let Ok(mut map) = registry.lock() {
+                for (guid, tid_map) in map.iter_mut() {
+                    if tid_map.remove(&tid).is_some() {
+                        debug!(
+                            "Removed thread TID {} from registry (Guid: {})",
+                            tid,
+                            Guid::guid_prefix_to_string(guid)
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Register current thread TID with associated Guid (all platforms)
+    #[allow(clippy::clone_on_copy)]
+    pub(crate) fn register_current_thread_name_with_guid_prefix(
+        name: &str,
+        guid_prefix: GuidPrefix,
+    ) {
         let tid = Self::get_current_thread_id();
         let registry = THREAD_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
 
         if let Ok(mut map) = registry.lock() {
-            map.insert(tid, name.to_string());
-            debug!("Registered thread TID {} with name '{}'", tid, name);
+            map.entry(guid_prefix).or_insert_with(HashMap::new).insert(tid, name.to_string());
+            debug!(
+                "Registered thread TID {} with name '{}' for GuidPrefix {}",
+                tid,
+                name,
+                Guid::guid_prefix_to_string(&guid_prefix)
+            );
+        }
+    }
+
+    /// Remove all threads associated with a Guid from registry (for cleanup on disable)
+    pub(crate) fn remove_threads_by_guid_prefix(guid_prefix: &GuidPrefix) {
+        if let Some(registry) = THREAD_REGISTRY.get() {
+            if let Ok(mut map) = registry.lock() {
+                if let Some(tid_map) = map.remove(guid_prefix) {
+                    debug!(
+                        "Removed {} threads associated with GuidPrefix {}",
+                        tid_map.len(),
+                        Guid::guid_prefix_to_string(guid_prefix)
+                    );
+                }
+            }
         }
     }
 
@@ -733,7 +780,11 @@ impl ThreadMonitor {
     fn get_thread_name_from_registry(tid: u32) -> Option<String> {
         if let Some(registry) = THREAD_REGISTRY.get() {
             if let Ok(map) = registry.lock() {
-                return map.get(&tid).cloned();
+                for tid_map in map.values() {
+                    if let Some(name) = tid_map.get(&tid) {
+                        return Some(name.clone());
+                    }
+                }
             }
         }
         None
@@ -779,6 +830,7 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    use crate::rtps::common::guid::Guid;
     use crate::rtps::common::types::{DomainId, ParticipantId};
     use crate::rtps::entities::participant::Participant;
 
@@ -786,7 +838,13 @@ mod tests {
         domain_id: DomainId,
         participant_id: ParticipantId,
     ) -> Arc<Participant> {
-        Arc::new(Participant::new(domain_id, participant_id, "127.0.0.1".to_string()))
+        Arc::new(Participant::new(
+            domain_id,
+            participant_id,
+            vec!["127.0.0.1".to_string()],
+            Vec::new(),
+            Vec::new(),
+        ))
     }
 
     #[test]
@@ -910,7 +968,10 @@ mod tests {
             .spawn(move || {
                 // Register thread name for monitoring
                 {
-                    ThreadMonitor::register_current_thread_name("test_thread_monitoring");
+                    ThreadMonitor::register_current_thread_name_with_guid_prefix(
+                        "test_thread_monitoring",
+                        Guid::UNKNOWN.prefix(),
+                    );
                 }
 
                 // Signal that thread has started

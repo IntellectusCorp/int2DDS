@@ -1,0 +1,5 @@
+struct PerformanceTestData {
+    unsigned long long seq_num;
+    unsigned long long timestamp;
+    sequence<octet> data;
+};

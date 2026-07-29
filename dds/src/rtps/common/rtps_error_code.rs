@@ -72,9 +72,13 @@ pub enum RtpsErrorCode {
     QosIncompatible = 500,
     PartitionIncompatible = 501,
     InternalLogicError = 502,
+    TopicKindIncompatible = 503,
 
     // Error propagated from DDS layer
     DdsError = 600,
+
+    // Transport send error
+    NotSent = 700,
 
     // For unexpected error
     Unknown = 999,
@@ -122,9 +126,13 @@ impl RtpsErrorCode {
             500 => Some(RtpsErrorCode::QosIncompatible),
             501 => Some(RtpsErrorCode::PartitionIncompatible),
             502 => Some(RtpsErrorCode::InternalLogicError),
+            503 => Some(RtpsErrorCode::TopicKindIncompatible),
 
             // Resource shortage
             600 => Some(RtpsErrorCode::DdsError),
+
+            // Transport send error
+            700 => Some(RtpsErrorCode::NotSent),
 
             999 => Some(RtpsErrorCode::Unknown),
 
@@ -156,11 +164,13 @@ impl RtpsErrorCode {
             RtpsErrorCode::QosIncompatible => "QoS policies are incompatible",
             RtpsErrorCode::PartitionIncompatible => "Partition policies are incompatible",
             RtpsErrorCode::InternalLogicError => "Internal Logic Error",
+            RtpsErrorCode::TopicKindIncompatible => "TopicKind mismatch between writer and reader",
             RtpsErrorCode::DataReaderCacheNotSet => "DataReader cache not set",
             RtpsErrorCode::WriterCacheNotSet => "Writer Cache not set",
             RtpsErrorCode::NotInitialized => "Not Initialized",
             RtpsErrorCode::DdsError => "DDS error",
             RtpsErrorCode::ArcUpgradeError => "Failed to upgrade Weak reference to Arc",
+            RtpsErrorCode::NotSent => "Message not sent",
             RtpsErrorCode::Unknown => "Unknown",
         }
     }

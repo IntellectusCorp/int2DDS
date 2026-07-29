@@ -31,6 +31,7 @@ use crate::{
         time::Duration,
         types::LENGTH_UNLIMITED,
     },
+    infrastructure::qos_kind::QosKind,
     infrastructure::qos_policy::{
         DataRepresentationQosPolicy, DeadlineQosPolicy, DestinationOrderQosPolicy,
         DurabilityQosPolicy, DurabilityServiceQosPolicy, HistoryQosPolicy, LatencyBudgetQosPolicy,
@@ -40,7 +41,7 @@ use crate::{
     },
 };
 
-pub const TOPIC_QOS_DEFAULT: TopicQos = TopicQos::DEFAULT;
+pub const TOPIC_QOS_DEFAULT: QosKind<TopicQos> = QosKind::Default;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicQos {
@@ -109,17 +110,9 @@ impl ConstDefault for TopicQos {
 impl Qos for TopicQos {
     fn check_unsupported_policies(&self) -> DdsResult<()> {
         if self.topic_data != TopicDataQosPolicy::default()
-            || self.durability != DurabilityQosPolicy::default()
             || self.durability_service != DurabilityServiceQosPolicy::default()
-            || self.deadline != DeadlineQosPolicy::default()
             || self.latency_budget != LatencyBudgetQosPolicy::default()
-            || self.liveliness != LivelinessQosPolicy::default()
-            || self.reliability.kind != ReliabilityQosPolicyKind::BestEffort
-            || self.history != HistoryQosPolicy::default()
-            || self.resource_limits != ResourceLimitsQosPolicy::default()
             || self.transport_priority != TransportPriorityQosPolicy::default()
-            || self.lifespan != LifespanQosPolicy::default()
-            || self.ownership != OwnershipQosPolicy::default()
         {
             return Err(DdsError::Unsupported);
         }
@@ -145,9 +138,9 @@ impl Qos for TopicQos {
     }
 
     fn is_consistent(&self) -> DdsResult<()> {
+        self.resource_limits.is_consistent()?;
         if self.resource_limits.max_samples_per_instance != LENGTH_UNLIMITED
             && self.history.depth() > Some(self.resource_limits.max_samples_per_instance)
-            || self.resource_limits.max_samples < self.resource_limits.max_samples_per_instance
         {
             return Err(DdsError::InconsistentPolicy);
         }

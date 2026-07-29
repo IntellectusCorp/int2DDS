@@ -12,8 +12,8 @@
 //! # Basic Usage
 //!
 //! ```no_run
-//! use int2dds::dcps::domain::DomainParticipantFactory;
-//! use int2dds::dcps::domain::qos::DomainParticipantQos;
+//! use int2dds::domain::domain_participant_factory::DomainParticipantFactory;
+//! use int2dds::domain::qos::DomainParticipantQos;
 //! use int2dds::infrastructure::status::StatusMask;
 //!
 //! // Get the factory singleton
@@ -44,16 +44,36 @@
 
 use std::{
     collections::HashMap,
+    path::Path,
     sync::{Arc, LazyLock, Mutex, Weak},
 };
 
 use crate::{
-    common::{env::init_from_env, instance_handle::InstanceHandle},
+    common::{
+        env::{get_default_qos_profile, get_qos_profile_paths, init_from_env, DEFAULT_DOMAIN_ID},
+        instance_handle::InstanceHandle,
+    },
+    config::{
+        json::{QosProvider, ResolvedDataReader, ResolvedDataWriter, ResolvedTopic},
+        xml::XmlTypeRegistry,
+    },
     core::{
         error::{DdsError, DdsResult},
         types::DomainId,
     },
-    infrastructure::{qos_policy::Qos, status::StatusMask},
+    infrastructure::{qos_kind::QosKind, qos_policy::Qos, status::StatusMask},
+    publication::{
+        data_writer::DataWriter,
+        publisher::Publisher,
+        qos::{DataWriterQos, PublisherQos},
+    },
+    subscription::{
+        data_reader::DataReader,
+        qos::{DataReaderQos, SubscriberQos},
+        subscriber::Subscriber,
+    },
+    topic::{qos::TopicQos, Topic},
+    xtypes::{DynamicData, DynamicTypeSupport},
 };
 
 use super::{
@@ -62,12 +82,58 @@ use super::{
     qos::{DomainParticipantFactoryQos, DomainParticipantQos},
 };
 
+// Optional participant-factory hook (feature-gated; no-op by default).
+#[cfg(feature = "factory-hook")]
+mod factory_hook {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    pub type HookFn = extern "C" fn() -> i32;
+
+    extern "C" fn default_hook() -> i32 {
+        1
+    }
+
+    static HOOK: AtomicUsize = AtomicUsize::new(0);
+
+    #[no_mangle]
+    pub extern "C" fn __int2dds_set_factory_hook(f: HookFn) {
+        HOOK.store(f as usize, Ordering::SeqCst);
+    }
+
+    pub(super) fn check() -> i32 {
+        let v = HOOK.load(Ordering::SeqCst);
+        if v == 0 {
+            return default_hook();
+        }
+        // SAFETY: `v` is only ever set from a valid HookFn in the setter.
+        let f: HookFn = unsafe { std::mem::transmute(v) };
+        f()
+    }
+}
+
+#[cfg(feature = "factory-hook")]
+#[inline]
+fn run_factory_hook() -> DdsResult<()> {
+    match factory_hook::check() {
+        0 => Ok(()),
+        code => Err(DdsError::Error(format!("participant creation refused (code {code})"))),
+    }
+}
+
+#[cfg(not(feature = "factory-hook"))]
+#[inline]
+fn run_factory_hook() -> DdsResult<()> {
+    Ok(())
+}
+
 #[derive(Default)]
 pub struct DomainParticipantFactory {
     participants: Mutex<HashMap<DomainId, Vec<Weak<DomainParticipant>>>>,
     orphaned_participants: Arc<Mutex<Vec<Arc<DomainParticipant>>>>,
     qos: Mutex<DomainParticipantFactoryQos>,
-    default_participant_qos: Mutex<DomainParticipantQos>,
+    default_participant_qos: Mutex<Option<DomainParticipantQos>>,
+    qos_provider: Mutex<QosProvider>,
+    type_registry: Mutex<XmlTypeRegistry>,
 }
 
 impl DomainParticipantFactory {
@@ -100,14 +166,42 @@ impl DomainParticipantFactory {
     pub fn create_participant(
         &self,
         domain_id: DomainId,
-        qos_list: DomainParticipantQos,
+        qos_list: impl Into<QosKind<DomainParticipantQos>>,
         listener: Option<Arc<dyn DomainParticipantListener>>,
         mask: StatusMask,
     ) -> DdsResult<DomainParticipant> {
-        // Initialize tracing for function timing measurements
-        // init_tracing();
+        run_factory_hook()?;
+        let domain_id = if domain_id != DEFAULT_DOMAIN_ID {
+            domain_id
+        } else {
+            std::env::var("DDS_DOMAIN_ID")
+                .ok()
+                .and_then(|v| v.parse::<DomainId>().ok())
+                .unwrap_or_else(|| {
+                    log::warn!("DDS_DOMAIN_ID is not set or invalid, defaulting to 0");
+                    0
+                })
+        };
 
-        let participant = DomainParticipant::new(domain_id, qos_list.clone(), listener, mask)?;
+        // Resolution chain for QosKind::Default: registered default → configured
+        // default profile → spec default. QosKind::Specific is used as-is.
+        let qos_list = match qos_list.into() {
+            QosKind::Specific(q) => q,
+            QosKind::Default => {
+                if let Some(registered) =
+                    self.default_participant_qos.lock().ok().and_then(|g| g.clone())
+                {
+                    registered
+                } else if let Ok(profile_qos) = self.get_participant_qos_from_profile("") {
+                    profile_qos
+                } else {
+                    DomainParticipantQos::default()
+                }
+            }
+        };
+
+        let participant =
+            DomainParticipant::new(false, domain_id, qos_list.clone(), listener, mask)?;
         if self.get_qos()?.entity_factory.autoenable_created_entities {
             participant.enable()?;
         }
@@ -299,7 +393,27 @@ impl DomainParticipantFactory {
     pub fn get_instance() -> &'static Self {
         static INSTANCE: LazyLock<DomainParticipantFactory> = LazyLock::new(|| {
             init_from_env();
-            DomainParticipantFactory::default()
+            let factory = DomainParticipantFactory::default();
+
+            // Auto-load QoS profiles from DDS_QOS_PROFILE env var
+            let paths = get_qos_profile_paths();
+            if !paths.is_empty() {
+                match factory.load_profiles(&paths) {
+                    Ok(()) => {
+                        for p in &paths {
+                            log::info!("Auto-loaded QoS profile: {}", p.display());
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "Failed to auto-load QoS profiles from DDS_QOS_PROFILE: {:?}",
+                            e
+                        );
+                    }
+                }
+            }
+
+            factory
         });
         &INSTANCE
     }
@@ -326,28 +440,364 @@ impl DomainParticipantFactory {
         }
     }
 
-    pub fn set_default_participant_qos(&self, qos: DomainParticipantQos) -> DdsResult<()> {
-        match self.default_participant_qos.lock() {
-            Ok(mut default_qos) => {
-                *default_qos = qos;
-                Ok(())
+    pub fn set_default_participant_qos(
+        &self,
+        qos: impl Into<QosKind<DomainParticipantQos>>,
+    ) -> DdsResult<()> {
+        match qos.into() {
+            QosKind::Default => match self.default_participant_qos.lock() {
+                Ok(mut default_qos) => {
+                    *default_qos = None;
+                    Ok(())
+                }
+                Err(e) => Err(DdsError::Error(e.to_string())),
+            },
+            QosKind::Specific(qos) => {
+                qos.is_consistent()?;
+                match self.default_participant_qos.lock() {
+                    Ok(mut default_qos) => {
+                        *default_qos = Some(qos);
+                        Ok(())
+                    }
+                    Err(e) => Err(DdsError::Error(e.to_string())),
+                }
             }
-            Err(e) => Err(DdsError::Error(e.to_string())),
         }
     }
 
     pub fn get_default_participant_qos(&self) -> DdsResult<DomainParticipantQos> {
-        Ok(self.default_participant_qos.lock().map_err(|e| DdsError::Error(e.to_string()))?.clone())
+        Ok(self
+            .default_participant_qos
+            .lock()
+            .map_err(|e| DdsError::Error(e.to_string()))?
+            .clone()
+            .unwrap_or_default())
     }
 
-    pub fn reset_default_qos(&self) -> DdsResult<()> {
-        match self.qos.lock() {
-            Ok(mut default_qos) => {
-                *default_qos = DomainParticipantFactoryQos::default();
-                Ok(())
+    // ========== QoS Profile methods ==========
+
+    /// Loads QoS profiles from one or more JSON files.
+    ///
+    /// The loaded profiles can be used with `create_participant_with_profile` and
+    /// `get_*_qos_from_profile` methods to create entities with predefined QoS settings.
+    ///
+    /// Multiple files can be loaded incrementally. If a library with the same name
+    /// already exists, it will be replaced by the new one.
+    ///
+    /// # Arguments
+    /// * `paths` - Slice of file paths to load QoS profiles from
+    ///
+    /// # Errors
+    /// Returns an error if any file cannot be read or parsed.
+    pub fn load_profiles<P: AsRef<Path>>(&self, paths: &[P]) -> DdsResult<()> {
+        {
+            let mut provider =
+                self.qos_provider.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            for path in paths {
+                provider.load_file(path.as_ref())?;
             }
-            Err(e) => Err(DdsError::Error(e.to_string())),
         }
+        // XML files may also carry `<types>` for the dynamic-topic path; the type
+        // parser ignores the qos/domain sections so loading the same file is safe.
+        let mut registry = self.type_registry.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        for path in paths {
+            let path = path.as_ref();
+            if path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("xml"))
+            {
+                registry.load_file(path)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolves a topic declaration path (`DomainLibrary::Domain::Topic`) loaded from
+    /// a `<domain_library>` into its topic name, registered type, and topic QoS.
+    pub fn resolve_topic(&self, path: &str) -> DdsResult<ResolvedTopic> {
+        let provider = self.qos_provider.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        provider
+            .resolve_topic(path)
+            .ok_or_else(|| DdsError::Error(format!("Topic declaration not found: {}", path)))
+    }
+
+    /// Builds a [`DynamicTypeSupport`] for a type defined in a loaded `<types>` section.
+    pub fn get_dynamic_type_support(&self, type_name: &str) -> DdsResult<DynamicTypeSupport> {
+        let registry = self.type_registry.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        registry.get(type_name)
+    }
+
+    /// Resolves a datawriter declaration path
+    /// (`ParticipantLibrary::Participant::Publisher::Writer`) into its topic and QoS.
+    pub fn resolve_datawriter(&self, path: &str) -> DdsResult<ResolvedDataWriter> {
+        let provider = self.qos_provider.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        provider
+            .resolve_datawriter(path)
+            .ok_or_else(|| DdsError::Error(format!("DataWriter declaration not found: {}", path)))
+    }
+
+    /// Resolves a datareader declaration path
+    /// (`ParticipantLibrary::Participant::Subscriber::Reader`) into its topic and QoS.
+    pub fn resolve_datareader(&self, path: &str) -> DdsResult<ResolvedDataReader> {
+        let provider = self.qos_provider.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        provider
+            .resolve_datareader(path)
+            .ok_or_else(|| DdsError::Error(format!("DataReader declaration not found: {}", path)))
+    }
+
+    /// Creates an entire participant tree (participant + publishers/subscribers +
+    /// datawriters/datareaders) from a `<domain_participant_library>` declaration at
+    /// `path` (`ParticipantLibrary::Participant`). Endpoints carry `DynamicData`; the
+    /// topic each follows comes from its `topic_ref` in the XML.
+    pub fn create_participant_from_config(&self, path: &str) -> DdsResult<ConfiguredParticipant> {
+        let resolved = {
+            let provider = self.qos_provider.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            provider.resolve_participant(path).ok_or_else(|| {
+                DdsError::Error(format!("Participant declaration not found: {}", path))
+            })?
+        };
+
+        let participant = self.create_participant(
+            resolved.domain_id,
+            resolved.participant_qos,
+            None,
+            StatusMask::default(),
+        )?;
+
+        let mut topics: HashMap<String, Topic> = HashMap::new();
+        let mut publishers = Vec::new();
+        let mut subscribers = Vec::new();
+        let mut datawriters = HashMap::new();
+        let mut datareaders = HashMap::new();
+
+        for pubd in resolved.publishers {
+            let publisher = participant.create_publisher(pubd.qos, None, StatusMask::default())?;
+            for endpoint in pubd.writers {
+                let support =
+                    Arc::new(self.get_dynamic_type_support(&endpoint.spec.topic.type_ref)?);
+                let topic =
+                    get_or_create_topic(&participant, &mut topics, &endpoint.spec.topic, &support)?;
+                let writer = publisher.create_datawriter_dynamic(
+                    &topic,
+                    support,
+                    endpoint.spec.qos,
+                    None,
+                    StatusMask::default(),
+                )?;
+                datawriters.insert(format!("{}::{}", pubd.name, endpoint.name), writer);
+            }
+            publishers.push(publisher);
+        }
+
+        for subd in resolved.subscribers {
+            let subscriber =
+                participant.create_subscriber(subd.qos, None, StatusMask::default())?;
+            for endpoint in subd.readers {
+                let support =
+                    Arc::new(self.get_dynamic_type_support(&endpoint.spec.topic.type_ref)?);
+                let topic =
+                    get_or_create_topic(&participant, &mut topics, &endpoint.spec.topic, &support)?;
+                let reader = subscriber.create_datareader_dynamic(
+                    &topic,
+                    support,
+                    endpoint.spec.qos,
+                    None,
+                    StatusMask::default(),
+                )?;
+                datareaders.insert(format!("{}::{}", subd.name, endpoint.name), reader);
+            }
+            subscribers.push(subscriber);
+        }
+
+        Ok(ConfiguredParticipant {
+            participant,
+            datawriters,
+            datareaders,
+            _topics: topics.into_values().collect(),
+            _publishers: publishers,
+            _subscribers: subscribers,
+        })
+    }
+
+    /// Creates a new `DomainParticipant` using QoS settings from a loaded profile.
+    ///
+    /// # Arguments
+    /// * `domain_id` - The domain ID to join
+    /// * `qos_path` - QoS path in the format `"Library::Profile"` or `"Library::Profile::QosName"`
+    /// * `listener` - Optional listener for status notifications
+    /// * `mask` - Status mask indicating which status changes trigger listener callbacks
+    ///
+    /// # Errors
+    /// Returns an error if the profile is not found or participant creation fails.
+    pub fn create_participant_with_profile(
+        &self,
+        domain_id: DomainId,
+        qos_path: &str,
+        listener: Option<Arc<dyn DomainParticipantListener>>,
+        mask: StatusMask,
+    ) -> DdsResult<DomainParticipant> {
+        let qos = self.get_participant_qos_from_profile(qos_path)?;
+        self.create_participant(domain_id, qos, listener, mask)
+    }
+
+    /// Returns the default QoS profile path (`"Library::Profile"`).
+    /// Checks `DDS_DEFAULT_QOS_PROFILE` env var first, then `is_default_profile` in the provider.
+    pub fn default_profile_path(&self) -> Option<String> {
+        if let Some(p) = get_default_qos_profile() {
+            return Some(p);
+        }
+        let provider = self.qos_provider.lock().ok()?;
+        provider.default_profile_path()
+    }
+
+    /// Resolves `qos_path`: returns as-is if non-empty, otherwise falls back to `default_profile_path()`.
+    fn resolve_profile_path(&self, qos_path: &str) -> DdsResult<String> {
+        if qos_path.is_empty() {
+            self.default_profile_path()
+                .ok_or_else(|| DdsError::Error("No default QoS profile configured".to_string()))
+        } else {
+            Ok(qos_path.to_string())
+        }
+    }
+
+    /// Retrieves `DomainParticipantQos` from a loaded profile.
+    ///
+    /// # Arguments
+    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    ///   Pass `""` to use the default profile (resolved via `default_profile_path()`).
+    ///
+    /// # Errors
+    /// Returns an error if the profile is not found.
+    pub fn get_participant_qos_from_profile(
+        &self,
+        qos_path: &str,
+    ) -> DdsResult<DomainParticipantQos> {
+        let resolved = self.resolve_profile_path(qos_path)?;
+        let provider = self.qos_provider.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        provider
+            .get_domainparticipant_qos(&resolved)
+            .ok_or_else(|| DdsError::Error(format!("QoS profile not found: {}", resolved)))
+    }
+
+    /// Retrieves `PublisherQos` from a loaded profile.
+    ///
+    /// # Arguments
+    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    ///
+    /// # Errors
+    /// Returns an error if the profile is not found.
+    pub fn get_publisher_qos_from_profile(&self, qos_path: &str) -> DdsResult<PublisherQos> {
+        let resolved = self.resolve_profile_path(qos_path)?;
+        let provider = self.qos_provider.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        provider
+            .get_publisher_qos(&resolved)
+            .ok_or_else(|| DdsError::Error(format!("QoS profile not found: {}", resolved)))
+    }
+
+    /// Retrieves `SubscriberQos` from a loaded profile.
+    ///
+    /// # Arguments
+    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    ///
+    /// # Errors
+    /// Returns an error if the profile is not found.
+    pub fn get_subscriber_qos_from_profile(&self, qos_path: &str) -> DdsResult<SubscriberQos> {
+        let resolved = self.resolve_profile_path(qos_path)?;
+        let provider = self.qos_provider.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        provider
+            .get_subscriber_qos(&resolved)
+            .ok_or_else(|| DdsError::Error(format!("QoS profile not found: {}", resolved)))
+    }
+
+    /// Retrieves `TopicQos` from a loaded profile.
+    ///
+    /// # Arguments
+    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    ///
+    /// # Errors
+    /// Returns an error if the profile is not found.
+    pub fn get_topic_qos_from_profile(&self, qos_path: &str) -> DdsResult<TopicQos> {
+        let resolved = self.resolve_profile_path(qos_path)?;
+        let provider = self.qos_provider.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        provider
+            .get_topic_qos(&resolved)
+            .ok_or_else(|| DdsError::Error(format!("QoS profile not found: {}", resolved)))
+    }
+
+    /// Retrieves `DataWriterQos` from a loaded profile.
+    ///
+    /// # Arguments
+    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    ///
+    /// # Errors
+    /// Returns an error if the profile is not found.
+    pub fn get_datawriter_qos_from_profile(&self, qos_path: &str) -> DdsResult<DataWriterQos> {
+        let resolved = self.resolve_profile_path(qos_path)?;
+        let provider = self.qos_provider.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        provider
+            .get_datawriter_qos(&resolved)
+            .ok_or_else(|| DdsError::Error(format!("QoS profile not found: {}", resolved)))
+    }
+
+    /// Retrieves `DataReaderQos` from a loaded profile.
+    ///
+    /// # Arguments
+    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    ///
+    /// # Errors
+    /// Returns an error if the profile is not found.
+    pub fn get_datareader_qos_from_profile(&self, qos_path: &str) -> DdsResult<DataReaderQos> {
+        let resolved = self.resolve_profile_path(qos_path)?;
+        let provider = self.qos_provider.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        provider
+            .get_datareader_qos(&resolved)
+            .ok_or_else(|| DdsError::Error(format!("QoS profile not found: {}", resolved)))
+    }
+}
+
+// Reuses an already-created topic by name, or creates it as a dynamic topic.
+fn get_or_create_topic(
+    participant: &DomainParticipant,
+    topics: &mut HashMap<String, Topic>,
+    topic: &ResolvedTopic,
+    support: &Arc<DynamicTypeSupport>,
+) -> DdsResult<Topic> {
+    if let Some(existing) = topics.get(&topic.topic_name) {
+        return Ok(existing.clone());
+    }
+    let created = participant.create_topic_dynamic(
+        &topic.topic_name,
+        support.clone(),
+        topic.topic_qos.clone(),
+        None,
+        StatusMask::default(),
+    )?;
+    topics.insert(topic.topic_name.clone(), created.clone());
+    Ok(created)
+}
+
+/// Entities created by [`DomainParticipantFactory::create_participant_from_config`].
+/// Datawriters/readers are addressable by their XML name (`"publisher::writer"` /
+/// `"subscriber::reader"`); topics/publishers/subscribers are held to keep them alive.
+pub struct ConfiguredParticipant {
+    pub participant: DomainParticipant,
+    datawriters: HashMap<String, DataWriter<DynamicData>>,
+    datareaders: HashMap<String, DataReader<DynamicData>>,
+    _topics: Vec<Topic>,
+    _publishers: Vec<Publisher>,
+    _subscribers: Vec<Subscriber>,
+}
+
+impl ConfiguredParticipant {
+    /// Returns the datawriter declared as `"<publisher>::<writer>"`.
+    pub fn datawriter(&self, name: &str) -> Option<DataWriter<DynamicData>> {
+        self.datawriters.get(name).cloned()
+    }
+
+    /// Returns the datareader declared as `"<subscriber>::<reader>"`.
+    pub fn datareader(&self, name: &str) -> Option<DataReader<DynamicData>> {
+        self.datareaders.get(name).cloned()
     }
 }
 
@@ -374,6 +824,7 @@ mod factory_test {
         let test_qos = DomainParticipantQos {
             user_data: UserDataQosPolicy::default(),
             entity_factory: EntityFactoryQosPolicy { autoenable_created_entities: false },
+            ..Default::default()
         };
         instance1.set_default_participant_qos(test_qos).unwrap();
 

@@ -2,17 +2,19 @@ use crate::{
     common::builtin::topic::builtin_topic_key::BuiltinTopicKey,
     infrastructure::qos_policy::{
         DataRepresentationQosPolicy, DeadlineQosPolicy, DestinationOrderQosPolicy,
-        DurabilityQosPolicy, DurabilityServiceQosPolicy, GroupDataQosPolicy,
+        DurabilityQosPolicy, DurabilityServiceQosPolicy, GroupDataQosPolicy, HistoryQosPolicy,
         LatencyBudgetQosPolicy, LifespanQosPolicy, LivelinessQosPolicy, OwnershipQosPolicy,
         OwnershipStrengthQosPolicy, PartitionQosPolicy, PresentationQosPolicy,
-        ReliabilityQosPolicy, TimeBasedFilterQosPolicy, TopicDataQosPolicy, UserDataQosPolicy,
+        ReliabilityQosPolicy, ResourceLimitsQosPolicy, TimeBasedFilterQosPolicy,
+        TopicDataQosPolicy, TransportPriorityQosPolicy, TypeConsistencyEnforcementQosPolicy,
+        UserDataQosPolicy,
     },
     rtps::common::{
         guid::Guid,
         locator::Locator,
         parameters::{ParameterId, ParameterValue, PlCdrParameter},
-        types::SerializedData,
     },
+    xtypes::{TypeIdentifier, TypeInformation, TypeObject},
 };
 
 use super::pl_cdr_deserialize::PlCdrParser;
@@ -55,6 +57,11 @@ pub struct ParsedBuiltinTopicData {
     // QoS Policies (subscription-specific)
     pub time_based_filter: Option<TimeBasedFilterQosPolicy>,
 
+    // QoS Policies (topic-specific)
+    pub history: Option<HistoryQosPolicy>,
+    pub resource_limits: Option<ResourceLimitsQosPolicy>,
+    pub transport_priority: Option<TransportPriorityQosPolicy>,
+
     // Locators
     pub unicast_locator_list: Vec<Locator>,
     pub multicast_locator_list: Vec<Locator>,
@@ -62,12 +69,18 @@ pub struct ParsedBuiltinTopicData {
     // Optional fields
     pub key_hash: Option<[u8; 16]>,
     pub type_max_size_serialized: Option<u32>,
+
+    // DDS-XTypes fields
+    pub type_identifier: Option<TypeIdentifier>,
+    pub type_object: Option<TypeObject>,
+    pub type_information: Option<TypeInformation>,
+    pub type_consistency_enforcement: Option<TypeConsistencyEnforcementQosPolicy>,
 }
 
 impl ParsedBuiltinTopicData {
-    pub fn from_serialized_data(data: SerializedData) -> Result<Self, String> {
+    pub fn from_serialized_data(data: &[u8]) -> Result<Self, String> {
         let parser = PlCdrParser::new(false); // default little endian
-        let parameters = parser.parse(&data)?;
+        let parameters = parser.parse(data)?;
 
         let mut parsed = Self::default();
 
@@ -109,6 +122,13 @@ impl ParsedBuiltinTopicData {
             multicast_locator_list: data.multicast_locator_list(),
             key_hash: None,
             type_max_size_serialized: None,
+            type_identifier: data.type_identifier().cloned(),
+            type_object: data.type_object().cloned(),
+            type_information: data.type_information().cloned(),
+            type_consistency_enforcement: None,
+            history: None,
+            resource_limits: None,
+            transport_priority: None,
         }
     }
 
@@ -143,13 +163,54 @@ impl ParsedBuiltinTopicData {
             multicast_locator_list: data.multicast_locator_list(),
             key_hash: None,
             type_max_size_serialized: None,
+            type_identifier: data.type_identifier().cloned(),
+            type_object: data.type_object().cloned(),
+            type_information: data.type_information().cloned(),
+            type_consistency_enforcement: Some(*data.type_consistency_enforcement()),
+            history: None,
+            resource_limits: None,
+            transport_priority: None,
+        }
+    }
+
+    pub fn from_participant_topic_data(
+        data: &crate::common::builtin::topic::participant_builtin_topic_data::ParticipantBuiltinTopicData,
+    ) -> Self {
+        Self {
+            participant_key: Some(data.key()),
+            user_data: Some(data.user_data()),
+            ..Self::default()
+        }
+    }
+
+    pub fn from_topic_topic_data(
+        data: &crate::common::builtin::topic::topic_builtin_topic_data::TopicBuiltinTopicData,
+    ) -> Self {
+        Self {
+            key: Some(data.key()),
+            topic_name: Some(data.name()),
+            type_name: Some(data.type_name()),
+            durability: Some(data.durability()),
+            durability_service: Some(data.durability_service()),
+            deadline: Some(data.deadline()),
+            latency_budget: Some(data.latency_budget()),
+            liveliness: Some(data.liveliness()),
+            reliability: Some(data.reliability()),
+            transport_priority: Some(data.transport_priority()),
+            lifespan: Some(data.lifespan()),
+            destination_order: Some(data.destination_order()),
+            history: Some(data.history()),
+            resource_limits: Some(data.resource_limits()),
+            ownership: Some(data.ownership()),
+            topic_data: Some(data.topic_data()),
+            ..Self::default()
         }
     }
 
     pub fn apply_parameter(&mut self, parameter: PlCdrParameter) -> Result<(), String> {
         match parameter.id {
             ParameterId::PidEndpointGuid => {
-                if let ParameterValue::ParticipantGuid(guid) = parameter.value {
+                if let ParameterValue::EndpointGuid(guid) = parameter.value {
                     self.key = Some(BuiltinTopicKey {
                         value: Self::convert_u8_to_i32_array(guid.prefix().to_owned()),
                     });
@@ -265,7 +326,7 @@ impl ParsedBuiltinTopicData {
             }
             ParameterId::PidGroupData => {
                 if let ParameterValue::GroupData(group_data) = parameter.value {
-                    self.group_data = Some(GroupDataQosPolicy { datavalue: group_data.to_vec() });
+                    self.group_data = Some(GroupDataQosPolicy { value: group_data.to_vec() });
                 }
             }
             ParameterId::PidTimeBasedFilter => {
@@ -300,6 +361,53 @@ impl ParsedBuiltinTopicData {
                     self.data_representation = Some(data_rep);
                 }
             }
+            ParameterId::PidTypeInformation => {
+                if let ParameterValue::TypeInformation(type_info) = parameter.value {
+                    let complete_id = &type_info.complete.typeid_with_size.type_id;
+                    if *complete_id != TypeIdentifier::None {
+                        self.type_identifier = Some(complete_id.clone());
+                    } else if type_info.minimal.typeid_with_size.type_id != TypeIdentifier::None {
+                        self.type_identifier =
+                            Some(type_info.minimal.typeid_with_size.type_id.clone());
+                    }
+                    self.type_information = Some(type_info);
+                }
+            }
+            ParameterId::PidTypeIdV1 => {
+                if self.type_identifier.is_none() {
+                    if let ParameterValue::TypeIdentifierV1(type_id) = parameter.value {
+                        if type_id != TypeIdentifier::None {
+                            self.type_identifier = Some(type_id);
+                        }
+                    }
+                }
+            }
+            ParameterId::PidTypeConsistencyEnforcement => {
+                if let ParameterValue::TypeConsistencyEnforcement(tce) = parameter.value {
+                    self.type_consistency_enforcement = Some(tce);
+                }
+            }
+            ParameterId::PidTypeObject => {
+                if let ParameterValue::TypeObject(type_obj) = parameter.value {
+                    self.type_object = Some(type_obj);
+                }
+            }
+            ParameterId::PidHistory => {
+                if let ParameterValue::HistoryQosPolicy(history) = parameter.value {
+                    self.history = Some(history);
+                }
+            }
+            ParameterId::PidResourceLimits => {
+                if let ParameterValue::ResourceLimits(resource_limits) = parameter.value {
+                    self.resource_limits = Some(resource_limits);
+                }
+            }
+            ParameterId::PidTransportPriority => {
+                if let ParameterValue::TransportPriority(value) = parameter.value {
+                    self.transport_priority =
+                        Some(TransportPriorityQosPolicy { value: value as i32 });
+                }
+            }
             _ => {
                 // Unsupported parameter for builtin topic data.
             }
@@ -311,9 +419,35 @@ impl ParsedBuiltinTopicData {
     /// Convert u8 array to i32 array for BuiltinTopicKey
     fn convert_u8_to_i32_array(data: [u8; 12]) -> [i32; 3] {
         [
-            i32::from_ne_bytes([data[0], data[1], data[2], data[3]]),
-            i32::from_ne_bytes([data[4], data[5], data[6], data[7]]),
-            i32::from_ne_bytes([data[8], data[9], data[10], data[11]]),
+            i32::from_be_bytes([data[0], data[1], data[2], data[3]]),
+            i32::from_be_bytes([data[4], data[5], data[6], data[7]]),
+            i32::from_be_bytes([data[8], data[9], data[10], data[11]]),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::infrastructure::qos_policy::{DataRepresentationId, DataRepresentationQosPolicy};
+
+    // B1: an endpoint whose DataRepresentation QoS is left unset (empty list)
+    // must still advertise the resolved default on the wire, so peers observe
+    // the same representation the endpoint actually serializes with.
+    #[test]
+    fn empty_data_representation_advertises_resolved_default() {
+        let parsed = ParsedBuiltinTopicData {
+            data_representation: Some(DataRepresentationQosPolicy { value: Vec::new() }),
+            ..Default::default()
+        };
+
+        let bytes = parsed.to_serialized_data();
+        let back =
+            ParsedBuiltinTopicData::from_serialized_data(&bytes[..]).expect("round-trip parse");
+
+        assert_eq!(
+            back.data_representation.expect("PidDataRepresentation present").value,
+            vec![DataRepresentationId::XcdrDataRepresentation],
+        );
     }
 }

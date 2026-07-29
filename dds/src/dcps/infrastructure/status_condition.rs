@@ -35,6 +35,7 @@ pub struct StatusCondition<Q> {
     entity: Option<Weak<dyn EntityInternal<Qos = Q> + Send + Sync>>,
     pub(crate) enabled_statuses: Arc<Mutex<StatusMask>>, // mask (list of enabled statuses)
     pub(crate) status_changes: Arc<Mutex<StatusMask>>,
+    #[allow(clippy::type_complexity)]
     waitset_callback: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
 }
 
@@ -96,7 +97,7 @@ impl<Q: Debug> StatusCondition<Q> {
         }
     }
 
-    pub fn set_enabled_statuses(&mut self, mask: StatusMask) -> DdsResult<()> {
+    pub fn set_enabled_statuses(&self, mask: StatusMask) -> DdsResult<()> {
         {
             let mut enabled_statuses = match self.enabled_statuses.lock() {
                 Ok(guard) => guard,
@@ -161,30 +162,33 @@ impl<Q: Debug> StatusCondition<Q> {
     }
 
     fn add_communication_status(&self, status: &StatusKind) -> DdsResult<()> {
-        match self.status_changes.lock() {
-            Ok(mut status_changes) => {
-                status_changes.insert(*status);
-                debug!("status_changes: {:?}", status_changes);
-
-                // Check if it's a status of interest in enabled_statuses
-                let should_trigger = match self.enabled_statuses.lock() {
-                    Ok(enabled_statuses) => enabled_statuses.contains(*status),
-                    Err(e) => return Err(DdsError::Error(e.to_string())),
-                };
-
-                // Call callback only when a status of interest is added
-                if should_trigger {
-                    if let Ok(callback) = self.waitset_callback.lock() {
-                        if let Some(callback) = callback.as_ref() {
-                            callback(); // Always true (state is activated)
-                        }
-                    }
+        {
+            match self.status_changes.lock() {
+                Ok(mut status_changes) => {
+                    status_changes.insert(*status);
+                    debug!("status_changes: {:?}", status_changes);
                 }
-
-                Ok(())
+                Err(e) => return Err(DdsError::Error(e.to_string())),
             }
-            Err(e) => Err(DdsError::Error(e.to_string())),
         }
+
+        // Match get_trigger_value lock ordering by never holding status_changes
+        // while checking enabled_statuses.
+        let should_trigger = match self.enabled_statuses.lock() {
+            Ok(enabled_statuses) => enabled_statuses.contains(*status),
+            Err(e) => return Err(DdsError::Error(e.to_string())),
+        };
+
+        // Call callback only when a status of interest is added.
+        if should_trigger {
+            if let Ok(callback) = self.waitset_callback.lock() {
+                if let Some(callback) = callback.as_ref() {
+                    callback(); // Always true (state is activated)
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -193,17 +197,16 @@ mod tests {
 
     use std::time::Duration;
 
-    use speedy::{Readable, Writable};
-
     use crate::{
         domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
         infrastructure::status::{StatusKind, StatusMask},
         subscription::qos::{DataReaderQos, SubscriberQos},
+        test_utils::unique_domain_id,
         topic::qos::TopicQos,
         DdsType,
     };
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     #[dds_type(crate_path = "crate")]
     struct HelloWorldType {
         index: u32,
@@ -213,7 +216,7 @@ mod tests {
     #[test]
     // test with 31_hello_world_best_effort_publisher
     fn test_status_condition() {
-        let domain_id = 31;
+        let domain_id = unique_domain_id();
         let participant_qos = DomainParticipantQos::default();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
@@ -241,7 +244,7 @@ mod tests {
 
         std::thread::sleep(Duration::from_secs(5));
 
-        let mut condition = reader.get_statuscondition().unwrap();
+        let condition = reader.get_statuscondition().unwrap();
         condition.set_enabled_statuses(StatusKind::SUBSCRIPTION_MATCHED).unwrap();
         println!("condition: {:?}", condition);
 
@@ -260,5 +263,8 @@ mod tests {
         println!("result: {:?}", result);
 
         subscriber.delete_datareader(reader).unwrap();
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 }

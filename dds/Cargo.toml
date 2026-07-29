@@ -1,10 +1,8 @@
-# [workspace]
-# members = [".", "int2DDS-derive"]
-
 [package]
 name = "int2dds"
-version = "0.0.1"
+version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -17,6 +15,8 @@ readme = "../README.md"
 
 [features]
 default = []
+# Optional create_participant factory hook; off by default.
+factory-hook = []
 
 [dependencies]
 int2dds-derive = { path = "../derive" }
@@ -26,6 +26,7 @@ const-default = { version = "1.0.0", features = ["derive", "std", "alloc"] }
 bitflags = "2.4"
 speedy = "0.8.0"
 bytes = "1"
+smallvec = "1.13"
 log = { version = "0.4.11", features = ["release_max_level_error"] }
 env_logger = "0.11"
 socket2 = { version = "0.5", features = ["all"] }
@@ -39,26 +40,25 @@ regex = "1.0"
 hostname = "0.4.1"
 fern = "0.7.1"
 md5 = "0.8"
+roxmltree = "0.20"
 clap = { version = "4.5", features = ["derive"] }
 dashmap = "5.5"
 arc-swap = "1.7"
 libloading = "0.8"
 
-# Function timing and tracing
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = [
-    "fmt",
-    "env-filter",
-    "json",
-    "time",
-] }
-tracing-appender = "0.2"
-
+num_cpus = "1.0"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.21"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+tokio-util = { version = "0.7.18", features = ["rt"] }
 futures-util = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+get_if_addrs = "0.5.3"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pemfile = "2"
+crossbeam-channel = "0.5.15"
+flume = "0.11"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gpio-cdev = "0.6"
@@ -66,12 +66,10 @@ gpio-cdev = "0.6"
 [lib]
 crate-type = ["rlib"]
 [target.'cfg(unix)'.dependencies]
-signal-hook = "0.3.9"
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 local-ip-address = "0.6.1"
-ctrlc = "3.4.7"
 winapi = { version = "0.3", features = [
     "processthreadsapi",
     "tlhelp32",
@@ -82,36 +80,35 @@ winapi = { version = "0.3", features = [
     "errhandlingapi",
     "winerror",
     "libloaderapi",
+    "memoryapi",
+    "minwindef",
 ] }
 # For getting Windows thread names in newer versions
-windows-sys = "0.52"
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_Memory"] }
 
 [[example]]
-name = "hello_world_param"
-path = "examples/hello_world/hello_world_param.rs"
+name = "hello_world_pub"
+path = "examples/hello_world/hello_world_pub.rs"
 
 [[example]]
-name = "perftest_publisher"
-path = "examples/performace_test/perftest_publisher.rs"
-
-[[example]]
-name = "perftest_subscriber"
-path = "examples/performace_test/perftest_subscriber.rs"
-
-[profile.dev]
-opt-level = 1
+name = "hello_world_sub"
+path = "examples/hello_world/hello_world_sub.rs"
 
 [dev-dependencies]
 husky-rs = "0.1.5"
+criterion = { version = "0.7.0", features = ["html_reports"] }
+tempfile = "3"
+ctrlc = { version = "3.4", features = ["termination"] }
+rcgen = "0.13"
+
 # Faster than opt-level = 0 and still reasonably debuggable
 # opt-level = 1: keeps most of the code structure while applying light optimizations → much faster debugging
 # opt-level = 2~3: too heavily optimized, making variable tracking difficult
-criterion = { version = "0.7.0", features = ["html_reports"] }
 
 [[bench]]
 name = "reliable" # Name of the Rust source file where the benchmark code will be written
 harness = false   # Set to false to disable the default benchmark functionality and enable Criterion
 
-[profile.release]
-# Keep debug info for tracing/profiling (does not affect runtime performance)
-debug = 1 # Minimal debug info for function names and line numbers
+[[bench]]
+name = "besteffort"
+harness = false

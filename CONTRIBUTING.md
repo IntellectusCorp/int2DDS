@@ -2,6 +2,20 @@
 
 Thank you for your interest in contributing to int2DDS! We welcome contributions from the community.
 
+int2DDS is an open-source real-time DDS middleware core.
+All contributions are governed by the Apache License 2.0 and a Contributor License Agreement (CLA).
+
+- License: Apache License 2.0 (see `LICENSE`)
+- CLA:
+  - Individual contributors: `CLA-Individual.md`
+  - Corporate / organizational contributors: `CLA-Corporate.md`
+
+**Contribution Acceptance Notice**
+
+By submitting a pull request or otherwise contributing to this repository,
+you agree to the terms of the applicable Contributor License Agreement (CLA).
+No additional signature is required unless explicitly requested.
+
 ## Table of Contents
 
 - [Code of Conduct](#code-of-conduct)
@@ -78,9 +92,9 @@ cargo build
 cargo build --release
 
 # Build specific package
-cargo build -p int2DDS
-cargo build -p int2DDS-derive
-cargo build -p int2DDS-ffi
+cargo build -p int2dds
+cargo build -p int2dds-derive
+cargo build -p int2dds-ffi
 
 # Build with all features
 cargo build --all-features
@@ -93,7 +107,7 @@ cargo build --all-features
 cargo test
 
 # Run tests for specific package
-cargo test -p int2DDS
+cargo test -p int2dds
 
 # Run tests with output
 cargo test -- --nocapture
@@ -108,16 +122,16 @@ RUST_LOG=debug cargo test
 ### Running Examples
 
 ```bash
-# List all examples
+# List the core hello_world examples
 ls dds/examples/
 
 # Run specific example
-cargo run --example hello_world_reliable_publisher
-cargo run --example hello_world_reliable_subscriber
+cargo run --example hello_world_pub -- --domain 0
+cargo run --example hello_world_sub -- --domain 0
 
 # Run with environment variables
-INT2DDS_THREAD_MONITORING=true cargo run --example hello_world_reliable_publisher
-RUST_LOG=info cargo run --example perftest_publisher
+INT2DDS_THREAD_MONITORING=true cargo run --example hello_world_pub -- --domain 0
+RUST_LOG=info cargo run --example hello_world_sub -- --domain 0
 ```
 
 ### Linting and Formatting
