@@ -18,9 +18,9 @@ use super::{error::*, types::*};
 ///
 /// # Safety
 /// - `condition_out` must be a valid pointer to a null pointer
-/// - The returned condition must be freed with `int2dds_guard_condition_delete`
+/// - The returned condition must be freed with `int2dds_guardcondition_delete`
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_guard_condition_new(
+pub unsafe extern "C" fn int2dds_guardcondition_new(
     condition_out: *mut *mut Int2DdsGuardCondition,
 ) -> Int2DdsRet {
     check_null!(condition_out);
@@ -41,7 +41,7 @@ pub unsafe extern "C" fn int2dds_guard_condition_new(
 /// - `condition` must be a valid guard condition
 /// - `value` is the new trigger value (true to trigger, false to reset)
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_guard_condition_set_trigger_value(
+pub unsafe extern "C" fn int2dds_guardcondition_set_trigger_value(
     condition: *const Int2DdsGuardCondition,
     value: bool,
 ) -> Int2DdsRet {
@@ -61,7 +61,7 @@ pub unsafe extern "C" fn int2dds_guard_condition_set_trigger_value(
 /// - `condition` must be a valid guard condition
 /// - `value_out` must be a valid pointer
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_guard_condition_get_trigger_value(
+pub unsafe extern "C" fn int2dds_guardcondition_get_trigger_value(
     condition: *const Int2DdsGuardCondition,
     value_out: *mut bool,
 ) -> Int2DdsRet {
@@ -86,7 +86,7 @@ pub unsafe extern "C" fn int2dds_guard_condition_get_trigger_value(
 /// - `condition` must not be used after this call
 /// - The condition should be detached from any WaitSets first
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_guard_condition_delete(
+pub unsafe extern "C" fn int2dds_guardcondition_delete(
     condition: *mut Int2DdsGuardCondition,
 ) -> Int2DdsRet {
     if condition.is_null() {
@@ -109,18 +109,18 @@ mod tests {
             let mut condition: *mut Int2DdsGuardCondition = ptr::null_mut();
 
             // Create guard condition
-            let ret = int2dds_guard_condition_new(&mut condition as *mut _);
+            let ret = int2dds_guardcondition_new(&mut condition as *mut _);
             assert_eq!(ret, INT2DDS_RET_OK);
             assert!(!condition.is_null());
 
             // Get initial trigger value
             let mut value: bool = true;
-            let ret = int2dds_guard_condition_get_trigger_value(condition, &mut value);
+            let ret = int2dds_guardcondition_get_trigger_value(condition, &mut value);
             assert_eq!(ret, INT2DDS_RET_OK);
             assert!(!value); // Should be false initially
 
             // Delete condition
-            let ret = int2dds_guard_condition_delete(condition);
+            let ret = int2dds_guardcondition_delete(condition);
             assert_eq!(ret, INT2DDS_RET_OK);
         }
     }

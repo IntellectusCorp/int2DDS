@@ -59,7 +59,7 @@ namespace Int2Dds.Core
                     }
 
                     ReturnCodeHelper.CheckReturn(
-                        NativeMethods.int2dds_create_publisher_with_qos(participant.Handle, qosHandle, out _handle));
+                        NativeMethods.int2dds_create_publisher(participant.Handle, qosHandle, out _handle));
                 }
                 finally
                 {
@@ -69,7 +69,7 @@ namespace Int2Dds.Core
             else
             {
                 ReturnCodeHelper.CheckReturn(
-                    NativeMethods.int2dds_create_publisher(participant.Handle, out _handle));
+                    NativeMethods.int2dds_create_publisher(participant.Handle, IntPtr.Zero, out _handle));
             }
         }
 

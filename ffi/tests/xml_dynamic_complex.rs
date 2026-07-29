@@ -108,7 +108,7 @@ fn xml_dynamic_complex_round_trip() {
         assert_eq!(int2dds_domain_participant_factory_get_instance(&mut factory), INT2DDS_RET_OK);
         let mut participant = ptr::null_mut();
         assert_eq!(
-            int2dds_create_participant(factory, ptr::null(), 52, &mut participant),
+            int2dds_create_participant(factory, 52, ptr::null(), &mut participant),
             INT2DDS_RET_OK
         );
 
@@ -150,9 +150,15 @@ fn xml_dynamic_complex_round_trip() {
             INT2DDS_RET_OK
         );
         let mut publisher = ptr::null_mut();
-        assert_eq!(int2dds_create_publisher(participant, &mut publisher), INT2DDS_RET_OK);
+        assert_eq!(
+            int2dds_create_publisher(participant, ptr::null(), &mut publisher),
+            INT2DDS_RET_OK
+        );
         let mut subscriber = ptr::null_mut();
-        assert_eq!(int2dds_create_subscriber(participant, &mut subscriber), INT2DDS_RET_OK);
+        assert_eq!(
+            int2dds_create_subscriber(participant, ptr::null(), &mut subscriber),
+            INT2DDS_RET_OK
+        );
         let mut writer = ptr::null_mut();
         assert_eq!(
             int2dds_create_datawriter_dynamic(publisher, topic, support, ptr::null(), &mut writer),

@@ -7,11 +7,11 @@ namespace Int2Dds.Interop
     {
         // const char *const *paths marshals as an array of UTF-8 pointers.
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern int int2dds_load_profiles(IntPtr factory, IntPtr[] paths, UIntPtr count);
+        internal static extern int int2dds_load_profiles(IntPtr[] paths, UIntPtr count);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern unsafe int int2dds_get_dynamic_type_support(
-            IntPtr factory, byte* type_name, out IntPtr support_out);
+            byte* type_name, out IntPtr support_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern unsafe int int2dds_create_participant_from_config(

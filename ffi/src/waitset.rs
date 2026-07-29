@@ -14,8 +14,8 @@
 //!
 //! 1. Create a WaitSet with `int2dds_waitset_new`
 //! 2. Get StatusConditions from entities with `int2dds_datareader_get_statuscondition`
-//! 3. Attach conditions with `int2dds_waitset_attach_condition`
-//! 4. Wait for conditions with `int2dds_waitset_wait`
+//! 3. Attach conditions with `int2dds_waitset_attach_statuscondition`
+//! 4. Wait for conditions with `int2dds_waitset_wait_ex`
 //! 5. Clean up with `int2dds_waitset_delete`
 
 use std::sync::Arc;
@@ -41,43 +41,6 @@ pub unsafe extern "C" fn int2dds_waitset_new(waitset_out: *mut *mut Int2DdsWaitS
     *waitset_out = Box::into_raw(waitset_handle);
 
     INT2DDS_RET_OK
-}
-
-/// Wait for conditions to be triggered
-///
-/// # Safety
-/// - `waitset` must be a valid waitset
-/// - `timeout_ms` is the timeout in milliseconds, or -1 for infinite
-///
-/// Returns:
-/// - INT2DDS_RET_OK if conditions were triggered
-/// - INT2DDS_RET_TIMEOUT if the timeout expired
-/// - INT2DDS_RET_ERROR for other errors
-#[deprecated(
-    note = "discards triggered conditions; use int2dds_waitset_wait_ex (ms) or int2dds_waitset_wait_ex_ns (ns)"
-)]
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_waitset_wait(
-    waitset: *const Int2DdsWaitSet,
-    timeout_ms: i64,
-) -> Int2DdsRet {
-    check_null!(waitset);
-
-    let waitset_ref = &*waitset;
-
-    let duration = if timeout_ms < 0 {
-        Duration::infinite()
-    } else {
-        Duration {
-            sec: (timeout_ms / 1000) as i32,
-            nanosec: ((timeout_ms % 1000) * 1_000_000) as u32,
-        }
-    };
-
-    match waitset_ref.inner.wait(duration) {
-        Ok(_conditions) => INT2DDS_RET_OK,
-        Err(e) => dds_error_to_code(&e),
-    }
 }
 
 /// Wait for conditions to be triggered and return the triggered conditions
@@ -123,10 +86,6 @@ pub unsafe extern "C" fn int2dds_waitset_wait_ex(
 }
 
 /// Wait for conditions to be triggered and return them, with nanosecond timeout resolution.
-///
-/// Combines `int2dds_waitset_wait_ex` (returns triggered conditions) with
-/// nanosecond timeout precision, so no capability is lost when migrating off the
-/// deprecated `int2dds_waitset_wait` entry point.
 ///
 /// # Safety
 /// - `waitset` must be a valid waitset
@@ -281,7 +240,7 @@ pub unsafe extern "C" fn int2dds_condition_delete(condition: *mut Int2DdsConditi
 /// - `waitset` must be a valid waitset
 /// - `condition` must be a valid guard condition
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_waitset_attach_guard_condition(
+pub unsafe extern "C" fn int2dds_waitset_attach_guardcondition(
     waitset: *const Int2DdsWaitSet,
     condition: *const Int2DdsGuardCondition,
 ) -> Int2DdsRet {
@@ -306,7 +265,7 @@ pub unsafe extern "C" fn int2dds_waitset_attach_guard_condition(
 /// - `waitset` must be a valid waitset
 /// - `condition` must be a valid guard condition that was previously attached
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_waitset_detach_guard_condition(
+pub unsafe extern "C" fn int2dds_waitset_detach_guardcondition(
     waitset: *const Int2DdsWaitSet,
     condition: *const Int2DdsGuardCondition,
 ) -> Int2DdsRet {
@@ -331,7 +290,7 @@ pub unsafe extern "C" fn int2dds_waitset_detach_guard_condition(
 /// - `waitset` must be a valid waitset
 /// - `condition` must be a valid status condition
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_waitset_attach_condition(
+pub unsafe extern "C" fn int2dds_waitset_attach_statuscondition(
     waitset: *const Int2DdsWaitSet,
     condition: *const Int2DdsStatusCondition,
 ) -> Int2DdsRet {
@@ -353,7 +312,7 @@ pub unsafe extern "C" fn int2dds_waitset_attach_condition(
 /// - `waitset` must be a valid waitset
 /// - `condition` must be a valid status condition that was previously attached
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_waitset_detach_condition(
+pub unsafe extern "C" fn int2dds_waitset_detach_statuscondition(
     waitset: *const Int2DdsWaitSet,
     condition: *const Int2DdsStatusCondition,
 ) -> Int2DdsRet {
@@ -413,122 +372,6 @@ pub unsafe extern "C" fn int2dds_waitset_detach_readcondition(
     }
 }
 
-/// Attach a DataReader's status condition to the WaitSet
-///
-/// This allows waiting for data to arrive on a DataReader.
-///
-/// # Safety
-/// - `waitset` must be a valid waitset
-/// - `reader` must be a valid datareader
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_waitset_attach_datareader(
-    waitset: *const Int2DdsWaitSet,
-    reader: *const Int2DdsDataReader,
-) -> Int2DdsRet {
-    check_null!(waitset);
-    check_null!(reader);
-
-    let waitset_ref = &*waitset;
-    let reader_ref = &*reader;
-
-    // Get status condition from reader
-    let status_condition = match reader_ref.inner.get_statuscondition() {
-        Ok(cond) => cond,
-        Err(e) => return dds_error_to_code(&e),
-    };
-
-    match waitset_ref.inner.attach_condition(status_condition) {
-        Ok(()) => INT2DDS_RET_OK,
-        Err(e) => dds_error_to_code(&e),
-    }
-}
-
-/// Detach a DataReader's status condition from the WaitSet
-///
-/// # Safety
-/// - `waitset` must be a valid waitset
-/// - `reader` must be a valid datareader that was previously attached
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_waitset_detach_datareader(
-    waitset: *const Int2DdsWaitSet,
-    reader: *const Int2DdsDataReader,
-) -> Int2DdsRet {
-    check_null!(waitset);
-    check_null!(reader);
-
-    let waitset_ref = &*waitset;
-    let reader_ref = &*reader;
-
-    // Get status condition from reader
-    let status_condition = match reader_ref.inner.get_statuscondition() {
-        Ok(cond) => cond,
-        Err(e) => return dds_error_to_code(&e),
-    };
-
-    match waitset_ref.inner.detach_condition(status_condition) {
-        Ok(()) => INT2DDS_RET_OK,
-        Err(e) => dds_error_to_code(&e),
-    }
-}
-
-/// Attach a DataWriter's status condition to the WaitSet
-///
-/// This allows waiting for publication matched events on a DataWriter.
-///
-/// # Safety
-/// - `waitset` must be a valid waitset
-/// - `writer` must be a valid datawriter
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_waitset_attach_datawriter(
-    waitset: *const Int2DdsWaitSet,
-    writer: *const Int2DdsDataWriter,
-) -> Int2DdsRet {
-    check_null!(waitset);
-    check_null!(writer);
-
-    let waitset_ref = &*waitset;
-    let writer_ref = &*writer;
-
-    // Get status condition from writer
-    let status_condition = match writer_ref.inner.get_statuscondition() {
-        Ok(cond) => cond,
-        Err(e) => return dds_error_to_code(&e),
-    };
-
-    match waitset_ref.inner.attach_condition(status_condition) {
-        Ok(()) => INT2DDS_RET_OK,
-        Err(e) => dds_error_to_code(&e),
-    }
-}
-
-/// Detach a DataWriter's status condition from the WaitSet
-///
-/// # Safety
-/// - `waitset` must be a valid waitset
-/// - `writer` must be a valid datawriter that was previously attached
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_waitset_detach_datawriter(
-    waitset: *const Int2DdsWaitSet,
-    writer: *const Int2DdsDataWriter,
-) -> Int2DdsRet {
-    check_null!(waitset);
-    check_null!(writer);
-
-    let waitset_ref = &*waitset;
-    let writer_ref = &*writer;
-
-    // Get status condition from writer
-    let status_condition = match writer_ref.inner.get_statuscondition() {
-        Ok(cond) => cond,
-        Err(e) => return dds_error_to_code(&e),
-    };
-
-    match waitset_ref.inner.detach_condition(status_condition) {
-        Ok(()) => INT2DDS_RET_OK,
-        Err(e) => dds_error_to_code(&e),
-    }
-}
-
 /// Delete a WaitSet
 ///
 /// # Safety
@@ -576,19 +419,19 @@ mod tests {
 
             // Create waitset and condition
             int2dds_waitset_new(&mut waitset as *mut _);
-            condition::int2dds_guard_condition_new(&mut guard_condition as *mut _);
+            condition::int2dds_guardcondition_new(&mut guard_condition as *mut _);
 
             // Attach condition
-            let ret = int2dds_waitset_attach_guard_condition(waitset, guard_condition);
+            let ret = int2dds_waitset_attach_guardcondition(waitset, guard_condition);
             assert_eq!(ret, INT2DDS_RET_OK);
 
             // Detach condition
-            let ret = int2dds_waitset_detach_guard_condition(waitset, guard_condition);
+            let ret = int2dds_waitset_detach_guardcondition(waitset, guard_condition);
             assert_eq!(ret, INT2DDS_RET_OK);
 
             // Cleanup
             int2dds_waitset_delete(waitset);
-            condition::int2dds_guard_condition_delete(guard_condition);
+            condition::int2dds_guardcondition_delete(guard_condition);
         }
     }
 
