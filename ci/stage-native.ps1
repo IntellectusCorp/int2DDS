@@ -69,7 +69,45 @@ $fileVersion = (Get-Item (Join-Path $Stage 'bin\int2dds_ffi.dll')).VersionInfo.F
 
 $archive = Join-Path $OutDir "int2dds-$Version-$DistName.zip"
 if (Test-Path $archive) { Remove-Item -Force $archive }
-Compress-Archive -Path $Stage -DestinationPath $archive
+
+# Compress-Archive writes zip entry names with literal backslash separators on
+# Windows, which violates the ZIP spec: entry names must use '/'. That breaks
+# extraction on Linux/macOS (e.g. Python's zipfile only normalizes backslashes
+# on extract, and only when os.sep -ne '/', so listing/reading the raw name is
+# unaffected but extractall() on a non-Windows host produces a flat pile of
+# files with literal backslashes instead of the bin/lib/include/src tree).
+#
+# [System.IO.Compression.ZipFile]::CreateFromDirectory() is not a safe fix either:
+# verified empirically that its separator behavior differs by .NET runtime --
+# forward slashes under .NET (Core) 8, but literal backslashes under .NET
+# Framework 4.x (the CLR behind Windows PowerShell 5.1). Since this script runs
+# under `shell: pwsh` in CI but may be invoked under either host elsewhere, we
+# cannot rely on that convenience API's internal path handling.
+#
+# Building each entry with the low-level ZipArchive API and a self-computed
+# forward-slash-only name has no such dependency: CreateEntry() writes exactly
+# the string it is given. Verified by raw central-directory byte inspection
+# (independent of any zip-reading library's own normalization) to produce '/'
+# on both .NET Framework 4.0.30319 (Windows PowerShell 5.1) and .NET 8.0.25.
+Add-Type -AssemblyName System.IO.Compression -ErrorAction SilentlyContinue
+
+$topDir = Split-Path -Leaf $Stage
+$archiveStream = [System.IO.File]::Open($archive, [System.IO.FileMode]::CreateNew)
+try {
+    $zip = New-Object System.IO.Compression.ZipArchive($archiveStream, [System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+        Get-ChildItem -Path $Stage -Recurse -File | ForEach-Object {
+            $relative = $_.FullName.Substring($Stage.Length).Replace([char]0x5C, [char]0x2F).Trim([char]0x2F)
+            $entryName = "$topDir/$relative"
+            $entry = $zip.CreateEntry($entryName, [System.IO.Compression.CompressionLevel]::Optimal)
+            $entryStream = $entry.Open()
+            try {
+                $fileStream = [System.IO.File]::OpenRead($_.FullName)
+                try { $fileStream.CopyTo($entryStream) } finally { $fileStream.Dispose() }
+            } finally { $entryStream.Dispose() }
+        }
+    } finally { $zip.Dispose() }
+} finally { $archiveStream.Dispose() }
 
 Write-Host "== manifest =="
 Get-Content (Join-Path $Stage 'manifest.txt')
