@@ -54,6 +54,9 @@ static void history_name(int32_t kind, int32_t depth, char* out, size_t out_len)
 
 int main(int argc, char* argv[]) {
     signal(SIGINT, handle_sigint);
+    /* Unbuffer stdout so redirected output (CI logs) appears as it is produced.
+       _IONBF rather than _IOLBF because the MSVC CRT does not implement line buffering. */
+    setvbuf(stdout, NULL, _IONBF, 0);
 
     Int2DdsRet ret;
     Int2DdsParticipantFactory* factory = NULL;
@@ -177,13 +180,14 @@ int main(int argc, char* argv[]) {
     struct Int2DdsSubscriptionMatchedStatus matched = {0};
     do {
         struct Int2DdsConditionSeq *triggered = NULL;
-        ret = int2dds_waitset_wait_ex(waitset, -1, &triggered);
+        ret = int2dds_waitset_wait_ex(waitset, 1000, &triggered);
         int2dds_condition_seq_delete(triggered);
-        if (ret != INT2DDS_RET_OK) {
+        if (ret != INT2DDS_RET_OK && ret != INT2DDS_RET_TIMEOUT) {
             fprintf(stderr, "WaitSet wait failed: %d\n", ret);
             goto cleanup;
         }
         if (g_stop) {
+            ret = INT2DDS_RET_OK;
             goto cleanup;
         }
 

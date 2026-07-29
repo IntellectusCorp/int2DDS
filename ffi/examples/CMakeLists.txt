@@ -33,7 +33,8 @@ add_executable(hello_world_sub hello_world/hello_world_sub.c)
 target_link_libraries(hello_world_sub ${INT2DDS_FFI_LIB})
 
 # Copy DLL next to the executables on Windows.
-if(WIN32 AND EXISTS ${INT2DDS_FFI_DLL})
+# Quoted because INT2DDS_FFI_DLL is only set on Windows/macOS.
+if(WIN32 AND EXISTS "${INT2DDS_FFI_DLL}")
     foreach(target hello_world_pub hello_world_sub)
         add_custom_command(TARGET ${target} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
