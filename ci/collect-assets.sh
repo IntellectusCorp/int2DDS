@@ -9,6 +9,11 @@ version="${1:?usage: collect-assets.sh <version> <artifact_root> <out_dir>}"
 artifact_root="${2:?}"
 out_dir="${3:?}"
 
+# nupkg/snupkg/wheel/sdist filenames use the base version (prerelease suffix
+# stripped) — the same value check-version.sh enforces on the source version
+# fields. dotnet-libs.zip and the 13 native archives use the full tag version.
+base_version="${version%%-*}"
+
 rm -rf "$out_dir"
 mkdir -p "$out_dir"
 
@@ -40,6 +45,32 @@ for dist in windows-x86_64 windows-i686 windows-aarch64 windows-x86_64-gnu; do
     exit 1
   fi
 done
+
+# Screening the remaining 11 (3 C# + 8 Python) by total count alone would let a
+# wrong filename (e.g. base/full version confusion) pass, because the count is
+# still 24. Check these 11 by exact name too.
+for f in "Int2Dds.$base_version.nupkg" \
+         "Int2Dds.$base_version.snupkg" \
+         "Int2Dds-$version-dotnet-libs.zip"; do
+  if [[ ! -f "$out_dir/$f" ]]; then
+    echo "ERROR: missing C# package $f" >&2
+    exit 1
+  fi
+done
+
+for tag in win_amd64 win_arm64 \
+           manylinux_2_35_x86_64 manylinux_2_35_aarch64 \
+           macosx_11_0_arm64 macosx_10_12_x86_64 \
+           any; do
+  if [[ ! -f "$out_dir/int2dds-$base_version-py3-none-$tag.whl" ]]; then
+    echo "ERROR: missing Python wheel int2dds-$base_version-py3-none-$tag.whl" >&2
+    exit 1
+  fi
+done
+if [[ ! -f "$out_dir/int2dds-$base_version.tar.gz" ]]; then
+  echo "ERROR: missing Python sdist int2dds-$base_version.tar.gz" >&2
+  exit 1
+fi
 
 ( cd "$out_dir" && sha256sum ./* > SHA256SUMS )
 
