@@ -1,0 +1,170 @@
+name: Release
+run-name: "Release ${{ github.ref_name }}"
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run_tag:
+        description: "Tag to use for the dry run (no release is created)"
+        required: true
+        default: "v0.1.1"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  RUST_TOOLCHAIN: "1.89.0"
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      is_prerelease: ${{ steps.check.outputs.is_prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify version consistency
+        id: check
+        shell: bash
+        run: |
+          tag="${{ github.event_name == 'workflow_dispatch' && inputs.dry_run_tag || github.ref_name }}"
+          version="$(./ci/check-version.sh "$tag")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$version" == *-* ]]; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Extract release notes
+        shell: bash
+        run: ./ci/extract-notes.sh "${{ steps.check.outputs.version }}" > release-notes.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: release-notes.md
+
+  native-linux-gnu:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { triple: x86_64-unknown-linux-gnu,        dist: linux-x86_64, runner: ubuntu-latest }
+          - { triple: aarch64-unknown-linux-gnu,       dist: linux-aarch64, runner: ubuntu-24.04-arm }
+          - { triple: armv7-unknown-linux-gnueabihf,   dist: linux-armhf,  runner: ubuntu-latest }
+    runs-on: ${{ matrix.runner }}
+    container: ubuntu:22.04
+    steps:
+      - name: Install build prerequisites
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            curl ca-certificates build-essential git pkg-config cmake perl file binutils
+          if [ "${{ matrix.triple }}" = "armv7-unknown-linux-gnueabihf" ]; then
+            apt-get install -y --no-install-recommends gcc-arm-linux-gnueabihf
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Mark workspace as a safe git directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --no-modify-path --profile minimal \
+                       --default-toolchain "$RUST_TOOLCHAIN"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Add target
+        run: rustup target add "${{ matrix.triple }}"
+
+      - name: Build
+        env:
+          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
+        run: cargo build --release --locked --target "${{ matrix.triple }}" -p int2dds-ffi -p int2dds-idl
+
+      - name: Fail if the committed cbindgen header is stale
+        run: git diff --exit-code ffi/include/int2dds-ffi.h
+
+      - name: Stage archive
+        run: ./ci/stage-native.sh "${{ matrix.triple }}" "${{ matrix.dist }}" "${{ needs.prepare.outputs.version }}" gnu
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.dist }}
+          path: dist/int2dds-*-${{ matrix.dist }}.tar.gz
+          if-no-files-found: error
+
+  native-linux-musl:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { triple: x86_64-unknown-linux-musl,  dist: linux-x86_64-musl,  runner: ubuntu-latest,    image: "alpine:3.20" }
+          - { triple: aarch64-unknown-linux-musl, dist: linux-aarch64-musl, runner: ubuntu-24.04-arm, image: "alpine:3.20" }
+          - { triple: armv7-unknown-linux-musleabihf, dist: linux-armhf-musl, runner: ubuntu-latest, image: "ghcr.io/cross-rs/armv7-unknown-linux-musleabihf:main" }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build in container
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.triple }}" = "armv7-unknown-linux-musleabihf" ]; then
+            # The cross-rs image already carries the musl cross toolchain.
+            # This target has no rustc host toolchain, so cross-compile on x86_64.
+            docker run --rm -v "$PWD":/src -w /src \
+              -e CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER=arm-linux-musleabihf-gcc \
+              -e RUSTFLAGS="-Ctarget-feature=-crt-static" \
+              "${{ matrix.image }}" \
+              bash -c '
+                set -eu
+                curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
+                  | sh -s -- -y --no-modify-path --profile minimal --default-toolchain '"$RUST_TOOLCHAIN"'
+                . "$HOME/.cargo/env"
+                rustup target add armv7-unknown-linux-musleabihf
+                cargo build --release --locked --target armv7-unknown-linux-musleabihf -p int2dds-ffi -p int2dds-idl
+              '
+          else
+            # Alpine is musl itself, so this is a native build. crt-static has to
+            # be off for rustc to emit a cdylib (.so) instead of a static library.
+            docker run --rm -v "$PWD":/src -w /src \
+              -e RUSTFLAGS="-Ctarget-feature=-crt-static" \
+              -e CARGO_TARGET_DIR=/src/target/${{ matrix.triple }}-tmp \
+              "${{ matrix.image }}" \
+              sh -c '
+                set -eu
+                apk add --no-cache build-base cmake perl nasm clang clang-dev llvm-dev \
+                                   pkgconf linux-headers libgcc curl bash binutils file rustup
+                rustup-init -y --no-modify-path --profile minimal --default-toolchain '"$RUST_TOOLCHAIN"'
+                export PATH=/root/.cargo/bin:$PATH
+                cargo build --release --locked -p int2dds-ffi -p int2dds-idl
+                mkdir -p /src/target/${{ matrix.triple }}/release
+                cp /src/target/${{ matrix.triple }}-tmp/release/libint2dds_ffi.so \
+                   /src/target/${{ matrix.triple }}/release/
+                cp /src/target/${{ matrix.triple }}-tmp/release/int2dds-idl \
+                   /src/target/${{ matrix.triple }}/release/
+              '
+          fi
+
+      - name: Stage archive
+        run: ./ci/stage-native.sh "${{ matrix.triple }}" "${{ matrix.dist }}" "${{ needs.prepare.outputs.version }}" musl
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.dist }}
+          path: dist/int2dds-*-${{ matrix.dist }}.tar.gz
+          if-no-files-found: error
