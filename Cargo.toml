@@ -1,5 +1,5 @@
 [workspace]
-members = ["dds", "derive", "ffi", "rpc", "idl"]
+members = ["dds", "derive", "ffi", "rpc", "idl", "java/native"]
 default-members = ["dds", "derive", "ffi", "rpc", "idl"]
 resolver = "2"
 
@@ -17,3 +17,18 @@ rust-version = "1.89.0"
 
 [profile.dev]
 opt-level = 1
+
+# Thin LTO lets int2dds-ffi's C-ABI functions inline into the JNI forwarders in
+# java/native, so the C ABI hop largely disappears from the machine code.
+#
+# Do NOT raise this to `lto = "fat"` with `codegen-units = 1`. That combination
+# makes rustc 1.89.0 die with SIGSEGV while compiling the `int2dds` core crate
+# on aarch64 — a stack overflow in the LLVM codegen thread, not memory pressure
+# (reproduced on a host with 111 GiB free). Thin LTO builds the same crate in
+# about 55 seconds.
+#
+# A cargo profile cannot be scoped to one crate, so this also applies to the
+# `int2dds_ffi` artifact that the C# and Python bindings ship. That is intended
+# and was accepted deliberately.
+[profile.release]
+lto = "thin"

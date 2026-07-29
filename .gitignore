@@ -152,6 +152,9 @@ int2DDS-shapes-demo
 
 # C# / .NET
 **/bin/
+# java/native/src/bin/ is real committed Rust source (the gen-jni generator),
+# not a .NET build output directory — exempt it from the rule above.
+!java/native/src/bin/
 **/obj/
 *.user
 *.suo
