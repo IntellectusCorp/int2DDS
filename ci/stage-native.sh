@@ -78,7 +78,7 @@ if [[ "$lib_file" == "libint2dds_ffi.so" ]]; then
   if [[ "$libc" == "musl" ]]; then
     echo "libc: musl" >> "$manifest"
   else
-    glibc="$(readelf -V "$real_lib" | grep -oE 'GLIBC_[0-9.]+' | sed 's/GLIBC_//' | sort -V | tail -1)"
+    glibc="$(readelf -V "$real_lib" | grep -oE 'GLIBC_[0-9.]+' | sed 's/GLIBC_//' | sort -V | tail -1 || true)"
     [[ -n "$glibc" ]] || glibc="unknown"
     echo "min_glibc: \"$glibc\"" >> "$manifest"
 
