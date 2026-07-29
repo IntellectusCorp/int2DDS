@@ -32,10 +32,14 @@ def candidate_paths(lib_name: str) -> list[Path]:
     paths: list[Path] = []
 
     # 1. Environment variable — overriding the bundled library is what makes
-    #    development and debugging possible.
+    #    development and debugging possible. Both forms are accepted: pointing
+    #    directly at the file (documented in the README) and pointing at a
+    #    directory (the form the C# binding and CI use).
     env_path = os.environ.get("INT2DDS_FFI_PATH")
     if env_path:
-        paths.append(Path(env_path) / lib_name)
+        env_base = Path(env_path)
+        paths.append(env_base)
+        paths.append(env_base / lib_name)
 
     # 2. Native library bundled in the package (platform wheels)
     paths.append(bundled_dir() / lib_name)

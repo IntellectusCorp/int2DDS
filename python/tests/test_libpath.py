@@ -34,9 +34,29 @@ def test_env_var_outranks_bundled(monkeypatch):
     monkeypatch.setenv("INT2DDS_FFI_PATH", "/custom/dir")
     name = _libpath.library_filename()
     paths = _libpath.candidate_paths(name)
-    env_index = paths.index(Path("/custom/dir") / name)
+    env_base = Path("/custom/dir")
+
+    # Both forms must be candidates: pointing directly at the file (documented in
+    # the README) and pointing at a directory (used by the C# binding and CI).
+    assert env_base in paths
+    assert env_base / name in paths
+
     bundled_index = paths.index(_libpath.bundled_dir() / name)
-    assert env_index < bundled_index
+    assert paths.index(env_base) < bundled_index
+    assert paths.index(env_base / name) < bundled_index
+
+
+def test_env_var_file_form_outranks_dir_form(monkeypatch):
+    """The file form is the more specific interpretation, so it comes before the
+    directory form."""
+    monkeypatch.setenv("INT2DDS_FFI_PATH", "/custom/dir")
+    name = _libpath.library_filename()
+    paths = _libpath.candidate_paths(name)
+    env_base = Path("/custom/dir")
+
+    file_index = paths.index(env_base)
+    dir_index = paths.index(env_base / name)
+    assert file_index < dir_index
 
 
 def test_bundled_outranks_system_paths(monkeypatch):
