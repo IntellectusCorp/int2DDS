@@ -342,7 +342,7 @@ class DataWriter(Generic[T]):
                 max_samples_per_instance=max_per_instance[0],
             ),
             data_frag=frag[0],
-            lifespan=Lifespan(duration=lifespan_ns[0] / 1_000_000_000),
+            lifespan=Lifespan.from_ns(lifespan_ns[0]),
         )
 
     def set_qos(self, qos: "DataWriterQos") -> None:
