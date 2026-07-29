@@ -71,11 +71,20 @@ fn emit_one(f: &FfiFn) -> String {
                 let star = if p.ty.starts_with("*mut ") { "*mut" } else { "*const" };
                 args.push(format!("{n} as usize as {star} _"));
             }
-            Kind::CString => {
+            Kind::CStringIn => {
                 pre.push_str(&format!(
                     "    let {n}_buf = crate::generated_support::take_bytes(&mut env, &{n});\n"
                 ));
                 args.push(format!("crate::generated_support::ptr_or_null(&{n}_buf) as _"));
+            }
+            Kind::CStringOut => {
+                pre.push_str(&format!(
+                    "    let mut {n}_buf = crate::generated_support::out_buffer(&mut env, &{n});\n"
+                ));
+                post.push_str(&format!(
+                    "    crate::generated_support::write_back_opt(&mut env, &{n}, &{n}_buf);\n"
+                ));
+                args.push(format!("crate::generated_support::ptr_or_null_mut(&mut {n}_buf) as _"));
             }
             Kind::CStringArray => {
                 pre.push_str(&format!(
@@ -269,6 +278,34 @@ mod tests {
         )]);
         assert!(out.contains("take_string_array(&mut env, &names)"), "{out}");
         assert!(out.contains("names_arr.as_ptr()"), "{out}");
+    }
+
+    #[test]
+    fn out_text_buffers_are_copied_back_to_java() {
+        // `*mut c_char` looks exactly like the in direction but the FFI writes
+        // into it. 12 functions — every get-name and get-last-error call.
+        let out = emit_rust(&[f(
+            "int2dds_last_error_message",
+            "last_error",
+            vec![p("buf", "*mut c_char"), p("buf_len", "i32")],
+            "i32",
+        )]);
+        assert!(out.contains("out_buffer(&mut env, &buf)"), "{out}");
+        assert!(out.contains("ptr_or_null_mut(&mut buf_buf)"), "{out}");
+        assert!(out.contains("write_back_opt(&mut env, &buf, &buf_buf)"), "{out}");
+        assert!(out.contains("let __ret = unsafe"), "{out}");
+    }
+
+    #[test]
+    fn in_c_strings_do_not_write_back() {
+        let out = emit_rust(&[f(
+            "int2dds_create_topic",
+            "topic",
+            vec![p("name", "*const c_char")],
+            "Int2DdsRet",
+        )]);
+        assert!(out.contains("take_bytes(&mut env, &name)"), "{out}");
+        assert!(!out.contains("write_back"), "{out}");
     }
 
     #[test]

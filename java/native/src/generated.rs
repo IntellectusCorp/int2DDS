@@ -3710,16 +3710,17 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1dy
     out_len: jlong,
 ) -> jint {
     let field_path_buf = crate::generated_support::take_bytes(&mut env, &field_path);
-    let out_buf_buf = crate::generated_support::take_bytes(&mut env, &out_buf);
+    let mut out_buf_buf = crate::generated_support::out_buffer(&mut env, &out_buf);
     let __ret = unsafe {
         int2dds_ffi::dynamic::int2dds_dynamic_data_get_string(
             data as usize as *const _,
             crate::generated_support::ptr_or_null(&field_path_buf) as _,
-            crate::generated_support::ptr_or_null(&out_buf_buf) as _,
+            crate::generated_support::ptr_or_null_mut(&mut out_buf_buf) as _,
             buf_cap as _,
             out_len as usize as *mut _,
         )
     };
+    crate::generated_support::write_back_opt(&mut env, &out_buf, &out_buf_buf);
     __ret as _
 }
 
@@ -4430,18 +4431,19 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1dy
     out_len: jlong,
 ) -> jint {
     let field_name_buf = crate::generated_support::take_bytes(&mut env, &field_name);
-    let out_buf_buf = crate::generated_support::take_bytes(&mut env, &out_buf);
+    let mut out_buf_buf = crate::generated_support::out_buffer(&mut env, &out_buf);
     let __ret = unsafe {
         int2dds_ffi::dynamic::int2dds_dynamic_sample_get_string(
             bytes as usize as *const _,
             len as _,
             type_obj as usize as *const _,
             crate::generated_support::ptr_or_null(&field_name_buf) as _,
-            crate::generated_support::ptr_or_null(&out_buf_buf) as _,
+            crate::generated_support::ptr_or_null_mut(&mut out_buf_buf) as _,
             buf_cap as _,
             out_len as usize as *mut _,
         )
     };
+    crate::generated_support::write_back_opt(&mut env, &out_buf, &out_buf_buf);
     __ret as _
 }
 
@@ -4653,16 +4655,17 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1dy
     out_len: jlong,
     out_value: jlong,
 ) -> jint {
-    let buf_buf = crate::generated_support::take_bytes(&mut env, &buf);
+    let mut buf_buf = crate::generated_support::out_buffer(&mut env, &buf);
     let __ret = unsafe {
         int2dds_ffi::dynamic_value::int2dds_dynamic_value_as_enum(
             value as usize as *const _,
-            crate::generated_support::ptr_or_null(&buf_buf) as _,
+            crate::generated_support::ptr_or_null_mut(&mut buf_buf) as _,
             buf_len as _,
             out_len as usize as *mut _,
             out_value as usize as *mut _,
         )
     };
+    crate::generated_support::write_back_opt(&mut env, &buf, &buf_buf);
     __ret as _
 }
 
@@ -4785,15 +4788,16 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1dy
     buf_len: jlong,
     out_len: jlong,
 ) -> jint {
-    let buf_buf = crate::generated_support::take_bytes(&mut env, &buf);
+    let mut buf_buf = crate::generated_support::out_buffer(&mut env, &buf);
     let __ret = unsafe {
         int2dds_ffi::dynamic_value::int2dds_dynamic_value_as_string(
             value as usize as *const _,
-            crate::generated_support::ptr_or_null(&buf_buf) as _,
+            crate::generated_support::ptr_or_null_mut(&mut buf_buf) as _,
             buf_len as _,
             out_len as usize as *mut _,
         )
     };
+    crate::generated_support::write_back_opt(&mut env, &buf, &buf_buf);
     __ret as _
 }
 
@@ -5296,15 +5300,16 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1dy
     buf_len: jlong,
     out_len: jlong,
 ) -> jint {
-    let buf_buf = crate::generated_support::take_bytes(&mut env, &buf);
+    let mut buf_buf = crate::generated_support::out_buffer(&mut env, &buf);
     let __ret = unsafe {
         int2dds_ffi::dynamic_value::int2dds_dynamic_value_to_string(
             value as usize as *const _,
-            crate::generated_support::ptr_or_null(&buf_buf) as _,
+            crate::generated_support::ptr_or_null_mut(&mut buf_buf) as _,
             buf_len as _,
             out_len as usize as *mut _,
         )
     };
+    crate::generated_support::write_back_opt(&mut env, &buf, &buf_buf);
     __ret as _
 }
 
@@ -5664,13 +5669,14 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1la
     buf: JByteArray<'local>,
     buf_len: jint,
 ) -> jint {
-    let buf_buf = crate::generated_support::take_bytes(&mut env, &buf);
+    let mut buf_buf = crate::generated_support::out_buffer(&mut env, &buf);
     let __ret = unsafe {
         int2dds_ffi::last_error::int2dds_last_error_message(
-            crate::generated_support::ptr_or_null(&buf_buf) as _,
+            crate::generated_support::ptr_or_null_mut(&mut buf_buf) as _,
             buf_len as _,
         )
     };
+    crate::generated_support::write_back_opt(&mut env, &buf, &buf_buf);
     __ret as _
 }
 
@@ -6070,16 +6076,17 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1pa
     out_len: jlong,
 ) -> jint {
     let name_buf = crate::generated_support::take_bytes(&mut env, &name);
-    let out_buf_buf = crate::generated_support::take_bytes(&mut env, &out_buf);
+    let mut out_buf_buf = crate::generated_support::out_buffer(&mut env, &out_buf);
     let __ret = unsafe {
         int2dds_ffi::qos::int2dds_participant_qos_find_property(
             qos as usize as *const _,
             crate::generated_support::ptr_or_null(&name_buf) as _,
-            crate::generated_support::ptr_or_null(&out_buf_buf) as _,
+            crate::generated_support::ptr_or_null_mut(&mut out_buf_buf) as _,
             out_cap as _,
             out_len as usize as *mut _,
         )
     };
+    crate::generated_support::write_back_opt(&mut env, &out_buf, &out_buf_buf);
     __ret as _
 }
 
@@ -6213,18 +6220,19 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1pa
     out_len: jlong,
 ) -> jint {
     let topic_name_buf = crate::generated_support::take_bytes(&mut env, &topic_name);
-    let type_name_buf_buf = crate::generated_support::take_bytes(&mut env, &type_name_buf);
+    let mut type_name_buf_buf = crate::generated_support::out_buffer(&mut env, &type_name_buf);
     let __ret = unsafe {
         int2dds_ffi::dynamic::int2dds_participant_wait_for_type_object(
             participant as usize as *const _,
             crate::generated_support::ptr_or_null(&topic_name_buf) as _,
             timeout_ms as _,
             type_obj_out as usize as *mut _,
-            crate::generated_support::ptr_or_null(&type_name_buf_buf) as _,
+            crate::generated_support::ptr_or_null_mut(&mut type_name_buf_buf) as _,
             type_name_buf_len as _,
             out_len as usize as *mut _,
         )
     };
+    crate::generated_support::write_back_opt(&mut env, &type_name_buf, &type_name_buf_buf);
     __ret as _
 }
 
@@ -7413,14 +7421,15 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1to
     name_out: JByteArray<'local>,
     name_size: jlong,
 ) -> jint {
-    let name_out_buf = crate::generated_support::take_bytes(&mut env, &name_out);
+    let mut name_out_buf = crate::generated_support::out_buffer(&mut env, &name_out);
     let __ret = unsafe {
         int2dds_ffi::topic::int2dds_topic_get_name(
             topic as usize as *const _,
-            crate::generated_support::ptr_or_null(&name_out_buf) as _,
+            crate::generated_support::ptr_or_null_mut(&mut name_out_buf) as _,
             name_size as _,
         )
     };
+    crate::generated_support::write_back_opt(&mut env, &name_out, &name_out_buf);
     __ret as _
 }
 
@@ -7488,14 +7497,15 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1to
     type_name_out: JByteArray<'local>,
     type_name_size: jlong,
 ) -> jint {
-    let type_name_out_buf = crate::generated_support::take_bytes(&mut env, &type_name_out);
+    let mut type_name_out_buf = crate::generated_support::out_buffer(&mut env, &type_name_out);
     let __ret = unsafe {
         int2dds_ffi::topic::int2dds_topic_get_type_name(
             topic as usize as *const _,
-            crate::generated_support::ptr_or_null(&type_name_out_buf) as _,
+            crate::generated_support::ptr_or_null_mut(&mut type_name_out_buf) as _,
             type_name_size as _,
         )
     };
+    crate::generated_support::write_back_opt(&mut env, &type_name_out, &type_name_out_buf);
     __ret as _
 }
 
@@ -8239,16 +8249,17 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1ty
     buf_len: jlong,
     out_len: jlong,
 ) -> jint {
-    let buf_buf = crate::generated_support::take_bytes(&mut env, &buf);
+    let mut buf_buf = crate::generated_support::out_buffer(&mut env, &buf);
     let __ret = unsafe {
         int2dds_ffi::dynamic::int2dds_type_object_member_name(
             t as usize as *const _,
             index as _,
-            crate::generated_support::ptr_or_null(&buf_buf) as _,
+            crate::generated_support::ptr_or_null_mut(&mut buf_buf) as _,
             buf_len as _,
             out_len as usize as *mut _,
         )
     };
+    crate::generated_support::write_back_opt(&mut env, &buf, &buf_buf);
     __ret as _
 }
 
@@ -8578,15 +8589,16 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1xm
     buf_len: jlong,
     out_len: jlong,
 ) -> jint {
-    let buf_buf = crate::generated_support::take_bytes(&mut env, &buf);
+    let mut buf_buf = crate::generated_support::out_buffer(&mut env, &buf);
     let __ret = unsafe {
         int2dds_ffi::xml::int2dds_xml_type_registry_type_name(
             registry as usize as *const _,
             index as _,
-            crate::generated_support::ptr_or_null(&buf_buf) as _,
+            crate::generated_support::ptr_or_null_mut(&mut buf_buf) as _,
             buf_len as _,
             out_len as usize as *mut _,
         )
     };
+    crate::generated_support::write_back_opt(&mut env, &buf, &buf_buf);
     __ret as _
 }

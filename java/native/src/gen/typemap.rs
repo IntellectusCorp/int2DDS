@@ -11,8 +11,15 @@ pub enum Kind {
     Scalar,
     /// Opaque handle or raw address, carried as a Java `long`.
     Pointer,
-    /// NUL-terminated C string, carried as a UTF-8 `byte[]`.
-    CString,
+    /// NUL-terminated C string the FFI reads, i.e. `*const c_char`.
+    CStringIn,
+    /// Caller-supplied text buffer the FFI *writes*, i.e. `*mut c_char`.
+    ///
+    /// Same trap as [`Kind::ByteArrayOut`], and easier to miss because the
+    /// pointee type is identical to the in direction. 12 functions take one —
+    /// every "get the name / the string / the last error" call in the API. The
+    /// forwarder must hand the FFI a scratch buffer and copy it back.
+    CStringOut,
     /// Array of C strings, carried as `byte[][]`.
     CStringArray,
     /// Fixed-size byte buffer the FFI reads, such as `*const [u8; 16]`.
@@ -97,7 +104,10 @@ pub fn map_type(rust_ty: &str) -> Option<Mapped> {
     }
     if pointee == "c_char" {
         return match depth {
-            1 => Some(m("byte[]", "JByteArray<'local>", Kind::CString)),
+            1 if t.starts_with("*mut ") => {
+                Some(m("byte[]", "JByteArray<'local>", Kind::CStringOut))
+            }
+            1 => Some(m("byte[]", "JByteArray<'local>", Kind::CStringIn)),
             2 => Some(m("byte[][]", "JObjectArray<'local>", Kind::CStringArray)),
             _ => None,
         };
@@ -167,10 +177,30 @@ mod tests {
         ] {
             let m = map_type(t).unwrap_or_else(|| panic!("{t} must map"));
             assert_eq!(m.java, "byte[]", "{t}");
-            assert_eq!(m.kind, Kind::CString, "{t}");
         }
         assert_eq!(map_type("*const *const c_char").unwrap().java, "byte[][]");
         assert_eq!(map_type("*const *const std::os::raw::c_char").unwrap().java, "byte[][]");
+    }
+
+    #[test]
+    fn mutable_c_strings_are_out_buffers() {
+        // `*mut c_char` is a buffer the FFI fills in. Mapping it like the in
+        // direction compiles and runs and hands Java back an untouched array —
+        // every get-name and get-last-error call would return nothing.
+        assert_eq!(map_type("*const c_char").unwrap().kind, Kind::CStringIn);
+        assert_eq!(map_type("*mut c_char").unwrap().kind, Kind::CStringOut);
+        assert_eq!(map_type("*mut std::os::raw::c_char").unwrap().kind, Kind::CStringOut);
+    }
+
+    #[test]
+    fn the_real_ffi_surface_has_out_text_buffers() {
+        let fns = parse_ffi_dir(Path::new("../../ffi/src")).unwrap();
+        let n = fns
+            .iter()
+            .flat_map(|f| f.params.iter())
+            .filter(|p| map_type(&p.ty).map(|m| m.kind) == Some(Kind::CStringOut))
+            .count();
+        assert_eq!(n, 12, "*mut c_char out buffers");
     }
 
     #[test]

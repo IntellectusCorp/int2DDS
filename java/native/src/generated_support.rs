@@ -43,6 +43,35 @@ pub fn ptr_or_null(buf: &Option<Vec<u8>>) -> *const u8 {
     }
 }
 
+/// A zeroed scratch buffer matching the caller's `byte[]` length, for a
+/// `*mut c_char` parameter the FFI writes text into.
+///
+/// Sized from the Java array rather than the separate length argument, so a
+/// caller that passes a length larger than its own array cannot make the FFI
+/// write past the end of this buffer.
+pub fn out_buffer(env: &mut JNIEnv, arr: &JByteArray) -> Option<Vec<u8>> {
+    if arr.is_null() {
+        return None;
+    }
+    let len = env.get_array_length(arr).ok()?;
+    Some(vec![0u8; len.max(0) as usize])
+}
+
+/// The writable address of a scratch buffer from [`out_buffer`], or null.
+pub fn ptr_or_null_mut(buf: &mut Option<Vec<u8>>) -> *mut u8 {
+    match buf {
+        Some(v) => v.as_mut_ptr(),
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// Copy a scratch buffer from [`out_buffer`] back into the caller's array.
+pub fn write_back_opt(env: &mut JNIEnv, arr: &JByteArray, src: &Option<Vec<u8>>) {
+    if let Some(v) = src {
+        write_back(env, arr, v);
+    }
+}
+
 /// Copy a Java `byte[]` into a fixed-size array such as a 16-byte GUID.
 ///
 /// Returns `None` for a null array or one shorter than `N`, so the forwarder
