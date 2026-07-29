@@ -301,8 +301,8 @@ impl TcpSender {
         tls_config: Option<Arc<TlsConfig>>,
         shared: Arc<ConnectionRegistry>,
         tcp_config: &TcpConfig,
+        cancel: CancellationToken,
     ) -> Arc<Self> {
-        let cancel = CancellationToken::new();
         let runtime_handle = tokio::runtime::Handle::current();
 
         // Prefer the configured public address (WAN/NAT).
@@ -509,6 +509,11 @@ impl TcpSender {
     /// connection actor via its child token.
     pub(crate) async fn shutdown(&self) {
         self.cancel.cancel();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cancel_token(&self) -> &CancellationToken {
+        &self.cancel
     }
 
     /// Heuristic: is this address our own listener? Avoids loopback
@@ -1158,6 +1163,7 @@ mod tests {
             None,
             shared,
             cfg,
+            CancellationToken::new(),
         );
         (sender, d_rx)
     }
@@ -1250,6 +1256,7 @@ mod tests {
             b_user_tx,
             None,
             TcpSocketTuning::default(),
+            CancellationToken::new(),
         )
         .expect("listener bind_and_spawn");
         let b_port = listener.port();
@@ -1289,6 +1296,7 @@ mod tests {
             b_user_tx,
             None,
             TcpSocketTuning::default(),
+            CancellationToken::new(),
         )
         .expect("listener bind_and_spawn");
         let b_port = listener.port();
@@ -1340,6 +1348,7 @@ mod tests {
             b_user_tx,
             None,
             TcpSocketTuning::default(),
+            CancellationToken::new(),
         )
         .expect("listener bind_and_spawn");
         let b_port = listener.port();
@@ -1383,6 +1392,7 @@ mod tests {
             b_user_tx,
             None,
             TcpSocketTuning::default(),
+            CancellationToken::new(),
         )
         .expect("listener bind_and_spawn");
         let b_port = listener.port();
@@ -1525,6 +1535,7 @@ mod tests {
             b_user_tx,
             None,
             TcpSocketTuning::default(),
+            CancellationToken::new(),
         )
         .expect("listener bind_and_spawn");
         let b_port = listener.port();
@@ -1967,6 +1978,7 @@ mod tests {
             b_user_tx,
             None,
             TcpSocketTuning::default(),
+            CancellationToken::new(),
         )
         .expect("listener bind_and_spawn");
         let b_port = listener.port();
@@ -2081,6 +2093,7 @@ mod tests {
             b_user_tx,
             None,
             TcpSocketTuning::default(),
+            CancellationToken::new(),
         )
         .expect("listener bind_and_spawn");
         let b_port = listener.port();
@@ -2133,6 +2146,7 @@ mod tests {
             b_user_tx,
             None,
             TcpSocketTuning::default(),
+            CancellationToken::new(),
         )
         .expect("listener bind_and_spawn");
         let b_port = listener.port();
@@ -2332,6 +2346,7 @@ mod tests {
             b_user_tx,
             None,
             TcpSocketTuning::default(),
+            CancellationToken::new(),
         )
         .expect("listener bind_and_spawn");
         let b_port = listener.port();
