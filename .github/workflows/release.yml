@@ -168,3 +168,117 @@ jobs:
           name: native-${{ matrix.dist }}
           path: dist/int2dds-*-${{ matrix.dist }}.tar.gz
           if-no-files-found: error
+
+  native-windows:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { triple: x86_64-pc-windows-msvc,  dist: windows-x86_64 }
+          - { triple: i686-pc-windows-msvc,    dist: windows-i686 }
+          - { triple: aarch64-pc-windows-msvc, dist: windows-aarch64 }
+          - { triple: x86_64-pc-windows-gnu,   dist: windows-x86_64-gnu }
+    runs-on: windows-2022
+    steps:
+      - name: Disable Windows Defender realtime monitoring
+        run: Set-MpPreference -DisableRealtimeMonitoring $true
+        shell: powershell
+
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "1.89.0"
+          target: ${{ matrix.triple }}
+          rustflags: ""
+          cache: false
+
+      - name: Build
+        shell: bash
+        env:
+          # MSVC targets use lld-link to cut link time. Not applied to MinGW.
+          RUSTFLAGS: ${{ endsWith(matrix.triple, '-msvc') && '-C linker=lld-link' || '' }}
+        run: cargo build --release --locked --target "${{ matrix.triple }}" -p int2dds-ffi -p int2dds-idl
+
+      - name: Fail if the committed cbindgen header is stale
+        shell: bash
+        run: git diff --exit-code ffi/include/int2dds-ffi.h
+
+      - name: Stage archive
+        shell: pwsh
+        run: ./ci/stage-native.ps1 -Triple "${{ matrix.triple }}" -DistName "${{ matrix.dist }}" -Version "${{ needs.prepare.outputs.version }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.dist }}
+          path: dist/int2dds-*-${{ matrix.dist }}.zip
+          if-no-files-found: error
+
+  native-macos:
+    needs: prepare
+    runs-on: macos-latest
+    env:
+      # Default deployment target for the x86_64 slice. aarch64 (Apple Silicon)
+      # hardware does not support anything below macOS 11.0 (Big Sur), so passing
+      # this value through makes the linker either reject it or silently promote it
+      # to 11.0 (depending on the toolchain), leaving the manifest out of sync with
+      # the actual binary. The aarch64 commands below override it to 11.0
+      # explicitly.
+      MACOSX_DEPLOYMENT_TARGET: "10.12"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "1.89.0"
+          target: x86_64-apple-darwin,aarch64-apple-darwin
+          rustflags: ""
+          cache: false
+
+      - name: Build both slices
+        run: |
+          cargo build --release --locked --target x86_64-apple-darwin  -p int2dds-ffi -p int2dds-idl
+          MACOSX_DEPLOYMENT_TARGET=11.0 cargo build --release --locked --target aarch64-apple-darwin -p int2dds-ffi -p int2dds-idl
+
+      - name: Fail if the committed cbindgen header is stale
+        run: git diff --exit-code ffi/include/int2dds-ffi.h
+
+      - name: Create universal2 slices
+        run: |
+          set -euo pipefail
+          mkdir -p target/universal2-apple-darwin/release
+          lipo -create \
+            target/x86_64-apple-darwin/release/libint2dds_ffi.dylib \
+            target/aarch64-apple-darwin/release/libint2dds_ffi.dylib \
+            -output target/universal2-apple-darwin/release/libint2dds_ffi.dylib
+          lipo -create \
+            target/x86_64-apple-darwin/release/int2dds-idl \
+            target/aarch64-apple-darwin/release/int2dds-idl \
+            -output target/universal2-apple-darwin/release/int2dds-idl
+          echo "== universal2 slices =="
+          lipo -info target/universal2-apple-darwin/release/libint2dds_ffi.dylib
+
+      - name: Stage archives
+        run: |
+          ./ci/stage-native.sh x86_64-apple-darwin     macos-x86_64     "${{ needs.prepare.outputs.version }}"
+          MACOSX_DEPLOYMENT_TARGET=11.0 ./ci/stage-native.sh aarch64-apple-darwin macos-arm64 "${{ needs.prepare.outputs.version }}"
+          ./ci/stage-native.sh universal2-apple-darwin macos-universal2 "${{ needs.prepare.outputs.version }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-macos-x86_64
+          path: dist/int2dds-*-macos-x86_64.tar.gz
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-macos-arm64
+          path: dist/int2dds-*-macos-arm64.tar.gz
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-macos-universal2
+          path: dist/int2dds-*-macos-universal2.tar.gz
+          if-no-files-found: error
