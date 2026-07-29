@@ -37,10 +37,13 @@ try:
         WriterDataLifecycle,
     )
     from int2dds.core.conditions import (
+        ALIVE_INSTANCE_STATE,
         ANY_INSTANCE_STATE,
         ANY_SAMPLE_STATE,
         ANY_VIEW_STATE,
         NEW_VIEW_STATE,
+        NOT_ALIVE_DISPOSED_INSTANCE_STATE,
+        NOT_ALIVE_NO_WRITERS_INSTANCE_STATE,
         NOT_READ_SAMPLE_STATE,
         READ_SAMPLE_STATE,
         Condition,
@@ -115,6 +118,9 @@ __all__ = [
     "NEW_VIEW_STATE",
     "ANY_VIEW_STATE",
     "ANY_INSTANCE_STATE",
+    "ALIVE_INSTANCE_STATE",
+    "NOT_ALIVE_DISPOSED_INSTANCE_STATE",
+    "NOT_ALIVE_NO_WRITERS_INSTANCE_STATE",
     # Async support
     "AsyncWaitSet",
     "AsyncDataReader",
