@@ -68,23 +68,22 @@ impl Socket {
         // Check if user specified which network to use via env variable
         let is_network_specified = get_network_interface().is_some() || get_network_ip().is_some();
 
-        if let Some(ip) = crate::common::enterprise_hooks::call_resolve_ip() {
-            // enterprise resolve_ip hook enabled
-            if is_network_specified {
-                log::debug!("Using enterprise hooks specified IP: {}", ip);
-                ips.push(ip);
-                from_feature = true;
-            } else {
-                log::warn!(
-                    "enterprise resolve_ip hook is enabled but no network interface specified. \
-                            Falling back to default (auto-detection)"
-                );
+        if is_network_specified {
+            match crate::common::enterprise_loader::resolve_ip() {
+                Some(ip) => {
+                    log::debug!("Using enterprise-resolved IP: {}", ip);
+                    ips.push(ip);
+                    from_feature = true;
+                }
+                None => log::warn!(
+                    "Env variable INT2DDS_NETWORK_INTERFACE or INT2DDS_NETWORK_IP is set \
+                     but the enterprise library did not resolve an IP. Ignoring the value"
+                ),
             }
-        } else if is_network_specified {
-            // These variables can only be used with the enterprise resolve_ip hook
+        } else if crate::common::enterprise_loader::is_loaded() {
             log::warn!(
-                "Env variable INT2DDS_NETWORK_INTERFACE or INT2DDS_NETWORK_IP is set \
-                 but the enterprise resolve_ip hook is not enabled. Ignoring the value"
+                "enterprise library is loaded but neither INT2DDS_NETWORK_INTERFACE nor \
+                 INT2DDS_NETWORK_IP is set; using default auto-detection"
             );
         }
 
