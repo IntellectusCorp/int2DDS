@@ -26,6 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.check.outputs.version }}
+      base_version: ${{ steps.check.outputs.base_version }}
       is_prerelease: ${{ steps.check.outputs.is_prerelease }}
     steps:
       - uses: actions/checkout@v4
@@ -37,6 +38,14 @@ jobs:
           tag="${{ github.event_name == 'workflow_dispatch' && inputs.dry_run_tag || github.ref_name }}"
           version="$(./ci/check-version.sh "$tag")"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          # Package filenames (nupkg/snupkg/wheel/sdist) come from the static
+          # version fields in Cargo.toml and pyproject.toml, and check-version.sh
+          # keeps those equal to the base version with the prerelease suffix
+          # stripped. Native archives, on the other hand, are named with the full
+          # tag version (suffix included). Output both so each job can use the one
+          # it needs.
+          base_version="${version%%-*}"
+          echo "base_version=$base_version" >> "$GITHUB_OUTPUT"
           if [[ "$version" == *-* ]]; then
             echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
           else
@@ -348,7 +357,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          pkg="dist/nuget/Int2Dds.${{ needs.prepare.outputs.version }}.nupkg"
+          # dotnet pack names the nupkg/snupkg from the version in
+          # Directory.Build.props (which reads Cargo.toml). That version is always
+          # the base version without a prerelease suffix (enforced by
+          # check-version.sh), so use base_version here, not the full tag version.
+          pkg="dist/nuget/Int2Dds.${{ needs.prepare.outputs.base_version }}.nupkg"
           listing="$(unzip -l "$pkg")"
           # A bare grep -c still returns "10" for a broken layout with nested paths
           # like runtimes/{rid}/native/{rid}/native/..., so counting alone misses it
@@ -382,7 +395,7 @@ jobs:
             echo "ERROR: expected 10 native RIDs in the nupkg, found $count" >&2
             exit 1
           fi
-          test -f "dist/nuget/Int2Dds.${{ needs.prepare.outputs.version }}.snupkg"
+          test -f "dist/nuget/Int2Dds.${{ needs.prepare.outputs.base_version }}.snupkg"
 
       - name: Build dotnet-libs zip
         shell: bash
@@ -471,7 +484,10 @@ jobs:
             ls -1 dist/wheels
             exit 1
           fi
-          test -f "dist/wheels/int2dds-${{ needs.prepare.outputs.version }}.tar.gz"
+          # The sdist filename uses base_version for the same reason as the nupkg:
+          # python -m build names it from the static version in pyproject.toml,
+          # which is always the base version without a suffix.
+          test -f "dist/wheels/int2dds-${{ needs.prepare.outputs.base_version }}.tar.gz"
 
       - name: Smoke test the linux x86_64 wheel
         shell: bash
