@@ -1,0 +1,132 @@
+name: Java
+run-name: "Java ${{ github.head_ref }}"
+
+on:
+  pull_request:
+    branches: [develop]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+jobs:
+  jni-drift:
+    name: Generated JNI layer is current
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.89.0
+          # gen-jni runs rustfmt on its output so `cargo fmt` stays a no-op on
+          # the committed file. Without the component the generator fails.
+          components: rustfmt
+          rustflags: ""
+
+      - name: Load cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-develop
+          save-if: false
+
+      - name: Check for generator drift
+        shell: bash
+        run: ./scripts/check-jni-drift.sh
+
+      - name: Verify the C ABI stays re-exported from the JNI library
+        shell: bash
+        run: |
+          # Spike S2: the Panama backend planned for a later branch reuses this
+          # same .so, which only works while the dependency rlib's #[no_mangle]
+          # symbols reach the dynamic symbol table. They do so because the
+          # forwarders reference them — a linker dead-code pass would drop them
+          # again if that ever stopped being true.
+          cargo build --release -p int2dds-java
+          count=$(nm -D --defined-only target/release/libint2dds_java.so \
+                  | grep -c ' T int2dds_')
+          echo "int2dds_ symbols exported: $count"
+          if [ "$count" -ne 444 ]; then
+            echo "ERROR: expected 444 re-exported C ABI symbols, found $count" >&2
+            exit 1
+          fi
+
+  java-test:
+    name: ${{ matrix.os }} / JDK ${{ matrix.jdk }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-2022, macos-latest]
+        jdk: [8, 11, 17, 21, 25]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Disable Windows Defender realtime monitoring
+        if: runner.os == 'Windows'
+        run: Set-MpPreference -DisableRealtimeMonitoring $true
+        shell: powershell
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.89.0
+          rustflags: ""
+
+      - name: Load cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-develop
+          save-if: false
+
+      # The matrix JDK runs the tests; JDK 17 runs Gradle itself. It is listed
+      # last on purpose — setup-java points JAVA_HOME at the final entry, and
+      # Gradle 8.10 on JDK 8 is not a combination worth relying on. Gradle finds
+      # the matrix JDK through toolchain auto-detection of these installs.
+      - name: Install JDKs
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: |
+            ${{ matrix.jdk }}
+            17
+
+      - name: Build native library
+        shell: bash
+        env:
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C linker=lld-link' || '' }}
+        run: cargo build --release -p int2dds-java
+
+      - name: Run Rust tests
+        shell: bash
+        env:
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C linker=lld-link' || '' }}
+        run: cargo test -p int2dds-java
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Run Java tests
+        working-directory: java
+        shell: bash
+        run: ./gradlew test --no-daemon -PtestJavaVersion=${{ matrix.jdk }}
+
+  # Reports the plain "java" status required by the develop ruleset;
+  # fails unless every matrix job succeeded.
+  java-gate:
+    name: java
+    needs: [jni-drift, java-test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check matrix results
+        run: |
+          if [ "${{ needs.jni-drift.result }}" != "success" ] \
+             || [ "${{ needs.java-test.result }}" != "success" ]; then
+            echo "jni-drift: ${{ needs.jni-drift.result }}"
+            echo "java-test: ${{ needs.java-test.result }}"
+            exit 1
+          fi
