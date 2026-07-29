@@ -36,6 +36,14 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
+      # Single place the runner's OS leaks into the rest of the job.
+      - name: Resolve the FFI library name for this runner
+        run: |
+          case "$(uname -s)" in
+            Darwin) echo "FFI_LIB=libint2dds_ffi.dylib" >> "$GITHUB_ENV" ;;
+            *)      echo "FFI_LIB=libint2dds_ffi.so"    >> "$GITHUB_ENV" ;;
+          esac
+
       - name: Build Rust examples and the FFI library
         run: |
           cargo build --package int2dds --examples
@@ -46,6 +54,17 @@ jobs:
           cmake -S ffi/examples -B ffi/examples/build
           cmake --build ffi/examples/build --parallel
 
+      # The C examples are the only stack that links the FFI at build time, so they
+      # are the only one that has to resolve the library by its soname at runtime.
+      - name: Show what the C examples link against
+        run: |
+          ls -l "target/debug/$FFI_LIB"*
+          if command -v readelf >/dev/null; then
+            readelf -d ffi/examples/build/hello_world_pub | grep -E 'NEEDED|RPATH|RUNPATH'
+          else
+            otool -l ffi/examples/build/hello_world_pub | grep -A2 -E 'LC_LOAD_DYLIB|LC_RPATH'
+          fi
+
       - name: Build C# examples
         run: |
           for proj in HelloWorldPub HelloWorldSub; do
@@ -53,13 +72,13 @@ jobs:
               -c Release -p:TargetFrameworks="$HW_DOTNET_TFM"
             # .NET probes the app directory; setting LD_LIBRARY_PATH from inside the
             # process (as NativeLibraryLoader does) is too late for glibc.
-            cp target/debug/libint2dds_ffi.so "csharp/examples/$proj/bin/Release/$HW_DOTNET_TFM/"
+            cp "target/debug/$FFI_LIB" "csharp/examples/$proj/bin/Release/$HW_DOTNET_TFM/"
           done
 
       - name: Package binaries
         run: |
           tar czf hello-world-bin.tar.gz \
-            target/debug/libint2dds_ffi.so \
+            target/debug/"$FFI_LIB"* \
             target/debug/examples/hello_world_pub \
             target/debug/examples/hello_world_sub \
             ffi/examples/build/hello_world_pub \
@@ -87,6 +106,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Resolve the FFI library name for this runner
+        run: |
+          case "$(uname -s)" in
+            Darwin) echo "FFI_LIB=libint2dds_ffi.dylib" >> "$GITHUB_ENV" ;;
+            *)      echo "FFI_LIB=libint2dds_ffi.so"    >> "$GITHUB_ENV" ;;
+          esac
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -106,7 +132,11 @@ jobs:
           name: hello-world-bin
 
       - name: Unpack binaries
-        run: tar xzf hello-world-bin.tar.gz
+        run: |
+          tar xzf hello-world-bin.tar.gz
+          # The soname symlink has to survive the round trip or the C examples
+          # cannot load the library.
+          ls -l "target/debug/$FFI_LIB"*
 
       - name: Run against every subscriber
         env:
