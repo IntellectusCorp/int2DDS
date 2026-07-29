@@ -15,8 +15,15 @@ pub enum Kind {
     CString,
     /// Array of C strings, carried as `byte[][]`.
     CStringArray,
-    /// Fixed-size byte buffer such as `[u8; 16]`, carried as `byte[]`.
-    ByteArray,
+    /// Fixed-size byte buffer the FFI reads, such as `*const [u8; 16]`.
+    ByteArrayIn,
+    /// Fixed-size byte buffer the FFI *writes*, such as `*mut [u8; 16]`.
+    ///
+    /// Distinct from [`Kind::ByteArrayIn`] because the forwarder must copy the
+    /// result back into the caller's Java array after the call. Treating an out
+    /// parameter as an in parameter compiles and runs, and silently returns
+    /// nothing — 17 functions in the FFI surface take one.
+    ByteArrayOut,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,10 +31,22 @@ pub struct Mapped {
     pub java: &'static str,
     pub jni: &'static str,
     pub kind: Kind,
+    /// Element count for the fixed-size byte-array kinds; `None` otherwise.
+    pub len: Option<usize>,
 }
 
 const fn m(java: &'static str, jni: &'static str, kind: Kind) -> Mapped {
-    Mapped { java, jni, kind }
+    Mapped { java, jni, kind, len: None }
+}
+
+/// Element count of a `[u8; N]` pointee, or `None` if this is not one.
+fn fixed_array_len(pointee: &str) -> Option<usize> {
+    let inner = pointee.strip_prefix('[')?.strip_suffix(']')?;
+    let (elem, count) = inner.split_once(';')?;
+    if elem.trim() != "u8" {
+        return None;
+    }
+    count.trim().parse().ok()
 }
 
 /// Strip the `std::os::raw::` prefix so `c_char` spellings unify.
@@ -83,8 +102,11 @@ pub fn map_type(rust_ty: &str) -> Option<Mapped> {
             _ => None,
         };
     }
-    if depth == 1 && (pointee.starts_with("[u8 ;") || pointee.starts_with("[u8;")) {
-        return Some(m("byte[]", "JByteArray<'local>", Kind::ByteArray));
+    if depth == 1 {
+        if let Some(n) = fixed_array_len(pointee) {
+            let kind = if t.starts_with("*mut ") { Kind::ByteArrayOut } else { Kind::ByteArrayIn };
+            return Some(Mapped { java: "byte[]", jni: "JByteArray<'local>", kind, len: Some(n) });
+        }
     }
     // Every other pointer, including double pointers to opaque structs, is a
     // raw address. Java obtains addresses via Ffi.directBufferAddress().
@@ -157,7 +179,37 @@ mod tests {
         assert_eq!(map_type("*mut [u8; 16]").unwrap().java, "byte[]");
         assert_eq!(map_type("*const [u8; 16]").unwrap().java, "byte[]");
         assert_eq!(map_type("*mut [u8; 12]").unwrap().java, "byte[]");
-        assert_eq!(map_type("*mut [u8; 16]").unwrap().kind, Kind::ByteArray);
+    }
+
+    #[test]
+    fn mutable_fixed_arrays_are_out_parameters() {
+        // The direction decides whether the forwarder copies the result back to
+        // Java. Conflating them loses every instance handle and GUID the FFI
+        // writes, without any compile or runtime error.
+        let out = map_type("*mut [u8; 16]").unwrap();
+        assert_eq!(out.kind, Kind::ByteArrayOut);
+        assert_eq!(out.len, Some(16));
+
+        let inp = map_type("*const [u8; 16]").unwrap();
+        assert_eq!(inp.kind, Kind::ByteArrayIn);
+        assert_eq!(inp.len, Some(16));
+
+        assert_eq!(map_type("*mut [u8; 12]").unwrap().len, Some(12));
+        // A plain pointer carries no length.
+        assert_eq!(map_type("*mut Int2DdsTopic").unwrap().len, None);
+    }
+
+    #[test]
+    fn the_real_ffi_surface_has_both_array_directions() {
+        let fns = parse_ffi_dir(Path::new("../../ffi/src")).unwrap();
+        let count = |k: Kind| {
+            fns.iter()
+                .flat_map(|f| f.params.iter())
+                .filter(|p| map_type(&p.ty).map(|m| m.kind) == Some(k))
+                .count()
+        };
+        assert_eq!(count(Kind::ByteArrayOut), 17, "*mut [u8; N] out parameters");
+        assert!(count(Kind::ByteArrayIn) > 0, "*const [u8; N] in parameters");
     }
 
     #[test]

@@ -9,7 +9,10 @@ use jni::sys::jint;
 use jni::JavaVM;
 use std::sync::OnceLock;
 
+pub mod buffer;
 pub mod gen;
+pub mod generated_support;
+pub mod strings;
 
 /// The product version, inherited from the workspace `Cargo.toml`.
 /// `NativeLoader` on the Java side compares this against the JAR version.
