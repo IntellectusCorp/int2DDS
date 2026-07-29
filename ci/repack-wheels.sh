@@ -9,6 +9,16 @@ set -euo pipefail
 version="${1:?usage: repack-wheels.sh <version> <native_root>}"
 native_root="${2:?}"
 
+# Archive paths under native_root are named with the full tag version (prerelease
+# suffix included, e.g. 0.2.0-rc.1), because ci/stage-native.sh takes that value
+# straight into the filename. The wheel/sdist filenames and the directory name
+# inside the wheel, on the other hand, come from the static version field in
+# python/pyproject.toml (the base version without a suffix, enforced by
+# ci/check-version.sh). Both forms are therefore used below: $version (full) to
+# look up native paths, $base_version (suffix stripped) for wheel filenames and
+# the internal directory name.
+base_version="${version%%-*}"
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 out_dir="$repo_root/dist/wheels"
 work="$repo_root/dist/wheel-work"
@@ -20,11 +30,11 @@ mkdir -p "$out_dir" "$work"
 python -m pip install --quiet --upgrade build wheel
 python -m build --outdir "$out_dir" "$repo_root/python"
 
-# The filename is deterministic — it comes from name/version in pyproject.toml —
-# so no glob is needed. Probing with ls would die without a diagnostic under
-# pipefail when nothing matches, so build the path directly and check it
-# explicitly.
-pure_wheel="$out_dir/int2dds-$version-py3-none-any.whl"
+# The filename is deterministic — it comes from name/version (= base_version) in
+# pyproject.toml — so no glob is needed. Probing with ls would die without a
+# diagnostic under pipefail when nothing matches, so build the path directly and
+# check it explicitly.
+pure_wheel="$out_dir/int2dds-$base_version-py3-none-any.whl"
 if [[ ! -f "$pure_wheel" ]]; then
   echo "ERROR: expected pure wheel not found at $pure_wheel (python -m build produced a different filename?)" >&2
   exit 1
@@ -61,7 +71,9 @@ for entry in "${entries[@]}"; do
   mkdir -p "$work/$tag"
   ( cd "$work/$tag" && wheel unpack "$pure_wheel" >/dev/null )
 
-  unpacked="$work/$tag/int2dds-$version"
+  # The directory name wheel unpack creates follows the wheel's own metadata
+  # version (= base_version), not the full tag version.
+  unpacked="$work/$tag/int2dds-$base_version"
   mkdir -p "$unpacked/int2dds/_native"
   cp "$src" "$unpacked/int2dds/_native/$dest_name"
 
@@ -69,7 +81,7 @@ for entry in "${entries[@]}"; do
   # inside it right away (as of wheel 0.47.0). Without mkdir first it raises
   # FileNotFoundError.
   mkdir -p "$work/$tag/out"
-  ( cd "$work/$tag" && wheel pack "int2dds-$version" --dest-dir "$work/$tag/out" >/dev/null )
+  ( cd "$work/$tag" && wheel pack "int2dds-$base_version" --dest-dir "$work/$tag/out" >/dev/null )
   # The output filename of wheel pack depends on normalization rules that vary by
   # wheel library version, so a real glob is needed here. On no match, ls fails to
   # find the literal "*.whl" (nullglob is unset), writes to stderr and would die

@@ -26,6 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.check.outputs.version }}
+      base_version: ${{ steps.check.outputs.base_version }}
       is_prerelease: ${{ steps.check.outputs.is_prerelease }}
     steps:
       - uses: actions/checkout@v4
@@ -37,6 +38,14 @@ jobs:
           tag="${{ github.event_name == 'workflow_dispatch' && inputs.dry_run_tag || github.ref_name }}"
           version="$(./ci/check-version.sh "$tag")"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          # Package filenames (nupkg/snupkg/wheel/sdist) come from the static
+          # version fields in Cargo.toml and pyproject.toml, and check-version.sh
+          # keeps those equal to the base version with the prerelease suffix
+          # stripped. Native archives, on the other hand, are named with the full
+          # tag version (suffix included). Output both so each job can use the one
+          # it needs.
+          base_version="${version%%-*}"
+          echo "base_version=$base_version" >> "$GITHUB_OUTPUT"
           if [[ "$version" == *-* ]]; then
             echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
           else
@@ -282,3 +291,263 @@ jobs:
           name: native-macos-universal2
           path: dist/int2dds-*-macos-universal2.tar.gz
           if-no-files-found: error
+
+  csharp:
+    needs: [prepare, native-linux-gnu, native-linux-musl, native-windows, native-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: native-artifacts
+
+      - name: Unpack native archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p native-unpacked
+          for f in native-artifacts/*/*.tar.gz; do tar -xzf "$f" -C native-unpacked; done
+          for f in native-artifacts/*/*.zip;    do unzip -q -o "$f" -d native-unpacked; done
+          ls -1 native-unpacked
+
+      - name: Place natives into runtimes/
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          root="csharp/src/Int2Dds/runtimes"
+          # "RID | dist name | path inside the archive | destination filename"
+          entries=(
+            "win-x64|windows-x86_64|bin/int2dds_ffi.dll|int2dds_ffi.dll"
+            "win-x86|windows-i686|bin/int2dds_ffi.dll|int2dds_ffi.dll"
+            "win-arm64|windows-aarch64|bin/int2dds_ffi.dll|int2dds_ffi.dll"
+            "linux-x64|linux-x86_64|lib/libint2dds_ffi.so.$VERSION|libint2dds_ffi.so"
+            "linux-arm64|linux-aarch64|lib/libint2dds_ffi.so.$VERSION|libint2dds_ffi.so"
+            "linux-arm|linux-armhf|lib/libint2dds_ffi.so.$VERSION|libint2dds_ffi.so"
+            "linux-musl-x64|linux-x86_64-musl|lib/libint2dds_ffi.so.$VERSION|libint2dds_ffi.so"
+            "linux-musl-arm64|linux-aarch64-musl|lib/libint2dds_ffi.so.$VERSION|libint2dds_ffi.so"
+            "osx-x64|macos-x86_64|lib/libint2dds_ffi.dylib|libint2dds_ffi.dylib"
+            "osx-arm64|macos-arm64|lib/libint2dds_ffi.dylib|libint2dds_ffi.dylib"
+          )
+          for e in "${entries[@]}"; do
+            IFS='|' read -r rid dist rel dest <<< "$e"
+            src="native-unpacked/int2dds-$VERSION-$dist/$rel"
+            if [[ ! -f "$src" ]]; then
+              echo "ERROR: missing native for RID $rid at $src" >&2
+              exit 1
+            fi
+            mkdir -p "$root/$rid/native"
+            cp "$src" "$root/$rid/native/$dest"
+          done
+          find "$root" -type f | sort
+
+      - name: Pack
+        run: dotnet pack csharp/src/Int2Dds/Int2Dds.csproj -c Release -o dist/nuget
+
+      - name: Verify package contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          # dotnet pack names the nupkg/snupkg from the version in
+          # Directory.Build.props (which reads Cargo.toml). That version is always
+          # the base version without a prerelease suffix (enforced by
+          # check-version.sh), so use base_version here, not the full tag version.
+          pkg="dist/nuget/Int2Dds.${{ needs.prepare.outputs.base_version }}.nupkg"
+          listing="$(unzip -l "$pkg")"
+          # A bare grep -c still returns "10" for a broken layout with nested paths
+          # like runtimes/{rid}/native/{rid}/native/..., so counting alone misses it
+          # (this actually happened: the PackagePath="runtimes/%(RecursiveDir)" bug
+          # double-nested the paths and the count was still 10). Check the exact
+          # path of each of the 10 RIDs first, then the total count to catch
+          # duplicate or missing entries.
+          rids=(
+            "win-x64|int2dds_ffi.dll"
+            "win-x86|int2dds_ffi.dll"
+            "win-arm64|int2dds_ffi.dll"
+            "linux-x64|libint2dds_ffi.so"
+            "linux-arm64|libint2dds_ffi.so"
+            "linux-arm|libint2dds_ffi.so"
+            "linux-musl-x64|libint2dds_ffi.so"
+            "linux-musl-arm64|libint2dds_ffi.so"
+            "osx-x64|libint2dds_ffi.dylib"
+            "osx-arm64|libint2dds_ffi.dylib"
+          )
+          for entry in "${rids[@]}"; do
+            IFS='|' read -r rid fname <<< "$entry"
+            path="runtimes/$rid/native/$fname"
+            if ! grep -qF "$path" <<< "$listing"; then
+              echo "ERROR: nupkg missing exact entry $path" >&2
+              echo "$listing" >&2
+              exit 1
+            fi
+          done
+          count="$(grep -c 'runtimes/.*/native/' <<< "$listing")"
+          if [[ "$count" -ne 10 ]]; then
+            echo "ERROR: expected 10 native RIDs in the nupkg, found $count" >&2
+            exit 1
+          fi
+          test -f "dist/nuget/Int2Dds.${{ needs.prepare.outputs.base_version }}.snupkg"
+
+      - name: Build dotnet-libs zip
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          dotnet build csharp/src/Int2Dds/Int2Dds.csproj -c Release
+          stage="dist/dotnet-libs/Int2Dds-$VERSION-dotnet-libs"
+          mkdir -p "$stage"
+          for tfm in net45 net48 netstandard2.0 netstandard2.1 net6.0 net8.0 net10.0; do
+            src="csharp/src/Int2Dds/bin/Release/$tfm"
+            if [[ ! -f "$src/Int2Dds.dll" ]]; then
+              echo "ERROR: missing build output for $tfm" >&2
+              exit 1
+            fi
+            mkdir -p "$stage/$tfm"
+            cp "$src/Int2Dds.dll" "$stage/$tfm/"
+            if [[ -f "$src/Int2Dds.pdb" ]]; then
+              cp "$src/Int2Dds.pdb" "$stage/$tfm/"
+            fi
+          done
+          cat > "$stage/README.txt" <<'EOF'
+          Int2Dds managed assemblies, one folder per target framework.
+
+          These are AnyCPU assemblies and are architecture independent. The native
+          library (int2dds_ffi.dll / libint2dds_ffi.so / libint2dds_ffi.dylib) is
+          NOT included here — download the archive for your architecture from the
+          same release and place the native library next to your executable, or
+          point INT2DDS_FFI_PATH at its directory.
+          EOF
+          ( cd dist/dotnet-libs && zip -qr "../Int2Dds-$VERSION-dotnet-libs.zip" "Int2Dds-$VERSION-dotnet-libs" )
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages-csharp
+          path: |
+            dist/nuget/*.nupkg
+            dist/nuget/*.snupkg
+            dist/Int2Dds-*-dotnet-libs.zip
+          if-no-files-found: error
+
+  python:
+    needs: [prepare, native-linux-gnu, native-linux-musl, native-windows, native-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: native-artifacts
+
+      - name: Unpack native archives into per-dist directories
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          for f in native-artifacts/*/*.tar.gz; do
+            dist="$(basename "$f" .tar.gz)"; dist="${dist#int2dds-"$VERSION"-}"
+            mkdir -p "native-root/$dist" && tar -xzf "$f" -C "native-root/$dist"
+          done
+          for f in native-artifacts/*/*.zip; do
+            dist="$(basename "$f" .zip)"; dist="${dist#int2dds-"$VERSION"-}"
+            mkdir -p "native-root/$dist" && unzip -q -o "$f" -d "native-root/$dist"
+          done
+          ls -1 native-root
+
+      - name: Build wheels
+        run: ./ci/repack-wheels.sh "${{ needs.prepare.outputs.version }}" native-root
+
+      - name: Verify wheel count
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          whls=(dist/wheels/*.whl)
+          count="${#whls[@]}"
+          if [[ "$count" -ne 7 ]]; then
+            echo "ERROR: expected 7 wheels (6 platform + 1 fallback), found $count" >&2
+            ls -1 dist/wheels
+            exit 1
+          fi
+          # The sdist filename uses base_version for the same reason as the nupkg:
+          # python -m build names it from the static version in pyproject.toml,
+          # which is always the base version without a suffix.
+          test -f "dist/wheels/int2dds-${{ needs.prepare.outputs.base_version }}.tar.gz"
+
+      - name: Smoke test the linux x86_64 wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install --quiet \
+            dist/wheels/int2dds-*-py3-none-manylinux_2_35_x86_64.whl
+          env -u INT2DDS_FFI_PATH /tmp/venv/bin/python -c "import int2dds; print('bundled native loaded')"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages-python
+          path: |
+            dist/wheels/*.whl
+            dist/wheels/*.tar.gz
+          if-no-files-found: error
+
+  verify-examples:
+    needs: [prepare, native-linux-gnu]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "1.89.0"
+          rustflags: ""
+          cache: false
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build the FFI library for C and Python examples
+        run: cargo build --release --locked -p int2dds-ffi
+
+      - name: Rust examples
+        run: cargo build --release --locked -p int2dds --example hello_world_pub --example hello_world_sub
+
+      - name: C examples
+        run: |
+          cmake -S ffi/examples -B /tmp/cbuild -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/cbuild
+
+      - name: C# examples
+        run: |
+          dotnet build csharp/examples/HelloWorldPub/HelloWorldPub.csproj -c Release
+          dotnet build csharp/examples/HelloWorldSub/HelloWorldSub.csproj -c Release
+
+      - name: Python examples
+        env:
+          INT2DDS_FFI_PATH: ${{ github.workspace }}/target/release
+        run: |
+          python -m pip install --quiet ./python
+          python -c "import ast,sys; [ast.parse(open(f).read()) for f in ['python/examples/hello_world_pub.py','python/examples/hello_world_sub.py']]"
+          python -c "import int2dds; print('python binding import ok')"
