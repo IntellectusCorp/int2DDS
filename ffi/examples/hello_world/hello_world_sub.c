@@ -69,14 +69,14 @@ int main(int argc, char* argv[]) {
     }
 
     /* Create participant */
-    ret = int2dds_create_participant(factory, "hello_world_subscriber", domain_id, &participant);
+    ret = int2dds_create_participant(factory, domain_id, NULL, &participant);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create participant: %d\n", ret);
         goto cleanup;
     }
 
     /* Create subscriber */
-    ret = int2dds_create_subscriber(participant, &subscriber);
+    ret = int2dds_create_subscriber(participant, NULL, &subscriber);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create subscriber: %d\n", ret);
         goto cleanup;
@@ -108,8 +108,8 @@ int main(int argc, char* argv[]) {
         goto cleanup;
     }
 
-    /* Create DataReader */
-    ret = int2dds_create_datareader(subscriber, topic, qos, &reader);
+    /* Create DataReader (no listener) */
+    ret = int2dds_create_datareader(subscriber, topic, qos, NULL, 0, &reader);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create datareader: %d\n", ret);
         goto cleanup;
@@ -139,15 +139,14 @@ int main(int argc, char* argv[]) {
         goto cleanup;
     }
 
-    ret = int2dds_waitset_attach_condition(waitset, condition);
+    ret = int2dds_waitset_attach_statuscondition(waitset, condition);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to attach condition to waitset: %d\n", ret);
         goto cleanup;
     }
 
     /* Loop until a publisher actually matches; the finite timeout keeps Ctrl-C responsive */
-    int32_t total_count = 0;
-    int32_t current_count = 0;
+    struct Int2DdsSubscriptionMatchedStatus matched = {0};
     do {
         struct Int2DdsConditionSeq *triggered = NULL;
         ret = int2dds_waitset_wait_ex(waitset, -1, &triggered);
@@ -160,14 +159,14 @@ int main(int argc, char* argv[]) {
             goto cleanup;
         }
 
-        ret = int2dds_get_subscription_matched_status(reader, &total_count, &current_count);
+        ret = int2dds_datareader_get_subscription_matched_status(reader, &matched);
         if (ret != INT2DDS_RET_OK) {
             fprintf(stderr, "Failed to get subscription matched status: %d\n", ret);
             goto cleanup;
         }
-    } while (current_count <= 0);
+    } while (matched.current_count <= 0);
 
-    printf("Publisher matched! (total: %d, current: %d)\n", total_count, current_count);
+    printf("Publisher matched! (total: %d, current: %d)\n", matched.total_count, matched.current_count);
     printf("Waiting for messages...\n\n");
 
     /* Receive messages using IDL-generated deserialization */
@@ -178,7 +177,7 @@ int main(int argc, char* argv[]) {
     int received_count = 0;
 
     while (!g_stop) {
-        ret = int2dds_take_serialized(reader, recv_buf, sizeof(recv_buf), &actual_size, &valid_data);
+        ret = int2dds_datareader_take_serialized(reader, recv_buf, sizeof(recv_buf), &actual_size, &valid_data);
 
         if (ret == INT2DDS_RET_OK && valid_data) {
             /* Deserialize CDR bytes to HelloWorld struct */
@@ -199,7 +198,7 @@ int main(int argc, char* argv[]) {
 cleanup:
     if (waitset) {
         if (condition) {
-            int2dds_waitset_detach_condition(waitset, condition);
+            int2dds_waitset_detach_statuscondition(waitset, condition);
         }
         int2dds_waitset_delete(waitset);
     }

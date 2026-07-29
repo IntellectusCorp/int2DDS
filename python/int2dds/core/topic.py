@@ -222,15 +222,20 @@ class Topic(Generic[T]):
 
         topic_ptr = ffi.new("Int2DdsTopic **")
 
-        # Create the topic from a named XML QoS profile when requested.
+        # Create the topic from a named XML QoS profile when requested. Keyed topics
+        # need a full TypeObject, which the profile path cannot build (#334).
         if profile is not None:
+            if has_key:
+                raise DdsUnsupported(
+                    f"Keyed topic '{topic_name}' cannot be created from a QoS profile; "
+                    f"keyed topics need field metadata for a spec-conformant KeyHash (#334)."
+                )
             check_ret(
                 lib.int2dds_create_topic_with_profile(
                     participant._handle,
                     topic_name_c,
                     type_name_c,
                     int(extensibility),
-                    has_key,
                     profile.encode(),
                     topic_ptr,
                 )
@@ -238,9 +243,6 @@ class Topic(Generic[T]):
             self._handle = topic_ptr[0]
             return
 
-        # Extract key field metadata from type class for compute_key() support
-        key_field_indices = []
-        key_field_types = []
         _KEY_TYPE_MAP = {
             "str": 0, "string": 0,
             "int": 1, "i32": 1, "int32": 1,
@@ -253,16 +255,6 @@ class Topic(Generic[T]):
             "u8": 8, "uint8": 8,
             "bool": 9,
         }
-        if has_key and hasattr(type_class, "_key_fields"):
-            for field_name, field_type_str in type_class._key_fields:
-                # Find field index from dataclass fields
-                import dataclasses
-                dc_fields = dataclasses.fields(type_class)
-                for idx, f in enumerate(dc_fields):
-                    if f.name == field_name:
-                        key_field_indices.append(idx)
-                        key_field_types.append(_KEY_TYPE_MAP.get(field_type_str, 0))
-                        break
 
         # Prefer advertising a conformant TypeObject when the generator emitted flat-type
         # metadata (_dds_type_info_fields) -- this matches the Rust derive so strict XTypes
@@ -322,7 +314,6 @@ class Topic(Generic[T]):
                     topic_name_c,
                     type_name_c,
                     int(extensibility),
-                    has_key,
                     qos_ptr,
                     names_c,
                     types_c,
@@ -331,31 +322,13 @@ class Topic(Generic[T]):
                     topic_ptr,
                 )
             )
-        elif key_field_indices:
-            indices_c = ffi.new("uint32_t[]", key_field_indices)
-            types_c = ffi.new("uint32_t[]", key_field_types)
-            check_ret(
-                lib.int2dds_create_topic_keyed_with_key_fields(
-                    participant._handle,
-                    topic_name_c,
-                    type_name_c,
-                    int(extensibility),
-                    has_key,
-                    qos_ptr,
-                    indices_c,
-                    types_c,
-                    len(key_field_indices),
-                    topic_ptr,
-                )
-            )
         else:
             check_ret(
-                lib.int2dds_create_topic_keyed(
+                lib.int2dds_create_topic(
                     participant._handle,
                     topic_name_c,
                     type_name_c,
                     int(extensibility),
-                    has_key,
                     qos_ptr,
                     topic_ptr,
                 )

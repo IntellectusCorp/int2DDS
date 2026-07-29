@@ -99,7 +99,7 @@ class DomainParticipant:
 
     Args:
         domain_id: The DDS domain to join (default 0)
-        name: Optional name for the participant
+        name: Optional label kept for API compatibility (not sent to the core)
         qos: Optional ParticipantQos (e.g. to set multicast TTL via PropertyQosPolicy)
     """
 
@@ -115,17 +115,16 @@ class DomainParticipant:
         self._closed = False
 
         factory = _get_factory()
-        name_c = ffi.new("char[]", name.encode()) if name else ffi.NULL
 
         participant_ptr = ffi.new("Int2DdsParticipant **")
         if qos is None:
             check_ret(lib.int2dds_create_participant(
-                factory.handle, name_c, domain_id, participant_ptr))
+                factory.handle, domain_id, ffi.NULL, participant_ptr))
         else:
             qos_handle = _build_participant_qos_handle(qos)
             try:
-                check_ret(lib.int2dds_create_participant_with_qos(
-                    factory.handle, name_c, domain_id, qos_handle, participant_ptr))
+                check_ret(lib.int2dds_create_participant(
+                    factory.handle, domain_id, qos_handle, participant_ptr))
             finally:
                 lib.int2dds_participant_qos_destroy(qos_handle)
         self._handle = participant_ptr[0]
@@ -218,7 +217,8 @@ class DomainParticipant:
 
         factory = _get_factory()
         qos_ptr = ffi.new("Int2DdsParticipantQos **")
-        check_ret(lib.int2dds_get_default_participant_qos(factory.handle, qos_ptr))
+        check_ret(lib.int2dds_domain_participant_factory_get_default_participant_qos(
+            factory.handle, qos_ptr))
         handle = qos_ptr[0]
         try:
             prop = Property()

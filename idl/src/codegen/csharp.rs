@@ -71,6 +71,7 @@ impl<'a> CsGen<'a> {
         self.line("// DO NOT EDIT");
         self.line("");
         self.line("using System;");
+        self.line("using System.Collections.Generic;");
         self.line("using Int2Dds.Cdr;");
         self.line("using Int2Dds.Types;");
         self.line("");

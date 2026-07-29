@@ -100,15 +100,6 @@ static inline bool HelloWorld_deserialize_cdr(
     return int2dds_cdr_reader_error(&r) == INT2DDS_CDR_OK;
 }
 
-static inline size_t HelloWorld_serialize_key(
-    const HelloWorld *val,
-    uint8_t *buf,
-    size_t capacity)
-{
-    (void)val; (void)buf; (void)capacity;
-    return 0;
-}
-
 static inline Int2DdsTypeInfo* HelloWorld_type_info(void) {
     Int2DdsTypeInfo *ti;
     int2dds_type_info_create("HelloWorld", 1, &ti);
