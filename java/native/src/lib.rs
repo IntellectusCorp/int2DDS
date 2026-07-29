@@ -9,6 +9,8 @@ use jni::sys::jint;
 use jni::JavaVM;
 use std::sync::OnceLock;
 
+pub mod gen;
+
 /// The product version, inherited from the workspace `Cargo.toml`.
 /// `NativeLoader` on the Java side compares this against the JAR version.
 pub fn crate_version() -> &'static str {
