@@ -222,6 +222,7 @@ mod tests {
     fn function_pointer_parameters_are_not_generatable() {
         let f = FfiFn {
             name: "int2dds_participant_qos_get_properties_with_prefix".into(),
+            module: "qos".into(),
             params: vec![
                 p("qos", "*const Int2DdsParticipantQos"),
                 p("prefix", "*const c_char"),
@@ -237,6 +238,7 @@ mod tests {
     fn unit_return_is_generatable() {
         let f = FfiFn {
             name: "int2dds_condition_seq_delete".into(),
+            module: "condition".into(),
             params: vec![p("seq", "*mut Int2DdsConditionSeq")],
             ret: "()".into(),
         };

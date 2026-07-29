@@ -29,6 +29,10 @@ pub struct FfiFn {
     pub name: String,
     pub params: Vec<Param>,
     pub ret: String,
+    /// The `int2dds_ffi` module the function lives in, i.e. the source file
+    /// stem. `int2dds-ffi` re-exports nothing at its crate root, so the
+    /// generated forwarders must call `int2dds_ffi::<module>::<name>`.
+    pub module: String,
 }
 
 /// Collapse a token-rendered type into a stable single-spaced string.
@@ -186,7 +190,7 @@ fn substitute(body: TokenStream, binds: &HashMap<String, TokenStream>) -> TokenS
 }
 
 /// Pull the signature out of a function item, if it is an exported C-ABI one.
-fn extract_fn(f: &syn::ItemFn) -> Result<Option<FfiFn>, String> {
+fn extract_fn(f: &syn::ItemFn, module: &str) -> Result<Option<FfiFn>, String> {
     if !matches!(f.vis, Visibility::Public(_)) {
         return Ok(None);
     }
@@ -209,7 +213,7 @@ fn extract_fn(f: &syn::ItemFn) -> Result<Option<FfiFn>, String> {
         ReturnType::Default => "()".to_string(),
         ReturnType::Type(_, t) => norm(&quote::quote!(#t).to_string()),
     };
-    Ok(Some(FfiFn { name: f.sig.ident.to_string(), params, ret }))
+    Ok(Some(FfiFn { name: f.sig.ident.to_string(), params, ret, module: module.to_string() }))
 }
 
 /// Parse every `.rs` file directly inside `dir`, returning exported functions
@@ -228,14 +232,19 @@ pub fn parse_ffi_dir(dir: &Path) -> Result<Vec<FfiFn>, String> {
         let src =
             std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
         let file = syn::parse_file(&src).map_err(|e| format!("parse {}: {e}", path.display()))?;
-        files.push(file);
+        let module = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| format!("{}: unreadable file stem", path.display()))?
+            .to_string();
+        files.push((module, file));
     }
 
     // Pass 1: collect the macros whose expansion defines exported symbols.
     // `macro_rules!` is textually scoped, but collecting across the whole
     // directory first keeps the result independent of file ordering.
     let mut macros: HashMap<String, Vec<MacroArm>> = HashMap::new();
-    for file in &files {
+    for (_, file) in &files {
         for item in &file.items {
             let Item::Macro(m) = item else { continue };
             let Some(name) = &m.ident else { continue };
@@ -250,11 +259,11 @@ pub fn parse_ffi_dir(dir: &Path) -> Result<Vec<FfiFn>, String> {
 
     // Pass 2: collect functions, expanding invocations of those macros.
     let mut out = Vec::new();
-    for file in &files {
+    for (module, file) in &files {
         for item in &file.items {
             match item {
                 Item::Fn(f) => {
-                    if let Some(ffi) = extract_fn(f)? {
+                    if let Some(ffi) = extract_fn(f, module)? {
                         out.push(ffi);
                     }
                 }
@@ -278,7 +287,7 @@ pub fn parse_ffi_dir(dir: &Path) -> Result<Vec<FfiFn>, String> {
                         .map_err(|e| format!("{name}!: expansion does not parse: {e}"))?;
                     for item in &parsed.items {
                         let Item::Fn(f) = item else { continue };
-                        if let Some(ffi) = extract_fn(f)? {
+                        if let Some(ffi) = extract_fn(f, module)? {
                             out.push(ffi);
                         }
                     }
@@ -350,6 +359,21 @@ mod tests {
     fn unit_return_is_normalised() {
         let fns = parse_ffi_dir(ffi_dir()).unwrap();
         assert!(fns.iter().any(|f| f.ret == "()"));
+    }
+
+    #[test]
+    fn functions_carry_their_ffi_module() {
+        // int2dds-ffi re-exports nothing at its crate root, so the generated
+        // forwarders need the module to build a resolvable call path.
+        let fns = parse_ffi_dir(ffi_dir()).unwrap();
+        let module_of =
+            |name: &str| fns.iter().find(|f| f.name == name).map(|f| f.module.as_str()).unwrap();
+        assert_eq!(module_of("int2dds_datawriter_write_serialized"), "publisher");
+        assert_eq!(module_of("int2dds_default_extensibility"), "qos");
+        // Macro-generated functions belong to the file the invocation sits in.
+        assert_eq!(module_of("int2dds_dynamic_data_set_i32"), "dynamic");
+        assert_eq!(module_of("int2dds_dynamic_value_u64"), "dynamic_value");
+        assert!(fns.iter().all(|f| !f.module.is_empty()));
     }
 
     #[test]
