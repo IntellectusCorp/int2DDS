@@ -1,5 +1,5 @@
-name: Hello World Interop
-run-name: "Hello World interop ${{ github.head_ref }}"
+name: Hello World Tests
+run-name: "Hello World Tests ${{ github.head_ref }}"
 
 on:
   pull_request:
@@ -215,7 +215,7 @@ jobs:
                           row[parts[0]] = parts[1]
               results[pub] = row
 
-          out = ["## Hello World Interoperability Report", "", "<table>"]
+          out = ["## Hello World Tests Report", "", "<table>"]
           out.append(
               "<tr><th rowspan='2'>Publisher</th>"
               f"<th colspan='{len(LANGS)}' align='center'>Subscriber</th></tr>"
