@@ -20,25 +20,49 @@ use crate::{
         time::Duration,
     },
     rtps::{
-        common::{guid::Guid, time::RtpsTime},
-        entities::{history::cache_change::CacheChange, participant::Participant},
-        task::timer_handler::TimerHandler,
+        common::{
+            guid::{Guid, GuidPrefix},
+            time::RtpsTime,
+        },
+        entities::history::cache_change::CacheChange,
     },
+    utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
 };
 
 pub(crate) trait HistoryCache {
-    type CacheChangeInputType;
-
-    fn get_changes(&self) -> &Vec<Arc<CacheChange>>;
-    fn get_changes_mut(&mut self) -> &mut Vec<Arc<CacheChange>>;
-    fn get_instance_map(
-        &self,
-    ) -> Arc<Mutex<HashMap<InstanceHandle, Vec<std::sync::Weak<CacheChange>>>>>;
-    fn get_rtps_participant(&self) -> DdsResult<Arc<Participant>>;
+    fn get_changes(&self) -> Vec<Arc<CacheChange>>;
+    fn get_max_samples(&self) -> i32;
+    fn get_max_instances(&self) -> i32;
+    fn get_max_samples_per_instance(&self) -> i32;
+    // Storage-agnostic counts backing the resource-limit checks below.
+    fn sample_count(&self) -> DdsResult<usize>;
+    fn instance_count(&self) -> DdsResult<usize>;
+    fn contains_instance(&self, instance_handle: InstanceHandle) -> DdsResult<bool>;
+    fn sample_count_of_instance(&self, instance_handle: InstanceHandle) -> DdsResult<usize>;
+    fn get_lifespan_timers(&self) -> Arc<Mutex<HashMap<Guid, TimerId>>>;
+    fn get_timer_handler(&self, guid_prefix: GuidPrefix) -> DdsResult<Arc<Mutex<TimerHandler>>> {
+        Ok(TimerHandler::get_instance(guid_prefix))
+    }
+    // Add a change under History/ResourceLimits. Returns (evicted, filtered); filtered is true
+    // when apply_filter held the sample via TIME_BASED_FILTER (nothing stored).
     fn add_change_with_cleanup(
         &mut self,
-        a_change: Self::CacheChangeInputType,
-    ) -> DdsResult<Option<Arc<CacheChange>>>; // Returns removed CacheChange while ensuring capacity
+        a_change: Arc<CacheChange>,
+        apply_filter: bool,
+    ) -> DdsResult<(Option<Arc<CacheChange>>, bool)>;
+
+    /// Mutate a CacheChange before making it immutable (set instance handle, reception timestamp, etc.)
+    /// Default: no-op. Only DataReaderHistoryCache overrides this.
+    fn add_info_to_cache_change(&mut self, _change: &mut CacheChange) -> DdsResult<()> {
+        Ok(())
+    }
+
+    // True when the owning reader requests coherent access
+    // Default: false. Only DataReaderHistoryCache overrides this.
+    fn is_coherent_access(&self) -> bool {
+        false
+    }
+
     fn remove_change(&mut self, a_change: Arc<CacheChange>) -> DdsResult<()>;
     fn ensure_capacity(
         &mut self,
@@ -49,26 +73,14 @@ pub(crate) trait HistoryCache {
         &mut self,
         instance_handle: InstanceHandle,
     ) -> DdsResult<Arc<CacheChange>>;
-    fn get_max_samples(&self) -> i32;
-    fn get_max_instances(&self) -> i32;
-    fn get_max_samples_per_instance(&self) -> i32;
 
     fn is_max_instances_exceeded(&self, instance_handle: InstanceHandle) -> DdsResult<bool> {
-        if instance_handle.is_nil() {
-            return Ok(false);
-        }
-
-        let instance_map = self.get_instance_map();
-        let instance_map_guard = instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-
-        let exceeded = !instance_map_guard.contains_key(&instance_handle)
-            && instance_map_guard.len() as i32 >= self.get_max_instances();
-
-        Ok(exceeded)
+        Ok(!self.contains_instance(instance_handle)?
+            && self.instance_count()? as i32 >= self.get_max_instances())
     }
 
-    fn is_max_samples_exceeded(&self) -> bool {
-        self.get_changes().len() as i32 >= self.get_max_samples()
+    fn is_max_samples_exceeded(&self) -> DdsResult<bool> {
+        Ok(self.sample_count()? as i32 >= self.get_max_samples())
     }
 
     fn is_max_samples_per_instance_exceeded(
@@ -77,48 +89,41 @@ pub(crate) trait HistoryCache {
     ) -> DdsResult<bool> {
         if instance_handle.is_nil() {
             // MAX_SAMPLES already considered DEPTH when initialized for NO_KEY && KEEP_LAST
-            return Ok(self.is_max_samples_exceeded());
+            return self.is_max_samples_exceeded();
         }
 
-        let instance_map = self.get_instance_map();
-        let instance_map_guard = instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-
-        let exceeded = instance_map_guard.contains_key(&instance_handle)
-            && instance_map_guard[&instance_handle].len() as i32
-                >= self.get_max_samples_per_instance();
-
-        Ok(exceeded)
+        Ok(self.contains_instance(instance_handle)?
+            && self.sample_count_of_instance(instance_handle)? as i32
+                >= self.get_max_samples_per_instance())
     }
 
-    // Used when lifespan qos is enabled
-    fn insert_change_sorted(&mut self, change: Arc<CacheChange>) {
-        let change_ts =
-            change.source_timestamp().or(change.reception_timestamp()).unwrap_or(RtpsTime::ZERO);
-
-        let changes = self.get_changes_mut();
-        let pos = changes
-            .binary_search_by_key(&change_ts, |c| {
-                c.source_timestamp().or(c.reception_timestamp()).unwrap_or(RtpsTime::ZERO)
-            })
-            .unwrap_or_else(|pos| pos);
-        changes.insert(pos, change);
+    // Dry run of ensure_capacity for a batch given its per-instance sample counts. Non-mutating;
+    // default true for caches that never add changes as an atomic batch.
+    fn ensure_capacity_dry(
+        &self,
+        _len_per_instance: &HashMap<InstanceHandle, usize>,
+    ) -> DdsResult<bool> {
+        Ok(true)
     }
 
-    fn lifespan_timers(&self) -> Arc<Mutex<HashMap<Guid, String>>>;
+    // Insert keeping source/reception-timestamp order. Used when lifespan qos is enabled.
+    fn insert_change_sorted(&mut self, change: Arc<CacheChange>);
 
-    fn get_timer_handler(&self) -> DdsResult<Arc<Mutex<TimerHandler>>> {
-        let rtps_participant = self.get_rtps_participant()?;
-        Ok(TimerHandler::get_instance(rtps_participant))
-    }
-
-    fn lifespan_timer_with_callback(
+    fn register_lifespan_timer(
         &self,
         writer_guid: Guid,
         lifespan_duration: Duration,
-        timer_id_prefix: &str,
+        timer_id: TimerId,
+    ) -> DdsResult<()>;
+
+    fn register_lifespan_timer_with_callback(
+        &self,
+        writer_guid: Guid,
+        lifespan_duration: Duration,
+        timer_id: TimerId,
         callback: Arc<dyn Fn() + Send + Sync>,
     ) -> DdsResult<()> {
-        let lifespan_timers = self.lifespan_timers();
+        let lifespan_timers = self.get_lifespan_timers();
         let mut timers_guard = lifespan_timers
             .lock()
             .map_err(|e| DdsError::Error(format!("Failed to lock lifespan_timers: {}", e)))?;
@@ -132,15 +137,14 @@ pub(crate) trait HistoryCache {
         let std_duration = std::time::Duration::try_from(lifespan_duration)
             .map_err(|e| DdsError::Error(format!("Failed to convert Duration: {:?}", e)))?;
 
-        let timer_id = format!("{}_{:?}", timer_id_prefix, writer_guid);
-        let timer_handler = self.get_timer_handler()?;
+        let timer_handler = self.get_timer_handler(writer_guid.prefix())?;
 
         {
             let handler = timer_handler
                 .lock()
                 .map_err(|e| DdsError::Error(format!("Failed to lock timer handler: {}", e)))?;
 
-            handler.add_timer(timer_id.clone(), std_duration, true, move || {
+            handler.add_timer(timer_id, std_duration, true, move || {
                 callback();
             });
         }
@@ -149,25 +153,18 @@ pub(crate) trait HistoryCache {
         Ok(())
     }
 
-    fn lifespan_timer(
-        &self,
-        writer_guid: Guid,
-        lifespan_duration: Duration,
-        timer_id_prefix: &str,
-    ) -> DdsResult<()>;
-
     fn update_lifespan_timer_interval(
         &self,
         writer_guid: Guid,
         interval_duration: std::time::Duration,
     ) -> DdsResult<()> {
-        let timer_handler = self.get_timer_handler()?;
-        let lifespan_timers = self.lifespan_timers();
+        let timer_handler = self.get_timer_handler(writer_guid.prefix())?;
+        let lifespan_timers = self.get_lifespan_timers();
         let timer_id = {
             let timers_guard = lifespan_timers
                 .lock()
                 .map_err(|e| DdsError::Error(format!("Failed to lock lifespan_timers: {}", e)))?;
-            timers_guard.get(&writer_guid).cloned()
+            timers_guard.get(&writer_guid).copied()
         };
 
         if let Some(timer_id) = timer_id {
@@ -179,7 +176,37 @@ pub(crate) trait HistoryCache {
         Ok(())
     }
 
-    fn lifespan_expired(
+    // Collect a writer's lifespan-expired changes plus the earliest expiry among the survivors
+    // (for the next timer interval). Default assumes get_changes() is source-timestamp ordered
+    // and early-breaks; stores that are not source-ordered override this.
+    fn collect_lifespan_expired(
+        &self,
+        writer_guid: Guid,
+        lifespan_duration: Duration,
+        now: RtpsTime,
+    ) -> (Vec<Arc<CacheChange>>, Option<RtpsTime>) {
+        let mut expired = Vec::new();
+        let mut earliest_survivor = None;
+        for change in self.get_changes().iter() {
+            if change.writer_guid() != writer_guid {
+                continue;
+            }
+            let Some(source_ts) = change.source_timestamp() else {
+                expired.push(change.clone());
+                continue;
+            };
+            let expiry = source_ts.add_nanos(lifespan_duration.as_nanos().max(0) as u64);
+            if now >= expiry {
+                expired.push(change.clone());
+            } else {
+                earliest_survivor = Some(expiry);
+                break;
+            }
+        }
+        (expired, earliest_survivor)
+    }
+
+    fn remove_lifespan_expired_changes(
         &mut self,
         writer_guid: Guid,
         lifespan_duration: Duration,
@@ -187,33 +214,8 @@ pub(crate) trait HistoryCache {
         use log::debug;
 
         let current_rtps_time = RtpsTime::now();
-        let changes = self.get_changes_mut();
-
-        let mut expired_changes = Vec::new();
-        let mut first_non_expired: Option<(Arc<CacheChange>, RtpsTime)> = None;
-
-        for change in changes.iter() {
-            if change.writer_guid() != writer_guid {
-                continue;
-            }
-
-            let Some(source_ts) = change.source_timestamp() else {
-                // If no source_timestamp, mark for removal
-                expired_changes.push(change.clone());
-                continue;
-            };
-
-            let expiry_rtps_time = source_ts.add_nanos(lifespan_duration.as_nanos().max(0) as u64);
-
-            if current_rtps_time >= expiry_rtps_time {
-                // If expired, mark for removal
-                expired_changes.push(change.clone());
-            } else {
-                // When encountering first non-expired change, all subsequent changes are non-expired, so stop
-                first_non_expired = Some((change.clone(), expiry_rtps_time));
-                break;
-            }
-        }
+        let (expired_changes, earliest_survivor) =
+            self.collect_lifespan_expired(writer_guid, lifespan_duration, current_rtps_time);
 
         // Remove all expired changes at once
         for expired_change in expired_changes {
@@ -221,7 +223,7 @@ pub(crate) trait HistoryCache {
                 debug!("[HistoryCache] Failed to remove expired change: {:?}", e);
             } else {
                 debug!(
-                    "[HistoryCache] Removed expired change seq_num: {:?}, writer_guid: {:?}",
+                    "[HistoryCache] Removed expired change seq_num: {}, writer_guid: {}",
                     expired_change.sequence_number().to_i64(),
                     writer_guid
                 );
@@ -229,7 +231,7 @@ pub(crate) trait HistoryCache {
         }
 
         // If there are non-expired changes, update timer interval
-        if let Some((_, expiry_rtps_time)) = first_non_expired {
+        if let Some(expiry_rtps_time) = earliest_survivor {
             let interval_nanos =
                 expiry_rtps_time.to_nanos().saturating_sub(current_rtps_time.to_nanos());
             let interval_duration = std::time::Duration::from_nanos(interval_nanos);
@@ -242,5 +244,29 @@ pub(crate) trait HistoryCache {
             self.update_lifespan_timer_interval(writer_guid, std_duration)?;
             Ok(false)
         }
+    }
+
+    // Drops samples whose `source_timestamp + lifespan` has elapsed; called from
+    // read/take so expiration is enforced independently of the cleanup timer.
+    fn purge_expired_on_read(&mut self) -> DdsResult<()> {
+        let now = RtpsTime::now();
+        let mut to_remove = Vec::new();
+
+        for change in self.get_changes().iter() {
+            let Some(lifespan) = change.lifespan_duration() else { continue };
+            if lifespan.is_infinite() {
+                continue;
+            }
+            let Some(source_ts) = change.source_timestamp() else { continue };
+            let expiry = source_ts.add_nanos(lifespan.as_nanos().max(0) as u64);
+            if now >= expiry {
+                to_remove.push(change.clone());
+            }
+        }
+
+        for change in to_remove {
+            let _ = self.remove_change(change);
+        }
+        Ok(())
     }
 }

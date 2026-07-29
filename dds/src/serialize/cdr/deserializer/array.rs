@@ -10,7 +10,7 @@ impl<'a> CdrDeserializer<'a> {
     pub fn deserialize_byte_array(&mut self, size: usize) -> Result<Vec<u8>, CdrError> {
         self.check_available(size)?;
 
-        let result = self.data[self.position..self.position + size].to_vec();
+        let result = self.input.copy_to_vec(self.position, size);
         self.position += size;
 
         Ok(result)
@@ -19,13 +19,11 @@ impl<'a> CdrDeserializer<'a> {
     /// Deserialize fixed-size u16 array (no length prefix)
     pub fn deserialize_u16_array(&mut self, size: usize) -> Result<Vec<u16>, CdrError> {
         self.align(2);
-        let mut result = Vec::with_capacity(size);
+        let mut result = Vec::with_capacity(self.checked_capacity(size, 2)?);
         for _ in 0..size {
             self.check_available(2)?;
-            let value = from_bytes_u16(
-                [self.data[self.position], self.data[self.position + 1]],
-                self.endianness,
-            );
+            let bytes = self.input.read_array::<2>(self.position);
+            let value = from_bytes_u16(bytes, self.endianness);
             result.push(value);
             self.position += 2;
         }
@@ -35,18 +33,11 @@ impl<'a> CdrDeserializer<'a> {
     /// Deserialize fixed-size u32 array (no length prefix)
     pub fn deserialize_u32_array(&mut self, size: usize) -> Result<Vec<u32>, CdrError> {
         self.align(4);
-        let mut result = Vec::with_capacity(size);
+        let mut result = Vec::with_capacity(self.checked_capacity(size, 4)?);
         for _ in 0..size {
             self.check_available(4)?;
-            let value = from_bytes_u32(
-                [
-                    self.data[self.position],
-                    self.data[self.position + 1],
-                    self.data[self.position + 2],
-                    self.data[self.position + 3],
-                ],
-                self.endianness,
-            );
+            let bytes = self.input.read_array::<4>(self.position);
+            let value = from_bytes_u32(bytes, self.endianness);
             result.push(value);
             self.position += 4;
         }
@@ -56,22 +47,11 @@ impl<'a> CdrDeserializer<'a> {
     /// Deserialize fixed-size u64 array (no length prefix)
     pub fn deserialize_u64_array(&mut self, size: usize) -> Result<Vec<u64>, CdrError> {
         self.align(8);
-        let mut result = Vec::with_capacity(size);
+        let mut result = Vec::with_capacity(self.checked_capacity(size, 8)?);
         for _ in 0..size {
             self.check_available(8)?;
-            let value = from_bytes_u64(
-                [
-                    self.data[self.position],
-                    self.data[self.position + 1],
-                    self.data[self.position + 2],
-                    self.data[self.position + 3],
-                    self.data[self.position + 4],
-                    self.data[self.position + 5],
-                    self.data[self.position + 6],
-                    self.data[self.position + 7],
-                ],
-                self.endianness,
-            );
+            let bytes = self.input.read_array::<8>(self.position);
+            let value = from_bytes_u64(bytes, self.endianness);
             result.push(value);
             self.position += 8;
         }
@@ -83,7 +63,7 @@ impl<'a> CdrDeserializer<'a> {
         self.check_available(size)?;
         let mut result = Vec::with_capacity(size);
         for _ in 0..size {
-            result.push(self.data[self.position] as i8);
+            result.push(self.input.read_byte(self.position) as i8);
             self.position += 1;
         }
         Ok(result)
@@ -92,13 +72,11 @@ impl<'a> CdrDeserializer<'a> {
     /// Deserialize fixed-size i16 array (no length prefix)
     pub fn deserialize_i16_array(&mut self, size: usize) -> Result<Vec<i16>, CdrError> {
         self.align(2);
-        let mut result = Vec::with_capacity(size);
+        let mut result = Vec::with_capacity(self.checked_capacity(size, 2)?);
         for _ in 0..size {
             self.check_available(2)?;
-            let value = from_bytes_i16(
-                [self.data[self.position], self.data[self.position + 1]],
-                self.endianness,
-            );
+            let bytes = self.input.read_array::<2>(self.position);
+            let value = from_bytes_i16(bytes, self.endianness);
             result.push(value);
             self.position += 2;
         }
@@ -108,18 +86,11 @@ impl<'a> CdrDeserializer<'a> {
     /// Deserialize fixed-size i32 array (no length prefix)
     pub fn deserialize_i32_array(&mut self, size: usize) -> Result<Vec<i32>, CdrError> {
         self.align(4);
-        let mut result = Vec::with_capacity(size);
+        let mut result = Vec::with_capacity(self.checked_capacity(size, 4)?);
         for _ in 0..size {
             self.check_available(4)?;
-            let value = from_bytes_i32(
-                [
-                    self.data[self.position],
-                    self.data[self.position + 1],
-                    self.data[self.position + 2],
-                    self.data[self.position + 3],
-                ],
-                self.endianness,
-            );
+            let bytes = self.input.read_array::<4>(self.position);
+            let value = from_bytes_i32(bytes, self.endianness);
             result.push(value);
             self.position += 4;
         }
@@ -129,22 +100,11 @@ impl<'a> CdrDeserializer<'a> {
     /// Deserialize fixed-size i64 array (no length prefix)
     pub fn deserialize_i64_array(&mut self, size: usize) -> Result<Vec<i64>, CdrError> {
         self.align(8);
-        let mut result = Vec::with_capacity(size);
+        let mut result = Vec::with_capacity(self.checked_capacity(size, 8)?);
         for _ in 0..size {
             self.check_available(8)?;
-            let value = from_bytes_i64(
-                [
-                    self.data[self.position],
-                    self.data[self.position + 1],
-                    self.data[self.position + 2],
-                    self.data[self.position + 3],
-                    self.data[self.position + 4],
-                    self.data[self.position + 5],
-                    self.data[self.position + 6],
-                    self.data[self.position + 7],
-                ],
-                self.endianness,
-            );
+            let bytes = self.input.read_array::<8>(self.position);
+            let value = from_bytes_i64(bytes, self.endianness);
             result.push(value);
             self.position += 8;
         }
@@ -154,18 +114,11 @@ impl<'a> CdrDeserializer<'a> {
     /// Deserialize fixed-size f32 array (no length prefix)
     pub fn deserialize_f32_array(&mut self, size: usize) -> Result<Vec<f32>, CdrError> {
         self.align(4);
-        let mut result = Vec::with_capacity(size);
+        let mut result = Vec::with_capacity(self.checked_capacity(size, 4)?);
         for _ in 0..size {
             self.check_available(4)?;
-            let value = from_bytes_f32(
-                [
-                    self.data[self.position],
-                    self.data[self.position + 1],
-                    self.data[self.position + 2],
-                    self.data[self.position + 3],
-                ],
-                self.endianness,
-            );
+            let bytes = self.input.read_array::<4>(self.position);
+            let value = from_bytes_f32(bytes, self.endianness);
             result.push(value);
             self.position += 4;
         }
@@ -175,24 +128,44 @@ impl<'a> CdrDeserializer<'a> {
     /// Deserialize fixed-size f64 array (no length prefix)
     pub fn deserialize_f64_array(&mut self, size: usize) -> Result<Vec<f64>, CdrError> {
         self.align(8);
-        let mut result = Vec::with_capacity(size);
+        let mut result = Vec::with_capacity(self.checked_capacity(size, 8)?);
         for _ in 0..size {
             self.check_available(8)?;
-            let value = from_bytes_f64(
-                [
-                    self.data[self.position],
-                    self.data[self.position + 1],
-                    self.data[self.position + 2],
-                    self.data[self.position + 3],
-                    self.data[self.position + 4],
-                    self.data[self.position + 5],
-                    self.data[self.position + 6],
-                    self.data[self.position + 7],
-                ],
-                self.endianness,
-            );
+            let bytes = self.input.read_array::<8>(self.position);
+            let value = from_bytes_f64(bytes, self.endianness);
             result.push(value);
             self.position += 8;
+        }
+        Ok(result)
+    }
+
+    /// Deserialize fixed-size bool array (no length prefix)
+    pub fn deserialize_bool_array(&mut self, size: usize) -> Result<Vec<bool>, CdrError> {
+        self.check_available(size)?;
+        let mut result = Vec::with_capacity(size);
+        for _ in 0..size {
+            result.push(self.input.read_byte(self.position) != 0);
+            self.position += 1;
+        }
+        Ok(result)
+    }
+
+    /// Deserialize fixed-size char array (no length prefix)
+    pub fn deserialize_char_array_fixed(&mut self, size: usize) -> Result<Vec<char>, CdrError> {
+        self.check_available(size)?;
+        let mut result = Vec::with_capacity(size);
+        for _ in 0..size {
+            result.push(self.input.read_byte(self.position) as char);
+            self.position += 1;
+        }
+        Ok(result)
+    }
+
+    /// Deserialize fixed-size string array (no length prefix)
+    pub fn deserialize_string_array(&mut self, size: usize) -> Result<Vec<String>, CdrError> {
+        let mut result = Vec::with_capacity(self.checked_capacity(size, 4)?);
+        for _ in 0..size {
+            result.push(self.deserialize_string()?);
         }
         Ok(result)
     }
@@ -209,13 +182,13 @@ impl<'a> Xcdr2Deserializer<'a> {
 
     pub fn deserialize_u16_array(&mut self, size: usize) -> Result<Vec<u16>, CdrError> {
         self.align(2);
-        let mut result = Vec::with_capacity(size);
+        let mut result = Vec::with_capacity(self.checked_capacity(size, 2)?);
         for _ in 0..size {
             self.check_available(2)?;
-            let value = from_bytes_u16(
-                [self.data[self.position], self.data[self.position + 1]],
-                self.endianness,
-            );
+            let bytes: [u8; 2] = self.data[self.position..self.position + 2]
+                .try_into()
+                .map_err(|_| CdrError::SliceConversionError)?;
+            let value = from_bytes_u16(bytes, self.endianness);
             result.push(value);
             self.position += 2;
         }
@@ -224,18 +197,13 @@ impl<'a> Xcdr2Deserializer<'a> {
 
     pub fn deserialize_u32_array(&mut self, size: usize) -> Result<Vec<u32>, CdrError> {
         self.align(4);
-        let mut result = Vec::with_capacity(size);
+        let mut result = Vec::with_capacity(self.checked_capacity(size, 4)?);
         for _ in 0..size {
             self.check_available(4)?;
-            let value = from_bytes_u32(
-                [
-                    self.data[self.position],
-                    self.data[self.position + 1],
-                    self.data[self.position + 2],
-                    self.data[self.position + 3],
-                ],
-                self.endianness,
-            );
+            let bytes: [u8; 4] = self.data[self.position..self.position + 4]
+                .try_into()
+                .map_err(|_| CdrError::SliceConversionError)?;
+            let value = from_bytes_u32(bytes, self.endianness);
             result.push(value);
             self.position += 4;
         }
@@ -244,22 +212,13 @@ impl<'a> Xcdr2Deserializer<'a> {
 
     pub fn deserialize_u64_array(&mut self, size: usize) -> Result<Vec<u64>, CdrError> {
         self.align(8);
-        let mut result = Vec::with_capacity(size);
+        let mut result = Vec::with_capacity(self.checked_capacity(size, 8)?);
         for _ in 0..size {
             self.check_available(8)?;
-            let value = from_bytes_u64(
-                [
-                    self.data[self.position],
-                    self.data[self.position + 1],
-                    self.data[self.position + 2],
-                    self.data[self.position + 3],
-                    self.data[self.position + 4],
-                    self.data[self.position + 5],
-                    self.data[self.position + 6],
-                    self.data[self.position + 7],
-                ],
-                self.endianness,
-            );
+            let bytes: [u8; 8] = self.data[self.position..self.position + 8]
+                .try_into()
+                .map_err(|_| CdrError::SliceConversionError)?;
+            let value = from_bytes_u64(bytes, self.endianness);
             result.push(value);
             self.position += 8;
         }
@@ -278,13 +237,13 @@ impl<'a> Xcdr2Deserializer<'a> {
 
     pub fn deserialize_i16_array(&mut self, size: usize) -> Result<Vec<i16>, CdrError> {
         self.align(2);
-        let mut result = Vec::with_capacity(size);
+        let mut result = Vec::with_capacity(self.checked_capacity(size, 2)?);
         for _ in 0..size {
             self.check_available(2)?;
-            let value = from_bytes_i16(
-                [self.data[self.position], self.data[self.position + 1]],
-                self.endianness,
-            );
+            let bytes: [u8; 2] = self.data[self.position..self.position + 2]
+                .try_into()
+                .map_err(|_| CdrError::SliceConversionError)?;
+            let value = from_bytes_i16(bytes, self.endianness);
             result.push(value);
             self.position += 2;
         }
@@ -293,18 +252,13 @@ impl<'a> Xcdr2Deserializer<'a> {
 
     pub fn deserialize_i32_array(&mut self, size: usize) -> Result<Vec<i32>, CdrError> {
         self.align(4);
-        let mut result = Vec::with_capacity(size);
+        let mut result = Vec::with_capacity(self.checked_capacity(size, 4)?);
         for _ in 0..size {
             self.check_available(4)?;
-            let value = from_bytes_i32(
-                [
-                    self.data[self.position],
-                    self.data[self.position + 1],
-                    self.data[self.position + 2],
-                    self.data[self.position + 3],
-                ],
-                self.endianness,
-            );
+            let bytes: [u8; 4] = self.data[self.position..self.position + 4]
+                .try_into()
+                .map_err(|_| CdrError::SliceConversionError)?;
+            let value = from_bytes_i32(bytes, self.endianness);
             result.push(value);
             self.position += 4;
         }
@@ -313,22 +267,13 @@ impl<'a> Xcdr2Deserializer<'a> {
 
     pub fn deserialize_i64_array(&mut self, size: usize) -> Result<Vec<i64>, CdrError> {
         self.align(8);
-        let mut result = Vec::with_capacity(size);
+        let mut result = Vec::with_capacity(self.checked_capacity(size, 8)?);
         for _ in 0..size {
             self.check_available(8)?;
-            let value = from_bytes_i64(
-                [
-                    self.data[self.position],
-                    self.data[self.position + 1],
-                    self.data[self.position + 2],
-                    self.data[self.position + 3],
-                    self.data[self.position + 4],
-                    self.data[self.position + 5],
-                    self.data[self.position + 6],
-                    self.data[self.position + 7],
-                ],
-                self.endianness,
-            );
+            let bytes: [u8; 8] = self.data[self.position..self.position + 8]
+                .try_into()
+                .map_err(|_| CdrError::SliceConversionError)?;
+            let value = from_bytes_i64(bytes, self.endianness);
             result.push(value);
             self.position += 8;
         }
@@ -337,18 +282,13 @@ impl<'a> Xcdr2Deserializer<'a> {
 
     pub fn deserialize_f32_array(&mut self, size: usize) -> Result<Vec<f32>, CdrError> {
         self.align(4);
-        let mut result = Vec::with_capacity(size);
+        let mut result = Vec::with_capacity(self.checked_capacity(size, 4)?);
         for _ in 0..size {
             self.check_available(4)?;
-            let value = from_bytes_f32(
-                [
-                    self.data[self.position],
-                    self.data[self.position + 1],
-                    self.data[self.position + 2],
-                    self.data[self.position + 3],
-                ],
-                self.endianness,
-            );
+            let bytes: [u8; 4] = self.data[self.position..self.position + 4]
+                .try_into()
+                .map_err(|_| CdrError::SliceConversionError)?;
+            let value = from_bytes_f32(bytes, self.endianness);
             result.push(value);
             self.position += 4;
         }
@@ -357,24 +297,43 @@ impl<'a> Xcdr2Deserializer<'a> {
 
     pub fn deserialize_f64_array(&mut self, size: usize) -> Result<Vec<f64>, CdrError> {
         self.align(8);
-        let mut result = Vec::with_capacity(size);
+        let mut result = Vec::with_capacity(self.checked_capacity(size, 8)?);
         for _ in 0..size {
             self.check_available(8)?;
-            let value = from_bytes_f64(
-                [
-                    self.data[self.position],
-                    self.data[self.position + 1],
-                    self.data[self.position + 2],
-                    self.data[self.position + 3],
-                    self.data[self.position + 4],
-                    self.data[self.position + 5],
-                    self.data[self.position + 6],
-                    self.data[self.position + 7],
-                ],
-                self.endianness,
-            );
+            let bytes: [u8; 8] = self.data[self.position..self.position + 8]
+                .try_into()
+                .map_err(|_| CdrError::SliceConversionError)?;
+            let value = from_bytes_f64(bytes, self.endianness);
             result.push(value);
             self.position += 8;
+        }
+        Ok(result)
+    }
+
+    pub fn deserialize_bool_array(&mut self, size: usize) -> Result<Vec<bool>, CdrError> {
+        self.check_available(size)?;
+        let mut result = Vec::with_capacity(size);
+        for _ in 0..size {
+            result.push(self.data[self.position] != 0);
+            self.position += 1;
+        }
+        Ok(result)
+    }
+
+    pub fn deserialize_char_array_fixed(&mut self, size: usize) -> Result<Vec<char>, CdrError> {
+        self.check_available(size)?;
+        let mut result = Vec::with_capacity(size);
+        for _ in 0..size {
+            result.push(self.data[self.position] as char);
+            self.position += 1;
+        }
+        Ok(result)
+    }
+
+    pub fn deserialize_string_array(&mut self, size: usize) -> Result<Vec<String>, CdrError> {
+        let mut result = Vec::with_capacity(self.checked_capacity(size, 4)?);
+        for _ in 0..size {
+            result.push(self.deserialize_string()?);
         }
         Ok(result)
     }

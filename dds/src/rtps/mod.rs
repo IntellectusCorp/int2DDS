@@ -14,7 +14,7 @@
 //! ├─────────────────────────────┤
 //! │     RTPS Protocol Layer     │  ← This module
 //! ├─────────────────────────────┤
-//! │   Transport (UDP/TCP)       │
+//! │   Transport (UDP/TCP/SHM)   │
 //! └─────────────────────────────┘
 //! ```
 //!
@@ -28,7 +28,7 @@
 //! - [`messages`] - RTPS message structures and serialization
 //! - [`service`] - RTPS services and background tasks
 //! - [`task`] - Task management for RTPS operations
-//! - [`transport`] - Transport layer implementations (UDP, TCP, Hybrid)
+//! - [`transport`] - Transport layer implementations (UDP, TCP, Hybrid, SHM)
 //!
 //! ## Key Concepts
 //!
@@ -49,6 +49,7 @@
 //! - **UDP**: Default mode using multicast for discovery and unicast for user data
 //! - **TCP**: Connection-oriented mode for NAT traversal and firewalled environments
 //! - **Hybrid**: Combines UDP multicast discovery with TCP unicast for reliable delivery
+//! - **SHM**: Shared memory for high-performance intra-host communication
 
 pub(crate) mod builtin;
 pub mod common;
@@ -56,6 +57,5 @@ pub(crate) mod dcps_bridge;
 pub(crate) mod entities;
 pub(crate) mod logic;
 pub(crate) mod messages;
-pub(crate) mod service;
 pub(crate) mod task;
 pub(crate) mod transport;

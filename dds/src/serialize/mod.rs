@@ -1,7 +1,11 @@
 pub mod cdr;
 pub mod core;
+pub mod key_holder;
 pub mod pl_cdr;
 pub use core::xcdr;
+pub use key_holder::{
+    align_up as key_holder_align_up, KeyHolder, KeyHolderAccessor, KeyHolderFallback,
+};
 
 #[doc(hidden)]
 #[macro_export]
@@ -16,6 +20,7 @@ macro_rules! impl_primitive_serialization {
     ) => {
         $(
             impl $serialize_trait for $ty {
+                const IS_PRIMITIVE: bool = true;
                 #[inline]
                 fn $serialize_method(&self, serializer: &mut $serializer) -> $result<()> {
                     serializer.$ser_fn(*self)
@@ -23,6 +28,7 @@ macro_rules! impl_primitive_serialization {
             }
 
             impl $deserialize_trait for $ty {
+                const IS_PRIMITIVE: bool = true;
                 #[inline]
                 fn $deserialize_method(deserializer: &mut $deserializer) -> $result<Self> {
                     deserializer.$de_fn()
@@ -36,6 +42,7 @@ pub use crate::infrastructure::qos_policy::DataRepresentationId;
 pub use core::{
     // Alignment utilities
     align_buffer,
+    align_buffer_with_header_offset,
     align_position_with_header_offset,
     deserialize_array_common,
     // Data payload deserialization
@@ -68,9 +75,8 @@ pub use core::{
     to_bytes_u32,
     to_bytes_u64,
     BufferManager,
-    BufferSize,
     DeserializerReader,
-    PooledBuffer,
     SerializationError,
+    WChar,
     WString,
 };

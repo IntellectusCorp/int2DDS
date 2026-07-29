@@ -21,7 +21,7 @@
 //! ```
 //! use int2dds::topic::type_support::DdsType;
 //!
-//! #[derive(DdsType, Clone)]
+//! #[derive(DdsType)]
 //! #[dds_type(crate_path = "int2dds")]
 //! struct MyData {
 //!     #[dds(key)]
@@ -37,6 +37,7 @@ pub mod qos;
 pub mod raw_data;
 #[doc(hidden)]
 pub mod sql;
+#[allow(clippy::module_inception)]
 pub mod topic;
 pub mod topic_description;
 pub mod topic_listener;
@@ -47,4 +48,4 @@ pub use raw_data::{RawData, RawDataTypeSupport};
 #[doc(hidden)]
 pub use topic::*;
 #[doc(hidden)]
-pub use type_support::{DdsType, TypeSupport};
+pub use type_support::{DdsType, FieldAccessor, TypeSupport};

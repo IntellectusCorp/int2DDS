@@ -2,14 +2,17 @@
 #![allow(unused_variables)]
 
 use std::{
+    cmp::max,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
-    {cmp::max, collections::BTreeMap},
+    time::Instant,
 };
 
 use log::debug;
 
 use crate::{
     common::builtin::topic::publication_builtin_topic_data::PublicationBuiltinTopicData,
+    core::time::Duration,
     infrastructure::status::{StatusInfo, StatusKind},
     rtps::{
         common::{
@@ -30,11 +33,15 @@ pub(crate) struct WriterProxy {
     multicast_locator_list: Vec<Locator>,
     data_max_size_serialized: u32,
     changes_from_writer: BTreeMap<SequenceNumber, ChangeFromWriter>,
-    acknack_count: i32,
-    nackfrag_count: i32,
+    acknack_count: u32,
+    nackfrag_count: u32,
     expected_sn: SequenceNumber, // Expected next sequence number from writer
-    buffered_change: Vec<CacheChange>, // Changes that reader has not processed yet
+    last_heartbeat_count: Option<u32>,
+    last_heartbeat_at: Option<Instant>,
+    last_heartbeat_frag_count: Option<u32>,
+    buffered_change: BTreeSet<CacheChange>, // Changes that reader has not processed yet
     publication_builtin_topic_data: PublicationBuiltinTopicData,
+    #[allow(clippy::type_complexity)]
     status_callback:
         Arc<Mutex<Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>>>,
 }
@@ -46,6 +53,7 @@ impl PartialEq for WriterProxy {
 }
 
 impl WriterProxy {
+    #[allow(clippy::type_complexity)]
     pub(crate) fn new(
         remote_writer_guid: Guid,
         remote_group_entity_id: EntityId,
@@ -67,25 +75,28 @@ impl WriterProxy {
             acknack_count: 0,
             nackfrag_count: 0,
             expected_sn: SequenceNumber::UNKNOWN,
-            buffered_change: Vec::new(),
+            last_heartbeat_count: None,
+            last_heartbeat_frag_count: None,
+            last_heartbeat_at: None,
+            buffered_change: BTreeSet::new(),
             publication_builtin_topic_data,
             status_callback,
         }
     }
 
     pub(crate) fn increase_acknack_count(&mut self) {
-        self.acknack_count += 1;
+        self.acknack_count = self.acknack_count.wrapping_add(1);
     }
 
-    pub(crate) fn acknack_count(&self) -> i32 {
+    pub(crate) fn acknack_count(&self) -> u32 {
         self.acknack_count
     }
 
     pub(crate) fn increase_nackfrag_count(&mut self) {
-        self.nackfrag_count += 1;
+        self.nackfrag_count = self.nackfrag_count.wrapping_add(1);
     }
 
-    pub(crate) fn nackfrag_count(&self) -> i32 {
+    pub(crate) fn nackfrag_count(&self) -> u32 {
         self.nackfrag_count
     }
 
@@ -93,13 +104,49 @@ impl WriterProxy {
         self.expected_sn
     }
 
+    // For a change already received (via DATA or GAP), whether it was relevant
+    // (DATA) or irrelevant (GAP). None if the change is not yet received.
+    #[cfg(test)]
+    pub(crate) fn received_change_is_relevant(&self, seq_num: SequenceNumber) -> Option<bool> {
+        self.changes_from_writer.get(&seq_num).and_then(|change| {
+            if change.status == ChangeFromWriterStatusKind::Received {
+                Some(change.is_relevant)
+            } else {
+                None
+            }
+        })
+    }
+
+    pub(crate) fn last_heartbeat_count(&self) -> Option<u32> {
+        self.last_heartbeat_count
+    }
+
+    pub(crate) fn set_last_heartbeat_count(&mut self, count: u32) {
+        self.last_heartbeat_count = Some(count);
+    }
+
+    pub(crate) fn last_heartbeat_frag_count(&self) -> Option<u32> {
+        self.last_heartbeat_frag_count
+    }
+
+    pub(crate) fn set_last_heartbeat_frag_count(&mut self, count: u32) {
+        self.last_heartbeat_frag_count = Some(count);
+    }
+
+    pub(crate) fn last_heartbeat_at(&self) -> Option<Instant> {
+        self.last_heartbeat_at
+    }
+
+    pub(crate) fn set_last_heartbeat_at(&mut self, at: Instant) {
+        self.last_heartbeat_at = Some(at);
+    }
+
     pub(crate) fn add_new_changes_from_writer(&mut self, change_from_writer: ChangeFromWriter) {
         self.changes_from_writer.insert(change_from_writer.sequence_number, change_from_writer);
     }
 
     pub(crate) fn add_buffered_change(&mut self, change: CacheChange) {
-        self.buffered_change.push(change);
-        self.buffered_change.sort_by_key(|c| c.sequence_number);
+        self.buffered_change.insert(change);
     }
 
     pub(crate) fn flush_buffered_changes(&mut self) -> Vec<CacheChange> {
@@ -107,8 +154,8 @@ impl WriterProxy {
 
         while let Some(change) = self.buffered_change.first() {
             if change.sequence_number <= self.expected_sn {
-                flushed_changes.push(change.clone());
-                self.buffered_change.remove(0);
+                let change = self.buffered_change.pop_first().unwrap();
+                flushed_changes.push(change);
                 self.increment_expected_sn();
             } else {
                 break;
@@ -124,6 +171,14 @@ impl WriterProxy {
 
     pub(crate) fn set_publication_builtin_topic_data(&mut self, data: PublicationBuiltinTopicData) {
         self.publication_builtin_topic_data = data;
+    }
+
+    pub(crate) fn get_ownership_strength(&self) -> i32 {
+        self.publication_builtin_topic_data.ownership_strength().value
+    }
+
+    pub(crate) fn get_lifespan_duration(&self) -> Duration {
+        self.publication_builtin_topic_data.lifespan().duration
     }
 
     pub(crate) fn has_fragmented_changes(
@@ -194,8 +249,8 @@ impl WriterProxy {
         self.remote_writer_guid
     }
 
-    pub(crate) fn unicast_locator_list(&self) -> Vec<Locator> {
-        self.unicast_locator_list.clone()
+    pub(crate) fn unicast_locator_list(&self) -> &[Locator] {
+        &self.unicast_locator_list
     }
 
     pub(crate) fn increment_expected_sn(&mut self) {
@@ -219,6 +274,14 @@ impl WriterProxy {
             .unwrap_or(SequenceNumber::UNKNOWN)
     }
 
+    /// Get the maximum sequence number from changes_from_writer (regardless of status).
+    pub(crate) fn changes_from_writer_max(&self) -> SequenceNumber {
+        self.changes_from_writer
+            .last_key_value()
+            .map(|(k, _)| *k)
+            .unwrap_or(SequenceNumber::UNKNOWN)
+    }
+
     pub(crate) fn irrelevant_change_set(&mut self, a_seq_num: SequenceNumber) {
         let change = self.changes_from_writer.entry(a_seq_num).or_insert(ChangeFromWriter {
             sequence_number: a_seq_num,
@@ -231,6 +294,7 @@ impl WriterProxy {
         change.is_relevant = false;
     }
 
+    #[allow(clippy::unnecessary_filter_map)]
     pub(crate) fn lost_changes_update(&mut self, first_available_seq_num: SequenceNumber) {
         self.expected_sn = max(self.expected_sn, first_available_seq_num);
 
@@ -239,7 +303,7 @@ impl WriterProxy {
             .range(..first_available_seq_num)
             .filter_map(|(seq_num, change_from_writer)| {
                 if change_from_writer.status == ChangeFromWriterStatusKind::Missing {
-                    debug!("Sample Lost!: {:?}", change_from_writer.sequence_number);
+                    debug!("Sample Lost!: {}", change_from_writer.sequence_number);
                     self.on_sample_lost();
                 }
                 Some(*seq_num)
@@ -256,7 +320,6 @@ impl WriterProxy {
         first_sn: SequenceNumber,
         last_sn: SequenceNumber,
     ) -> Vec<SequenceNumber> {
-        // fastdds Note
         self.lost_changes_update(first_sn);
 
         self.update_changes_for_heartbeat_range(first_sn, last_sn);
@@ -348,7 +411,7 @@ impl WriterProxy {
         &mut self,
         seq_num: SequenceNumber,
         total_fragments: u32,
-        received_fragments: std::collections::HashSet<u32>,
+        received: impl IntoIterator<Item = u32>,
     ) {
         let change = self.changes_from_writer.entry(seq_num).or_insert_with(|| ChangeFromWriter {
             sequence_number: seq_num,
@@ -361,14 +424,17 @@ impl WriterProxy {
             }),
         });
 
-        // Combine existing fragments with new received fragments
+        // Merge this submessage's fragment numbers into the accumulated set
         if let Some(info) = &mut change.fragment_info {
-            for &fragment in &received_fragments {
+            // A HEARTBEAT_FRAG may have seeded this entry with a smaller
+            // last-fragment number than the sample's true total; keep the max.
+            info.total_fragments = info.total_fragments.max(total_fragments);
+            for fragment in received {
                 info.received_fragments.insert(fragment);
             }
 
             // Update completion status
-            info.is_complete = info.received_fragments.len() == total_fragments as usize;
+            info.is_complete = info.received_fragments.len() == info.total_fragments as usize;
         }
     }
 
@@ -414,4 +480,60 @@ pub(crate) struct FragmentInfo {
     pub(crate) total_fragments: u32,
     pub(crate) received_fragments: std::collections::HashSet<u32>,
     pub(crate) is_complete: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_writer_proxy() -> WriterProxy {
+        let pub_data = PublicationBuiltinTopicData::default();
+        WriterProxy::new(
+            pub_data.endpoint_guid(),
+            pub_data.endpoint_guid().entity_id(),
+            Vec::new(),
+            Vec::new(),
+            0,
+            pub_data,
+            Arc::new(Mutex::new(None)),
+        )
+    }
+
+    // Single-fragment submessages arriving out of order must accumulate;
+    // missing set and completion track the union of received ranges.
+    #[test]
+    fn test_mark_frag_received_accumulates_out_of_order() {
+        let mut proxy = empty_writer_proxy();
+        let sn = SequenceNumber::new(0, 1);
+
+        proxy.mark_frag_received(sn, 4, 3..4); // fragment 3
+        proxy.mark_frag_received(sn, 4, 1..2); // fragment 1
+        assert!(proxy.still_missing_fragments(sn));
+        assert_eq!(
+            proxy.calculate_missing_fragments(sn, sn),
+            Some(FragmentNumberSet::from_vec(2, vec![2, 4])),
+        );
+
+        proxy.mark_frag_received(sn, 4, 2..3); // fragment 2
+        proxy.mark_frag_received(sn, 4, 4..5); // fragment 4
+        assert!(proxy.all_fragments_received(sn));
+        assert_eq!(proxy.calculate_missing_fragments(sn, sn), None);
+    }
+
+    // A submessage carrying several fragments passes a multi-element range.
+    #[test]
+    fn test_mark_frag_received_multi_fragment_range() {
+        let mut proxy = empty_writer_proxy();
+        let sn = SequenceNumber::new(0, 1);
+
+        proxy.mark_frag_received(sn, 4, 1..3); // fragments 1, 2
+        assert!(proxy.still_missing_fragments(sn));
+        assert_eq!(
+            proxy.calculate_missing_fragments(sn, sn),
+            Some(FragmentNumberSet::from_vec(3, vec![3, 4])),
+        );
+
+        proxy.mark_frag_received(sn, 4, 3..5); // fragments 3, 4
+        assert!(proxy.all_fragments_received(sn));
+    }
 }

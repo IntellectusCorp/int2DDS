@@ -25,7 +25,6 @@ use crate::{
             types::{Count, ProtocolVersion, VendorId},
         },
     },
-    serialize::core::{BufferSize, PooledBuffer},
 };
 
 pub struct PlCdrSerializer {
@@ -132,15 +131,19 @@ impl PlCdrSerializer {
             ));
         }
 
-        // Parameter length field
-        self.write_u16(buffer, param_data.len() as u16);
+        // Align to 4-byte boundary between parameters (RTPS 2.5, Section 9.6.2.2.2):
+        // parameterLength MUST include the trailing padding (i.e. be a multiple of 4). A strict
+        // remote parser advances by parameterLength, so an unpadded length on a
+        // variable-size parameter (USER_DATA/TOPIC_DATA/etc.) misaligns and corrupts later params.
+        let padding =
+            (PARAMETER_ALIGNMENT - (param_data.len() % PARAMETER_ALIGNMENT)) % PARAMETER_ALIGNMENT;
+
+        // Parameter length field (padded length per RTPS)
+        self.write_u16(buffer, (param_data.len() + padding) as u16);
 
         // Parameter data bytes
         buffer.extend_from_slice(&param_data);
 
-        // Align to 4-byte boundary between parameters (RTPS 2.5, Section 9.6.2)
-        let padding =
-            (PARAMETER_ALIGNMENT - (param_data.len() % PARAMETER_ALIGNMENT)) % PARAMETER_ALIGNMENT;
         if padding > 0 {
             buffer.extend(std::iter::repeat_n(0u8, padding));
         }
@@ -157,8 +160,7 @@ impl PlCdrSerializer {
 
     /// Serialize parameter value
     fn serialize_parameter_value(&self, value: &ParameterValue) -> Result<Vec<u8>, String> {
-        // Use buffer pool for parameter serialization (high-frequency operation)
-        let mut buffer = PooledBuffer::new(BufferSize::Small);
+        let mut buffer: Vec<u8> = Vec::with_capacity(256);
 
         match value {
             ParameterValue::ProtocolVersion(v) => {
@@ -186,6 +188,9 @@ impl PlCdrSerializer {
                 self.write_duration(&mut buffer, d);
             }
             ParameterValue::ParticipantGuid(guid) => {
+                buffer.extend_from_slice(&guid.to_bytes());
+            }
+            ParameterValue::EndpointGuid(guid) => {
                 buffer.extend_from_slice(&guid.to_bytes());
             }
             ParameterValue::BuiltinEndpointSet(bes) => {
@@ -350,6 +355,46 @@ impl PlCdrSerializer {
                     buffer.extend(std::iter::repeat_n(0u8, padding));
                 }
             }
+            ParameterValue::TypeInformation(type_info) => {
+                // 0x0075: headerless PL_CDR2 TypeInformation (no encapsulation header).
+                buffer.extend_from_slice(&type_info.serialize_for_parameter());
+                let padding = (4 - (buffer.len() % 4)) % 4;
+                if padding > 0 {
+                    buffer.extend(std::iter::repeat_n(0u8, padding));
+                }
+            }
+            ParameterValue::TypeIdentifierV1(type_id) => {
+                buffer.extend_from_slice(&type_id.serialize_for_parameter_v1());
+                let padding = (4 - (buffer.len() % 4)) % 4;
+                if padding > 0 {
+                    buffer.extend(std::iter::repeat_n(0u8, padding));
+                }
+            }
+            ParameterValue::TypeConsistencyEnforcement(tce) => {
+                // TypeConsistencyEnforcementQosPolicy: kind(2) + 5 bools(5) + padding(1)
+                self.write_u16(&mut buffer, tce.kind as u16);
+                buffer.push(if tce.ignore_sequence_bounds { 1 } else { 0 });
+                buffer.push(if tce.ignore_string_bounds { 1 } else { 0 });
+                buffer.push(if tce.ignore_member_names { 1 } else { 0 });
+                buffer.push(if tce.prevent_type_widening { 1 } else { 0 });
+                buffer.push(if tce.force_type_validation { 1 } else { 0 });
+                buffer.push(0); // padding to 8 bytes total
+            }
+            ParameterValue::TypeObject(type_obj) => {
+                buffer.extend_from_slice(&type_obj.serialize_for_parameter());
+                // CDR alignment - pad to 4-byte boundary if needed
+                let padding = (4 - (buffer.len() % 4)) % 4;
+                if padding > 0 {
+                    buffer.extend(std::iter::repeat_n(0u8, padding));
+                }
+            }
+            ParameterValue::TypeObjectV1(type_obj) => {
+                buffer.extend_from_slice(&type_obj.serialize());
+                let padding = (4 - (buffer.len() % 4)) % 4;
+                if padding > 0 {
+                    buffer.extend(std::iter::repeat_n(0u8, padding));
+                }
+            }
             ParameterValue::ContentFilterProperty(cfp) => {
                 self.write_string(&mut buffer, &cfp.content_filtered_topic_name);
                 self.write_string(&mut buffer, &cfp.related_topic_name);
@@ -369,7 +414,7 @@ impl PlCdrSerializer {
                 // PID_SENTINEL has no data, just return empty buffer
             }
             ParameterValue::Count(count) => {
-                self.write_i32(&mut buffer, *count);
+                self.write_u32(&mut buffer, *count);
             }
             ParameterValue::Unknown(data) => {
                 buffer.extend_from_slice(data);
@@ -379,8 +424,7 @@ impl PlCdrSerializer {
             }
         }
 
-        // Convert PooledBuffer to Vec<u8> for return
-        Ok(buffer.into_vec())
+        Ok(buffer)
     }
 
     /// Serialize duration
@@ -797,7 +841,7 @@ impl super::ParsedBuiltinTopicData {
         if let Some(guid) = &self.endpoint_guid {
             parameters.push(PlCdrParameter {
                 id: ParameterId::PidEndpointGuid,
-                value: ParameterValue::ParticipantGuid(*guid),
+                value: ParameterValue::EndpointGuid(*guid),
             });
         }
         if let Some(guid) = &self.participant_guid {
@@ -932,13 +976,31 @@ impl super::ParsedBuiltinTopicData {
         if let Some(group_data) = &self.group_data {
             parameters.push(PlCdrParameter {
                 id: ParameterId::PidGroupData,
-                value: ParameterValue::GroupData(&group_data.datavalue),
+                value: ParameterValue::GroupData(&group_data.value),
             });
         }
         if let Some(time_based_filter) = &self.time_based_filter {
             parameters.push(PlCdrParameter {
                 id: ParameterId::PidTimeBasedFilter,
                 value: ParameterValue::TimeBasedFilter(time_based_filter.minimum_separation.into()),
+            });
+        }
+        if let Some(history) = &self.history {
+            parameters.push(PlCdrParameter {
+                id: ParameterId::PidHistory,
+                value: ParameterValue::HistoryQosPolicy(*history),
+            });
+        }
+        if let Some(resource_limits) = &self.resource_limits {
+            parameters.push(PlCdrParameter {
+                id: ParameterId::PidResourceLimits,
+                value: ParameterValue::ResourceLimits(*resource_limits),
+            });
+        }
+        if let Some(transport_priority) = &self.transport_priority {
+            parameters.push(PlCdrParameter {
+                id: ParameterId::PidTransportPriority,
+                value: ParameterValue::TransportPriority(transport_priority.value as u32),
             });
         }
 
@@ -970,14 +1032,40 @@ impl super::ParsedBuiltinTopicData {
             });
         }
 
-        // DataRepresentation (only if explicitly set)
+        // DataRepresentation: advertise the effective representation so the wire
+        // reflects the resolved default (empty QoS list → default) and matches
+        // what the endpoint actually serializes.
         if let Some(data_representation) = &self.data_representation {
-            if !data_representation.value.is_empty() {
-                parameters.push(PlCdrParameter {
-                    id: ParameterId::PidDataRepresentation,
-                    value: ParameterValue::DataRepresentation(data_representation.clone()),
-                });
-            }
+            use crate::infrastructure::qos_policy::DataRepresentationQosPolicy;
+            parameters.push(PlCdrParameter {
+                id: ParameterId::PidDataRepresentation,
+                value: ParameterValue::DataRepresentation(DataRepresentationQosPolicy {
+                    value: data_representation.effective_ids().to_vec(),
+                }),
+            });
+        }
+
+        // TypeInformation (DDS-XTypes): prefer the enriched (sizes + deps) form when present.
+        if let Some(type_id) = &self.type_identifier {
+            let type_info = self.type_information.clone().unwrap_or_else(|| {
+                crate::xtypes::TypeInformation::from_type_identifier(type_id.clone())
+            });
+            parameters.push(PlCdrParameter {
+                id: ParameterId::PidTypeInformation,
+                value: ParameterValue::TypeInformation(type_info),
+            });
+            parameters.push(PlCdrParameter {
+                id: ParameterId::PidTypeIdV1,
+                value: ParameterValue::TypeIdentifierV1(type_id.clone()),
+            });
+        }
+
+        // TypeConsistencyEnforcement (DDS-XTypes, subscription only)
+        if let Some(tce) = &self.type_consistency_enforcement {
+            parameters.push(PlCdrParameter {
+                id: ParameterId::PidTypeConsistencyEnforcement,
+                value: ParameterValue::TypeConsistencyEnforcement(*tce),
+            });
         }
 
         // Serialize parameters to PL-CDR format

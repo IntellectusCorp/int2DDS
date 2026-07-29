@@ -16,6 +16,7 @@
 //! - **Deadline**: Maximum allowed time between data writes
 //! - **Liveliness**: Mechanism for asserting the writer's activity
 //! - **Ownership**: Shared or exclusive ownership of instances
+//! - **WriterReliabilityExtension**: int2DDS extension for writer reliability options (heartbeat, NACK response)
 //! - And many more...
 //!
 //! Default QoS can be accessed via `PUBLISHER_QOS_DEFAULT` and `DATAWRITER_QOS_DEFAULT`.
@@ -26,20 +27,21 @@ use crate::{
         time::Duration,
         types::LENGTH_UNLIMITED,
     },
+    infrastructure::qos_kind::QosKind,
     infrastructure::qos_policy::{
-        DataRepresentationQosPolicy, DeadlineQosPolicy, DestinationOrderQosPolicy,
-        DurabilityQosPolicy, DurabilityServiceQosPolicy, EntityFactoryQosPolicy,
-        GroupDataQosPolicy, HistoryQosPolicy, LatencyBudgetQosPolicy, LifespanQosPolicy,
-        LivelinessQosPolicy, OwnershipQosPolicy, OwnershipStrengthQosPolicy, PartitionQosPolicy,
-        PresentationQosPolicy, Qos, ReliabilityQosPolicy, ReliabilityQosPolicyKind,
-        ResourceLimitsQosPolicy, TransportPriorityQosPolicy, UserDataQosPolicy,
-        WriterDataLifecycleQosPolicy,
+        DataFragQosPolicy, DataRepresentationQosPolicy, DeadlineQosPolicy,
+        DestinationOrderQosPolicy, DurabilityQosPolicy, DurabilityServiceQosPolicy,
+        EntityFactoryQosPolicy, GroupDataQosPolicy, HistoryQosPolicy, LatencyBudgetQosPolicy,
+        LifespanQosPolicy, LivelinessQosPolicy, OwnershipQosPolicy, OwnershipStrengthQosPolicy,
+        PartitionQosPolicy, PresentationQosPolicy, Qos, ReliabilityQosPolicy,
+        ReliabilityQosPolicyKind, ResourceLimitsQosPolicy, TransportPriorityQosPolicy,
+        UserDataQosPolicy, WriterDataLifecycleQosPolicy, WriterReliabilityExtensionQosPolicy,
     },
 };
 use const_default::ConstDefault;
 
-pub const PUBLISHER_QOS_DEFAULT: PublisherQos = PublisherQos::DEFAULT;
-pub const DATAWRITER_QOS_DEFAULT: DataWriterQos = DataWriterQos::DEFAULT;
+pub const PUBLISHER_QOS_DEFAULT: QosKind<PublisherQos> = QosKind::Default;
+pub const DATAWRITER_QOS_DEFAULT: QosKind<DataWriterQos> = QosKind::Default;
 // todo # define DATAWRITER_QOS_USE_TOPIC_QOS
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +62,8 @@ pub struct DataWriterQos {
     pub ownership_strength: OwnershipStrengthQosPolicy,
     pub writer_data_lifecycle: WriterDataLifecycleQosPolicy,
     pub data_representation: DataRepresentationQosPolicy,
+    pub writer_reliability_extension: WriterReliabilityExtensionQosPolicy,
+    pub data_frag: DataFragQosPolicy,
 }
 
 impl Default for DataWriterQos {
@@ -84,6 +88,8 @@ impl Default for DataWriterQos {
             ownership_strength: OwnershipStrengthQosPolicy::default(),
             writer_data_lifecycle: WriterDataLifecycleQosPolicy::default(),
             data_representation: DataRepresentationQosPolicy::default(),
+            writer_reliability_extension: WriterReliabilityExtensionQosPolicy::default(),
+            data_frag: DataFragQosPolicy::default(),
         }
     }
 }
@@ -109,22 +115,31 @@ impl ConstDefault for DataWriterQos {
         ownership_strength: OwnershipStrengthQosPolicy::DEFAULT,
         writer_data_lifecycle: WriterDataLifecycleQosPolicy::DEFAULT,
         data_representation: DataRepresentationQosPolicy::DEFAULT,
+        writer_reliability_extension: WriterReliabilityExtensionQosPolicy::DEFAULT,
+        data_frag: DataFragQosPolicy::DEFAULT,
     };
 }
 
 impl Qos for DataWriterQos {
     fn check_unsupported_policies(&self) -> DdsResult<()> {
-        if self.user_data != UserDataQosPolicy::default()
-            // || self.durability.kind == DurabilityQosPolicyKind::Transient
-            // || self.durability.kind == DurabilityQosPolicyKind::Persistent
-            // || self.durability_service != DurabilityServiceQosPolicy::default()
-            || self.latency_budget != LatencyBudgetQosPolicy::default()
+        if self.latency_budget != LatencyBudgetQosPolicy::default()
             // || self.liveliness != LivelinessQosPolicy::default()
             || self.transport_priority != TransportPriorityQosPolicy::default()
-            // || self.lifespan != LifespanQosPolicy::default()
-            // || self.ownership != OwnershipQosPolicy::default()
-            // || self.ownership_strength != OwnershipStrengthQosPolicy::default()
-            || self.writer_data_lifecycle != WriterDataLifecycleQosPolicy::default()
+        // || self.durability.kind == DurabilityQosPolicyKind::Transient
+        // || self.durability.kind == DurabilityQosPolicyKind::Persistent
+        // || self.lifespan != LifespanQosPolicy::default()
+        // || self.ownership != OwnershipQosPolicy::default()
+        // || self.ownership_strength != OwnershipStrengthQosPolicy::default()
+        // || self.writer_data_lifecycle != WriterDataLifecycleQosPolicy::default()
+        {
+            return Err(DdsError::Unsupported);
+        }
+
+        // WriterReliabilityExtensionQosPolicy unsupported fields check
+        let ext_default = WriterReliabilityExtensionQosPolicy::DEFAULT;
+        if self.writer_reliability_extension.push_mode != ext_default.push_mode
+            || self.writer_reliability_extension.nack_suppression_duration
+                != ext_default.nack_suppression_duration
         {
             return Err(DdsError::Unsupported);
         }
@@ -136,6 +151,7 @@ impl Qos for DataWriterQos {
         if self.durability != new_qos.durability
             || self.ownership != new_qos.ownership
             || self.reliability != new_qos.reliability
+            || self.writer_reliability_extension != new_qos.writer_reliability_extension
             || self.liveliness != new_qos.liveliness
             || self.history != new_qos.history
             || self.resource_limits != new_qos.resource_limits
@@ -150,9 +166,9 @@ impl Qos for DataWriterQos {
     }
 
     fn is_consistent(&self) -> DdsResult<()> {
+        self.resource_limits.is_consistent()?;
         if self.resource_limits.max_samples_per_instance != LENGTH_UNLIMITED
             && self.history.depth() > Some(self.resource_limits.max_samples_per_instance)
-            || self.resource_limits.max_samples < self.resource_limits.max_samples_per_instance
         {
             return Err(DdsError::InconsistentPolicy);
         }
@@ -173,10 +189,9 @@ pub struct PublisherQos {
 
 impl Qos for PublisherQos {
     fn check_unsupported_policies(&self) -> DdsResult<()> {
-        if self.presentation != PresentationQosPolicy::default()
-            // || self.partition != PartitionQosPolicy::default()
-            || self.group_data != GroupDataQosPolicy::default()
-        {
+        if
+        // || self.partition != PartitionQosPolicy::default()
+        self.group_data != GroupDataQosPolicy::default() {
             return Err(DdsError::Unsupported);
         }
 
@@ -195,5 +210,4 @@ impl Qos for PublisherQos {
         self.entity_factory.autoenable_created_entities
     }
 }
-
 impl PublisherQos {}

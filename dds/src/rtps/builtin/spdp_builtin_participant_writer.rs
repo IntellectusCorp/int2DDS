@@ -28,7 +28,7 @@ use crate::{
             locator::Locator,
             sequence::SequenceNumber,
             time::{RtpsDuration, RtpsTime},
-            types::{ChangeKind, SerializedData, TopicKind},
+            types::{ChangeKind, TopicKind},
         },
         entities::{
             endpoint::Endpoint,
@@ -87,7 +87,10 @@ impl SPDPbuiltinParticipantWriter {
             heartbeat_period,
             data_max_size_serialized,
             reader_locators: Arc::new(Mutex::new(Vec::new())),
-            writer_cache: Arc::new(Mutex::new(WriterHistoryCache::new(guid, endpoint_id))),
+            writer_cache: Arc::new(Mutex::new(WriterHistoryCache::new(
+                std::sync::Weak::new(),
+                endpoint_id,
+            ))),
         }
     }
 
@@ -120,9 +123,9 @@ impl SPDPbuiltinParticipantWriter {
         match self.reader_locators.lock() {
             Ok(mut reader_locators) => {
                 debug!(
-                    "SPDP Builtin Participant Writer had {} reader locators before remove {:?}",
+                    "SPDP Builtin Participant Writer had {} reader locators before remove {}",
                     reader_locators.len(),
-                    guid_prefix
+                    Guid::guid_prefix_to_string(&guid_prefix)
                 );
                 reader_locators.retain(|x| x.guid_prefix() != guid_prefix);
                 debug!(
@@ -178,7 +181,7 @@ impl Writer for SPDPbuiltinParticipantWriter {
     fn new_change(
         &self,
         kind: ChangeKind,
-        data: SerializedData,
+        data: Vec<u8>,
         // Not present in RTPS
         // inline_qos: ParameterList,
         handle: InstanceHandle,
@@ -206,6 +209,16 @@ impl Writer for SPDPbuiltinParticipantWriter {
             source_timestamp,
         )
     }
+    fn new_change_with_rpc_callback(
+        &self,
+        _kind: ChangeKind,
+        _handle: InstanceHandle,
+        _source_timestamp: Option<RtpsTime>,
+        _data_fn: Box<dyn FnOnce(Guid, SequenceNumber) -> Vec<u8> + '_>,
+    ) -> CacheChange {
+        unimplemented!("SPDP writer does not support RPC callback")
+    }
+
     fn data_max_size_serialized(&self) -> i32 {
         self.data_max_size_serialized
     }
@@ -227,6 +240,19 @@ impl Writer for SPDPbuiltinParticipantWriter {
     fn nack_suppression_duration(&self) -> RtpsDuration {
         self.nack_suppression_duration
     }
+    fn allocate_sequence_number(&self) -> SequenceNumber {
+        match self.last_change_sequence_number.lock() {
+            Ok(mut seq) => {
+                *seq += 1;
+                *seq
+            }
+            Err(e) => {
+                log::error!("Failed to acquire last_change_sequence_number lock: {}", e);
+                SequenceNumber::UNKNOWN
+            }
+        }
+    }
+
     fn push_mode(&self) -> bool {
         self.push_mode
     }
@@ -269,6 +295,17 @@ impl Writer for SPDPbuiltinParticipantWriter {
         _reader_guid: Guid,
     ) -> RtpsResult<SubscriptionBuiltinTopicData> {
         Err(RtpsError::new(RtpsErrorCode::Unknown, "UnSupported"))
+    }
+
+    fn remove_matched_reader_and_update_status(&self, _reader_guid: Guid) -> RtpsResult<bool> {
+        Ok(false)
+    }
+
+    fn remove_all_matched_readers_with_prefix_and_update_status(
+        &self,
+        _prefix: GuidPrefix,
+    ) -> RtpsResult<usize> {
+        Ok(0)
     }
 }
 

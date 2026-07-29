@@ -1,1 +1,10 @@
+#!/bin/sh
+set -e
+
+STAGED_FILES=$(git diff --cached --name-only)
+
 cargo fmt --all
+
+printf '%s\n' "$STAGED_FILES" | while IFS= read -r f; do
+  [ -n "$f" ] && [ -e "$f" ] && git add "$f"
+done

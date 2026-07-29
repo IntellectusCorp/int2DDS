@@ -21,6 +21,7 @@
 //! `DomainParticipant::delete_topic()` before the participant is deleted. A topic cannot be
 //! deleted while DataReaders or DataWriters are still using it.
 
+use arc_swap::ArcSwap;
 use std::{
     any::Any,
     fmt::Debug,
@@ -42,8 +43,8 @@ use crate::{
     infrastructure::{
         domain_entity::DomainEntity,
         entity::{
-            impl_dds_entity, impl_dds_entity_impl, BaseEntity, EnableChild, Entity, EntityInternal,
-            UpdateStatus,
+            impl_check_parent_enabled, impl_dds_entity, impl_dds_entity_impl, BaseEntity,
+            EnableChild, Entity, EntityInternal, UpdateStatus,
         },
         qos_policy::Qos,
         status::{InconsistentTopicStatus, StatusInfo, StatusKind, StatusMask},
@@ -55,8 +56,17 @@ use crate::{
 
 #[derive(Clone)]
 pub struct Topic {
+    // Indicates whether this entity is a built-in entity.
+    //
+    // Built-in entities are managed internally and have restricted operations:
+    // - Cannot be deleted (delete_topic)
+    // - Cannot modify QoS (set_qos)
+    //
+    // See also: DomainParticipant::get_builtin_subscriber()
+    is_builtin: bool,
     guid: Guid,
-    qos: Arc<Mutex<TopicQos>>,
+    qos: Arc<ArcSwap<TopicQos>>,
+    update_lock: Arc<Mutex<()>>,
     listener: Arc<RwLock<Option<Arc<dyn TopicListener>>>>,
     mask: Arc<RwLock<StatusMask>>,
     status_condition: Arc<Mutex<StatusCondition<TopicQos>>>,
@@ -73,7 +83,7 @@ impl Debug for Topic {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Topic")
             .field("guid", &self.guid)
-            .field("qos", &self.qos.lock().unwrap())
+            .field("qos", &**self.qos.load())
             .field(
                 "listener",
                 &self.listener.read().unwrap().as_ref().map(|_| "Arc<dyn TopicListener>"),
@@ -97,6 +107,11 @@ impl Eq for Topic {}
 
 impl Drop for Topic {
     fn drop(&mut self) {
+        // Builtin entities are managed separately, skip orphan handling
+        if self.is_builtin {
+            return;
+        }
+
         // Only handle drop for the last reference (not clones)
         if let Some(ref self_arc) = self.self_ref {
             if Arc::strong_count(self_arc) > 1 {
@@ -117,7 +132,9 @@ impl Drop for Topic {
 
 impl_topic_description!(Topic);
 impl_dds_entity!(Topic, TopicQos);
-impl EnableChild for Topic {}
+impl EnableChild for Topic {
+    impl_check_parent_enabled!(get_participant);
+}
 impl DomainEntity for Topic {}
 impl UpdateStatus for Topic {
     fn update_status(
@@ -145,7 +162,9 @@ impl UpdateStatus for Topic {
 }
 
 impl Topic {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
+        is_builtin: bool,
         topic_name: &str,
         type_name: &str,
         qos: TopicQos,
@@ -155,8 +174,10 @@ impl Topic {
         participant: &Arc<DomainParticipant>,
     ) -> Self {
         let mut topic = Self {
+            is_builtin,
             guid: handle.to_guid(),
-            qos: Arc::new(Mutex::new(qos)),
+            qos: Arc::new(ArcSwap::from_pointee(qos)),
+            update_lock: Arc::new(Mutex::new(())),
             listener: Arc::new(RwLock::new(listener)),
             mask: Arc::new(RwLock::new(mask)),
             status_condition: Arc::new(Mutex::new(StatusCondition::new(None))),
@@ -176,6 +197,11 @@ impl Topic {
         }
         topic.self_ref = Some(topic_arc); // Without Arc, the new() function completes and memory is freed. The StatusCondition's entity field returns None.
         topic
+    }
+
+    /// Returns whether this topic is a built-in entity.
+    pub(crate) fn is_builtin(&self) -> bool {
+        self.is_builtin
     }
 
     pub fn get_inconsistent_topic_status(&self) -> DdsResult<InconsistentTopicStatus> {
@@ -307,23 +333,23 @@ pub(crate) mod tests {
     };
 
     use int2dds_derive::DdsType;
-    use speedy::{Readable, Writable};
 
     use crate::{
         core::{error::DdsError, time::Duration},
         domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
         infrastructure::status::StatusMask,
+        publication::qos::{DataWriterQos, PublisherQos},
         subscription::qos::{DataReaderQos, SubscriberQos},
         topic::{qos::TopicQos, topic_listener::TopicListener},
     };
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     pub struct HelloWorld {
         pub index: u32,
         pub message: String,
     }
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     pub struct HelloWorldWithKey {
         #[dds(key)]
         pub index: u32,
@@ -354,6 +380,9 @@ pub(crate) mod tests {
 
         // assert_eq!(found_topic.get_instance_handle(), Err(DdsError::AlreadyDeleted));
         assert_eq!(topic.get_instance_handle(), Err(DdsError::AlreadyDeleted));
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -420,6 +449,9 @@ pub(crate) mod tests {
         log::info!("Status Info: {:?}", topic.get_inconsistent_topic_status().unwrap());
         // Error may occur if the timing of data arrival doesn't match
         assert_eq!(topic.get_inconsistent_topic_status().unwrap().total_count_change(), 0);
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -481,5 +513,300 @@ pub(crate) mod tests {
             .unwrap();
 
         std::thread::sleep(std::time::Duration::from_secs(10));
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
+    }
+
+    /// Writer(WITH_KEY) on dp1 vs Reader(NO_KEY) on dp2
+    #[test]
+    fn test_topic_kind_mismatch_writer_keyed_reader_no_key() {
+        let dpf = DomainParticipantFactory::get_instance();
+
+        // dp1: keyed writer
+        let dp1 = dpf
+            .create_participant(20, DomainParticipantQos::default(), None, StatusMask::default())
+            .unwrap();
+        let topic1 = dp1
+            .create_topic::<HelloWorldWithKey>(
+                "topic_kind_mismatch_wk_rnk",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher =
+            dp1.create_publisher(PublisherQos::default(), None, StatusMask::default()).unwrap();
+        let _writer = publisher
+            .create_datawriter::<HelloWorldWithKey>(
+                &topic1,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        // dp2: no-key reader
+        let dp2 = dpf
+            .create_participant(20, DomainParticipantQos::default(), None, StatusMask::default())
+            .unwrap();
+        let topic2 = dp2
+            .create_topic::<HelloWorld>(
+                "topic_kind_mismatch_wk_rnk",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber2 =
+            dp2.create_subscriber(SubscriberQos::default(), None, StatusMask::default()).unwrap();
+        let _reader2 = subscriber2
+            .create_datareader::<HelloWorld>(
+                &topic2,
+                DataReaderQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        std::thread::sleep(std::time::Duration::from_secs(5));
+
+        let status = topic1.get_inconsistent_topic_status().unwrap();
+        assert!(
+            status.total_count >= 1,
+            "Expected InconsistentTopicStatus total_count >= 1, got {}",
+            status.total_count
+        );
+
+        dp1.delete_contained_entities().unwrap();
+        dpf.delete_participant(dp1).unwrap();
+        dp2.delete_contained_entities().unwrap();
+        dpf.delete_participant(dp2).unwrap();
+    }
+
+    /// Writer(NO_KEY) on dp1 vs Reader(WITH_KEY) on dp2
+    #[test]
+    fn test_topic_kind_mismatch_writer_no_key_reader_keyed() {
+        let dpf = DomainParticipantFactory::get_instance();
+
+        // dp1: no-key writer
+        let dp1 = dpf
+            .create_participant(21, DomainParticipantQos::default(), None, StatusMask::default())
+            .unwrap();
+        let topic1 = dp1
+            .create_topic::<HelloWorld>(
+                "topic_kind_mismatch_wnk_rk",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher =
+            dp1.create_publisher(PublisherQos::default(), None, StatusMask::default()).unwrap();
+        let _writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic1,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        // dp2: keyed reader
+        let dp2 = dpf
+            .create_participant(21, DomainParticipantQos::default(), None, StatusMask::default())
+            .unwrap();
+        let topic2 = dp2
+            .create_topic::<HelloWorldWithKey>(
+                "topic_kind_mismatch_wnk_rk",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber2 =
+            dp2.create_subscriber(SubscriberQos::default(), None, StatusMask::default()).unwrap();
+        let _reader2 = subscriber2
+            .create_datareader::<HelloWorldWithKey>(
+                &topic2,
+                DataReaderQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        std::thread::sleep(std::time::Duration::from_secs(5));
+
+        let status = topic1.get_inconsistent_topic_status().unwrap();
+        assert!(
+            status.total_count >= 1,
+            "Expected InconsistentTopicStatus total_count >= 1, got {}",
+            status.total_count
+        );
+
+        dp1.delete_contained_entities().unwrap();
+        dpf.delete_participant(dp1).unwrap();
+        dp2.delete_contained_entities().unwrap();
+        dpf.delete_participant(dp2).unwrap();
+    }
+
+    /// Writer(WITH_KEY) + Reader(WITH_KEY): same participant + remote participant
+    #[test]
+    fn test_topic_kind_match_both_keyed() {
+        let dpf = DomainParticipantFactory::get_instance();
+
+        // dp1: keyed writer + keyed reader (local match)
+        let dp1 = dpf
+            .create_participant(22, DomainParticipantQos::default(), None, StatusMask::default())
+            .unwrap();
+        let topic1 = dp1
+            .create_topic::<HelloWorldWithKey>(
+                "topic_kind_match_both_keyed",
+                "HelloWorldWithKey",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher =
+            dp1.create_publisher(PublisherQos::default(), None, StatusMask::default()).unwrap();
+        let _writer = publisher
+            .create_datawriter::<HelloWorldWithKey>(
+                &topic1,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber1 =
+            dp1.create_subscriber(SubscriberQos::default(), None, StatusMask::default()).unwrap();
+        let _reader1 = subscriber1
+            .create_datareader::<HelloWorldWithKey>(
+                &topic1,
+                DataReaderQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        // dp2: keyed reader (remote match)
+        let dp2 = dpf
+            .create_participant(22, DomainParticipantQos::default(), None, StatusMask::default())
+            .unwrap();
+        let topic2 = dp2
+            .create_topic::<HelloWorldWithKey>(
+                "topic_kind_match_both_keyed",
+                "HelloWorldWithKey",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber2 =
+            dp2.create_subscriber(SubscriberQos::default(), None, StatusMask::default()).unwrap();
+        let _reader2 = subscriber2
+            .create_datareader::<HelloWorldWithKey>(
+                &topic2,
+                DataReaderQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        std::thread::sleep(std::time::Duration::from_secs(5));
+
+        let status = topic1.get_inconsistent_topic_status().unwrap();
+        assert_eq!(
+            status.total_count, 0,
+            "Expected no InconsistentTopicStatus, got total_count={}",
+            status.total_count
+        );
+
+        dp1.delete_contained_entities().unwrap();
+        dpf.delete_participant(dp1).unwrap();
+        dp2.delete_contained_entities().unwrap();
+        dpf.delete_participant(dp2).unwrap();
+    }
+
+    /// Writer(NO_KEY) + Reader(NO_KEY): same participant + remote participant
+    #[test]
+    fn test_topic_kind_match_both_no_key() {
+        let dpf = DomainParticipantFactory::get_instance();
+
+        // dp1: no-key writer + no-key reader (local match)
+        let dp1 = dpf
+            .create_participant(23, DomainParticipantQos::default(), None, StatusMask::default())
+            .unwrap();
+        let topic1 = dp1
+            .create_topic::<HelloWorld>(
+                "topic_kind_match_both_no_key",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher =
+            dp1.create_publisher(PublisherQos::default(), None, StatusMask::default()).unwrap();
+        let _writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic1,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber1 =
+            dp1.create_subscriber(SubscriberQos::default(), None, StatusMask::default()).unwrap();
+        let _reader1 = subscriber1
+            .create_datareader::<HelloWorld>(
+                &topic1,
+                DataReaderQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        // dp2: no-key reader (remote match)
+        let dp2 = dpf
+            .create_participant(23, DomainParticipantQos::default(), None, StatusMask::default())
+            .unwrap();
+        let topic2 = dp2
+            .create_topic::<HelloWorld>(
+                "topic_kind_match_both_no_key",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber2 =
+            dp2.create_subscriber(SubscriberQos::default(), None, StatusMask::default()).unwrap();
+        let _reader2 = subscriber2
+            .create_datareader::<HelloWorld>(
+                &topic2,
+                DataReaderQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        std::thread::sleep(std::time::Duration::from_secs(5));
+
+        let status = topic1.get_inconsistent_topic_status().unwrap();
+        assert_eq!(
+            status.total_count, 0,
+            "Expected no InconsistentTopicStatus, got total_count={}",
+            status.total_count
+        );
+
+        dp1.delete_contained_entities().unwrap();
+        dpf.delete_participant(dp1).unwrap();
+        dp2.delete_contained_entities().unwrap();
+        dpf.delete_participant(dp2).unwrap();
     }
 }

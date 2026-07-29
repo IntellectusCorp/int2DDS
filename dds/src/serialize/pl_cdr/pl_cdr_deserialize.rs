@@ -13,7 +13,8 @@ use crate::{
         DurabilityServiceQosPolicy, HistoryQosPolicy, HistoryQosPolicyKind, LivelinessQosPolicy,
         LivelinessQosPolicyKind, OwnershipQosPolicy, OwnershipQosPolicyKind,
         PresentationQosAccessScopeKind, PresentationQosPolicy, ReliabilityQosPolicy,
-        ReliabilityQosPolicyKind, ResourceLimitsQosPolicy,
+        ReliabilityQosPolicyKind, ResourceLimitsQosPolicy, TypeConsistencyEnforcementQosPolicy,
+        TypeConsistencyKind,
     },
     rtps::{
         builtin::data::content_filtered_topic::ContentFilterProperty,
@@ -27,9 +28,23 @@ use crate::{
             types::{GroupInfo, ProtocolVersion},
         },
     },
+    xtypes::{TypeIdentifier, TypeObject},
 };
 
 use super::{reader::PlCdrReader, MAX_PARAMETER_ITERATIONS};
+
+/// Returns true if `data` begins with a recognized CDR/XCDR encapsulation header
+/// (the 2-byte big-endian encoding identifier). Used to distinguish standard
+/// XTypes PID payloads from legacy headerless int2DDS bodies.
+fn has_encapsulation_header(data: &[u8]) -> bool {
+    if data.len() < 4 {
+        return false;
+    }
+    matches!(
+        u16::from_be_bytes([data[0], data[1]]),
+        0x0000 | 0x0001 | 0x0002 | 0x0003 | 0x0006 | 0x0007 | 0x0008 | 0x0009 | 0x000A | 0x000B
+    )
+}
 
 pub struct PlCdrParser {
     endianness: Endianness,
@@ -270,7 +285,7 @@ impl PlCdrParser {
     fn parse_string_sequence(&self, data: &[u8]) -> Result<Vec<String>, String> {
         let mut reader = PlCdrReader::new(data, self.endianness);
         let count = reader.read_u32()? as usize;
-        let mut strings = Vec::with_capacity(count);
+        let mut strings = Vec::new();
 
         for _ in 0..count {
             let length = reader.read_u32()? as usize;
@@ -338,7 +353,7 @@ impl PlCdrParser {
     fn parse_property_list(&self, data: &[u8]) -> Result<Vec<Property>, String> {
         let mut reader = PlCdrReader::new(data, self.endianness);
         let count = reader.read_u32()? as usize;
-        let mut properties = Vec::with_capacity(count);
+        let mut properties = Vec::new();
 
         for _ in 0..count {
             let name_len = reader.read_u32()? as usize;
@@ -388,7 +403,7 @@ impl PlCdrParser {
             }
             ParameterId::PidParticipantManualLivelinessCount => {
                 if data.len() >= 4 {
-                    ParameterValue::Count(self.read_i32(data))
+                    ParameterValue::Count(self.read_u32(data))
                 } else {
                     return Err("Invalid Manual Liveliness Count data".to_string());
                 }
@@ -425,9 +440,13 @@ impl PlCdrParser {
                 let locator = self.parse_locator(data)?;
                 ParameterValue::Locator(locator)
             }
-            ParameterId::PidParticipantGuid | ParameterId::PidEndpointGuid => {
+            ParameterId::PidParticipantGuid => {
                 let guid = self.parse_guid(data)?;
                 ParameterValue::ParticipantGuid(guid)
+            }
+            ParameterId::PidEndpointGuid => {
+                let guid = self.parse_guid(data)?;
+                ParameterValue::EndpointGuid(guid)
             }
             ParameterId::PidParticipantLeaseDuration
             | ParameterId::PidDeadline
@@ -539,7 +558,7 @@ impl PlCdrParser {
                     1 => HistoryQosPolicyKind::KeepAll,
                     _ => HistoryQosPolicyKind::KeepLast(depth),
                 };
-                ParameterValue::HistoryQosPolicy(HistoryQosPolicy { kind })
+                ParameterValue::HistoryQosPolicy(HistoryQosPolicy { kind, strict: true })
             }
             ParameterId::PidResourceLimits => {
                 let mut reader = PlCdrReader::new(data, self.endianness);
@@ -643,9 +662,96 @@ impl PlCdrParser {
                     return Err("No valid data representation IDs found".to_string());
                 }
 
-                ParameterValue::DataRepresentation(DataRepresentationQosPolicy::new(
-                    representations,
-                ))
+                ParameterValue::DataRepresentation(DataRepresentationQosPolicy {
+                    value: representations,
+                })
+            }
+            ParameterId::PidTypeInformation => {
+                match crate::xtypes::TypeInformation::deserialize_for_parameter(data) {
+                    Ok(type_info) => ParameterValue::TypeInformation(type_info),
+                    Err(_) => match crate::xtypes::TypeInformation::deserialize(data) {
+                        Ok((type_info, _consumed)) => ParameterValue::TypeInformation(type_info),
+                        Err(e) => {
+                            warn!("Failed to parse TypeInformation (0x0075): {}", e);
+                            ParameterValue::Unknown(data)
+                        }
+                    },
+                }
+            }
+            ParameterId::PidTypeIdV1 => {
+                let standard = if has_encapsulation_header(data) {
+                    TypeIdentifier::deserialize(&data[4..]).ok().map(|(tid, _)| tid)
+                } else {
+                    None
+                };
+                match standard {
+                    Some(type_id) => ParameterValue::TypeIdentifierV1(type_id),
+                    None => match crate::xtypes::TypeInformation::deserialize(data) {
+                        Ok((type_info, _)) => {
+                            let mut tid = type_info.minimal.typeid_with_size.type_id;
+                            if tid == TypeIdentifier::None {
+                                tid = type_info.complete.typeid_with_size.type_id;
+                            }
+                            ParameterValue::TypeIdentifierV1(tid)
+                        }
+                        Err(e) => {
+                            warn!("Failed to parse PID_TYPE_IDV1: {}", e);
+                            ParameterValue::Unknown(data)
+                        }
+                    },
+                }
+            }
+            ParameterId::PidTypeConsistencyEnforcement => {
+                // TypeConsistencyEnforcementQosPolicy: kind(2) + 5 bools(5) + padding(1) = 8 bytes
+                if data.len() < 7 {
+                    warn!("Insufficient data for TypeConsistencyEnforcement");
+                    ParameterValue::Unknown(data)
+                } else {
+                    let mut reader = PlCdrReader::new(data, self.endianness);
+                    let kind_u16 = reader.read_u16().unwrap_or(0);
+                    let kind = TypeConsistencyKind::from_u16(kind_u16)
+                        .unwrap_or(TypeConsistencyKind::DisallowTypeCoercion);
+
+                    // Read boolean flags (1 byte each)
+                    let ignore_sequence_bounds =
+                        reader.read_bytes(1).map(|b| b[0] != 0).unwrap_or(false);
+                    let ignore_string_bounds =
+                        reader.read_bytes(1).map(|b| b[0] != 0).unwrap_or(false);
+                    let ignore_member_names =
+                        reader.read_bytes(1).map(|b| b[0] != 0).unwrap_or(false);
+                    let prevent_type_widening =
+                        reader.read_bytes(1).map(|b| b[0] != 0).unwrap_or(false);
+                    let force_type_validation =
+                        reader.read_bytes(1).map(|b| b[0] != 0).unwrap_or(false);
+
+                    ParameterValue::TypeConsistencyEnforcement(
+                        TypeConsistencyEnforcementQosPolicy {
+                            kind,
+                            ignore_sequence_bounds,
+                            ignore_string_bounds,
+                            ignore_member_names,
+                            prevent_type_widening,
+                            force_type_validation,
+                        },
+                    )
+                }
+            }
+            ParameterId::PidTypeObject => {
+                let result = if has_encapsulation_header(data) {
+                    TypeObject::deserialize(&data[4..]).or_else(|_| TypeObject::deserialize(data))
+                } else {
+                    TypeObject::deserialize(data)
+                };
+                match result {
+                    Ok((type_obj, _consumed)) => ParameterValue::TypeObject(type_obj),
+                    Err(e) => match crate::xtypes::TypeObjectV1::deserialize(data) {
+                        Ok((type_obj_v1, _consumed)) => ParameterValue::TypeObjectV1(type_obj_v1),
+                        Err(e_v1) => {
+                            warn!("Failed to parse TypeObject (v2: {}; v1: {})", e, e_v1);
+                            ParameterValue::Unknown(data)
+                        }
+                    },
+                }
             }
             _ => ParameterValue::Unknown(data),
         };

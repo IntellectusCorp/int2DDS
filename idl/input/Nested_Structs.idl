@@ -1,0 +1,23 @@
+struct InnerStruct {
+    long x;
+    long y;
+    string name;
+};
+
+struct DeepInnerStruct {
+    long value;
+    string description;
+};
+
+struct MiddleStruct {
+    long level;
+    DeepInnerStruct deep;
+};
+
+@extensibility(APPENDABLE)
+struct NestedStructType {
+    @key long id;
+    InnerStruct simple_nested;
+    MiddleStruct deep_nested;
+    sequence<InnerStruct> struct_seq;
+};

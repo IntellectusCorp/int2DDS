@@ -1,4 +1,5 @@
 use log::{debug, warn};
+use smallvec::SmallVec;
 use speedy::Endianness;
 
 use crate::rtps::{
@@ -54,7 +55,8 @@ impl InlineQosParser {
             if param_id == ParameterId::PidSentinel as u16 {
                 let _ = reader.read_u16();
                 if let Some(ref mut parameters) = parameters {
-                    parameters.add_parameter(Parameter::new(ParameterId::PidSentinel, vec![]));
+                    parameters
+                        .add_parameter(Parameter::new(ParameterId::PidSentinel, SmallVec::new()));
                 }
                 break;
             }
@@ -136,14 +138,15 @@ impl InlineQosParser {
         let mut reader = PlCdrReader::new(data, self.endianness);
 
         let num_bitmaps = reader.read_u32()? as usize;
-        let mut filter_result = Vec::with_capacity(num_bitmaps);
+        let mut filter_result = Vec::new();
         for _ in 0..num_bitmaps {
             let bitmap = reader.read_i32()?;
             filter_result.push(bitmap);
         }
 
         let num_signatures = reader.read_u32()? as usize;
-        let expected_bitmaps = (num_signatures / 32) + if num_signatures % 32 != 0 { 1 } else { 0 };
+        let expected_bitmaps =
+            (num_signatures / 32) + if !num_signatures.is_multiple_of(32) { 1 } else { 0 };
         if num_bitmaps != expected_bitmaps {
             return Err(format!(
                 "Invalid content filter info: numBitmaps={} but expected {} for numSignatures={}",
@@ -151,7 +154,7 @@ impl InlineQosParser {
             ));
         }
 
-        let mut filter_signatures = Vec::with_capacity(num_signatures);
+        let mut filter_signatures = Vec::new();
         for _ in 0..num_signatures {
             let bytes = reader.read_bytes(16)?;
             let mut signature = [0u8; 16];

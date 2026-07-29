@@ -25,11 +25,11 @@ use crate::{
     infrastructure::qos_policy::LivelinessQosPolicy,
     rtps::{
         common::{
-            guid::Guid,
+            guid::{Guid, GuidPrefix},
             rtps_error_code::RtpsResult,
             sequence::SequenceNumber,
             time::{RtpsDuration, RtpsTime},
-            types::{ChangeKind, SerializedData},
+            types::ChangeKind,
         },
         entities::{
             endpoint::Endpoint,
@@ -46,11 +46,24 @@ pub(crate) trait Writer: Entity + Endpoint + Debug + Any {
     fn new_change(
         &self,
         kind: ChangeKind,
-        data: SerializedData,
+        data: Vec<u8>,
         // inline_qos: ParameterList,
         handle: InstanceHandle,
         source_timestamp: Option<RtpsTime>,
     ) -> CacheChange;
+
+    /// Call `data_fn` to produce serialized data under the lock, then create the CacheChange.
+    /// Designed for RPC DataWriters to generate request/reply samples with correct SampleIdentity in a single step.
+    fn new_change_with_rpc_callback(
+        &self,
+        kind: ChangeKind,
+        handle: InstanceHandle,
+        source_timestamp: Option<RtpsTime>,
+        data_fn: Box<dyn FnOnce(Guid, SequenceNumber) -> Vec<u8> + '_>,
+    ) -> CacheChange;
+
+    /// Allocate and return the next sequence number without creating a CacheChange.
+    fn allocate_sequence_number(&self) -> SequenceNumber;
 
     fn push_mode(&self) -> bool;
     fn heartbeat_period(&self) -> RtpsDuration;
@@ -76,6 +89,14 @@ pub(crate) trait Writer: Entity + Endpoint + Debug + Any {
         &self,
         reader_guid: Guid,
     ) -> RtpsResult<SubscriptionBuiltinTopicData>;
+    fn remove_matched_reader_and_update_status(&self, reader_guid: Guid) -> RtpsResult<bool>;
+
+    // Remove all matched readers whose GUID prefix equals `prefix` (e.g. on remote
+    // participant termination). Returns the number of readers removed.
+    fn remove_all_matched_readers_with_prefix_and_update_status(
+        &self,
+        prefix: GuidPrefix,
+    ) -> RtpsResult<usize>;
 
     //any
     fn as_any(&self) -> &dyn Any;

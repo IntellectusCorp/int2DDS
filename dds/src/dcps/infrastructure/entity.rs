@@ -34,6 +34,7 @@ pub trait Entity: BaseEntity {
     fn get_statuscondition(&self) -> DdsResult<StatusCondition<Self::Qos>>;
     fn set_qos(&self, qos: Self::Qos) -> DdsResult<()>;
     fn get_qos(&self) -> DdsResult<Self::Qos>;
+    fn get_qos_arc(&self) -> DdsResult<Arc<Self::Qos>>;
 }
 
 pub(crate) trait EnableChild: Entity {
@@ -44,6 +45,9 @@ pub(crate) trait EnableChild: Entity {
         Ok(())
     }
     fn update_rtps_entity(&self, _qos: &Self::Qos) -> DdsResult<()> {
+        Ok(())
+    }
+    fn check_parent_enabled(&self) -> DdsResult<()> {
         Ok(())
     }
 }
@@ -90,14 +94,19 @@ macro_rules! impl_dds_entity_impl {
                 if self.is_enabled().is_ok() {
                     return Ok(());
                 }
-                let qos = self.get_qos()?;
+
+                self.check_parent_enabled()?;
+
+                let qos = self.get_qos_arc()?;
                 qos.check_unsupported_policies()?;
                 qos.is_consistent()?;
+
+                self.enable_rtps_entities()?;
+                self.enabled.store(true, Ordering::SeqCst);
+
                 if qos.autoenable_created_entities() {
                     self.enable_child_entities()?;
                 }
-                self.enable_rtps_entities()?;
-                self.enabled.store(true, Ordering::SeqCst);
                 Ok(())
             }
 
@@ -121,30 +130,36 @@ macro_rules! impl_dds_entity_impl {
             }
 
             fn set_qos(&self, qos: Self::Qos) -> DdsResult<()> {
+                if self.is_builtin {
+                    return Err(DdsError::PreconditionNotMet);
+                }
                 self.is_deleted()?;
                 qos.check_unsupported_policies()?;
                 qos.is_consistent()?;
 
                 if self.is_enabled().is_ok() {
-                    self.get_qos()?.check_immutable_change(&qos)?;
+                    self.get_qos_arc()?.check_immutable_change(&qos)?;
                 }
 
-                match self.qos.lock() {
-                    Ok(mut prev_qos) => {
-                        self.update_rtps_entity(&qos)?;
-                        *prev_qos = qos;
-                        Ok(())
-                    }
-                    Err(e) => Err(DdsError::Error(e.to_string())),
-                }
+                // Allow only one set_qos to run at a time so that the cache store
+                // and the following update_rtps_entity stay paired. Reads via
+                // get_qos() go through ArcSwap and never block on this lock.
+                let _update_guard = self.update_lock.lock()
+                    .map_err(|e| DdsError::Error(e.to_string()))?;
+
+                self.qos.store(std::sync::Arc::new(qos.clone()));
+                self.update_rtps_entity(&qos)?;
+                Ok(())
             }
 
             fn get_qos(&self) -> DdsResult<Self::Qos> {
                 self.is_deleted()?;
-                match self.qos.lock() {
-                    Ok(qos) => Ok(qos.clone()),
-                    Err(e) => Err(DdsError::Error(e.to_string())),
-                }
+                Ok((**self.qos.load()).clone())
+            }
+
+            fn get_qos_arc(&self) -> DdsResult<std::sync::Arc<Self::Qos>> {
+                self.is_deleted()?;
+                Ok(self.qos.load_full())
             }
         }
 
@@ -201,6 +216,13 @@ macro_rules! impl_dds_entity_impl {
             pub fn get_qos(&self) -> DdsResult<$qos_type> {
                 <Self as Entity>::get_qos(self)
             }
+
+            // Shared read-only handle to the current QoS. Avoids a deep clone
+            // on hot paths that only read a field.
+            #[inline]
+            pub(crate) fn get_qos_arc(&self) -> DdsResult<std::sync::Arc<$qos_type>> {
+                <Self as Entity>::get_qos_arc(self)
+            }
         }
     };
 }
@@ -218,5 +240,18 @@ macro_rules! impl_dds_entity {
     };
 }
 
+macro_rules! impl_check_parent_enabled {
+    ($parent_getter:ident) => {
+        fn check_parent_enabled(&self) -> DdsResult<()> {
+            match self.$parent_getter()?.is_enabled() {
+                Ok(()) => Ok(()),
+                Err(DdsError::NotEnabled) => Err(DdsError::PreconditionNotMet),
+                Err(e) => Err(e),
+            }
+        }
+    };
+}
+
+pub(crate) use impl_check_parent_enabled;
 pub(crate) use impl_dds_entity;
 pub(crate) use impl_dds_entity_impl;

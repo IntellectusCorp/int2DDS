@@ -4,11 +4,11 @@
 //! DDS domain. A GUID consists of a GuidPrefix (12 bytes, unique per participant) and
 //! an EntityId (4 bytes, unique within the participant).
 
-use speedy::{Readable, Writable};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::dcps::topic::type_support::DdsType;
 use crate::rtps::common::entity_id::EntityId;
 use crate::rtps::common::entity_kind::EntityKind;
 
@@ -16,7 +16,8 @@ use crate::rtps::common::entity_kind::EntityKind;
 pub const GUIDPREFIX_UNKNOWN: GuidPrefix = [0x00; 12];
 pub type GuidPrefix = [u8; 12];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Readable, Writable, Hash)]
+#[derive(DdsType, Copy, Eq, PartialOrd, Ord, Hash)]
+#[dds_type(crate_path = "crate")]
 pub struct Guid {
     prefix: GuidPrefix,  // [u8; 12]
     entity_id: EntityId, // [u8; 4]
@@ -96,7 +97,16 @@ impl Guid {
     }
 
     pub fn guid_prefix_to_string(prefix: &GuidPrefix) -> String {
-        prefix.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(":")
+        prefix.iter().map(|b| format!("{:02x}", b)).collect()
+    }
+
+    pub fn to_hex_string(&self) -> String {
+        self.to_bytes().iter().map(|b| format!("{:02x}", b)).collect()
+    }
+}
+impl std::fmt::Display for Guid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_hex_string())
     }
 }
 
@@ -118,6 +128,14 @@ impl GroupDigest {
     pub fn from_entity_ids() -> Self {
         todo!()
         // DDSI-RTPS v2.5 9.3.2.5 GroupDigest_t (p.150)
+    }
+}
+impl std::fmt::Display for GroupDigest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for b in &self.0 {
+            write!(f, "{:02x}", b)?;
+        }
+        Ok(())
     }
 }
 

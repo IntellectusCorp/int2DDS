@@ -10,9 +10,11 @@
 use crate::{
     infrastructure::qos_policy::LivelinessQosPolicyKind,
     rtps::common::{guid::GuidPrefix, types::SerializedData},
+    topic::type_support::DdsType,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(DdsType, Copy, PartialEq, Eq)]
+#[dds_type(crate_path = "crate", no_default, no_partialeq)]
 pub(crate) struct ParticipantMessageDataKind([u8; 4]);
 
 impl ParticipantMessageDataKind {
@@ -39,7 +41,8 @@ impl From<LivelinessQosPolicyKind> for ParticipantMessageDataKind {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(DdsType)]
+#[dds_type(crate_path = "crate", no_default)]
 pub(crate) struct ParticipantMessageData {
     participant_guid_prefix: GuidPrefix,
     kind: ParticipantMessageDataKind,
@@ -88,8 +91,8 @@ impl ParticipantMessageData {
         self.kind == ParticipantMessageDataKind::MANUAL_LIVELINESS_UPDATE
     }
 
-    pub(crate) fn from_serialized_data(data: SerializedData) -> Result<Self, String> {
-        let bytes = data.as_ref();
+    pub(crate) fn from_serialized_data(data: &[u8]) -> Result<Self, String> {
+        let bytes = data;
 
         // Minimum size: 4 (header) + 12 (GuidPrefix) + 4 (kind) + 4 (data length) = 24 bytes
         if bytes.len() < 24 {
@@ -184,9 +187,7 @@ impl ParticipantMessageData {
 
         // Add padding to 4-byte alignment if needed
         let padding_needed = (4 - (serialized.len() % 4)) % 4;
-        for _ in 0..padding_needed {
-            serialized.push(0x00);
-        }
+        serialized.extend(std::iter::repeat_n(0x00, padding_needed));
 
         SerializedData::from(serialized)
     }

@@ -29,6 +29,10 @@ use std::{
     },
 };
 
+use arc_swap::ArcSwap;
+
+use log::debug;
+
 use crate::{
     common::{
         builtin::topic::{
@@ -46,16 +50,18 @@ use crate::{
         deadline_monitor::DeadlineMonitor,
         domain_entity::DomainEntity,
         entity::{
-            impl_dds_entity, impl_dds_entity_impl, BaseEntity, EnableChild, Entity, EntityInternal,
-            UpdateStatus,
+            impl_check_parent_enabled, impl_dds_entity, impl_dds_entity_impl, BaseEntity,
+            EnableChild, Entity, EntityInternal, UpdateStatus,
         },
         history_cache::HistoryCache as _,
         qos_policy::{
-            DataRepresentationId, LivelinessQosPolicyKind, Qos, ReliabilityQosPolicyKind,
+            DataRepresentationId, DurabilityQosPolicyKind, HistoryQosPolicyKind,
+            LivelinessQosPolicyKind, Qos, ReliabilityQosPolicyKind,
         },
         status::{
             LivelinessLostStatus, OfferedDeadlineMissedStatus, OfferedIncompatibleQosStatus,
-            PublicationMatchedStatus, StatusInfo, StatusKind, StatusMask,
+            OfferedIncompatibleTypeStatus, PublicationMatchedStatus, StatusInfo, StatusKind,
+            StatusMask,
         },
         status_condition::StatusCondition,
     },
@@ -64,10 +70,14 @@ use crate::{
         common::{
             entity_kind::EntityKind,
             guid::Guid,
+            sequence::SequenceNumber,
             time::RtpsTime,
             types::{ChangeKind, SerializedData},
         },
-        entities::writer::Writer as RtpsWriter,
+        entities::{
+            history::cache_change::{CacheChange, PresentationInfo},
+            writer::{StatefulWriter, Writer as RtpsWriter},
+        },
         logic::wlp_logic::WlpLogic,
     },
     topic::{
@@ -76,6 +86,20 @@ use crate::{
     },
     DdsType,
 };
+
+pub struct SerializedWriteLoan {
+    change: CacheChange,
+}
+
+impl SerializedWriteLoan {
+    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.change.data_mut().as_mut_ptr()
+    }
+
+    pub fn capacity(&mut self) -> usize {
+        self.change.data_mut().capacity()
+    }
+}
 
 use super::{data_writer_listener::DataWriterListener, publisher::Publisher, qos::DataWriterQos};
 
@@ -86,6 +110,7 @@ pub trait DataWriterBase: DomainEntity + Send + Any {
     fn get_liveliness_lost_status(&self) -> DdsResult<LivelinessLostStatus>;
     fn get_offered_deadline_missed_status(&self) -> DdsResult<OfferedDeadlineMissedStatus>;
     fn get_offered_incompatible_qos_status(&self) -> DdsResult<OfferedIncompatibleQosStatus>;
+    fn get_offered_incompatible_type_status(&self) -> DdsResult<OfferedIncompatibleTypeStatus>;
     fn get_publication_matched_status(&self) -> DdsResult<PublicationMatchedStatus>;
     fn get_topic(&self) -> DdsResult<Topic>;
     fn get_publisher(&self) -> DdsResult<Publisher>;
@@ -99,17 +124,29 @@ pub trait DataWriterBase: DomainEntity + Send + Any {
 
 pub(crate) trait DataWriterInternal: DataWriterBase {
     fn disable(&self) -> DdsResult<()>;
-    // fn reset_default_qos(&self) -> DdsResult<()>;
     fn clone_boxed(&self) -> Box<dyn DataWriterInternal<Qos = DataWriterQos> + Send>;
     fn as_any(&self) -> &dyn Any;
     fn get_type_id(&self) -> TypeId;
     fn delete(&self);
     fn is_deleted(&self) -> DdsResult<()>;
+    fn is_builtin(&self) -> bool;
+    fn end_coherent_set(&self) -> DdsResult<()>;
 }
 
 pub struct DataWriter<Foo> {
+    // Indicates whether this entity is a built-in entity.
+    //
+    // Currently always `false` as DDS spec does not define built-in
+    // DataWriter exposed to users.
+    //
+    // TODO: Reserved for future DCPS-RTPS built-in entity mapping
+    // if needed (e.g., exposing built-in writers for diagnostics).
+    is_builtin: bool,
     guid: Guid,
-    qos: Arc<Mutex<DataWriterQos>>,
+    qos: Arc<ArcSwap<DataWriterQos>>,
+    // Serializes set_qos so that (cache store + update_rtps_entity) executes
+    // as a unit. get_qos reads are lock-free via ArcSwap.
+    update_lock: Arc<Mutex<()>>,
     listener: Arc<RwLock<Option<Arc<dyn DataWriterListener<Foo = Foo>>>>>,
     mask: Arc<RwLock<StatusMask>>,
     status_condition: Arc<Mutex<StatusCondition<DataWriterQos>>>,
@@ -121,22 +158,26 @@ pub struct DataWriter<Foo> {
     publisher: Option<Weak<Publisher>>,
     rtps_writer: Arc<Mutex<Option<Weak<dyn RtpsWriter + Send + Sync>>>>,
     key_instances: Arc<Mutex<HashMap<SerializedData, InstanceHandle>>>, // <serialized_key, ih>
+    #[allow(clippy::type_complexity)]
     instances: Arc<Mutex<HashMap<InstanceHandle, (SerializedData, Time, InstanceState)>>>, // for instance managing
     liveliness_lost_status: Arc<Mutex<LivelinessLostStatus>>,
     offered_deadline_missed_status: Arc<Mutex<OfferedDeadlineMissedStatus>>,
     offered_incompatible_qos_status: Arc<Mutex<OfferedIncompatibleQosStatus>>,
+    offered_incompatible_type_status: Arc<Mutex<OfferedIncompatibleTypeStatus>>,
     publication_matched_status: Arc<Mutex<PublicationMatchedStatus>>,
     deadline_monitor: Arc<Mutex<Option<DeadlineMonitor>>>,
     _phantom: PhantomData<fn() -> Foo>,
     datawriter_cache: Arc<Mutex<DataWriterHistoryCache<Foo>>>,
     wlp_logic: Option<WlpLogic>,
+    // First sequence number of this writer's open coherent set; None outside a set.
+    current_coherent_start: Arc<Mutex<Option<SequenceNumber>>>,
 }
 
 impl<Foo> Debug for DataWriter<Foo> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DataWriter")
             .field("guid", &self.guid)
-            .field("qos", &self.qos.lock().unwrap())
+            .field("qos", &**self.qos.load())
             .field(
                 "listener",
                 &self.listener.read().unwrap().as_ref().map(|_| "Arc<dyn DataWriterListener>"),
@@ -161,6 +202,10 @@ impl<Foo> Debug for DataWriter<Foo> {
                 "offered_incompatible_qos_status",
                 &self.offered_incompatible_qos_status.lock().unwrap(),
             )
+            .field(
+                "offered_incompatible_type_status",
+                &self.offered_incompatible_type_status.lock().unwrap(),
+            )
             .field("publication_matched_status", &self.publication_matched_status.lock().unwrap())
             .field("_phantom", &self._phantom)
             .finish()
@@ -170,8 +215,10 @@ impl<Foo> Debug for DataWriter<Foo> {
 impl<Foo: 'static + Clone> Clone for DataWriter<Foo> {
     fn clone(&self) -> Self {
         Self {
+            is_builtin: self.is_builtin,
             guid: self.guid,
             qos: self.qos.clone(),
+            update_lock: self.update_lock.clone(),
             listener: self.listener.clone(),
             mask: self.mask.clone(),
             status_condition: self.status_condition.clone(),
@@ -187,11 +234,13 @@ impl<Foo: 'static + Clone> Clone for DataWriter<Foo> {
             liveliness_lost_status: self.liveliness_lost_status.clone(),
             offered_deadline_missed_status: self.offered_deadline_missed_status.clone(),
             offered_incompatible_qos_status: self.offered_incompatible_qos_status.clone(),
+            offered_incompatible_type_status: self.offered_incompatible_type_status.clone(),
             publication_matched_status: self.publication_matched_status.clone(),
             deadline_monitor: self.deadline_monitor.clone(),
             _phantom: self._phantom,
             datawriter_cache: self.datawriter_cache.clone(),
             wlp_logic: self.wlp_logic.clone(),
+            current_coherent_start: self.current_coherent_start.clone(),
         }
     }
 }
@@ -199,10 +248,16 @@ impl<Foo: 'static + Clone> Clone for DataWriter<Foo> {
 // When user doesn't call delete_datawriter and automatic drop occurs when going out of scope,
 // it must not be deleted from Publisher.
 impl<Foo> Drop for DataWriter<Foo> {
+    #[allow(clippy::match_result_ok)]
     fn drop(&mut self) {
+        // Builtin entities are managed separately, skip orphan handling
+        if self.is_builtin {
+            return;
+        }
+
         // Only handle drop for the last reference (not clones)
         if let Some(guard) = self.self_ref.lock().ok() {
-            if let Some(ref self_arc) = guard.as_ref() {
+            if let Some(self_arc) = guard.as_ref() {
                 if Arc::strong_count(self_arc) > 1 {
                     return;
                 }
@@ -242,14 +297,28 @@ impl<Foo: 'static + Clone> EnableChild for DataWriter<Foo> {
         let publisher = self.get_publisher()?;
         let participant = publisher.get_participant()?;
         let topic = self.get_topic()?;
-        let mut publication_builtin_topic_data = PublicationBuiltinTopicData::new(
-            &self.get_qos()?,
-            &publisher.get_qos()?,
-            &topic.get_qos()?,
-        );
+        let writer_qos = self.get_qos_arc()?;
+        let publisher_qos = publisher.get_qos_arc()?;
+        let topic_qos = topic.get_qos_arc()?;
+        let mut publication_builtin_topic_data =
+            PublicationBuiltinTopicData::new(&writer_qos, &publisher_qos, &topic_qos);
         publication_builtin_topic_data.set_topic_name(topic.get_name().to_string());
         publication_builtin_topic_data.set_type_name(topic.get_type_name().to_string());
         publication_builtin_topic_data.set_endpoint_guid(self.guid);
+
+        // Set TypeIdentifier and TypeObject for DDS-XTypes discovery
+        if let Some(type_id) = self.type_support.get_type_identifier() {
+            publication_builtin_topic_data.set_type_identifier(Some(type_id));
+        }
+        if let Some(type_obj) = self.type_support.get_type_object() {
+            publication_builtin_topic_data.set_type_object(Some(type_obj));
+        }
+        let type_closure = self.type_support.get_type_object_closure();
+        publication_builtin_topic_data
+            .set_type_information(crate::xtypes::TypeInformation::from_closure(&type_closure));
+        if let Ok(rtps_participant) = participant.get_rtps_participant() {
+            rtps_participant.register_local_type_objects(&type_closure);
+        }
 
         let status_callback = self.create_status_callback()?;
 
@@ -275,16 +344,52 @@ impl<Foo: 'static + Clone> EnableChild for DataWriter<Foo> {
                 Some(Arc::downgrade(&rtps_writer));
         }
 
+        // A volatile, keep-all writer has no reason to keep samples acked by all readers,
+        // so register a callback that removes them unless the user opted into strict mode
+        let qos = self.get_qos_arc()?;
+        if qos.durability.kind == DurabilityQosPolicyKind::Volatile
+            && qos.history.kind == HistoryQosPolicyKind::KeepAll
+            && !qos.history.strict
+            && qos.reliability.kind == ReliabilityQosPolicyKind::Reliable
+        {
+            if let Some(stateful_writer) = rtps_writer.as_any().downcast_ref::<StatefulWriter>() {
+                let cache = Arc::downgrade(&self.datawriter_cache);
+                stateful_writer.set_all_acked_callback(Arc::new(move |max_acked| {
+                    if let Some(cache) = cache.upgrade() {
+                        if let Ok(mut cache) = cache.lock() {
+                            let _ = cache.remove_changes_acked_up_to(max_acked);
+                        }
+                    }
+                }));
+            }
+        }
+
         Ok(())
     }
     fn update_rtps_entity(&self, qos: &Self::Qos) -> DdsResult<()> {
         let publisher = self.get_publisher()?;
         let topic = self.get_topic()?;
+        let publisher_qos = publisher.get_qos_arc()?;
+        let topic_qos = topic.get_qos_arc()?;
         let mut publication_builtin_topic_data =
-            PublicationBuiltinTopicData::new(qos, &publisher.get_qos()?, &topic.get_qos()?);
+            PublicationBuiltinTopicData::new(qos, &publisher_qos, &topic_qos);
         publication_builtin_topic_data.set_topic_name(topic.get_name().to_string());
         publication_builtin_topic_data.set_type_name(topic.get_type_name().to_string());
         publication_builtin_topic_data.set_endpoint_guid(self.guid);
+
+        // Set TypeIdentifier and TypeObject for DDS-XTypes discovery
+        if let Some(type_id) = self.type_support.get_type_identifier() {
+            publication_builtin_topic_data.set_type_identifier(Some(type_id));
+        }
+        if let Some(type_obj) = self.type_support.get_type_object() {
+            publication_builtin_topic_data.set_type_object(Some(type_obj));
+        }
+        publication_builtin_topic_data.set_type_information(
+            crate::xtypes::TypeInformation::from_closure(
+                &self.type_support.get_type_object_closure(),
+            ),
+        );
+
         let rtps_writer = self.get_rtps_writer()?;
         rtps_writer
             .set_publication_builtin_topic_data(publication_builtin_topic_data.clone())
@@ -301,6 +406,8 @@ impl<Foo: 'static + Clone> EnableChild for DataWriter<Foo> {
 
         Ok(())
     }
+
+    impl_check_parent_enabled!(get_publisher);
 }
 impl<Foo: 'static + Clone> UpdateStatus for DataWriter<Foo> {
     fn update_status(
@@ -323,6 +430,13 @@ impl<Foo: 'static + Clone> UpdateStatus for DataWriter<Foo> {
                 )
                 .map_err(|_| DdsError::BadParameter)?;
                 self.handle_offered_incompatible_qos_status(info)
+            }
+            StatusKind::OFFERED_INCOMPATIBLE_TYPE => {
+                let info = Arc::downcast::<OfferedIncompatibleTypeStatus>(
+                    info.ok_or(DdsError::BadParameter)?,
+                )
+                .map_err(|_| DdsError::BadParameter)?;
+                self.handle_offered_incompatible_type_status(info)
             }
             StatusKind::LIVELINESS_LOST => {
                 if info.is_some() {
@@ -348,7 +462,9 @@ impl<Foo: 'static + Clone> UpdateStatus for DataWriter<Foo> {
 impl<Foo: 'static + Clone> DataWriter<Foo> {
     // DataWriter should be specialized for each data type.
     // Trait defining methods that should be defined in auto-generated class for <Foo>
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
+        is_builtin: bool,
         guid: Guid,
         type_support: Arc<dyn TypeSupport + Send>,
         topic: &Arc<Topic>,
@@ -358,9 +474,11 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         publisher: &Arc<Publisher>,
         wlp_logic: Option<WlpLogic>,
     ) -> DdsResult<Self> {
-        let mut writer = Self {
+        let writer = Self {
+            is_builtin,
             guid,
-            qos: Arc::new(Mutex::new(qos.clone())),
+            qos: Arc::new(ArcSwap::from_pointee(qos.clone())),
+            update_lock: Arc::new(Mutex::new(())),
             listener: Arc::new(RwLock::new(listener)),
             mask: Arc::new(RwLock::new(mask)),
             status_condition: Arc::new(Mutex::new(StatusCondition::new(None))),
@@ -380,17 +498,22 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             offered_incompatible_qos_status: Arc::new(Mutex::new(
                 OfferedIncompatibleQosStatus::default(),
             )),
+            offered_incompatible_type_status: Arc::new(Mutex::new(
+                OfferedIncompatibleTypeStatus::default(),
+            )),
             publication_matched_status: Arc::new(Mutex::new(PublicationMatchedStatus::default())),
             deadline_monitor: Arc::new(Mutex::new(None)),
             _phantom: PhantomData,
             datawriter_cache: Arc::new(Mutex::new(DataWriterHistoryCache::<Foo>::new(
                 Weak::new(),
                 qos.reliability,
+                qos.durability,
                 qos.history,
                 qos.resource_limits,
                 type_support.is_compute_key_provided(),
             ))),
             wlp_logic,
+            current_coherent_start: Arc::new(Mutex::new(None)),
         };
         let writer_arc = Arc::new(writer.clone());
         let weak_ref = Arc::downgrade(&writer_arc);
@@ -404,9 +527,16 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 writer.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
             datawriter_cache.set_datawriter(weak_ref);
         }
-        writer.self_ref = Arc::new(Mutex::new(Some(writer_arc))); // Without Arc, memory is freed when new() function ends. StatusCondition's entity field returns None.
-        let period = writer.get_qos()?.deadline.period;
-        if !period.is_infinite() && guid.entity_kind() == EntityKind::USER_DEFINED_WRITER_WITH_KEY {
+        {
+            let mut self_ref =
+                writer.self_ref.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            *self_ref = Some(writer_arc);
+        }
+        let period = writer.get_qos_arc()?.deadline.period;
+        if !period.is_infinite()
+            && (guid.entity_kind() == EntityKind::USER_DEFINED_WRITER_WITH_KEY
+                || guid.entity_kind() == EntityKind::USER_DEFINED_WRITER_NO_KEY)
+        {
             let status_callback = writer.create_status_callback()?;
             let mut deadline_monitor =
                 writer.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
@@ -419,13 +549,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         data_representation: &[DataRepresentationId],
         extensibility: crate::serialize::xcdr::ExtensibilityKind,
     ) -> DdsResult<SerializationFormat> {
-        let supported = if data_representation.is_empty() {
-            &[DataRepresentationId::XcdrDataRepresentation][..]
-        } else {
-            data_representation
-        };
-
-        for representation in supported {
+        for representation in data_representation {
             match representation {
                 DataRepresentationId::XcdrDataRepresentation => {
                     return Ok(SerializationFormat::Cdr);
@@ -450,6 +574,58 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         }
 
         Err(DdsError::Error("No supported DataRepresentationId found in QoS policy".to_string()))
+    }
+
+    fn validate_timestamp(timestamp: &Time) -> DdsResult<()> {
+        if timestamp.is_infinite() || timestamp.sec < 0 || !timestamp.is_valid() {
+            return Err(DdsError::BadParameter);
+        }
+        Ok(())
+    }
+
+    fn resolve_handle(
+        instance_handle: InstanceHandle,
+        user_handle: InstanceHandle,
+    ) -> DdsResult<InstanceHandle> {
+        if user_handle.is_nil() {
+            Ok(instance_handle)
+        } else if user_handle != instance_handle {
+            Err(DdsError::PreconditionNotMet)
+        } else {
+            Ok(instance_handle)
+        }
+    }
+
+    fn resolve_dispose_key(
+        &self,
+        serialized_key: SerializedData,
+        computed_handle: InstanceHandle,
+        user_handle: InstanceHandle,
+    ) -> DdsResult<(SerializedData, InstanceHandle)> {
+        let instance_handle = {
+            let key_instances =
+                self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            key_instances.get(&serialized_key).copied().unwrap_or(computed_handle)
+        };
+        let resolved = Self::resolve_handle(instance_handle, user_handle)?;
+        Ok((serialized_key, resolved))
+    }
+
+    fn resolve_unregister_key(
+        &self,
+        serialized_key: SerializedData,
+        user_handle: InstanceHandle,
+    ) -> DdsResult<(SerializedData, InstanceHandle)> {
+        let instance_handle = {
+            let key_instances =
+                self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            match key_instances.get(&serialized_key) {
+                Some(h) => *h,
+                None => return Err(DdsError::BadParameter),
+            }
+        };
+        let resolved = Self::resolve_handle(instance_handle, user_handle)?;
+        Ok((serialized_key, resolved))
     }
 
     /// Disposes of a data instance, indicating it is no longer valid.
@@ -503,112 +679,20 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
     ) -> DdsResult<()> {
         // let start_time = Time::now();
         self.is_enabled()?;
-        if timestamp.is_infinite() || timestamp.sec < 0 || !timestamp.is_valid() {
-            return Err(DdsError::BadParameter);
+
+        if !self.type_support.is_compute_key_provided() {
+            log::warn!("dispose on no-key topic has no effect");
+            return Ok(());
         }
 
-        // TODO: Check and allocate resource space when Reliable
-        // let qos = self.get_qos().unwrap();
-        // let reliability = qos.reliability;
-        // if reliability.kind == ReliabilityQosPolicyKind::Reliable {
-        //     while !registry.has_free_space() {
-        //         if start_time.elapsed().unwrap() > reliability.max_blocking_time {
-        //             return Err(DdsError::Timeout);
-        //         }
-        //         if registry.resource_expected_to_become_available() {
-        //             return Err(DdsError::OutOfResources);
-        //         }
-        //         std::thread::sleep(Duration::from_millis(10));
-        //     }
-        //     // Example has_free_space implementation
-        //     fn has_space(&self) -> bool {
-        //         let max_samples = self.qos.resource_limits.max_samples;
-        //         let max_instances = self.qos.resource_limits.max_instances;
-        //         let history_depth = self.qos.history.depth;
-        //         let instance_count = self.get_instance_count();
-        //         // Condition 2: instance count > sample count → blocking
-        //         if max_samples < max_instances {
-        //             if instance_count >= max_samples {
-        //                 return false;
-        //             }
-        //         }
-        //         // Condition 1: overall sample count limit
-        //         let theoretical_max = instance_count * history_depth;
-        //         if max_samples < theoretical_max {
-        //             // there's potential to discard some samples
-        //             self.evict_oldest_sample_if_needed();
-        //             if self.total_sample_count() >= max_samples {
-        //                 return false; // still no space available → blocking candidate
-        //             }
-        //         }
-        //         true
-        //     }
-        // }
+        Self::validate_timestamp(&timestamp)?;
+
         let serialized_key = self.type_support.serialize_key(data as &dyn Any)?;
-        let instance_handle = match self.key_instances.lock() {
-            Ok(mut key_instances) => {
-                if let Some(instance_handle) = key_instances.remove(&serialized_key) {
-                    instance_handle
-                } else {
-                    // 3. Deserialize key
-                    //hashing
-                    self.type_support.compute_key(data as &dyn Any)
-                }
-            }
-            Err(e) => return Err(DdsError::Error(e.to_string())),
-        };
+        let computed_handle = self.type_support.compute_key(data as &dyn Any);
+        let (serialized_key, resolved_handle) =
+            self.resolve_dispose_key(serialized_key, computed_handle, handle)?;
 
-        let handle = if handle.is_nil() {
-            instance_handle
-        } else {
-            // If handle != HANDLE_NIL, verify that instance and handle match
-            if handle != instance_handle {
-                return Err(DdsError::PreconditionNotMet);
-            }
-            instance_handle
-        };
-
-        {
-            let mut instances =
-                self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-
-            match instances.get(&handle) {
-                Some((_, _, InstanceState::Registered))
-                | Some((_, _, InstanceState::Unregistered)) => {
-                    // OK, in disposable state
-                }
-                Some((_, _, InstanceState::Disposed)) => {
-                    // Already in disposed state
-                    return Ok(());
-                }
-                None => {
-                    // Does not exist
-                    return Err(DdsError::BadParameter);
-                }
-            }
-
-            instances.insert(handle, (serialized_key.clone(), timestamp, InstanceState::Disposed));
-
-            let monitor_guard =
-                self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            if !handle.is_nil() {
-                if let Some(monitor) = monitor_guard.as_ref() {
-                    monitor.cancel_instance(&handle);
-                }
-            }
-
-            self.add_change(
-                ChangeKind::NotAliveDisposed,
-                serialized_key,
-                // ParameterList::default(),
-                handle,
-                Some(timestamp.into()),
-            )?;
-
-            self.update_liveliness()?;
-
-            Ok(())
-        }
+        self.dispose_inner(serialized_key, resolved_handle, timestamp, Some(data))
     }
 
     /// Publishes a data sample to the topic.
@@ -694,133 +778,157 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         handle: InstanceHandle,
         timestamp: Time,
     ) -> DdsResult<()> {
-        // in: data: <Foo>, handle: InstanceHandle, timestamp: Time
-        // out: DdsError_t
-        /*
-            This operation performs the same function as write, but additionally allows specifying a source_timestamp value.
-            This timestamp is used by DataReader objects through the source_timestamp attribute in SampleInfo.
-            For more details on data timestamps on the receiving side, refer to 2.2.2.5, Subscription Module, and for information on the DESTINATION_ORDER QoS policy, see 2.2.3.17.
-            Constraints on the handle parameter value and related error behavior are defined the same as for the write operation (see 2.2.2.4.2.11).
-            This operation can block under the same conditions as the write operation and may return TIMEOUT.
-            Additionally, this operation can return errors in the following situations:
-            - OUT_OF_RESOURCES
-            - PRECONDITION_NOT_MET
-            - BAD_PARAMETER
-            This operation, like write, should also be provided in the specialized class generated for the specific data type used by the application.
-        */
-        // let start_time = Time::now();
+        self.write_w_timestamp_inner(data, handle, timestamp)?;
+        Ok(())
+    }
+
+    /// Write data and return the SampleIdentity (writer GUID + sequence number).
+    /// `on_identity_assigned` is called with the allocated identity before serialization,
+    /// allowing the caller to embed it into the data (e.g. RequestHeader.request_id). (7.8.1)
+    /// Used by DDS-RPC for request-reply correlation.
+    pub fn write_and_obtain_sample_identity(
+        &self,
+        data: &mut Foo,
+        handle: InstanceHandle,
+        on_identity_assigned: impl FnOnce(&mut Foo, Guid, SequenceNumber),
+    ) -> DdsResult<(Guid, SequenceNumber)> {
         self.is_enabled()?;
-        if timestamp.is_infinite() || timestamp.sec < 0 || !timestamp.is_valid() {
-            return Err(DdsError::BadParameter);
-        }
+        let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
+        Self::validate_timestamp(&timestamp)?;
 
-        // TODO: Check and allocate resource space when Reliable
-        // let qos = self.get_qos().unwrap();
-        // let reliability = qos.reliability;
-        // if reliability.kind == ReliabilityQosPolicyKind::Reliable {
-        //     while !registry.has_free_space() {
-        //         if start_time.elapsed().unwrap() > reliability.max_blocking_time {
-        //             return Err(DdsError::Timeout);
-        //         }
-        //         if registry.resource_expected_to_become_available() {
-        //             return Err(DdsError::OutOfResources);
-        //         }
-        //         std::thread::sleep(Duration::from_millis(10));
-        //     }
-        //     // Example has_free_space implementation
-        //     fn has_space(&self) -> bool {
-        //         let max_samples = self.qos.resource_limits.max_samples;
-        //         let max_instances = self.qos.resource_limits.max_instances;
-        //         let history_depth = self.qos.history.depth;
-        //         let instance_count = self.get_instance_count();
-        //         // Condition 2: instance count > sample count → blocking
-        //         if max_samples < max_instances {
-        //             if instance_count >= max_samples {
-        //                 return false;
-        //             }
-        //         }
-        //         // Condition 1: overall sample count limit
-        //         let theoretical_max = instance_count * history_depth;
-        //         if max_samples < theoretical_max {
-        //             // there's potential to discard some samples
-        //             self.evict_oldest_sample_if_needed();
-        //             if self.total_sample_count() >= max_samples {
-        //                 return false; // still no space available → blocking candidate
-        //             }
-        //         }
-        //         true
-        //     }
-        // }
-
-        // DDS-XTypes spec 7.6.3.4.1:
-        // Select the correct serialization format by combining DataRepresentation QoS and type's extensibility
         let format = {
-            let qos = self.qos.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-
+            let qos = self.qos.load();
             let extensibility = self.type_support.get_extensibility_kind();
-
-            Self::resolve_serialization_format(&qos.data_representation.value, extensibility)?
-
-            // qos lock is automatically released here (end of scope)
+            Self::resolve_serialization_format(
+                qos.data_representation.effective_ids(),
+                extensibility,
+            )?
         };
 
-        let serialized_data = self.type_support.serialize_with_format(data as &dyn Any, &format)?;
-        let mut instance_handle = InstanceHandle::NIL;
-        if self.type_support.is_compute_key_provided() {
-            // When data arrives -> if we have a key, instance_handle pair just use the handle, or add it and continue
+        let key_info = if self.type_support.is_compute_key_provided() {
             let serialized_key = self.type_support.serialize_key(data as &dyn Any)?;
-            instance_handle = match self.key_instances.lock() {
-                Ok(mut key_instances) => {
-                    if let Some(instance_handle) = key_instances.get(&serialized_key) {
-                        *instance_handle
-                    } else {
-                        // 3. Deserialize key
-                        let computed_handle = self.type_support.compute_key(data as &dyn Any); //hashing
+            let computed_handle = self.type_support.compute_key(data as &dyn Any);
+            Some((serialized_key, computed_handle))
+        } else {
+            None
+        };
 
-                        {
-                            let mut instances = self
-                                .instances
-                                .lock()
-                                .map_err(|e| DdsError::Error(e.to_string()))?;
-                            instances.insert(
-                                computed_handle,
-                                (serialized_key.clone(), timestamp, InstanceState::Registered),
-                            );
-                        }
+        let (instance_handle, _) = self.resolve_write_instance(key_info, handle, timestamp)?;
 
-                        key_instances.insert(serialized_key, computed_handle);
-
-                        let monitor_guard = self
-                            .deadline_monitor
-                            .lock()
-                            .map_err(|e| DdsError::Error(e.to_string()))?;
-                        if let Some(monitor) = monitor_guard.as_ref() {
-                            monitor.track_instance(&computed_handle);
-                        }
-
-                        computed_handle
-                    }
-                }
-                Err(e) => return Err(DdsError::Error(e.to_string())),
-            }
+        let type_support = self.type_support.clone();
+        let seq_num;
+        {
+            let rtps_writer = self.get_rtps_writer()?;
+            let change = rtps_writer.new_change_with_rpc_callback(
+                ChangeKind::Alive,
+                instance_handle,
+                Some(timestamp.into()),
+                Box::new(move |guid, seq| {
+                    on_identity_assigned(data, guid, seq);
+                    type_support
+                        .serialize(data as &dyn Any, Some(&format))
+                        .unwrap_or_default()
+                        .to_vec()
+                }),
+            );
+            seq_num = change.sequence_number();
+            let mut datawriter_cache =
+                self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            datawriter_cache.add_change_with_cleanup(Arc::new(change), false)?;
         }
 
-        if !handle.is_nil() && handle != instance_handle {
-            return Err(DdsError::PreconditionNotMet);
-        }
+        self.update_liveliness()?;
+        Ok((self.guid, seq_num))
+    }
 
-        let monitor_guard =
-            self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-        if !instance_handle.is_nil() {
-            if let Some(monitor) = monitor_guard.as_ref() {
-                monitor.reschedule_instance(&instance_handle);
-            }
-        }
+    // pub: needed by DDS-RPC for SampleIdentity construction
+    pub fn guid(&self) -> Guid {
+        self.guid
+    }
 
-        self.add_change(
+    fn write_w_timestamp_inner(
+        &self,
+        data: &Foo,
+        handle: InstanceHandle,
+        timestamp: Time,
+    ) -> DdsResult<SequenceNumber> {
+        self.is_enabled()?;
+        Self::validate_timestamp(&timestamp)?;
+
+        let format = {
+            let qos = self.qos.load();
+            let extensibility = self.type_support.get_extensibility_kind();
+            Self::resolve_serialization_format(
+                qos.data_representation.effective_ids(),
+                extensibility,
+            )?
+        };
+
+        let key_info = if self.type_support.is_compute_key_provided() {
+            let serialized_key = self.type_support.serialize_key(data as &dyn Any)?;
+            let computed_handle = self.type_support.compute_key(data as &dyn Any);
+            Some((serialized_key, computed_handle))
+        } else {
+            None
+        };
+
+        let (instance_handle, _) = self.resolve_write_instance(key_info, handle, timestamp)?;
+
+        let seq_num = self.add_change(
+            ChangeKind::Alive,
+            data as &dyn Any,
+            &format,
+            instance_handle,
+            Some(timestamp.into()),
+        )?;
+        debug!("add_change completed in datawriter");
+
+        self.update_liveliness()?;
+        debug!("update_liveliness completed in datawriter");
+
+        Ok(seq_num)
+    }
+
+    /// Write pre-serialized data directly, bypassing TypeSupport serialization.
+    ///
+    /// This is the primary write path for FFI/C users who serialize data in C
+    /// using CDR utilities. The `serialized_data` must be a valid CDR-encoded
+    /// byte sequence including the 4-byte encapsulation header.
+    ///
+    /// # Arguments
+    /// * `serialized_data` - CDR-encoded bytes (with encapsulation header)
+    /// * `serialized_key` - CDR-encoded key bytes for instance identification.
+    ///   If `None`, `InstanceHandle::NIL` is used (unkeyed topic).
+    pub fn write_serialized(
+        &self,
+        serialized_data: &[u8],
+        serialized_key: Option<&[u8]>,
+    ) -> DdsResult<()> {
+        let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
+        self.write_serialized_w_timestamp(serialized_data, serialized_key, timestamp)
+    }
+
+    /// Write pre-serialized data with an explicit timestamp.
+    pub fn write_serialized_w_timestamp(
+        &self,
+        serialized_data: &[u8],
+        serialized_key: Option<&[u8]>,
+        timestamp: Time,
+    ) -> DdsResult<()> {
+        self.is_enabled()?;
+        Self::validate_timestamp(&timestamp)?;
+
+        // Key and handle are derived canonically from the sample; any caller-
+        // supplied key is ignored (bindings no longer pre-serialize the key).
+        let _ = serialized_key;
+        let key_info = self.serialized_key_info(serialized_data)?;
+
+        let (instance_handle, _) =
+            self.resolve_write_instance(key_info, InstanceHandle::NIL, timestamp)?;
+
+        self.add_change_serialized(
             ChangeKind::Alive,
             serialized_data,
-            // ParameterList::default(),
             instance_handle,
             Some(timestamp.into()),
         )?;
@@ -828,6 +936,216 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         self.update_liveliness()?;
 
         Ok(())
+    }
+
+    pub fn prepare_serialized_write(&self, capacity: usize) -> DdsResult<SerializedWriteLoan> {
+        self.is_enabled()?;
+        let mut change = {
+            let mut datawriter_cache =
+                self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            datawriter_cache.acquire_change()
+        };
+
+        let data = change.data_mut();
+        data.clear();
+        if data.capacity() < capacity {
+            data.reserve(capacity - data.capacity());
+        }
+
+        Ok(SerializedWriteLoan { change })
+    }
+
+    pub fn commit_serialized_write(
+        &self,
+        mut loan: SerializedWriteLoan,
+        actual_size: usize,
+        serialized_key: Option<&[u8]>,
+    ) -> DdsResult<()> {
+        if actual_size > loan.change.data_mut().capacity() {
+            return Err(DdsError::BadParameter);
+        }
+
+        let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
+        self.is_enabled()?;
+        Self::validate_timestamp(&timestamp)?;
+
+        // Expose the caller-written bytes to derive key+handle canonically from
+        // that sample. Any caller-supplied key is ignored. `reset` clears the
+        // buffer length (bytes stay in capacity), so re-expose them afterwards.
+        let _ = serialized_key;
+        unsafe {
+            loan.change.data_mut().set_len(actual_size);
+        }
+        let key_info = self.serialized_key_info(loan.change.data_mut())?;
+
+        let (instance_handle, _) =
+            self.resolve_write_instance(key_info, InstanceHandle::NIL, timestamp)?;
+
+        let rtps_writer = self.get_rtps_writer()?;
+        let seq_num = rtps_writer.allocate_sequence_number();
+        loan.change.reset(
+            ChangeKind::Alive,
+            rtps_writer.guid(),
+            instance_handle,
+            seq_num,
+            Some(timestamp.into()),
+        );
+        self.configure_coherent_set(&mut loan.change, seq_num)?;
+        unsafe {
+            loan.change.data_mut().set_len(actual_size);
+        }
+        loan.change.apply_fragmentation(rtps_writer.data_max_size_serialized() as usize);
+
+        let mut datawriter_cache =
+            self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        datawriter_cache.add_change_with_cleanup(Arc::new(loan.change), false)?;
+
+        self.update_liveliness()?;
+
+        Ok(())
+    }
+
+    /// Compute an InstanceHandle from raw key bytes.
+    /// If key_bytes fits in 16 bytes, it is used directly as the KeyHash.
+    /// Otherwise, MD5 hash is computed.
+    /// Derive the canonical serialized key CDR and InstanceHandle from a full
+    /// serialized sample via the type support — the spec RTPS KeyHash projection
+    /// (§9.6.4.8, member-id order, nested @key recursion, max-size raw/MD5
+    /// threshold) that native-Rust/derive and the dynamic path also produce. A
+    /// no-key type (or a raw topic without a full TypeObject) yields an empty key
+    /// and NIL handle. This replaces the former flat actual-length hashing so the
+    /// serialized write/register/lookup handles match the wire KeyHash.
+    fn key_info_from_serialized_sample(
+        &self,
+        sample: &[u8],
+    ) -> DdsResult<(SerializedData, InstanceHandle)> {
+        let boxed = self.type_support.deserialize(sample, None)?;
+        let key = self.type_support.serialize_key(&*boxed)?;
+        let handle = self.type_support.compute_key(&*boxed);
+        Ok((key, handle))
+    }
+
+    /// `Some((canonical key CDR, handle))` when this sample carries a key, else
+    /// `None` (no-key topic, or no full TypeObject on a raw keyed topic).
+    fn serialized_key_info(
+        &self,
+        sample: &[u8],
+    ) -> DdsResult<Option<(SerializedData, InstanceHandle)>> {
+        if sample.is_empty() || !self.type_support.is_compute_key_provided() {
+            return Ok(None);
+        }
+        let (key, handle) = self.key_info_from_serialized_sample(sample)?;
+        if key.is_empty() {
+            // is_compute_key_provided() is true but the key machinery produced nothing —
+            // a keyed topic whose key cannot be computed (e.g. a raw topic without a full
+            // TypeObject). Surface it instead of silently returning NIL, so keyed
+            // register/dispose/unregister/lookup fail loudly rather than acting on a bogus
+            // NIL instance.
+            return Err(DdsError::PreconditionNotMet);
+        }
+        Ok(Some((key, handle)))
+    }
+
+    /// Register an instance from a full serialized sample.
+    pub fn register_instance_serialized(&self, sample: &[u8]) -> DdsResult<InstanceHandle> {
+        let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
+        self.register_instance_serialized_w_timestamp(sample, timestamp)
+    }
+
+    /// Register an instance from a full serialized sample with explicit timestamp.
+    pub fn register_instance_serialized_w_timestamp(
+        &self,
+        sample: &[u8],
+        timestamp: Time,
+    ) -> DdsResult<InstanceHandle> {
+        self.is_enabled()?;
+        Self::validate_timestamp(&timestamp)?;
+
+        let (key_data, handle) = match self.serialized_key_info(sample)? {
+            Some(info) => info,
+            None => return Ok(InstanceHandle::NIL),
+        };
+
+        self.register_instance_inner(key_data, handle, timestamp)
+    }
+
+    /// Dispose an instance from a full serialized sample.
+    pub fn dispose_serialized(&self, sample: &[u8], handle: InstanceHandle) -> DdsResult<()> {
+        let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
+        self.dispose_serialized_w_timestamp(sample, handle, timestamp)
+    }
+
+    /// Dispose an instance from a full serialized sample with explicit timestamp.
+    pub fn dispose_serialized_w_timestamp(
+        &self,
+        sample: &[u8],
+        handle: InstanceHandle,
+        timestamp: Time,
+    ) -> DdsResult<()> {
+        self.is_enabled()?;
+        Self::validate_timestamp(&timestamp)?;
+
+        let (serialized_key, computed_handle) = match self.serialized_key_info(sample)? {
+            Some(info) => info,
+            None => return Ok(()),
+        };
+        let (serialized_key, resolved_handle) =
+            self.resolve_dispose_key(serialized_key, computed_handle, handle)?;
+
+        self.dispose_inner(serialized_key, resolved_handle, timestamp, None)
+    }
+
+    /// Unregister an instance from a full serialized sample.
+    pub fn unregister_instance_serialized(
+        &self,
+        sample: &[u8],
+        handle: InstanceHandle,
+    ) -> DdsResult<()> {
+        let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
+        self.unregister_instance_serialized_w_timestamp(sample, handle, timestamp)
+    }
+
+    /// Unregister an instance from a full serialized sample with explicit timestamp.
+    pub fn unregister_instance_serialized_w_timestamp(
+        &self,
+        sample: &[u8],
+        handle: InstanceHandle,
+        timestamp: Time,
+    ) -> DdsResult<()> {
+        self.is_enabled()?;
+        Self::validate_timestamp(&timestamp)?;
+
+        let serialized_key = match self.serialized_key_info(sample)? {
+            Some((key, _)) => key,
+            None => return Ok(()),
+        };
+        let (serialized_key, resolved_handle) =
+            self.resolve_unregister_key(serialized_key, handle)?;
+
+        self.unregister_instance_inner(serialized_key, resolved_handle, timestamp, None)
+    }
+
+    /// Lookup an instance handle from a full serialized sample.
+    pub fn lookup_instance_serialized(&self, sample: &[u8]) -> DdsResult<InstanceHandle> {
+        let serialized_key = match self.serialized_key_info(sample)? {
+            Some((key, _)) => key,
+            None => return Ok(InstanceHandle::NIL),
+        };
+
+        let key_instances =
+            self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
+        Ok(key_instances.get(&serialized_key).copied().unwrap_or(InstanceHandle::NIL))
+    }
+
+    /// Get the serialized key bytes for a given instance handle.
+    pub fn get_key_value_serialized(&self, handle: InstanceHandle) -> DdsResult<Arc<[u8]>> {
+        let instances = self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
+        match instances.get(&handle) {
+            Some((key_data, _, _)) => Ok(key_data.clone()),
+            None => Err(DdsError::BadParameter),
+        }
     }
 
     pub fn get_key_value(&self, key_holder: &mut Foo, handle: InstanceHandle) -> DdsResult<()> {
@@ -864,7 +1182,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             }
         }
     }
-
+    /// Look up an instance handle using pre-serialized key bytes.
     pub fn lookup_instance(&self, instance: &Foo) -> DdsResult<InstanceHandle> {
         // in: instance: <Foo>
         // out: InstanceHandle
@@ -946,6 +1264,11 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
     }
 
     #[inline]
+    pub fn get_offered_incompatible_type_status(&self) -> DdsResult<OfferedIncompatibleTypeStatus> {
+        <Self as DataWriterBase>::get_offered_incompatible_type_status(self)
+    }
+
+    #[inline]
     pub fn get_publication_matched_status(&self) -> DdsResult<PublicationMatchedStatus> {
         <Self as DataWriterBase>::get_publication_matched_status(self)
     }
@@ -1003,39 +1326,139 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         <Self as DataWriterBase>::wait_for_acknowledgments(self, max_wait)
     }
 
-    fn is_enabled(&self) -> DdsResult<()> {
+    pub(crate) fn is_enabled(&self) -> DdsResult<()> {
         self.is_deleted()?;
-        {
-            let _ = self.get_rtps_writer()?;
-        }
         if self.enabled.load(Ordering::SeqCst) {
+            {
+                let _ = self.get_rtps_writer()?;
+            }
             Ok(())
         } else {
             Err(DdsError::NotEnabled)
         }
     }
 
+    // True while the owning publisher has an open coherent set.
+    fn publisher_in_coherent_changes(&self) -> bool {
+        self.publisher
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .is_some_and(|publisher| publisher.in_coherent_changes())
+    }
+
+    // Stamp PID_COHERENT_SET on the change while the publisher's coherent set is open,
+    // recording this writer's first member seq as the set id. No-op outside a set.
+    fn configure_coherent_set(
+        &self,
+        change: &mut CacheChange,
+        seq_num: SequenceNumber,
+    ) -> DdsResult<()> {
+        if !self.publisher_in_coherent_changes() {
+            return Ok(());
+        }
+        let mut start =
+            self.current_coherent_start.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        let set_start = *start.get_or_insert(seq_num);
+        change.set_presentation_info(PresentationInfo {
+            coherent_set: Some(set_start),
+            ..Default::default()
+        });
+        Ok(())
+    }
+
+    /// Pool-based add_change skeleton: acquire from pool → reset → fill buffer → add to history.
+    /// Avoids per-write heap allocation by reusing CacheChange and its internal buffer.
+    /// `fill` writes the payload into the reused buffer (already cleared by reset).
+    fn add_change_pooled_with(
+        &self,
+        kind: ChangeKind,
+        handle: InstanceHandle,
+        source_timestamp: Option<RtpsTime>,
+        fill: impl FnOnce(&mut Vec<u8>) -> DdsResult<()>,
+    ) -> DdsResult<SequenceNumber> {
+        let rtps_writer = self.get_rtps_writer()?;
+
+        // 1. Acquire from pool (fast: Vec::pop)
+        let mut change = {
+            let mut cache =
+                self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            cache.acquire_change()
+        };
+
+        // 2. Allocate sequence number
+        let seq_num = rtps_writer.allocate_sequence_number();
+
+        // 3. Reset metadata + fill the reused buffer
+        change.reset(kind, rtps_writer.guid(), handle, seq_num, source_timestamp);
+        self.configure_coherent_set(&mut change, seq_num)?;
+        fill(change.data_mut())?;
+        change.apply_fragmentation(rtps_writer.data_max_size_serialized() as usize);
+
+        // 4. Add to history (may evict → release back to pool)
+        {
+            let mut cache =
+                self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            cache.add_change_with_cleanup(Arc::new(change), false)?;
+        }
+
+        // 5. Best-effort-only / no-reliable-reader writers get no ACKNACK, so the send
+        // just completed is the only chance to purge. Runs after the cache lock is
+        // released so the removal callback can re-lock it. No-op unless the all-acked
+        // callback is registered (volatile + keep_all + !strict + reliable).
+        if let Some(stateful_writer) = rtps_writer.as_any().downcast_ref::<StatefulWriter>() {
+            debug!("[history-strict] trigger=send-complete seq={}", seq_num.to_i64());
+            stateful_writer.process_acked_changes();
+            let dcps_len = match self.datawriter_cache.try_lock() {
+                Ok(cache) => cache.changes_len().to_string(),
+                Err(_) => "busy".to_string(),
+            };
+            debug!(
+                "[history-strict] after send-complete rtps_len={} dcps_len={}",
+                stateful_writer.rtps_cache_len(),
+                dcps_len
+            );
+        }
+
+        Ok(seq_num)
+    }
+
+    /// Pooled add_change for typed data: fills the buffer via TypeSupport serialization.
     fn add_change(
         &self,
         kind: ChangeKind,
-        data: SerializedData,
-        // inline_qos: ParameterList,
+        data: &dyn Any,
+        format: &SerializationFormat,
         handle: InstanceHandle,
         source_timestamp: Option<RtpsTime>,
+    ) -> DdsResult<SequenceNumber> {
+        self.add_change_pooled_with(kind, handle, source_timestamp, |buf| {
+            self.type_support.serialize_into(data, buf, Some(format))
+        })
+    }
+
+    /// Pooled add_change for pre-serialized bytes: copies the bytes into the reused buffer.
+    /// Used by the serialized write path and dispose/unregister (empty payload).
+    fn add_change_serialized(
+        &self,
+        kind: ChangeKind,
+        bytes: &[u8],
+        handle: InstanceHandle,
+        source_timestamp: Option<RtpsTime>,
+    ) -> DdsResult<SequenceNumber> {
+        self.add_change_pooled_with(kind, handle, source_timestamp, |buf| {
+            buf.extend_from_slice(bytes);
+            Ok(())
+        })
+    }
+
+    fn register_instance_to_datawriter_cache(
+        &self,
+        instance_handle: InstanceHandle,
     ) -> DdsResult<()> {
-        {
-            let rtps_writer = self.get_rtps_writer()?;
-            let change = rtps_writer.new_change(
-                kind,
-                data,
-                // ParameterList::default(),
-                handle,
-                source_timestamp,
-            );
-            let mut datawriter_cache =
-                self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            datawriter_cache.add_change_with_cleanup(Arc::new(change))?;
-        }
+        let mut datawriter_cache =
+            self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        datawriter_cache.register_instance(instance_handle)?;
+
         Ok(())
     }
 
@@ -1051,6 +1474,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         Ok(rtps_writer)
     }
 
+    #[allow(clippy::type_complexity)]
     pub(crate) fn create_status_callback(
         &self,
     ) -> DdsResult<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>> {
@@ -1089,6 +1513,18 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
     fn take_offered_incompatible_qos_status(&self) -> DdsResult<OfferedIncompatibleQosStatus> {
         let mut status_guard = self
             .offered_incompatible_qos_status
+            .lock()
+            .map_err(|e| DdsError::Error(e.to_string()))?;
+        let result = status_guard.clone();
+
+        // Reset count_change
+        status_guard.total_count_change = 0;
+        Ok(result)
+    }
+    #[allow(dead_code)]
+    fn take_offered_incompatible_type_status(&self) -> DdsResult<OfferedIncompatibleTypeStatus> {
+        let mut status_guard = self
+            .offered_incompatible_type_status
             .lock()
             .map_err(|e| DdsError::Error(e.to_string()))?;
         let result = status_guard.clone();
@@ -1189,7 +1625,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
 
         // Listener
         let mask = self.get_listener_mask()?;
-        if mask.contains(StatusKind::SAMPLE_LOST) {
+        if mask.contains(StatusKind::OFFERED_INCOMPATIBLE_QOS) {
             let mut listener_called = false;
             if let Some(listener) = self.get_listener()? {
                 listener.on_offered_incompatible_qos(self, &status);
@@ -1217,6 +1653,26 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         Ok(())
     }
 
+    fn handle_offered_incompatible_type_status(
+        &self,
+        _info: Arc<OfferedIncompatibleTypeStatus>,
+    ) -> DdsResult<()> {
+        {
+            let mut status_guard = self
+                .offered_incompatible_type_status
+                .lock()
+                .map_err(|e| DdsError::Error(e.to_string()))?;
+
+            status_guard.total_count += 1;
+            status_guard.total_count_change += 1;
+        }
+
+        // StatusCondition
+        self.set_communication_status_propagation(&StatusKind::OFFERED_INCOMPATIBLE_TYPE, true)?;
+
+        Ok(())
+    }
+
     fn handle_liveliness_lost_status(&self) -> DdsResult<()> {
         let status = {
             let mut status_guard =
@@ -1229,7 +1685,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
 
         // Listener
         let mask = self.get_listener_mask()?;
-        if mask.contains(StatusKind::SAMPLE_LOST) {
+        if mask.contains(StatusKind::LIVELINESS_LOST) {
             let mut listener_called = false;
             if let Some(listener) = self.get_listener()? {
                 listener.on_liveliness_lost(self, &status);
@@ -1280,7 +1736,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
 
         // Listener
         let mask = self.get_listener_mask()?;
-        if mask.contains(StatusKind::SAMPLE_LOST) {
+        if mask.contains(StatusKind::PUBLICATION_MATCHED) {
             let mut listener_called = false;
             if let Some(listener) = self.get_listener()? {
                 listener.on_publication_matched(self, &status);
@@ -1315,7 +1771,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
     }
 
     fn update_liveliness(&self) -> DdsResult<()> {
-        match self.get_qos()?.liveliness.kind {
+        match self.get_qos_arc()?.liveliness.kind {
             LivelinessQosPolicyKind::Automatic => Ok(()),
             LivelinessQosPolicyKind::ManualByParticipant => {
                 let wlp = self
@@ -1323,8 +1779,10 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                     .as_ref()
                     .ok_or(DdsError::Error("WLP not initialized".to_string()))?;
                 // Update Participant liveliness
-                wlp.update_local_participant_liveliness();
-                Ok(())
+                match wlp.update_local_participant_liveliness() {
+                    Ok(()) => Ok(()),
+                    Err(e) => Err(DdsError::Error(e.to_string())),
+                }
             }
             LivelinessQosPolicyKind::ManualByTopic => {
                 // Update own writer liveliness (LivelinessMonitor)
@@ -1334,10 +1792,245 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                     .ok_or(DdsError::Error("WLP not initialized".to_string()))?;
                 // Update Participant liveliness
                 let writer_guid = self.get_rtps_writer()?.guid();
-                wlp.update_local_writer_liveliness(writer_guid);
-                Ok(())
+                match wlp.renew_asserting_writer(&writer_guid) {
+                    Ok(()) => Ok(()),
+                    Err(e) => Err(DdsError::Error(e.to_string())),
+                }
             }
         }
+    }
+
+    /// Common logic for register_instance after key serialization and handle computation.
+    fn register_instance_inner(
+        &self,
+        serialized_key: SerializedData,
+        handle: InstanceHandle,
+        timestamp: Time,
+    ) -> DdsResult<InstanceHandle> {
+        self.register_instance_to_datawriter_cache(handle)?;
+
+        {
+            let mut instances =
+                self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
+            match instances.get(&handle) {
+                Some((_, _, InstanceState::Registered)) => {
+                    return Ok(handle);
+                }
+                Some((_, _, InstanceState::Unregistered))
+                | Some((_, _, InstanceState::Disposed))
+                | None => {}
+            }
+
+            instances
+                .insert(handle, (serialized_key.clone(), timestamp, InstanceState::Registered));
+
+            let mut key_instances =
+                self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            key_instances.insert(serialized_key, handle);
+
+            let monitor_guard =
+                self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            if let Some(monitor) = monitor_guard.as_ref() {
+                monitor.track_instance(&handle);
+            }
+
+            log::debug!("Registering Instance - handle: {}", handle);
+        }
+        Ok(handle)
+    }
+
+    // Wrap a headerless big-endian key as a wire serializedKey SerializedPayload in the
+    // writer's data representation. Empty stays empty so no K-flag is set.
+    fn key_to_wire_payload(
+        &self,
+        serialized_key: &[u8],
+        typed: Option<&Foo>,
+    ) -> DdsResult<SerializedData> {
+        if serialized_key.is_empty() {
+            return Ok(Arc::from(Vec::new()));
+        }
+        let format = {
+            let qos = self.qos.load();
+            let extensibility = self.type_support.get_extensibility_kind();
+            Self::resolve_serialization_format(
+                qos.data_representation.effective_ids(),
+                extensibility,
+            )?
+        };
+        // Encode the key as a wire serializedKey in `format` via the type support, so the
+        // encapsulation header and body alignment always agree (XCDR1 => 8-byte max
+        // alignment, XCDR2 => max-align-4). The previous inline CDR arm reused the
+        // max-align-4 KeyHash body under an XCDR1 (CDR_BE) header, which a spec-compliant
+        // peer misparses for keys carrying an 8-byte member at a 4-but-not-8 offset.
+        match typed {
+            // Have the value: encode the key straight to `format`.
+            Some(data) => self.type_support.serialize_key_payload(data as &dyn Any, &format),
+            // Only the headerless big-endian key bytes: decode them, then re-encode in `format`.
+            None => {
+                let key_any = self.type_support.deserialize_key(serialized_key)?;
+                self.type_support.serialize_key_payload(&*key_any, &format)
+            }
+        }
+    }
+
+    fn dispose_inner(
+        &self,
+        serialized_key: SerializedData,
+        resolved_handle: InstanceHandle,
+        timestamp: Time,
+        typed: Option<&Foo>,
+    ) -> DdsResult<()> {
+        let mut instances = self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
+        match instances.get(&resolved_handle) {
+            Some((_, _, InstanceState::Registered)) | Some((_, _, InstanceState::Unregistered)) => {
+            }
+            Some((_, _, InstanceState::Disposed)) => {
+                return Ok(());
+            }
+            None => {
+                return Err(DdsError::BadParameter);
+            }
+        }
+
+        instances
+            .insert(resolved_handle, (serialized_key.clone(), timestamp, InstanceState::Disposed));
+
+        let monitor_guard =
+            self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        if !resolved_handle.is_nil() {
+            if let Some(monitor) = monitor_guard.as_ref() {
+                monitor.cancel_instance(&resolved_handle);
+            }
+        }
+
+        // Carry the key on the wire as a serializedKey payload (K-flag): peers without a
+        // reversible KeyHash (e.g. >16-byte string keys) need it to identify the instance.
+        let wire_key = self.key_to_wire_payload(&serialized_key, typed)?;
+        self.add_change_serialized(
+            ChangeKind::NotAliveDisposed,
+            &wire_key,
+            resolved_handle,
+            Some(timestamp.into()),
+        )?;
+
+        self.update_liveliness()?;
+
+        Ok(())
+    }
+
+    /// Common logic for unregister_instance after key resolution and handle validation.
+    fn unregister_instance_inner(
+        &self,
+        serialized_key: SerializedData,
+        resolved_handle: InstanceHandle,
+        timestamp: Time,
+        typed: Option<&Foo>,
+    ) -> DdsResult<()> {
+        let mut instances = self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
+        match instances.get(&resolved_handle) {
+            Some((_, _, InstanceState::Registered)) => {}
+            Some((_, _, _)) => {
+                return Err(DdsError::BadParameter);
+            }
+            None => {
+                return Err(DdsError::BadParameter);
+            }
+        }
+
+        instances.insert(
+            resolved_handle,
+            (serialized_key.clone(), timestamp, InstanceState::Unregistered),
+        );
+
+        let monitor_guard =
+            self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        if let Some(monitor) = monitor_guard.as_ref() {
+            monitor.cancel_instance(&resolved_handle);
+        }
+
+        let change_kind =
+            if self.get_qos_arc()?.writer_data_lifecycle.autodispose_unregistered_instances {
+                ChangeKind::NotAliveDisposedUnregistered
+            } else {
+                ChangeKind::NotAliveUnregistered
+            };
+
+        let wire_key = self.key_to_wire_payload(&serialized_key, typed)?;
+        self.add_change_serialized(
+            change_kind,
+            &wire_key,
+            resolved_handle,
+            Some(timestamp.into()),
+        )?;
+
+        self.update_liveliness()?;
+
+        Ok(())
+    }
+
+    /// Common logic for write instance resolution: auto-register if needed, validate handle,
+    /// and update deadline monitor.
+    ///
+    /// `key_info`: If the topic has keys, `Some((serialized_key, computed_handle))`.
+    ///             For no-key topics, `None`.
+    /// `handle`: The user-provided handle (may be NIL).
+    /// `timestamp`: Source timestamp.
+    ///
+    /// Returns `(instance_handle, is_new_instance)`.
+    fn resolve_write_instance(
+        &self,
+        key_info: Option<(SerializedData, InstanceHandle)>,
+        handle: InstanceHandle,
+        timestamp: Time,
+    ) -> DdsResult<(InstanceHandle, bool)> {
+        let mut instance_handle = InstanceHandle::NIL;
+        let mut is_new_instance = false;
+
+        if let Some((serialized_key, computed_handle)) = key_info {
+            let existing_handle = {
+                let key_instances =
+                    self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+                key_instances.get(&serialized_key).copied()
+            };
+
+            instance_handle = if let Some(h) = existing_handle {
+                h
+            } else {
+                {
+                    let mut instances =
+                        self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+                    instances.insert(
+                        computed_handle,
+                        (serialized_key.clone(), timestamp, InstanceState::Registered),
+                    );
+                }
+                {
+                    let mut key_instances =
+                        self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+                    key_instances.insert(serialized_key, computed_handle);
+                }
+                is_new_instance = true;
+                computed_handle
+            };
+        }
+
+        if !handle.is_nil() && handle != instance_handle {
+            return Err(DdsError::PreconditionNotMet);
+        }
+
+        let monitor_guard =
+            self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        if let Some(monitor) = monitor_guard.as_ref() {
+            if is_new_instance || instance_handle.is_nil() {
+                monitor.track_instance(&instance_handle);
+            }
+            monitor.reschedule_instance(&instance_handle);
+        }
+
+        Ok((instance_handle, is_new_instance))
     }
 }
 
@@ -1427,95 +2120,19 @@ where
         */
         // let start_time = Time::now();
         self.is_enabled()?;
-        if timestamp.is_infinite() || timestamp.sec < 0 || !timestamp.is_valid() {
-            return Err(DdsError::BadParameter);
+
+        if !self.type_support.is_compute_key_provided() {
+            log::warn!("register_instance on no-key topic has no effect");
+            return Ok(InstanceHandle::NIL);
         }
-        // TODO: Check and allocate resource space when Reliable
-        // let qos = self.get_qos().unwrap();
-        // let reliability = qos.reliability;
-        // if reliability.kind == ReliabilityQosPolicyKind::Reliable {
-        //     while !registry.has_free_space() {
-        //         if start_time.elapsed().unwrap() > reliability.max_blocking_time {
-        //             return Err(DdsError::Timeout);
-        //         }
-        //         if registry.resource_expected_to_become_available() {
-        //             return Err(DdsError::OutOfResources);
-        //         }
-        //         std::thread::sleep(Duration::from_millis(10));
-        //     }
-        //     // Example has_free_space implementation
-        //     fn has_space(&self) -> bool {
-        //         let max_samples = self.qos.resource_limits.max_samples;
-        //         let max_instances = self.qos.resource_limits.max_instances;
-        //         let history_depth = self.qos.history.depth;
-        //         let instance_count = self.get_instance_count();
-        //         // Condition 2: instance count > sample count → blocking
-        //         if max_samples < max_instances {
-        //             if instance_count >= max_samples {
-        //                 return false;
-        //             }
-        //         }
-        //         // Condition 1: overall sample count limit
-        //         let theoretical_max = instance_count * history_depth;
-        //         if max_samples < theoretical_max {
-        //             // there's potential to discard some samples
-        //             self.evict_oldest_sample_if_needed();
-        //             if self.total_sample_count() >= max_samples {
-        //                 return false; // still no space available → blocking candidate
-        //             }
-        //         }
-        //         true
-        //     }
-        // }
+
+        Self::validate_timestamp(&timestamp)?;
+
         let serialized_key = self.type_support.serialize_key(instance as &dyn Any)?;
-        // 3. Deserialize key
         let handle = self.type_support.compute_key(instance as &dyn Any);
 
-        {
-            let mut instances =
-                self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-
-            match instances.get(&handle) {
-                Some((_, _, InstanceState::Registered)) => {
-                    return Ok(handle);
-                }
-                Some((_, _, InstanceState::Unregistered))
-                | Some((_, _, InstanceState::Disposed))
-                | None => {
-                    // OK, in registerable state
-                }
-            }
-
-            // Register new instance
-            instances
-                .insert(handle, (serialized_key.clone(), timestamp, InstanceState::Registered));
-
-            let mut key_instances =
-                self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            key_instances.insert(serialized_key.clone(), handle);
-
-            let monitor_guard =
-                self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            if !handle.is_nil() {
-                if let Some(monitor) = monitor_guard.as_ref() {
-                    monitor.track_instance(&handle);
-                }
-            }
-
-            log::debug!("Registering Instance - handle: {:?}", handle);
-
-            // self.add_change(
-            //     ChangeKind::Alive,
-            //     // serialized_key,
-            //     self.type_support.serialize(instance as &dyn Any)?,
-            //     // ParameterList::default(),
-            //     handle,
-            //     Some(timestamp.into()),
-            // )?;
-        }
-        Ok(handle)
+        self.register_instance_inner(serialized_key, handle, timestamp)
     }
-
     pub fn unregister_instance(&self, instance: &Foo, handle: InstanceHandle) -> DdsResult<()> {
         // in: instance: <Foo>, handle: InstanceHandle
         // out: DdsError_t
@@ -1565,109 +2182,17 @@ where
         */
         // let start_time = Time::now();
         self.is_enabled()?;
-        if timestamp.is_infinite() || timestamp.sec < 0 || !timestamp.is_valid() {
-            return Err(DdsError::BadParameter);
+        if !self.type_support.is_compute_key_provided() {
+            log::warn!("unregister on no-key topic has no effect");
+            return Ok(());
         }
+        Self::validate_timestamp(&timestamp)?;
 
-        // TODO: Check and allocate resource space when Reliable
-        // let qos = self.get_qos().unwrap();
-        // let reliability = qos.reliability;
-        // if reliability.kind == ReliabilityQosPolicyKind::Reliable {
-        //     while !registry.has_free_space() {
-        //         if start_time.elapsed().unwrap() > reliability.max_blocking_time {
-        //             return Err(DdsError::Timeout);
-        //         }
-        //         if registry.resource_expected_to_become_available() {
-        //             return Err(DdsError::OutOfResources);
-        //         }
-        //         std::thread::sleep(Duration::from_millis(10));
-        //     }
-        //     // Example has_free_space implementation
-        //     fn has_space(&self) -> bool {
-        //         let max_samples = self.qos.resource_limits.max_samples;
-        //         let max_instances = self.qos.resource_limits.max_instances;
-        //         let history_depth = self.qos.history.depth;
-        //         let instance_count = self.get_instance_count();
-        //         // Condition 2: instance count > sample count → blocking
-        //         if max_samples < max_instances {
-        //             if instance_count >= max_samples {
-        //                 return false;
-        //             }
-        //         }
-        //         // Condition 1: overall sample count limit
-        //         let theoretical_max = instance_count * history_depth;
-        //         if max_samples < theoretical_max {
-        //             // there's potential to discard some samples
-        //             self.evict_oldest_sample_if_needed();
-        //             if self.total_sample_count() >= max_samples {
-        //                 return false; // still no space available → blocking candidate
-        //             }
-        //         }
-        //         true
-        //     }
-        // }
         let serialized_key = self.type_support.serialize_key(instance as &dyn Any)?;
-        let instance_handle = match self.key_instances.lock() {
-            Ok(key_instances) => {
-                if let Some(instance_handle) = key_instances.get(&serialized_key) {
-                    *instance_handle
-                } else {
-                    return Err(DdsError::BadParameter);
-                }
-            }
-            Err(e) => return Err(DdsError::Error(e.to_string())),
-        };
+        let (serialized_key, resolved_handle) =
+            self.resolve_unregister_key(serialized_key, handle)?;
 
-        let handle = if handle.is_nil() {
-            instance_handle
-        } else {
-            // If handle != HANDLE_NIL, verify that instance and handle match
-            if handle != instance_handle {
-                return Err(DdsError::PreconditionNotMet);
-            }
-            instance_handle
-        };
-
-        {
-            let mut instances =
-                self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-
-            match instances.get(&handle) {
-                Some((_, _, InstanceState::Registered)) => {
-                    // OK, in registered state
-                }
-                Some((_, _, _)) => {
-                    // Exists in different state - might be an error
-                    return Err(DdsError::BadParameter);
-                }
-                None => {
-                    // Does not exist
-                    return Err(DdsError::BadParameter);
-                }
-            }
-
-            // Change state from Registered → Unregistered
-            instances
-                .insert(handle, (serialized_key.clone(), timestamp, InstanceState::Unregistered));
-
-            let monitor_guard =
-                self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            if let Some(monitor) = monitor_guard.as_ref() {
-                monitor.cancel_instance(&handle);
-            }
-
-            self.add_change(
-                ChangeKind::NotAliveUnregistered,
-                serialized_key,
-                // ParameterList::default(),
-                handle,
-                Some(timestamp.into()),
-            )?;
-
-            self.update_liveliness()?;
-
-            Ok(())
-        }
+        self.unregister_instance_inner(serialized_key, resolved_handle, timestamp, Some(instance))
     }
 }
 
@@ -1683,7 +2208,7 @@ impl<Foo: 'static + Clone> DataWriterBase for DataWriter<Foo> {
         */
         self.is_enabled()?;
 
-        match self.get_qos()?.liveliness.kind {
+        match self.get_qos_arc()?.liveliness.kind {
             LivelinessQosPolicyKind::Automatic => Ok(()),
             LivelinessQosPolicyKind::ManualByParticipant => {
                 self.get_publisher()?.get_participant()?.assert_liveliness()
@@ -1756,6 +2281,27 @@ impl<Foo: 'static + Clone> DataWriterBase for DataWriter<Foo> {
         status_guard.total_count_change = 0;
 
         self.set_communication_status_propagation(&StatusKind::OFFERED_INCOMPATIBLE_QOS, false)?;
+
+        Ok(result)
+    }
+
+    fn get_offered_incompatible_type_status(&self) -> DdsResult<OfferedIncompatibleTypeStatus> {
+        /*
+            This operation provides access to the OFFERED_INCOMPATIBLE_TYPE communication status.
+            Refer to Section 2.2.4.1 Communication Status for a description of communication status.
+        */
+        self.is_deleted()?;
+
+        let mut status_guard = self
+            .offered_incompatible_type_status
+            .lock()
+            .map_err(|e| DdsError::Error(e.to_string()))?;
+        let result = status_guard.clone();
+
+        // 1. Reset total_count_change
+        status_guard.total_count_change = 0;
+
+        self.set_communication_status_propagation(&StatusKind::OFFERED_INCOMPATIBLE_TYPE, false)?;
 
         Ok(result)
     }
@@ -1867,10 +2413,9 @@ impl<Foo: 'static + Clone> DataWriterBase for DataWriter<Foo> {
         A TIMEOUT return value indicates that max_wait has elapsed but some data has not yet been acknowledged.
         */
         self.is_enabled()?;
-        let reliability = self.get_qos()?.reliability;
+        let reliability = self.get_qos_arc()?.reliability;
         if reliability.kind == ReliabilityQosPolicyKind::Reliable {
             let rtps_writer = self.get_rtps_writer()?;
-            // FastDDS example
             if rtps_writer.wait_for_all_acked(max_wait) {
                 return Ok(());
             }
@@ -1905,7 +2450,9 @@ impl<Foo: 'static + Clone> DataWriterInternal for DataWriter<Foo> {
         };
         drop(monitor_to_drop);
 
-        self.self_ref.lock().ok().map(|mut guard| *guard = None);
+        let value_to_drop = self.self_ref.lock().ok().and_then(|mut guard| guard.take());
+        drop(value_to_drop);
+
         self.deleted.store(true, Ordering::SeqCst);
     }
 
@@ -1916,12 +2463,48 @@ impl<Foo: 'static + Clone> DataWriterInternal for DataWriter<Foo> {
             Ok(())
         }
     }
+
+    fn is_builtin(&self) -> bool {
+        self.is_builtin
+    }
+
+    // Close this writer's open coherent set by sending a payload-less end marker that
+    // carries no coherent set id. No-op when no set is open.
+    fn end_coherent_set(&self) -> DdsResult<()> {
+        let started =
+            self.current_coherent_start.lock().map_err(|e| DdsError::Error(e.to_string()))?.take();
+        if started.is_none() {
+            return Ok(());
+        }
+
+        // A payload-less Data carrying no coherent set id marks the end of the coherent set.
+        let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
+        let rtps_writer = self.get_rtps_writer()?;
+        let mut change = {
+            let mut cache =
+                self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            cache.acquire_change()
+        };
+        let seq_num = rtps_writer.allocate_sequence_number();
+        change.reset(
+            ChangeKind::Alive,
+            rtps_writer.guid(),
+            InstanceHandle::NIL,
+            seq_num,
+            Some(timestamp.into()),
+        );
+
+        let mut cache = self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        cache.add_change_with_cleanup(Arc::new(change), false)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::domain::domain_participant_factory::DomainParticipantFactory;
     use crate::domain::qos::DomainParticipantQos;
+    use crate::infrastructure::qos_policy::HistoryQosPolicyKind;
     use crate::publication::qos::PublisherQos;
     use crate::topic::qos::TopicQos;
     use std::{sync::atomic::AtomicUsize, thread};
@@ -1930,9 +2513,8 @@ mod tests {
 
     // Test struct - for detecting drop
     use crate::dcps::topic::type_support::DdsType;
-    use speedy::{Readable, Writable};
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     pub struct TestData {
         #[dds(key)]
         id: u32,
@@ -2006,6 +2588,9 @@ mod tests {
             initial_writers_count + 1,
             "Writer should be moved to orphaned_writers"
         );
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -2083,6 +2668,9 @@ mod tests {
             final_writers_count, initial_writers_count,
             "No writers should be added to orphaned_writers when properly deleted"
         );
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -2117,16 +2705,22 @@ mod tests {
             let rtps_writer = writer.get_rtps_writer();
             assert!(rtps_writer.is_ok());
         }
-        let mut dcps_bridge = domain_participant.get_dcps_bridge().unwrap();
-        let dcps_bridge = dcps_bridge.as_mut().unwrap();
-        dcps_bridge
-            .delete_rtps_writer(
-                "TestTopic".to_string(),
-                writer.get_instance_handle().unwrap().to_guid().entity_id(),
-            )
-            .unwrap();
+        {
+            let mut dcps_bridge = domain_participant.get_dcps_bridge().unwrap();
+            let dcps_bridge = dcps_bridge.as_mut().unwrap();
+            dcps_bridge
+                .delete_rtps_writer(
+                    "TestTopic".to_string(),
+                    writer.get_instance_handle().unwrap().to_guid().entity_id(),
+                )
+                .unwrap();
+        }
         let rtps_writer = writer.get_rtps_writer();
         assert!(rtps_writer.is_err());
+
+        drop(writer);
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     // Listener for DeadlineQos testing
@@ -2168,9 +2762,9 @@ mod tests {
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
-        // QoS settings with 200ms deadline
+        // QoS settings with 500ms deadline (large margin for CI)
         let mut writer_qos = DataWriterQos::default();
-        writer_qos.deadline.period = Duration::from_millis(200);
+        writer_qos.deadline.period = Duration::from_millis(500);
 
         let deadline_miss_count = Arc::new(AtomicUsize::new(0));
         let listener =
@@ -2193,12 +2787,12 @@ mod tests {
         println!("First write completed");
 
         // Write again before deadline - miss should not occur
-        thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(200));
         writer.write(&data, InstanceHandle::NIL).unwrap();
         println!("Second write completed (within deadline)");
 
         // Verify after short wait
-        thread::sleep(std::time::Duration::from_millis(50));
+        thread::sleep(std::time::Duration::from_millis(100));
         assert_eq!(
             deadline_miss_count.load(Ordering::SeqCst),
             0,
@@ -2207,7 +2801,7 @@ mod tests {
 
         // Wait to exceed deadline - miss should occur
         println!("Waiting for deadline to expire...");
-        thread::sleep(std::time::Duration::from_millis(250));
+        thread::sleep(std::time::Duration::from_millis(600));
 
         // Verify deadline miss
         let miss_count = deadline_miss_count.load(Ordering::SeqCst);
@@ -2217,6 +2811,9 @@ mod tests {
             "At least one deadline miss should be detected, got {}",
             miss_count
         );
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -2266,6 +2863,9 @@ mod tests {
         writer.unregister_instance(&data, handle2).unwrap();
 
         println!("All operations completed without error with infinite deadline");
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -2309,7 +2909,7 @@ mod tests {
 
         // Start tracking instance with register_instance
         let handle = writer.register_instance(&data).unwrap();
-        println!("Instance registered with handle: {:?}", handle);
+        println!("Instance registered with handle: {}", handle);
 
         // Wait for deadline - miss should occur
         thread::sleep(std::time::Duration::from_millis(200));
@@ -2338,6 +2938,9 @@ mod tests {
             count_after_dispose - count_before_dispose <= 1,
             "Deadline miss should not occur after dispose"
         );
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -2399,6 +3002,9 @@ mod tests {
             "At least 3 deadline misses expected (one per instance), got {}",
             miss_count
         );
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -2462,6 +3068,9 @@ mod tests {
             deadline_miss_count.load(Ordering::SeqCst) >= 1,
             "Deadline miss should occur after stopping writes"
         );
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -2528,6 +3137,282 @@ mod tests {
         assert_eq!(
             count_before_delete, count_after_delete,
             "Deadline miss should not occur after delete (shutdown)"
+        );
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
+    }
+
+    // ========================================================================
+    // Listener mask tests - verify that individual StatusKind mask correctly
+    // gates listener callback invocation.
+    //
+    // These tests call update_status() directly with a specific StatusKind mask
+    // to verify that the corresponding listener callback is invoked.
+    // Before the fix, handle_offered_incompatible_qos_status and
+    // handle_publication_matched_status checked StatusKind::SAMPLE_LOST
+    // instead of their correct StatusKind, so callbacks never fired
+    // with individual masks.
+    // ========================================================================
+
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct MaskTestListener {
+        offered_deadline_missed_called: AtomicBool,
+        offered_incompatible_qos_called: AtomicBool,
+        liveliness_lost_called: AtomicBool,
+        publication_matched_called: AtomicBool,
+    }
+
+    impl MaskTestListener {
+        fn new() -> Self {
+            Self {
+                offered_deadline_missed_called: AtomicBool::new(false),
+                offered_incompatible_qos_called: AtomicBool::new(false),
+                liveliness_lost_called: AtomicBool::new(false),
+                publication_matched_called: AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl DataWriterListener for MaskTestListener {
+        type Foo = TestData;
+
+        fn on_offered_deadline_missed(
+            &self,
+            _writer: &DataWriter<TestData>,
+            _status: &OfferedDeadlineMissedStatus,
+        ) {
+            self.offered_deadline_missed_called.store(true, Ordering::SeqCst);
+        }
+
+        fn on_offered_incompatible_qos(
+            &self,
+            _writer: &DataWriter<TestData>,
+            _status: &OfferedIncompatibleQosStatus,
+        ) {
+            self.offered_incompatible_qos_called.store(true, Ordering::SeqCst);
+        }
+
+        fn on_liveliness_lost(
+            &self,
+            _writer: &DataWriter<TestData>,
+            _status: &LivelinessLostStatus,
+        ) {
+            self.liveliness_lost_called.store(true, Ordering::SeqCst);
+        }
+
+        fn on_publication_matched(
+            &self,
+            _writer: &DataWriter<TestData>,
+            _status: &PublicationMatchedStatus,
+        ) {
+            self.publication_matched_called.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn setup_mask_test() -> (
+        crate::domain::domain_participant::DomainParticipant,
+        crate::publication::publisher::Publisher,
+        crate::topic::topic::Topic,
+    ) {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
+            .unwrap();
+        let topic = participant
+            .create_topic::<TestData>(
+                "MaskTestTopic",
+                "TestData",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        (participant, publisher, topic)
+    }
+
+    #[test]
+    fn test_mask_offered_incompatible_qos() {
+        let (participant, publisher, topic) = setup_mask_test();
+
+        let listener = Arc::new(MaskTestListener::new());
+        let writer = publisher
+            .create_datawriter::<TestData>(
+                &topic,
+                DataWriterQos::default(),
+                Some(listener.clone() as Arc<dyn DataWriterListener<Foo = TestData>>),
+                StatusKind::OFFERED_INCOMPATIBLE_QOS,
+            )
+            .unwrap();
+
+        let status = Arc::new(OfferedIncompatibleQosStatus::default());
+        writer.update_status(StatusKind::OFFERED_INCOMPATIBLE_QOS, Some(status)).unwrap();
+
+        assert!(
+            listener
+                .offered_incompatible_qos_called
+                .load(Ordering::SeqCst),
+            "on_offered_incompatible_qos should be called when mask contains OFFERED_INCOMPATIBLE_QOS"
+        );
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn test_mask_publication_matched() {
+        let (participant, publisher, topic) = setup_mask_test();
+
+        let listener = Arc::new(MaskTestListener::new());
+        let writer = publisher
+            .create_datawriter::<TestData>(
+                &topic,
+                DataWriterQos::default(),
+                Some(listener.clone() as Arc<dyn DataWriterListener<Foo = TestData>>),
+                StatusKind::PUBLICATION_MATCHED,
+            )
+            .unwrap();
+
+        let status = Arc::new(PublicationMatchedStatus {
+            total_count: 0,
+            total_count_change: 1,
+            current_count: 0,
+            current_count_change: 1,
+            last_subscription_handle: InstanceHandle::default(),
+        });
+        writer.update_status(StatusKind::PUBLICATION_MATCHED, Some(status)).unwrap();
+
+        assert!(
+            listener.publication_matched_called.load(Ordering::SeqCst),
+            "on_publication_matched should be called when mask contains PUBLICATION_MATCHED"
+        );
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn test_mask_liveliness_lost() {
+        let (participant, publisher, topic) = setup_mask_test();
+
+        let listener = Arc::new(MaskTestListener::new());
+        let writer = publisher
+            .create_datawriter::<TestData>(
+                &topic,
+                DataWriterQos::default(),
+                Some(listener.clone() as Arc<dyn DataWriterListener<Foo = TestData>>),
+                StatusKind::LIVELINESS_LOST,
+            )
+            .unwrap();
+
+        writer.update_status(StatusKind::LIVELINESS_LOST, None).unwrap();
+
+        assert!(
+            listener.liveliness_lost_called.load(Ordering::SeqCst),
+            "on_liveliness_lost should be called when mask contains LIVELINESS_LOST"
+        );
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn test_mask_offered_deadline_missed() {
+        let (participant, publisher, topic) = setup_mask_test();
+
+        let listener = Arc::new(MaskTestListener::new());
+        let writer = publisher
+            .create_datawriter::<TestData>(
+                &topic,
+                DataWriterQos::default(),
+                Some(listener.clone() as Arc<dyn DataWriterListener<Foo = TestData>>),
+                StatusKind::OFFERED_DEADLINE_MISSED,
+            )
+            .unwrap();
+
+        let status = Arc::new(OfferedDeadlineMissedStatus::default());
+        writer.update_status(StatusKind::OFFERED_DEADLINE_MISSED, Some(status)).unwrap();
+
+        assert!(
+            listener
+                .offered_deadline_missed_called
+                .load(Ordering::SeqCst),
+            "on_offered_deadline_missed should be called when mask contains OFFERED_DEADLINE_MISSED"
+        );
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
+    }
+
+    // Builds a writer with KeepLast(depth) and returns it plus a way to read the pool size.
+    fn create_pool_test_writer(topic_name: &str, depth: i32) -> DataWriter<TestData> {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
+            .unwrap();
+        let topic = participant
+            .create_topic::<TestData>(
+                topic_name,
+                "TestData",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+
+        let mut writer_qos = DataWriterQos::default();
+        writer_qos.history.kind = HistoryQosPolicyKind::KeepLast(depth);
+        publisher
+            .create_datawriter::<TestData>(&topic, writer_qos, None, StatusMask::default())
+            .unwrap()
+    }
+
+    // Repeated serialized writes must reuse the pool so the free list stays at the
+    // working-set size. A non-pooled path never acquires, leaving the pre-filled pool
+    // pinned at `depth`; the balanced path drains it well below `depth`.
+    #[test]
+    fn write_serialized_keeps_pool_at_working_set() {
+        let depth = 4;
+        let writer = create_pool_test_writer("PoolSerializedTopic", depth);
+
+        // 4-byte encapsulation header + body; content is not parsed for alive writes
+        let serialized = vec![0u8, 1, 0, 0, 42, 0, 0, 0];
+        for _ in 0..50 {
+            writer.write_serialized(&serialized, None).unwrap();
+        }
+
+        let cache = writer.get_datawriter_cache().unwrap();
+        let pool_len = cache.lock().unwrap().pool_len();
+        assert!(
+            pool_len < depth as usize,
+            "serialized path should keep pool at working-set size, got {pool_len} (depth {depth})"
+        );
+    }
+
+    // Typed writes already go through the pooled path; included as the balanced-path
+    // counterpart to the serialized regression above.
+    #[test]
+    fn write_keeps_pool_at_working_set() {
+        let depth = 4;
+        let writer = create_pool_test_writer("PoolTypedTopic", depth);
+
+        let data = TestData { id: 7 };
+        for _ in 0..50 {
+            writer.write(&data, InstanceHandle::NIL).unwrap();
+        }
+
+        let cache = writer.get_datawriter_cache().unwrap();
+        let pool_len = cache.lock().unwrap().pool_len();
+        assert!(
+            pool_len < depth as usize,
+            "typed path should keep pool at working-set size, got {pool_len} (depth {depth})"
         );
     }
 }

@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "int2dds"
+version = "0.1.1"
+description = "Python bindings for int2DDS - a high-performance DDS implementation"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Distributed Computing",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+keywords = ["dds", "pub-sub", "middleware", "real-time", "distributed"]
+dependencies = [
+    "cffi>=1.15.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "mypy>=1.0",
+    "ruff>=0.1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/IntellectusCorp/int2DDS"
+Documentation = "https://github.com/IntellectusCorp/int2DDS/tree/main/python"
+Repository = "https://github.com/IntellectusCorp/int2DDS"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["int2dds*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+strict = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]

@@ -1,14 +1,51 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
-use crate::rtps::transport::{Transport, TransportType};
-use crate::rtps::{common::locator::MULTICAST_IP, transport::port_manager::PortManager};
+use crate::rtps::{
+    common::locator::MULTICAST_IP,
+    transport::{port_manager::PortManager, UdpConfig},
+};
 use log::debug;
 use socket2::{Domain, Protocol, SockAddr, Socket as Socket2, Type};
 use std::env;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Mutex,
+};
+use std::time::Instant;
+
+static UDP_PROFILE_COUNT: AtomicU64 = AtomicU64::new(0);
+static UDP_PROFILE_LOCK_US: AtomicU64 = AtomicU64::new(0);
+static UDP_PROFILE_SENDTO_US: AtomicU64 = AtomicU64::new(0);
+static UDP_PROFILE_TOTAL_US: AtomicU64 = AtomicU64::new(0);
+
+fn udp_profile_enabled() -> bool {
+    std::env::var_os("RMW_INT2DDS_PROFILE").is_some()
+}
+
+fn elapsed_us(start: Instant, end: Instant) -> u64 {
+    end.duration_since(start).as_micros() as u64
+}
+
+fn record_udp_send_profile(lock_us: u64, sendto_us: u64, total_us: u64) {
+    let n = UDP_PROFILE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    UDP_PROFILE_LOCK_US.fetch_add(lock_us, Ordering::Relaxed);
+    UDP_PROFILE_SENDTO_US.fetch_add(sendto_us, Ordering::Relaxed);
+    UDP_PROFILE_TOTAL_US.fetch_add(total_us, Ordering::Relaxed);
+
+    if n % 4096 == 0 {
+        let divisor = n as f64;
+        eprintln!(
+            "INT2DDS_UDP_PROFILE count={} total_avg_us={:.3} lock_avg_us={:.3} sendto_avg_us={:.3}",
+            n,
+            UDP_PROFILE_TOTAL_US.load(Ordering::Relaxed) as f64 / divisor,
+            UDP_PROFILE_LOCK_US.load(Ordering::Relaxed) as f64 / divisor,
+            UDP_PROFILE_SENDTO_US.load(Ordering::Relaxed) as f64 / divisor,
+        );
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct UdpSender {
@@ -34,19 +71,25 @@ impl UdpSender {
             .unwrap_or(0)
     }
 
-    pub(crate) fn new(working_ip: String) -> std::io::Result<Self> {
-        let addr: Ipv4Addr = working_ip.parse().unwrap();
-
+    pub(crate) fn new(
+        bind_ip: String,
+        multicast_if_ip: String,
+        udp_config: UdpConfig,
+    ) -> std::io::Result<Self> {
         let socket = Socket2::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-        socket.set_multicast_if_v4(&addr)?;
-        let bind_addr = SocketAddr::new(IpAddr::V4(addr), 0);
-        let sock_addr = SockAddr::from(bind_addr);
+
+        let mc_addr: Ipv4Addr = multicast_if_ip.parse().unwrap();
+        socket.set_multicast_if_v4(&mc_addr)?;
+        socket.set_multicast_ttl_v4(udp_config.multicast_ttl as u32)?;
+
+        let bind_addr: Ipv4Addr = bind_ip.parse().unwrap();
+        let sock_addr = SockAddr::from(SocketAddr::new(IpAddr::V4(bind_addr), 0));
         socket.bind(&sock_addr)?;
         if let Some(size) = Self::get_socket_buffer_size() {
             socket.set_send_buffer_size(size)?;
         }
 
-        crate::common::int2dds_feature_ffi::init_broadcast(&socket)?;
+        crate::common::int2dds_feature_ffi::init_extended_discovery(&socket)?;
 
         Ok(Self { socket: Mutex::new(Some(socket)) })
     }
@@ -61,32 +104,32 @@ impl UdpSender {
             }
         }
     }
-}
 
-/// Implementation of Transport trait for UdpSender
-///
-/// This allows UdpSender to be used through the generic Transport interface,
-/// enabling transport-agnostic code throughout the DDS stack.
-impl Transport for UdpSender {
-    fn send(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
-        let guard = self
-            .socket
-            .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Mutex poisoned"))?;
+    pub(crate) fn send(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
+        let profile = udp_profile_enabled();
+        let total_t0 = Instant::now();
+        let lock_t0 = Instant::now();
+        let guard = self.socket.lock().map_err(|_| io::Error::other("Mutex poisoned"))?;
+        let lock_us = if profile { elapsed_us(lock_t0, Instant::now()) } else { 0 };
         let socket = guard
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "Socket is closed"))?;
         let sock_addr = SockAddr::from(*addr);
+        let sendto_t0 = Instant::now();
         let result = socket.send_to(data, &sock_addr);
+        if profile {
+            record_udp_send_profile(
+                lock_us,
+                elapsed_us(sendto_t0, Instant::now()),
+                elapsed_us(total_t0, Instant::now()),
+            );
+        }
         debug!("UDP send to {:?}: {:?}", addr, result);
         result
     }
 
-    fn send_multicast(&self, domain_id: u32, data: &[u8]) -> io::Result<usize> {
-        let guard = self
-            .socket
-            .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Mutex poisoned"))?;
+    pub(crate) fn send_multicast(&self, domain_id: u32, data: &[u8]) -> io::Result<usize> {
+        let guard = self.socket.lock().map_err(|_| io::Error::other("Mutex poisoned"))?;
         let socket = guard
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "Socket is closed"))?;
@@ -97,38 +140,12 @@ impl Transport for UdpSender {
         let result = socket.send_to(data, &sock_addr);
         debug!("UDP multicast send (domain {}): {:?}", domain_id, result);
 
-        if let Err(e) =
-            crate::common::int2dds_feature_ffi::send_broadcast(socket, port, data, domain_id)
-        {
-            log::warn!("[udp_sender] Broadcast send failed: {}", e);
+        if let Err(e) = crate::common::int2dds_feature_ffi::send_extended_discovery(
+            socket, port, data, domain_id,
+        ) {
+            log::warn!("[udp_sender] Extended discovery send failed: {}", e);
         }
 
         result
-    }
-
-    fn port(&self) -> u16 {
-        self.socket
-            .lock()
-            .ok()
-            .and_then(|guard| {
-                guard
-                    .as_ref()
-                    .and_then(|s| s.local_addr().ok())
-                    .and_then(|addr| addr.as_socket_ipv4().map(|v4| v4.port()))
-            })
-            .unwrap_or(0)
-    }
-
-    fn transport_type(&self) -> TransportType {
-        TransportType::UDP
-    }
-
-    fn close(self) {
-        if let Ok(mut guard) = self.socket.lock() {
-            if let Some(socket) = guard.take() {
-                log::info!("[UdpSender] Socket closed, port released");
-                drop(socket);
-            }
-        }
     }
 }

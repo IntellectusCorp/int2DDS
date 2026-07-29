@@ -1,0 +1,66 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net45;net48;netstandard2.0;netstandard2.1;net6.0;net8.0;net10.0</TargetFrameworks>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <RootNamespace>Int2Dds</RootNamespace>
+    <AssemblyName>Int2Dds</AssemblyName>
+
+    <!-- Package metadata -->
+    <PackageId>Int2Dds</PackageId>
+    <!-- Version is centralized in csharp/Directory.Build.props (read from ../Cargo.toml). -->
+    <Authors>IntellectusCorp</Authors>
+    <Description>C# binding for int2DDS - a high-performance DDS implementation</Description>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+  </PropertyGroup>
+
+  <!-- net45/net48: relax nullable to annotations only (no enforcement); attributes provided by PolySharp -->
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net45' OR '$(TargetFramework)' == 'net48'">
+    <Nullable>annotations</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Int2Dds.Tests" />
+  </ItemGroup>
+
+  <!-- Async support: Microsoft.Bcl.AsyncInterfaces does not target .NET Framework (net45/net48).
+       Async/ folder is also excluded from those builds (see below). -->
+  <ItemGroup Condition="'$(TargetFramework)' != 'net45' AND '$(TargetFramework)' != 'net48'">
+    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="6.0.0" />
+  </ItemGroup>
+
+  <!-- System.Runtime.CompilerServices.Unsafe (used by InstanceHandle):
+       - net6.0+: built into the BCL, no NuGet needed.
+       - netstandard2.0/2.1: ships only as a NuGet (BCL has only the namespace shell).
+       - net45/net48: 6.0.0 doesn't support .NET Framework; instead it comes in transitively as
+         4.5.3 via System.Memory below. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0' OR '$(TargetFramework)' == 'netstandard2.1'">
+    <PackageReference Include="System.Runtime.CompilerServices.Unsafe" Version="6.0.0" />
+  </ItemGroup>
+
+  <!-- Span<T> / Memory<T> / BinaryPrimitives: built-in on netstandard2.1+/.NET Core 3+,
+       NuGet on net45/net48 + netstandard2.0. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net45' OR '$(TargetFramework)' == 'net48' OR '$(TargetFramework)' == 'netstandard2.0'">
+    <PackageReference Include="System.Memory" Version="4.5.5" />
+  </ItemGroup>
+
+  <!-- net45 build-time only: reference assemblies (the SDK doesn't ship these) and C# 8 attribute polyfills.
+       PrivateAssets="all" ensures these do NOT propagate to consumers nor end up as runtime dependencies. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net45'">
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net45" Version="1.0.3" PrivateAssets="all" />
+    <PackageReference Include="PolySharp" Version="1.14.1" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!-- net48 build-time only: reference assemblies (the SDK doesn't ship these) and C# attribute polyfills.
+       PrivateAssets="all" ensures these do NOT propagate to consumers nor end up as runtime dependencies. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net48" Version="1.0.3" PrivateAssets="all" />
+    <PackageReference Include="PolySharp" Version="1.14.1" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!-- Async/ folder requires IAsyncEnumerable / ValueTask which are not available on net45/net48. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net45' OR '$(TargetFramework)' == 'net48'">
+    <Compile Remove="Async/**/*.cs" />
+  </ItemGroup>
+
+</Project>

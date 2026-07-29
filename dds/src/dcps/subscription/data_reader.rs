@@ -25,16 +25,19 @@
 //! - **Conditions**: Read, query, and status conditions for event-driven reading
 //! - **Status Notifications**: Callbacks for data available, subscription matched, etc.
 
+use arc_swap::ArcSwap;
+use bytes::Bytes;
 use std::{
     any::{Any, TypeId},
     cmp::Ordering as CmpOrdering,
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     fmt::Debug,
     marker::PhantomData,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, RwLock, Weak,
     },
+    time::Instant,
 };
 
 use super::{
@@ -55,21 +58,21 @@ use crate::{
     },
     core::{
         error::{DdsError, DdsResult},
-        time::Duration,
+        time::{Duration, Time},
     },
     infrastructure::{
         deadline_monitor::DeadlineMonitor,
         domain_entity::DomainEntity,
         entity::{
-            impl_dds_entity, impl_dds_entity_impl, BaseEntity, EnableChild, Entity, EntityInternal,
-            UpdateStatus,
+            impl_check_parent_enabled, impl_dds_entity, impl_dds_entity_impl, BaseEntity,
+            EnableChild, Entity, EntityInternal, UpdateStatus,
         },
         history_cache::HistoryCache as DcpsHistoryCache,
-        qos_policy::{DestinationOrderQosPolicyKind, HistoryQosPolicyKind, Qos},
+        qos_policy::{HistoryQosPolicyKind, PresentationQosAccessScopeKind, Qos},
         status::{
             LivelinessChangedStatus, RequestedDeadlineMissedStatus, RequestedIncompatibleQosStatus,
-            SampleLostStatus, SampleRejectedStatus, StatusInfo, StatusKind, StatusMask,
-            SubscriptionMatchedStatus,
+            RequestedIncompatibleTypeStatus, SampleLostStatus, SampleRejectedStatus, StatusInfo,
+            StatusKind, StatusMask, SubscriptionMatchedStatus,
         },
         status_condition::StatusCondition,
     },
@@ -80,10 +83,11 @@ use crate::{
             history::{cache_change::CacheChange, history_cache::HistoryCache as _},
             reader::Reader as RtpsReader,
         },
+        logic::wlp_logic::LivelinessTransition,
     },
     subscription::{
-        data_reader_history::DataReaderHistoryCache,
-        data_sample::DataSample,
+        data_reader_history::{DataReaderHistoryCache, ReaderChangeId},
+        data_sample::{DataSample, SamplePayload},
         read_condition::ReadConditionTrait,
         sample_info::{InstanceInfo, SampleInfo, StateMaskExt},
     },
@@ -93,7 +97,114 @@ use crate::{
         topic_description::TopicDescription,
         type_support::{DdsType, TypeSupport},
     },
+    utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
 };
+
+pub enum BoundedSerialized {
+    Fit(Bytes, SampleInfo),
+    TooSmall { required: usize },
+}
+
+static SERIALIZED_TAKE_PROFILE_COUNT: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_PROFILE_PRECHECK_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_PROFILE_GET_CHANGES_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_PROFILE_SORT_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_PROFILE_FILTER_SETUP_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_PROFILE_INSTANCE_INFO_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_PROFILE_LOOP_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_PROFILE_CLEANUP_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_PROFILE_TOTAL_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_LOOP_PROFILE_COUNT: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_LOOP_PROFILE_SAMPLE_STATE_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_LOOP_PROFILE_INFO_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_LOOP_PROFILE_MATCH_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_LOOP_PROFILE_DATA_BYTES_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_LOOP_PROFILE_SAMPLE_INFO_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_LOOP_PROFILE_REMOVE_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_LOOP_PROFILE_PUSH_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_LOOP_PROFILE_TOTAL_US: AtomicU64 = AtomicU64::new(0);
+
+fn serialized_take_profile_enabled() -> bool {
+    std::env::var_os("RMW_INT2DDS_PROFILE").is_some()
+}
+
+fn elapsed_us(start: Instant, end: Instant) -> u64 {
+    end.duration_since(start).as_micros() as u64
+}
+
+fn record_serialized_take_profile(
+    precheck_us: u64,
+    get_changes_us: u64,
+    sort_us: u64,
+    filter_setup_us: u64,
+    instance_info_us: u64,
+    loop_us: u64,
+    cleanup_us: u64,
+    total_us: u64,
+) {
+    let n = SERIALIZED_TAKE_PROFILE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    SERIALIZED_TAKE_PROFILE_PRECHECK_US.fetch_add(precheck_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_PROFILE_GET_CHANGES_US.fetch_add(get_changes_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_PROFILE_SORT_US.fetch_add(sort_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_PROFILE_FILTER_SETUP_US.fetch_add(filter_setup_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_PROFILE_INSTANCE_INFO_US.fetch_add(instance_info_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_PROFILE_LOOP_US.fetch_add(loop_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_PROFILE_CLEANUP_US.fetch_add(cleanup_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_PROFILE_TOTAL_US.fetch_add(total_us, Ordering::Relaxed);
+
+    if n % 300 == 0 {
+        let divisor = n as f64;
+        eprintln!(
+            "INT2DDS_SERIALIZED_TAKE_PROFILE count={} total_avg_us={:.3} precheck_avg_us={:.3} get_changes_avg_us={:.3} sort_avg_us={:.3} filter_setup_avg_us={:.3} instance_info_avg_us={:.3} loop_avg_us={:.3} cleanup_avg_us={:.3}",
+            n,
+            SERIALIZED_TAKE_PROFILE_TOTAL_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_PROFILE_PRECHECK_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_PROFILE_GET_CHANGES_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_PROFILE_SORT_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_PROFILE_FILTER_SETUP_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_PROFILE_INSTANCE_INFO_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_PROFILE_LOOP_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_PROFILE_CLEANUP_US.load(Ordering::Relaxed) as f64 / divisor,
+        );
+    }
+}
+
+fn record_serialized_take_loop_profile(
+    sample_state_us: u64,
+    info_us: u64,
+    match_us: u64,
+    data_bytes_us: u64,
+    sample_info_us: u64,
+    remove_us: u64,
+    push_us: u64,
+    total_us: u64,
+) {
+    let n = SERIALIZED_TAKE_LOOP_PROFILE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    SERIALIZED_TAKE_LOOP_PROFILE_SAMPLE_STATE_US.fetch_add(sample_state_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_LOOP_PROFILE_INFO_US.fetch_add(info_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_LOOP_PROFILE_MATCH_US.fetch_add(match_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_LOOP_PROFILE_DATA_BYTES_US.fetch_add(data_bytes_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_LOOP_PROFILE_SAMPLE_INFO_US.fetch_add(sample_info_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_LOOP_PROFILE_REMOVE_US.fetch_add(remove_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_LOOP_PROFILE_PUSH_US.fetch_add(push_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_LOOP_PROFILE_TOTAL_US.fetch_add(total_us, Ordering::Relaxed);
+
+    if n % 300 == 0 {
+        let divisor = n as f64;
+        eprintln!(
+            "INT2DDS_SERIALIZED_TAKE_LOOP_PROFILE count={} total_avg_us={:.3} sample_state_avg_us={:.3} info_avg_us={:.3} match_avg_us={:.3} data_bytes_avg_us={:.3} sample_info_avg_us={:.3} remove_avg_us={:.3} push_avg_us={:.3}",
+            n,
+            SERIALIZED_TAKE_LOOP_PROFILE_TOTAL_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_LOOP_PROFILE_SAMPLE_STATE_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_LOOP_PROFILE_INFO_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_LOOP_PROFILE_MATCH_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_LOOP_PROFILE_DATA_BYTES_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_LOOP_PROFILE_SAMPLE_INFO_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_LOOP_PROFILE_REMOVE_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_LOOP_PROFILE_PUSH_US.load(Ordering::Relaxed) as f64 / divisor,
+        );
+    }
+}
 
 // Pub/Sub must contain multiple types of DataWriter/Reader<Foo>,
 // so we use trait objects for runtime polymorphism instead of generics
@@ -103,6 +214,7 @@ pub trait DataReaderBase: DomainEntity + Send + Any {
     fn get_sample_lost_status(&self) -> DdsResult<SampleLostStatus>;
     fn get_requested_deadline_missed_status(&self) -> DdsResult<RequestedDeadlineMissedStatus>;
     fn get_requested_incompatible_qos_status(&self) -> DdsResult<RequestedIncompatibleQosStatus>;
+    fn get_requested_incompatible_type_status(&self) -> DdsResult<RequestedIncompatibleTypeStatus>;
     fn get_subscription_matched_status(&self) -> DdsResult<SubscriptionMatchedStatus>;
     fn get_matched_publication_data(
         &self,
@@ -137,6 +249,7 @@ pub(crate) trait DataReaderInternal: DataReaderBase {
     fn get_type_id(&self) -> TypeId;
     fn delete(&self);
     fn is_deleted(&self) -> DdsResult<()>;
+    fn is_builtin(&self) -> bool;
     fn get_topic(&self) -> DdsResult<Topic>;
     fn get_readconditions(&self) -> DdsResult<Vec<Arc<dyn ReadConditionTrait + Send + Sync>>>;
     fn delete_readcondition_internal(
@@ -151,8 +264,17 @@ pub(crate) trait DataReaderInternal: DataReaderBase {
 
 // #[derive(Clone)]
 pub struct DataReader<Foo> {
+    // Indicates whether this entity is a built-in entity.
+    //
+    // Built-in entities are managed internally and have restricted operations:
+    // - Cannot be deleted (delete_datareader)
+    // - Cannot modify QoS (set_qos)
+    //
+    // See also: DomainParticipant::get_builtin_subscriber()
+    is_builtin: bool,
     guid: Guid,
-    qos: Arc<Mutex<DataReaderQos>>,
+    qos: Arc<ArcSwap<DataReaderQos>>,
+    update_lock: Arc<Mutex<()>>,
     listener: Arc<RwLock<Option<Arc<dyn DataReaderListener<Foo = Foo>>>>>,
     mask: Arc<RwLock<StatusMask>>,
     pub status_condition: Arc<Mutex<StatusCondition<DataReaderQos>>>,
@@ -171,10 +293,12 @@ pub struct DataReader<Foo> {
     sample_rejected_status: Arc<Mutex<SampleRejectedStatus>>,
     requested_deadline_missed_status: Arc<Mutex<RequestedDeadlineMissedStatus>>,
     requested_incompatible_qos_status: Arc<Mutex<RequestedIncompatibleQosStatus>>,
+    requested_incompatible_type_status: Arc<Mutex<RequestedIncompatibleTypeStatus>>,
     subscription_matched_status: Arc<Mutex<SubscriptionMatchedStatus>>,
     sample_lost_status: Arc<Mutex<SampleLostStatus>>,
     deadline_monitor: Arc<Mutex<Option<DeadlineMonitor>>>,
     change_callback: Option<Arc<dyn Fn(Arc<CacheChange>) + Send + Sync>>,
+    #[allow(clippy::type_complexity)]
     status_callback: Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>,
     _phantom: PhantomData<fn() -> Foo>, // Temporary
     datareader_cache: Arc<Mutex<DataReaderHistoryCache<Foo>>>,
@@ -184,7 +308,7 @@ impl<Foo> Debug for DataReader<Foo> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DataReader")
             .field("guid", &self.guid)
-            .field("qos", &self.qos.lock().unwrap())
+            .field("qos", &**self.qos.load())
             .field(
                 "listener",
                 &self.listener.read().unwrap().as_ref().map(|_| "Arc<dyn DataReaderListener>"),
@@ -209,6 +333,10 @@ impl<Foo> Debug for DataReader<Foo> {
                 "requested_incompatible_qos_status",
                 &self.requested_incompatible_qos_status.lock().unwrap(),
             )
+            .field(
+                "requested_incompatible_type_status",
+                &self.requested_incompatible_type_status.lock().unwrap(),
+            )
             .field("subscription_matched_status", &self.subscription_matched_status.lock().unwrap())
             .field("sample_lost_status", &self.sample_lost_status.lock().unwrap())
             .field("_phantom", &self._phantom)
@@ -219,8 +347,10 @@ impl<Foo> Debug for DataReader<Foo> {
 impl<Foo: 'static + Clone + Debug> Clone for DataReader<Foo> {
     fn clone(&self) -> Self {
         Self {
+            is_builtin: self.is_builtin,
             guid: self.guid,
             qos: self.qos.clone(),
+            update_lock: self.update_lock.clone(),
             listener: self.listener.clone(),
             mask: self.mask.clone(),
             status_condition: self.status_condition.clone(),
@@ -240,6 +370,7 @@ impl<Foo: 'static + Clone + Debug> Clone for DataReader<Foo> {
             sample_lost_status: self.sample_lost_status.clone(),
             requested_deadline_missed_status: self.requested_deadline_missed_status.clone(),
             requested_incompatible_qos_status: self.requested_incompatible_qos_status.clone(),
+            requested_incompatible_type_status: self.requested_incompatible_type_status.clone(),
             subscription_matched_status: self.subscription_matched_status.clone(),
             deadline_monitor: self.deadline_monitor.clone(),
             change_callback: self.change_callback.clone(),
@@ -253,10 +384,16 @@ impl<Foo: 'static + Clone + Debug> Clone for DataReader<Foo> {
 // When the user goes out of scope and auto-drops without calling delete_datareader,
 // it should not be deleted from Subscriber.
 impl<Foo> Drop for DataReader<Foo> {
+    #[allow(clippy::match_result_ok)]
     fn drop(&mut self) {
+        // Builtin entities are managed separately, skip orphan handling
+        if self.is_builtin {
+            return;
+        }
+
         // Only handle drop for the last reference (not clones)
         if let Some(guard) = self.self_ref.lock().ok() {
-            if let Some(ref self_arc) = guard.as_ref() {
+            if let Some(self_arc) = guard.as_ref() {
                 if Arc::strong_count(self_arc) > 1 {
                     return;
                 }
@@ -293,92 +430,113 @@ impl_dds_entity!(DataReader<Foo>, DataReaderQos, Foo: 'static + Clone + Debug);
 impl<Foo: 'static + Clone + Debug> DomainEntity for DataReader<Foo> {}
 impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
     fn enable_rtps_entities(&self) -> DdsResult<()> {
-        let topic_description = self.get_topicdescription()?;
-        let cft = topic_description.as_any().downcast_ref::<ContentFilteredTopic>();
-        let subscriber = self.get_subscriber()?;
-        let participant = subscriber.get_participant()?;
-
-        let content_filter_property = if let Some(content_filtered_topic) = cft {
-            let related_topic = content_filtered_topic.get_related_topic()?;
-            Some(ContentFilterProperty {
-                content_filtered_topic_name: content_filtered_topic.get_name().to_owned(),
-                related_topic_name: related_topic.get_name().to_owned(),
-                filter_class_name: "DDSSQL".to_string(),
-                filter_expression: content_filtered_topic.get_filter_expression()?,
-                expression_parameters: content_filtered_topic.get_expression_parameters()?,
-            })
+        let rtps_reader = if self.is_builtin {
+            // Builtin: RTPS reader was already set during creation
+            self.get_rtps_reader()?
         } else {
-            None
-        };
+            // Non-builtin: Create RTPS reader
+            let topic_description = self.get_topicdescription()?;
+            let cft = topic_description.as_any().downcast_ref::<ContentFilteredTopic>();
+            let subscriber = self.get_subscriber()?;
+            let participant = subscriber.get_participant()?;
 
-        // Downcast to get underlying Topic for QoS
-        let topic_qos = if let Some(topic) = topic_description.as_any().downcast_ref::<Topic>() {
-            topic.get_qos()?
-        } else if let Some(content_filtered_topic) = cft {
-            content_filtered_topic.get_related_topic()?.get_qos()?
-        } else {
-            return Err(DdsError::Error("Unsupported TopicDescription type".to_string()));
-        };
+            let content_filter_property = if let Some(content_filtered_topic) = cft {
+                let related_topic = content_filtered_topic.get_related_topic()?;
+                Some(ContentFilterProperty {
+                    content_filtered_topic_name: content_filtered_topic.get_name().to_owned(),
+                    related_topic_name: related_topic.get_name().to_owned(),
+                    filter_class_name: "DDSSQL".to_string(),
+                    filter_expression: content_filtered_topic.get_filter_expression()?,
+                    expression_parameters: content_filtered_topic.get_expression_parameters()?,
+                })
+            } else {
+                None
+            };
 
-        let topic_name = if let Some(topic) = topic_description.as_any().downcast_ref::<Topic>() {
-            topic.get_name().to_string()
-        } else if let Some(content_filtered_topic) = cft {
-            content_filtered_topic.get_related_topic()?.get_name().to_string()
-        } else {
-            return Err(DdsError::Error("Unsupported TopicDescription type".to_string()));
-        };
+            // Downcast to get underlying Topic for QoS
+            let topic_qos = if let Some(topic) = topic_description.as_any().downcast_ref::<Topic>()
+            {
+                topic.get_qos_arc()?
+            } else if let Some(content_filtered_topic) = cft {
+                content_filtered_topic.get_related_topic()?.get_qos_arc()?
+            } else {
+                return Err(DdsError::Error("Unsupported TopicDescription type".to_string()));
+            };
 
-        let mut subscription_builtin_topic_data =
-            SubscriptionBuiltinTopicData::new(&self.get_qos()?, &subscriber.get_qos()?, &topic_qos);
-        subscription_builtin_topic_data.set_topic_name(topic_name);
-        subscription_builtin_topic_data
-            .set_type_name(topic_description.get_type_name().to_string());
-        subscription_builtin_topic_data.set_endpoint_guid(self.guid);
+            let topic_name = if let Some(topic) = topic_description.as_any().downcast_ref::<Topic>()
+            {
+                topic.get_name().to_string()
+            } else if let Some(content_filtered_topic) = cft {
+                content_filtered_topic.get_related_topic()?.get_name().to_string()
+            } else {
+                return Err(DdsError::Error("Unsupported TopicDescription type".to_string()));
+            };
 
-        let status_callback = self
-            .status_callback
-            .as_ref()
-            .ok_or(DdsError::Error("Status callback is not initialized".to_string()))?
-            .clone();
-        let change_callback = self
-            .change_callback
-            .as_ref()
-            .ok_or(DdsError::Error("Change callback is not initialized".to_string()))?
-            .clone();
+            let reader_qos = self.get_qos_arc()?;
+            let subscriber_qos = subscriber.get_qos_arc()?;
+            let mut subscription_builtin_topic_data =
+                SubscriptionBuiltinTopicData::new(&reader_qos, &subscriber_qos, &topic_qos);
+            subscription_builtin_topic_data.set_topic_name(topic_name);
+            subscription_builtin_topic_data
+                .set_type_name(topic_description.get_type_name().to_string());
+            subscription_builtin_topic_data.set_endpoint_guid(self.guid);
 
-        // Use Weak to avoid lifetime issues in closure
-        let mut dcps_bridge = participant.get_dcps_bridge()?;
-        let rtps_reader = match dcps_bridge.as_mut() {
-            Some(dcps_bridge) => dcps_bridge
-                .create_rtps_reader(
-                    subscription_builtin_topic_data,
-                    content_filter_property,
-                    Some(change_callback),
-                    Some(status_callback),
-                )
-                .map_err(|e| DdsError::Error(e.message))?,
-            None => return Err(DdsError::Error("DCPS Bridge is not initialized".to_string())),
-        };
+            // Set TypeIdentifier and TypeObject for DDS-XTypes discovery
+            if let Some(type_id) = self.type_support.get_type_identifier() {
+                subscription_builtin_topic_data.set_type_identifier(Some(type_id));
+            }
+            if let Some(type_obj) = self.type_support.get_type_object() {
+                subscription_builtin_topic_data.set_type_object(Some(type_obj));
+            }
+            let type_closure = self.type_support.get_type_object_closure();
+            subscription_builtin_topic_data
+                .set_type_information(crate::xtypes::TypeInformation::from_closure(&type_closure));
+            if let Ok(rtps_participant) = participant.get_rtps_participant() {
+                rtps_participant.register_local_type_objects(&type_closure);
+            }
 
-        drop(dcps_bridge);
+            let status_callback = self
+                .status_callback
+                .as_ref()
+                .ok_or(DdsError::Error("Status callback is not initialized".to_string()))?
+                .clone();
+            let change_callback = self
+                .change_callback
+                .as_ref()
+                .ok_or(DdsError::Error("Change callback is not initialized".to_string()))?
+                .clone();
 
-        {
-            let reader_cache = rtps_reader.reader_cache();
-            reader_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?.set_datareader_cache(
-                Arc::downgrade(&self.datareader_cache)
-                    as Weak<
-                        Mutex<
-                            dyn DcpsHistoryCache<CacheChangeInputType = Arc<Mutex<CacheChange>>>
-                                + Send
-                                + Sync,
-                        >,
-                    >,
-            );
-        }
+            // Use Weak to avoid lifetime issues in closure
+            let mut dcps_bridge = participant.get_dcps_bridge()?;
+            let rtps_reader = match dcps_bridge.as_mut() {
+                Some(dcps_bridge) => dcps_bridge
+                    .create_rtps_reader(
+                        subscription_builtin_topic_data,
+                        content_filter_property,
+                        Some(change_callback),
+                        Some(status_callback),
+                    )
+                    .map_err(|e| DdsError::Error(e.message))?,
+                None => return Err(DdsError::Error("DCPS Bridge is not initialized".to_string())),
+            };
 
-        {
+            drop(dcps_bridge);
+
+            // Store RTPS reader reference
             *self.rtps_reader.lock().map_err(|e| DdsError::Error(e.to_string()))? =
                 Some(Arc::downgrade(&rtps_reader));
+
+            rtps_reader
+        };
+
+        // Common: Connect datareader cache to RTPS reader cache
+        {
+            let reader_cache = rtps_reader.reader_cache();
+            reader_cache
+                .lock()
+                .map_err(|e| DdsError::Error(e.to_string()))?
+                .set_datareader_cache(Arc::downgrade(&self.datareader_cache)
+                    as Weak<Mutex<dyn DcpsHistoryCache + Send + Sync>>);
         }
 
         Ok(())
@@ -386,11 +544,27 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
     fn update_rtps_entity(&self, qos: &Self::Qos) -> DdsResult<()> {
         let subscriber = self.get_subscriber()?;
         let topic = self.get_topic()?;
+        let subscriber_qos = subscriber.get_qos_arc()?;
+        let topic_qos = topic.get_qos_arc()?;
         let mut subscription_builtin_topic_data =
-            SubscriptionBuiltinTopicData::new(qos, &subscriber.get_qos()?, &topic.get_qos()?);
+            SubscriptionBuiltinTopicData::new(qos, &subscriber_qos, &topic_qos);
         subscription_builtin_topic_data.set_topic_name(topic.get_name().to_string());
         subscription_builtin_topic_data.set_type_name(topic.get_type_name().to_string());
         subscription_builtin_topic_data.set_endpoint_guid(self.guid);
+
+        // Set TypeIdentifier and TypeObject for DDS-XTypes discovery
+        if let Some(type_id) = self.type_support.get_type_identifier() {
+            subscription_builtin_topic_data.set_type_identifier(Some(type_id));
+        }
+        if let Some(type_obj) = self.type_support.get_type_object() {
+            subscription_builtin_topic_data.set_type_object(Some(type_obj));
+        }
+        subscription_builtin_topic_data.set_type_information(
+            crate::xtypes::TypeInformation::from_closure(
+                &self.type_support.get_type_object_closure(),
+            ),
+        );
+
         let rtps_reader = self.get_rtps_reader()?;
         rtps_reader
             .set_subscription_builtin_topic_data(subscription_builtin_topic_data.clone())
@@ -422,6 +596,8 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
 
         Ok(())
     }
+
+    impl_check_parent_enabled!(get_subscriber);
 }
 impl<Foo: 'static + Clone + Debug> UpdateStatus for DataReader<Foo> {
     fn update_status(
@@ -445,6 +621,13 @@ impl<Foo: 'static + Clone + Debug> UpdateStatus for DataReader<Foo> {
                 .map_err(|_| DdsError::BadParameter)?;
                 self.handle_requested_incompatible_qos_status(info)
             }
+            StatusKind::REQUESTED_INCOMPATIBLE_TYPE => {
+                let info = Arc::downcast::<RequestedIncompatibleTypeStatus>(
+                    info.ok_or(DdsError::BadParameter)?,
+                )
+                .map_err(|_| DdsError::BadParameter)?;
+                self.handle_requested_incompatible_type_status(info)
+            }
             StatusKind::SAMPLE_LOST => {
                 if info.is_some() {
                     return Err(DdsError::BadParameter);
@@ -467,6 +650,31 @@ impl<Foo: 'static + Clone + Debug> UpdateStatus for DataReader<Foo> {
                 let info =
                     Arc::downcast::<LivelinessChangedStatus>(info.ok_or(DdsError::BadParameter)?)
                         .map_err(|_| DdsError::BadParameter)?;
+
+                let transition = LivelinessTransition::from_deltas(
+                    info.alive_count_change(),
+                    info.not_alive_count_change(),
+                );
+
+                // Lost / UnmatchAlive / UnmatchNotAlive.
+                if matches!(
+                    transition,
+                    Some(
+                        LivelinessTransition::Lost
+                            | LivelinessTransition::UnmatchAlive
+                            | LivelinessTransition::UnmatchNotAlive
+                    )
+                ) {
+                    if let Ok(datareader_cache) = self.datareader_cache.lock() {
+                        datareader_cache.revoke_writer_ownership(
+                            info.last_publication_handle().to_guid(),
+                            None,
+                            true,
+                            true,
+                        )?;
+                    }
+                }
+
                 self.handle_liveliness_changed_status(info)
             }
             StatusKind::SUBSCRIPTION_MATCHED => {
@@ -510,32 +718,36 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     /// # Examples
     ///
     /// ```no_run
-    /// # use int2dds::dcps::domain::DomainParticipantFactory;
+    /// # use int2dds::domain::domain_participant_factory::DomainParticipantFactory;
+    /// # use int2dds::domain::qos::DomainParticipantQos;
+    /// # use int2dds::infrastructure::status::StatusMask;
+    /// # use int2dds::topic::qos::TopicQos;
+    /// # use int2dds::subscription::qos::{SubscriberQos, DataReaderQos};
     /// # use int2dds::topic::type_support::DdsType;
     /// # use int2dds::subscription::sample_info::SampleStateKind;
     /// # use int2dds::subscription::sample_info::ViewStateKind;
     /// # use int2dds::subscription::sample_info::InstanceStateKind;
     /// # use int2dds::core::types::LENGTH_UNLIMITED;
-    /// # #[derive(Clone, DdsType, Debug)]
+    /// # #[derive(DdsType)]
     /// # struct MyData { #[dds(key)] id: u32, message: String }
     /// # let factory = DomainParticipantFactory::get_instance();
-    /// # let participant = factory.create_participant(0, Default::default(), None, Default::default())?;
-    /// # let topic = participant.create_topic::<MyData>("MyTopic", "MyData", Default::default(), None, Default::default())?;
-    /// # let subscriber = participant.create_subscriber(Default::default(), None, Default::default())?;
-    /// # let reader = subscriber.create_datareader::<MyData>(&topic, Default::default(), None, Default::default())?;
+    /// # let participant = factory.create_participant(0, DomainParticipantQos::default(), None, StatusMask::default()).unwrap();
+    /// # let topic = participant.create_topic::<MyData>("MyTopic", "MyData", TopicQos::default(), None, StatusMask::default()).unwrap();
+    /// # let subscriber = participant.create_subscriber(SubscriberQos::default(), None, StatusMask::default()).unwrap();
+    /// # let reader = subscriber.create_datareader::<MyData>(&topic, DataReaderQos::default(), None, StatusMask::default()).unwrap();
     /// // Take some samples
     /// let samples = reader.take(
     ///     LENGTH_UNLIMITED,
     ///     &[SampleStateKind::ANY_SAMPLE_STATE],
     ///     &[ViewStateKind::ANY_VIEW_STATE],
     ///     &[InstanceStateKind::ANY_INSTANCE_STATE]
-    /// )?;
+    /// ).unwrap();
     ///
     /// for sample in samples {
     ///     let handle = sample.sample_info().instance_handle;
     ///
     ///     // Get the key values for this instance
-    ///     let key_holder = reader.get_key_value(handle)?;
+    ///     let key_holder = reader.get_key_value(handle).unwrap();
     ///     println!("Instance key: {:?}", key_holder.id);
     /// }
     /// ```
@@ -561,6 +773,31 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                 .map(|boxed| *boxed)
                 .map_err(|_| DdsError::Error("Type downcast failed".to_string()))?;
             Ok(result)
+        } else {
+            Err(DdsError::BadParameter)
+        }
+    }
+
+    /// Get the raw serialized key bytes for a given instance handle.
+    ///
+    /// Serialized counterpart of [`get_key_value`](Self::get_key_value) for the FFI
+    /// raw-serialized path, mirroring the writer's `get_key_value_serialized`. For
+    /// native (derive) types this returns the CDR-serialized key; for raw FFI types
+    /// (which cannot deserialize/re-serialize a key) it returns the stored instance
+    /// handle bytes, which still round-trip through `lookup_instance_serialized`.
+    pub fn get_key_value_serialized(&self, handle: InstanceHandle) -> DdsResult<Arc<[u8]>> {
+        self.is_enabled()?;
+
+        if handle.is_nil() {
+            return Err(DdsError::BadParameter);
+        }
+
+        let instance_info = self.get_instance_infos()?;
+        if let Some(info) = instance_info.get(&handle) {
+            if info.key.is_empty() {
+                return Err(DdsError::Error("Unknown Key".to_string()));
+            }
+            Ok(info.key.clone())
         } else {
             Err(DdsError::BadParameter)
         }
@@ -592,20 +829,24 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     /// # Examples
     ///
     /// ```no_run
-    /// # use int2dds::dcps::domain::DomainParticipantFactory;
+    /// # use int2dds::domain::domain_participant_factory::DomainParticipantFactory;
+    /// # use int2dds::domain::qos::DomainParticipantQos;
+    /// # use int2dds::infrastructure::status::StatusMask;
+    /// # use int2dds::topic::qos::TopicQos;
+    /// # use int2dds::subscription::qos::{SubscriberQos, DataReaderQos};
     /// # use int2dds::topic::type_support::DdsType;
     /// # use int2dds::common::instance_handle::InstanceHandle;
-    /// # #[derive(Clone, DdsType)]
+    /// # #[derive(DdsType)]
     /// # struct MyData { #[dds(key)] id: u32, message: String }
     /// # let factory = DomainParticipantFactory::get_instance();
-    /// # let participant = factory.create_participant(0, Default::default(), None, Default::default())?;
-    /// # let topic = participant.create_topic::<MyData>("MyTopic", "MyData", Default::default(), None, Default::default())?;
-    /// # let subscriber = participant.create_subscriber(Default::default(), None, Default::default())?;
-    /// # let reader = subscriber.create_datareader::<MyData>(&topic, Default::default(), None, Default::default())?;
+    /// # let participant = factory.create_participant(0, DomainParticipantQos::default(), None, StatusMask::default()).unwrap();
+    /// # let topic = participant.create_topic::<MyData>("MyTopic", "MyData", TopicQos::default(), None, StatusMask::default()).unwrap();
+    /// # let subscriber = participant.create_subscriber(SubscriberQos::default(), None, StatusMask::default()).unwrap();
+    /// # let reader = subscriber.create_datareader::<MyData>(&topic, DataReaderQos::default(), None, StatusMask::default()).unwrap();
     /// let instance = MyData { id: 1, message: String::new() };
     ///
     /// // Look up the handle for this instance
-    /// let handle = reader.lookup_instance(&instance)?;
+    /// let handle = reader.lookup_instance(&instance).unwrap();
     ///
     /// if handle == InstanceHandle::NIL {
     ///     println!("Instance not known to this reader");
@@ -634,6 +875,31 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                 None => InstanceHandle::NIL, // Unregistered instance
             })
         }
+    }
+
+    /// Look up an instance handle from the stored serialized key bytes.
+    ///
+    /// Serialized counterpart of [`lookup_instance`](Self::lookup_instance) for the FFI
+    /// raw-serialized path. The reader stores each instance's canonical key CDR (via the
+    /// type support's `serialize_key`, the same projection the wire uses), so this matches
+    /// on the stored key bytes — as returned by [`get_key_value_serialized`](Self::get_key_value_serialized).
+    /// Returns `InstanceHandle::NIL` if the instance is not known to this reader.
+    pub fn lookup_instance_serialized(&self, key: &[u8]) -> DdsResult<InstanceHandle> {
+        self.is_deleted()?;
+
+        if key.is_empty() {
+            return Ok(InstanceHandle::NIL);
+        }
+
+        let instances = self.instance_infos.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
+        for (handle, info) in instances.iter() {
+            if info.key.as_ref() == key {
+                return Ok(*handle);
+            }
+        }
+
+        Ok(InstanceHandle::NIL)
     }
 
     // For Entity
@@ -699,8 +965,22 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     }
 
     #[inline]
+    pub fn get_requested_incompatible_type_status(
+        &self,
+    ) -> DdsResult<RequestedIncompatibleTypeStatus> {
+        <Self as DataReaderBase>::get_requested_incompatible_type_status(self)
+    }
+
+    #[inline]
     pub fn get_subscription_matched_status(&self) -> DdsResult<SubscriptionMatchedStatus> {
         <Self as DataReaderBase>::get_subscription_matched_status(self)
+    }
+
+    /// Returns the 16-byte RTPS GUID of this DataReader. This is the same endpoint
+    /// GUID advertised over SEDP discovery (the `endpoint_guid` of this reader's
+    /// `SubscriptionBuiltinTopicData`). Read-only accessor; mirrors `DataWriter::guid`.
+    pub fn guid(&self) -> Guid {
+        self.guid
     }
 
     #[inline]
@@ -772,10 +1052,10 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
     pub(crate) fn is_enabled(&self) -> DdsResult<()> {
         self.is_deleted()?;
-        {
-            let _ = self.get_rtps_reader()?;
-        }
         if self.enabled.load(Ordering::SeqCst) {
+            {
+                let _ = self.get_rtps_reader()?;
+            }
             Ok(())
         } else {
             Err(DdsError::NotEnabled)
@@ -840,7 +1120,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     }
 
     fn get_max_samples(&self) -> DdsResult<usize> {
-        let qos = self.get_qos()?;
+        let qos = self.get_qos_arc()?;
 
         let samples_limit = match qos.history.kind {
             HistoryQosPolicyKind::KeepLast(depth) => depth,
@@ -875,10 +1155,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         if writer_samples.len() >= max_samples {
             if let Some(&oldest_seq_num) = writer_samples.iter().next() {
                 writer_samples.remove(&oldest_seq_num);
-                log::debug!(
-                    "Removed oldest read sample with sequence number: {:?}",
-                    oldest_seq_num
-                );
+                log::debug!("Removed oldest read sample with sequence number: {}", oldest_seq_num);
             }
         }
 
@@ -908,6 +1185,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         Ok(rtps_reader)
     }
 
+    #[allow(clippy::type_complexity)]
     pub(crate) fn create_status_callback(
         &self,
     ) -> DdsResult<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>> {
@@ -966,6 +1244,19 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     fn take_requested_incompatible_qos_status(&self) -> DdsResult<RequestedIncompatibleQosStatus> {
         let mut status_guard = self
             .requested_incompatible_qos_status
+            .lock()
+            .map_err(|e| DdsError::Error(e.to_string()))?;
+        let result = status_guard.clone();
+
+        // Reset total_count_change
+        status_guard.total_count_change = 0;
+        Ok(result)
+    }
+    fn take_requested_incompatible_type_status(
+        &self,
+    ) -> DdsResult<RequestedIncompatibleTypeStatus> {
+        let mut status_guard = self
+            .requested_incompatible_type_status
             .lock()
             .map_err(|e| DdsError::Error(e.to_string()))?;
         let result = status_guard.clone();
@@ -1078,6 +1369,25 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
         // StatusCondition
         self.set_communication_status_propagation(&StatusKind::REQUESTED_INCOMPATIBLE_QOS, true)?;
+
+        Ok(())
+    }
+    fn handle_requested_incompatible_type_status(
+        &self,
+        _info: Arc<RequestedIncompatibleTypeStatus>,
+    ) -> DdsResult<()> {
+        {
+            let mut status_guard = self
+                .requested_incompatible_type_status
+                .lock()
+                .map_err(|e| DdsError::Error(e.to_string()))?;
+
+            status_guard.total_count += 1;
+            status_guard.total_count_change += 1;
+        }
+
+        // StatusCondition
+        self.set_communication_status_propagation(&StatusKind::REQUESTED_INCOMPATIBLE_TYPE, true)?;
 
         Ok(())
     }
@@ -1230,15 +1540,6 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         // StatusCondition
         self.set_communication_status_propagation(&StatusKind::LIVELINESS_CHANGED, true)?;
 
-        // Not alive writer cleanup
-        if info.alive_count == 0 || info.not_alive_count() < 0 {
-            if let Ok(datareader_cache) = self.datareader_cache.lock() {
-                datareader_cache.remove_writer_from_owner_candidates(
-                    info.last_publication_handle().to_guid(),
-                )?;
-            }
-        }
-
         Ok(())
     }
     pub(crate) fn handle_subscription_matched_status(
@@ -1332,10 +1633,41 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     }
 
     pub(crate) fn get_available_changes(&self) -> DdsResult<Vec<Arc<CacheChange>>> {
+        let topic_ordered = self.subscriber_topic_ordered();
         let datareader_cache = self.get_datareader_cache();
         let arc = datareader_cache?;
-        let guard = arc.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-        Ok(guard.get_changes().clone())
+        let mut guard = arc.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        // Enforce Lifespan QoS at read time so expired samples are never returned,
+        // even if the periodic cleanup timer hasn't fired yet.
+        guard.purge_expired_on_read()?;
+        // TOPIC ordered_access presents samples in topic-wide DESTINATION_ORDER across instances;
+        // otherwise return the per-instance storage order.
+        if topic_ordered {
+            Ok(guard.get_changes_for_topic_scoped_ordered_access())
+        } else {
+            Ok(guard.get_changes())
+        }
+    }
+
+    fn subscriber_topic_ordered(&self) -> bool {
+        self.get_subscriber()
+            .and_then(|s| s.get_qos_arc())
+            .map(|q| {
+                q.presentation.ordered_access
+                    && q.presentation.access_scope == PresentationQosAccessScopeKind::Topic
+            })
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn is_subscriber_coherent(&self) -> bool {
+        self.get_subscriber()
+            .and_then(|s| s.get_qos_arc())
+            .map(|q| q.presentation.coherent_access)
+            .unwrap_or(false)
+    }
+
+    pub fn has_cached_data(&self) -> DdsResult<bool> {
+        Ok(!self.get_available_changes()?.is_empty())
     }
 
     pub(crate) fn get_change(
@@ -1361,6 +1693,42 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         Ok(())
     }
 
+    /// Removes all changes of the given instance from both DataReader and RTPS reader caches.
+    /// This acquires both cache locks, so avoid calling from RTPS Reader contexts to prevent deadlock.
+    pub(crate) fn remove_change_of_instance(
+        &self,
+        instance_handle: InstanceHandle,
+    ) -> DdsResult<()> {
+        let change_id_set_to_remove =
+            if let Ok(mut datareader_cache) = self.get_datareader_cache()?.lock() {
+                let ids = datareader_cache.get_change_id_set_of_instance(instance_handle)?;
+                datareader_cache.remove_all_changes_of_instance(instance_handle)?;
+                ids
+            } else {
+                HashSet::new()
+            };
+
+        self.remove_change_from_rtps_reader_cache_by_id_set(change_id_set_to_remove)?;
+        Ok(())
+    }
+
+    // Remove the SampleInfo bookkeeping for an instance.
+    pub(crate) fn remove_instance_info(&self, instance_handle: InstanceHandle) {
+        if let Ok(mut instance_infos) = self.instance_infos.lock() {
+            instance_infos.remove(&instance_handle);
+        }
+    }
+
+    // Fully reclaim an instance after its NOT_ALIVE_NO_WRITERS autopurge delay: drop its
+    // samples and all per-instance state, so future samples are treated as a new instance.
+    pub(crate) fn reclaim_instance(&self, instance_handle: InstanceHandle) -> DdsResult<()> {
+        self.remove_change_of_instance(instance_handle)?;
+        if let Ok(cache) = self.get_datareader_cache()?.lock() {
+            cache.remove_all_instance_resources(instance_handle);
+        }
+        Ok(())
+    }
+
     /// This should be only called when removing a change from data reader side to rtps reader side to avoid deadlock.
     /// RTPS reader history keeps acquiring datareader cache lock on socket listening thread,
     /// So never try to acquire rtps reader cache lock while holding datareader cache lock.
@@ -1378,9 +1746,37 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
             })?;
             let res = cache_guard.remove_change(a_change);
             if res.is_ok() {
-                return Ok(());
+                Ok(())
             } else {
-                return Err(DdsError::Error(res.err().unwrap().to_string()));
+                Err(DdsError::Error(res.err().unwrap().to_string()))
+            }
+        } else {
+            Err(DdsError::Error("RTPS Reader is not initialized".to_string()))
+        }
+    }
+
+    /// Removes changes by the given change IDs from RTPS reader cache.
+    /// This should be only called when removing changes from data reader side to rtps reader side to avoid deadlock.
+    fn remove_change_from_rtps_reader_cache_by_id_set(
+        &self,
+        change_id_set: HashSet<ReaderChangeId>,
+    ) -> DdsResult<()> {
+        if let Ok(weak_rtps_reader) = self.rtps_reader.lock().as_ref() {
+            let weak_rtps_reader = weak_rtps_reader
+                .as_ref()
+                .ok_or(DdsError::Error("RTPS Reader is not initialized".to_string()))?;
+            let rtps_reader = weak_rtps_reader
+                .upgrade()
+                .ok_or(DdsError::Error("Failed to upgrade rtps reader weak".to_string()))?;
+            let rtps_reader_cache = rtps_reader.reader_cache();
+            let mut cache_guard = rtps_reader_cache.lock().map_err(|e| {
+                DdsError::Error(format!("Failed to lock rtps reader cache mutex: {}", e))
+            })?;
+            let res = cache_guard.remove_change_by_id_set(change_id_set);
+            if res.is_ok() {
+                Ok(())
+            } else {
+                Err(DdsError::Error(res.err().unwrap().to_string()))
             }
         } else {
             Err(DdsError::Error("RTPS Reader is not initialized".to_string()))
@@ -1393,29 +1789,119 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     ) -> DdsResult<InstanceHandle> {
         let instance_handle = change.instance_handle();
 
-        // Fallback: If InlineQos has no key_hash, compute from SerializedData (RTPS 9.6.4.8)
-        if instance_handle.is_nil() && self.type_support.is_compute_key_provided() {
-            log::info!("Instance handle is NIL, computing from serialized data (fallback)");
-            let data = self.type_support.deserialize(change.data_value())?;
-            let computed_handle = self.type_support.compute_key(&*data);
-            // log::info!("Computed instance handle from data: {:?}", computed_handle);
-            Ok(computed_handle)
+        if !instance_handle.is_nil() || !self.type_support.is_compute_key_provided() {
+            return Ok(instance_handle);
+        }
+
+        // Dispose/unregister/filtered samples carry a key-only payload; only Alive
+        // (and AliveFiltered) samples carry the full data record.
+        if matches!(change.kind(), ChangeKind::Alive | ChangeKind::AliveFiltered) {
+            let data = self.type_support.deserialize(change.data_value(), None)?;
+            Ok(self.type_support.compute_key(&*data))
         } else {
-            // log::info!("Using instance_handle from InlineQos (no fallback needed)");
-            Ok(instance_handle)
+            // Dispose/unregister carry a wire serializedKey (with encapsulation header).
+            let key_any = self.type_support.deserialize_key_payload(change.data_value())?;
+            Ok(self.type_support.compute_key(&*key_any))
         }
     }
 
+    // Mark synthetic invalid-data sample pending.
+    pub(crate) fn mark_pending_notification(
+        &self,
+        instance_handle: InstanceHandle,
+    ) -> DdsResult<()> {
+        let mut instance_infos =
+            self.instance_infos.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        if let Some(info) = instance_infos.get_mut(&instance_handle) {
+            info.pending_notification = true;
+        }
+        Ok(())
+    }
+
+    // Clear pending_notification after synthetic sample emitted.
+    pub(crate) fn clear_pending_notification(
+        &self,
+        instance_handle: InstanceHandle,
+    ) -> DdsResult<()> {
+        let mut instance_infos =
+            self.instance_infos.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        if let Some(info) = instance_infos.get_mut(&instance_handle) {
+            info.pending_notification = false;
+        }
+        Ok(())
+    }
+
+    // Drain pending synthetic notifications matching the filters; clears flags.
+    fn drain_pending_notifications(
+        &self,
+        instance_infos: &HashMap<InstanceHandle, InstanceInfo>,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+        instance_filter: Option<InstanceHandle>,
+        max: i32,
+    ) -> DdsResult<Vec<SampleInfo>> {
+        let mut synthetic_sample_infos = Vec::new();
+
+        if max <= 0 || !sample_states.matches(SampleStateKind::NOT_READ_SAMPLE_STATE) {
+            return Ok(synthetic_sample_infos);
+        }
+
+        for (instance_handle, info) in instance_infos.iter() {
+            if synthetic_sample_infos.len() as i32 >= max {
+                break;
+            }
+
+            if !info.pending_notification {
+                continue;
+            }
+
+            if matches!(instance_filter, Some(expected) if expected != *instance_handle) {
+                continue;
+            }
+
+            if !view_states.matches(info.view_state)
+                || !instance_states.matches(info.instance_state)
+            {
+                continue;
+            }
+
+            // Suppress synthetic on rebirth; only surface while still NOT_ALIVE_NO_WRITERS.
+            if info.instance_state != InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE {
+                continue;
+            }
+
+            synthetic_sample_infos.push(SampleInfo {
+                sample_state: SampleStateKind::NOT_READ_SAMPLE_STATE,
+                view_state: info.view_state,
+                instance_state: info.instance_state,
+                disposed_generation_count: info.disposed_generation_count,
+                no_writers_generation_count: info.no_writers_generation_count,
+                sample_rank: 0,
+                generation_rank: 0,
+                absolute_generation_rank: 0,
+                source_timestamp: Time::now(),
+                instance_handle: *instance_handle,
+                publication_handle: InstanceHandle::NIL,
+                valid_data: false,
+            });
+            self.clear_pending_notification(*instance_handle)?;
+        }
+        Ok(synthetic_sample_infos)
+    }
+
+    // Returns true if the instance state actually changed (a rejected no-op
+    // transition returns false), so callers can avoid synthesizing notifications.
     pub(crate) fn update_instance_state(
         &self,
         instance_handle: InstanceHandle,
         new_state: InstanceStateKind,
         cache_change: Option<&CacheChange>,
-    ) -> DdsResult<()> {
+    ) -> DdsResult<bool> {
         // Non-keyed topic doesn't have instance state
-        if instance_handle.is_nil() {
-            return Err(DdsError::BadParameter);
-        }
+        // if instance_handle.is_nil() {
+        //     return Err(DdsError::BadParameter);
+        // }
 
         let mut instance_infos =
             self.instance_infos.lock().map_err(|e| DdsError::Error(e.to_string()))?;
@@ -1426,7 +1912,10 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
             instance_state: InstanceStateKind::ALIVE_INSTANCE_STATE,
             disposed_generation_count: 0,
             no_writers_generation_count: 0,
+            pending_notification: false,
         });
+
+        let prev_state = info.instance_state;
 
         // Update InstanceState based on change kind
         log::trace!("Updating instance state based on change kind: {:?}", new_state);
@@ -1445,6 +1934,8 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                     log::trace!("Instance was previously NOT_ALIVE_NO_WRITERS, incrementing no_writers_generation_count to {}",
                                    info.no_writers_generation_count);
                     info.no_writers_generation_count += 1;
+                    // Drop pending synthetic; rebirth supersedes the prior transition.
+                    info.pending_notification = false;
                 }
 
                 // 2.2.2.5.1.8 Interpretation of the SampleInfo view_state
@@ -1460,7 +1951,10 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
                 info.instance_state = InstanceStateKind::ALIVE_INSTANCE_STATE;
 
-                if info.key.is_empty() && cache_change.is_some() {
+                if info.key.is_empty() && instance_handle.is_nil() {
+                    // Non-keyed Type: Save NIL handle
+                    info.key = Arc::from(instance_handle.value().as_slice());
+                } else if info.key.is_empty() && cache_change.is_some() {
                     log::debug!("Extracting and serializing key from data");
                     let data = self.type_support.deserialize(
                         cache_change
@@ -1469,14 +1963,27 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                                 "CacheChange is not properly initialized".to_string(),
                             ))?
                             .data_value(),
-                    )?;
-                    let foo = data
-                        .downcast::<Foo>()
-                        .map(|boxed| *boxed)
-                        .map_err(|_| DdsError::Error("Type downcast failed".to_string()))?;
-                    log::trace!("Deserialized data: {:?}", &foo);
-                    let ser_key = self.type_support.serialize_key(&foo as &dyn Any)?;
-                    info.key = ser_key;
+                        None,
+                    );
+                    match data {
+                        Ok(deserialized) => {
+                            // Native Type : deserialize success → serialize_key
+                            #[allow(clippy::disallowed_names)]
+                            let foo = deserialized
+                                .downcast::<Foo>()
+                                .map(|boxed| *boxed)
+                                .map_err(|_| DdsError::Error("Type downcast failed".to_string()))?;
+                            log::trace!("Deserialized data: {:?}", &foo);
+                            let ser_key = self.type_support.serialize_key(&foo as &dyn Any)?;
+                            info.key = ser_key;
+                        }
+                        Err(_) if !instance_handle.is_nil() => {
+                            // FFI Type: deserialize not supported → Use already calculated handle hash
+                            log::debug!("Using pre-computed instance handle as key (FFI path)");
+                            info.key = Arc::from(instance_handle.value().as_slice());
+                        }
+                        Err(e) => return Err(e), // Unexpected errors
+                    }
                 }
 
                 let monitor_guard =
@@ -1486,37 +1993,92 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                 }
             }
             InstanceStateKind::NOT_ALIVE_DISPOSED_INSTANCE_STATE => {
-                log::debug!("Setting instance state to NOT_ALIVE_DISPOSED");
-                info.instance_state = InstanceStateKind::NOT_ALIVE_DISPOSED_INSTANCE_STATE;
-                if info.key.is_empty() && cache_change.is_some() {
-                    info.key = cache_change
-                        .as_ref()
-                        .ok_or(DdsError::Error(
-                            "CacheChange is not properly initialized".to_string(),
-                        ))?
-                        .data_value_arc();
-                }
-                let monitor_guard =
-                    self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-                if let Some(monitor) = monitor_guard.as_ref() {
-                    monitor.cancel_instance(&instance_handle);
+                if info.instance_state == InstanceStateKind::ALIVE_INSTANCE_STATE {
+                    log::debug!("Setting instance state to NOT_ALIVE_DISPOSED");
+                    info.instance_state = InstanceStateKind::NOT_ALIVE_DISPOSED_INSTANCE_STATE;
+                    if info.key.is_empty() && cache_change.is_some() {
+                        info.key = Arc::from(
+                            cache_change
+                                .as_ref()
+                                .ok_or(DdsError::Error(
+                                    "CacheChange is not properly initialized".to_string(),
+                                ))?
+                                .data_value(),
+                        );
+                    }
+
+                    let monitor_guard =
+                        self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+                    if let Some(monitor) = monitor_guard.as_ref() {
+                        monitor.cancel_instance(&instance_handle);
+                    }
+
+                    let reader_qos = self.get_qos_arc()?;
+                    let reader_data_lifecycle_qos = &reader_qos.reader_data_lifecycle;
+                    if !reader_data_lifecycle_qos.autopurge_disposed_samples_delay.is_infinite() {
+                        let std_duration = std::time::Duration::from_nanos(
+                            reader_data_lifecycle_qos.autopurge_disposed_samples_delay.as_nanos()
+                                as u64,
+                        );
+                        self.add_autopurge_timer(
+                            std_duration,
+                            TimerId::AutopurgeDisposed { reader_guid: self.guid },
+                            instance_handle,
+                            false,
+                        )?;
+                    }
+                } else {
+                    log::debug!(
+                        "Not alive state transition only occurs from ALIVE to NOT_ALIVE,cannot change to NOT_ALIVE_DISPOSED from {:?}",
+                        info.instance_state
+                    );
                 }
             }
             InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE => {
-                log::debug!("Setting instance state to NOT_ALIVE_NO_WRITERS");
-                info.instance_state = InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE;
-                if info.key.is_empty() && cache_change.is_some() {
-                    info.key = cache_change
-                        .as_ref()
-                        .ok_or(DdsError::Error(
-                            "CacheChange is not properly initialized".to_string(),
-                        ))?
-                        .data_value_arc();
-                }
-                let monitor_guard =
-                    self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-                if let Some(monitor) = monitor_guard.as_ref() {
-                    monitor.cancel_instance(&instance_handle);
+                if info.instance_state == InstanceStateKind::ALIVE_INSTANCE_STATE {
+                    log::debug!("Setting instance state to NOT_ALIVE_NO_WRITERS");
+                    info.instance_state = InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE;
+                    if info.key.is_empty() && cache_change.is_some() {
+                        info.key = Arc::from(
+                            cache_change
+                                .as_ref()
+                                .ok_or(DdsError::Error(
+                                    "CacheChange is not properly initialized".to_string(),
+                                ))?
+                                .data_value(),
+                        );
+                    }
+
+                    let monitor_guard =
+                        self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+                    if let Some(monitor) = monitor_guard.as_ref() {
+                        // Keep deadline tracking for synthetic no-writer transitions on non-keyed data.
+                        let synthetic_non_keyed_no_writers =
+                            instance_handle.is_nil() && cache_change.is_none();
+                        if !synthetic_non_keyed_no_writers {
+                            monitor.cancel_instance(&instance_handle);
+                        }
+                    }
+
+                    let reader_qos = self.get_qos_arc()?;
+                    let reader_data_lifecycle_qos = &reader_qos.reader_data_lifecycle;
+                    if !reader_data_lifecycle_qos.autopurge_nowriter_samples_delay.is_infinite() {
+                        let std_duration = std::time::Duration::from_nanos(
+                            reader_data_lifecycle_qos.autopurge_nowriter_samples_delay.as_nanos()
+                                as u64,
+                        );
+                        self.add_autopurge_timer(
+                            std_duration,
+                            TimerId::AutopurgeNowriter { reader_guid: self.guid },
+                            instance_handle,
+                            true,
+                        )?;
+                    }
+                } else {
+                    log::debug!(
+                        "Not alive state transition only occurs from ALIVE to NOT_ALIVE, cannot change to NOT_ALIVE_NO_WRITERS from {:?}",
+                        info.instance_state
+                    );
                 }
             }
             _ => {
@@ -1524,12 +2086,47 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
             }
         }
 
+        Ok(info.instance_state != prev_state)
+    }
+
+    fn add_autopurge_timer(
+        &self,
+        std_duration: std::time::Duration,
+        timer_id: TimerId,
+        instance_handle: InstanceHandle,
+        full_reclaim: bool,
+    ) -> DdsResult<()> {
+        // Get weak reference to self (DataReader)
+        let self_ref = self.self_ref.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        let weak_self = self_ref.as_ref().map(Arc::downgrade);
+
+        // Get timer handler lock
+        let timer_handler = TimerHandler::get_instance(self.guid.prefix());
+        let timer_handler_guard = timer_handler
+            .lock()
+            .map_err(|e| DdsError::Error(format!("Failed to lock timer handler: {}", e)))?;
+
+        timer_handler_guard.add_timer(timer_id, std_duration, false, move || {
+            if let Some(strong) = weak_self.as_ref().and_then(|w| w.upgrade()) {
+                // NO_WRITERS reclaims all instance state; DISPOSED purges only the samples.
+                let res = if full_reclaim {
+                    strong.reclaim_instance(instance_handle)
+                } else {
+                    strong.remove_change_of_instance(instance_handle)
+                };
+                if let Err(e) = res {
+                    log::error!("Failed to autopurge instance: {:?}", e);
+                }
+            }
+        });
         Ok(())
     }
 }
 
 impl<Foo: DdsType> DataReader<Foo> {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
+        is_builtin: bool,
         guid: Guid,
         type_support: Arc<dyn TypeSupport + Send>,
         topic_description: &dyn TopicDescription,
@@ -1537,7 +2134,13 @@ impl<Foo: DdsType> DataReader<Foo> {
         listener: Option<Arc<dyn DataReaderListener<Foo = Foo>>>,
         mask: StatusMask,
         subscriber: &Arc<Subscriber>,
+        rtps_reader: Option<Arc<dyn RtpsReader + Send + Sync>>,
     ) -> DdsResult<Self> {
+        // Builtin entities must have rtps_reader, non-builtin must not
+        if is_builtin != rtps_reader.is_some() {
+            return Err(DdsError::PreconditionNotMet);
+        }
+
         // Downcast to get Topic reference
         let (topic_weak, cft_weak) = if let Some(topic) =
             topic_description.as_any().downcast_ref::<Topic>()
@@ -1555,8 +2158,10 @@ impl<Foo: DdsType> DataReader<Foo> {
             (None, None)
         };
         let mut reader = Self {
+            is_builtin,
             guid,
-            qos: Arc::new(Mutex::new(qos.clone())),
+            qos: Arc::new(ArcSwap::from_pointee(qos.clone())),
+            update_lock: Arc::new(Mutex::new(())),
             listener: Arc::new(RwLock::new(listener)),
             mask: Arc::new(RwLock::new(mask)),
             status_condition: Arc::new(Mutex::new(StatusCondition::new(None))),
@@ -1568,7 +2173,7 @@ impl<Foo: DdsType> DataReader<Foo> {
             topic: topic_weak,
             content_filtered_topic: cft_weak,
             subscriber: Some(Arc::downgrade(subscriber)),
-            rtps_reader: Arc::new(Mutex::new(None)),
+            rtps_reader: Arc::new(Mutex::new(rtps_reader.map(|r| Arc::downgrade(&r)))),
             enabled: Arc::new(AtomicBool::new(false)),
             deleted: Arc::new(AtomicBool::new(false)),
             liveliness_changed_status: Arc::new(Mutex::new(LivelinessChangedStatus::default())),
@@ -1579,6 +2184,9 @@ impl<Foo: DdsType> DataReader<Foo> {
             )),
             requested_incompatible_qos_status: Arc::new(Mutex::new(
                 RequestedIncompatibleQosStatus::default(),
+            )),
+            requested_incompatible_type_status: Arc::new(Mutex::new(
+                RequestedIncompatibleTypeStatus::default(),
             )),
             subscription_matched_status: Arc::new(Mutex::new(SubscriptionMatchedStatus::default())),
             deadline_monitor: Arc::new(Mutex::new(None)),
@@ -1592,6 +2200,7 @@ impl<Foo: DdsType> DataReader<Foo> {
                 qos.resource_limits,
                 type_support.is_compute_key_provided(),
                 qos.ownership.kind,
+                qos.destination_order.kind,
             ))),
         };
 
@@ -1603,7 +2212,12 @@ impl<Foo: DdsType> DataReader<Foo> {
             *status_condition = StatusCondition::new(Some(weak_ref.clone()));
         }
 
-        reader.self_ref = Arc::new(Mutex::new(Some(reader_arc))); // Without the Arc, the new() function ends and memory is freed. StatusCondition's entity field returns None.
+        // Without the Arc, the new() function ends and memory is freed. StatusCondition's entity field returns None.
+        {
+            let mut self_ref =
+                reader.self_ref.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            *self_ref = Some(reader_arc);
+        }
 
         let change_callback = reader.create_change_received_callback()?;
         reader.change_callback = Some(change_callback.clone());
@@ -1614,10 +2228,13 @@ impl<Foo: DdsType> DataReader<Foo> {
             let mut datareader_cache =
                 reader.datareader_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
             datareader_cache.set_datareader(weak_ref);
+            if reader.content_filtered_topic.is_some() {
+                datareader_cache.set_content_filter();
+            }
             datareader_cache.set_update_status(status_callback.clone());
         }
 
-        let period = reader.get_qos()?.deadline.period;
+        let period = reader.get_qos_arc()?.deadline.period;
         if !period.is_infinite() {
             *reader.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))? =
                 Some(DeadlineMonitor::new(period, status_callback, false));
@@ -1974,6 +2591,440 @@ impl<Foo: DdsType> DataReader<Foo> {
         )
     }
 
+    // ========================================================================
+    // Raw Serialized Data Access (bypasses TypeSupport deserialization)
+    // ========================================================================
+
+    /// Take pre-serialized data directly from the cache, bypassing TypeSupport deserialization.
+    ///
+    /// Returns raw CDR bytes and SampleInfo for each matching sample.
+    /// The samples are removed from the cache (take semantics).
+    ///
+    /// Note: QueryCondition and ContentFilteredTopic filters are NOT applied,
+    /// as they require deserialized data.
+    pub fn take_serialized(
+        &self,
+        max_samples: i32,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+    ) -> DdsResult<Vec<(Arc<[u8]>, SampleInfo)>> {
+        self.read_or_take_serialized(
+            max_samples,
+            sample_states,
+            view_states,
+            instance_states,
+            true,
+            None,
+        )
+    }
+
+    /// Take pre-serialized samples belonging to a single instance.
+    ///
+    /// Like [`take_serialized`](Self::take_serialized) but restricted to the
+    /// instance identified by `handle`. A nil handle returns `BadParameter`; an
+    /// unknown handle yields no samples (mirroring `take_instance`).
+    pub fn take_instance_serialized(
+        &self,
+        max_samples: i32,
+        handle: InstanceHandle,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+    ) -> DdsResult<Vec<(Arc<[u8]>, SampleInfo)>> {
+        self.read_or_take_serialized(
+            max_samples,
+            sample_states,
+            view_states,
+            instance_states,
+            true,
+            Some(handle),
+        )
+    }
+
+    /// Read pre-serialized samples belonging to a single instance.
+    ///
+    /// Like [`read_serialized`](Self::read_serialized) but restricted to the
+    /// instance identified by `handle`. A nil handle returns `BadParameter`; an
+    /// unknown handle yields no samples (mirroring `read_instance`).
+    pub fn read_instance_serialized(
+        &self,
+        max_samples: i32,
+        handle: InstanceHandle,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+    ) -> DdsResult<Vec<(Arc<[u8]>, SampleInfo)>> {
+        self.read_or_take_serialized(
+            max_samples,
+            sample_states,
+            view_states,
+            instance_states,
+            false,
+            Some(handle),
+        )
+    }
+
+    /// Read pre-serialized data directly from the cache, bypassing TypeSupport deserialization.
+    ///
+    /// Returns raw CDR bytes and SampleInfo for each matching sample.
+    /// The samples remain in the cache and are marked as read.
+    ///
+    /// Note: QueryCondition and ContentFilteredTopic filters are NOT applied,
+    /// as they require deserialized data.
+    pub fn read_serialized(
+        &self,
+        max_samples: i32,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+    ) -> DdsResult<Vec<(Arc<[u8]>, SampleInfo)>> {
+        self.read_or_take_serialized(
+            max_samples,
+            sample_states,
+            view_states,
+            instance_states,
+            false,
+            None,
+        )
+    }
+
+    /// Take a single pre-serialized sample from the cache.
+    pub fn take_next_serialized(&self) -> DdsResult<(Arc<[u8]>, SampleInfo)> {
+        let results = self.read_or_take_serialized(
+            1,
+            &[SampleStateKind::NOT_READ_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::ANY_INSTANCE_STATE],
+            true,
+            None,
+        )?;
+        results.into_iter().next().ok_or(DdsError::NoData)
+    }
+
+    /// Take a single pre-serialized sample without copying shared receive payloads.
+    pub fn take_next_serialized_bytes(&self) -> DdsResult<(Bytes, SampleInfo)> {
+        let (results, _) = self.read_or_take_serialized_bytes(
+            1,
+            &[SampleStateKind::NOT_READ_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::ANY_INSTANCE_STATE],
+            true,
+            None,
+            None,
+        )?;
+        results.into_iter().next().ok_or(DdsError::NoData)
+    }
+
+    fn bounded_single_serialized(
+        &self,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+        take: bool,
+        max_bytes: usize,
+    ) -> DdsResult<BoundedSerialized> {
+        let (results, too_small) = self.read_or_take_serialized_bytes(
+            1,
+            sample_states,
+            view_states,
+            instance_states,
+            take,
+            Some(max_bytes),
+            None,
+        )?;
+        if let Some(required) = too_small {
+            return Ok(BoundedSerialized::TooSmall { required });
+        }
+        results
+            .into_iter()
+            .next()
+            .map(|(data, info)| BoundedSerialized::Fit(data, info))
+            .ok_or(DdsError::NoData)
+    }
+
+    pub fn take_next_serialized_bounded(&self, max_bytes: usize) -> DdsResult<BoundedSerialized> {
+        self.bounded_single_serialized(
+            &[SampleStateKind::NOT_READ_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::ANY_INSTANCE_STATE],
+            true,
+            max_bytes,
+        )
+    }
+
+    pub fn read_next_serialized_bounded(&self, max_bytes: usize) -> DdsResult<BoundedSerialized> {
+        self.bounded_single_serialized(
+            &[SampleStateKind::NOT_READ_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::ANY_INSTANCE_STATE],
+            false,
+            max_bytes,
+        )
+    }
+
+    pub fn take_serialized_bounded(
+        &self,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+        max_bytes: usize,
+    ) -> DdsResult<BoundedSerialized> {
+        self.bounded_single_serialized(sample_states, view_states, instance_states, true, max_bytes)
+    }
+
+    pub fn read_serialized_bounded(
+        &self,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+        max_bytes: usize,
+    ) -> DdsResult<BoundedSerialized> {
+        self.bounded_single_serialized(
+            sample_states,
+            view_states,
+            instance_states,
+            false,
+            max_bytes,
+        )
+    }
+
+    fn read_or_take_serialized(
+        &self,
+        max_samples: i32,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+        take: bool,
+        instance_handle: Option<InstanceHandle>,
+    ) -> DdsResult<Vec<(Arc<[u8]>, SampleInfo)>> {
+        self.read_or_take_serialized_bytes(
+            max_samples,
+            sample_states,
+            view_states,
+            instance_states,
+            take,
+            None,
+            instance_handle,
+        )
+        .map(|(results, _)| {
+            results.into_iter().map(|(data, info)| (Arc::from(data.as_ref()), info)).collect()
+        })
+    }
+
+    fn read_or_take_serialized_bytes(
+        &self,
+        max_samples: i32,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+        take: bool,
+        max_bytes: Option<usize>,
+        instance_handle: Option<InstanceHandle>,
+    ) -> DdsResult<(Vec<(Bytes, SampleInfo)>, Option<usize>)> {
+        let profile = serialized_take_profile_enabled();
+        let total_t0 = Instant::now();
+        let precheck_t0 = Instant::now();
+        self.is_enabled()?;
+
+        if max_samples == 0 {
+            return Err(DdsError::BadParameter);
+        }
+
+        // Instance-scoped variants reject a nil handle, matching the typed
+        // read/take_instance path; an unknown (non-nil) handle simply yields no
+        // matching samples via the in-loop filter below.
+        if let Some(handle) = instance_handle {
+            if handle.is_nil() {
+                return Err(DdsError::BadParameter);
+            }
+        }
+
+        self.set_read_communication_status(false)?;
+        let precheck_us = if profile { elapsed_us(precheck_t0, Instant::now()) } else { 0 };
+        let mut result: Vec<(Bytes, SampleInfo)> = Vec::new();
+        let mut remaining = if max_samples == -1 { i32::MAX } else { max_samples };
+
+        let get_changes_t0 = Instant::now();
+        let changes = self.get_available_changes()?;
+        let get_changes_us = if profile { elapsed_us(get_changes_t0, Instant::now()) } else { 0 };
+
+        let sort_us = 0u64;
+
+        // ContentFilteredTopic is applied on the receive path, so the cache is already filtered.
+        let filter_setup_us = 0u64;
+
+        let instance_info_t0 = Instant::now();
+        let instance_infos = self.get_instance_infos()?;
+        let instance_info_us =
+            if profile { elapsed_us(instance_info_t0, Instant::now()) } else { 0 };
+
+        let loop_t0 = Instant::now();
+        let mut loop_sample_state_us = 0;
+        let mut loop_info_us = 0;
+        let mut loop_match_us = 0;
+        let mut loop_data_bytes_us = 0;
+        let mut loop_sample_info_us = 0;
+        let mut loop_remove_us = 0;
+        let mut loop_push_us = 0;
+        for change in changes.iter() {
+            if remaining <= 0 {
+                break;
+            }
+
+            // Instance filter: skip changes belonging to a different instance,
+            // before any state check or cache removal (so `take` never consumes
+            // samples from other instances).
+            if let Some(target) = instance_handle {
+                if change.instance_handle() != target {
+                    continue;
+                }
+            }
+
+            let sample_state_t0 = Instant::now();
+            let sample_state =
+                self.get_sample_state(&change.writer_guid(), &change.sequence_number())?;
+            if profile {
+                loop_sample_state_us += elapsed_us(sample_state_t0, Instant::now());
+            }
+            let info_t0 = Instant::now();
+            let info = match instance_infos.get(&change.instance_handle()) {
+                Some(info) => info,
+                None => &InstanceInfo {
+                    key: Arc::new([]),
+                    view_state: ViewStateKind::NEW_VIEW_STATE,
+                    instance_state: InstanceStateKind::ALIVE_INSTANCE_STATE,
+                    disposed_generation_count: 0,
+                    no_writers_generation_count: 0,
+                    pending_notification: false,
+                },
+            };
+            if profile {
+                loop_info_us += elapsed_us(info_t0, Instant::now());
+            }
+
+            let match_t0 = Instant::now();
+            if !sample_states.matches(sample_state)
+                || !view_states.matches(info.view_state)
+                || !instance_states.matches(info.instance_state)
+            {
+                continue;
+            }
+            if profile {
+                loop_match_us += elapsed_us(match_t0, Instant::now());
+            }
+
+            let has_valid_data = match change.kind() {
+                ChangeKind::Alive | ChangeKind::AliveFiltered => true,
+                ChangeKind::NotAliveDisposed
+                | ChangeKind::NotAliveUnregistered
+                | ChangeKind::NotAliveDisposedUnregistered => false,
+            };
+
+            let data_bytes_t0 = Instant::now();
+            let serialized_data = change.data_bytes();
+            if profile {
+                loop_data_bytes_us += elapsed_us(data_bytes_t0, Instant::now());
+            }
+
+            if let Some(cap) = max_bytes {
+                if has_valid_data && serialized_data.len() > cap {
+                    return Ok((Vec::new(), Some(serialized_data.len())));
+                }
+            }
+
+            let sample_info_t0 = Instant::now();
+            let sample_info = SampleInfo {
+                sample_state,
+                view_state: info.view_state,
+                instance_state: info.instance_state,
+                disposed_generation_count: info.disposed_generation_count,
+                no_writers_generation_count: info.no_writers_generation_count,
+                sample_rank: 0,
+                generation_rank: 0,
+                absolute_generation_rank: 0,
+                source_timestamp: (*change.source_timestamp().as_ref().ok_or(DdsError::Error(
+                    "CacheChange's source timestamp is not properly initialized".to_string(),
+                ))?)
+                .into(),
+                instance_handle: change.instance_handle(),
+                publication_handle: InstanceHandle::from_guid(&change.writer_guid()),
+                valid_data: has_valid_data,
+            };
+            if profile {
+                loop_sample_info_us += elapsed_us(sample_info_t0, Instant::now());
+            }
+
+            let remove_t0 = Instant::now();
+            if take {
+                self.remove_change(change.clone())?;
+            } else {
+                self.mark_sample_as_read(&change.writer_guid(), change.sequence_number())?;
+            }
+            if profile {
+                loop_remove_us += elapsed_us(remove_t0, Instant::now());
+            }
+
+            let push_t0 = Instant::now();
+            result.push((serialized_data, sample_info));
+            remaining -= 1;
+            if profile {
+                loop_push_us += elapsed_us(push_t0, Instant::now());
+            }
+        }
+        let loop_us = if profile { elapsed_us(loop_t0, Instant::now()) } else { 0 };
+        if profile {
+            record_serialized_take_loop_profile(
+                loop_sample_state_us,
+                loop_info_us,
+                loop_match_us,
+                loop_data_bytes_us,
+                loop_sample_info_us,
+                loop_remove_us,
+                loop_push_us,
+                loop_us,
+            );
+        }
+
+        let cleanup_t0 = Instant::now();
+        for sample_info in self.drain_pending_notifications(
+            &instance_infos,
+            sample_states,
+            view_states,
+            instance_states,
+            None,
+            remaining,
+        )? {
+            result.push((Bytes::new(), sample_info));
+        }
+
+        for (_, sample_info) in &result {
+            self.mark_instance_as_viewed(sample_info.instance_handle);
+        }
+
+        self.reevaluate_all_conditions()?;
+        let cleanup_us = if profile { elapsed_us(cleanup_t0, Instant::now()) } else { 0 };
+
+        if result.is_empty() {
+            Err(DdsError::NoData)
+        } else {
+            if profile {
+                record_serialized_take_profile(
+                    precheck_us,
+                    get_changes_us,
+                    sort_us,
+                    filter_setup_us,
+                    instance_info_us,
+                    loop_us,
+                    cleanup_us,
+                    elapsed_us(total_t0, Instant::now()),
+                );
+            }
+            Ok((result, None))
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn read_or_take(
         &self,
         max_samples: i32,
@@ -1986,8 +3037,14 @@ impl<Foo: DdsType> DataReader<Foo> {
         exact: bool,
         take: bool,
     ) -> DdsResult<Vec<DataSample<Foo>>> {
-        log::debug!("read_or_take called: max_samples={}, handle={:?}, single_instance={}, exact={}, take={}",
-                   max_samples, handle, single_instance, exact, take);
+        log::debug!(
+            "read_or_take called: max_samples={}, handle={}, single_instance={}, exact={}, take={}",
+            max_samples,
+            handle,
+            single_instance,
+            exact,
+            take
+        );
         log::debug!(
             "direct_states: sample={:?}, view={:?}, instance={:?}",
             direct_sample_states.is_some(),
@@ -1998,7 +3055,7 @@ impl<Foo: DdsType> DataReader<Foo> {
 
         self.is_enabled()?;
 
-        if max_samples == 0 || max_samples > i32::MAX {
+        if max_samples == 0 {
             log::warn!("BadParameter: max_samples={}", max_samples);
             return Err(DdsError::BadParameter);
         }
@@ -2031,12 +3088,6 @@ impl<Foo: DdsType> DataReader<Foo> {
 
         let mut changes = self.get_available_changes()?;
         log::debug!("Available changes count: {}", changes.len());
-        // self.sort_changes_by_timestamp(&mut changes)?;
-
-        if changes.is_empty() {
-            log::debug!("NoData: no available changes");
-            return Err(DdsError::NoData);
-        }
 
         let (sample_states, view_states, instance_states) = if let Some(cond) = condition {
             log::debug!("Using condition masks");
@@ -2049,22 +3100,13 @@ impl<Foo: DdsType> DataReader<Foo> {
                 if let Some(order_by_fields) = query_condition.get_order_by_fields() {
                     log::debug!("QueryCondition ORDER BY detected: {:?}", order_by_fields);
                     self.sort_changes_by_order_fields(&mut changes, order_by_fields)?;
-                } else {
-                    // Default sorting if no ORDER BY
-                    log::debug!("No ORDER BY, using timestamp sort");
-                    self.sort_changes_by_timestamp(&mut changes)?;
                 }
-            } else {
-                // Default sorting for ReadCondition
-                log::debug!("ReadCondition detected, using timestamp sort");
-                self.sort_changes_by_timestamp(&mut changes)?;
             }
             states
         } else if let (Some(sample_states), Some(view_states), Some(instance_states)) =
             (direct_sample_states, direct_view_states, direct_instance_states)
         {
             log::debug!("Using direct state masks");
-            self.sort_changes_by_timestamp(&mut changes)?;
             (sample_states, view_states, instance_states)
         } else {
             // No mask
@@ -2083,17 +3125,11 @@ impl<Foo: DdsType> DataReader<Foo> {
             (None, Vec::new())
         };
 
-        // Get ContentFilteredTopic expression (independently!)
-        let (cft_expression, cft_parameters) = if let Some(cft) = &self.content_filtered_topic {
-            let cft = cft
-                .upgrade()
-                .ok_or(DdsError::Error("ContentFilteredTopic is deleted".to_string()))?;
-            (Some(cft.parsed_expression.clone()), cft.get_expression_parameters()?)
-        } else {
-            (None, Vec::new())
-        };
-
         log::debug!("Processing {} changes, need {} samples", changes.len(), remaining_samples);
+
+        // Get instance_infos once outside the loop to avoid repeated lock acquisition and cloning
+        let instance_infos = self.get_instance_infos()?;
+
         for (idx, change) in changes.iter().enumerate() {
             if remaining_samples <= 0 {
                 log::debug!("Reached sample limit, stopping");
@@ -2105,17 +3141,7 @@ impl<Foo: DdsType> DataReader<Foo> {
                 continue;
             }
 
-            // let is_read = self.is_sample_read(&change.writer_guid(), &change.sequence_number())?;
-            // let sample_state = if is_read {
-            //     SampleStateKind::READ_SAMPLE_STATE
-            // } else {
-            //     SampleStateKind::NOT_READ_SAMPLE_STATE
-            // };
-            // if !sample_states.matches(sample_state) {
-            //     continue;
-            // }
             // Check sample state
-            let instance_infos = self.get_instance_infos()?; // Only DataSample1 of the same instance is treated as New, DataSample2 is treated as NotNew.
             let sample_state =
                 self.get_sample_state(&change.writer_guid(), &change.sequence_number())?;
             let info = match instance_infos.get(&change.instance_handle()) {
@@ -2126,6 +3152,7 @@ impl<Foo: DdsType> DataReader<Foo> {
                     instance_state: InstanceStateKind::ALIVE_INSTANCE_STATE,
                     disposed_generation_count: 0,
                     no_writers_generation_count: 0,
+                    pending_notification: false,
                 },
             };
 
@@ -2140,8 +3167,13 @@ impl<Foo: DdsType> DataReader<Foo> {
             }
             log::trace!("Change {} passed state mask filters", idx);
 
-            // 2. Create DataSample
-            match self.change_to_data_sample(change, change.instance_handle(), sample_state) {
+            // 2. Create DataSample - use optimized version with pre-fetched instance_infos
+            match self.change_to_data_sample_with_infos(
+                change,
+                change.instance_handle(),
+                sample_state,
+                Some(&instance_infos),
+            ) {
                 Ok(data_sample) => {
                     if let Some(qc_expr) = &qc_expression {
                         if !qc_expr.evaluate(&data_sample.data()?, &qc_parameters)? {
@@ -2153,16 +3185,8 @@ impl<Foo: DdsType> DataReader<Foo> {
                         }
                         log::trace!("Change {} passed QueryCondition", idx);
                     }
-                    if let Some(cft_expr) = &cft_expression {
-                        if !cft_expr.evaluate(&data_sample.data()?, &cft_parameters)? {
-                            log::trace!(
-                                "Skipping change {}: ContentFilteredTopic expression failed",
-                                idx
-                            );
-                            continue;
-                        }
-                        log::trace!("Change {} passed ContentFilteredTopic", idx);
-                    }
+                    // ContentFilteredTopic is applied on the receive path, so non-matching
+                    // samples are never in the cache here.
                     // self.mark_instance_as_viewed(change.instance_handle());
                     if take {
                         self.remove_change(change.clone())?;
@@ -2179,6 +3203,17 @@ impl<Foo: DdsType> DataReader<Foo> {
                     continue;
                 }
             }
+        }
+
+        for sample_info in self.drain_pending_notifications(
+            &instance_infos,
+            sample_states,
+            view_states,
+            instance_states,
+            if exact { Some(handle) } else { None },
+            remaining_samples,
+        )? {
+            result_samples.push(DataSample::new(None, sample_info, None));
         }
 
         // 2.2.2.5.1.8 Interpretation of the SampleInfo view_state
@@ -2217,34 +3252,12 @@ impl<Foo: DdsType> DataReader<Foo> {
         log::debug!("Processing instance registration for change");
         let instance_handle = change.instance_handle();
 
-        let has_key = self.type_support.is_compute_key_provided() && !instance_handle.is_nil();
-        log::debug!(
-            "Type has key: {}, handle is valid: {}",
-            self.type_support.is_compute_key_provided(),
-            !instance_handle.is_nil()
-        );
-
-        let info = if has_key {
-            // With key: store in instance_info
-            log::debug!("Processing keyed type instance");
-            let mut instance_infos =
+        let info = {
+            let instance_infos =
                 self.instance_infos.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-
-            let info = instance_infos.get_mut(&instance_handle).ok_or_else(|| {
+            instance_infos.get(&instance_handle).ok_or_else(|| {
                 DdsError::Error("InstanceInfo should have been updated already when added to data reader history cache".to_string())
-            })?;
-
-            info.clone() // Clone and use after releasing lock
-        } else {
-            // NoKey type
-            log::debug!("Processing keyless type instance with temporary InstanceInfo");
-            InstanceInfo {
-                key: Arc::new([]),
-                view_state: ViewStateKind::NEW_VIEW_STATE,
-                instance_state: InstanceStateKind::ALIVE_INSTANCE_STATE,
-                disposed_generation_count: 0,
-                no_writers_generation_count: 0,
-            }
+            })?.clone()
         };
 
         if let Ok(readconditions) = self.get_readconditions() {
@@ -2315,9 +3328,21 @@ impl<Foo: DdsType> DataReader<Foo> {
 
     fn change_to_data_sample(
         &self,
-        change: &CacheChange,
+        change: &Arc<CacheChange>,
         instance_handle: InstanceHandle,
         sample_state: SampleStateKind,
+    ) -> DdsResult<DataSample<Foo>> {
+        // Delegate to optimized version, fetching instance_infos internally
+        self.change_to_data_sample_with_infos(change, instance_handle, sample_state, None)
+    }
+
+    /// Optimized version that accepts pre-fetched instance_infos to avoid repeated lock acquisition
+    fn change_to_data_sample_with_infos(
+        &self,
+        change: &Arc<CacheChange>,
+        instance_handle: InstanceHandle,
+        sample_state: SampleStateKind,
+        cached_instance_infos: Option<&HashMap<InstanceHandle, InstanceInfo>>,
     ) -> DdsResult<DataSample<Foo>> {
         // Check if change has valid data based on its kind
         let has_valid_data = match change.kind() {
@@ -2327,24 +3352,33 @@ impl<Foo: DdsType> DataReader<Foo> {
             | ChangeKind::NotAliveDisposedUnregistered => false,
         };
 
-        // Deserialize the data
-        let data = if has_valid_data { Some(change.data_value_arc()) } else { None };
-
-        let instance_infos = self.get_instance_infos()?;
-        let info = if !instance_handle.is_nil() {
-            instance_infos
-                .get(&instance_handle)
-                .ok_or(DdsError::Error("Instance not found".to_string()))?
-                .clone()
+        let data = if has_valid_data {
+            // Carry fragment chunks straight through when present, so deserialization
+            // happens across them with no contiguous reassembly.
+            Some(match change.data_chunks() {
+                Some((chunks, cached)) => SamplePayload::Chained {
+                    chunks: chunks.iter().cloned().collect(),
+                    cached: cached.clone(),
+                },
+                None => SamplePayload::Contiguous(change.data_bytes()),
+            })
         } else {
-            InstanceInfo {
-                key: change.data_value_arc(),
-                instance_state: InstanceStateKind::ALIVE_INSTANCE_STATE,
-                view_state: ViewStateKind::NEW_VIEW_STATE,
-                disposed_generation_count: 0,
-                no_writers_generation_count: 0,
+            None
+        };
+
+        // Use cached instance_infos if provided, otherwise fetch
+        let owned_instance_infos;
+        let instance_infos = match cached_instance_infos {
+            Some(infos) => infos,
+            None => {
+                owned_instance_infos = self.get_instance_infos()?;
+                &owned_instance_infos
             }
         };
+
+        let info = instance_infos
+            .get(&instance_handle)
+            .ok_or(DdsError::Error("Instance not found".to_string()))?;
 
         let sample_info = SampleInfo {
             sample_state,
@@ -2363,27 +3397,7 @@ impl<Foo: DdsType> DataReader<Foo> {
             publication_handle: InstanceHandle::from_guid(&change.writer_guid()),
             valid_data: has_valid_data,
         };
-        Ok(DataSample::new(data, sample_info))
-    }
-
-    fn sort_changes_by_timestamp(&self, changes: &mut [Arc<CacheChange>]) -> DdsResult<()> {
-        let destination_kind = self.get_qos()?.destination_order.kind;
-        changes.sort_by(|a, b| {
-            if destination_kind == DestinationOrderQosPolicyKind::ByReceptionTimestamp {
-                // Sort by reception_timestamp (oldest to newest)
-                a.reception_timestamp()
-                    .cmp(&b.reception_timestamp())
-                    // If timestamp is same, compare by sequence_number (safety mechanism)
-                    .then_with(|| a.sequence_number().cmp(&b.sequence_number()))
-            } else {
-                // Sort by source_timestamp (oldest to newest)
-                a.source_timestamp()
-                    .cmp(&b.source_timestamp())
-                    // If timestamp is same, compare by sequence_number (safety mechanism)
-                    .then_with(|| a.sequence_number().cmp(&b.sequence_number()))
-            }
-        });
-        Ok(())
+        Ok(DataSample::new(data, sample_info, Some(self.type_support.clone())))
     }
 
     /// Sort changes according to ORDER BY fields
@@ -2452,15 +3466,22 @@ impl<Foo: DdsType> DataReader<Foo> {
         &self,
         previous_handle: InstanceHandle,
     ) -> DdsResult<InstanceHandle> {
-        // 1. Collect all available instance handles
-        let available_handles = self.get_available_instance_handles()?;
+        // 1. Candidate instances: those with available changes, plus those carrying a
+        // pending synthetic NOT_ALIVE_NO_WRITERS notification whose cache is already empty.
+        let mut handles: std::collections::HashSet<InstanceHandle> =
+            self.get_available_instance_handles()?.into_iter().collect();
+        for (instance_handle, info) in self.get_instance_infos()? {
+            if info.pending_notification {
+                handles.insert(instance_handle);
+            }
+        }
 
-        if available_handles.is_empty() {
+        if handles.is_empty() {
             return Ok(InstanceHandle::NIL);
         }
 
         // 2. Sort instance handles
-        let mut sorted_handles = available_handles;
+        let mut sorted_handles: Vec<InstanceHandle> = handles.into_iter().collect();
         sorted_handles.sort();
 
         // log::debug!("find_next_instance_handle: previous_handle={:?}, sorted_handles={:?}",
@@ -2473,21 +3494,47 @@ impl<Foo: DdsType> DataReader<Foo> {
             return Ok(first);
         }
 
-        // 4. Find the instance after previous_handle
-        let mut found_previous = false;
+        // 4. Return the smallest available handle strictly greater than previous_handle
         for handle in sorted_handles {
-            if found_previous {
-                // log::debug!("Found next instance after {:?}: {:?}", previous_handle, handle);
+            if handle > previous_handle {
                 return Ok(handle);
-            }
-            if handle == previous_handle {
-                found_previous = true;
             }
         }
 
-        // 5. Return NIL if no next instance
-        // log::debug!("No next instance found after {:?}, returning NIL", previous_handle);
+        // 5. No greater handle remains: the iteration is finished.
         Ok(InstanceHandle::NIL)
+    }
+
+    // True if the change should be kept for this reader's ContentFilteredTopic.
+    // No CFT, a disabled filter, or non-Alive (key-only) samples always pass.
+    pub(crate) fn passes_content_filter(&self, change: &CacheChange) -> DdsResult<bool> {
+        let cft = match &self.content_filtered_topic {
+            Some(weak) => match weak.upgrade() {
+                Some(cft) => cft,
+                None => return Ok(true),
+            },
+            None => return Ok(true),
+        };
+        if !cft.is_filter_enabled()? {
+            return Ok(true);
+        }
+        if !matches!(change.kind(), ChangeKind::Alive | ChangeKind::AliveFiltered) {
+            return Ok(true);
+        }
+        let expr = cft.get_parsed_expression()?;
+        let parameters = cft.get_expression_parameters()?;
+        let serialized_data = change.data_bytes();
+        let typed = match self.type_support.deserialize(&serialized_data, None) {
+            Ok(deserialized) => match deserialized.downcast::<Foo>() {
+                Ok(typed) => typed,
+                Err(_) => return Ok(true),
+            },
+            Err(_) => return Ok(true),
+        };
+        match expr.evaluate(&*typed, &parameters) {
+            Ok(false) => Ok(false),
+            _ => Ok(true),
+        }
     }
 
     fn get_available_instance_handles(&self) -> DdsResult<Vec<InstanceHandle>> {
@@ -2497,9 +3544,7 @@ impl<Foo: DdsType> DataReader<Foo> {
 
         // Collect instance handles from changes
         for change in changes {
-            if !change.instance_handle().is_nil() {
-                handles.insert(change.instance_handle());
-            }
+            handles.insert(change.instance_handle());
         }
 
         Ok(handles.into_iter().collect())
@@ -2542,6 +3587,7 @@ impl<Foo: DdsType> DataReader<Foo> {
                     instance_state: InstanceStateKind::ALIVE_INSTANCE_STATE,
                     disposed_generation_count: 0,
                     no_writers_generation_count: 0,
+                    pending_notification: false,
                 },
             };
 
@@ -2622,6 +3668,18 @@ impl<Foo: 'static + Clone + Debug> DataReaderBase for DataReader<Foo> {
 
         self.set_communication_status_propagation(&StatusKind::REQUESTED_INCOMPATIBLE_QOS, false)?;
         self.take_requested_incompatible_qos_status()
+    }
+
+    fn get_requested_incompatible_type_status(&self) -> DdsResult<RequestedIncompatibleTypeStatus> {
+        // out: DdsError_t, status: RequestedIncompatibleTypeStatus
+        /*
+            This operation provides access to the REQUESTED_INCOMPATIBLE_TYPE communication status.
+            Communication status is described in Section 2.2.4.1, Communication Status.
+        */
+        self.is_deleted()?;
+
+        self.set_communication_status_propagation(&StatusKind::REQUESTED_INCOMPATIBLE_TYPE, false)?;
+        self.take_requested_incompatible_type_status()
     }
 
     fn get_subscription_matched_status(&self) -> DdsResult<SubscriptionMatchedStatus> {
@@ -2876,7 +3934,9 @@ impl<Foo: 'static + Clone + Debug> DataReaderInternal for DataReader<Foo> {
         // Lock is released here, then monitor drops (triggering shutdown and join)
         drop(monitor_to_drop);
 
-        self.self_ref.lock().ok().map(|mut guard| *guard = None);
+        let value_to_drop = self.self_ref.lock().ok().and_then(|mut guard| guard.take());
+        drop(value_to_drop);
+
         self.deleted.store(true, Ordering::SeqCst);
     }
 
@@ -2886,6 +3946,10 @@ impl<Foo: 'static + Clone + Debug> DataReaderInternal for DataReader<Foo> {
         } else {
             Ok(())
         }
+    }
+
+    fn is_builtin(&self) -> bool {
+        self.is_builtin
     }
 
     fn get_topic(&self) -> DdsResult<Topic> {
@@ -2953,38 +4017,41 @@ impl<Foo: 'static + Clone + Debug> DataReaderInternal for DataReader<Foo> {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use speedy::{Readable, Writable};
-
     use super::*;
     use crate::dcps::topic::type_support::DdsType;
     use crate::domain::domain_participant_factory::DomainParticipantFactory;
     use crate::domain::qos::DomainParticipantQos;
+    use crate::infrastructure::qos_policy::{
+        DurabilityQosPolicy, DurabilityQosPolicyKind, HistoryQosPolicy,
+        PresentationQosAccessScopeKind, PresentationQosPolicy, ReliabilityQosPolicy,
+        ReliabilityQosPolicyKind,
+    };
     use crate::infrastructure::wait_set::WaitSet;
     use crate::publication::data_writer_listener::DataWriterListener;
     use crate::publication::qos::{DataWriterQos, PublisherQos};
+    use crate::rtps::entities::reader::StatefulReader;
     use crate::subscription::data_reader_listener::DataReaderListener;
     use crate::subscription::qos::SubscriberQos;
     use crate::subscription::sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind};
     use crate::subscription::subscriber_listener::SubscriberListener;
+    use crate::test_utils::unique_domain_id;
     use crate::topic::qos::TopicQos;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::{sync_channel, SyncSender};
     use std::sync::Arc;
-    use std::thread;
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     pub struct TestData {
         #[dds(key)]
         id: u32,
     }
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     pub struct HelloWorld {
         pub index: u32,
         pub message: String,
     }
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     pub struct HelloWorldWithKey {
         #[dds(key)]
         pub index: u32,
@@ -2993,9 +4060,15 @@ pub(crate) mod tests {
 
     #[test]
     fn test_reader_statuscondition() {
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
-            .create_participant(18, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
             .unwrap();
 
         let topic = participant
@@ -3025,7 +4098,10 @@ pub(crate) mod tests {
 
         println!("{:?}", status_condition.get_entity());
 
-        assert!(status_condition.get_entity().is_err())
+        assert!(status_condition.get_entity().is_err());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     struct SubListener {
@@ -3048,10 +4124,10 @@ pub(crate) mod tests {
     fn test_read_samples_change_in_order() {
         // let _ = env_logger::builder().filter_level(log::LevelFilter::Info).try_init();
 
-        let domain_id = 19;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
 
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -3060,7 +4136,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorld>(
                 "hello_world_order",
                 "HelloWorldType",
@@ -3070,42 +4146,34 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+
         let writer = publisher
-            .create_datawriter::<HelloWorld>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorld>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let topic = sub_participant
-            .create_topic::<HelloWorld>(
-                "hello_world_order",
-                "HelloWorldType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -3120,14 +4188,14 @@ pub(crate) mod tests {
         let data1 = HelloWorld { index: 0, message: "HelloWorld".to_string() };
         let data2 = HelloWorld { index: 1, message: "HelloWorld".to_string() };
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -3162,13 +4230,16 @@ pub(crate) mod tests {
         assert_eq!(samples[1].sample_info().sample_rank, 0);
         assert_eq!(samples[0].data().unwrap().index, data1.index);
         assert_eq!(samples[1].data().unwrap().index, data2.index);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_read_only_first_sample() {
-        let domain_id = 19;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -3177,7 +4248,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorld>(
                 "hello_world_first",
                 "HelloWorldType",
@@ -3187,42 +4258,34 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+
         let writer = publisher
-            .create_datawriter::<HelloWorld>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorld>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let topic = sub_participant
-            .create_topic::<HelloWorld>(
-                "hello_world_first",
-                "HelloWorldType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -3238,14 +4301,14 @@ pub(crate) mod tests {
         let data1 = HelloWorld { index: 0, message: "HelloWorld".to_string() };
         let data2 = HelloWorld { index: 1, message: "HelloWorld".to_string() }; // Published by Writer
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -3291,13 +4354,16 @@ pub(crate) mod tests {
         assert_eq!(sample2[0].sample_info().sample_rank, 0);
         assert_eq!(sample1[0].data().unwrap().index, data1.index);
         assert_eq!(sample2[0].data().unwrap().index, data1.index);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_take_samples() {
-        let domain_id = 19;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -3306,7 +4372,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorld>(
                 "hello_world_takes",
                 "HelloWorldType",
@@ -3316,41 +4382,34 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+
         let writer = publisher
-            .create_datawriter::<HelloWorld>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorld>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let topic = sub_participant
-            .create_topic::<HelloWorld>(
-                "hello_world_takes",
-                "HelloWorldType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -3366,14 +4425,14 @@ pub(crate) mod tests {
         let data1 = HelloWorld { index: 0, message: "HelloWorld".to_string() };
         let data2 = HelloWorld { index: 1, message: "HelloWorld".to_string() };
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -3416,13 +4475,16 @@ pub(crate) mod tests {
             &[InstanceStateKind::ANY_INSTANCE_STATE],
         );
         assert!(second_take.is_err());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_take_samples_in_order() {
-        let domain_id = 39;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -3431,7 +4493,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorld>(
                 "hello_world",
                 "HelloWorldType",
@@ -3441,41 +4503,34 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+
         let writer = publisher
-            .create_datawriter::<HelloWorld>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorld>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let topic = sub_participant
-            .create_topic::<HelloWorld>(
-                "hello_world",
-                "HelloWorldType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -3491,14 +4546,14 @@ pub(crate) mod tests {
         let data1 = HelloWorld { index: 0, message: "HelloWorld".to_string() };
         let data2 = HelloWorld { index: 1, message: "HelloWorld".to_string() };
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -3542,13 +4597,16 @@ pub(crate) mod tests {
             &[InstanceStateKind::ANY_INSTANCE_STATE],
         );
         assert!(second_take.is_err());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_read_next_samples() {
-        let domain_id = 19;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -3557,7 +4615,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorld>(
                 "hello_world",
                 "HelloWorldType",
@@ -3567,41 +4625,34 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+
         let writer = publisher
-            .create_datawriter::<HelloWorld>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorld>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let topic = sub_participant
-            .create_topic::<HelloWorld>(
-                "hello_world",
-                "HelloWorldType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -3617,14 +4668,14 @@ pub(crate) mod tests {
         let data1 = HelloWorld { index: 0, message: "HelloWorld".to_string() };
         let data2 = HelloWorld { index: 1, message: "HelloWorld".to_string() };
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -3652,13 +4703,16 @@ pub(crate) mod tests {
         assert_eq!(sample1.sample_info().sample_rank, 0);
         assert_eq!(sample0.data().unwrap().index, data1.index);
         assert_eq!(sample1.data().unwrap().index, data2.index);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_take_next_samples() {
-        let domain_id = 19;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -3667,7 +4721,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorld>(
                 "hello_world",
                 "HelloWorldType",
@@ -3677,41 +4731,34 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+
         let writer = publisher
-            .create_datawriter::<HelloWorld>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorld>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let topic = sub_participant
-            .create_topic::<HelloWorld>(
-                "hello_world",
-                "HelloWorldType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -3727,14 +4774,14 @@ pub(crate) mod tests {
         let data1 = HelloWorld { index: 0, message: "HelloWorld".to_string() };
         let data2 = HelloWorld { index: 1, message: "HelloWorld".to_string() };
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -3762,6 +4809,9 @@ pub(crate) mod tests {
         assert_eq!(sample1.sample_info().sample_rank, 0);
         assert_eq!(sample0.data().unwrap().index, data1.index);
         assert_eq!(sample1.data().unwrap().index, data2.index);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     struct SubKeyListener {
@@ -3820,9 +4870,9 @@ pub(crate) mod tests {
 
     #[test]
     fn test_read_instance_with_specific_handle() {
-        let domain_id = 39;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -3831,7 +4881,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorldWithKey>(
                 "HelloWorldWithKeySpec",
                 "HelloWorldWithKeyType",
@@ -3841,43 +4891,35 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
         let (sender, _receiver) = sync_channel(0);
         let _listener = PubKeyListener { sender };
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let writer = publisher
-            .create_datawriter::<HelloWorldWithKey>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorldWithKey>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let topic = sub_participant
-            .create_topic::<HelloWorldWithKey>(
-                "HelloWorldWithKeySpec",
-                "HelloWorldWithKeyType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubKeyListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -3889,14 +4931,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -3918,7 +4960,7 @@ pub(crate) mod tests {
         while let Ok(_) = counter_receiver.recv() {
             count += 1;
             println!("Data received count: {}", count);
-            if count == 3 {
+            if count == 4 {
                 break;
             }
         }
@@ -3949,13 +4991,16 @@ pub(crate) mod tests {
         for sample in &samples {
             assert_eq!(sample.sample_info().instance_handle, instance_handle_1);
         }
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_take_instance_with_specific_handle() {
-        let domain_id = 9;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -3964,7 +5009,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorldWithKey>(
                 "HelloWorldWithKeyHandle",
                 "HelloWorldWithKeyType",
@@ -3974,43 +5019,35 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
         let (sender, _receiver) = sync_channel(0);
         let _listener = PubKeyListener { sender };
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let writer = publisher
-            .create_datawriter::<HelloWorldWithKey>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorldWithKey>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let topic = sub_participant
-            .create_topic::<HelloWorldWithKey>(
-                "HelloWorldWithKeyHandle",
-                "HelloWorldWithKeyType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubKeyListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -4022,14 +5059,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -4052,7 +5089,7 @@ pub(crate) mod tests {
         while let Ok(_) = counter_receiver.recv() {
             count += 1;
             println!("Data received count: {}", count);
-            if count == 3 {
+            if count == 4 {
                 break;
             }
         }
@@ -4102,13 +5139,16 @@ pub(crate) mod tests {
             .expect("Failed to take remaining instance samples");
 
         assert_eq!(remaining_samples.len(), 2);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_read_instance_with_nil_handle() {
-        let domain_id = 29;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -4117,7 +5157,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorldWithKey>(
                 "HelloWorldWithKey",
                 "HelloWorldWithKeyType",
@@ -4127,43 +5167,37 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
         let (sender, _receiver) = sync_channel(0);
         let _listener = PubKeyListener { sender };
+
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+
         let _writer = publisher
-            .create_datawriter::<HelloWorldWithKey>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorldWithKey>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let topic = sub_participant
-            .create_topic::<HelloWorldWithKey>(
-                "HelloWorldWithKey",
-                "HelloWorldWithKeyType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, _counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubKeyListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -4188,13 +5222,16 @@ pub(crate) mod tests {
 
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), DdsError::BadParameter);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_take_instance_with_nonexistent_handle() {
-        let domain_id = 29;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -4203,7 +5240,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorldWithKey>(
                 "HelloWorldWithKeyNon",
                 "HelloWorldWithKeyType",
@@ -4213,43 +5250,35 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
         let (sender, _receiver) = sync_channel(0);
         let _listener = PubKeyListener { sender };
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let writer = publisher
-            .create_datawriter::<HelloWorldWithKey>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorldWithKey>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let topic = sub_participant
-            .create_topic::<HelloWorldWithKey>(
-                "HelloWorldWithKeyNon",
-                "HelloWorldWithKeyType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubKeyListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -4261,14 +5290,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -4291,7 +5320,7 @@ pub(crate) mod tests {
         while let Ok(_) = counter_receiver.recv() {
             count += 1;
             println!("Data received count: {}", count);
-            if count == 1 {
+            if count == 4 {
                 break;
             }
         }
@@ -4311,13 +5340,16 @@ pub(crate) mod tests {
 
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), DdsError::NoData);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_read_instance_with_sample_state_filter() {
-        let domain_id = 39;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -4326,7 +5358,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorldWithKey>(
                 "HelloWorldWithKeySample",
                 "HelloWorldWithKeyType",
@@ -4336,43 +5368,35 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
         let (sender, _receiver) = sync_channel(0);
         let _listener = PubKeyListener { sender };
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let writer = publisher
-            .create_datawriter::<HelloWorldWithKey>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorldWithKey>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let topic = sub_participant
-            .create_topic::<HelloWorldWithKey>(
-                "HelloWorldWithKeySample",
-                "HelloWorldWithKeyType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubKeyListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -4384,14 +5408,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -4414,7 +5438,7 @@ pub(crate) mod tests {
         while let Ok(_) = counter_receiver.recv() {
             count += 1;
             println!("Data received count: {}", count);
-            if count == 2 {
+            if count == 4 {
                 break;
             }
         }
@@ -4449,13 +5473,16 @@ pub(crate) mod tests {
             .expect("Failed to read read samples");
 
         assert_eq!(read_samples.len(), 2);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_read_next_instance_basic() {
-        let domain_id = 29;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -4464,7 +5491,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorldWithKey>(
                 "HelloWorldWithKeyBasic",
                 "HelloWorldWithKeyType",
@@ -4474,43 +5501,35 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
         let (sender, _receiver) = sync_channel(0);
         let _listener = PubKeyListener { sender };
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let writer = publisher
-            .create_datawriter::<HelloWorldWithKey>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorldWithKey>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let topic = sub_participant
-            .create_topic::<HelloWorldWithKey>(
-                "HelloWorldWithKeyBasic",
-                "HelloWorldWithKeyType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubKeyListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -4522,14 +5541,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -4598,13 +5617,16 @@ pub(crate) mod tests {
         let samples = result.unwrap();
         assert_eq!(samples.len(), 1);
         assert_eq!(*samples[0].data().unwrap().serialize().unwrap(), *payload3);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_read_next_instance_no_next_instance() {
-        let domain_id = 17;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -4613,7 +5635,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorldWithKey>(
                 "HelloWorldWithKeyNoNext",
                 "HelloWorldWithKeyType",
@@ -4623,43 +5645,35 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
         let (sender, _receiver) = sync_channel(0);
         let _listener = PubKeyListener { sender };
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let writer = publisher
-            .create_datawriter::<HelloWorldWithKey>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorldWithKey>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let topic = sub_participant
-            .create_topic::<HelloWorldWithKey>(
-                "HelloWorldWithKeyNoNext",
-                "HelloWorldWithKeyType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubKeyListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -4671,14 +5685,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -4720,13 +5734,16 @@ pub(crate) mod tests {
 
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), DdsError::NoData);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_take_next_instance_basic() {
-        let domain_id = 9;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -4735,7 +5752,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorldWithKey>(
                 "HelloWorldWithKey",
                 "HelloWorldWithKeyType",
@@ -4745,43 +5762,35 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
         let (sender, _receiver) = sync_channel(0);
         let _listener = PubKeyListener { sender };
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let writer = publisher
-            .create_datawriter::<HelloWorldWithKey>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorldWithKey>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let topic = sub_participant
-            .create_topic::<HelloWorldWithKey>(
-                "HelloWorldWithKey",
-                "HelloWorldWithKeyType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubKeyListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -4793,14 +5802,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -4876,13 +5885,18 @@ pub(crate) mod tests {
 
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), DdsError::NoData);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
+    // take_next_instance must advance past an instance whose samples were already
+    // taken, using the returned handle as previous_handle even though it is gone from the cache.
     #[test]
-    fn test_read_next_instance_with_view_state_filter() {
-        let domain_id = 37;
+    fn test_take_next_instance_advances_past_taken_handle() {
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -4891,7 +5905,253 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
+            .create_topic::<HelloWorldWithKey>(
+                "HelloWorldWithKeyAdvance",
+                "HelloWorldWithKeyType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let writer = publisher
+            .create_datawriter::<HelloWorldWithKey>(&topic, writer_qos, None, StatusMask::default())
+            .unwrap();
+
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
+        let read_listener = SubKeyListener { counter_sender };
+        let data_reader = subscriber
+            .create_datareader::<HelloWorldWithKey>(
+                &topic,
+                reader_qos,
+                Some(Arc::new(read_listener)),
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let condition = writer.get_statuscondition().unwrap().clone();
+        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
+        let wait_set = WaitSet::new();
+        wait_set.attach_condition(condition.clone()).unwrap();
+        wait_set.wait(Duration::infinite()).unwrap();
+        writer.get_publication_matched_status().unwrap();
+        wait_set.detach_condition(condition).unwrap();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
+        condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
+        wait_set.attach_condition(condition.clone()).unwrap();
+        wait_set.wait(Duration::infinite()).unwrap();
+        data_reader.get_subscription_matched_status().unwrap();
+        wait_set.detach_condition(condition).unwrap();
+
+        // Two distinct instances (keys 0 and 1), one sample each.
+        let data_a = HelloWorldWithKey { index: 0, message: "A".to_string() };
+        let data_b = HelloWorldWithKey { index: 1, message: "B".to_string() };
+        let handle_a = writer.register_instance(&data_a).unwrap();
+        let handle_b = writer.register_instance(&data_b).unwrap();
+        writer.write(&data_a, handle_a).unwrap();
+        writer.write(&data_b, handle_b).unwrap();
+
+        let mut count = 0;
+        while counter_receiver.recv().is_ok() {
+            count += 1;
+            if count == 2 {
+                break;
+            }
+        }
+
+        // Take the first (smallest-handle) instance; capture its handle, then it is removed.
+        let first = data_reader
+            .take_next_instance(
+                10,
+                InstanceHandle::NIL,
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        let first_handle = first[0].sample_info().instance_handle;
+        let first_index = first[0].data().unwrap().index;
+
+        // Advance with the now-vanished handle: must return the OTHER instance, not NoData.
+        let second = data_reader
+            .take_next_instance(
+                10,
+                first_handle,
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+            .unwrap();
+        assert_eq!(second.len(), 1);
+        let second_index = second[0].data().unwrap().index;
+
+        assert_ne!(first_index, second_index);
+        assert!(first_index == 0 || first_index == 1);
+        assert!(second_index == 0 || second_index == 1);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn test_take_next_instance_surfaces_no_writers_after_writer_deleted() {
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic = participant
+            .create_topic::<HelloWorldWithKey>(
+                "HelloWorldWithKeyNoWriters",
+                "HelloWorldWithKeyType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let writer = publisher
+            .create_datawriter::<HelloWorldWithKey>(&topic, writer_qos, None, StatusMask::default())
+            .unwrap();
+
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
+        let read_listener = SubKeyListener { counter_sender };
+        let data_reader = subscriber
+            .create_datareader::<HelloWorldWithKey>(
+                &topic,
+                reader_qos,
+                Some(Arc::new(read_listener)),
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let condition = writer.get_statuscondition().unwrap().clone();
+        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
+        let wait_set = WaitSet::new();
+        wait_set.attach_condition(condition.clone()).unwrap();
+        wait_set.wait(Duration::infinite()).unwrap();
+        writer.get_publication_matched_status().unwrap();
+        wait_set.detach_condition(condition).unwrap();
+        let sub_condition = data_reader.get_statuscondition().unwrap().clone();
+        sub_condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
+        wait_set.attach_condition(sub_condition.clone()).unwrap();
+        wait_set.wait(Duration::infinite()).unwrap();
+        data_reader.get_subscription_matched_status().unwrap();
+        wait_set.detach_condition(sub_condition).unwrap();
+
+        // One sample for a single instance, then drain it so its cache is empty.
+        let data = HelloWorldWithKey { index: 0, message: "A".to_string() };
+        let handle = writer.register_instance(&data).unwrap();
+        writer.write(&data, handle).unwrap();
+        counter_receiver.recv().unwrap();
+
+        let alive = data_reader
+            .take_next_instance(
+                10,
+                InstanceHandle::NIL,
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+            .unwrap();
+        assert_eq!(alive.len(), 1);
+        assert!(alive[0].sample_info().valid_data);
+
+        // Delete the writer and wait for the reader to process the departure. The reader sets the
+        // instance to NOT_ALIVE_NO_WRITERS while handling LIVELINESS_CHANGED, before that status
+        // wakes the wait set, so the synthetic notification is set once wait returns.
+        let liveliness = data_reader.get_statuscondition().unwrap().clone();
+        liveliness.set_enabled_statuses(StatusMask::LIVELINESS_CHANGED).unwrap();
+        wait_set.attach_condition(liveliness.clone()).unwrap();
+        publisher.delete_datawriter(writer).unwrap();
+        wait_set.wait(Duration::infinite()).unwrap();
+        wait_set.detach_condition(liveliness).unwrap();
+
+        // The instance's cache is empty, so NO_WRITERS only exists as a synthetic pending sample.
+        let no_writers = data_reader
+            .take_next_instance(
+                10,
+                InstanceHandle::NIL,
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+            .unwrap();
+        assert_eq!(no_writers.len(), 1);
+        let info = no_writers[0].sample_info();
+        assert!(!info.valid_data);
+        assert_eq!(info.instance_state, InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn test_read_next_instance_with_view_state_filter() {
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic = participant
             .create_topic::<HelloWorldWithKey>(
                 "HelloWorldWithKeyView",
                 "HelloWorldWithKeyType",
@@ -4901,43 +6161,35 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
         let (sender, _receiver) = sync_channel(0);
         let _listener = PubKeyListener { sender };
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let writer = publisher
-            .create_datawriter::<HelloWorldWithKey>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorldWithKey>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let topic = sub_participant
-            .create_topic::<HelloWorldWithKey>(
-                "HelloWorldWithKeyView",
-                "HelloWorldWithKeyType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubKeyListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -4949,14 +6201,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -5017,13 +6269,16 @@ pub(crate) mod tests {
         let samples = result.unwrap();
         assert_eq!(samples.len(), 1);
         assert_eq!(*samples[0].data().unwrap().serialize().unwrap(), *payload2);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_take_next_instance_with_multiple_samples_per_instance() {
-        let domain_id = 9;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -5032,7 +6287,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorldWithKey>(
                 "HelloWorldWithKeyMulti",
                 "HelloWorldWithKeyType",
@@ -5042,43 +6297,35 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
         let (sender, _receiver) = sync_channel(0);
         let _listener = PubKeyListener { sender };
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let writer = publisher
-            .create_datawriter::<HelloWorldWithKey>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorldWithKey>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let topic = sub_participant
-            .create_topic::<HelloWorldWithKey>(
-                "HelloWorldWithKeyMulti",
-                "HelloWorldWithKeyType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubKeyListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -5090,14 +6337,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -5173,13 +6420,16 @@ pub(crate) mod tests {
         let samples = result.unwrap();
         assert_eq!(samples.len(), 1); // 1 sample of the third instance
         assert_eq!(*samples[0].data().unwrap().serialize().unwrap(), *payload4);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_read_next_instance_with_nonexistent_previous_handle() {
-        let domain_id = 9;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -5188,7 +6438,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorldWithKey>(
                 "HelloWorldWithKeyNext",
                 "HelloWorldWithKeyType",
@@ -5198,43 +6448,35 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
         let (sender, _receiver) = sync_channel(0);
         let _listener = PubKeyListener { sender };
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let writer = publisher
-            .create_datawriter::<HelloWorldWithKey>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorldWithKey>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let topic = sub_participant
-            .create_topic::<HelloWorldWithKey>(
-                "HelloWorldWithKeyNext",
-                "HelloWorldWithKeyType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubKeyListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -5246,14 +6488,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -5295,13 +6537,16 @@ pub(crate) mod tests {
         );
 
         assert_eq!(result.unwrap_err(), DdsError::NoData); // In current implementation, compares by instance_handle size..
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_take_next_instance_with_max_samples_limit() {
-        let domain_id = 29;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -5310,7 +6555,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorldWithKey>(
                 "HelloWorldWithKeyTakeMax",
                 "HelloWorldWithKeyType",
@@ -5320,43 +6565,35 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
         let (sender, _receiver) = sync_channel(0);
         let _listener = PubKeyListener { sender };
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let writer = publisher
-            .create_datawriter::<HelloWorldWithKey>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorldWithKey>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let topic = sub_participant
-            .create_topic::<HelloWorldWithKey>(
-                "HelloWorldWithKeyTakeMax",
-                "HelloWorldWithKeyType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubKeyListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -5368,14 +6605,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -5423,14 +6660,23 @@ pub(crate) mod tests {
         assert!(result.is_ok());
         let samples = result.unwrap();
         assert_eq!(samples.len(), 1); // Return only 1 out of 2
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
     //
 
     #[test]
     fn test_delete_contained_entities_reader() {
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
-            .create_participant(18, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
             .unwrap();
 
         let topic = participant
@@ -5475,13 +6721,22 @@ pub(crate) mod tests {
         reader.delete_contained_entities().unwrap();
 
         assert!(reader.get_readconditions().unwrap().is_empty());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
     fn test_delete_reader() {
+        let domain_id = unique_domain_id();
         let domain_participant_factory = DomainParticipantFactory::get_instance();
         let domain_participant = domain_participant_factory
-            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
             .unwrap();
 
         let topic = domain_participant
@@ -5509,16 +6764,22 @@ pub(crate) mod tests {
             let rtps_reader = reader.get_rtps_reader();
             assert!(rtps_reader.is_ok());
         }
-        let mut dcps_bridge = domain_participant.get_dcps_bridge().unwrap();
-        let dcps_bridge = dcps_bridge.as_mut().unwrap();
-        dcps_bridge
-            .delete_rtps_reader(
-                "hello_world".to_string(),
-                reader.get_instance_handle().unwrap().to_guid().entity_id(),
-            )
-            .unwrap();
+        {
+            let mut dcps_bridge = domain_participant.get_dcps_bridge().unwrap();
+            let dcps_bridge = dcps_bridge.as_mut().unwrap();
+            dcps_bridge
+                .delete_rtps_reader(
+                    "hello_world".to_string(),
+                    reader.get_instance_handle().unwrap().to_guid().entity_id(),
+                )
+                .unwrap();
+        }
         let rtps_reader = reader.get_rtps_reader();
         assert!(rtps_reader.is_err());
+
+        drop(reader);
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
@@ -5553,7 +6814,7 @@ pub(crate) mod tests {
 
             fn on_data_on_readers(&self, subscriber: &Subscriber) {
                 log::info!(
-                    "Get DataOnReaders Status - Guid {:?}",
+                    "Get DataOnReaders Status - Guid {}",
                     subscriber.get_instance_handle().unwrap().to_guid()
                 );
             }
@@ -5561,11 +6822,16 @@ pub(crate) mod tests {
 
         let (sender, _receiver) = sync_channel(0);
         let listener = SubscriberListenerStructure { _sender: sender };
-        let _ = env_logger::builder().filter_level(log::LevelFilter::Info).try_init();
 
+        let domain_id = unique_domain_id();
         let domain_participant_factory = DomainParticipantFactory::get_instance();
         let domain_participant = domain_participant_factory
-            .create_participant(10, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
             .unwrap();
         let topic = domain_participant
             .create_topic::<HelloWorld>(
@@ -5594,878 +6860,150 @@ pub(crate) mod tests {
             .unwrap();
 
         std::thread::sleep(std::time::Duration::from_secs(10));
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
-    fn test_datareader_with_topic() {
+    fn volatile_late_joiner_receives_gap_for_open_set_member() {
+        // A volatile reader that joins mid coherent set must never receive a DATA whose
+        // set start was GAPped. The writer GAPs those members instead, so on the reader
+        // side the open-set member (sn5) arrives as an irrelevant (GAP) change, not DATA,
+        // and nothing is buffered for the incomplete set.
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
-            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
             .unwrap();
 
         let topic = participant
             .create_topic::<HelloWorld>(
-                "test_topic",
-                "HelloWorld",
+                "volatile_coherent_gap",
+                "HelloWorldType",
                 TopicQos::default(),
                 None,
                 StatusMask::default(),
             )
             .unwrap();
 
-        let subscriber = participant
-            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
-            .unwrap();
+        // The publisher must offer the same coherent presentation as the subscriber requests,
+        // otherwise presentation QoS is incompatible and the endpoints never match.
+        let publisher_qos = PublisherQos {
+            presentation: PresentationQosPolicy {
+                access_scope: PresentationQosAccessScopeKind::Topic,
+                coherent_access: true,
+                ordered_access: false,
+            },
+            ..Default::default()
+        };
+        let publisher =
+            participant.create_publisher(publisher_qos, None, StatusMask::default()).unwrap();
 
-        // Create DataReader with Topic
-        let reader = subscriber
-            .create_datareader::<HelloWorld>(
-                &topic,
-                DataReaderQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let cft = participant
-            .create_contentfilteredtopic::<HelloWorld>(
-                "filtered_topic",
-                &topic,
-                "index > %0",
-                vec!["10".to_string()],
-            )
-            .unwrap();
-
-        let cft_reader = subscriber
-            .create_datareader::<HelloWorld>(
-                &cft,
-                DataReaderQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        // Verify get_topicdescription returns the Topic
-        let topic_desc = reader.get_topicdescription().unwrap();
-        assert_eq!(topic_desc.get_name(), "test_topic");
-        assert_eq!(topic_desc.get_type_name(), "HelloWorld");
-
-        let topic_desc = cft_reader.get_topicdescription().unwrap();
-        assert_eq!(topic_desc.get_name(), "filtered_topic");
-        assert_eq!(topic_desc.get_type_name(), "HelloWorld");
-
-        subscriber.delete_datareader(reader).unwrap();
-        subscriber.delete_datareader(cft_reader).unwrap();
-        participant.delete_contentfilteredtopic(cft).unwrap();
-        participant.delete_topic(topic).unwrap();
-        participant.delete_subscriber(subscriber).unwrap();
-        factory.delete_participant(participant).unwrap();
-    }
-
-    #[test]
-    fn test_content_filtered_topic_read() {
-        // let _ = env_logger::builder().filter_level(log::LevelFilter::Info).try_init();
-
-        let domain_id = 50;
-        let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let topic = pub_participant
-            .create_topic::<HelloWorldWithKey>(
-                "CFT_Read_Test",
-                "HelloWorldWithKey",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let publisher = pub_participant
-            .create_publisher(PublisherQos::default(), None, StatusMask::default())
-            .unwrap();
-
+        let writer_qos = DataWriterQos {
+            durability: DurabilityQosPolicy { kind: DurabilityQosPolicyKind::Volatile },
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let writer = publisher
-            .create_datawriter::<HelloWorldWithKey>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorld>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let sub_topic = sub_participant
-            .create_topic::<HelloWorldWithKey>(
-                "CFT_Read_Test",
-                "HelloWorldWithKey",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        // Create ContentFilteredTopic that filters index > 1
-        let cft = sub_participant
-            .create_contentfilteredtopic::<HelloWorldWithKey>(
-                "CFT_Read_Test",
-                &sub_topic,
-                "index > %0",
-                vec!["1".to_string()],
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
-            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
-            .unwrap();
-
-        let data_reader = subscriber
-            .create_datareader::<HelloWorldWithKey>(
-                &cft,
-                DataReaderQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let mut condition = writer.get_statuscondition().unwrap().clone();
-        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
-        let wait_set = WaitSet::new();
-        wait_set.attach_condition(condition.clone()).unwrap();
-        wait_set.wait(Duration::infinite()).unwrap();
-        writer.get_publication_matched_status().unwrap();
-        wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
-        condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
-        wait_set.attach_condition(condition.clone()).unwrap();
-        wait_set.wait(Duration::infinite()).unwrap();
-        data_reader.get_subscription_matched_status().unwrap();
-        wait_set.detach_condition(condition).unwrap();
-
-        // Write test data
-        let data1 = HelloWorldWithKey { index: 0, message: "Should be filtered".to_string() };
-        let data2 = HelloWorldWithKey { index: 1, message: "Should be filtered".to_string() };
-        let data3 = HelloWorldWithKey { index: 2, message: "Should pass filter".to_string() };
-        let data4 = HelloWorldWithKey { index: 3, message: "Should pass filter".to_string() };
-
-        writer.write(&data1, InstanceHandle::NIL).unwrap();
-        writer.write(&data2, InstanceHandle::NIL).unwrap();
-        writer.write(&data3, InstanceHandle::NIL).unwrap();
-        writer.write(&data4, InstanceHandle::NIL).unwrap();
-
-        std::thread::sleep(std::time::Duration::from_secs(5));
-
-        // Read with ContentFilteredTopic - should only get data3 and data4
-        let result = data_reader.read(
-            10,
-            &[SampleStateKind::ANY_SAMPLE_STATE],
-            &[ViewStateKind::ANY_VIEW_STATE],
-            &[InstanceStateKind::ANY_INSTANCE_STATE],
-        );
-
-        assert!(result.is_ok());
-        let samples = result.unwrap();
-        assert_eq!(samples.len(), 2);
-        assert_eq!(samples[0].data().unwrap().index, 2);
-        assert_eq!(samples[1].data().unwrap().index, 3);
-
-        // Cleanup
-        subscriber.delete_datareader(data_reader).unwrap();
-        sub_participant.delete_contentfilteredtopic(cft).unwrap();
-        sub_participant.delete_topic(sub_topic).unwrap();
-        sub_participant.delete_subscriber(subscriber).unwrap();
-        factory.delete_participant(sub_participant).unwrap();
-
-        publisher.delete_datawriter(writer).unwrap();
-        pub_participant.delete_publisher(publisher).unwrap();
-        pub_participant.delete_topic(topic).unwrap();
-        factory.delete_participant(pub_participant).unwrap();
-    }
-
-    #[test]
-    fn test_content_filtered_topic_with_read_condition() {
-        let domain_id = 51;
-        let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let topic = pub_participant
-            .create_topic::<HelloWorldWithKey>(
-                "CFT_ReadCondition_Test",
-                "HelloWorldWithKey",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let publisher = pub_participant
-            .create_publisher(PublisherQos::default(), None, StatusMask::default())
-            .unwrap();
-
-        let writer = publisher
-            .create_datawriter::<HelloWorldWithKey>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let sub_topic = sub_participant
-            .create_topic::<HelloWorldWithKey>(
-                "CFT_ReadCondition_Test",
-                "HelloWorldWithKey",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        // Create ContentFilteredTopic that filters index > 0
-        let cft = sub_participant
-            .create_contentfilteredtopic::<HelloWorldWithKey>(
-                "CFT_ReadCondition_Test",
-                &sub_topic,
-                "index > %0",
-                vec!["0".to_string()],
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
-            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
-            .unwrap();
-
-        let data_reader = subscriber
-            .create_datareader::<HelloWorldWithKey>(
-                &cft,
-                DataReaderQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        // Create ReadCondition for NOT_READ samples
-        let read_condition = data_reader
-            .create_readcondition(
-                &[SampleStateKind::NOT_READ_SAMPLE_STATE],
-                &[ViewStateKind::ANY_VIEW_STATE],
-                &[InstanceStateKind::ANY_INSTANCE_STATE],
-            )
-            .unwrap();
-
-        let mut condition = writer.get_statuscondition().unwrap().clone();
-        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
-        let wait_set = WaitSet::new();
-        wait_set.attach_condition(condition.clone()).unwrap();
-        wait_set.wait(Duration::infinite()).unwrap();
-        writer.get_publication_matched_status().unwrap();
-        wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
-        condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
-        wait_set.attach_condition(condition.clone()).unwrap();
-        wait_set.wait(Duration::infinite()).unwrap();
-        data_reader.get_subscription_matched_status().unwrap();
-        wait_set.detach_condition(condition).unwrap();
-
-        // Write test data
-        let data1 = HelloWorldWithKey { index: 0, message: "Filtered by CFT".to_string() };
-        let data2 = HelloWorldWithKey { index: 1, message: "Pass CFT, NOT_READ".to_string() };
-        let data3 = HelloWorldWithKey { index: 2, message: "Pass CFT, NOT_READ".to_string() };
-
-        writer.write(&data1, InstanceHandle::NIL).unwrap();
-        writer.write(&data2, InstanceHandle::NIL).unwrap();
-        writer.write(&data3, InstanceHandle::NIL).unwrap();
-
-        std::thread::sleep(std::time::Duration::from_secs(5));
-
-        // Read with both ContentFilteredTopic and ReadCondition
-        let result = data_reader.read_w_condition(10, read_condition.clone());
-
-        assert!(result.is_ok());
-        let samples = result.unwrap();
-        assert_eq!(samples.len(), 2); // Only data2 and data3 pass CFT filter
-        assert_eq!(samples[0].data().unwrap().index, 1);
-        assert_eq!(samples[1].data().unwrap().index, 2);
-
-        // Read again - should get no data since samples are now READ
-        let result = data_reader.read_w_condition(10, read_condition.clone());
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), DdsError::NoData);
-
-        // Cleanup
-        data_reader.delete_readcondition(read_condition).unwrap();
-        subscriber.delete_datareader(data_reader).unwrap();
-        sub_participant.delete_contentfilteredtopic(cft).unwrap();
-        sub_participant.delete_topic(sub_topic).unwrap();
-        sub_participant.delete_subscriber(subscriber).unwrap();
-        factory.delete_participant(sub_participant).unwrap();
-
-        publisher.delete_datawriter(writer).unwrap();
-        pub_participant.delete_publisher(publisher).unwrap();
-        pub_participant.delete_topic(topic).unwrap();
-        factory.delete_participant(pub_participant).unwrap();
-    }
-
-    #[test]
-    fn test_content_filtered_topic_with_query_condition() {
-        let domain_id = 52;
-        let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let topic = pub_participant
-            .create_topic::<HelloWorldWithKey>(
-                "CFT_QueryCondition_Test",
-                "HelloWorldWithKey",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let publisher = pub_participant
-            .create_publisher(PublisherQos::default(), None, StatusMask::default())
-            .unwrap();
-
-        let writer = publisher
-            .create_datawriter::<HelloWorldWithKey>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let sub_topic = sub_participant
-            .create_topic::<HelloWorldWithKey>(
-                "CFT_QueryCondition_Test",
-                "HelloWorldWithKey",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        // Create ContentFilteredTopic that filters index >= 1
-        let cft = sub_participant
-            .create_contentfilteredtopic::<HelloWorldWithKey>(
-                "CFT_QueryCondition_Test",
-                &sub_topic,
-                "index >= %0",
-                vec!["1".to_string()],
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
-            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
-            .unwrap();
-
-        let data_reader = subscriber
-            .create_datareader::<HelloWorldWithKey>(
-                &cft,
-                DataReaderQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        // Create QueryCondition for index < 3
-        let query_condition = data_reader
-            .create_querycondition(
-                &[SampleStateKind::ANY_SAMPLE_STATE],
-                &[ViewStateKind::ANY_VIEW_STATE],
-                &[InstanceStateKind::ANY_INSTANCE_STATE],
-                "index < %0",
-                vec!["3".to_string()],
-            )
-            .unwrap();
-
-        let mut condition = writer.get_statuscondition().unwrap().clone();
-        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
-        let wait_set = WaitSet::new();
-        wait_set.attach_condition(condition.clone()).unwrap();
-        wait_set.wait(Duration::infinite()).unwrap();
-        writer.get_publication_matched_status().unwrap();
-        wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
-        condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
-        wait_set.attach_condition(condition.clone()).unwrap();
-        wait_set.wait(Duration::infinite()).unwrap();
-        data_reader.get_subscription_matched_status().unwrap();
-        wait_set.detach_condition(condition).unwrap();
-
-        // Write test data
-        let data1 = HelloWorldWithKey { index: 0, message: "Filtered by CFT".to_string() };
-        let data2 = HelloWorldWithKey { index: 1, message: "Pass both filters".to_string() };
-        let data3 = HelloWorldWithKey { index: 2, message: "Pass both filters".to_string() };
-        let data4 = HelloWorldWithKey { index: 3, message: "Filtered by QC".to_string() };
-        let data5 = HelloWorldWithKey { index: 4, message: "Filtered by QC".to_string() };
-
-        writer.write(&data1, InstanceHandle::NIL).unwrap();
-        writer.write(&data2, InstanceHandle::NIL).unwrap();
-        writer.write(&data3, InstanceHandle::NIL).unwrap();
-        writer.write(&data4, InstanceHandle::NIL).unwrap();
-        writer.write(&data5, InstanceHandle::NIL).unwrap();
-
-        std::thread::sleep(std::time::Duration::from_secs(5));
-
-        // Read with both ContentFilteredTopic (index >= 1) and QueryCondition (index < 3)
-        // Should only get data2 and data3 (index = 1, 2)
-        let result = data_reader.read_w_condition(10, query_condition.clone());
-
-        assert!(result.is_ok());
-        let samples = result.unwrap();
-        assert_eq!(samples.len(), 2);
-        assert_eq!(samples[0].data().unwrap().index, 1);
-        assert_eq!(samples[1].data().unwrap().index, 2);
-
-        // Test with ORDER BY in QueryCondition (currently only ascending order is supported)
-        let query_condition_ordered = data_reader
-            .create_querycondition(
-                &[SampleStateKind::ANY_SAMPLE_STATE],
-                &[ViewStateKind::ANY_VIEW_STATE],
-                &[InstanceStateKind::ANY_INSTANCE_STATE],
-                "index < %0 ORDER BY message",
-                vec!["3".to_string()],
-            )
-            .unwrap();
-
-        let result = data_reader.read_w_condition(10, query_condition_ordered.clone());
-        assert!(result.is_ok());
-        let samples = result.unwrap();
-        assert_eq!(samples.len(), 2);
-        // Sorted by message field in ascending order
-        assert_eq!(samples[0].data().unwrap().message, "Pass both filters");
-        assert_eq!(samples[1].data().unwrap().message, "Pass both filters");
-
-        // Cleanup
-        data_reader.delete_readcondition(query_condition).unwrap();
-        data_reader.delete_readcondition(query_condition_ordered).unwrap();
-        subscriber.delete_datareader(data_reader).unwrap();
-        sub_participant.delete_contentfilteredtopic(cft).unwrap();
-        sub_participant.delete_topic(sub_topic).unwrap();
-        sub_participant.delete_subscriber(subscriber).unwrap();
-        factory.delete_participant(sub_participant).unwrap();
-
-        publisher.delete_datawriter(writer).unwrap();
-        pub_participant.delete_publisher(publisher).unwrap();
-        pub_participant.delete_topic(topic).unwrap();
-        factory.delete_participant(pub_participant).unwrap();
-    }
-
-    struct ReaderDeadlineListener {
-        miss_count: Arc<AtomicUsize>,
-    }
-
-    impl DataReaderListener for ReaderDeadlineListener {
-        type Foo = TestData;
-
-        fn on_requested_deadline_missed(
-            &self,
-            _reader: &DataReader<Self::Foo>,
-            _status: &RequestedDeadlineMissedStatus,
-        ) {
-            self.miss_count.fetch_add(1, Ordering::SeqCst);
-            println!("Reader deadline missed detected!");
+        // Open a coherent set and write sn1..4 before any reader has matched.
+        publisher.begin_coherent_changes().unwrap();
+        for index in 0..4 {
+            let data = HelloWorld { index, message: "member".to_string() };
+            writer.write(&data, InstanceHandle::NIL).unwrap();
         }
-    }
 
-    #[test]
-    fn test_reader_deadline_qos_basic() {
-        let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
-            .create_participant(60, DomainParticipantQos::default(), None, StatusMask::default())
+        // A coherent subscriber so the reader buffers set members when it does receive DATA.
+        let subscriber_qos = SubscriberQos {
+            presentation: PresentationQosPolicy {
+                access_scope: PresentationQosAccessScopeKind::Topic,
+                coherent_access: true,
+                ordered_access: false,
+            },
+            ..Default::default()
+        };
+        let subscriber =
+            participant.create_subscriber(subscriber_qos, None, StatusMask::default()).unwrap();
+        let reader_qos = DataReaderQos {
+            durability: DurabilityQosPolicy { kind: DurabilityQosPolicyKind::Volatile },
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let data_reader = subscriber
+            .create_datareader::<HelloWorld>(&topic, reader_qos, None, StatusMask::default())
             .unwrap();
 
-        let pub_topic = pub_participant
-            .create_topic::<TestData>(
-                "ReaderDeadlineTestTopic",
-                "TestData",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        // Publisher & Writer
-        let publisher = pub_participant
-            .create_publisher(PublisherQos::default(), None, StatusMask::default())
-            .unwrap();
-
-        let mut writer_qos = DataWriterQos::default();
-        writer_qos.deadline.period = Duration::from_millis(200);
-
-        let writer = publisher
-            .create_datawriter::<TestData>(&pub_topic, writer_qos, None, StatusMask::default())
-            .unwrap();
-
-        let sub_participant = factory
-            .create_participant(60, DomainParticipantQos::default(), None, StatusMask::default())
-            .unwrap();
-
-        let sub_topic = sub_participant
-            .create_topic::<TestData>(
-                "ReaderDeadlineTestTopic",
-                "TestData",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        // Subscriber & Reader with deadline
-        let subscriber = sub_participant
-            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
-            .unwrap();
-
-        let mut reader_qos = DataReaderQos::default();
-        reader_qos.deadline.period = Duration::from_millis(200);
-
-        let deadline_miss_count = Arc::new(AtomicUsize::new(0));
-        let listener =
-            Arc::new(ReaderDeadlineListener { miss_count: Arc::clone(&deadline_miss_count) });
-
-        let reader = subscriber
-            .create_datareader::<TestData>(
-                &sub_topic,
-                reader_qos,
-                Some(listener),
-                StatusMask::REQUESTED_DEADLINE_MISSED,
-            )
-            .unwrap();
-
-        let mut condition = writer.get_statuscondition().unwrap().clone();
-        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
+        // Wait for the reader to late-join: its match horizon is fixed at sn4.
         let wait_set = WaitSet::new();
+        let condition = writer.get_statuscondition().unwrap().clone();
+        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
-        wait_set.wait(Duration::from_millis(5000)).unwrap();
-        writer.get_publication_matched_status().unwrap();
+        wait_set
+            .wait(Duration::from_seconds(10))
+            .expect("timed out waiting for PUBLICATION_MATCHED");
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
-        wait_set.wait(Duration::from_millis(5000)).unwrap();
-        reader.get_subscription_matched_status().unwrap();
+        wait_set
+            .wait(Duration::from_seconds(10))
+            .expect("timed out waiting for SUBSCRIPTION_MATCHED");
         wait_set.detach_condition(condition).unwrap();
 
-        let data = TestData { id: 1 };
-
-        // Send first data
+        // Write one more member (sn5) while the set is still open.
+        let data = HelloWorld { index: 4, message: "member".to_string() };
         writer.write(&data, InstanceHandle::NIL).unwrap();
-        thread::sleep(std::time::Duration::from_millis(100));
 
-        // Send again before deadline
-        writer.write(&data, InstanceHandle::NIL).unwrap();
-        thread::sleep(std::time::Duration::from_millis(100));
+        let writer_guid = writer.guid();
+        let rtps_reader = data_reader.get_rtps_reader().unwrap();
+        let stateful_reader =
+            rtps_reader.as_any().downcast_ref::<StatefulReader>().expect("stateful reader");
+        let writer_proxies = stateful_reader.writer_proxies();
+        let reader_cache = rtps_reader.reader_cache();
 
-        // Should not have deadline miss yet
+        // Poll until sn5 has been received on the reader side (as DATA or GAP).
+        let sn5 = SequenceNumber::from_i64(5);
+        let mut is_relevant = None;
+        for _ in 0..100 {
+            is_relevant = writer_proxies
+                .lock()
+                .unwrap()
+                .first()
+                .and_then(|wp| wp.received_change_is_relevant(sn5));
+            if is_relevant.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        // sn5 must arrive as an irrelevant (GAP) change, and no member of the incomplete
+        // set may be buffered on the reader.
+        assert_eq!(is_relevant, Some(false), "sn5 should be received via GAP, not DATA");
         assert_eq!(
-            deadline_miss_count.load(Ordering::SeqCst),
+            reader_cache.lock().unwrap().pending_coherent_len(writer_guid),
             0,
-            "No deadline miss should occur when receiving data within deadline"
+            "no member of the GAPped set should be buffered"
         );
 
-        // Wait to exceed deadline
-        thread::sleep(std::time::Duration::from_millis(300));
+        publisher.end_coherent_changes().unwrap();
 
-        // Deadline miss occurs
-        let miss_count = deadline_miss_count.load(Ordering::SeqCst);
-        assert!(
-            miss_count >= 1,
-            "At least one deadline miss should be detected, got {}",
-            miss_count
-        );
-
-        // Cleanup
-        subscriber.delete_datareader(reader).unwrap();
-        publisher.delete_datawriter(writer).unwrap();
-        sub_participant.delete_subscriber(subscriber).unwrap();
-        pub_participant.delete_publisher(publisher).unwrap();
-        sub_participant.delete_topic(sub_topic).unwrap();
-        pub_participant.delete_topic(pub_topic).unwrap();
-        factory.delete_participant(sub_participant).unwrap();
-        factory.delete_participant(pub_participant).unwrap();
-    }
-
-    #[test]
-    fn test_reader_deadline_qos_on_dispose() {
-        use std::thread;
-
-        let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
-            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
-            .unwrap();
-
-        let pub_topic = pub_participant
-            .create_topic::<TestData>(
-                "ReaderDisposeDeadlineTestTopic",
-                "TestData",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        // Publisher & Writer
-        let publisher = pub_participant
-            .create_publisher(PublisherQos::default(), None, StatusMask::default())
-            .unwrap();
-
-        let mut writer_qos = DataWriterQos::default();
-        writer_qos.deadline.period = Duration::from_millis(150);
-
-        let writer = publisher
-            .create_datawriter::<TestData>(&pub_topic, writer_qos, None, StatusMask::default())
-            .unwrap();
-
-        let sub_participant = factory
-            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
-            .unwrap();
-
-        let sub_topic = sub_participant
-            .create_topic::<TestData>(
-                "ReaderDisposeDeadlineTestTopic",
-                "TestData",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        // Subscriber & Reader
-        let subscriber = sub_participant
-            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
-            .unwrap();
-
-        let mut reader_qos = DataReaderQos::default();
-        reader_qos.deadline.period = Duration::from_millis(150);
-
-        let deadline_miss_count = Arc::new(AtomicUsize::new(0));
-        let listener =
-            Arc::new(ReaderDeadlineListener { miss_count: Arc::clone(&deadline_miss_count) });
-
-        let reader = subscriber
-            .create_datareader::<TestData>(
-                &sub_topic,
-                reader_qos,
-                Some(listener),
-                StatusMask::REQUESTED_DEADLINE_MISSED,
-            )
-            .unwrap();
-
-        let mut condition = writer.get_statuscondition().unwrap().clone();
-        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
-        let wait_set = WaitSet::new();
-        wait_set.attach_condition(condition.clone()).unwrap();
-        wait_set.wait(Duration::from_millis(5000)).unwrap();
-        writer.get_publication_matched_status().unwrap();
-        wait_set.detach_condition(condition).unwrap();
-        let mut condition = reader.get_statuscondition().unwrap().clone();
-        condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
-        wait_set.attach_condition(condition.clone()).unwrap();
-        wait_set.wait(Duration::from_millis(5000)).unwrap();
-        reader.get_subscription_matched_status().unwrap();
-        wait_set.detach_condition(condition).unwrap();
-
-        let data = TestData { id: 42 };
-
-        // Send data (register instance)
-        let handle = writer.register_instance(&data).unwrap();
-        writer.write(&data, handle).unwrap();
-        println!("Data sent, instance registered");
-
-        thread::sleep(std::time::Duration::from_millis(100));
-
-        // Wait for deadline miss to occur
-        thread::sleep(std::time::Duration::from_millis(200));
-        assert!(deadline_miss_count.load(Ordering::SeqCst) >= 1, "Deadline miss should occur");
-
-        // Send dispose
-        writer.dispose(&data, handle).unwrap();
-        println!("Instance disposed");
-
-        thread::sleep(std::time::Duration::from_millis(100));
-
-        let count_before = deadline_miss_count.load(Ordering::SeqCst);
-
-        // Wait to exceed deadline after dispose
-        thread::sleep(std::time::Duration::from_millis(200));
-
-        let count_after = deadline_miss_count.load(Ordering::SeqCst);
-
-        println!("Count before dispose processing: {}, after: {}", count_before, count_after);
-
-        // After dispose, deadline miss should not occur anymore (or very rarely)
-        assert!(count_after - count_before <= 1, "Deadline miss should stop after dispose");
-
-        // Cleanup
-        subscriber.delete_datareader(reader).unwrap();
-        publisher.delete_datawriter(writer).unwrap();
-        sub_participant.delete_subscriber(subscriber).unwrap();
-        pub_participant.delete_publisher(publisher).unwrap();
-        sub_participant.delete_topic(sub_topic).unwrap();
-        pub_participant.delete_topic(pub_topic).unwrap();
-        factory.delete_participant(sub_participant).unwrap();
-        factory.delete_participant(pub_participant).unwrap();
-    }
-
-    #[test]
-    fn test_reader_deadline_qos_multiple_instances() {
-        use std::thread;
-
-        let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
-            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
-            .unwrap();
-
-        let pub_topic = pub_participant
-            .create_topic::<TestData>(
-                "ReaderMultiInstanceDeadlineTestTopic",
-                "TestData",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        // Publisher & Writer
-        let publisher = pub_participant
-            .create_publisher(PublisherQos::default(), None, StatusMask::default())
-            .unwrap();
-
-        let mut writer_qos = DataWriterQos::default();
-        writer_qos.deadline.period = Duration::from_millis(150);
-
-        let writer = publisher
-            .create_datawriter::<TestData>(&pub_topic, writer_qos, None, StatusMask::default())
-            .unwrap();
-
-        let sub_participant = factory
-            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
-            .unwrap();
-
-        let sub_topic = sub_participant
-            .create_topic::<TestData>(
-                "ReaderMultiInstanceDeadlineTestTopic",
-                "TestData",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        // Subscriber & Reader
-        let subscriber = sub_participant
-            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
-            .unwrap();
-
-        let mut reader_qos = DataReaderQos::default();
-        reader_qos.deadline.period = Duration::from_millis(150);
-
-        let deadline_miss_count = Arc::new(AtomicUsize::new(0));
-        let listener =
-            Arc::new(ReaderDeadlineListener { miss_count: Arc::clone(&deadline_miss_count) });
-
-        let reader = subscriber
-            .create_datareader::<TestData>(
-                &sub_topic,
-                reader_qos,
-                Some(listener),
-                StatusMask::REQUESTED_DEADLINE_MISSED,
-            )
-            .unwrap();
-
-        let mut condition = writer.get_statuscondition().unwrap().clone();
-        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
-        let wait_set = WaitSet::new();
-        wait_set.attach_condition(condition.clone()).unwrap();
-        wait_set.wait(Duration::from_millis(5000)).unwrap();
-        writer.get_publication_matched_status().unwrap();
-        wait_set.detach_condition(condition).unwrap();
-        let mut condition = reader.get_statuscondition().unwrap().clone();
-        condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
-        wait_set.attach_condition(condition.clone()).unwrap();
-        wait_set.wait(Duration::from_millis(5000)).unwrap();
-        reader.get_subscription_matched_status().unwrap();
-        wait_set.detach_condition(condition).unwrap();
-
-        // Send multiple instances
-        let data1 = TestData { id: 1 };
-        let data2 = TestData { id: 2 };
-        let data3 = TestData { id: 3 };
-
-        writer.write(&data1, InstanceHandle::NIL).unwrap();
-        writer.write(&data2, InstanceHandle::NIL).unwrap();
-        writer.write(&data3, InstanceHandle::NIL).unwrap();
-
-        println!("Three instances sent");
-
-        thread::sleep(std::time::Duration::from_millis(100));
-
-        // Wait for all instances' deadlines to expire
-        thread::sleep(std::time::Duration::from_millis(200));
-
-        // Deadline miss should occur in all 3 instances
-        let miss_count = deadline_miss_count.load(Ordering::SeqCst);
-        println!("Reader deadline miss count for 3 instances: {}", miss_count);
-        assert!(
-            miss_count >= 3,
-            "At least 3 deadline misses expected (one per instance), got {}",
-            miss_count
-        );
-
-        // Cleanup
-        subscriber.delete_datareader(reader).unwrap();
-        publisher.delete_datawriter(writer).unwrap();
-        sub_participant.delete_subscriber(subscriber).unwrap();
-        pub_participant.delete_publisher(publisher).unwrap();
-        sub_participant.delete_topic(sub_topic).unwrap();
-        pub_participant.delete_topic(pub_topic).unwrap();
-        factory.delete_participant(sub_participant).unwrap();
-        factory.delete_participant(pub_participant).unwrap();
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 }

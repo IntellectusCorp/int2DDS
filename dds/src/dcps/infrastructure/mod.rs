@@ -34,6 +34,7 @@ pub mod entity;
 pub mod guard_condition;
 pub(crate) mod history_cache;
 pub(crate) mod liveliness_monitor;
+pub mod qos_kind;
 pub mod qos_policy;
 pub mod status;
 pub mod status_condition;

@@ -21,16 +21,18 @@ use std::{
     collections::HashMap,
     fmt::Debug,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         Arc, Mutex, RwLock, Weak,
     },
 };
+
+use arc_swap::ArcSwap;
 
 use super::{
     data_writer::{DataWriter, DataWriterBase, DataWriterInternal},
     data_writer_listener::DataWriterListener,
     publisher_listener::PublisherListener,
-    qos::{DataWriterQos, PublisherQos, DATAWRITER_QOS_DEFAULT},
+    qos::{DataWriterQos, PublisherQos},
 };
 use crate::{
     common::instance_handle::InstanceHandle,
@@ -38,13 +40,17 @@ use crate::{
         error::{DdsError, DdsResult},
         time::Duration,
     },
-    domain::domain_participant::DomainParticipant,
+    dcps::topic::type_support::{DdsType, TypeSupport},
+    domain::{
+        domain_participant::DomainParticipant, domain_participant_factory::DomainParticipantFactory,
+    },
     infrastructure::{
         domain_entity::DomainEntity,
         entity::{
-            impl_dds_entity, impl_dds_entity_impl, BaseEntity, EnableChild, Entity, EntityInternal,
-            UpdateStatus,
+            impl_check_parent_enabled, impl_dds_entity, impl_dds_entity_impl, BaseEntity,
+            EnableChild, Entity, EntityInternal, UpdateStatus,
         },
+        qos_kind::QosKind,
         qos_policy::Qos,
         status::StatusMask,
         status_condition::StatusCondition,
@@ -55,28 +61,41 @@ use crate::{
 
 #[derive(Clone)]
 pub struct Publisher {
+    // Indicates whether this entity is a built-in entity.
+    //
+    // Currently always `false` as DDS spec does not define built-in
+    // Publisher exposed to users.
+    //
+    // TODO: Reserved for future DCPS-RTPS built-in entity mapping
+    // if needed (e.g., exposing built-in publisher for diagnostics).
+    is_builtin: bool,
     guid: Guid,
-    qos: Arc<Mutex<PublisherQos>>,
+    qos: Arc<ArcSwap<PublisherQos>>,
+    update_lock: Arc<Mutex<()>>,
     listener: Arc<RwLock<Option<Arc<dyn PublisherListener>>>>,
     mask: Arc<RwLock<StatusMask>>,
     status_condition: Arc<Mutex<StatusCondition<PublisherQos>>>,
     pub(crate) self_ref: Option<Arc<Publisher>>,
     enabled: Arc<AtomicBool>,
     deleted: Arc<AtomicBool>,
+    #[allow(clippy::type_complexity)]
     writers_by_topic_name:
         Arc<Mutex<HashMap<String, Vec<Weak<dyn DataWriterInternal<Qos = DataWriterQos>>>>>>,
+    #[allow(clippy::type_complexity)]
     writers_by_topic_handle:
         Arc<Mutex<HashMap<InstanceHandle, Vec<Weak<dyn DataWriterInternal<Qos = DataWriterQos>>>>>>,
     orphaned_writers: Arc<Mutex<Vec<Arc<dyn DataWriterInternal<Qos = DataWriterQos>>>>>,
-    default_datawriter_qos: Arc<Mutex<DataWriterQos>>,
+    default_datawriter_qos: Arc<Mutex<Option<DataWriterQos>>>,
     participant: Option<Weak<DomainParticipant>>,
+    // Nesting depth of begin/end_coherent_changes; the set is open while non-zero.
+    coherent_depth: Arc<AtomicU32>,
 }
 
 impl Debug for Publisher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Publisher")
             .field("guid", &self.guid)
-            .field("qos", &self.qos.lock().unwrap())
+            .field("qos", &**self.qos.load())
             .field(
                 "listener",
                 &self.listener.read().unwrap().as_ref().map(|_| "Arc<dyn PublisherListener>"),
@@ -99,6 +118,11 @@ impl Eq for Publisher {}
 
 impl Drop for Publisher {
     fn drop(&mut self) {
+        // Builtin entities are managed separately, skip orphan handling
+        if self.is_builtin {
+            return;
+        }
+
         // Only handle drop for the last reference (not clones)
         if let Some(ref self_arc) = self.self_ref {
             if Arc::strong_count(self_arc) > 1 {
@@ -135,12 +159,15 @@ impl EnableChild for Publisher {
 
         Ok(())
     }
+
+    impl_check_parent_enabled!(get_participant);
 }
 impl UpdateStatus for Publisher {}
 impl DomainEntity for Publisher {}
 
 impl Publisher {
     pub(crate) fn new(
+        is_builtin: bool,
         qos: PublisherQos,
         listener: Option<Arc<dyn PublisherListener>>,
         mask: StatusMask,
@@ -148,7 +175,9 @@ impl Publisher {
         participant: &Arc<DomainParticipant>,
     ) -> Self {
         let mut publisher = Self {
-            qos: Arc::new(Mutex::new(qos)),
+            is_builtin,
+            qos: Arc::new(ArcSwap::from_pointee(qos)),
+            update_lock: Arc::new(Mutex::new(())),
             guid: handle.to_guid(),
             listener: Arc::new(RwLock::new(listener)),
             mask: Arc::new(RwLock::new(mask)),
@@ -159,8 +188,9 @@ impl Publisher {
             writers_by_topic_name: Arc::new(Mutex::new(HashMap::new())),
             writers_by_topic_handle: Arc::new(Mutex::new(HashMap::new())),
             orphaned_writers: Arc::new(Mutex::new(Vec::new())),
-            default_datawriter_qos: Arc::new(Mutex::new(DataWriterQos::default())),
+            default_datawriter_qos: Arc::new(Mutex::new(None)),
             participant: Some(Arc::downgrade(participant)),
+            coherent_depth: Arc::new(AtomicU32::new(0)),
         };
         let publisher_arc = Arc::new(publisher.clone());
         let weak_ref = Arc::downgrade(&publisher_arc);
@@ -170,6 +200,11 @@ impl Publisher {
         }
         publisher.self_ref = Some(publisher_arc); // Without Arc, the new() function ends and memory is freed. StatusCondition's entity field would return None.
         publisher
+    }
+
+    /// Returns whether this publisher is a built-in entity.
+    pub(crate) fn is_builtin(&self) -> bool {
+        self.is_builtin
     }
 
     /// Creates a new `DataWriter` for publishing data of type `Foo` to the specified topic.
@@ -204,24 +239,66 @@ impl Publisher {
     /// * Type support for the topic is not found
     /// * The QoS policies are inconsistent
     /// * The DCPS bridge is not initialized
+    /// Resolution chain for `QosKind::Default`: registered default → configured
+    /// default profile → spec default. `QosKind::Specific` is used as-is.
+    ///
+    /// Shared by `create_datawriter` and `create_datawriter_dynamic` so both entry
+    /// points resolve the default sentinel identically.
+    fn resolve_datawriter_qos(&self, qos: QosKind<DataWriterQos>) -> DataWriterQos {
+        match qos {
+            QosKind::Specific(q) => q,
+            QosKind::Default => {
+                if let Some(registered) =
+                    self.default_datawriter_qos.lock().ok().and_then(|g| g.clone())
+                {
+                    registered
+                } else if let Ok(profile_qos) =
+                    DomainParticipantFactory::get_instance().get_datawriter_qos_from_profile("")
+                {
+                    profile_qos
+                } else {
+                    DataWriterQos::default()
+                }
+            }
+        }
+    }
+
     pub fn create_datawriter<Foo: 'static + Clone>(
         &self,
         topic: &Topic,
-        qos: DataWriterQos,
+        qos: impl Into<QosKind<DataWriterQos>>,
         listener: Option<Arc<dyn DataWriterListener<Foo = Foo>>>,
         mask: StatusMask,
     ) -> DdsResult<DataWriter<Foo>> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
 
-        let _ = self.cleanup_dead_writers();
+        let qos = self.resolve_datawriter_qos(qos.into());
 
-        let topic_arc = self.get_participant()?.find_internal_topic(topic)?;
         let type_support = self.get_participant()?.find_typesupport(topic.get_type_name());
         if type_support.is_none() {
             return Err(DdsError::Error("Failed to create DataWriter: Topic does not belong to the same DomainParticipant as Publisher.".to_string()));
         }
         let type_support =
             type_support.ok_or(DdsError::Error("TypeSupport not found for Topic".to_string()))?;
+
+        self.create_datawriter_impl(type_support, topic, qos, listener, mask)
+    }
+
+    /// Internal implementation for creating a DataWriter with a provided TypeSupport.
+    fn create_datawriter_impl<Foo: 'static + Clone>(
+        &self,
+        type_support: Arc<dyn TypeSupport>,
+        topic: &Topic,
+        qos: DataWriterQos,
+        listener: Option<Arc<dyn DataWriterListener<Foo = Foo>>>,
+        mask: StatusMask,
+    ) -> DdsResult<DataWriter<Foo>> {
+        let _ = self.cleanup_dead_writers();
+
+        let topic_arc = self.get_participant()?.find_internal_topic(topic)?;
 
         qos.is_consistent()?;
 
@@ -249,6 +326,7 @@ impl Publisher {
         drop(dcps_bridge);
 
         let datawriter = DataWriter::new(
+            false,
             guid,
             type_support,
             &topic_arc,
@@ -259,8 +337,10 @@ impl Publisher {
             wlp_logic,
         )?;
 
-        if self.get_qos()?.entity_factory.autoenable_created_entities {
-            datawriter.enable()?;
+        if let Ok(()) = self.is_enabled() {
+            if self.get_qos_arc()?.entity_factory.autoenable_created_entities {
+                datawriter.enable()?;
+            }
         }
 
         let writer_ops: Arc<dyn DataWriterInternal<Qos = DataWriterQos>> = datawriter
@@ -298,10 +378,118 @@ impl Publisher {
         Ok(datawriter)
     }
 
+    /// Creates a new `DataWriter` using QoS settings from a loaded profile.
+    ///
+    /// This is a convenience method that retrieves QoS from the profile and delegates
+    /// to [`create_datawriter`](Self::create_datawriter).
+    ///
+    /// # Arguments
+    ///
+    /// * `topic` - The topic to write data to.
+    /// * `qos_path` - QoS path in the format `"Library::Profile"` or `"Library::Profile::QosName"`.
+    ///   See [`QosProvider`](crate::config::json::QosProvider) for supported path formats.
+    /// * `listener` - Optional listener for status notifications.
+    /// * `mask` - Status mask indicating which status changes trigger listener callbacks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the profile is not found or datawriter creation fails.
+    pub fn create_datawriter_with_profile<Foo: 'static + Clone>(
+        &self,
+        topic: &Topic,
+        qos_path: &str,
+        listener: Option<Arc<dyn DataWriterListener<Foo = Foo>>>,
+        mask: StatusMask,
+    ) -> DdsResult<DataWriter<Foo>> {
+        let qos = self.get_datawriter_qos_from_profile(qos_path)?;
+        self.create_datawriter::<Foo>(topic, qos, listener, mask)
+    }
+
+    /// Creates a `DataWriter` from a `<domain_participant_library>` declaration at `path`
+    /// (`ParticipantLibrary::Participant::Publisher::Writer`). The topic (name, type, QoS)
+    /// it follows and the writer QoS all come from the XML; only the Rust type `Foo` is in code.
+    pub fn create_datawriter_from_config<Foo: DdsType + 'static + Clone>(
+        &self,
+        path: &str,
+        listener: Option<Arc<dyn DataWriterListener<Foo = Foo>>>,
+        mask: StatusMask,
+    ) -> DdsResult<DataWriter<Foo>> {
+        let resolved = DomainParticipantFactory::get_instance().resolve_datawriter(path)?;
+        let topic = self.get_participant()?.create_topic::<Foo>(
+            &resolved.topic.topic_name,
+            &resolved.topic.type_name,
+            resolved.topic.topic_qos,
+            None,
+            mask,
+        )?;
+        self.create_datawriter::<Foo>(&topic, resolved.qos, listener, mask)
+    }
+
+    /// Creates a `DataWriter` for `DynamicData` using a `DynamicTypeSupport`.
+    ///
+    /// This method is used when the data type is not known at compile time.
+    /// The `DynamicTypeSupport` is typically created from a `TypeObject`.
+    ///
+    /// # Arguments
+    ///
+    /// * `topic` - The topic to write data to.
+    /// * `type_support` - The `DynamicTypeSupport` describing the data type.
+    /// * `qos` - QoS policies for the DataWriter.
+    /// * `listener` - Optional listener for status notifications.
+    /// * `mask` - Status mask indicating which status changes trigger listener callbacks.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use int2dds::xtypes::{DynamicTypeSupport, DynamicData};
+    ///
+    /// // Create DynamicTypeSupport from a TypeObject
+    /// let type_support = DynamicTypeSupport::from_type_object(type_object)?;
+    ///
+    /// // Create a DataWriter for DynamicData
+    /// let writer = publisher.create_datawriter_dynamic(
+    ///     &topic,
+    ///     Arc::new(type_support.clone()),
+    ///     DataWriterQos::default(),
+    ///     None,
+    ///     StatusMask::default(),
+    /// )?;
+    ///
+    /// // Create and write data
+    /// let mut data = type_support.create_data();
+    /// data.set("id", 42i32)?;
+    /// data.set("message", "Hello!")?;
+    /// writer.write(&data, InstanceHandle::NIL)?;
+    /// ```
+    pub fn create_datawriter_dynamic(
+        &self,
+        topic: &Topic,
+        type_support: Arc<crate::xtypes::DynamicTypeSupport>,
+        qos: impl Into<QosKind<DataWriterQos>>,
+        listener: Option<Arc<dyn DataWriterListener<Foo = crate::xtypes::DynamicData>>>,
+        mask: StatusMask,
+    ) -> DdsResult<DataWriter<crate::xtypes::DynamicData>> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
+        self.is_deleted()?;
+
+        // Same default-resolution chain as the typed create_datawriter: a caller that
+        // wants the QoS profile applied passes DATAWRITER_QOS_DEFAULT. Passing a
+        // concrete DataWriterQos still means "use exactly this" via the blanket
+        // From<T> for QosKind<T>, so existing callers are unaffected.
+        let qos = self.resolve_datawriter_qos(qos.into());
+
+        self.create_datawriter_impl(type_support, topic, qos, listener, mask)
+    }
+
     pub fn delete_datawriter<Foo: 'static + Clone>(
         &self,
         datawriter: DataWriter<Foo>,
     ) -> DdsResult<()> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
         let arc_writer: Arc<dyn DataWriterInternal<Qos = DataWriterQos>> =
             Arc::new(datawriter.clone());
@@ -342,7 +530,7 @@ impl Publisher {
             let mut bridge_guard = participant.get_dcps_bridge()?;
             match bridge_guard.as_mut() {
                 Some(bridge) => bridge
-                    .delete_rtps_writer(topic_name.clone(), self.guid.entity_id())
+                    .delete_rtps_writer(topic_name.clone(), handle.to_guid().entity_id())
                     .map_err(|e| DdsError::Error(e.message))?,
                 None => return Err(DdsError::Error("DCPS Bridge is not initialized".to_string())),
             };
@@ -642,6 +830,7 @@ impl Publisher {
     }
 
     // Return DataWriters grouped by type
+    #[allow(clippy::type_complexity)]
     pub fn get_writers_by_type(
         &self,
     ) -> DdsResult<HashMap<TypeId, Vec<Box<dyn DataWriterBase<Qos = DataWriterQos>>>>> {
@@ -691,7 +880,6 @@ impl Publisher {
         Err(DdsError::Unsupported)
     }
 
-    // TODO
     pub fn begin_coherent_changes(&self) -> DdsResult<()> {
         /*
             This operation requests the application to begin a 'coherent set' of modifications using DataWriter objects attached to the Publisher.
@@ -711,17 +899,53 @@ impl Publisher {
             Without delivering both values together, readers might misinterpret them as indicating an aircraft on a collision course.
         */
         self.is_deleted()?;
-        Err(DdsError::Unsupported)
+        // Nested calls only deepen the current set; a new set starts at depth 0 -> 1.
+        self.coherent_depth.fetch_add(1, Ordering::AcqRel);
+        Ok(())
     }
 
-    // TODO
     pub fn end_coherent_changes(&self) -> DdsResult<()> {
         /*
             This operation terminates the 'coherent set' initiated by begin_coherent_changes.
             If called without a matching begin_coherent_changes call, this operation returns PRECONDITION_NOT_MET error.
         */
         self.is_deleted()?;
-        Err(DdsError::Unsupported)
+
+        // fetch_update returns the pre-decrement depth; checked_sub refuses to go below zero.
+        match self
+            .coherent_depth
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |depth| depth.checked_sub(1))
+        {
+            // Depth was 0: no matching begin_coherent_changes.
+            Err(_) => Err(DdsError::PreconditionNotMet),
+            // Depth 1 -> 0: outermost end closes the set, writers send their end markers.
+            Ok(1) => self.end_writer_coherent_sets(),
+            // Depth 2+ -> 1+: nested end, the set stays open.
+            Ok(_) => Ok(()),
+        }
+    }
+
+    // Ask every attached writer to close its open coherent set; returns the first error.
+    fn end_writer_coherent_sets(&self) -> DdsResult<()> {
+        let writers_by_topic_name =
+            self.writers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        let mut result = Ok(());
+        for weak_writers in writers_by_topic_name.values() {
+            for weak_writer in weak_writers.iter() {
+                if let Some(writer) = weak_writer.upgrade() {
+                    let end_result = writer.end_coherent_set();
+                    if result.is_ok() {
+                        result = end_result;
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    // True while a coherent set is open (begin called without matching end).
+    pub(crate) fn in_coherent_changes(&self) -> bool {
+        self.coherent_depth.load(Ordering::Acquire) > 0
     }
 
     pub fn delete_contained_entities(&self) -> DdsResult<()> {
@@ -732,6 +956,9 @@ impl Publisher {
             If any of the contained entities is in a state where it cannot be deleted, this operation returns PRECONDITION_NOT_MET error.
             When delete_contained_entities returns successfully, the application is guaranteed that the Publisher no longer contains any DataWriter objects and can delete the Publisher.
         */
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
         {
             match self.get_datawriters_internal() {
@@ -745,27 +972,30 @@ impl Publisher {
         }
         Ok(())
     }
-    pub fn set_default_datawriter_qos(&self, qos: DataWriterQos) -> DdsResult<()> {
+    pub fn set_default_datawriter_qos(
+        &self,
+        qos: impl Into<QosKind<DataWriterQos>>,
+    ) -> DdsResult<()> {
         self.is_deleted()?;
-        if qos == DATAWRITER_QOS_DEFAULT {
-            return self.reset_default_datawriter_qos();
-        }
-        match qos.is_consistent() {
-            Ok(()) => match self.default_datawriter_qos.lock() {
-                Ok(mut default_qos) => {
-                    *default_qos = qos;
-                    Ok(())
+        match qos.into() {
+            QosKind::Default => self.reset_default_datawriter_qos(),
+            QosKind::Specific(qos) => {
+                qos.is_consistent()?;
+                match self.default_datawriter_qos.lock() {
+                    Ok(mut default_qos) => {
+                        *default_qos = Some(qos);
+                        Ok(())
+                    }
+                    Err(e) => Err(DdsError::Error(e.to_string())),
                 }
-                Err(e) => Err(DdsError::Error(e.to_string())),
-            },
-            Err(err_code) => Err(err_code),
+            }
         }
     }
 
     fn reset_default_datawriter_qos(&self) -> DdsResult<()> {
         match self.default_datawriter_qos.lock() {
             Ok(mut default_qos) => {
-                *default_qos = DATAWRITER_QOS_DEFAULT;
+                *default_qos = None;
                 Ok(())
             }
             Err(e) => Err(DdsError::Error(e.to_string())),
@@ -775,9 +1005,23 @@ impl Publisher {
     pub fn get_default_datawriter_qos(&self) -> DdsResult<DataWriterQos> {
         self.is_deleted()?;
         match self.default_datawriter_qos.lock() {
-            Ok(default_datawriter_qos) => Ok(default_datawriter_qos.clone()),
+            Ok(default_datawriter_qos) => Ok(default_datawriter_qos.clone().unwrap_or_default()),
             Err(e) => Err(DdsError::Error(e.to_string())),
         }
+    }
+
+    /// Retrieves `DataWriterQos` from a loaded profile.
+    ///
+    /// # Arguments
+    ///
+    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the publisher is deleted or the profile is not found.
+    pub fn get_datawriter_qos_from_profile(&self, qos_path: &str) -> DdsResult<DataWriterQos> {
+        self.is_deleted()?;
+        DomainParticipantFactory::get_instance().get_datawriter_qos_from_profile(qos_path)
     }
 
     pub fn copy_from_topic_qos(
@@ -798,6 +1042,7 @@ impl Publisher {
         datawriter_qos.transport_priority = topic_qos.transport_priority;
         datawriter_qos.lifespan = topic_qos.lifespan;
         datawriter_qos.ownership = topic_qos.ownership;
+        datawriter_qos.data_representation = topic_qos.data_representation.clone();
         Ok(datawriter_qos)
     }
 
@@ -840,7 +1085,9 @@ impl Publisher {
         if let Some(weak_ref) = self.participant.as_ref() {
             // Attempt to upgrade Weak<T> to Arc<T>
             if let Some(participant_arc) = weak_ref.upgrade() {
-                return Ok((*participant_arc).clone());
+                let mut participant = (*participant_arc).clone();
+                participant.self_ref = Some(participant_arc);
+                return Ok(participant);
             }
         }
 
@@ -853,8 +1100,15 @@ impl Publisher {
         {
             match self.writers_by_topic_name.lock() {
                 Ok(writers) => {
-                    if !writers.is_empty() {
-                        return Ok(true);
+                    // Check for non-builtin writers
+                    for weak_writers in writers.values() {
+                        for weak_writer in weak_writers {
+                            if let Some(writer) = weak_writer.upgrade() {
+                                if !writer.is_builtin() {
+                                    return Ok(true);
+                                }
+                            }
+                        }
                     }
                 }
                 Err(e) => return Err(DdsError::Error(e.to_string())),
@@ -996,7 +1250,7 @@ mod tests {
         publication::qos::PublisherQos,
     };
 
-    #[derive(DdsType, speedy::Readable, speedy::Writable)]
+    #[derive(DdsType)]
     pub struct HelloWorld {
         pub index: u32,
         pub message: String,
@@ -1017,6 +1271,131 @@ mod tests {
         drop(publisher);
         let contains_publisher = domain_participant.contains_entity(publisher_handle).unwrap();
         assert!(contains_publisher, "Publisher deleted!")
+    }
+
+    #[test]
+    fn test_delete_datawriter_removes_rtps_writer() {
+        use crate::{
+            core::time::Duration,
+            infrastructure::{
+                qos_policy::{ReliabilityQosPolicy, ReliabilityQosPolicyKind},
+                wait_set::WaitSet,
+            },
+            subscription::qos::{DataReaderQos, SubscriberQos},
+            test_utils::unique_domain_id,
+        };
+
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+
+        // Participant 1: publisher side
+        let participant1 = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic1 = participant1
+            .create_topic::<HelloWorld>(
+                "test_delete_writer",
+                "HelloWorldType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let reliable_qos = ReliabilityQosPolicy {
+            kind: ReliabilityQosPolicyKind::Reliable,
+            max_blocking_time: Duration::from_seconds(1),
+        };
+
+        let publisher = participant1
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic1,
+                DataWriterQos { reliability: reliable_qos.clone(), ..Default::default() },
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        // Participant 2: subscriber side
+        let participant2 = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic2 = participant2
+            .create_topic::<HelloWorld>(
+                "test_delete_writer",
+                "HelloWorldType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let subscriber = participant2
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &topic2,
+                DataReaderQos { reliability: reliable_qos, ..Default::default() },
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        // Wait for publication matched
+        let wait_set = WaitSet::new();
+        let cond = writer.get_statuscondition().unwrap().clone();
+        cond.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
+        wait_set.attach_condition(cond.clone()).unwrap();
+        wait_set.wait(Duration::from_seconds(5)).unwrap();
+        let pub_status = writer.get_publication_matched_status().unwrap();
+        assert_eq!(pub_status.current_count(), 1);
+        wait_set.detach_condition(cond).unwrap();
+
+        // Wait for subscription matched
+        let cond = reader.get_statuscondition().unwrap().clone();
+        cond.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
+        wait_set.attach_condition(cond.clone()).unwrap();
+        wait_set.wait(Duration::from_seconds(5)).unwrap();
+        let sub_status = reader.get_subscription_matched_status().unwrap();
+        assert_eq!(sub_status.current_count(), 1);
+        wait_set.detach_condition(cond).unwrap();
+
+        // Delete writer
+        publisher.delete_datawriter(writer).unwrap();
+
+        // Wait for subscription matched to drop to 0
+        let cond = reader.get_statuscondition().unwrap().clone();
+        cond.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
+        wait_set.attach_condition(cond.clone()).unwrap();
+        wait_set.wait(Duration::from_seconds(5)).unwrap();
+        let sub_status = reader.get_subscription_matched_status().unwrap();
+        assert_eq!(
+            sub_status.current_count(),
+            0,
+            "Reader should see 0 matched writers after delete_datawriter"
+        );
+        wait_set.detach_condition(cond).unwrap();
+
+        participant1.delete_contained_entities().unwrap();
+        factory.delete_participant(participant1).unwrap();
+        participant2.delete_contained_entities().unwrap();
+        factory.delete_participant(participant2).unwrap();
     }
 
     #[test]
@@ -1054,5 +1433,8 @@ mod tests {
         publisher.delete_contained_entities().unwrap();
 
         assert!(publisher.get_data_writers().unwrap().is_empty());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 }

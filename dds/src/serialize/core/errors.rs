@@ -12,7 +12,13 @@ pub enum SerializationError {
     // XCDR specific errors
     InvalidExtensibility,
     InvalidMemberHeader,
-    TypeHashMismatch([u8; 32], [u8; 32]),
+    TypeHashMismatch([u8; 14], [u8; 14]),
+    // Enum/Union specific errors
+    InvalidEnumDiscriminant(i32),
+    InvalidUnionDiscriminant(i32),
+    // Slice conversion error
+    SliceConversionError,
+    InvalidMemberId(u32),
 }
 
 impl std::fmt::Display for SerializationError {
@@ -35,6 +41,18 @@ impl std::fmt::Display for SerializationError {
             SerializationError::InvalidMemberHeader => write!(f, "Invalid member header"),
             SerializationError::TypeHashMismatch(expected, actual) => {
                 write!(f, "Type hash mismatch: expected {:?}, got {:?}", expected, actual)
+            }
+            SerializationError::InvalidEnumDiscriminant(d) => {
+                write!(f, "Invalid enum discriminant: {}", d)
+            }
+            SerializationError::InvalidUnionDiscriminant(d) => {
+                write!(f, "Invalid union discriminant: {}", d)
+            }
+            SerializationError::SliceConversionError => {
+                write!(f, "Slice conversion error")
+            }
+            SerializationError::InvalidMemberId(id) => {
+                write!(f, "EMHEADER member_id exceeds 28 bits: {:#x}", id)
             }
         }
     }

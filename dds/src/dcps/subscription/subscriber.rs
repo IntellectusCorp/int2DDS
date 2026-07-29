@@ -25,21 +25,30 @@ use std::{
     },
 };
 
+use arc_swap::ArcSwap;
+
 use crate::{
     common::instance_handle::InstanceHandle,
     core::error::{DdsError, DdsResult},
-    domain::domain_participant::DomainParticipant,
+    dcps::topic::type_support::TypeSupport,
+    domain::{
+        domain_participant::DomainParticipant, domain_participant_factory::DomainParticipantFactory,
+    },
     infrastructure::{
         domain_entity::DomainEntity,
         entity::{
-            impl_dds_entity, impl_dds_entity_impl, BaseEntity, EnableChild, Entity, EntityInternal,
-            UpdateStatus,
+            impl_check_parent_enabled, impl_dds_entity, impl_dds_entity_impl, BaseEntity,
+            EnableChild, Entity, EntityInternal, UpdateStatus,
         },
+        qos_kind::QosKind,
         qos_policy::{PresentationQosAccessScopeKind, Qos},
         status::StatusMask,
         status_condition::StatusCondition,
     },
-    rtps::common::{entity_kind::EntityKind, guid::Guid},
+    rtps::{
+        common::{entity_kind::EntityKind, guid::Guid},
+        entities::reader::Reader,
+    },
     topic::{qos::TopicQos, topic_description::TopicDescription},
     DdsType,
 };
@@ -47,27 +56,50 @@ use crate::{
 use super::{
     data_reader::{DataReader, DataReaderBase, DataReaderInternal},
     data_reader_listener::DataReaderListener,
-    qos::{DataReaderQos, SubscriberQos, DATAREADER_QOS_DEFAULT},
+    qos::{DataReaderQos, SubscriberQos},
     sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind},
     subscriber_listener::SubscriberListener,
 };
 
+fn effective_topic_name(topic_description: &dyn TopicDescription) -> DdsResult<String> {
+    if let Some(cft) = topic_description
+        .as_any()
+        .downcast_ref::<crate::topic::content_filtered_topic::ContentFilteredTopic>()
+    {
+        return Ok(cft.get_related_topic()?.get_name().to_string());
+    }
+    Ok(topic_description.get_name().to_string())
+}
+
 #[derive(Clone)]
 pub struct Subscriber {
+    // Indicates whether this entity is a built-in entity.
+    //
+    // Built-in entities are managed internally and have restricted operations:
+    // - Cannot be deleted (delete_subscriber)
+    // - Cannot modify QoS (set_qos)
+    // - Cannot create/delete child DataReaders (create_datareader, delete_datareader)
+    //
+    // See also: DomainParticipant::get_builtin_subscriber()
+    is_builtin: bool,
     guid: Guid,
-    qos: Arc<Mutex<SubscriberQos>>,
+    qos: Arc<ArcSwap<SubscriberQos>>,
+    update_lock: Arc<Mutex<()>>,
     listener: Arc<RwLock<Option<Arc<dyn SubscriberListener>>>>,
     mask: Arc<RwLock<StatusMask>>,
     status_condition: Arc<Mutex<StatusCondition<SubscriberQos>>>,
     pub(crate) self_ref: Option<Arc<Subscriber>>,
-    enabled: Arc<AtomicBool>,
+    pub(crate) enabled: Arc<AtomicBool>,
     deleted: Arc<AtomicBool>,
+    #[allow(clippy::type_complexity)]
     readers_by_topic_name:
         Arc<Mutex<HashMap<String, Vec<Weak<dyn DataReaderInternal<Qos = DataReaderQos>>>>>>,
+    #[allow(clippy::type_complexity)]
     readers_by_topic_handle:
         Arc<Mutex<HashMap<InstanceHandle, Vec<Weak<dyn DataReaderInternal<Qos = DataReaderQos>>>>>>,
+    builtin_readers: Arc<Mutex<Vec<Arc<dyn DataReaderInternal<Qos = DataReaderQos>>>>>,
     orphaned_readers: Arc<Mutex<Vec<Arc<dyn DataReaderInternal<Qos = DataReaderQos>>>>>,
-    default_datareader_qos: Arc<Mutex<DataReaderQos>>,
+    default_datareader_qos: Arc<Mutex<Option<DataReaderQos>>>,
     participant: Option<Weak<DomainParticipant>>,
 }
 
@@ -75,7 +107,7 @@ impl Debug for Subscriber {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Subscriber")
             .field("guid", &self.guid)
-            .field("qos", &self.qos.lock().unwrap())
+            .field("qos", &**self.qos.load())
             .field(
                 "listener",
                 &self.listener.read().unwrap().as_ref().map(|_| "Arc<dyn SubscriberListener>"),
@@ -98,6 +130,11 @@ impl Eq for Subscriber {}
 
 impl Drop for Subscriber {
     fn drop(&mut self) {
+        // Builtin entities are managed separately, skip orphan handling
+        if self.is_builtin {
+            return;
+        }
+
         // Only handle drop for the last reference (not clones)
         if let Some(ref self_arc) = self.self_ref {
             if Arc::strong_count(self_arc) > 1 {
@@ -134,12 +171,15 @@ impl EnableChild for Subscriber {
 
         Ok(())
     }
+
+    impl_check_parent_enabled!(get_participant);
 }
 impl UpdateStatus for Subscriber {}
 impl DomainEntity for Subscriber {}
 
 impl Subscriber {
     pub(crate) fn new(
+        is_builtin: bool,
         qos: SubscriberQos,
         listener: Option<Arc<dyn SubscriberListener>>,
         mask: StatusMask,
@@ -147,8 +187,10 @@ impl Subscriber {
         participant: &Arc<DomainParticipant>,
     ) -> Self {
         let mut subscriber = Self {
+            is_builtin,
             guid: handle.to_guid(),
-            qos: Arc::new(Mutex::new(qos)),
+            qos: Arc::new(ArcSwap::from_pointee(qos)),
+            update_lock: Arc::new(Mutex::new(())),
             listener: Arc::new(RwLock::new(listener)),
             mask: Arc::new(RwLock::new(mask)),
             status_condition: Arc::new(Mutex::new(StatusCondition::new(None))),
@@ -157,8 +199,9 @@ impl Subscriber {
             deleted: Arc::new(AtomicBool::new(false)),
             readers_by_topic_name: Arc::new(Mutex::new(HashMap::new())),
             readers_by_topic_handle: Arc::new(Mutex::new(HashMap::new())),
+            builtin_readers: Arc::new(Mutex::new(Vec::new())),
             orphaned_readers: Arc::new(Mutex::new(Vec::new())),
-            default_datareader_qos: Arc::new(Mutex::new(DataReaderQos::default())),
+            default_datareader_qos: Arc::new(Mutex::new(None)),
             participant: Some(Arc::downgrade(participant)),
         };
         let subscriber_arc = Arc::new(subscriber.clone());
@@ -169,6 +212,11 @@ impl Subscriber {
         }
         subscriber.self_ref = Some(subscriber_arc); // Without Arc, the new() function ends and memory is freed. StatusCondition's entity field would return None.
         subscriber
+    }
+
+    /// Returns whether this subscriber is a built-in entity.
+    pub(crate) fn is_builtin(&self) -> bool {
+        self.is_builtin
     }
 
     /// Creates a new `DataReader` for receiving data of type `Foo` from the specified topic.
@@ -205,16 +253,43 @@ impl Subscriber {
     /// * The QoS policies are inconsistent
     /// * The DCPS bridge is not initialized
     /// * The topic description type is unsupported
+    /// Resolution chain for `QosKind::Default`: registered default → configured
+    /// default profile → spec default. `QosKind::Specific` is used as-is.
+    ///
+    /// Shared by `create_datareader` and `create_datareader_dynamic` so both entry
+    /// points resolve the default sentinel identically.
+    fn resolve_datareader_qos(&self, qos: QosKind<DataReaderQos>) -> DataReaderQos {
+        match qos {
+            QosKind::Specific(q) => q,
+            QosKind::Default => {
+                if let Some(registered) =
+                    self.default_datareader_qos.lock().ok().and_then(|g| g.clone())
+                {
+                    registered
+                } else if let Ok(profile_qos) =
+                    DomainParticipantFactory::get_instance().get_datareader_qos_from_profile("")
+                {
+                    profile_qos
+                } else {
+                    DataReaderQos::default()
+                }
+            }
+        }
+    }
+
     pub fn create_datareader<Foo: DdsType>(
         &self,
         topic_description: &dyn TopicDescription,
-        qos: DataReaderQos,
+        qos: impl Into<QosKind<DataReaderQos>>,
         listener: Option<Arc<dyn DataReaderListener<Foo = Foo>>>,
         mask: StatusMask,
     ) -> DdsResult<DataReader<Foo>> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
 
-        let _ = self.cleanup_dead_readers();
+        let qos = self.resolve_datareader_qos(qos.into());
 
         let type_support =
             self.get_participant()?.find_typesupport(topic_description.get_type_name());
@@ -223,6 +298,20 @@ impl Subscriber {
         }
         let type_support =
             type_support.ok_or(DdsError::Error("TypeSupport not found for Topic".to_string()))?;
+
+        self.create_datareader_impl(type_support, topic_description, qos, listener, mask)
+    }
+
+    /// Internal implementation for creating a DataReader with a provided TypeSupport.
+    fn create_datareader_impl<Foo: DdsType>(
+        &self,
+        type_support: Arc<dyn TypeSupport>,
+        topic_description: &dyn TopicDescription,
+        qos: DataReaderQos,
+        listener: Option<Arc<dyn DataReaderListener<Foo = Foo>>>,
+        mask: StatusMask,
+    ) -> DdsResult<DataReader<Foo>> {
+        let _ = self.cleanup_dead_readers();
 
         qos.is_consistent()?;
 
@@ -245,11 +334,22 @@ impl Subscriber {
 
         drop(dcps_bridge);
 
-        let datareader =
-            DataReader::new(guid, type_support, topic_description, qos, listener, mask, self_ref)?;
+        let datareader = DataReader::new(
+            false,
+            guid,
+            type_support,
+            topic_description,
+            qos,
+            listener,
+            mask,
+            self_ref,
+            None, // Non-builtin: RTPS reader created in enable_rtps_entities()
+        )?;
 
-        if self.get_qos()?.entity_factory.autoenable_created_entities {
-            datareader.enable()?;
+        if let Ok(()) = self.is_enabled() {
+            if self.get_qos_arc()?.entity_factory.autoenable_created_entities {
+                datareader.enable()?;
+            }
         }
 
         let reader_ops: Arc<dyn DataReaderInternal<Qos = DataReaderQos>> = datareader
@@ -272,7 +372,7 @@ impl Subscriber {
                 Err(e) => return Err(DdsError::Error(e.to_string())),
             };
 
-            let topic_name = topic_description.get_name().to_string();
+            let topic_name = effective_topic_name(topic_description)?;
             let topic_handle = topic_description.topic_instance_handle()?;
 
             readers_by_topic_name
@@ -288,10 +388,179 @@ impl Subscriber {
         Ok(datareader)
     }
 
+    /// Creates a new `DataReader` using QoS settings from a loaded profile.
+    ///
+    /// This is a convenience method that retrieves QoS from the profile and delegates
+    /// to [`create_datareader`](Self::create_datareader).
+    ///
+    /// # Arguments
+    ///
+    /// * `topic_description` - The topic description to read data from.
+    /// * `qos_path` - QoS path in the format `"Library::Profile"` or `"Library::Profile::QosName"`.
+    ///   See [`QosProvider`](crate::config::json::QosProvider) for supported path formats.
+    /// * `listener` - Optional listener for status notifications.
+    /// * `mask` - Status mask indicating which status changes trigger listener callbacks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the profile is not found or datareader creation fails.
+    pub fn create_datareader_with_profile<Foo: DdsType>(
+        &self,
+        topic_description: &dyn TopicDescription,
+        qos_path: &str,
+        listener: Option<Arc<dyn DataReaderListener<Foo = Foo>>>,
+        mask: StatusMask,
+    ) -> DdsResult<DataReader<Foo>> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
+        let qos = self.get_datareader_qos_from_profile(qos_path)?;
+        self.create_datareader::<Foo>(topic_description, qos, listener, mask)
+    }
+
+    /// Creates a `DataReader` from a `<domain_participant_library>` declaration at `path`
+    /// (`ParticipantLibrary::Participant::Subscriber::Reader`). The topic (name, type, QoS)
+    /// it follows and the reader QoS all come from the XML; only the Rust type `Foo` is in code.
+    pub fn create_datareader_from_config<Foo: DdsType>(
+        &self,
+        path: &str,
+        listener: Option<Arc<dyn DataReaderListener<Foo = Foo>>>,
+        mask: StatusMask,
+    ) -> DdsResult<DataReader<Foo>> {
+        let resolved = DomainParticipantFactory::get_instance().resolve_datareader(path)?;
+        let topic = self.get_participant()?.create_topic::<Foo>(
+            &resolved.topic.topic_name,
+            &resolved.topic.type_name,
+            resolved.topic.topic_qos,
+            None,
+            mask,
+        )?;
+        self.create_datareader::<Foo>(&topic, resolved.qos, listener, mask)
+    }
+
+    /// Creates a `DataReader` for `DynamicData` using a `DynamicTypeSupport`.
+    ///
+    /// This method is used when the data type is not known at compile time.
+    /// The `DynamicTypeSupport` is typically created from a `TypeObject` received
+    /// during discovery.
+    ///
+    /// # Arguments
+    ///
+    /// * `topic_description` - The topic description to read data from.
+    /// * `type_support` - The `DynamicTypeSupport` describing the data type.
+    /// * `qos` - QoS policies for the DataReader.
+    /// * `listener` - Optional listener for status notifications.
+    /// * `mask` - Status mask indicating which status changes trigger listener callbacks.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use int2dds::xtypes::{DynamicTypeSupport, DynamicData};
+    ///
+    /// // Create DynamicTypeSupport from a TypeObject received during discovery
+    /// let type_support = DynamicTypeSupport::from_type_object(type_object)?;
+    ///
+    /// // Create a DataReader for DynamicData
+    /// let reader = subscriber.create_datareader_dynamic(
+    ///     &topic,
+    ///     Arc::new(type_support),
+    ///     DataReaderQos::default(),
+    ///     None,
+    ///     StatusMask::default(),
+    /// )?;
+    ///
+    /// // Read data
+    /// let samples = reader.take(10)?;
+    /// for sample in samples {
+    ///     if let Some(data) = sample.data() {
+    ///         let id: i32 = data.get("id")?;
+    ///         println!("Received id: {}", id);
+    ///     }
+    /// }
+    /// ```
+    pub fn create_datareader_dynamic(
+        &self,
+        topic_description: &dyn TopicDescription,
+        type_support: Arc<crate::xtypes::DynamicTypeSupport>,
+        qos: impl Into<QosKind<DataReaderQos>>,
+        listener: Option<Arc<dyn DataReaderListener<Foo = crate::xtypes::DynamicData>>>,
+        mask: StatusMask,
+    ) -> DdsResult<DataReader<crate::xtypes::DynamicData>> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
+        self.is_deleted()?;
+
+        // Same default-resolution chain as the typed create_datareader: a caller that
+        // wants the QoS profile applied passes DATAREADER_QOS_DEFAULT. Passing a
+        // concrete DataReaderQos still means "use exactly this" via the blanket
+        // From<T> for QosKind<T>, so existing callers are unaffected.
+        let qos = self.resolve_datareader_qos(qos.into());
+
+        self.create_datareader_impl(type_support, topic_description, qos, listener, mask)
+    }
+
+    pub(crate) fn create_builtin_datareader<Foo: DdsType>(
+        &self,
+        topic_description: &dyn TopicDescription,
+        qos: DataReaderQos,
+        rtps_reader: Arc<dyn Reader + Send + Sync>,
+    ) -> DdsResult<DataReader<Foo>> {
+        if !self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
+
+        let type_support =
+            self.get_participant()?.find_typesupport(topic_description.get_type_name());
+        let type_support =
+            type_support.ok_or(DdsError::Error("TypeSupport not found".to_string()))?;
+
+        let self_ref = self
+            .self_ref
+            .as_ref()
+            .ok_or(DdsError::Error("Subscriber not initialized".to_string()))?;
+        let guid = rtps_reader.guid();
+
+        let datareader = DataReader::new(
+            true,
+            guid,
+            type_support,
+            topic_description,
+            qos,
+            None,
+            StatusMask::all(),
+            self_ref,
+            Some(rtps_reader.clone()), // builtin endpoint(reader)
+        )?;
+
+        // Enable if subscriber is enabled and autoenable is set (same as create_datareader)
+        if let Ok(()) = self.is_enabled() {
+            if self.get_qos_arc()?.entity_factory.autoenable_created_entities {
+                datareader.enable()?;
+            }
+        }
+
+        // Store builtin reader with strong reference (not in readers_by_topic_name/handle)
+        let reader_ops: Arc<dyn DataReaderInternal<Qos = DataReaderQos>> = datareader
+            .self_ref
+            .lock()
+            .map_err(|e| DdsError::Error(e.to_string()))?
+            .as_ref()
+            .ok_or(DdsError::Error("DataReader not initialized".to_string()))?
+            .clone();
+
+        self.builtin_readers.lock().map_err(|e| DdsError::Error(e.to_string()))?.push(reader_ops);
+
+        Ok(datareader)
+    }
+
     pub fn delete_datareader<Foo: 'static + Clone + Debug>(
         &self,
         datareader: DataReader<Foo>,
     ) -> DdsResult<()> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
         let arc_reader: Arc<dyn DataReaderInternal<Qos = DataReaderQos>> =
             Arc::new(datareader.clone());
@@ -324,15 +593,16 @@ impl Subscriber {
             return Err(DdsError::PreconditionNotMet);
         }
         let handle = datareader.get_instance_handle()?;
-        let topic_name = datareader.get_topicdescription()?.get_name().to_string();
-        let topic_handle = datareader.get_topicdescription()?.topic_instance_handle()?;
+        let topic_description = datareader.get_topicdescription()?;
+        let topic_name = effective_topic_name(topic_description.as_ref())?;
+        let topic_handle = topic_description.topic_instance_handle()?;
 
         {
             let participant = self.get_participant()?;
             let mut bridge_guard = participant.get_dcps_bridge()?;
             match bridge_guard.as_mut() {
                 Some(bridge) => bridge
-                    .delete_rtps_reader(topic_name.clone(), self.guid.entity_id())
+                    .delete_rtps_reader(topic_name.clone(), handle.to_guid().entity_id())
                     .map_err(|e| DdsError::Error(e.message))?,
                 None => return Err(DdsError::Error("DCPS Bridge is not initialized".to_string())),
             };
@@ -466,6 +736,9 @@ impl Subscriber {
             If any of the contained entities is in a state where it cannot be deleted, this operation returns PRECONDITION_NOT_MET error.
             When delete_contained_entities returns successfully, the application is guaranteed that the Subscriber no longer contains any DataReader objects and can delete the Subscriber.
         */
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
         {
             match self.get_datareaders_internal() {
@@ -542,6 +815,25 @@ impl Subscriber {
         topic_name: &str,
     ) -> DdsResult<DataReader<Foo>> {
         self.is_deleted()?;
+
+        // For builtin subscriber, search in builtin_readers
+        if self.is_builtin {
+            let builtin_readers =
+                self.builtin_readers.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            for reader in builtin_readers.iter() {
+                if let Ok(topic) = reader.get_topic() {
+                    if topic.get_name() == topic_name {
+                        if let Some(typed_reader) =
+                            reader.as_any().downcast_ref::<DataReader<Foo>>()
+                        {
+                            return Ok(typed_reader.clone());
+                        }
+                    }
+                }
+            }
+            return Err(DdsError::Error("DataReader not found.".to_string()));
+        }
+
         let _ = self.cleanup_dead_readers();
         {
             let readers_by_topic_name =
@@ -677,6 +969,7 @@ impl Subscriber {
     }
 
     // Return DataReaders grouped by type
+    #[allow(clippy::type_complexity)]
     pub fn get_readers_by_type(
         &self,
     ) -> DdsResult<HashMap<TypeId, Vec<Box<dyn DataReaderBase<Qos = DataReaderQos>>>>> {
@@ -733,7 +1026,7 @@ impl Subscriber {
             Additional error code that may be returned besides standard errors: PRECONDITION_NOT_MET.
         */
         self.is_deleted()?;
-        if self.get_qos()?.presentation.access_scope != PresentationQosAccessScopeKind::Group {
+        if self.get_qos_arc()?.presentation.access_scope != PresentationQosAccessScopeKind::Group {
             return Ok(());
         }
         Err(DdsError::Unsupported)
@@ -749,7 +1042,7 @@ impl Subscriber {
             Additional error code that may be returned besides standard errors: PRECONDITION_NOT_MET.
         */
         self.is_deleted()?;
-        if self.get_qos()?.presentation.access_scope != PresentationQosAccessScopeKind::Group {
+        if self.get_qos_arc()?.presentation.access_scope != PresentationQosAccessScopeKind::Group {
             return Ok(());
         }
         Err(DdsError::Unsupported)
@@ -777,7 +1070,9 @@ impl Subscriber {
         if let Some(weak_ref) = self.participant.as_ref() {
             // Attempt to upgrade Weak<T> to Arc<T>
             if let Some(participant_arc) = weak_ref.upgrade() {
-                return Ok((*participant_arc).clone());
+                let mut participant = (*participant_arc).clone();
+                participant.self_ref = Some(participant_arc);
+                return Ok(participant);
             }
         }
 
@@ -785,27 +1080,33 @@ impl Subscriber {
         Err(DdsError::Error("Participant reference is invalid or expired".to_string()))
     }
 
-    pub fn set_default_datareader_qos(&self, qos: DataReaderQos) -> DdsResult<()> {
-        self.is_deleted()?;
-        if qos == DATAREADER_QOS_DEFAULT {
-            return self.reset_default_datareader_qos();
+    pub fn set_default_datareader_qos(
+        &self,
+        qos: impl Into<QosKind<DataReaderQos>>,
+    ) -> DdsResult<()> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
         }
-        match qos.is_consistent() {
-            Ok(()) => match self.default_datareader_qos.lock() {
-                Ok(mut default_qos) => {
-                    *default_qos = qos;
-                    Ok(())
+        self.is_deleted()?;
+        match qos.into() {
+            QosKind::Default => self.reset_default_datareader_qos(),
+            QosKind::Specific(qos) => {
+                qos.is_consistent()?;
+                match self.default_datareader_qos.lock() {
+                    Ok(mut default_qos) => {
+                        *default_qos = Some(qos);
+                        Ok(())
+                    }
+                    Err(e) => Err(DdsError::Error(e.to_string())),
                 }
-                Err(e) => Err(DdsError::Error(e.to_string())),
-            },
-            Err(err_code) => Err(err_code),
+            }
         }
     }
 
     fn reset_default_datareader_qos(&self) -> DdsResult<()> {
         match self.default_datareader_qos.lock() {
             Ok(mut default_qos) => {
-                *default_qos = DATAREADER_QOS_DEFAULT;
+                *default_qos = None;
                 Ok(())
             }
             Err(e) => Err(DdsError::Error(e.to_string())),
@@ -815,9 +1116,23 @@ impl Subscriber {
     pub fn get_default_datareader_qos(&self) -> DdsResult<DataReaderQos> {
         self.is_deleted()?;
         match self.default_datareader_qos.lock() {
-            Ok(default_datareader_qos) => Ok(default_datareader_qos.clone()),
+            Ok(default_datareader_qos) => Ok(default_datareader_qos.clone().unwrap_or_default()),
             Err(e) => Err(DdsError::Error(e.to_string())),
         }
+    }
+
+    /// Retrieves `DataReaderQos` from a loaded profile.
+    ///
+    /// # Arguments
+    ///
+    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscriber is deleted or the profile is not found.
+    pub fn get_datareader_qos_from_profile(&self, qos_path: &str) -> DdsResult<DataReaderQos> {
+        self.is_deleted()?;
+        DomainParticipantFactory::get_instance().get_datareader_qos_from_profile(qos_path)
     }
 
     pub fn copy_from_topic_qos(
@@ -835,6 +1150,7 @@ impl Subscriber {
         datareader_qos.history = topic_qos.history;
         datareader_qos.resource_limits = topic_qos.resource_limits;
         datareader_qos.ownership = topic_qos.ownership;
+        datareader_qos.data_representation = topic_qos.data_representation.clone();
         Ok(datareader_qos)
     }
 
@@ -843,8 +1159,15 @@ impl Subscriber {
         {
             match self.readers_by_topic_name.lock() {
                 Ok(readers) => {
-                    if !readers.is_empty() {
-                        return Ok(true);
+                    // Check for non-builtin readers
+                    for weak_readers in readers.values() {
+                        for weak_reader in weak_readers {
+                            if let Some(reader) = weak_reader.upgrade() {
+                                if !reader.is_builtin() {
+                                    return Ok(true);
+                                }
+                            }
+                        }
                     }
                 }
                 Err(e) => return Err(DdsError::Error(e.to_string())),
@@ -967,6 +1290,20 @@ impl Subscriber {
         self.deleted.store(true, Ordering::SeqCst);
     }
 
+    /// Cleans up builtin entities (datareaders) to break self-reference cycles.
+    /// Called during participant deletion.
+    pub(crate) fn cleanup_builtin_entities(&mut self) {
+        // Delete all builtin datareaders
+        if let Ok(mut builtin_readers) = self.builtin_readers.lock() {
+            for reader in builtin_readers.drain(..) {
+                reader.delete();
+            }
+        }
+        // Break self-reference cycle
+        self.self_ref = None;
+        self.deleted.store(true, Ordering::SeqCst);
+    }
+
     fn is_deleted(&self) -> DdsResult<()> {
         if self.deleted.load(Ordering::SeqCst) {
             Err(DdsError::AlreadyDeleted)
@@ -990,7 +1327,7 @@ mod tests {
         topic::qos::TopicQos,
     };
 
-    #[derive(DdsType, speedy::Readable, speedy::Writable)]
+    #[derive(DdsType)]
     pub struct HelloWorld {
         pub index: u32,
         pub message: String,
@@ -1011,6 +1348,131 @@ mod tests {
         drop(subscriber);
         let contains_subscriber = domain_participant.contains_entity(subscriber_handle).unwrap();
         assert!(contains_subscriber, "Subscriber deleted!")
+    }
+
+    #[test]
+    fn test_delete_datareader_removes_rtps_reader() {
+        use crate::{
+            core::time::Duration,
+            infrastructure::{
+                qos_policy::{ReliabilityQosPolicy, ReliabilityQosPolicyKind},
+                wait_set::WaitSet,
+            },
+            publication::qos::{DataWriterQos, PublisherQos},
+            test_utils::unique_domain_id,
+        };
+
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+
+        // Participant 1: publisher side
+        let participant1 = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic1 = participant1
+            .create_topic::<HelloWorld>(
+                "test_delete_reader",
+                "HelloWorldType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let reliable_qos = ReliabilityQosPolicy {
+            kind: ReliabilityQosPolicyKind::Reliable,
+            max_blocking_time: Duration::from_seconds(1),
+        };
+
+        let publisher = participant1
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic1,
+                DataWriterQos { reliability: reliable_qos.clone(), ..Default::default() },
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        // Participant 2: subscriber side
+        let participant2 = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic2 = participant2
+            .create_topic::<HelloWorld>(
+                "test_delete_reader",
+                "HelloWorldType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let subscriber = participant2
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &topic2,
+                DataReaderQos { reliability: reliable_qos, ..Default::default() },
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        // Wait for publication matched
+        let wait_set = WaitSet::new();
+        let cond = writer.get_statuscondition().unwrap().clone();
+        cond.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
+        wait_set.attach_condition(cond.clone()).unwrap();
+        wait_set.wait(Duration::from_seconds(5)).unwrap();
+        let pub_status = writer.get_publication_matched_status().unwrap();
+        assert_eq!(pub_status.current_count(), 1);
+        wait_set.detach_condition(cond).unwrap();
+
+        // Wait for subscription matched
+        let cond = reader.get_statuscondition().unwrap().clone();
+        cond.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
+        wait_set.attach_condition(cond.clone()).unwrap();
+        wait_set.wait(Duration::from_seconds(5)).unwrap();
+        let sub_status = reader.get_subscription_matched_status().unwrap();
+        assert_eq!(sub_status.current_count(), 1);
+        wait_set.detach_condition(cond).unwrap();
+
+        // Delete reader
+        subscriber.delete_datareader(reader).unwrap();
+
+        // Wait for publication matched to drop to 0
+        let cond = writer.get_statuscondition().unwrap().clone();
+        cond.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
+        wait_set.attach_condition(cond.clone()).unwrap();
+        wait_set.wait(Duration::from_seconds(5)).unwrap();
+        let pub_status = writer.get_publication_matched_status().unwrap();
+        assert_eq!(
+            pub_status.current_count(),
+            0,
+            "Writer should see 0 matched readers after delete_datareader"
+        );
+        wait_set.detach_condition(cond).unwrap();
+
+        participant1.delete_contained_entities().unwrap();
+        factory.delete_participant(participant1).unwrap();
+        participant2.delete_contained_entities().unwrap();
+        factory.delete_participant(participant2).unwrap();
     }
 
     #[test]
@@ -1063,5 +1525,8 @@ mod tests {
         subscriber.delete_contained_entities().unwrap();
 
         assert!(subscriber.get_data_readers().unwrap().is_empty());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 }

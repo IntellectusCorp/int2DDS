@@ -4,11 +4,11 @@
 //! within a participant. Each EntityId consists of a 3-byte key and an EntityKind byte that
 //! indicates the entity type (builtin vs user-defined, reader vs writer, keyed vs keyless).
 
-use speedy::{Readable, Writable};
-
+use crate::dcps::topic::type_support::DdsType;
 use crate::rtps::common::entity_kind::EntityKind;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Readable, Writable, Hash)]
+#[derive(DdsType, PartialEq, Copy, Eq, PartialOrd, Ord, Hash)]
+#[dds_type(crate_path = "crate", no_partialeq)]
 pub struct EntityId {
     pub entity_key: [u8; 3],
     pub entity_kind: EntityKind, //u8
@@ -39,6 +39,16 @@ impl EntityId {
         Self { entity_key: [00, 0x02, 00], entity_kind: EntityKind::BUILT_IN_WRITER_WITH_KEY };
     pub const P2P_BUILTIN_PARTICIPANT_MESSAGE_READER: Self =
         Self { entity_key: [00, 0x02, 00], entity_kind: EntityKind::BUILT_IN_READER_WITH_KEY };
+
+    // DDS-XTypes 1.3 Table 21 - TypeLookup service builtin endpoints (keyless).
+    pub const TYPE_LOOKUP_REQUEST_WRITER: Self =
+        Self { entity_key: [0x00, 0x03, 0x00], entity_kind: EntityKind::BUILT_IN_WRITER_NO_KEY };
+    pub const TYPE_LOOKUP_REQUEST_READER: Self =
+        Self { entity_key: [0x00, 0x03, 0x00], entity_kind: EntityKind::BUILT_IN_READER_NO_KEY };
+    pub const TYPE_LOOKUP_REPLY_WRITER: Self =
+        Self { entity_key: [0x00, 0x03, 0x01], entity_kind: EntityKind::BUILT_IN_WRITER_NO_KEY };
+    pub const TYPE_LOOKUP_REPLY_READER: Self =
+        Self { entity_key: [0x00, 0x03, 0x01], entity_kind: EntityKind::BUILT_IN_READER_NO_KEY };
 
     pub fn new<T>(entity_key: [u8; 3], entity_kind: T) -> Self
     where
@@ -86,8 +96,8 @@ impl EntityId {
 
         // {00, 02, 01} with kinds c3 or c4
         if self.entity_key == [0x00, 0x02, 0x01]
-            && (matches!(self.entity_kind, EntityKind::BUILT_IN_WRITER_NO_KEY)
-                || matches!(self.entity_kind, EntityKind::BUILT_IN_READER_NO_KEY))
+            && (self.entity_kind == EntityKind::BUILT_IN_WRITER_NO_KEY
+                || self.entity_kind == EntityKind::BUILT_IN_READER_NO_KEY)
         {
             return true;
         }
@@ -99,8 +109,8 @@ impl EntityId {
     fn is_dds_xtypes_reserved(&self) -> bool {
         // {00, 03, 00} and {00, 03, 01} with kinds c3 or c4
         if (self.entity_key == [0x00, 0x03, 0x00] || self.entity_key == [0x00, 0x03, 0x01])
-            && (matches!(self.entity_kind, EntityKind::BUILT_IN_WRITER_NO_KEY)
-                || matches!(self.entity_kind, EntityKind::BUILT_IN_READER_NO_KEY))
+            && (self.entity_kind == EntityKind::BUILT_IN_WRITER_NO_KEY
+                || self.entity_kind == EntityKind::BUILT_IN_READER_NO_KEY)
         {
             return true;
         }
@@ -161,5 +171,14 @@ impl EntityId {
         key.copy_from_slice(&bytes[0..3]);
 
         EntityId { entity_key: key, entity_kind: EntityKind(bytes[3]) }
+    }
+}
+impl std::fmt::Display for EntityId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:02x}{:02x}{:02x}{}",
+            self.entity_key[0], self.entity_key[1], self.entity_key[2], self.entity_kind
+        )
     }
 }

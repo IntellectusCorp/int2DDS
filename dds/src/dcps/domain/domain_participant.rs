@@ -21,10 +21,15 @@
 //! # Basic Usage
 //!
 //! ```no_run
-//! use int2dds::dcps::domain::DomainParticipantFactory;
+//! use int2dds::domain::domain_participant_factory::DomainParticipantFactory;
+//! use int2dds::domain::qos::DomainParticipantQos;
+//! use int2dds::infrastructure::status::StatusMask;
+//! use int2dds::publication::qos::PublisherQos;
+//! use int2dds::subscription::qos::SubscriberQos;
+//! use int2dds::topic::qos::TopicQos;
 //! use int2dds::topic::type_support::DdsType;
 //!
-//! #[derive(Clone, DdsType)]
+//! #[derive(DdsType)]
 //! struct MyData {
 //!     id: u32,
 //!     value: String,
@@ -32,24 +37,25 @@
 //!
 //! // Get factory and create participant
 //! let factory = DomainParticipantFactory::get_instance();
-//! let participant = factory.create_participant(0, Default::default(), None, Default::default())?;
+//! let participant = factory.create_participant(0, DomainParticipantQos::default(), None, StatusMask::default()).unwrap();
 //!
 //! // Create topic
-//! let topic = participant.create_topic::<MyData>("MyTopic", "MyData", Default::default(), None, Default::default())?;
+//! let topic = participant.create_topic::<MyData>("MyTopic", "MyData", TopicQos::default(), None, StatusMask::default()).unwrap();
 //!
 //! // Create publisher and subscriber
-//! let publisher = participant.create_publisher(Default::default(), None, Default::default())?;
-//! let subscriber = participant.create_subscriber(Default::default(), None, Default::default())?;
+//! let publisher = participant.create_publisher(PublisherQos::default(), None, StatusMask::default()).unwrap();
+//! let subscriber = participant.create_subscriber(SubscriberQos::default(), None, StatusMask::default()).unwrap();
 //!
 //! // Clean up
-//! participant.delete_subscriber(subscriber)?;
-//! participant.delete_publisher(publisher)?;
-//! participant.delete_topic(topic)?;
+//! participant.delete_subscriber(subscriber).unwrap();
+//! participant.delete_publisher(publisher).unwrap();
+//! participant.delete_topic(topic).unwrap();
 //! // or
-//! participant.delete_contained_entities()?;
-//! factory.delete_participant(participant)?;
+//! participant.delete_contained_entities().unwrap();
+//! factory.delete_participant(participant).unwrap();
 //! ```
 
+use arc_swap::ArcSwap;
 use std::{
     collections::HashMap,
     fmt::Debug,
@@ -60,14 +66,13 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use super::{
-    domain_participant_listener::DomainParticipantListener,
-    qos::{DomainParticipantQos, PARTICIPANT_QOS_DEFAULT},
-};
+use super::{domain_participant_listener::DomainParticipantListener, qos::DomainParticipantQos};
 use crate::{
     common::{
         builtin::topic::{
             participant_builtin_topic_data::ParticipantBuiltinTopicData,
+            publication_builtin_topic_data::PublicationBuiltinTopicData,
+            subscription_builtin_topic_data::SubscriptionBuiltinTopicData,
             topic_builtin_topic_data::TopicBuiltinTopicData,
         },
         instance_handle::InstanceHandle,
@@ -75,37 +80,44 @@ use crate::{
     core::{
         error::{DdsError, DdsResult},
         time::{Duration, Time},
-        types::DomainId,
+        types::{DomainId, LENGTH_UNLIMITED},
     },
     domain::domain_participant_factory::DomainParticipantFactory,
+    infrastructure::qos_kind::QosKind,
     infrastructure::{
         entity::{
             impl_dds_entity, impl_dds_entity_impl, BaseEntity, EnableChild, Entity, EntityInternal,
             UpdateStatus,
         },
-        qos_policy::{LivelinessQosPolicyKind, Qos},
+        qos_policy::{
+            DeadlineQosPolicy, DestinationOrderQosPolicy, DestinationOrderQosPolicyKind,
+            DurabilityQosPolicy, DurabilityQosPolicyKind, EntityFactoryQosPolicy, HistoryQosPolicy,
+            HistoryQosPolicyKind, LivelinessQosPolicy, LivelinessQosPolicyKind, OwnershipQosPolicy,
+            OwnershipQosPolicyKind, Qos, ReaderDataLifecycleQosPolicy, ReliabilityQosPolicy,
+            ReliabilityQosPolicyKind, ResourceLimitsQosPolicy, TimeBasedFilterQosPolicy,
+        },
         status::StatusMask,
         status_condition::StatusCondition,
     },
-    publication::{
-        publisher::Publisher,
-        publisher_listener::PublisherListener,
-        qos::{PublisherQos, PUBLISHER_QOS_DEFAULT},
-    },
+    publication::{publisher::Publisher, publisher_listener::PublisherListener, qos::PublisherQos},
     rtps::{
+        builtin::data::participant_message_data::ParticipantMessageData,
         common::{guid::Guid, rtps_error_code::RtpsErrorCode},
         dcps_bridge::dcps_bridge::DcpsBridge,
-        entities::{entity::Entity as RtpsEntity, participant::Participant as RtpsParticipant},
+        entities::{
+            entity::Entity as RtpsEntity, participant::Participant as RtpsParticipant,
+            reader::Reader,
+        },
     },
     subscription::{
-        qos::{SubscriberQos, SUBSCRIBER_QOS_DEFAULT},
+        qos::{DataReaderQos, SubscriberQos},
         subscriber::Subscriber,
         subscriber_listener::SubscriberListener,
     },
     topic::{
         content_filtered_topic::ContentFilteredTopic,
         multi_topic::MultiTopic,
-        qos::{TopicQos, TOPIC_QOS_DEFAULT},
+        qos::TopicQos,
         topic::Topic,
         topic_description::{TopicDescription, TopicDescriptionInternal},
         topic_listener::TopicListener,
@@ -115,9 +127,18 @@ use crate::{
 
 #[derive(Clone)]
 pub struct DomainParticipant {
+    // Indicates whether this entity is a built-in entity.
+    //
+    // Currently always `false` as DDS spec does not define built-in
+    // DomainParticipant exposed to users.
+    //
+    // TODO: Reserved for future DCPS-RTPS built-in entity mapping
+    // if needed (e.g., exposing built-in participant for diagnostics).
+    is_builtin: bool,
     guid: Arc<Guid>,
     domain_id: DomainId,
-    qos: Arc<Mutex<DomainParticipantQos>>,
+    qos: Arc<ArcSwap<DomainParticipantQos>>,
+    update_lock: Arc<Mutex<()>>,
     listener: Arc<RwLock<Option<Arc<dyn DomainParticipantListener>>>>,
     mask: Arc<RwLock<StatusMask>>,
     status_condition: Arc<Mutex<StatusCondition<DomainParticipantQos>>>,
@@ -126,6 +147,8 @@ pub struct DomainParticipant {
     deleted: Arc<AtomicBool>,
     // rtps_participant: Arc<Mutex<Option<RtpsParticipant>>>,
     dcps_bridge: Arc<Mutex<Option<DcpsBridge>>>,
+    builtin_subscriber: Arc<Mutex<Option<Subscriber>>>,
+    builtin_topics: Arc<Mutex<Vec<Topic>>>,
     publishers: Arc<Mutex<Vec<Weak<Publisher>>>>,
     publishers_by_handle: Arc<Mutex<HashMap<InstanceHandle, Weak<Publisher>>>>,
     subscribers: Arc<Mutex<Vec<Weak<Subscriber>>>>,
@@ -137,10 +160,16 @@ pub struct DomainParticipant {
         Arc<Mutex<HashMap<InstanceHandle, Vec<Weak<ContentFilteredTopic>>>>>,
     // multi_topics: Arc<Mutex<Vec<Weak<MultiTopic>>>>,
     orphaned_entities: Arc<Mutex<OrphanedEntities>>,
-    types: Arc<RwLock<HashMap<String, Arc<dyn TypeSupport>>>>,
-    default_subscriber_qos: Arc<Mutex<SubscriberQos>>,
-    default_publisher_qos: Arc<Mutex<PublisherQos>>,
-    default_topic_qos: Arc<Mutex<TopicQos>>,
+    // Reference-counted type registry: each create_topic registers (+1) and each
+    // delete_topic unregisters (-1); the entry is dropped only when the count reaches 0.
+    // The count prevents a concurrent topic deletion from unregistering a type that a
+    // concurrent topic/endpoint creation still needs (the previous presence-only map plus
+    // the non-atomic has_other_topics_with_type gate let a delete race ahead of a create,
+    // making find_typesupport return None and entity creation fail under node churn).
+    types: Arc<RwLock<HashMap<String, (Arc<dyn TypeSupport>, usize)>>>,
+    default_subscriber_qos: Arc<Mutex<Option<SubscriberQos>>>,
+    default_publisher_qos: Arc<Mutex<Option<PublisherQos>>>,
+    default_topic_qos: Arc<Mutex<Option<TopicQos>>>,
     next_instance_id: Arc<AtomicU32>,
 }
 
@@ -157,6 +186,11 @@ impl Debug for DomainParticipant {
 
 impl Drop for DomainParticipant {
     fn drop(&mut self) {
+        // Builtin entities are managed separately, skip orphan handling
+        if self.is_builtin {
+            return;
+        }
+
         // Only handle drop for the last reference (not clones)
         if let Some(ref self_arc) = self.self_ref {
             if Arc::strong_count(self_arc) > 1 {
@@ -264,8 +298,10 @@ impl EnableChild for DomainParticipant {
         let dcps_bridge = dcps_bridge
             .as_mut()
             .ok_or(DdsError::Error("DcpsBridge is not initialized".to_string()))?;
-        dcps_bridge.init();
-        Ok(())
+        match dcps_bridge.init() {
+            Ok(()) => Ok(()),
+            Err(e) => Err(DdsError::Error(e.to_string())),
+        }
     }
     fn enable_child_entities(&self) -> DdsResult<()> {
         // Helper macro to reduce repetitive code
@@ -327,17 +363,22 @@ impl UpdateStatus for DomainParticipant {}
 
 impl DomainParticipant {
     pub(crate) fn new(
+        is_builtin: bool,
         domain_id: DomainId,
         qos: DomainParticipantQos,
         listener: Option<Arc<dyn DomainParticipantListener>>,
         mask: StatusMask,
     ) -> DdsResult<Self> {
-        let dcps_bridge = DcpsBridge::new(domain_id as u32);
+        let dcps_bridge = DcpsBridge::new(domain_id as u32, &qos.property)
+            .map_err(|e| DdsError::Error(e.message))?;
         let guid = dcps_bridge.get_participant().map_err(|e| DdsError::Error(e.message))?.guid();
+
         let mut participant = Self {
+            is_builtin,
             guid: Arc::new(guid),
             domain_id,
-            qos: Arc::new(Mutex::new(qos)),
+            qos: Arc::new(ArcSwap::from_pointee(qos)),
+            update_lock: Arc::new(Mutex::new(())),
             listener: Arc::new(RwLock::new(listener)),
             mask: Arc::new(RwLock::new(mask)),
             status_condition: Arc::new(Mutex::new(StatusCondition::new(None))),
@@ -346,6 +387,8 @@ impl DomainParticipant {
             deleted: Arc::new(AtomicBool::new(false)),
             // rtps_participant: Arc::new(Mutex::new(None)),
             dcps_bridge: Arc::new(Mutex::new(Some(dcps_bridge))),
+            builtin_subscriber: Arc::new(Mutex::new(None)),
+            builtin_topics: Arc::new(Mutex::new(Vec::new())),
             publishers: Arc::new(Mutex::new(Vec::new())),
             publishers_by_handle: Arc::new(Mutex::new(HashMap::new())),
             subscribers: Arc::new(Mutex::new(Vec::new())),
@@ -357,9 +400,9 @@ impl DomainParticipant {
             // multi_topics: Arc::new(Mutex::new(Vec::new())),
             orphaned_entities: Arc::new(Mutex::new(OrphanedEntities::default())),
             types: Arc::new(RwLock::new(HashMap::new())),
-            default_subscriber_qos: Arc::new(Mutex::new(SubscriberQos::default())),
-            default_publisher_qos: Arc::new(Mutex::new(PublisherQos::default())),
-            default_topic_qos: Arc::new(Mutex::new(TopicQos::default())),
+            default_subscriber_qos: Arc::new(Mutex::new(None)),
+            default_publisher_qos: Arc::new(Mutex::new(None)),
+            default_topic_qos: Arc::new(Mutex::new(None)),
             next_instance_id: Arc::new(AtomicU32::new(0)),
         };
 
@@ -369,32 +412,175 @@ impl DomainParticipant {
             let mut status_condition = participant.status_condition.lock().unwrap();
             *status_condition = StatusCondition::new(Some(weak_ref));
         }
-        participant.self_ref = Some(participant_arc); // Without Arc, the new() function ends and memory is freed. StatusCondition's entity field returns None.
+        participant.self_ref = Some(participant_arc.clone()); // Without Arc, the new() function ends and memory is freed. StatusCondition's entity field returns None.
+                                                              // Builtin-Endpoints
+
+        Self::initialize_builtin_entities(&participant_arc)?;
+
         Ok(participant)
+    }
+
+    #[allow(clippy::field_reassign_with_default, clippy::needless_borrow)]
+    fn initialize_builtin_entities(participant: &Arc<Self>) -> DdsResult<()> {
+        let rtps_participant = participant.get_rtps_participant()?;
+        let endpoints = rtps_participant.builtin_endpoints();
+        let sedp_builtin_publications_reader = endpoints.sedp_builtin_publications_reader.clone();
+        let sedp_builtin_subscriptions_reader = endpoints.sedp_builtin_subscriptions_reader.clone();
+        // let sedp_builtin_topics_reader = endpoints.sedp_builtin_topics_reader.clone();
+        let spdp_builtin_participant_reader = endpoints.spdp_builtin_participant_reader.clone();
+        let builtin_participant_message_reader =
+            endpoints.builtin_participant_message_reader.clone();
+
+        // Create builtin topics (type registration is handled internally)
+        let dcps_participant_topic = Self::create_builtin_topic::<ParticipantBuiltinTopicData>(
+            participant,
+            "DCPSParticipant",
+            "SPDPdiscoveredParticipantData",
+        )?;
+        let dcps_publication_topic = Self::create_builtin_topic::<PublicationBuiltinTopicData>(
+            participant,
+            "DCPSPublication",
+            "DiscoveredWriterData",
+        )?;
+        let dcps_subscription_topic = Self::create_builtin_topic::<SubscriptionBuiltinTopicData>(
+            participant,
+            "DCPSSubscription",
+            "DiscoveredReaderData",
+        )?;
+        // TODO
+        // let dcps_topic_topic = Self::create_builtin_topic::<TopicBuiltinTopicData>(
+        //     participant,
+        //     "DCPSTopic",
+        //     "DiscoveredTopicData",
+        // )?;
+        let dcps_participant_message_topic = Self::create_builtin_topic::<ParticipantMessageData>(
+            participant,
+            "DCPSParticipantMessage",
+            "BuiltinParticipantMessageReader",
+        )?;
+
+        // 2.2.5 Built-in Topics
+        let mut subscriber_qos = SubscriberQos::default();
+        // TODO
+        // subscriber_qos.presentation = PresentationQosPolicy {
+        //     access_scope: PresentationQosAccessScopeKind::Topic,
+        //     coherent_access: false,
+        //     ordered_access: false,
+        // };
+        subscriber_qos.entity_factory =
+            EntityFactoryQosPolicy { autoenable_created_entities: true };
+
+        let builtin_subscriber = Subscriber::new(
+            true,
+            subscriber_qos,
+            None,
+            StatusMask::all(),
+            participant.create_instance_handle()?,
+            &participant,
+        );
+
+        // Directly enable builtin subscriber (bypass parent check during initialization)
+        builtin_subscriber.enabled.store(true, Ordering::SeqCst);
+
+        // 2.2.5 Built-in Topics
+        let mut reader_qos = DataReaderQos::default();
+        reader_qos.durability =
+            DurabilityQosPolicy { kind: DurabilityQosPolicyKind::TransientLocal };
+        reader_qos.deadline = DeadlineQosPolicy { period: Duration::infinite() };
+        reader_qos.ownership = OwnershipQosPolicy { kind: OwnershipQosPolicyKind::Shared };
+        reader_qos.liveliness = LivelinessQosPolicy {
+            kind: LivelinessQosPolicyKind::Automatic,
+            lease_duration: Duration::from_seconds(100), // mutable, unspecified
+        };
+        reader_qos.time_based_filter =
+            TimeBasedFilterQosPolicy { minimum_separation: Duration::zero() };
+        reader_qos.reliability = ReliabilityQosPolicy {
+            kind: ReliabilityQosPolicyKind::Reliable,
+            max_blocking_time: Duration::from_millis(100),
+        };
+        reader_qos.destination_order =
+            DestinationOrderQosPolicy { kind: DestinationOrderQosPolicyKind::ByReceptionTimestamp };
+        reader_qos.history =
+            HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepLast(1), strict: true };
+        reader_qos.resource_limits = ResourceLimitsQosPolicy {
+            max_instances: LENGTH_UNLIMITED,
+            max_samples: LENGTH_UNLIMITED,
+            max_samples_per_instance: LENGTH_UNLIMITED,
+        };
+        reader_qos.reader_data_lifecycle = ReaderDataLifecycleQosPolicy {
+            autopurge_nowriter_samples_delay: Duration {
+                sec: Duration::INFINITE_SEC,
+                nanosec: Duration::INFINITE_NSEC,
+            },
+            autopurge_disposed_samples_delay: Duration {
+                sec: Duration::INFINITE_SEC,
+                nanosec: Duration::INFINITE_NSEC,
+            },
+        };
+
+        let _participant_reader = builtin_subscriber
+            .create_builtin_datareader::<ParticipantBuiltinTopicData>(
+                &dcps_participant_topic,
+                reader_qos.clone(),
+                spdp_builtin_participant_reader.clone() as Arc<dyn Reader + Send + Sync>,
+            )?;
+        let _publication_reader = builtin_subscriber
+            .create_builtin_datareader::<PublicationBuiltinTopicData>(
+                &dcps_publication_topic,
+                reader_qos.clone(),
+                sedp_builtin_publications_reader.clone() as Arc<dyn Reader + Send + Sync>,
+            )?;
+        let _subscription_reader = builtin_subscriber
+            .create_builtin_datareader::<SubscriptionBuiltinTopicData>(
+                &dcps_subscription_topic,
+                reader_qos.clone(),
+                sedp_builtin_subscriptions_reader.clone() as Arc<dyn Reader + Send + Sync>,
+            )?;
+        // TODO
+        // let _topic_reader = builtin_subscriber
+        //     .create_builtin_datareader::<TopicBuiltinTopicData>(
+        //         &dcps_topic_topic,
+        //         reader_qos,
+        //         sedp_builtin_topics_reader.clone() as Arc<dyn Reader + Send + Sync>,
+        //     )?;
+        let _participant_message_reader = builtin_subscriber
+            .create_builtin_datareader::<ParticipantMessageData>(
+                &dcps_participant_message_topic,
+                reader_qos.clone(),
+                builtin_participant_message_reader.clone() as Arc<dyn Reader + Send + Sync>,
+            )?;
+
+        *participant.builtin_subscriber.lock().map_err(|e| DdsError::Error(e.to_string()))? =
+            Some(builtin_subscriber);
+
+        Ok(())
     }
 
     pub(crate) fn has_active_entities(&self) -> DdsResult<bool> {
         self.is_deleted()?;
         {
+            // Check non-builtin publishers
             match self.get_publishers() {
                 Ok(publishers) => {
-                    if !publishers.is_empty() {
+                    if publishers.iter().any(|p| !p.is_builtin()) {
                         return Ok(true);
                     }
                 }
                 Err(err) => return Err(err),
             }
+            // Check non-builtin subscribers
             match self.get_subscribers() {
                 Ok(subscribers) => {
-                    if !subscribers.is_empty() {
+                    if subscribers.iter().any(|s| !s.is_builtin()) {
                         return Ok(true);
                     }
                 }
                 Err(e) => return Err(e),
             }
+            // Check non-builtin topics
             match self.get_topics() {
                 Ok(topics) => {
-                    if !topics.is_empty() {
+                    if topics.iter().any(|t| !t.is_builtin()) {
                         return Ok(true);
                     }
                 }
@@ -417,16 +603,6 @@ impl DomainParticipant {
             //     Err(e) => return Err(e),
             // }
             Ok(false)
-        }
-    }
-
-    fn _reset_default_qos(&self) -> DdsResult<()> {
-        match self.qos.lock() {
-            Ok(mut default_qos) => {
-                *default_qos = PARTICIPANT_QOS_DEFAULT;
-                Ok(())
-            }
-            Err(e) => Err(DdsError::Error(e.to_string())),
         }
     }
 
@@ -453,7 +629,6 @@ impl DomainParticipant {
 
             Error codes that may be returned in addition to standard error codes: OUT_OF_RESOURCES.
         */
-        // FastDDS-based implementation example
         // match &self.rtps_participant {
         //     None => DdsError::NotEnabled,
         //     Some(participant) => {
@@ -556,11 +731,33 @@ impl DomainParticipant {
     /// * System resources are insufficient
     pub fn create_publisher(
         &self,
-        qos: PublisherQos,
+        qos: impl Into<QosKind<PublisherQos>>,
         listener: Option<Arc<dyn PublisherListener>>,
         mask: StatusMask,
     ) -> DdsResult<Publisher> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
+
+        // Resolution chain for QosKind::Default: registered default → configured
+        // default profile → spec default. QosKind::Specific is used as-is.
+        let qos = match qos.into() {
+            QosKind::Specific(q) => q,
+            QosKind::Default => {
+                if let Some(registered) =
+                    self.default_publisher_qos.lock().ok().and_then(|g| g.clone())
+                {
+                    registered
+                } else if let Ok(profile_qos) =
+                    DomainParticipantFactory::get_instance().get_publisher_qos_from_profile("")
+                {
+                    profile_qos
+                } else {
+                    PublisherQos::default()
+                }
+            }
+        };
 
         qos.is_consistent()?;
         let handle = self.create_instance_handle()?;
@@ -569,10 +766,12 @@ impl DomainParticipant {
             .self_ref
             .as_ref()
             .ok_or(DdsError::Error("DomainParticipant is not properly initialized".to_string()))?;
-        let publisher = Publisher::new(qos, listener, mask, handle, self_ref);
-        let qos = self.get_qos()?;
-        if qos.entity_factory.autoenable_created_entities {
-            publisher.enable()?;
+        let publisher = Publisher::new(false, qos, listener, mask, handle, self_ref);
+        let qos = self.get_qos_arc()?;
+        if let Ok(()) = self.is_enabled() {
+            if qos.entity_factory.autoenable_created_entities {
+                publisher.enable()?;
+            }
         }
 
         let publisher_ref = publisher
@@ -595,7 +794,35 @@ impl DomainParticipant {
         Ok(publisher)
     }
 
+    /// Creates a new `Publisher` using QoS settings from a loaded profile.
+    ///
+    /// This is a convenience method that retrieves QoS from the profile and delegates
+    /// to [`create_publisher`](Self::create_publisher).
+    ///
+    /// # Arguments
+    ///
+    /// * `qos_path` - QoS path in the format `"Library::Profile"` or `"Library::Profile::QosName"`.
+    ///   See [`QosProvider`](crate::config::json::QosProvider) for supported path formats.
+    /// * `listener` - Optional listener for status notifications.
+    /// * `mask` - Status mask indicating which status changes trigger listener callbacks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the profile is not found or publisher creation fails.
+    pub fn create_publisher_with_profile(
+        &self,
+        qos_path: &str,
+        listener: Option<Arc<dyn PublisherListener>>,
+        mask: StatusMask,
+    ) -> DdsResult<Publisher> {
+        let qos = self.get_publisher_qos_from_profile(qos_path)?;
+        self.create_publisher(qos, listener, mask)
+    }
+
     pub fn delete_publisher(&self, mut publisher: Publisher) -> DdsResult<()> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
 
         match self.try_delete_publisher(&mut publisher) {
@@ -722,11 +949,31 @@ impl DomainParticipant {
     /// * System resources are insufficient
     pub fn create_subscriber(
         &self,
-        qos: SubscriberQos,
+        qos: impl Into<QosKind<SubscriberQos>>,
         listener: Option<Arc<dyn SubscriberListener>>,
         mask: StatusMask,
     ) -> DdsResult<Subscriber> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
+
+        let qos = match qos.into() {
+            QosKind::Specific(q) => q,
+            QosKind::Default => {
+                if let Some(registered) =
+                    self.default_subscriber_qos.lock().ok().and_then(|g| g.clone())
+                {
+                    registered
+                } else if let Ok(profile_qos) =
+                    DomainParticipantFactory::get_instance().get_subscriber_qos_from_profile("")
+                {
+                    profile_qos
+                } else {
+                    SubscriberQos::default()
+                }
+            }
+        };
 
         qos.is_consistent()?;
         let handle = self.create_instance_handle()?;
@@ -735,10 +982,12 @@ impl DomainParticipant {
             .self_ref
             .as_ref()
             .ok_or(DdsError::Error("DomainParticipant not properly initialized".to_string()))?;
-        let subscriber = Subscriber::new(qos, listener, mask, handle, self_ref);
-        let qos = self.get_qos()?;
-        if qos.entity_factory.autoenable_created_entities {
-            subscriber.enable()?;
+        let subscriber = Subscriber::new(false, qos, listener, mask, handle, self_ref);
+        let qos = self.get_qos_arc()?;
+        if let Ok(()) = self.is_enabled() {
+            if qos.entity_factory.autoenable_created_entities {
+                subscriber.enable()?;
+            }
         }
 
         let subscriber_ref = subscriber
@@ -761,7 +1010,35 @@ impl DomainParticipant {
         Ok(subscriber)
     }
 
+    /// Creates a new `Subscriber` using QoS settings from a loaded profile.
+    ///
+    /// This is a convenience method that retrieves QoS from the profile and delegates
+    /// to [`create_subscriber`](Self::create_subscriber).
+    ///
+    /// # Arguments
+    ///
+    /// * `qos_path` - QoS path in the format `"Library::Profile"` or `"Library::Profile::QosName"`.
+    ///   See [`QosProvider`](crate::config::json::QosProvider) for supported path formats.
+    /// * `listener` - Optional listener for status notifications.
+    /// * `mask` - Status mask indicating which status changes trigger listener callbacks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the profile is not found or subscriber creation fails.
+    pub fn create_subscriber_with_profile(
+        &self,
+        qos_path: &str,
+        listener: Option<Arc<dyn SubscriberListener>>,
+        mask: StatusMask,
+    ) -> DdsResult<Subscriber> {
+        let qos = self.get_subscriber_qos_from_profile(qos_path)?;
+        self.create_subscriber(qos, listener, mask)
+    }
+
     pub fn delete_subscriber(&self, mut subscriber: Subscriber) -> DdsResult<()> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
 
         match self.try_delete_subscriber(&mut subscriber) {
@@ -865,7 +1142,6 @@ impl DomainParticipant {
         // If not found, it has already been properly deleted via delete_subscriber, so do nothing
     }
 
-    // TODO: RTPS layer implementation must be completed first (Built-in)
     pub fn get_builtin_subscriber(&self) -> DdsResult<Subscriber> {
         /*
             This operation enables access to the built-in Subscriber.
@@ -876,10 +1152,14 @@ impl DomainParticipant {
             Descriptions of these built-in objects are covered in Section 2.2.5, Built-in Topics.
         */
         self.is_deleted()?;
-        Err(DdsError::Unsupported)
+        self.builtin_subscriber
+            .lock()
+            .map_err(|e| DdsError::Error(e.to_string()))?
+            .clone()
+            .ok_or(DdsError::PreconditionNotMet)
     }
 
-    // TODO: In the future, when ContentFilteredTopic and MultiTopic are implemented, extend this function to
+    // TODO: In the future, when MultiTopic are implemented, extend this function to
     // TODO: Should enable searching for TopicDescription of this type.
     pub fn lookup_topicdescription(
         &self,
@@ -919,6 +1199,9 @@ impl DomainParticipant {
         _subscription_expression: &str,
         _expression_parameters: Vec<String>,
     ) -> DdsResult<MultiTopic> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
         // let multi_topic = MultiTopic::new(
         //     type_name,
@@ -940,6 +1223,9 @@ impl DomainParticipant {
     pub fn delete_multitopic(&self, _multi_topic: MultiTopic) -> DdsResult<()> {
         // in: multitopic: Multitopic
         // out: DdsError_t
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
         Err(DdsError::Unsupported)
     }
@@ -1170,6 +1456,9 @@ impl DomainParticipant {
 
             If delete_contained_entities returns successfully, the application can delete the DomainParticipant knowing that no contained entities exist anymore.
         */
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
         {
             match self.get_publishers() {
@@ -1278,24 +1567,52 @@ impl DomainParticipant {
     /// * The QoS policies are inconsistent
     /// * Type registration fails
     /// * A topic with the same name but different type already exists
+    /// Resolution chain for `QosKind::Default`: registered default → configured
+    /// default profile → spec default. `QosKind::Specific` is used as-is.
+    ///
+    /// Shared by `create_topic` and `create_topic_dynamic` so both entry points
+    /// resolve the default sentinel identically.
+    fn resolve_topic_qos(&self, qos: QosKind<TopicQos>) -> TopicQos {
+        match qos {
+            QosKind::Specific(q) => q,
+            QosKind::Default => {
+                if let Some(registered) = self.default_topic_qos.lock().ok().and_then(|g| g.clone())
+                {
+                    registered
+                } else if let Ok(profile_qos) =
+                    DomainParticipantFactory::get_instance().get_topic_qos_from_profile("")
+                {
+                    profile_qos
+                } else {
+                    TopicQos::default()
+                }
+            }
+        }
+    }
+
     pub fn create_topic<Foo>(
         &self,
         topic_name: &str,
         type_name: &str,
-        qos: TopicQos,
+        qos: impl Into<QosKind<TopicQos>>,
         listener: Option<Arc<dyn TopicListener>>,
         mask: StatusMask,
     ) -> DdsResult<Topic>
     where
         Foo: DdsType,
     {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
+
+        let qos = self.resolve_topic_qos(qos.into());
 
         qos.is_consistent()?;
         let handle = self.create_instance_handle()?;
 
         let type_support = Foo::TypeSupport::default();
-        self.register_type(Arc::new(type_support), type_name)?;
+        self.register_type_for_topic(Arc::new(type_support), type_name)?;
         if self.find_typesupport(type_name).is_none() {
             return Err(DdsError::PreconditionNotMet);
         }
@@ -1304,10 +1621,12 @@ impl DomainParticipant {
             .self_ref
             .as_ref()
             .ok_or(DdsError::Error("DomainParticipant not properly initialized".to_string()))?;
-        let topic = Topic::new(topic_name, type_name, qos, listener, mask, handle, self_ref);
-        let qos = self.get_qos()?;
-        if qos.entity_factory.autoenable_created_entities {
-            topic.enable()?;
+        let topic = Topic::new(false, topic_name, type_name, qos, listener, mask, handle, self_ref);
+        let qos = self.get_qos_arc()?;
+        if let Ok(()) = self.is_enabled() {
+            if qos.entity_factory.autoenable_created_entities {
+                topic.enable()?;
+            }
         }
 
         let topic_ref = topic
@@ -1329,7 +1648,143 @@ impl DomainParticipant {
         Ok(topic)
     }
 
+    /// Creates a new `Topic` using QoS settings from a loaded profile.
+    ///
+    /// This is a convenience method that retrieves QoS from the profile and delegates
+    /// to [`create_topic`](Self::create_topic).
+    ///
+    /// # Arguments
+    ///
+    /// * `topic_name` - The name of the topic.
+    /// * `type_name` - The registered type name for this topic.
+    /// * `qos_path` - QoS path in the format `"Library::Profile"` or `"Library::Profile::QosName"`.
+    ///   See [`QosProvider`](crate::config::json::QosProvider) for supported path formats.
+    /// * `listener` - Optional listener for status notifications.
+    /// * `mask` - Status mask indicating which status changes trigger listener callbacks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the profile is not found or topic creation fails.
+    pub fn create_topic_with_profile<Foo>(
+        &self,
+        topic_name: &str,
+        type_name: &str,
+        qos_path: &str,
+        listener: Option<Arc<dyn TopicListener>>,
+        mask: StatusMask,
+    ) -> DdsResult<Topic>
+    where
+        Foo: DdsType,
+    {
+        let qos = self.get_topic_qos_from_profile(qos_path)?;
+        self.create_topic::<Foo>(topic_name, type_name, qos, listener, mask)
+    }
+
+    /// Creates a `Topic` from a `<domain_library>` declaration loaded via
+    /// [`DomainParticipantFactory::load_profiles`]. The topic name, registered type
+    /// name, and topic QoS are taken from the XML at `path` (`DomainLibrary::Domain::Topic`);
+    /// the Rust type `Foo` must match the declared type.
+    pub fn create_topic_from_domain<Foo>(
+        &self,
+        path: &str,
+        listener: Option<Arc<dyn TopicListener>>,
+        mask: StatusMask,
+    ) -> DdsResult<Topic>
+    where
+        Foo: DdsType,
+    {
+        let resolved = DomainParticipantFactory::get_instance().resolve_topic(path)?;
+        self.create_topic::<Foo>(
+            &resolved.topic_name,
+            &resolved.type_name,
+            resolved.topic_qos,
+            listener,
+            mask,
+        )
+    }
+
+    /// Like [`create_topic_from_domain`](Self::create_topic_from_domain) but resolves the
+    /// type from the `<types>` section into a `DynamicData` topic (no Rust type required).
+    pub fn create_topic_from_domain_dynamic(
+        &self,
+        path: &str,
+        listener: Option<Arc<dyn TopicListener>>,
+        mask: StatusMask,
+    ) -> DdsResult<Topic> {
+        let factory = DomainParticipantFactory::get_instance();
+        let resolved = factory.resolve_topic(path)?;
+        let type_support = factory.get_dynamic_type_support(&resolved.type_ref)?;
+        self.create_topic_dynamic(
+            &resolved.topic_name,
+            Arc::new(type_support),
+            resolved.topic_qos,
+            listener,
+            mask,
+        )
+    }
+
+    /// Creates a builtin topic for internal use.
+    ///
+    /// Builtin topics are used for discovery protocol (DCPSParticipant, DCPSPublication,
+    /// DCPSSubscription, DCPSParticipantMessage). They are created during participant
+    /// initialization and cannot be deleted by user code.
+    fn create_builtin_topic<Foo>(
+        participant: &Arc<Self>,
+        topic_name: &str,
+        type_name: &str,
+    ) -> DdsResult<Topic>
+    where
+        Foo: DdsType,
+    {
+        let handle = participant.create_instance_handle()?;
+
+        // Register type support for builtin type
+        let type_support = Foo::TypeSupport::default();
+        participant.register_type_for_topic(Arc::new(type_support), type_name)?;
+
+        let topic = Topic::new(
+            true, // is_builtin
+            topic_name,
+            type_name,
+            TopicQos::default(),
+            None,
+            StatusMask::all(),
+            handle,
+            participant,
+        );
+
+        // Add weak references to topics collection (for find_internal_topic lookup)
+        let topic_ref = topic
+            .self_ref
+            .as_ref()
+            .ok_or(DdsError::Error("Topic is not properly initialized".to_string()))?
+            .clone();
+        let weak_topic = Arc::downgrade(&topic_ref);
+        {
+            let mut topics =
+                participant.topics.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            topics.push(weak_topic.clone());
+        }
+        {
+            let mut topics_by_handle =
+                participant.topics_by_handle.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            topics_by_handle.insert(handle, weak_topic);
+        }
+
+        // Store owned topic in builtin_topics for proper cleanup
+        {
+            let mut builtin_topics =
+                participant.builtin_topics.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            builtin_topics.push(topic.clone());
+        }
+
+        Ok(topic)
+    }
+
     pub fn delete_topic(&self, mut topic: Topic) -> DdsResult<()> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
 
         match self.try_delete_topic(&mut topic) {
@@ -1364,7 +1819,6 @@ impl DomainParticipant {
 
         let type_name = topic.get_type_name();
         let handle = topic.get_instance_handle()?;
-        let should_unregister_type = !self.has_other_topics_with_type(type_name, &handle)?;
 
         {
             let mut topics = self
@@ -1392,10 +1846,12 @@ impl DomainParticipant {
             topics_by_handle.remove(&handle);
         }
 
-        // Unregister type only when not used by other topics
-        if should_unregister_type {
-            self.unregister_type(type_name)?;
-        }
+        // Drop this topic's reference to its type. The reference-counted registry keeps
+        // the entry alive while other topics/endpoints of the same type still exist, so a
+        // concurrent creation can never observe a missing type (the former presence-only
+        // unregister gated by has_other_topics_with_type was racy under node churn).
+        // Ignore a benign mismatch (e.g. a type registered outside create_topic).
+        let _ = self.unregister_type(type_name);
 
         topic.delete();
         Ok(())
@@ -1532,26 +1988,33 @@ impl DomainParticipant {
     }
 
     // TODO: RTPS layer implementation must precede this (Built-in)
-    pub fn get_discovered_participants(
-        &self,
-        _participant_handles: Vec<InstanceHandle>,
-    ) -> DdsResult<Vec<InstanceHandle>> {
+    pub fn get_discovered_participants(&self) -> DdsResult<Vec<InstanceHandle>> {
         /*
             Among the DomainParticipants discovered in the domain,
             Retrieves a list of DomainParticipants that the application has not specified to "ignore" through the ignore_participant operation.
             If the infrastructure does not maintain connectivity information locally
-            This operation may fail, in which case it returns UNSUPPORTED.
         */
+        // TODO: Filter out participants ignored via ignore_participant operation
         self.is_deleted()?;
-        Err(DdsError::Unsupported)
+        let rtps_participant = self.get_rtps_participant()?;
+        let proxy_datas = rtps_participant.remote_participant_proxy_datas();
+        let result = match proxy_datas.lock() {
+            Ok(datas) => {
+                let handles = datas
+                    .iter()
+                    .map(|data| InstanceHandle::from_guid(&data.participant_guid()))
+                    .collect();
+                Ok(handles)
+            }
+            Err(e) => Err(DdsError::Error(e.to_string())),
+        };
+        result
     }
 
-    // TODO: RTPS layer implementation must precede this (Built-in)
     pub fn get_discovered_participant_data(
         &self,
-        _participant_data: ParticipantBuiltinTopicData,
-        _participant_handles: Vec<InstanceHandle>,
-    ) -> DdsResult<TopicBuiltinTopicData> {
+        participant_handle: InstanceHandle,
+    ) -> DdsResult<ParticipantBuiltinTopicData> {
         /*
             This operation retrieves information about DomainParticipants discovered on the network.
             The Participant must belong to the same domain as the DomainParticipant on which this operation is called,
@@ -1560,17 +2023,44 @@ impl DomainParticipant {
             Otherwise the operation fails and returns PRECONDITION_NOT_MET.
             The get_discovered_participants operation can be used to find currently discovered DomainParticipants.
             If the infrastructure does not maintain the information needed to fill participant_data,
-            This operation may fail and return UNSUPPORTED.
         */
+        // TODO: Filter out participants ignored via ignore_participant operation
         self.is_deleted()?;
-        Err(DdsError::Unsupported)
+        let participant_guid = participant_handle.to_guid();
+        let rtps_participant = self.get_rtps_participant()?;
+        let proxy_datas = rtps_participant.remote_participant_proxy_datas();
+        let datas_guard = proxy_datas.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        let proxy_data = datas_guard
+            .iter()
+            .find(|data| data.participant_guid() == participant_guid)
+            .ok_or(DdsError::PreconditionNotMet)?;
+        Ok(ParticipantBuiltinTopicData::new(participant_guid, proxy_data.user_data().clone()))
+    }
+
+    pub fn get_discovered_publications(&self) -> DdsResult<Vec<PublicationBuiltinTopicData>> {
+        self.is_deleted()?;
+        let rtps_participant = self.get_rtps_participant()?;
+        let remote_publications = rtps_participant.remote_publications();
+        let mut result = Vec::new();
+        for entry in remote_publications.iter() {
+            result.extend(entry.value().values().cloned());
+        }
+        Ok(result)
+    }
+
+    pub fn get_discovered_subscriptions(&self) -> DdsResult<Vec<SubscriptionBuiltinTopicData>> {
+        self.is_deleted()?;
+        let rtps_participant = self.get_rtps_participant()?;
+        let remote_subscriptions = rtps_participant.remote_subscriptions();
+        let mut result = Vec::new();
+        for entry in remote_subscriptions.iter() {
+            result.extend(entry.value().values().cloned());
+        }
+        Ok(result)
     }
 
     // TODO: RTPS layer implementation must precede this (Built-in)
-    pub fn get_discovered_topics(
-        &self,
-        _topic_handles: Vec<InstanceHandle>,
-    ) -> DdsResult<Vec<InstanceHandle>> {
+    pub fn get_discovered_topics(&self) -> DdsResult<Vec<InstanceHandle>> {
         /*
             Among the Topics discovered in the domain,
             retrieves a list of Topics that the application has not specified to "ignore" through the ignore_topic operation.
@@ -1582,8 +2072,7 @@ impl DomainParticipant {
     // TODO: RTPS layer implementation must precede this (Built-in)
     pub fn get_discovered_topic_data(
         &self,
-        _topic_data: TopicBuiltinTopicData,
-        _topic_handles: Vec<InstanceHandle>,
+        _topic_handle: InstanceHandle,
     ) -> DdsResult<TopicBuiltinTopicData> {
         /*
             This operation retrieves information about Topics discovered on the network.
@@ -1659,28 +2148,31 @@ impl DomainParticipant {
         }
     }
 
-    pub fn set_default_publisher_qos(&self, qos: PublisherQos) -> DdsResult<()> {
+    pub fn set_default_publisher_qos(
+        &self,
+        qos: impl Into<QosKind<PublisherQos>>,
+    ) -> DdsResult<()> {
         self.is_deleted()?;
 
-        if qos == PUBLISHER_QOS_DEFAULT {
-            return self.reset_default_publisher_qos();
-        }
-        match qos.is_consistent() {
-            Ok(()) => match self.default_publisher_qos.lock() {
-                Ok(mut default_qos) => {
-                    *default_qos = qos;
-                    Ok(())
+        match qos.into() {
+            QosKind::Default => self.reset_default_publisher_qos(),
+            QosKind::Specific(qos) => {
+                qos.is_consistent()?;
+                match self.default_publisher_qos.lock() {
+                    Ok(mut default_qos) => {
+                        *default_qos = Some(qos);
+                        Ok(())
+                    }
+                    Err(e) => Err(DdsError::Error(e.to_string())),
                 }
-                Err(e) => Err(DdsError::Error(e.to_string())),
-            },
-            Err(err_code) => Err(err_code),
+            }
         }
     }
 
     fn reset_default_publisher_qos(&self) -> DdsResult<()> {
         match self.default_publisher_qos.lock() {
             Ok(mut default_qos) => {
-                *default_qos = PUBLISHER_QOS_DEFAULT;
+                *default_qos = None;
                 Ok(())
             }
             Err(e) => Err(DdsError::Error(e.to_string())),
@@ -1690,31 +2182,53 @@ impl DomainParticipant {
     pub fn get_default_publisher_qos(&self) -> DdsResult<PublisherQos> {
         self.is_deleted()?;
 
-        Ok(self.default_publisher_qos.lock().map_err(|e| DdsError::Error(e.to_string()))?.clone())
+        Ok(self
+            .default_publisher_qos
+            .lock()
+            .map_err(|e| DdsError::Error(e.to_string()))?
+            .clone()
+            .unwrap_or_default())
     }
 
-    pub fn set_default_subscriber_qos(&self, qos: SubscriberQos) -> DdsResult<()> {
+    /// Retrieves `PublisherQos` from a loaded profile.
+    ///
+    /// # Arguments
+    ///
+    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the participant is deleted or the profile is not found.
+    pub fn get_publisher_qos_from_profile(&self, qos_path: &str) -> DdsResult<PublisherQos> {
+        self.is_deleted()?;
+        DomainParticipantFactory::get_instance().get_publisher_qos_from_profile(qos_path)
+    }
+
+    pub fn set_default_subscriber_qos(
+        &self,
+        qos: impl Into<QosKind<SubscriberQos>>,
+    ) -> DdsResult<()> {
         self.is_deleted()?;
 
-        if qos == SUBSCRIBER_QOS_DEFAULT {
-            return self.reset_default_subscriber_qos();
-        }
-        match qos.is_consistent() {
-            Ok(()) => match self.default_subscriber_qos.lock() {
-                Ok(mut default_qos) => {
-                    *default_qos = qos;
-                    Ok(())
+        match qos.into() {
+            QosKind::Default => self.reset_default_subscriber_qos(),
+            QosKind::Specific(qos) => {
+                qos.is_consistent()?;
+                match self.default_subscriber_qos.lock() {
+                    Ok(mut default_qos) => {
+                        *default_qos = Some(qos);
+                        Ok(())
+                    }
+                    Err(e) => Err(DdsError::Error(e.to_string())),
                 }
-                Err(e) => Err(DdsError::Error(e.to_string())),
-            },
-            Err(err_code) => Err(err_code),
+            }
         }
     }
 
     fn reset_default_subscriber_qos(&self) -> DdsResult<()> {
         match self.default_subscriber_qos.lock() {
             Ok(mut default_qos) => {
-                *default_qos = SUBSCRIBER_QOS_DEFAULT;
+                *default_qos = None;
                 Ok(())
             }
             Err(e) => Err(DdsError::Error(e.to_string())),
@@ -1724,31 +2238,50 @@ impl DomainParticipant {
     pub fn get_default_subscriber_qos(&self) -> DdsResult<SubscriberQos> {
         self.is_deleted()?;
 
-        Ok(self.default_subscriber_qos.lock().map_err(|e| DdsError::Error(e.to_string()))?.clone())
+        Ok(self
+            .default_subscriber_qos
+            .lock()
+            .map_err(|e| DdsError::Error(e.to_string()))?
+            .clone()
+            .unwrap_or_default())
     }
 
-    pub fn set_default_topic_qos(&self, qos: TopicQos) -> DdsResult<()> {
+    /// Retrieves `SubscriberQos` from a loaded profile.
+    ///
+    /// # Arguments
+    ///
+    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the participant is deleted or the profile is not found.
+    pub fn get_subscriber_qos_from_profile(&self, qos_path: &str) -> DdsResult<SubscriberQos> {
+        self.is_deleted()?;
+        DomainParticipantFactory::get_instance().get_subscriber_qos_from_profile(qos_path)
+    }
+
+    pub fn set_default_topic_qos(&self, qos: impl Into<QosKind<TopicQos>>) -> DdsResult<()> {
         self.is_deleted()?;
 
-        if qos == TOPIC_QOS_DEFAULT {
-            return self.reset_default_topic_qos();
-        }
-        match qos.is_consistent() {
-            Ok(()) => match self.default_topic_qos.lock() {
-                Ok(mut default_qos) => {
-                    *default_qos = qos;
-                    Ok(())
+        match qos.into() {
+            QosKind::Default => self.reset_default_topic_qos(),
+            QosKind::Specific(qos) => {
+                qos.is_consistent()?;
+                match self.default_topic_qos.lock() {
+                    Ok(mut default_qos) => {
+                        *default_qos = Some(qos);
+                        Ok(())
+                    }
+                    Err(e) => Err(DdsError::Error(e.to_string())),
                 }
-                Err(e) => Err(DdsError::Error(e.to_string())),
-            },
-            Err(err_code) => Err(err_code),
+            }
         }
     }
 
     fn reset_default_topic_qos(&self) -> DdsResult<()> {
         match self.default_topic_qos.lock() {
             Ok(mut default_qos) => {
-                *default_qos = TOPIC_QOS_DEFAULT;
+                *default_qos = None;
                 Ok(())
             }
             Err(e) => Err(DdsError::Error(e.to_string())),
@@ -1758,7 +2291,26 @@ impl DomainParticipant {
     pub fn get_default_topic_qos(&self) -> DdsResult<TopicQos> {
         self.is_deleted()?;
 
-        Ok(self.default_topic_qos.lock().map_err(|e| DdsError::Error(e.to_string()))?.clone())
+        Ok(self
+            .default_topic_qos
+            .lock()
+            .map_err(|e| DdsError::Error(e.to_string()))?
+            .clone()
+            .unwrap_or_default())
+    }
+
+    /// Retrieves `TopicQos` from a loaded profile.
+    ///
+    /// # Arguments
+    ///
+    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the participant is deleted or the profile is not found.
+    pub fn get_topic_qos_from_profile(&self, qos_path: &str) -> DdsResult<TopicQos> {
+        self.is_deleted()?;
+        DomainParticipantFactory::get_instance().get_topic_qos_from_profile(qos_path)
     }
 
     pub fn get_domain_id(&self) -> DdsResult<DomainId> {
@@ -1981,6 +2533,320 @@ impl DomainParticipant {
         Ok(false)
     }
 
+    /// Register a custom TypeSupport implementation with the DomainParticipant.
+    ///
+    /// This method allows registering a TypeSupport for a type before creating topics.
+    /// When a topic is created with the same type_name, the already-registered TypeSupport
+    /// will be used instead of the default one.
+    ///
+    /// This is particularly useful for FFI scenarios where the TypeSupport implementation
+    /// needs to be provided at runtime rather than compile time.
+    ///
+    /// # Arguments
+    /// * `type_support` - The TypeSupport implementation to register
+    /// * `type_name` - The name to register the type under (must be non-empty)
+    ///
+    /// # Errors
+    /// * `DdsError::BadParameter` - If type_name is empty
+    /// * `DdsError::PreconditionNotMet` - If a different TypeSupport is already registered
+    ///   for this type_name (same TypeSupport is OK)
+    pub fn register_type_support(
+        &self,
+        type_support: Arc<dyn TypeSupport>,
+        type_name: &str,
+    ) -> DdsResult<()> {
+        self.register_type(type_support, type_name)
+    }
+
+    /// Registers a `DynamicTypeSupport` for dynamic type handling.
+    ///
+    /// This is a convenience method for registering type support for dynamic data.
+    /// The type name is automatically extracted from the DynamicTypeSupport.
+    ///
+    /// # Arguments
+    ///
+    /// * `type_support` - The `DynamicTypeSupport` created from a `TypeObject`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use int2dds::xtypes::DynamicTypeSupport;
+    ///
+    /// // Create DynamicTypeSupport from a TypeObject received during discovery
+    /// let type_support = DynamicTypeSupport::from_type_object(type_object)?;
+    ///
+    /// // Register the dynamic type
+    /// participant.register_dynamic_type(Arc::new(type_support))?;
+    /// ```
+    pub fn register_dynamic_type(
+        &self,
+        type_support: Arc<crate::xtypes::DynamicTypeSupport>,
+    ) -> DdsResult<()> {
+        let type_name = type_support.get_type_name().to_string();
+        self.register_type(type_support, &type_name)
+    }
+
+    /// Creates a Topic for use with `DynamicData`.
+    ///
+    /// This method creates a topic without requiring a compile-time type. It is used
+    /// when working with `DynamicTypeSupport` for dynamic data handling.
+    ///
+    /// # Arguments
+    ///
+    /// * `topic_name` - Name of the topic to create.
+    /// * `type_support` - The `DynamicTypeSupport` for this topic.
+    /// * `qos` - QoS policies for the topic.
+    /// * `listener` - Optional listener for topic events.
+    /// * `mask` - Status mask for listener callbacks.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use int2dds::xtypes::DynamicTypeSupport;
+    ///
+    /// let type_support = DynamicTypeSupport::from_type_object(type_object)?;
+    /// let type_support_arc = Arc::new(type_support);
+    ///
+    /// // Register and create topic
+    /// participant.register_dynamic_type(type_support_arc.clone())?;
+    /// let topic = participant.create_topic_dynamic(
+    ///     "SensorData",
+    ///     type_support_arc,
+    ///     TopicQos::default(),
+    ///     None,
+    ///     StatusMask::default(),
+    /// )?;
+    /// ```
+    pub fn create_topic_dynamic(
+        &self,
+        topic_name: &str,
+        type_support: Arc<crate::xtypes::DynamicTypeSupport>,
+        qos: impl Into<QosKind<TopicQos>>,
+        listener: Option<Arc<dyn TopicListener>>,
+        mask: StatusMask,
+    ) -> DdsResult<Topic> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
+        self.is_deleted()?;
+
+        // Same default-resolution chain as the typed create_topic: a caller that wants
+        // the QoS profile applied passes TOPIC_QOS_DEFAULT. Passing a concrete TopicQos
+        // still means "use exactly this" via the blanket From<T> for QosKind<T>, so
+        // existing callers are unaffected.
+        let qos = self.resolve_topic_qos(qos.into());
+
+        qos.is_consistent()?;
+        let handle = self.create_instance_handle()?;
+
+        let type_name = type_support.get_type_name().to_string();
+        self.register_type_for_topic(type_support, &type_name)?;
+
+        let self_ref = self
+            .self_ref
+            .as_ref()
+            .ok_or(DdsError::Error("DomainParticipant not properly initialized".to_string()))?;
+        let topic =
+            Topic::new(false, topic_name, &type_name, qos, listener, mask, handle, self_ref);
+        let qos = self.get_qos_arc()?;
+        if let Ok(()) = self.is_enabled() {
+            if qos.entity_factory.autoenable_created_entities {
+                topic.enable()?;
+            }
+        }
+
+        // Store topic reference
+        let topic_ref = topic
+            .self_ref
+            .as_ref()
+            .ok_or(DdsError::Error("Topic is not properly initialized".to_string()))?
+            .clone();
+        let weak_topic = Arc::downgrade(&topic_ref);
+        {
+            let mut topics = self.topics.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            topics.push(weak_topic.clone());
+        }
+        {
+            let mut topics_by_handle =
+                self.topics_by_handle.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            topics_by_handle.insert(handle, weak_topic.clone());
+        }
+
+        Ok(topic)
+    }
+
+    /// Creates a `DynamicTypeSupport` from a `TypeObject`.
+    ///
+    /// This is a convenience method for creating dynamic type support from
+    /// TypeObjects received during discovery. The TypeObject is typically
+    /// obtained from `PublicationBuiltinTopicData::type_object()` after
+    /// reading from the builtin subscriber's DCPSPublication DataReader.
+    ///
+    /// # Arguments
+    ///
+    /// * `type_object` - The `TypeObject` received during discovery.
+    ///
+    /// # Returns
+    ///
+    /// A `DynamicTypeSupport` that can be used to create DataReader or
+    /// DataWriter for `DynamicData`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use int2dds::xtypes::{DynamicTypeSupport, TypeObject};
+    ///
+    /// // Get TypeObject from discovered publication
+    /// let publication_data = datareader.get_matched_publication_data(handle)?;
+    /// if let Some(type_object) = publication_data.type_object() {
+    ///     // Create DynamicTypeSupport from TypeObject
+    ///     let type_support = participant.create_dynamic_type_from_type_object(
+    ///         type_object.clone()
+    ///     )?;
+    ///
+    ///     // Register and use for dynamic data handling
+    ///     let type_support_arc = Arc::new(type_support);
+    ///     participant.register_dynamic_type(type_support_arc.clone())?;
+    ///     let topic = participant.create_topic_dynamic(
+    ///         "SensorTopic",
+    ///         type_support_arc.clone(),
+    ///         TopicQos::default(),
+    ///         None,
+    ///         StatusMask::default(),
+    ///     )?;
+    ///     let reader = subscriber.create_datareader_dynamic(
+    ///         &topic,
+    ///         type_support_arc,
+    ///         DataReaderQos::default(),
+    ///         None,
+    ///         StatusMask::default(),
+    ///     )?;
+    /// }
+    /// ```
+    pub fn create_dynamic_type_from_type_object(
+        &self,
+        type_object: crate::xtypes::TypeObject,
+    ) -> DdsResult<crate::xtypes::DynamicTypeSupport> {
+        let registry = self.get_rtps_participant()?.type_registry();
+        let guard = registry.read().map_err(|e| DdsError::Error(e.to_string()))?;
+        crate::xtypes::DynamicTypeSupport::from_type_object_with_registry(type_object, &guard)
+    }
+
+    pub fn create_dynamic_type_support_from_discovered_type(
+        &self,
+        topic_name: &str,
+    ) -> DdsResult<crate::xtypes::DynamicTypeSupport> {
+        let type_object = self.discovered_type_object(topic_name)?;
+        self.create_dynamic_type_from_type_object(type_object)
+    }
+
+    /// Build a dynamic `Topic` for a topic discovered over SEDP.
+    pub fn create_topic_from_discovered_type(&self, topic_name: &str) -> DdsResult<Topic> {
+        let type_support =
+            Arc::new(self.create_dynamic_type_support_from_discovered_type(topic_name)?);
+        self.create_topic_dynamic(
+            topic_name,
+            type_support,
+            TopicQos::default(),
+            None,
+            StatusMask::default(),
+        )
+    }
+
+    /// Use an inline TypeObject directly when its direct dependencies are already
+    /// in the registry; otherwise trigger a TypeLookup fetch and ask the caller to
+    /// retry once the dependency closure has arrived.
+    fn use_or_fetch_inline(
+        &self,
+        obj: &crate::xtypes::TypeObject,
+        type_id: Option<&crate::xtypes::TypeIdentifier>,
+        prefix: crate::rtps::common::guid::GuidPrefix,
+    ) -> DdsResult<crate::xtypes::TypeObject> {
+        let rtps_participant = self.get_rtps_participant()?;
+        if let crate::xtypes::TypeObject::Complete(complete) = obj {
+            let missing = rtps_participant
+                .type_registry()
+                .read()
+                .map(|reg| reg.missing_direct_dependencies(complete))
+                .unwrap_or_default();
+            if !missing.is_empty() {
+                if let Some(id) = type_id {
+                    rtps_participant.fetch_type_via_lookup(prefix, id.clone());
+                    return Err(DdsError::PreconditionNotMet);
+                }
+            }
+        }
+        Ok(obj.clone())
+    }
+
+    /// Resolve the TypeObject for `topic_name`. Triggers a TypeLookup fetch and
+    /// returns `PreconditionNotMet` while the reply is pending; retry until Ok.
+    pub fn discovered_type_object(&self, topic_name: &str) -> DdsResult<crate::xtypes::TypeObject> {
+        let rtps_participant = self.get_rtps_participant()?;
+
+        // Inline TypeObject advertised by a remote publication/subscription. The
+        // inline slot carries only the top-level type, so when it references nested
+        // types absent from the registry, fall back to a TypeLookup fetch.
+        if let Some(bucket) = rtps_participant.remote_publications().get(topic_name) {
+            if let Some(result) = bucket.values().find_map(|b| {
+                b.type_object().map(|obj| {
+                    self.use_or_fetch_inline(obj, b.type_identifier(), b.endpoint_guid().prefix())
+                })
+            }) {
+                return result;
+            }
+        }
+        if let Some(bucket) = rtps_participant.remote_subscriptions().get(topic_name) {
+            if let Some(result) = bucket.values().find_map(|b| {
+                b.type_object().map(|obj| {
+                    self.use_or_fetch_inline(obj, b.type_identifier(), b.endpoint_guid().prefix())
+                })
+            }) {
+                return result;
+            }
+        }
+
+        // Otherwise locate the advertised TypeIdentifier and its origin prefix.
+        let mut discovered: Option<(
+            crate::rtps::common::guid::GuidPrefix,
+            crate::xtypes::TypeIdentifier,
+        )> = None;
+        if let Some(bucket) = rtps_participant.remote_publications().get(topic_name) {
+            for b in bucket.values() {
+                if let Some(id) = b.type_identifier() {
+                    discovered = Some((b.endpoint_guid().prefix(), id.clone()));
+                    break;
+                }
+            }
+        }
+        if discovered.is_none() {
+            if let Some(bucket) = rtps_participant.remote_subscriptions().get(topic_name) {
+                for b in bucket.values() {
+                    if let Some(id) = b.type_identifier() {
+                        discovered = Some((b.endpoint_guid().prefix(), id.clone()));
+                        break;
+                    }
+                }
+            }
+        }
+
+        let (remote_prefix, type_id) = discovered.ok_or_else(|| {
+            DdsError::Error(format!("No discovered type advertised for topic '{}'", topic_name))
+        })?;
+
+        // Resolve from the registry (populated by an earlier TypeLookup reply).
+        if let Ok(registry) = rtps_participant.type_registry().read() {
+            use crate::xtypes::TypeResolver;
+            if let Some(obj) = registry.resolve_complete(&type_id) {
+                return Ok(obj);
+            }
+        }
+
+        // Not available yet: fetch it and ask the caller to retry.
+        rtps_participant.fetch_type_via_lookup(remote_prefix, type_id);
+        Err(DdsError::PreconditionNotMet)
+    }
+
     pub(crate) fn register_type(
         &self,
         type_support: Arc<dyn TypeSupport>,
@@ -1993,48 +2859,64 @@ impl DomainParticipant {
         // Use write lock of RwLock
         let mut types = self.types.write().unwrap();
 
-        if let Some(existing_type) = types.get(type_name) {
+        if let Some((existing_type, _count)) = types.get(type_name) {
             // type_id() method is available (from Arc<dyn TypeSupport>)
             if existing_type.type_id() == type_support.type_id() {
+                // Already present: leave the topic reference count untouched. This path
+                // is the explicit "ensure registered" used by register_type_support /
+                // register_dynamic_type and the FFI create_topic pre-registration; the
+                // topic's own reference is added once by register_type_for_topic.
                 return Ok(());
             }
             return Err(DdsError::PreconditionNotMet);
         }
 
-        types.insert(type_name.to_string(), type_support);
+        // Present with no topic reference yet (count 0); a following create_topic adds it.
+        types.insert(type_name.to_string(), (type_support, 0));
+        Ok(())
+    }
+
+    /// Registers a type on behalf of a topic creation, atomically adding one topic
+    /// reference. Used by create_topic / create_builtin_topic / create_topic_dynamic so
+    /// the count equals the number of live topics of this type: a concurrent delete_topic
+    /// can never unregister a type that another in-flight topic still needs, and the entry
+    /// is dropped exactly when the last topic of the type is deleted (old semantics).
+    fn register_type_for_topic(
+        &self,
+        type_support: Arc<dyn TypeSupport>,
+        type_name: &str,
+    ) -> DdsResult<()> {
+        if type_name.is_empty() {
+            return Err(DdsError::BadParameter);
+        }
+
+        let mut types = self.types.write().unwrap();
+
+        if let Some((existing_type, count)) = types.get_mut(type_name) {
+            if existing_type.type_id() == type_support.type_id() {
+                *count += 1;
+                return Ok(());
+            }
+            return Err(DdsError::PreconditionNotMet);
+        }
+
+        types.insert(type_name.to_string(), (type_support, 1));
         Ok(())
     }
 
     pub(crate) fn unregister_type(&self, type_name: &str) -> DdsResult<()> {
         let mut types = self.types.write().unwrap();
 
-        if types.get(type_name).is_some() {
-            types.remove(type_name);
+        if let Some((_, count)) = types.get_mut(type_name) {
+            // Drop one reference; remove the entry only when the last user is gone.
+            // saturating_sub guards against an unmatched unregister (no underflow panic).
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                types.remove(type_name);
+            }
             return Ok(());
         }
         Err(DdsError::PreconditionNotMet)
-    }
-
-    fn has_other_topics_with_type(
-        &self,
-        type_name: &str,
-        excluding_handle: &InstanceHandle,
-    ) -> DdsResult<bool> {
-        let topics =
-            self.topics.lock().map_err(|_| DdsError::Error("Failed to lock topics".to_string()))?;
-
-        for weak_topic in topics.iter() {
-            if let Some(topic) = weak_topic.upgrade() {
-                if let Ok(topic_handle) = topic.get_instance_handle() {
-                    // Check excluding topics to be removed
-                    if topic_handle != *excluding_handle && topic.get_type_name() == type_name {
-                        return Ok(true);
-                    }
-                }
-            }
-        }
-
-        Ok(false)
     }
 
     pub(crate) fn find_internal_topic(&self, external_topic: &Topic) -> DdsResult<Arc<Topic>> {
@@ -2068,7 +2950,7 @@ impl DomainParticipant {
 
     pub(crate) fn find_typesupport(&self, type_name: &str) -> Option<Arc<dyn TypeSupport>> {
         // Use read lock of RwLock (multiple threads can read simultaneously)
-        self.types.read().unwrap().get(type_name).cloned()
+        self.types.read().unwrap().get(type_name).map(|(ts, _)| ts.clone())
     }
 
     fn create_instance_handle(&self) -> DdsResult<InstanceHandle> {
@@ -2143,7 +3025,8 @@ impl DomainParticipant {
         for publisher in publishers {
             let writers = publisher.get_data_writers()?;
             for writer in writers {
-                if writer.get_qos()?.liveliness.kind == LivelinessQosPolicyKind::ManualByParticipant
+                if writer.get_qos_arc()?.liveliness.kind
+                    == LivelinessQosPolicyKind::ManualByParticipant
                 {
                     return Ok(true);
                 }
@@ -2152,11 +3035,14 @@ impl DomainParticipant {
         Ok(false)
     }
 
-    pub(crate) fn guid(&self) -> DdsResult<Guid> {
+    pub fn guid(&self) -> DdsResult<Guid> {
         Ok(*self.guid)
     }
 
     pub(crate) fn delete(&mut self) -> DdsResult<()> {
+        // Clean up builtin entities to break self-reference cycles
+        self.cleanup_builtin_entities();
+
         let mut bridge_guard =
             self.dcps_bridge.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
@@ -2178,6 +3064,23 @@ impl DomainParticipant {
         Ok(())
     }
 
+    /// Cleans up builtin entities to break self-reference cycles and prevent memory leaks.
+    fn cleanup_builtin_entities(&self) {
+        // Clean up builtin subscriber and its datareaders
+        if let Ok(mut guard) = self.builtin_subscriber.lock() {
+            if let Some(mut subscriber) = guard.take() {
+                subscriber.cleanup_builtin_entities();
+            }
+        }
+
+        // Clean up builtin topics
+        if let Ok(mut builtin_topics) = self.builtin_topics.lock() {
+            for mut topic in builtin_topics.drain(..) {
+                topic.delete();
+            }
+        }
+    }
+
     fn is_deleted(&self) -> DdsResult<()> {
         if self.deleted.load(Ordering::SeqCst) {
             Err(DdsError::AlreadyDeleted)
@@ -2191,14 +3094,16 @@ impl DomainParticipant {
 mod domain_participant_tests {
     use super::*;
     use crate::domain::domain_participant_factory::DomainParticipantFactory;
+    use crate::infrastructure::qos_policy::EntityFactoryQosPolicy;
     use crate::publication::qos::DataWriterQos;
     use crate::subscription::data_reader::DataReaderInternal;
     use crate::subscription::qos::DataReaderQos;
     use crate::subscription::sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind};
+    use crate::test_utils::unique_domain_id;
     use std::time::{Duration as StdDuration, Instant};
     use std::{sync::Arc, thread};
 
-    #[derive(DdsType, speedy::Readable, speedy::Writable)]
+    #[derive(DdsType)]
     pub struct HelloWorld {
         pub index: u32,
         pub message: String,
@@ -2265,6 +3170,15 @@ mod domain_participant_tests {
         assert!(Arc::ptr_eq(&participant1.publishers, &participant1_clone.publishers));
         assert!(Arc::ptr_eq(&participant1.subscribers, &participant1_clone.subscribers));
         assert!(Arc::ptr_eq(&participant1.topics, &participant1_clone.topics));
+
+        participant1.delete_contained_entities().unwrap();
+        factory.delete_participant(participant1).unwrap();
+        participant2.delete_contained_entities().unwrap();
+        factory.delete_participant(participant2).unwrap();
+        participant3.delete_contained_entities().unwrap();
+        factory.delete_participant(participant3).unwrap();
+        participant4.delete_contained_entities().unwrap();
+        factory.delete_participant(participant4).unwrap();
     }
 
     #[test]
@@ -2285,12 +3199,139 @@ mod domain_participant_tests {
         // Add Publisher to participant
 
         assert!(participant == participant_clone);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn autoenable_created_entities_false() {
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+
+        let mut domain_participant_qos = DomainParticipantQos::default();
+        domain_participant_qos.entity_factory =
+            EntityFactoryQosPolicy { autoenable_created_entities: false };
+
+        let participant = factory
+            .create_participant(domain_id, domain_participant_qos, None, StatusMask::default())
+            .unwrap();
+
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "hello_world",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+
+        let res = publisher.is_enabled();
+        assert!(res.is_err());
+
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let res = writer.is_enabled();
+        assert!(res.is_err());
+
+        // write() should fail when not enabled
+        let res = writer
+            .write(&HelloWorld { index: 0, message: "hello".to_string() }, InstanceHandle::NIL);
+        assert!(res.is_err());
+
+        // Manually enable the writer
+        let res = writer.enable();
+        assert!(res.is_err());
+
+        participant.enable().unwrap();
+        let res = participant.is_enabled();
+        assert!(res.is_ok());
+        publisher.enable().unwrap();
+
+        // Now write() should succeed
+        let res_2 = writer
+            .write(&HelloWorld { index: 0, message: "hello".to_string() }, InstanceHandle::NIL);
+        assert!(res_2.is_ok());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn autoenable_created_entities_false_pub() {
+        let domain_id: i32 = 87;
+        let factory = DomainParticipantFactory::get_instance();
+
+        let domain_participant_qos = DomainParticipantQos::default();
+        let participant = factory
+            .create_participant(domain_id, domain_participant_qos, None, StatusMask::default())
+            .unwrap();
+
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "hello_world",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let mut publisher_qos = PublisherQos::default();
+        publisher_qos.entity_factory =
+            EntityFactoryQosPolicy { autoenable_created_entities: false };
+
+        let publisher =
+            participant.create_publisher(publisher_qos, None, StatusMask::default()).unwrap();
+
+        let res = publisher.is_enabled();
+        assert!(res.is_ok());
+
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let res = writer.is_enabled();
+        assert!(res.is_err());
+
+        // write() should fail when not enabled
+        let res = writer
+            .write(&HelloWorld { index: 0, message: "hello".to_string() }, InstanceHandle::NIL);
+        assert!(res.is_err());
+
+        // Manually enable the writer
+        let res = writer.enable();
+        assert!(res.is_ok());
+
+        // Now write() should succeed
+        let res_2 = writer
+            .write(&HelloWorld { index: 0, message: "hello".to_string() }, InstanceHandle::NIL);
+        assert!(res_2.is_ok());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     use crate::dcps::topic::type_support::DdsType;
-    use speedy::{Readable, Writable};
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     pub struct TestData {
         #[dds(key)]
         id: u32,
@@ -2327,6 +3368,9 @@ mod domain_participant_tests {
                 panic!("Test failed: Could not find existing topic, error code: {:?}", code);
             }
         }
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -2350,6 +3394,9 @@ mod domain_participant_tests {
                 println!("Test passed: Timeout occurred appropriately with timeout 0");
             }
         }
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -2368,11 +3415,6 @@ mod domain_participant_tests {
         let create_thread = thread::Builder::new()
             .name("delayed_topic_creator".to_string())
             .spawn(move || {
-                // Register thread name for monitoring
-                {
-                    use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name("delayed_topic_creator");
-                }
                 // Create topic after waiting 300ms
                 thread::sleep(StdDuration::from_millis(300));
                 let _delayed_topic = participant_clone
@@ -2407,6 +3449,9 @@ mod domain_participant_tests {
 
         // Wait for creation thread to complete
         create_thread.join().expect("Failed to join delayed_topic_creator thread");
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -2444,6 +3489,9 @@ mod domain_participant_tests {
                 );
             }
         }
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -2475,6 +3523,9 @@ mod domain_participant_tests {
         } else {
             panic!("StatusCondition's entity is None");
         }
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -2516,6 +3567,9 @@ mod domain_participant_tests {
         } else {
             panic!("StatusCondition's entity is None");
         }
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -2543,6 +3597,9 @@ mod domain_participant_tests {
             pp_publisher.get_instance_handle().unwrap(),
             "Publisher returned from DomainParticipant differs from the Publisher."
         );
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -2642,9 +3699,15 @@ mod domain_participant_tests {
 
     #[test]
     fn test_contentfilteredtopic_lifecycle() {
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
-            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
             .unwrap();
 
         // Create a topic
@@ -2694,9 +3757,15 @@ mod domain_participant_tests {
 
     #[test]
     fn test_contentfilteredtopic_drop_without_explicit_delete() {
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
-            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
             .unwrap();
 
         let topic = participant
@@ -2736,9 +3805,15 @@ mod domain_participant_tests {
 
     #[test]
     fn test_topic_drop_without_explicit_delete() {
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
-            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
             .unwrap();
 
         {
@@ -2760,9 +3835,15 @@ mod domain_participant_tests {
 
     #[test]
     fn test_multiple_contentfilteredtopics_on_same_topic() {
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
-            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
             .unwrap();
 
         let topic = participant
@@ -2823,9 +3904,15 @@ mod domain_participant_tests {
 
     #[test]
     fn test_lookup_topicdescription() {
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
-            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
             .unwrap();
 
         // Create a Topic
@@ -2873,9 +3960,15 @@ mod domain_participant_tests {
 
     #[test]
     fn test_datareader_with_contentfilteredtopic() {
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
-            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
             .unwrap();
 
         let topic = participant
@@ -2915,7 +4008,6 @@ mod domain_participant_tests {
         let topic_desc = reader.get_topicdescription().unwrap();
         assert_eq!(topic_desc.get_name(), "filtered_topic");
         assert_eq!(topic_desc.get_type_name(), "HelloWorld");
-
         subscriber.delete_datareader(reader).unwrap();
         participant.delete_contentfilteredtopic(cft).unwrap();
         participant.delete_topic(topic).unwrap();
@@ -2957,6 +4049,9 @@ mod domain_participant_tests {
         // Topic deletion succeeds
         assert!(participant.delete_topic(topic).is_ok());
         assert!(participant.get_topic_strong_count("RefCountTestTopic").is_none());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -3033,6 +4128,9 @@ mod domain_participant_tests {
 
         // Deletion now succeeds
         assert!(participant.delete_topic(topic).is_ok());
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -3060,6 +4158,11 @@ mod domain_participant_tests {
 
         // Attempt to delete non-existent topic
         assert!(matches!(participant.delete_topic(topic), Err(_)));
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+        other_participant.delete_contained_entities().unwrap();
+        factory.delete_participant(other_participant).unwrap();
     }
 
     #[test]
@@ -3128,6 +4231,8 @@ mod domain_participant_tests {
         assert!(subscriber.get_data_readers().is_err());
         assert!(participant.get_subscribers().unwrap().is_empty());
         assert!(participant.get_publishers().unwrap().is_empty());
+
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -3140,8 +4245,11 @@ mod domain_participant_tests {
             .unwrap();
 
         let instance_handle = participant.get_instance_handle().unwrap();
-        println!("instance_handle: {:?}", instance_handle);
+        println!("instance_handle: {}", instance_handle);
         assert_eq!(instance_handle.is_nil(), false);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]
@@ -3162,9 +4270,15 @@ mod domain_participant_tests {
 
     #[test]
     fn test_get_entity_guid() {
+        let domain_id = unique_domain_id();
         let domain_participant_factory = DomainParticipantFactory::get_instance();
         let domain_participant = domain_participant_factory
-            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
             .unwrap();
 
         let topic = domain_participant
@@ -3218,6 +4332,9 @@ mod domain_participant_tests {
             .unwrap();
 
         println!("domain_participant guid: {:?}", domain_participant.guid());
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     impl DomainParticipant {
@@ -3229,9 +4346,15 @@ mod domain_participant_tests {
 
     #[test]
     fn test_type_unregistered_when_last_topic_deleted() {
+        let domain_id = unique_domain_id();
         let domain_participant_factory = DomainParticipantFactory::get_instance();
         let domain_participant = domain_participant_factory
-            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
             .unwrap();
         let type_name = "TestType";
 
@@ -3254,13 +4377,22 @@ mod domain_participant_tests {
 
         // Check if type is unregistered
         assert!(!domain_participant.is_type_registered(type_name));
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
     }
 
     #[test]
     fn test_multiple_types_independent_cleanup() {
+        let domain_id = unique_domain_id();
         let domain_participant_factory = DomainParticipantFactory::get_instance();
         let domain_participant = domain_participant_factory
-            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
             .unwrap();
         let type_name = "TestMultipleType";
 
@@ -3289,5 +4421,261 @@ mod domain_participant_tests {
 
         // Should still be registered
         assert!(domain_participant.is_type_registered(type_name));
+
+        domain_participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(domain_participant).unwrap();
+    }
+
+    // ==================== Builtin Subscriber Tests (DDS 2.2.2.2.1.13) ====================
+
+    /// Test that get_builtin_subscriber returns successfully
+    #[test]
+    fn test_get_builtin_subscriber_success() {
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        // Should return the builtin subscriber without error
+        let builtin_subscriber = participant.get_builtin_subscriber();
+        assert!(builtin_subscriber.is_ok(), "get_builtin_subscriber should succeed");
+
+        factory.delete_participant(participant).unwrap();
+    }
+
+    /// Test that builtin subscriber contains expected DataReaders
+    #[test]
+    fn test_builtin_subscriber_contains_datareaders() {
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let builtin_subscriber = participant.get_builtin_subscriber().unwrap();
+
+        // Check that builtin DataReaders exist via lookup_datareader
+        // DCPSParticipant
+        let participant_reader =
+            builtin_subscriber.lookup_datareader::<ParticipantBuiltinTopicData>("DCPSParticipant");
+        assert!(participant_reader.is_ok(), "DCPSParticipant reader lookup should succeed");
+
+        // DCPSPublication
+        let publication_reader =
+            builtin_subscriber.lookup_datareader::<PublicationBuiltinTopicData>("DCPSPublication");
+        assert!(publication_reader.is_ok(), "DCPSPublication reader lookup should succeed");
+
+        // DCPSSubscription
+        let subscription_reader = builtin_subscriber
+            .lookup_datareader::<SubscriptionBuiltinTopicData>("DCPSSubscription");
+        assert!(subscription_reader.is_ok(), "DCPSSubscription reader lookup should succeed");
+
+        factory.delete_participant(participant).unwrap();
+    }
+
+    /// Test that builtin subscriber has correct QoS settings per DDS 2.2.5
+    #[test]
+    fn test_builtin_subscriber_qos() {
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let builtin_subscriber = participant.get_builtin_subscriber().unwrap();
+        let qos = builtin_subscriber.get_qos().unwrap();
+
+        // ENTITY_FACTORY: autoenable_created_entities = TRUE
+        assert!(
+            qos.entity_factory.autoenable_created_entities,
+            "Builtin subscriber should have autoenable_created_entities = true"
+        );
+
+        factory.delete_participant(participant).unwrap();
+    }
+
+    /// Test that builtin DataReaders have correct QoS settings per DDS 2.2.5
+    #[test]
+    fn test_builtin_datareader_qos() {
+        use crate::infrastructure::qos_policy::{
+            DestinationOrderQosPolicyKind, DurabilityQosPolicyKind, HistoryQosPolicyKind,
+            OwnershipQosPolicyKind, ReliabilityQosPolicyKind,
+        };
+
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let builtin_subscriber = participant.get_builtin_subscriber().unwrap();
+
+        // Get DCPSSubscription reader and check its QoS
+        let subscription_reader = builtin_subscriber
+            .lookup_datareader::<SubscriptionBuiltinTopicData>("DCPSSubscription")
+            .unwrap();
+
+        let qos = subscription_reader.get_qos().unwrap();
+
+        // DURABILITY: TRANSIENT_LOCAL
+        assert_eq!(
+            qos.durability.kind,
+            DurabilityQosPolicyKind::TransientLocal,
+            "Builtin reader should have TRANSIENT_LOCAL durability"
+        );
+
+        // DEADLINE: infinite
+        assert!(qos.deadline.period.is_infinite(), "Builtin reader should have infinite deadline");
+
+        // OWNERSHIP: SHARED
+        assert_eq!(
+            qos.ownership.kind,
+            OwnershipQosPolicyKind::Shared,
+            "Builtin reader should have SHARED ownership"
+        );
+
+        // RELIABILITY: RELIABLE
+        assert_eq!(
+            qos.reliability.kind,
+            ReliabilityQosPolicyKind::Reliable,
+            "Builtin reader should have RELIABLE reliability"
+        );
+
+        // DESTINATION_ORDER: BY_RECEPTION_TIMESTAMP
+        assert_eq!(
+            qos.destination_order.kind,
+            DestinationOrderQosPolicyKind::ByReceptionTimestamp,
+            "Builtin reader should have BY_RECEPTION_TIMESTAMP destination order"
+        );
+
+        // HISTORY: KEEP_LAST depth=1
+        assert!(
+            matches!(qos.history.kind, HistoryQosPolicyKind::KeepLast(1)),
+            "Builtin reader should have KEEP_LAST(1) history"
+        );
+
+        // TIME_BASED_FILTER: minimum_separation = 0
+        assert!(
+            qos.time_based_filter.minimum_separation.is_zero(),
+            "Builtin reader should have zero time_based_filter"
+        );
+
+        // RESOURCE_LIMITS: all LENGTH_UNLIMITED
+        assert_eq!(
+            qos.resource_limits.max_instances, LENGTH_UNLIMITED,
+            "Builtin reader should have unlimited max_instances"
+        );
+        assert_eq!(
+            qos.resource_limits.max_samples, LENGTH_UNLIMITED,
+            "Builtin reader should have unlimited max_samples"
+        );
+        assert_eq!(
+            qos.resource_limits.max_samples_per_instance, LENGTH_UNLIMITED,
+            "Builtin reader should have unlimited max_samples_per_instance"
+        );
+
+        // READER_DATA_LIFECYCLE: autopurge delays = infinite
+        assert!(
+            qos.reader_data_lifecycle.autopurge_nowriter_samples_delay.is_infinite(),
+            "Builtin reader should have infinite autopurge_nowriter_samples_delay"
+        );
+        assert!(
+            qos.reader_data_lifecycle.autopurge_disposed_samples_delay.is_infinite(),
+            "Builtin reader should have infinite autopurge_disposed_samples_delay"
+        );
+
+        factory.delete_participant(participant).unwrap();
+    }
+
+    /// Test that builtin subscriber cannot be deleted
+    #[test]
+    fn test_builtin_subscriber_cannot_be_deleted() {
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let builtin_subscriber = participant.get_builtin_subscriber().unwrap();
+
+        // Attempting to delete builtin subscriber should fail
+        let result = participant.delete_subscriber(builtin_subscriber);
+        assert!(result.is_err(), "Deleting builtin subscriber should fail");
+
+        factory.delete_participant(participant).unwrap();
+    }
+
+    /// Test that builtin subscriber QoS cannot be modified
+    #[test]
+    fn test_builtin_subscriber_qos_immutable() {
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let builtin_subscriber = participant.get_builtin_subscriber().unwrap();
+
+        // Attempting to modify QoS should fail
+        let mut new_qos = builtin_subscriber.get_qos().unwrap();
+        new_qos.entity_factory.autoenable_created_entities = false;
+
+        let result = builtin_subscriber.set_qos(new_qos);
+        assert!(result.is_err(), "Modifying builtin subscriber QoS should fail");
+
+        factory.delete_participant(participant).unwrap();
+    }
+
+    /// Test get_builtin_subscriber on deleted participant
+    #[test]
+    fn test_get_builtin_subscriber_on_deleted_participant() {
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let participant_clone = participant.clone();
+        factory.delete_participant(participant).unwrap();
+
+        // Should return error on deleted participant
+        let result = participant_clone.get_builtin_subscriber();
+        assert!(result.is_err(), "get_builtin_subscriber on deleted participant should fail");
     }
 }

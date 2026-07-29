@@ -8,7 +8,7 @@ use crate::{
         publication_builtin_topic_data::PublicationBuiltinTopicData,
         subscription_builtin_topic_data::SubscriptionBuiltinTopicData,
     },
-    infrastructure::qos_policy::{DataRepresentationId, DataRepresentationQosPolicy, QosPolicyId},
+    infrastructure::qos_policy::{DataRepresentationQosPolicy, QosPolicyId},
 };
 
 pub(crate) fn check_qos_compatibility(
@@ -28,8 +28,8 @@ pub(crate) fn check_qos_compatibility(
         || offered.latency_budget().duration > requested.latency_budget().duration
         || offered.type_name() != requested.type_name()
         || !is_data_representation_compatible(
-            &mut requested.data_representation().clone(),
-            &mut offered.data_representation().clone(),
+            requested.data_representation(),
+            offered.data_representation(),
         )
     {
         return false;
@@ -39,25 +39,17 @@ pub(crate) fn check_qos_compatibility(
 }
 
 pub(crate) fn is_data_representation_compatible(
-    requested: &mut DataRepresentationQosPolicy,
-    offered: &mut DataRepresentationQosPolicy,
+    requested: &DataRepresentationQosPolicy,
+    offered: &DataRepresentationQosPolicy,
 ) -> bool {
-    if requested.value.is_empty() && offered.value.is_empty() {
-        return true;
-    }
-
-    if requested.value.is_empty() {
-        requested.value.push(DataRepresentationId::XcdrDataRepresentation);
-    }
-
-    if offered.value.is_empty() {
-        offered.value.push(DataRepresentationId::XcdrDataRepresentation);
-    }
+    // Empty list resolves to the default representation (single source).
+    let requested_reps = requested.effective_ids();
+    let offered_reps = offered.effective_ids();
 
     // DDS-XTypes spec 7.6.3.4.1:
     // DataRepresentation QoS is compatible if the intersection of Writer and Reader is not empty
-    for offered_id in &offered.value {
-        if requested.value.contains(offered_id) {
+    for offered_id in offered_reps {
+        if requested_reps.contains(offered_id) {
             return true;
         }
     }
@@ -104,8 +96,8 @@ pub(crate) fn check_qos_compatibility_with_policy_id(
         return Some(QosPolicyId::LatencyBudget);
     }
     if !is_data_representation_compatible(
-        &mut requested.data_representation().clone(),
-        &mut offered.data_representation().clone(),
+        requested.data_representation(),
+        offered.data_representation(),
     ) {
         return Some(QosPolicyId::DataRepresentation);
     }
@@ -121,10 +113,10 @@ mod tests {
     };
     use crate::core::time::Duration;
     use crate::dcps::infrastructure::qos_policy::{
-        DeadlineQosPolicy, DestinationOrderQosPolicyKind, DurabilityQosPolicyKind,
-        LivelinessQosPolicy, LivelinessQosPolicyKind, OwnershipQosPolicy, OwnershipQosPolicyKind,
-        PresentationQosAccessScopeKind, PresentationQosPolicy, ReliabilityQosPolicy,
-        ReliabilityQosPolicyKind,
+        DataRepresentationId, DeadlineQosPolicy, DestinationOrderQosPolicyKind,
+        DurabilityQosPolicyKind, LivelinessQosPolicy, LivelinessQosPolicyKind, OwnershipQosPolicy,
+        OwnershipQosPolicyKind, PresentationQosAccessScopeKind, PresentationQosPolicy,
+        ReliabilityQosPolicy, ReliabilityQosPolicyKind,
     };
     use crate::infrastructure::qos_policy::DurabilityQosPolicy;
     use crate::publication::qos::{DataWriterQos, PublisherQos};

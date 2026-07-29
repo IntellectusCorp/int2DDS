@@ -6,8 +6,6 @@
 
 #![allow(dead_code)]
 
-use log::error;
-
 use crate::{
     common::builtin::topic::{
         publication_builtin_topic_data::PublicationBuiltinTopicData,
@@ -21,20 +19,16 @@ use crate::{
     rtps::{
         common::{
             entity_id::EntityId,
-            guid::Guid,
+            guid::{Guid, GuidPrefix},
             locator::Locator,
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
-            sequence::SequenceNumber,
             time::RtpsDuration,
             types::TopicKind,
         },
         entities::{
             endpoint::Endpoint,
             entity::Entity,
-            history::{
-                cache_change::CacheChange, history_cache::HistoryCache,
-                reader_history::ReaderHistoryCache,
-            },
+            history::{cache_change::CacheChange, reader_history::ReaderHistoryCache},
             reader::Reader,
         },
         messages::spdp_message::SpdpMessage,
@@ -89,7 +83,7 @@ impl SPDPBuiltinParticipantReader {
     }
 
     fn add_change(&mut self, a_change: CacheChange) {
-        let _ = self.reader_cache.lock().unwrap().add_change(a_change);
+        let _ = self.reader_cache.lock().unwrap().add_change(a_change, false);
     }
 }
 
@@ -156,16 +150,6 @@ impl Reader for SPDPBuiltinParticipantReader {
     fn on_change(&self, _change: Arc<CacheChange>) {
         // SPDP builtin reader handles changes through internal discovery logic, not user callbacks
     }
-    fn get_next_sequence_number(&self) -> SequenceNumber {
-        let cache_guard = match self.reader_cache.lock() {
-            Ok(guard) => guard,
-            Err(e) => {
-                error!("Failed to acquire reader cache lock: {}", e);
-                return SequenceNumber::new(0, 0);
-            }
-        };
-        cache_guard.get_seq_num_max().next()
-    }
 
     fn as_any(&self) -> &dyn Any {
         self
@@ -175,13 +159,7 @@ impl Reader for SPDPBuiltinParticipantReader {
     }
     fn set_datareader_cache(
         &mut self,
-        datareader_cache: Weak<
-            Mutex<
-                dyn dcps_history_cache<CacheChangeInputType = Arc<Mutex<CacheChange>>>
-                    + Send
-                    + Sync,
-            >,
-        >,
+        datareader_cache: Weak<Mutex<dyn dcps_history_cache + Send + Sync>>,
     ) -> RtpsResult<()> {
         let cache_guard = self.reader_cache.lock();
         match cache_guard {
@@ -208,5 +186,16 @@ impl Reader for SPDPBuiltinParticipantReader {
         _writer_guid: Guid,
     ) -> RtpsResult<PublicationBuiltinTopicData> {
         Err(RtpsError::new(RtpsErrorCode::Unknown, "UnSupported"))
+    }
+
+    fn remove_matched_writer_and_update_status(&self, _writer_guid: Guid) -> RtpsResult<bool> {
+        Ok(false)
+    }
+
+    fn remove_all_matched_writers_with_prefix_and_update_status(
+        &self,
+        _prefix: GuidPrefix,
+    ) -> RtpsResult<usize> {
+        Ok(0)
     }
 }

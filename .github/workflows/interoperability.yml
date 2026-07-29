@@ -1,17 +1,31 @@
-name: Run Interoperability Tests
-run-name: ${{ github.actor }} is running Interoperability Tests 🍀
+name: Interoperability Tests
+run-name: "Interop test ${{ github.head_ref }}"
 on:
   workflow_dispatch:
     inputs:
+      enable_int2dds_logging:
+        description: "Enable int2DDS logging"
+        required: false
+        type: boolean
+        default: false
       enable_packet_dump:
-        description: "Enable packet capture"
+        description: "Enable packet capture for debugging"
         required: false
         type: boolean
         default: false
       dump_dds_name:
-        description: "DDS implementation to capture (e.g., opendds, fastdds, connext, dustdds, intercom, coredx, all)"
+        description: "DDS implementation to capture"
         required: false
-        type: string
+        type: choice
+        options:
+          - opendds
+          - fastdds
+          - connext
+          - dustdds
+          - intercom
+          - coredx
+          - int2DDS
+          - all
         default: "all"
       dump_role:
         description: "Role to capture (publisher, subscriber, both)"
@@ -23,7 +37,7 @@ on:
           - both
         default: "both"
   pull_request:
-    branches: [main]
+    branches: [develop]
     types: [opened, synchronize, reopened, ready_for_review]
 jobs:
   build_binary:
@@ -37,18 +51,31 @@ jobs:
           repository: IntellectusCorp/int2DDS-shapes-demo
           token: ${{ secrets.ORG_PAT }}
           path: shapes-demo
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+          ref: ${{ inputs.enable_int2dds_logging && 'log' || 'main' }}
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: 1.89.0
           rustflags: ""
-      - run: |
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            shapes-demo/shapes-demo-interoperability/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - name: Build shapes demo
+        run: |
           cd shapes-demo/shapes-demo-interoperability
-          cargo build --release
+          cargo build
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
           name: int2DDS_shapes_demo
-          path: shapes-demo/shapes-demo-interoperability/target/release/shapes-demo-interoperability
+          path: shapes-demo/shapes-demo-interoperability/target/debug/shapes-demo-interoperability
   download_binaries:
     needs: build_binary
     runs-on: ubuntu-latest
@@ -57,6 +84,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: omg-dds/dds-rtps
+          ref: master
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11.4"
@@ -64,7 +92,7 @@ jobs:
         uses: robinraju/release-downloader@v1.10
         with:
           repository: "omg-dds/dds-rtps"
-          latest: true
+          tag: "v2.1.2026"
           fileName: "*"
       - name: Unzip
         run: |
@@ -105,16 +133,14 @@ jobs:
         dds:
           - name: connext
             pattern: connext_dds-*_shape_main_linux
-          - name: dustdds
-            pattern: dust_dds-*_shape_main_linux
+          - name: cyclone
+            pattern: eclipse_cyclone-*_shape_main_linux
           - name: fastdds
             pattern: eprosima_fastdds-*_shape_main_linux
-          - name: intercom
-            pattern: intercom_dds-*_shape_main_linux
           - name: opendds
             pattern: opendds-*_shape_main_linux
           - name: coredx
-            pattern: toc_coredx_dds-*-shape_main_linux
+            pattern: toc_coredx_dds-*_shape_main_linux
         role: [publisher, subscriber]
         include:
           - dds:
@@ -134,8 +160,9 @@ jobs:
           executable-pattern: ${{ matrix.dds.pattern }}
           role: ${{ matrix.role }}
           dump-packet: ${{ inputs.enable_packet_dump && (inputs.dump_dds_name == 'all' || inputs.dump_dds_name == matrix.dds.name) && (inputs.dump_role == 'both' || inputs.dump_role == matrix.role) }}
+          enable-int2dds-logging: ${{ inputs.enable_int2dds_logging }}
 
-  merge_reports:
+  merge_files:
     needs: test_all_dds
     runs-on: ubuntu-latest
     steps:
@@ -144,26 +171,79 @@ jobs:
         with:
           pattern: junit_report_*
           merge-multiple: true
+          path: ./reports
+      - name: Download all test logs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: logs_*
+          merge-multiple: false
+          path: ./logs
+        continue-on-error: true
+      - name: Download all packet captures
+        uses: actions/download-artifact@v4
+        with:
+          pattern: tshark_*
+          merge-multiple: true
+          path: ./packets
+        continue-on-error: true
       - name: Install junitparser
         run: pip install junitparser
       - name: Merge reports
         run: |
+          cd reports
           junitparser merge *.xml junit_interoperability_report.xml
           ls -la *.xml
+          mv junit_interoperability_report.xml ../
+          cd ..
+      - name: Create test logs archive
+        run: |
+          if [ -d "./logs" ] && [ "$(ls -A ./logs)" ]; then
+            cd logs
+            ls -la
+            zip -r ../logs.zip .
+            cd ..
+          else
+            echo "No logs found, skipping archive creation"
+          fi
+        continue-on-error: true
+      - name: Create packet captures archive
+        run: |
+          if [ -d "./packets" ] && [ "$(ls -A ./packets)" ]; then
+            cd packets
+            ls -la
+            zip -r ../packet_captures.zip *.pcap
+            cd ..
+          else
+            echo "No packet captures found, skipping archive creation"
+          fi
+        continue-on-error: true
       - name: Upload merged report
         uses: actions/upload-artifact@v4
         with:
           name: xml_report
           path: ./junit_interoperability_report.xml
+      - name: Upload test logs archive
+        if: hashFiles('logs.zip') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs
+          path: logs.zip
+      - name: Upload packet captures archive
+        if: hashFiles('packet_captures.zip') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: packet_captures
+          path: packet_captures.zip
 
   generate_report:
     runs-on: ubuntu-latest
-    needs: merge_reports
+    needs: merge_files
     steps:
       - name: Checkout dds-rtps repo
         uses: actions/checkout@v4
         with:
           repository: omg-dds/dds-rtps
+          ref: master
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
@@ -180,11 +260,90 @@ jobs:
       - name: Generate xlsx report
         run: |
           source .venv/bin/activate
-          sed -i "66i\\        elif 'int2' in product.lower():" generate_xlsx_report.py
-          sed -i "67i\\            return 'Intellectus'" generate_xlsx_report.py
-          sed -i "87i\\        elif 'int2DDS' in product.lower():" generate_xlsx_report.py
-          sed -i "88i\\            return 'int2DDS'" generate_xlsx_report.py
+          # Insert int2DDS naming before the "unknown product" RuntimeError anchors so it
+          # survives upstream line shifts in generate_xlsx_report.py
+          python3 - <<'PY'
+          path = 'generate_xlsx_report.py'
+          src = open(path).read()
+          src = src.replace(
+              "        else:\n            raise RuntimeError('Impossible to get company name: ' + product)",
+              "        elif 'int2' in product.lower():\n            return 'Intellectus'\n        else:\n            raise RuntimeError('Impossible to get company name: ' + product)")
+          src = src.replace(
+              "        else:\n            raise RuntimeError('Impossible to get product name: ' + product)",
+              "        elif 'int2' in product.lower():\n            return 'int2DDS'\n        else:\n            raise RuntimeError('Impossible to get product name: ' + product)")
+          open(path, 'w').write(src)
+          PY
           python3 generate_xlsx_report.py --input junit_interoperability_report.xml --output interoperability_report.xlsx
+      - name: Display report in summary
+        run: |
+          source .venv/bin/activate
+          pip install openpyxl
+          python3 << 'EOF'
+          import openpyxl
+          import os
+
+          wb = openpyxl.load_workbook('interoperability_report.xlsx')
+          ws = wb['int2DDS']
+
+          rows = list(ws.iter_rows(values_only=True))
+
+          # Find empty columns to remove (columns 0, 9 based on your data)
+          empty_cols = set()
+          for col_idx in range(len(rows[0])):
+              if all(row[col_idx] is None or row[col_idx] == "" for row in rows):
+                  empty_cols.add(col_idx)
+
+          # Remove empty columns from all rows
+          def filter_row(row):
+              return [cell for idx, cell in enumerate(row) if idx not in empty_cols]
+
+          rows = [filter_row(row) for row in rows]
+
+          # Row 2 has DDS names (actual column headers)
+          dds_headers = rows[2] if len(rows) > 2 else []
+
+          # Derive section sizes from the data so the table tracks the matrix size.
+          # Excludes the leading 'Test' column; pub/sub sections are equal.
+          total_cols = max(len(dds_headers) - 1, 0)
+          pub_cols = total_cols // 2
+          sub_cols = total_cols - pub_cols
+
+          # Get header info from row 0
+          pub_header = rows[0][1] if len(rows[0]) > 1 else "Publisher: int2DDS"
+          sub_header = rows[0][1 + pub_cols] if len(rows[0]) > 1 + pub_cols else "Subscriber: int2DDS"
+
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write("## 📊 Interoperability Test Report (int2DDS)\n\n")
+              f.write("<table>\n")
+
+              # Header row with merged cells
+              f.write("<tr>")
+              f.write("<th rowspan='2'>Test</th>")
+              f.write(f"<th colspan='{pub_cols}' align='center'>{pub_header}</th>")
+              f.write(f"<th colspan='{sub_cols}' align='center'>{sub_header}</th>")
+              f.write("</tr>\n")
+
+              # DDS names row
+              f.write("<tr>")
+              for idx, cell in enumerate(dds_headers[1:]):  # Skip 'Test' column
+                  if cell:
+                      f.write(f"<th>{cell}</th>")
+              f.write("</tr>\n")
+
+              # Data rows (starting from row 3)
+              for row in rows[3:]:
+                  f.write("<tr>")
+                  for idx, cell in enumerate(row):
+                      if cell is None or cell == "":
+                          f.write("<td></td>")
+                      elif cell == "ERROR":
+                          f.write("<td>❌</td>")
+                      else:
+                          f.write(f"<td>{cell}</td>")
+                  f.write("</tr>\n")
+
+              f.write("</table>\n")
+          EOF
       - name: XUnit Viewer
         id: xunit-viewer
         uses: AutoModality/action-xunit-viewer@v1
@@ -200,3 +359,16 @@ jobs:
             ./index.html
             ./junit_interoperability_report.xml
             ./interoperability_report.xlsx
+      - name: Delete intermediate artifacts
+        if: always()
+        uses: geekyeggo/delete-artifact@v5
+        with:
+          name: |
+            int2DDS_shapes_demo
+            executables
+            dds-rtps-files
+            junit_report_*
+            logs_*
+            tshark_*
+            xml_report
+          failOnError: false

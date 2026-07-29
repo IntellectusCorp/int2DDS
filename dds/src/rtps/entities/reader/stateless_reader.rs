@@ -15,19 +15,18 @@ use crate::{
         history_cache::HistoryCache as dcps_history_cache,
         qos_policy::{QosPolicyId, ReliabilityQosPolicyKind},
         status::{
-            QosPolicyCount, RequestedIncompatibleQosStatus, StatusInfo, StatusKind,
-            SubscriptionMatchedStatus,
+            QosPolicyCount, RequestedIncompatibleQosStatus, RequestedIncompatibleTypeStatus,
+            StatusInfo, StatusKind, SubscriptionMatchedStatus,
         },
     },
     rtps::{
         common::{
             entity_id::EntityId,
-            guid::Guid,
+            guid::{Guid, GuidPrefix},
             locator::Locator,
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
-            sequence::SequenceNumber,
             time::RtpsDuration,
-            types::{ChangeKind, TopicKind},
+            types::TopicKind,
         },
         entities::{
             endpoint::Endpoint,
@@ -45,7 +44,7 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
-use super::{Reader, WriterLocator};
+use super::{Reader, RemoteWriterInfo};
 
 #[allow(dead_code)]
 pub(crate) struct StatelessReader {
@@ -59,16 +58,21 @@ pub(crate) struct StatelessReader {
     heartbeat_response_delay: RtpsDuration,
     heartbeat_suppression_duration: RtpsDuration,
     reader_cache: Arc<Mutex<ReaderHistoryCache>>,
-    matched_writers: Arc<Mutex<Vec<WriterLocator>>>,
+    matched_writers: Arc<Mutex<Vec<RemoteWriterInfo>>>,
+    #[allow(clippy::type_complexity)]
     change_callback: Arc<Mutex<Option<Arc<dyn Fn(Arc<CacheChange>) + Send + Sync>>>>,
+    #[allow(clippy::type_complexity)]
     status_callback:
         Arc<Mutex<Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>>>,
     subscription_builtin_topic_data: Arc<Mutex<SubscriptionBuiltinTopicData>>,
     subscription_matched_status: Arc<Mutex<SubscriptionMatchedStatus>>,
     requested_incompatible_qos_status: Arc<Mutex<RequestedIncompatibleQosStatus>>,
+    requested_incompatible_type_status: Arc<Mutex<RequestedIncompatibleTypeStatus>>,
 }
 
 impl StatelessReader {
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::type_complexity)]
     pub(crate) fn new(
         guid: Guid,
         topic_kind: TopicKind,
@@ -101,10 +105,13 @@ impl StatelessReader {
             requested_incompatible_qos_status: Arc::new(Mutex::new(
                 RequestedIncompatibleQosStatus::default(),
             )),
+            requested_incompatible_type_status: Arc::new(Mutex::new(
+                RequestedIncompatibleTypeStatus::default(),
+            )),
         }
     }
 
-    pub(crate) fn matched_writer_add(&self, a_writer_proxy: WriterLocator) {
+    pub(crate) fn matched_writer_add(&self, a_writer_proxy: RemoteWriterInfo) {
         match self.matched_writers.lock() {
             Ok(mut matched_writers) => {
                 matched_writers.push(a_writer_proxy);
@@ -115,7 +122,7 @@ impl StatelessReader {
         }
     }
 
-    pub(crate) fn matched_writer_remove(&self, a_writer_proxy: WriterLocator) {
+    pub(crate) fn matched_writer_remove(&self, a_writer_proxy: RemoteWriterInfo) {
         match self.matched_writers.lock() {
             Ok(mut matched_writers) => {
                 matched_writers.retain(|proxy| proxy != &a_writer_proxy);
@@ -126,7 +133,7 @@ impl StatelessReader {
         }
     }
 
-    pub(crate) fn matched_writer_lookup(&self, a_writer_guid: Guid) -> Option<WriterLocator> {
+    pub(crate) fn matched_writer_lookup(&self, a_writer_guid: Guid) -> Option<RemoteWriterInfo> {
         match self.matched_writers.lock() {
             Ok(matched_writers) => matched_writers
                 .iter()
@@ -139,7 +146,7 @@ impl StatelessReader {
         }
     }
 
-    pub(crate) fn writer_locators(&self) -> Arc<Mutex<Vec<WriterLocator>>> {
+    pub(crate) fn remote_writer_infos(&self) -> Arc<Mutex<Vec<RemoteWriterInfo>>> {
         self.matched_writers.clone()
     }
 
@@ -222,15 +229,28 @@ impl StatelessReader {
         }
     }
 
+    pub(crate) fn update_requested_incompatible_type_status(&self) {
+        match self.requested_incompatible_type_status.lock() {
+            Ok(mut requested_incompatible_type_status) => {
+                requested_incompatible_type_status.total_count += 1;
+                requested_incompatible_type_status.total_count_change += 1;
+
+                self.update_status(
+                    StatusKind::REQUESTED_INCOMPATIBLE_TYPE,
+                    Some(Arc::new(requested_incompatible_type_status.clone())),
+                );
+
+                requested_incompatible_type_status.total_count_change = 0;
+            }
+            Err(e) => {
+                log::error!("Failed to lock requested_incompatible_type_status: {:?}", e);
+            }
+        }
+    }
+
     fn set_datareader_cache(
         &mut self,
-        datareader_cache: Weak<
-            Mutex<
-                dyn dcps_history_cache<CacheChangeInputType = Arc<Mutex<CacheChange>>>
-                    + Send
-                    + Sync,
-            >,
-        >,
+        datareader_cache: Weak<Mutex<dyn dcps_history_cache + Send + Sync>>,
     ) {
         match self.reader_cache.lock() {
             Ok(mut guard) => {
@@ -245,7 +265,7 @@ impl StatelessReader {
 
 impl Debug for StatelessReader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "StatelessReader: {:?}", self.guid)
+        write!(f, "StatelessReader: {}", self.guid)
     }
 }
 
@@ -373,14 +393,12 @@ impl Reader for StatelessReader {
     }
 
     fn on_change(&self, change: Arc<CacheChange>) {
-        log::debug!("change: {:?}", change);
+        log::debug!("change: {}", change);
 
         match self.status_callback.lock() {
             Ok(callback) => {
                 if let Some(callback) = callback.as_ref() {
-                    if change.kind() == ChangeKind::Alive {
-                        callback(StatusKind::DATA_AVAILABLE, None);
-                    }
+                    callback(StatusKind::DATA_AVAILABLE, None);
                 }
             }
             Err(e) => {
@@ -398,17 +416,8 @@ impl Reader for StatelessReader {
                 log::error!("Failed to lock callback: {:?}", e);
             }
         };
-    }
 
-    fn get_next_sequence_number(&self) -> SequenceNumber {
-        let cache_guard = match self.reader_cache.lock() {
-            Ok(guard) => guard,
-            Err(e) => {
-                error!("Failed to acquire reader cache lock: {}", e);
-                return SequenceNumber::new(0, 0);
-            }
-        };
-        cache_guard.get_seq_num_max().next()
+        log::debug!("StatelessReader on_change completed.");
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -421,13 +430,7 @@ impl Reader for StatelessReader {
 
     fn set_datareader_cache(
         &mut self,
-        datareader_cache: Weak<
-            Mutex<
-                dyn dcps_history_cache<CacheChangeInputType = Arc<Mutex<CacheChange>>>
-                    + Send
-                    + Sync,
-            >,
-        >,
+        datareader_cache: Weak<Mutex<dyn dcps_history_cache + Send + Sync>>,
     ) -> RtpsResult<()> {
         let cache_guard = self.reader_cache.lock();
         match cache_guard {
@@ -468,5 +471,81 @@ impl Reader for StatelessReader {
         } else {
             Err(RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, ""))
         }
+    }
+
+    fn remove_matched_writer_and_update_status(&self, writer_guid: Guid) -> RtpsResult<bool> {
+        let mut writers = self
+            .matched_writers
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+        // Find the index of the writer to remove
+        let Some(idx) = writers.iter().position(|info| info.remote_writer_guid() == writer_guid)
+        else {
+            debug!("Writer proxy with guid {} not found in matched writers", writer_guid);
+            return Ok(false);
+        };
+
+        // Remove the writer from the matched writers list
+        writers.swap_remove(idx);
+        drop(writers);
+
+        // Connectivity change: drop any open coherent set from the removed writer.
+        if let Ok(mut cache) = self.reader_cache.lock() {
+            cache.discard_coherent_pending(writer_guid);
+        }
+
+        // Update subscription matched status
+        self.update_subscription_matched_status(-1, InstanceHandle::from_guid(&writer_guid));
+
+        debug!("Removed writer proxy with guid {} from matched writers", writer_guid);
+        Ok(true)
+    }
+
+    fn remove_all_matched_writers_with_prefix_and_update_status(
+        &self,
+        prefix: GuidPrefix,
+    ) -> RtpsResult<usize> {
+        let mut remote_writer_info = self
+            .matched_writers
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+        debug!(
+            "Before unmatching with writer, this reader had {:?} matched writer",
+            remote_writer_info.len()
+        );
+        for info in remote_writer_info.iter() {
+            if info.remote_writer_guid().prefix() == prefix {
+                self.update_subscription_matched_status(
+                    -1,
+                    InstanceHandle::from_guid(&info.remote_writer_guid()),
+                );
+            }
+        }
+        let removed_guids: Vec<Guid> = remote_writer_info
+            .iter()
+            .filter(|info| info.remote_writer_guid().prefix() == prefix)
+            .map(|info| info.remote_writer_guid())
+            .collect();
+        let len_before = remote_writer_info.len();
+        remote_writer_info.retain(|info| info.remote_writer_guid().prefix() != prefix);
+        let removed = len_before - remote_writer_info.len();
+        let len_after = remote_writer_info.len();
+        drop(remote_writer_info);
+
+        // Connectivity change: drop any open coherent sets from the removed writers.
+        if let Ok(mut cache) = self.reader_cache.lock() {
+            for writer_guid in &removed_guids {
+                cache.discard_coherent_pending(*writer_guid);
+            }
+        }
+
+        debug!(
+            "Removed all unmatched remote writers from participant: {}",
+            Guid::guid_prefix_to_string(&prefix)
+        );
+        debug!("Current number of matched writer: {:?}", len_after);
+        Ok(removed)
     }
 }

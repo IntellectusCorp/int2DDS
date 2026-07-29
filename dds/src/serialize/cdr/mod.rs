@@ -1,3 +1,4 @@
+mod cdr_input;
 pub mod deserializer;
 pub mod serializer;
 pub mod xcdr1;
@@ -6,10 +7,17 @@ pub mod xcdr2;
 use crate::serialize::core::{SerializationError, SerializationResult};
 
 // Re-export v1 (CDR) types
-pub use xcdr1::{CdrDeserializer, CdrSerializer};
+pub use xcdr1::{CdrDeserializer, CdrSerializer, PlCdrMemberHeader};
 
 // Re-export v2 (XCDR2) types
 pub use xcdr2::{Xcdr2Deserializer, Xcdr2Serializer};
+
+// Re-export serializer traits for unified API
+pub use serializer::array::ArraySerialize;
+pub use serializer::primitive::PrimitiveSerialize;
+pub use serializer::sequence::SequenceSerialize;
+pub use serializer::string::StringSerialize;
+pub use serializer::CdrSerializerCommon;
 
 /// XCDR v2 extensibility kinds
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,11 +53,38 @@ pub struct MemberHeader {
     pub must_understand: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LcHint {
+    Auto,
+    SeqMul4,
+    SeqMul8,
+    Dheader,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LengthCode {
+    /// LC 0-3: Length is directly in lower 16 bits (0-65535 bytes)
+    Direct = 0,
+    /// LC 4: Next 4 bytes contain the actual length
+    NextInt = 4,
+    /// LC 5: Length is (next 4 bytes) * 4
+    NextIntMul4 = 5,
+    /// LC 6: Length is (next 4 bytes) * 8
+    NextIntMul8 = 6,
+    /// LC 7: Nested length (complex case)
+    Nested = 7,
+}
+
 impl MemberHeader {
     pub fn new(member_id: u32, length: usize) -> Self {
         Self { member_id, member_length: length as u32, must_understand: false }
     }
 
+    pub fn with_must_understand(member_id: u32, length: usize, must_understand: bool) -> Self {
+        Self { member_id, member_length: length as u32, must_understand }
+    }
+
+    /// Write EMHEADER1 per DDS-XTypes 7.4.3.4.2.
     pub fn write(
         &self,
         buffer: &mut Vec<u8>,
@@ -57,11 +92,72 @@ impl MemberHeader {
     ) -> Result<(), SerializationError> {
         use crate::serialize::to_bytes_u32;
 
-        // Write EMHEADER (member_id + length encoded)
-        let header = (self.member_id << 16) | (self.member_length & 0xFFFF);
-        let bytes = to_bytes_u32(header, endianness);
-        buffer.extend_from_slice(&bytes);
+        if self.member_id > 0x0FFF_FFFF {
+            return Err(SerializationError::InvalidMemberId(self.member_id));
+        }
+
+        let must_bit = if self.must_understand { 0x8000_0000u32 } else { 0 };
+        let (lc_word, nextint) = match self.member_length {
+            1 => (0u32 << 28, None),
+            2 => (1u32 << 28, None),
+            4 => (2u32 << 28, None),
+            8 => (3u32 << 28, None),
+            n => (4u32 << 28, Some(n)),
+        };
+        let header = must_bit | lc_word | (self.member_id & 0x0FFF_FFFF);
+        buffer.extend_from_slice(&to_bytes_u32(header, endianness));
+        if let Some(len) = nextint {
+            buffer.extend_from_slice(&to_bytes_u32(len, endianness));
+        }
         Ok(())
+    }
+
+    /// Read EMHEADER from buffer
+    /// Returns (MemberHeader, bytes_consumed) on success
+    pub fn read(
+        data: &[u8],
+        position: usize,
+        endianness: speedy::Endianness,
+    ) -> Result<(Self, usize), SerializationError> {
+        use crate::serialize::from_bytes_u32;
+
+        if position + 4 > data.len() {
+            return Err(SerializationError::InsufficientData);
+        }
+
+        let header_bytes: [u8; 4] = data[position..position + 4]
+            .try_into()
+            .map_err(|_| SerializationError::InsufficientData)?;
+        let header = from_bytes_u32(header_bytes, endianness);
+
+        let must_understand = (header & 0x8000_0000) != 0;
+        let lc = ((header >> 28) & 0x07) as u8;
+        let member_id = header & 0x0FFF_FFFF;
+
+        let read_nextint = |buf: &[u8]| -> Result<u32, SerializationError> {
+            if position + 8 > buf.len() {
+                return Err(SerializationError::InsufficientData);
+            }
+            let b: [u8; 4] = buf[position + 4..position + 8]
+                .try_into()
+                .map_err(|_| SerializationError::InsufficientData)?;
+            Ok(from_bytes_u32(b, endianness))
+        };
+
+        // LC=5/6/7: NEXTINT overlaps with payload's first 4 bytes (DDS-XTypes 7.4.3.4.2)
+        let (member_length, bytes_consumed) = match lc {
+            0 => (1u32, 4usize),
+            1 => (2u32, 4usize),
+            2 => (4u32, 4usize),
+            3 => (8u32, 4usize),
+            4 => (read_nextint(data)?, 8usize),
+            5 => (4u32 + read_nextint(data)?, 4usize),
+            6 => (4u32 + 4 * read_nextint(data)?, 4usize),
+            7 => (4u32 + 8 * read_nextint(data)?, 4usize),
+            _ => return Err(SerializationError::InvalidMemberHeader),
+        };
+
+        Ok((MemberHeader { member_id, member_length, must_understand }, bytes_consumed))
     }
 }
 
@@ -83,11 +179,17 @@ pub type XcdrDeserializer<'a> = Xcdr2Deserializer<'a>;
 
 /// Trait for types that can be serialized using CDR
 pub trait CdrSerialize {
+    /// Whether this type is a CDR primitive. Unused by classic CDR encoding
+    /// (no DHEADER) but defined for symmetry with [`XcdrSerialize`] so the
+    /// shared `impl_primitive_serialization!` macro can set it uniformly.
+    const IS_PRIMITIVE: bool = false;
     fn serialize_cdr(&self, serializer: &mut CdrSerializer) -> CdrResult<()>;
 }
 
 /// Trait for types that can be deserialized using CDR
 pub trait CdrDeserialize: Sized {
+    /// See [`CdrSerialize::IS_PRIMITIVE`].
+    const IS_PRIMITIVE: bool = false;
     fn deserialize_cdr(deserializer: &mut CdrDeserializer) -> CdrResult<Self>;
 }
 
@@ -144,27 +246,6 @@ impl<T: CdrDeserialize> CdrDeserialize for Vec<T> {
     }
 }
 
-impl<T: CdrSerialize> CdrSerialize for Option<T> {
-    fn serialize_cdr(&self, serializer: &mut CdrSerializer) -> CdrResult<()> {
-        match self {
-            Some(value) => {
-                serializer.serialize_bool(true)?;
-                value.serialize_cdr(serializer)?;
-            }
-            None => {
-                serializer.serialize_bool(false)?;
-            }
-        }
-        Ok(())
-    }
-}
-
-impl<T: CdrDeserialize> CdrDeserialize for Option<T> {
-    fn deserialize_cdr(deserializer: &mut CdrDeserializer) -> CdrResult<Self> {
-        deserializer.deserialize_optional(|d| T::deserialize_cdr(d))
-    }
-}
-
 impl<T: CdrSerialize, const N: usize> CdrSerialize for [T; N] {
     fn serialize_cdr(&self, serializer: &mut CdrSerializer) -> CdrResult<()> {
         // Arrays are fixed size, no need to write length
@@ -188,13 +269,27 @@ impl<T: CdrDeserialize, const N: usize> CdrDeserialize for [T; N] {
     }
 }
 
+pub trait XcdrSerializeMembers {
+    fn serialize_xcdr_members(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()>;
+}
+
+pub trait XcdrDeserializeMembers: Sized {
+    fn deserialize_xcdr_members(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self>;
+}
+
 /// Trait for types that can be serialized using XCDR
 pub trait XcdrSerialize {
+    /// Whether this type is a CDR primitive (no DHEADER required when used as
+    /// the element type of a sequence/array per DDS-XTypes 7.4.3.5.3-4).
+    /// Defaults to `false`; primitive impls override to `true`.
+    const IS_PRIMITIVE: bool = false;
     fn serialize_xcdr(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()>;
 }
 
 /// Trait for types that can be deserialized using XCDR
 pub trait XcdrDeserialize: Sized {
+    /// See [`XcdrSerialize::IS_PRIMITIVE`].
+    const IS_PRIMITIVE: bool = false;
     fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self>;
 }
 
@@ -234,10 +329,10 @@ impl XcdrDeserialize for String {
 
 impl<T: XcdrSerialize> XcdrSerialize for Vec<T> {
     fn serialize_xcdr(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()> {
-        // Write sequence length
         serializer.serialize_u32(self.len() as u32)?;
-
-        // Write sequence elements
+        if T::IS_PRIMITIVE {
+            serializer.buffer_mut().reserve(self.len() * std::mem::size_of::<T>());
+        }
         for item in self {
             item.serialize_xcdr(serializer)?;
         }
@@ -247,7 +342,13 @@ impl<T: XcdrSerialize> XcdrSerialize for Vec<T> {
 
 impl<T: XcdrDeserialize> XcdrDeserialize for Vec<T> {
     fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
-        deserializer.deserialize_sequence(|d| T::deserialize_xcdr(d))
+        let length = deserializer.deserialize_u32()? as usize;
+        let capacity = deserializer.checked_capacity(length, 1)?;
+        let mut result = Vec::with_capacity(capacity);
+        for _ in 0..length {
+            result.push(T::deserialize_xcdr(deserializer)?);
+        }
+        Ok(result)
     }
 }
 
@@ -274,7 +375,6 @@ impl<T: XcdrDeserialize> XcdrDeserialize for Option<T> {
 
 impl<T: XcdrSerialize, const N: usize> XcdrSerialize for [T; N] {
     fn serialize_xcdr(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()> {
-        // Arrays are fixed size, no need to write length
         for item in self.iter() {
             item.serialize_xcdr(serializer)?;
         }
@@ -284,7 +384,6 @@ impl<T: XcdrSerialize, const N: usize> XcdrSerialize for [T; N] {
 
 impl<T: XcdrDeserialize, const N: usize> XcdrDeserialize for [T; N] {
     fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
-        // Collect into Vec and try to convert to array
         let mut vec = Vec::with_capacity(N);
         for _ in 0..N {
             vec.push(T::deserialize_xcdr(deserializer)?);
@@ -327,7 +426,7 @@ where
         let len = deserializer.deserialize_u32()? as usize;
 
         // Read key-value pairs
-        let mut map = HashMap::with_capacity(len);
+        let mut map = HashMap::new();
         for _ in 0..len {
             let key = K::deserialize_cdr(deserializer)?;
             let value = V::deserialize_cdr(deserializer)?;
@@ -343,15 +442,25 @@ where
     V: XcdrSerialize,
 {
     fn serialize_xcdr(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()> {
-        // Write map length
-        serializer.serialize_u32(self.len() as u32)?;
-
-        // Write key-value pairs
-        for (key, value) in self {
-            key.serialize_xcdr(serializer)?;
-            value.serialize_xcdr(serializer)?;
+        if K::IS_PRIMITIVE && V::IS_PRIMITIVE {
+            serializer.serialize_u32(self.len() as u32)?;
+            for (key, value) in self {
+                key.serialize_xcdr(serializer)?;
+                value.serialize_xcdr(serializer)?;
+            }
+            Ok(())
+        } else {
+            let dh = serializer.reserve_dheader();
+            let start = serializer.position();
+            serializer.serialize_u32(self.len() as u32)?;
+            for (key, value) in self {
+                key.serialize_xcdr(serializer)?;
+                value.serialize_xcdr(serializer)?;
+            }
+            let size = (serializer.position() - start) as u32;
+            serializer.write_dheader_at(dh, size);
+            Ok(())
         }
-        Ok(())
     }
 }
 
@@ -361,17 +470,26 @@ where
     V: XcdrDeserialize,
 {
     fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
-        // Read map length
-        let len = deserializer.deserialize_u32()? as usize;
-
-        // Read key-value pairs
-        let mut map = HashMap::with_capacity(len);
-        for _ in 0..len {
-            let key = K::deserialize_xcdr(deserializer)?;
-            let value = V::deserialize_xcdr(deserializer)?;
-            map.insert(key, value);
+        if K::IS_PRIMITIVE && V::IS_PRIMITIVE {
+            let len = deserializer.deserialize_u32()? as usize;
+            let mut map = HashMap::new();
+            for _ in 0..len {
+                let key = K::deserialize_xcdr(deserializer)?;
+                let value = V::deserialize_xcdr(deserializer)?;
+                map.insert(key, value);
+            }
+            Ok(map)
+        } else {
+            let _dheader = deserializer.read_dheader()?;
+            let len = deserializer.deserialize_u32()? as usize;
+            let mut map = HashMap::new();
+            for _ in 0..len {
+                let key = K::deserialize_xcdr(deserializer)?;
+                let value = V::deserialize_xcdr(deserializer)?;
+                map.insert(key, value);
+            }
+            Ok(map)
         }
-        Ok(map)
     }
 }
 
@@ -419,15 +537,25 @@ where
     V: XcdrSerialize,
 {
     fn serialize_xcdr(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()> {
-        // Write map length
-        serializer.serialize_u32(self.len() as u32)?;
-
-        // Write key-value pairs
-        for (key, value) in self {
-            key.serialize_xcdr(serializer)?;
-            value.serialize_xcdr(serializer)?;
+        if K::IS_PRIMITIVE && V::IS_PRIMITIVE {
+            serializer.serialize_u32(self.len() as u32)?;
+            for (key, value) in self {
+                key.serialize_xcdr(serializer)?;
+                value.serialize_xcdr(serializer)?;
+            }
+            Ok(())
+        } else {
+            let dh = serializer.reserve_dheader();
+            let start = serializer.position();
+            serializer.serialize_u32(self.len() as u32)?;
+            for (key, value) in self {
+                key.serialize_xcdr(serializer)?;
+                value.serialize_xcdr(serializer)?;
+            }
+            let size = (serializer.position() - start) as u32;
+            serializer.write_dheader_at(dh, size);
+            Ok(())
         }
-        Ok(())
     }
 }
 
@@ -437,17 +565,63 @@ where
     V: XcdrDeserialize,
 {
     fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
-        // Read map length
-        let len = deserializer.deserialize_u32()? as usize;
-
-        // Read key-value pairs
-        let mut map = BTreeMap::new();
-        for _ in 0..len {
-            let key = K::deserialize_xcdr(deserializer)?;
-            let value = V::deserialize_xcdr(deserializer)?;
-            map.insert(key, value);
+        if K::IS_PRIMITIVE && V::IS_PRIMITIVE {
+            let len = deserializer.deserialize_u32()? as usize;
+            let mut map = BTreeMap::new();
+            for _ in 0..len {
+                let key = K::deserialize_xcdr(deserializer)?;
+                let value = V::deserialize_xcdr(deserializer)?;
+                map.insert(key, value);
+            }
+            Ok(map)
+        } else {
+            let _dheader = deserializer.read_dheader()?;
+            let len = deserializer.deserialize_u32()? as usize;
+            let mut map = BTreeMap::new();
+            for _ in 0..len {
+                let key = K::deserialize_xcdr(deserializer)?;
+                let value = V::deserialize_xcdr(deserializer)?;
+                map.insert(key, value);
+            }
+            Ok(map)
         }
-        Ok(map)
+    }
+}
+
+// Box<T> support for @external
+impl<T: CdrSerialize> CdrSerialize for Box<T> {
+    fn serialize_cdr(&self, serializer: &mut CdrSerializer) -> CdrResult<()> {
+        (**self).serialize_cdr(serializer)
+    }
+}
+
+impl<T: CdrDeserialize> CdrDeserialize for Box<T> {
+    fn deserialize_cdr(deserializer: &mut CdrDeserializer) -> CdrResult<Self> {
+        Ok(Box::new(T::deserialize_cdr(deserializer)?))
+    }
+}
+
+impl<T: XcdrSerialize> XcdrSerialize for Box<T> {
+    fn serialize_xcdr(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()> {
+        (**self).serialize_xcdr(serializer)
+    }
+}
+
+impl<T: XcdrDeserialize> XcdrDeserialize for Box<T> {
+    fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
+        Ok(Box::new(T::deserialize_xcdr(deserializer)?))
+    }
+}
+
+impl<T: XcdrSerializeMembers> XcdrSerializeMembers for Box<T> {
+    fn serialize_xcdr_members(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()> {
+        (**self).serialize_xcdr_members(serializer)
+    }
+}
+
+impl<T: XcdrDeserializeMembers> XcdrDeserializeMembers for Box<T> {
+    fn deserialize_xcdr_members(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
+        Ok(Box::new(T::deserialize_xcdr_members(deserializer)?))
     }
 }
 
@@ -477,5 +651,34 @@ impl XcdrDeserialize for WString {
     fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
         let s = deserializer.deserialize_wstring16()?;
         Ok(WString::from(s))
+    }
+}
+
+// WChar support
+use crate::serialize::core::WChar;
+
+impl CdrSerialize for WChar {
+    fn serialize_cdr(&self, serializer: &mut CdrSerializer) -> CdrResult<()> {
+        serializer.serialize_wchar16(self.as_char())
+    }
+}
+
+impl CdrDeserialize for WChar {
+    fn deserialize_cdr(deserializer: &mut CdrDeserializer) -> CdrResult<Self> {
+        let c = deserializer.deserialize_wchar16()?;
+        Ok(WChar::from(c))
+    }
+}
+
+impl XcdrSerialize for WChar {
+    fn serialize_xcdr(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()> {
+        serializer.serialize_wchar16(self.as_char())
+    }
+}
+
+impl XcdrDeserialize for WChar {
+    fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
+        let c = deserializer.deserialize_wchar16()?;
+        Ok(WChar::from(c))
     }
 }

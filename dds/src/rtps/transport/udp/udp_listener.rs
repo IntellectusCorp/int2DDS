@@ -10,15 +10,20 @@ use std::env;
 use std::net::UdpSocket as StdUdpSocket;
 
 use crate::rtps::common::locator::{Locator, MULTICAST_IP};
-use crate::rtps::transport::Listener;
+use crate::rtps::transport::udp::recv_arena::{
+    RecvArena, DEFAULT_RECV_ARENA_CHUNK_BYTES, MAX_UDP_PACKET_BYTES,
+};
 
-const MAX_MESSAGE_SIZE: usize = 64 * 1024; // This is max we can get from UDP.
+// One arena per listener; reused across every incoming datagram on this socket.
+fn new_recv_arena() -> RecvArena {
+    RecvArena::new(DEFAULT_RECV_ARENA_CHUNK_BYTES, MAX_UDP_PACKET_BYTES)
+}
 
 #[derive(Debug)]
 pub(crate) struct UdpListener {
     port: u16,
     socket: Option<mio::net::UdpSocket>,
-    recv_buffer: Box<[u8; MAX_MESSAGE_SIZE]>,
+    recv_arena: RecvArena,
 }
 
 impl Drop for UdpListener {
@@ -57,7 +62,7 @@ impl UdpListener {
             mio::net::UdpSocket::from_std(std_socket)
         };
 
-        Ok(Self { socket: Some(socket), port, recv_buffer: Box::new([0; MAX_MESSAGE_SIZE]) })
+        Ok(Self { socket: Some(socket), port, recv_arena: new_recv_arena() })
     }
 
     pub(crate) fn port(&self) -> u16 {
@@ -79,8 +84,7 @@ impl UdpListener {
         interface_address_list.clone().map(|a| Locator::from_ip_and_port(&a, port as u32)).collect()
     }
 
-    pub(crate) fn new_multicast(port: u16, working_ip: String) -> std::io::Result<Self> {
-        // socket2 bind
+    pub(crate) fn new_multicast(port: u16, working_ips: &[String]) -> std::io::Result<Self> {
         let socket = Socket2::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
         socket.set_reuse_address(true)?;
         socket.set_broadcast(true)?;
@@ -94,12 +98,21 @@ impl UdpListener {
             let _ = socket.set_recv_buffer_size(new_size);
         }
 
-        // println!("[socket] new_multicast recv_buffer_size: {:?}", socket.recv_buffer_size());
+        // Join multicast group on each working interface individually,
+        // so multicast works regardless of OS default route availability.
+        for ip in working_ips {
+            match ip.parse::<std::net::Ipv4Addr>() {
+                Ok(addr) => {
+                    socket.join_multicast_v4(&MULTICAST_IP, &addr).unwrap_or_else(|e| {
+                        error!("Fail - join_multicast_v4 : {:?} {:?}", e, addr);
+                    });
+                }
+                Err(e) => {
+                    log::warn!("Skipping non-IPv4 address: {} ({})", ip, e);
+                }
+            }
+        }
 
-        let addr = working_ip.parse().unwrap();
-        socket.join_multicast_v4(&MULTICAST_IP, &addr).unwrap_or_else(|e| {
-            error!("Fail - join_multicast_v4 : {:?} {:?}", e, addr);
-        });
         let addr: SocketAddr = format!("0.0.0.0:{}", port).parse().unwrap();
         let sock_addr = SockAddr::from(addr);
         socket.bind(&sock_addr)?;
@@ -175,7 +188,7 @@ impl UdpListener {
         //     });
         // }
 
-        Ok(Self { socket: Some(socket), port, recv_buffer: Box::new([0; MAX_MESSAGE_SIZE]) })
+        Ok(Self { socket: Some(socket), port, recv_arena: new_recv_arena() })
     }
 
     pub(crate) fn socket(&mut self) -> &mut mio::net::UdpSocket {
@@ -183,14 +196,11 @@ impl UdpListener {
     }
 
     pub(crate) fn get_message(&mut self) -> Option<(Bytes, SocketAddr)> {
-        match self.socket.as_mut().unwrap().recv_from(&mut self.recv_buffer[..]) {
-            Ok((nbytes, sender)) => {
-                Some((Bytes::copy_from_slice(&self.recv_buffer[..nbytes]), sender))
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // Break if there's nothing more to read
-                None
-            }
+        // The arena owns recv: it routes the syscall through a reusable scratch
+        // buffer, then hands back a zero-copy Bytes view into its chunk.
+        match self.recv_arena.recv_from(self.socket.as_ref().unwrap()) {
+            Ok(pair) => Some(pair),
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => None,
             Err(e) => {
                 error!("UDPListener::get_message failed: {e:?}");
                 None
@@ -229,29 +239,5 @@ impl UdpListener {
             }
             drop(socket);
         }
-    }
-}
-
-/// Implementation of Listener trait for UdpListener
-///
-/// This allows UdpListener to be used through the generic Listener interface,
-/// enabling transport-agnostic listener management.
-impl Listener for UdpListener {
-    fn socket_udp(&mut self) -> Option<&mut mio::net::UdpSocket> {
-        self.socket.as_mut()
-    }
-
-    fn socket_tcp(&mut self) -> Option<&mut mio::net::TcpListener> {
-        // UDP listener doesn't have a TCP socket
-        None
-    }
-
-    fn port(&self) -> u16 {
-        self.port
-    }
-
-    fn close(&mut self) {
-        // Call the UdpListener's own close method
-        UdpListener::close(self)
     }
 }

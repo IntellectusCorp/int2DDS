@@ -3,7 +3,7 @@
 
 use std::{
     fmt::Debug,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
 };
 
 use log::{debug, error};
@@ -20,19 +20,19 @@ use crate::{
     infrastructure::{
         qos_policy::{LivelinessQosPolicy, QosPolicyId, ReliabilityQosPolicyKind},
         status::{
-            OfferedIncompatibleQosStatus, PublicationMatchedStatus, QosPolicyCount, StatusInfo,
-            StatusKind,
+            OfferedIncompatibleQosStatus, OfferedIncompatibleTypeStatus, PublicationMatchedStatus,
+            QosPolicyCount, StatusInfo, StatusKind,
         },
     },
     rtps::{
         common::{
             entity_id::EntityId,
-            guid::Guid,
+            guid::{Guid, GuidPrefix},
             locator::Locator,
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
             sequence::SequenceNumber,
             time::{RtpsDuration, RtpsTime},
-            types::{ChangeKind, SerializedData, TopicKind},
+            types::{ChangeKind, TopicKind},
         },
         entities::{
             endpoint::Endpoint,
@@ -41,6 +41,8 @@ use crate::{
         },
     },
 };
+
+use crate::rtps::entities::participant::Participant;
 
 use super::{reader_locator::ReaderLocator, Writer};
 
@@ -60,14 +62,18 @@ pub(crate) struct StatelessWriter {
     data_max_size_serialized: i32,
     reader_locators: Arc<Mutex<Vec<ReaderLocator>>>,
     writer_cache: Arc<Mutex<WriterHistoryCache>>, // Subject to change to Rc, Mutex, etc. in the future
+    #[allow(clippy::type_complexity)]
     callback:
         Arc<Mutex<Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>>>,
     publication_builtin_topic_data: Arc<Mutex<PublicationBuiltinTopicData>>,
     publication_matched_status: Arc<Mutex<PublicationMatchedStatus>>,
     offered_incompatible_qos_status: Arc<Mutex<OfferedIncompatibleQosStatus>>,
+    offered_incompatible_type_status: Arc<Mutex<OfferedIncompatibleTypeStatus>>,
 }
 
 impl StatelessWriter {
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::type_complexity)]
     pub(crate) fn new(
         guid: Guid,
         unicast_locator_list: Vec<Locator>,
@@ -80,7 +86,7 @@ impl StatelessWriter {
         data_max_size_serialized: i32,
         callback: Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>,
         publication_builtin_topic_data: PublicationBuiltinTopicData,
-        participant_guid: Guid,
+        participant: Weak<Participant>,
     ) -> Self {
         // in:attribute_values
         // 8.4.7.1.1 & 8.4.7.1.2 & 8.4.7.2.1
@@ -102,15 +108,15 @@ impl StatelessWriter {
             heartbeat_period,
             data_max_size_serialized,
             reader_locators: Arc::new(Mutex::new(Vec::new())),
-            writer_cache: Arc::new(Mutex::new(WriterHistoryCache::new(
-                participant_guid,
-                endpoint_id,
-            ))),
+            writer_cache: Arc::new(Mutex::new(WriterHistoryCache::new(participant, endpoint_id))),
             callback: Arc::new(Mutex::new(callback)),
             publication_builtin_topic_data: Arc::new(Mutex::new(publication_builtin_topic_data)),
             publication_matched_status: Arc::new(Mutex::new(PublicationMatchedStatus::default())),
             offered_incompatible_qos_status: Arc::new(Mutex::new(
                 OfferedIncompatibleQosStatus::default(),
+            )),
+            offered_incompatible_type_status: Arc::new(Mutex::new(
+                OfferedIncompatibleTypeStatus::default(),
             )),
         }
     }
@@ -150,24 +156,6 @@ impl StatelessWriter {
     }
     pub(crate) fn reader_locator(&self) -> Arc<Mutex<Vec<ReaderLocator>>> {
         self.reader_locators.clone()
-    }
-    pub(crate) fn update_to_sent(
-        &self,
-        reader_locator: ReaderLocator,
-        sequence_number: SequenceNumber,
-    ) {
-        match self.reader_locators.lock() {
-            Ok(mut reader_locators) => {
-                for locator in reader_locators.iter_mut() {
-                    if locator.locator() == reader_locator.locator() {
-                        locator.set_highest_sent_change_sn(sequence_number);
-                    }
-                }
-            }
-            Err(e) => {
-                error!("Failed to lock reader_locators: {}", e);
-            }
-        }
     }
 
     pub(crate) fn publication_builtin_topic_data(&self) -> RtpsResult<PublicationBuiltinTopicData> {
@@ -247,6 +235,25 @@ impl StatelessWriter {
         }
     }
 
+    pub(crate) fn update_offered_incompatible_type_status(&self) {
+        match self.offered_incompatible_type_status.lock() {
+            Ok(mut offered_incompatible_type_status) => {
+                offered_incompatible_type_status.total_count += 1;
+                offered_incompatible_type_status.total_count_change += 1;
+
+                self.update_status(
+                    StatusKind::OFFERED_INCOMPATIBLE_TYPE,
+                    Some(Arc::new(offered_incompatible_type_status.clone())),
+                );
+
+                offered_incompatible_type_status.total_count_change = 0;
+            }
+            Err(e) => {
+                log::error!("Failed to lock offered_incompatible_type_status: {:?}", e);
+            }
+        }
+    }
+
     pub(crate) fn matched_reader_lookup(&self, a_reader_guid: Guid) -> Option<ReaderLocator> {
         match self.reader_locators.lock() {
             Ok(matched_readers) => matched_readers
@@ -263,7 +270,7 @@ impl StatelessWriter {
 
 impl Debug for StatelessWriter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "StatelessWriter: {:?}", self.guid)
+        write!(f, "StatelessWriter: {}", self.guid)
     }
 }
 
@@ -275,7 +282,7 @@ impl Writer for StatelessWriter {
     fn new_change(
         &self,
         kind: ChangeKind,
-        data: SerializedData,
+        data: Vec<u8>,
         // inline_qos: ParameterList,
         handle: InstanceHandle,
         source_timestamp: Option<RtpsTime>,
@@ -315,6 +322,48 @@ impl Writer for StatelessWriter {
         }
     }
 
+    fn new_change_with_rpc_callback(
+        &self,
+        kind: ChangeKind,
+        handle: InstanceHandle,
+        source_timestamp: Option<RtpsTime>,
+        data_fn: Box<dyn FnOnce(Guid, SequenceNumber) -> Vec<u8> + '_>,
+    ) -> CacheChange {
+        let last_change_sequence_number = match self.last_change_sequence_number.lock() {
+            Ok(mut last_change_sequence_number) => {
+                *last_change_sequence_number += 1;
+                *last_change_sequence_number
+            }
+            Err(e) => {
+                error!("Failed to acquire last_change_sequence_number lock: {}", e);
+                SequenceNumber::UNKNOWN
+            }
+        };
+
+        let data = data_fn(self.guid, last_change_sequence_number);
+
+        if data.len() > self.data_max_size_serialized as usize {
+            CacheChange::create_fragmented(
+                kind,
+                self.guid,
+                handle,
+                last_change_sequence_number,
+                &data,
+                source_timestamp,
+                self.data_max_size_serialized as usize,
+            )
+        } else {
+            CacheChange::new(
+                kind,
+                self.guid,
+                handle,
+                last_change_sequence_number,
+                data,
+                source_timestamp,
+            )
+        }
+    }
+
     fn data_max_size_serialized(&self) -> i32 {
         self.data_max_size_serialized
     }
@@ -339,6 +388,19 @@ impl Writer for StatelessWriter {
 
     fn nack_suppression_duration(&self) -> RtpsDuration {
         self.nack_suppression_duration
+    }
+
+    fn allocate_sequence_number(&self) -> SequenceNumber {
+        match self.last_change_sequence_number.lock() {
+            Ok(mut seq) => {
+                *seq += 1;
+                *seq
+            }
+            Err(e) => {
+                log::error!("Failed to acquire last_change_sequence_number lock: {}", e);
+                SequenceNumber::UNKNOWN
+            }
+        }
     }
 
     fn push_mode(&self) -> bool {
@@ -414,10 +476,76 @@ impl Writer for StatelessWriter {
         reader_guid: Guid,
     ) -> RtpsResult<SubscriptionBuiltinTopicData> {
         if let Some(reader) = self.matched_reader_lookup(reader_guid) {
-            Ok(reader.subscription_builtin_topic_data())
+            Ok(reader.subscription_builtin_topic_data().clone())
         } else {
             Err(RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, ""))
         }
+    }
+
+    fn remove_matched_reader_and_update_status(&self, reader_guid: Guid) -> RtpsResult<bool> {
+        let mut locators = self
+            .reader_locators
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+        // One reader can register multiple ReaderLocators (per NIC); drop them all.
+        let len_before = locators.len();
+        locators.retain(|locator| {
+            locator.guid_prefix() != reader_guid.prefix()
+                || locator.remote_entity_id() != reader_guid.entity_id()
+        });
+
+        if locators.len() == len_before {
+            debug!("Reader locator with guid {} not found in matched readers", reader_guid);
+            return Ok(false);
+        }
+
+        drop(locators);
+        self.update_publication_matched_status(-1, InstanceHandle::from_guid(&reader_guid));
+
+        debug!("Removed reader locator with guid {} from matched readers", reader_guid);
+        Ok(true)
+    }
+
+    fn remove_all_matched_readers_with_prefix_and_update_status(
+        &self,
+        prefix: GuidPrefix,
+    ) -> RtpsResult<usize> {
+        let mut reader_locator = self
+            .reader_locators
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+        debug!(
+            "Before unmatching with reader, this writer had {:?} matched readers",
+            reader_locator.len()
+        );
+
+        // Collect unique entity IDs to avoid duplicate callbacks (a reader can have
+        // multiple locators per NIC).
+        let unique_entity_ids: std::collections::HashSet<_> = reader_locator
+            .iter()
+            .filter(|locator| locator.guid_prefix() == prefix)
+            .map(|locator| locator.remote_entity_id())
+            .collect();
+
+        for entity_id in &unique_entity_ids {
+            self.update_publication_matched_status(
+                -1,
+                InstanceHandle::from_guid(&Guid::new(prefix, *entity_id)),
+            );
+        }
+
+        let len_before = reader_locator.len();
+        reader_locator.retain(|locator| locator.guid_prefix() != prefix);
+        let removed = len_before - reader_locator.len();
+
+        debug!(
+            "Removed all unmatched reader locators from participant: {}",
+            Guid::guid_prefix_to_string(&prefix)
+        );
+        debug!("Current number of matched reader: {:?}", reader_locator.len());
+        Ok(removed)
     }
 }
 
