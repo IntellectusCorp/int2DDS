@@ -5,8 +5,9 @@
 //! Rust calls, so the FFI layer and the DDS core link statically into a single
 //! `int2dds_java` shared library.
 
+use jni::objects::{JByteArray, JClass};
 use jni::sys::jint;
-use jni::JavaVM;
+use jni::{JNIEnv, JavaVM};
 use std::sync::OnceLock;
 
 pub mod buffer;
@@ -38,4 +39,20 @@ pub fn jvm() -> Option<&'static JavaVM> {
 pub extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut std::ffi::c_void) -> jint {
     let _ = JVM.set(vm);
     jni::sys::JNI_VERSION_1_8
+}
+
+/// The product version as UTF-8 bytes, for `NativeLoader`'s version check.
+///
+/// Bytes rather than a `String`: the whole binding avoids JNI's modified UTF-8.
+///
+/// # Safety
+/// Invoked by the JVM under JNI conventions.
+#[no_mangle]
+pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_FfiHandwritten_nativeVersion<
+    'local,
+>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+) -> JByteArray<'local> {
+    env.byte_array_from_slice(crate_version().as_bytes()).expect("allocate version byte array")
 }

@@ -28,6 +28,19 @@ dependencies {
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
 }
 
+// Tests load the native library built by `cargo build --release -p int2dds-java`.
+// Overridable so CI can point at a downloaded artifact instead.
+tasks.withType<Test>().configureEach {
+    val fromEnv = System.getenv("INT2DDS_JAVA_LIB")
+    val builtName = when {
+        org.gradle.internal.os.OperatingSystem.current().isWindows -> "int2dds_java.dll"
+        org.gradle.internal.os.OperatingSystem.current().isMacOsX -> "libint2dds_java.dylib"
+        else -> "libint2dds_java.so"
+    }
+    val built = rootProject.file("../target/release/$builtName")
+    environment("INT2DDS_JAVA_LIB", fromEnv ?: built.absolutePath)
+}
+
 tasks.jar {
     archiveBaseName.set("int2dds-api")
     into("META-INF/versions/22") {

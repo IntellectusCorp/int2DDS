@@ -18,4 +18,13 @@ public final class FfiHandwritten {
      * entry {@code 2i} is always a name and {@code 2i + 1} its value.
      */
     static native byte[][] participantQosPropertiesWithPrefix(long qos, byte[] prefix);
+
+    /**
+     * Product version of the loaded native library, as UTF-8 bytes.
+     *
+     * <p>Public because {@code NativeLoader} lives in the parent package and
+     * needs it to verify the library against the JAR. Everything else here
+     * stays package-private.
+     */
+    public static native byte[] nativeVersion();
 }
