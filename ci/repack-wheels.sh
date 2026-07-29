@@ -67,7 +67,7 @@ for entry in "${entries[@]}"; do
     *)        dest_name="libint2dds_ffi.so" ;;
   esac
 
-  rm -rf "$work/$tag"
+  rm -rf "${work:?}/${tag:?}"
   mkdir -p "$work/$tag"
   ( cd "$work/$tag" && wheel unpack "$pure_wheel" >/dev/null )
 
