@@ -72,3 +72,24 @@ def test_find_library_falls_back_to_bare_name(monkeypatch, tmp_path):
     monkeypatch.setenv("INT2DDS_FFI_PATH", str(tmp_path / "nonexistent"))
     monkeypatch.setattr(_libpath, "candidate_paths", lambda name: [])
     assert _libpath.find_library() == _libpath.library_filename()
+
+
+def test_find_library_dir_form_returns_the_file(monkeypatch, tmp_path):
+    """When INT2DDS_FFI_PATH points at a directory, find_library() must return the
+    path of the library file inside it, not the directory itself. Returning the
+    directory breaks ffi.dlopen()."""
+    name = _libpath.library_filename()
+    lib_file = tmp_path / name
+    lib_file.write_bytes(b"")
+    monkeypatch.setenv("INT2DDS_FFI_PATH", str(tmp_path))
+    assert _libpath.find_library() == str(tmp_path / name)
+
+
+def test_find_library_file_form_returns_that_file(monkeypatch, tmp_path):
+    """When INT2DDS_FFI_PATH points directly at the library file, find_library()
+    must return that path as is."""
+    name = _libpath.library_filename()
+    lib_file = tmp_path / name
+    lib_file.write_bytes(b"")
+    monkeypatch.setenv("INT2DDS_FFI_PATH", str(lib_file))
+    assert _libpath.find_library() == str(lib_file)

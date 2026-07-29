@@ -76,6 +76,12 @@ def find_library() -> str:
     take over when none is found."""
     lib_name = library_filename()
     for path in candidate_paths(lib_name):
-        if path.exists():
+        # exists() also returns True for directories. When INT2DDS_FFI_PATH points
+        # at a directory (e.g. CI, the C# binding), that directory would be taken
+        # for the library and ffi.dlopen() would break, so only file candidates may
+        # be selected. is_file() follows symlinks, so the
+        # libint2dds_ffi.so -> .so.0 -> .so.0.1.1 chain in the Linux release
+        # archive still resolves.
+        if path.is_file():
             return str(path)
     return lib_name
