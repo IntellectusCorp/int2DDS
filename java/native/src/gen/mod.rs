@@ -4,3 +4,4 @@
 //! parse of `ffi/src/**.rs`, so the two sides cannot drift apart.
 
 pub mod parse;
+pub mod typemap;
