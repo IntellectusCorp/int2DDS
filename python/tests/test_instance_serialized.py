@@ -27,6 +27,12 @@ class Keyed:
     _extensibility: ClassVar[Extensibility] = Extensibility.FINAL
     _has_key: ClassVar[bool] = True
 
+    # A keyed topic needs field metadata to advertise a TypeObject (#347).
+    _dds_type_info_fields: ClassVar[list] = [
+        ("field", "sensor_id", 9, 0, 1),   # u32, key
+        ("field", "value", 12, 0, 0),      # f64
+    ]
+
     sensor_id: int = 0    # @key u32
     value: float = 0.0    # f64
 
