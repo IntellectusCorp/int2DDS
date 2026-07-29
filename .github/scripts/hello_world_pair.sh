@@ -22,7 +22,19 @@ mkdir -p "$LOG_DIR"
 PUB_LOG="$LOG_DIR/${PUB_LANG}_to_${SUB_LANG}.pub.log"
 SUB_LOG="$LOG_DIR/${PUB_LANG}_to_${SUB_LANG}.sub.log"
 
-export LD_LIBRARY_PATH="$ROOT/target/debug${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# The C examples carry an rpath from CMake, and Python/C# are handed an explicit
+# path, so these exports are only a fallback -- which matters on macOS, where SIP
+# strips DYLD_* from the environment of protected interpreters anyway.
+case "$(uname -s)" in
+    Darwin)
+        FFI_LIB="libint2dds_ffi.dylib"
+        export DYLD_LIBRARY_PATH="$ROOT/target/debug${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+        ;;
+    *)
+        FFI_LIB="libint2dds_ffi.so"
+        export LD_LIBRARY_PATH="$ROOT/target/debug${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        ;;
+esac
 export INT2DDS_UDP_SOCKET_BUFFER="${INT2DDS_UDP_SOCKET_BUFFER:-5242880}"
 
 lang_tag() {
@@ -48,7 +60,7 @@ build_cmd() {
         python)
             # INT2DDS_FFI_PATH is a file for Python, and is set explicitly because the
             # binding's search order prefers target/release over target/debug.
-            CMD=(env "INT2DDS_FFI_PATH=$ROOT/target/debug/libint2dds_ffi.so"
+            CMD=(env "INT2DDS_FFI_PATH=$ROOT/target/debug/$FFI_LIB"
                  PYTHONUNBUFFERED=1
                  python3 -u "$ROOT/python/examples/hello_world_$role.py")
             ;;
