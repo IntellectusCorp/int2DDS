@@ -30,6 +30,29 @@ static void handle_sigint(int sig) {
     g_stop = 1;
 }
 
+const char* topic_name = "hello_world_topic";
+
+static const char* reliability_name(int32_t kind) {
+    return kind == INT2DDS_QOS_RELIABILITY_RELIABLE ? "Reliable" : "BestEffort";
+}
+
+static const char* durability_name(int32_t kind) {
+    switch (kind) {
+        case INT2DDS_QOS_DURABILITY_TRANSIENT_LOCAL: return "TransientLocal";
+        case INT2DDS_QOS_DURABILITY_TRANSIENT:       return "Transient";
+        case INT2DDS_QOS_DURABILITY_PERSISTENT:      return "Persistent";
+        default:                                     return "Volatile";
+    }
+}
+
+static void history_name(int32_t kind, int32_t depth, char* out, size_t out_len) {
+    if (kind == INT2DDS_QOS_HISTORY_KEEP_ALL) {
+        snprintf(out, out_len, "KeepAll");
+    } else {
+        snprintf(out, out_len, "KeepLast(%d)", depth);
+    }
+}
+
 int main(int argc, char* argv[]) {
     signal(SIGINT, handle_sigint);
 
@@ -56,10 +79,6 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    printf("int2dds IDL Hello World Publisher\n");
-    printf("Domain: %d, QoS: %s\n", domain_id, use_reliable ? "RELIABLE" : "BEST_EFFORT");
-    printf("-----------------------------------\n");
-
     /* Initialize factory */
     ret = int2dds_domain_participant_factory_get_instance(&factory);
     if (ret != INT2DDS_RET_OK) {
@@ -83,7 +102,7 @@ int main(int argc, char* argv[]) {
 
     /* Create topic — extensibility is carried by the type via HelloWorld_type_info(),
        so no extensibility argument is passed (parity with the Rust/Python/C# examples). */
-    ret = HelloWorld_create_topic(participant, "hello_world_topic", NULL, &topic);
+    ret = HelloWorld_create_topic(participant, topic_name, NULL, &topic);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create topic: %d\n", ret);
         goto cleanup;
@@ -114,7 +133,17 @@ int main(int argc, char* argv[]) {
         goto cleanup;
     }
 
-    printf("Publisher ready. Waiting for subscriber...\n");
+    int32_t rel_kind = 0, dur_kind = 0, hist_kind = 0, hist_depth = 0;
+    int64_t max_blocking_ns = 0;
+    char hist_text[32];
+    int2dds_datawriter_qos_get_reliability(qos, &rel_kind, &max_blocking_ns);
+    int2dds_datawriter_qos_get_durability(qos, &dur_kind);
+    int2dds_datawriter_qos_get_history(qos, &hist_kind, &hist_depth);
+    history_name(hist_kind, hist_depth, hist_text, sizeof(hist_text));
+
+    printf("[publisher INFO] domain_id: %d, topic: %s\n", domain_id, topic_name);
+    printf("[publisher qos] reliability: %s, durability: %s, history: %s\n",
+           reliability_name(rel_kind), durability_name(dur_kind), hist_text);
 
     /* Create WaitSet */
     ret = int2dds_waitset_new(&waitset);
@@ -163,8 +192,7 @@ int main(int argc, char* argv[]) {
         }
     } while (matched.current_count <= 0);
 
-    printf("Subscriber matched! (total: %d, current: %d)\n", matched.total_count, matched.current_count);
-    printf("Starting to send messages...\n\n");
+    printf("Subscriber matched!\n");
 
     /* Publish messages using IDL-generated serialization */
     HelloWorld hw;
@@ -176,7 +204,7 @@ int main(int argc, char* argv[]) {
 
         /* Fill struct directly */
         hw.index = i;
-        snprintf(hw.message, sizeof(hw.message), "Hello World from C! [%u]", i);
+        snprintf(hw.message, sizeof(hw.message), "[C]HelloWorld_d%d", domain_id);
 
         /* Serialize to CDR bytes */
         size_t serialized_len = HelloWorld_serialize_cdr(&hw, buf, sizeof(buf), false);
@@ -190,7 +218,7 @@ int main(int argc, char* argv[]) {
         if (ret != INT2DDS_RET_OK) {
             fprintf(stderr, "Failed to write: %d\n", ret);
         } else {
-            printf("[%u] Sent: %s\n", i, hw.message);
+            printf("Published HelloWorld { index: %u, message: \"%s\" }\n", hw.index, hw.message);
         }
 
         sleep_ms(1000);
