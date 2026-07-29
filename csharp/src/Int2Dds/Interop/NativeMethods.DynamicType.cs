@@ -14,25 +14,18 @@ namespace Int2Dds.Interop
     internal static partial class NativeMethods
     {
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern int int2dds_get_builtin_subscriber(IntPtr participant, out IntPtr subscriber_out);
+        internal static extern int int2dds_participant_get_builtin_subscriber(IntPtr participant, out IntPtr subscriber_out);
+
+        // Returns an Int2DdsPublicationBuiltinTopicData handle (see NativeMethods.Discovery.cs
+        // for the accessor/destroy family).
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_subscriber_take_publication_data(IntPtr builtin_sub, byte* topic_name_filter, int timeout_ms, out IntPtr data_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static unsafe extern int int2dds_take_publication_data(IntPtr builtin_sub, byte* topic_name_filter, int timeout_ms, out IntPtr data_out);
+        internal static extern int int2dds_publication_builtin_topic_data_take_type_object(IntPtr data, out IntPtr type_object_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern void int2dds_publication_data_destroy(IntPtr p);
-
-        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static unsafe extern int int2dds_publication_data_topic_name(IntPtr p, byte* buf, UIntPtr buf_len, out UIntPtr out_len);
-
-        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static unsafe extern int int2dds_publication_data_type_name(IntPtr p, byte* buf, UIntPtr buf_len, out UIntPtr out_len);
-
-        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern int int2dds_publication_data_take_type_object(IntPtr p, out IntPtr type_object_out);
-
-        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static unsafe extern int int2dds_wait_for_type_object(IntPtr participant, byte* topic_name, int timeout_ms, out IntPtr type_obj_out, byte* type_name_buf, UIntPtr type_name_buf_len, out UIntPtr out_len);
+        internal static unsafe extern int int2dds_participant_wait_for_type_object(IntPtr participant, byte* topic_name, int timeout_ms, out IntPtr type_obj_out, byte* type_name_buf, UIntPtr type_name_buf_len, out UIntPtr out_len);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern void int2dds_type_object_destroy(IntPtr t);
