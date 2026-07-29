@@ -120,11 +120,18 @@ class ResourceLimits:
 class Lifespan:
     duration: float = float("inf")  # seconds, inf = infinite
 
+    _INFINITE_NS = 0x7FFFFFFFFFFFFFFF
+
     @property
     def _duration_ns(self) -> int:
         if self.duration == float("inf"):
-            return 0x7FFFFFFFFFFFFFFF
+            return self._INFINITE_NS
         return int(self.duration * 1_000_000_000)
+
+    @classmethod
+    def from_ns(cls, ns: int) -> "Lifespan":
+        # Inverse of _duration_ns: the sentinel maps back to infinite, not ~292 years.
+        return cls(duration=float("inf") if ns == cls._INFINITE_NS else ns / 1_000_000_000)
 
 
 @dataclass
