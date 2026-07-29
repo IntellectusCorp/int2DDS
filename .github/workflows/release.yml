@@ -551,3 +551,39 @@ jobs:
           python -m pip install --quiet ./python
           python -c "import ast,sys; [ast.parse(open(f).read()) for f in ['python/examples/hello_world_pub.py','python/examples/hello_world_sub.py']]"
           python -c "import int2dds; print('python binding import ok')"
+
+  release:
+    needs: [prepare, native-linux-gnu, native-linux-musl, native-windows, native-macos, csharp, python, verify-examples]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect assets and generate checksums
+        run: ./ci/collect-assets.sh "${{ needs.prepare.outputs.version }}" artifacts dist/release
+
+      - name: Create draft release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${{ github.ref_name }}" \
+            --draft \
+            --title "int2DDS ${{ needs.prepare.outputs.version }}" \
+            --notes-file artifacts/release-notes/release-notes.md \
+            ${{ needs.prepare.outputs.is_prerelease == 'true' && '--prerelease' || '' }} \
+            dist/release/*
+
+      - name: Dry run summary
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          {
+            echo "### Dry run — no release created"
+            echo '```'
+            ls -1 dist/release
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
