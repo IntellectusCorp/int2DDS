@@ -131,11 +131,12 @@ class Subscriber:
             c_array = ffi.new("char*[]", c_strings)
             check_ret(lib.int2dds_subscriber_qos_set_partition(
                 qos_handle, c_array, len(qos.partition.names)))
-            check_ret(lib.int2dds_create_subscriber_with_qos(
+            check_ret(lib.int2dds_create_subscriber(
                 participant._handle, qos_handle, subscriber_ptr))
             lib.int2dds_subscriber_qos_destroy(qos_handle)
         else:
-            check_ret(lib.int2dds_create_subscriber(participant._handle, subscriber_ptr))
+            check_ret(lib.int2dds_create_subscriber(
+                participant._handle, ffi.NULL, subscriber_ptr))
         self._handle = subscriber_ptr[0]
 
     def create_datareader(
@@ -174,6 +175,13 @@ class Subscriber:
     def delete_contained_entities(self) -> None:
         """Delete all DataReaders created by this subscriber."""
         check_ret(lib.int2dds_subscriber_delete_contained_entities(self._handle))
+
+    def get_instance_handle(self) -> bytes:
+        """Get this subscriber's 16-byte instance handle."""
+        buf = ffi.new("uint8_t[16]")
+        check_ret(lib.int2dds_subscriber_get_instance_handle(
+            self._handle, ffi.cast("uint8_t(*)[16]", buf)))
+        return bytes(ffi.buffer(buf, 16))
 
     def get_statuscondition(self) -> StatusCondition:
         """Get the StatusCondition associated with this subscriber."""
@@ -277,43 +285,34 @@ class DataReader(Generic[T]):
         from int2dds.core.topic import ContentFilteredTopic
         is_cft = isinstance(topic, ContentFilteredTopic)
 
+        c_listener = ffi.NULL
+        mask = 0
+        if listener is not None:
+            mask = status_mask if status_mask is not None else STATUS_MASK_ALL
+            c_listener, ctx_id = _create_reader_listener_struct(listener, self)
+            self._listener_ctx_id = ctx_id
+
         if profile is not None:
             check_ret(
                 lib.int2dds_create_datareader_with_profile(
-                    subscriber._handle, topic._handle, profile.encode(), reader_ptr
+                    subscriber._handle, topic._handle, profile.encode(),
+                    c_listener, mask, reader_ptr
                 )
             )
-        elif listener is not None:
-            mask = status_mask if status_mask is not None else STATUS_MASK_ALL
-            c_listener, ctx_id = _create_reader_listener_struct(listener, self)
-            if is_cft:
-                check_ret(
-                    lib.int2dds_create_datareader_cft_with_listener(
-                        subscriber._handle, topic._handle, qos_ptr,
-                        c_listener, mask, reader_ptr
-                    )
+        elif is_cft:
+            check_ret(
+                lib.int2dds_create_datareader_cft(
+                    subscriber._handle, topic._handle, qos_ptr,
+                    c_listener, mask, reader_ptr
                 )
-            else:
-                check_ret(
-                    lib.int2dds_create_datareader_with_listener(
-                        subscriber._handle, topic._handle, qos_ptr,
-                        c_listener, mask, reader_ptr
-                    )
-                )
-            self._listener_ctx_id = ctx_id
+            )
         else:
-            if is_cft:
-                check_ret(
-                    lib.int2dds_create_datareader_cft(
-                        subscriber._handle, topic._handle, qos_ptr, reader_ptr
-                    )
+            check_ret(
+                lib.int2dds_create_datareader(
+                    subscriber._handle, topic._handle, qos_ptr,
+                    c_listener, mask, reader_ptr
                 )
-            else:
-                check_ret(
-                    lib.int2dds_create_datareader(
-                        subscriber._handle, topic._handle, qos_ptr, reader_ptr
-                    )
-                )
+            )
 
         self._handle = reader_ptr[0]
 
@@ -356,11 +355,11 @@ class DataReader(Generic[T]):
 
     def _take_one(self) -> Sample[T] | None:
         """Take a single sample from the reader."""
-        return self._take_or_read_one(lib.int2dds_take_serialized)
+        return self._take_or_read_one(lib.int2dds_datareader_take_serialized)
 
     def _read_one(self) -> Sample[T] | None:
         """Read a single sample without removing it from the cache."""
-        return self._take_or_read_one(lib.int2dds_read_serialized)
+        return self._take_or_read_one(lib.int2dds_datareader_read_serialized)
 
     def take(self) -> list[Sample[T]]:
         """
@@ -459,7 +458,7 @@ class DataReader(Generic[T]):
     ) -> list[Sample[T]]:
         """Take samples matching a Read/QueryCondition (removed from the cache)."""
         return self._read_or_take_w_condition(
-            condition, max_samples, lib.int2dds_datareader_take_w_readcondition
+            condition, max_samples, lib.int2dds_datareader_take_serialized_batch_w_readcondition
         )
 
     def read_w_condition(
@@ -467,7 +466,7 @@ class DataReader(Generic[T]):
     ) -> list[Sample[T]]:
         """Read samples matching a Read/QueryCondition (left in the cache)."""
         return self._read_or_take_w_condition(
-            condition, max_samples, lib.int2dds_datareader_read_w_readcondition
+            condition, max_samples, lib.int2dds_datareader_read_serialized_batch_w_readcondition
         )
 
     def _read_or_take_w_condition(
@@ -526,7 +525,7 @@ class DataReader(Generic[T]):
         """
         return self._read_or_take_instance_serialized(
             handle, max_samples, sample_states, view_states, instance_states,
-            lib.int2dds_take_instance_serialized_batch)
+            lib.int2dds_datareader_take_instance_serialized_batch)
 
     def read_instance_serialized(
         self,
@@ -539,7 +538,7 @@ class DataReader(Generic[T]):
         """Read samples belonging to a single instance (samples stay in cache)."""
         return self._read_or_take_instance_serialized(
             handle, max_samples, sample_states, view_states, instance_states,
-            lib.int2dds_read_instance_serialized_batch)
+            lib.int2dds_datareader_read_instance_serialized_batch)
 
     def _read_or_take_instance_serialized(
         self, handle: bytes, max_samples: int,
@@ -590,12 +589,12 @@ class DataReader(Generic[T]):
     def take_serialized(self, max_samples: int = -1) -> list[Sample[T]]:
         """Take all available samples in one batch (raw serialized path)."""
         return self._read_or_take_serialized_batch(
-            max_samples, lib.int2dds_take_serialized_batch)
+            max_samples, lib.int2dds_datareader_take_serialized_batch)
 
     def read_serialized(self, max_samples: int = -1) -> list[Sample[T]]:
         """Read all available samples in one batch (samples stay in cache)."""
         return self._read_or_take_serialized_batch(
-            max_samples, lib.int2dds_read_serialized_batch)
+            max_samples, lib.int2dds_datareader_read_serialized_batch)
 
     def _read_or_take_serialized_batch(
         self, max_samples: int, native_fn
@@ -643,12 +642,11 @@ class DataReader(Generic[T]):
         Returns:
             Tuple of (total_count, current_count) indicating matched writers
         """
-        total_out = ffi.new("int32_t *")
-        current_out = ffi.new("int32_t *")
+        status = ffi.new("Int2DdsSubscriptionMatchedStatus *")
         check_ret(
-            lib.int2dds_get_subscription_matched_status(self._handle, total_out, current_out)
+            lib.int2dds_datareader_get_subscription_matched_status(self._handle, status)
         )
-        return total_out[0], current_out[0]
+        return status.total_count, status.current_count
 
     @property
     def matched_writers(self) -> int:
@@ -712,7 +710,7 @@ class DataReader(Generic[T]):
     def get_qos(self) -> "DataReaderQos":
         """Return the effective QoS (reliability, durability, history) in force."""
         from int2dds.core.qos import (
-            DataReaderQos, Reliability, Durability, History,
+            DataReaderQos, Reliability, Durability, History, ResourceLimits,
             ReliabilityKind, DurabilityKind, HistoryKind,
         )
 
@@ -728,6 +726,11 @@ class DataReader(Generic[T]):
             hist_kind = ffi.new("int32_t *")
             depth = ffi.new("int32_t *")
             check_ret(lib.int2dds_datareader_qos_get_history(handle, hist_kind, depth))
+            max_samples = ffi.new("int32_t *")
+            max_instances = ffi.new("int32_t *")
+            max_per_instance = ffi.new("int32_t *")
+            check_ret(lib.int2dds_datareader_qos_get_resource_limits(
+                handle, max_samples, max_instances, max_per_instance))
         finally:
             lib.int2dds_datareader_qos_destroy(handle)
 
@@ -738,6 +741,11 @@ class DataReader(Generic[T]):
             ),
             durability=Durability(kind=DurabilityKind(dur_kind[0]).name),
             history=History(kind=HistoryKind(hist_kind[0]).name, depth=depth[0]),
+            resource_limits=ResourceLimits(
+                max_samples=max_samples[0],
+                max_instances=max_instances[0],
+                max_samples_per_instance=max_per_instance[0],
+            ),
         )
 
     def set_qos(self, qos: "DataReaderQos") -> None:
@@ -865,7 +873,7 @@ class DataReader(Generic[T]):
         size_out = ffi.new("size_t *")
         valid_out = ffi.new("bool *")
         loan_out = ffi.new("Int2DdsSerializedLoan **")
-        ret = lib.int2dds_take_serialized_loaned(
+        ret = lib.int2dds_datareader_take_serialized_loaned(
             self._handle, data_out, size_out, valid_out, loan_out)
         if ret == INT2DDS_RET_NO_DATA:
             return None
@@ -876,7 +884,7 @@ class DataReader(Generic[T]):
             return bytes(ffi.buffer(data_out[0], size_out[0]))
         finally:
             if loan_out[0] != ffi.NULL:
-                lib.int2dds_return_serialized_loan(loan_out[0])
+                lib.int2dds_datareader_return_serialized_loan(loan_out[0])
 
     def get_statuscondition(self) -> StatusCondition:
         """Get the StatusCondition associated with this DataReader."""

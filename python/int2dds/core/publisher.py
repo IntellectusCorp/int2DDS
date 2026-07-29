@@ -107,11 +107,12 @@ class Publisher:
             c_array = ffi.new("char*[]", c_strings)
             check_ret(lib.int2dds_publisher_qos_set_partition(
                 qos_handle, c_array, len(qos.partition.names)))
-            check_ret(lib.int2dds_create_publisher_with_qos(
+            check_ret(lib.int2dds_create_publisher(
                 participant._handle, qos_handle, publisher_ptr))
             lib.int2dds_publisher_qos_destroy(qos_handle)
         else:
-            check_ret(lib.int2dds_create_publisher(participant._handle, publisher_ptr))
+            check_ret(lib.int2dds_create_publisher(
+                participant._handle, ffi.NULL, publisher_ptr))
         self._handle = publisher_ptr[0]
 
     def create_datawriter(
@@ -246,41 +247,46 @@ class DataWriter(Generic[T]):
             _apply_datawriter_qos(self._qos_handle, qos)
             qos_ptr = self._qos_handle
 
-        # Effective representation = caller's choice, else the core default
-        # (single source of truth in the Rust core, not hardcoded here).
-        if qos is not None and qos.data_representation is not None:
-            effective_repr = qos.data_representation._kind_int
-        else:
-            effective_repr = lib.int2dds_default_data_representation()
-        # INT2DDS_QOS_DATA_REPR_XCDR2 == 2
-        self._xcdr2 = (effective_repr == 2)
-
         writer_ptr = ffi.new("Int2DdsDataWriter **")
+
+        c_listener = ffi.NULL
+        mask = 0
+        if listener is not None:
+            mask = status_mask if status_mask is not None else STATUS_MASK_ALL
+            c_listener, ctx_id = _create_writer_listener_struct(listener, self)
+            self._listener_ctx_id = ctx_id
 
         if profile is not None:
             check_ret(
                 lib.int2dds_create_datawriter_with_profile(
-                    publisher._handle, topic._handle, profile.encode(), writer_ptr
+                    publisher._handle, topic._handle, profile.encode(),
+                    c_listener, mask, writer_ptr
                 )
             )
-        elif listener is not None:
-            mask = status_mask if status_mask is not None else STATUS_MASK_ALL
-            c_listener, ctx_id = _create_writer_listener_struct(listener, self)
+        else:
             check_ret(
-                lib.int2dds_create_datawriter_with_listener(
+                lib.int2dds_create_datawriter(
                     publisher._handle, topic._handle, qos_ptr,
                     c_listener, mask, writer_ptr
                 )
             )
-            self._listener_ctx_id = ctx_id
-        else:
-            check_ret(
-                lib.int2dds_create_datawriter(
-                    publisher._handle, topic._handle, qos_ptr, writer_ptr
-                )
-            )
 
         self._handle = writer_ptr[0]
+
+        # The native layer may resolve the data representation from a QoS profile or
+        # the spec default; re-read it from the created writer so client-side CDR
+        # serialization matches what SEDP advertises — a profile may select XCDR2
+        # even when the library default is XCDR1 (mirrors the C# binding).
+        wqos_ptr = ffi.new("Int2DdsDataWriterQos **")
+        check_ret(lib.int2dds_datawriter_get_qos(self._handle, wqos_ptr))
+        wqos_handle = wqos_ptr[0]
+        try:
+            repr_out = ffi.new("int32_t *")
+            check_ret(lib.int2dds_datawriter_qos_get_data_representation(wqos_handle, repr_out))
+            # INT2DDS_QOS_DATA_REPR_XCDR2 == 2
+            self._xcdr2 = (repr_out[0] == 2)
+        finally:
+            lib.int2dds_datawriter_qos_destroy(wqos_handle)
 
         # Clean up QoS handle after use
         if self._qos_handle is not None:
@@ -295,7 +301,7 @@ class DataWriter(Generic[T]):
     def get_qos(self) -> "DataWriterQos":
         """Return the effective QoS (reliability, durability, history) in force."""
         from int2dds.core.qos import (
-            DataWriterQos, Reliability, Durability, History,
+            DataWriterQos, Reliability, Durability, History, ResourceLimits,
             ReliabilityKind, DurabilityKind, HistoryKind,
         )
 
@@ -313,6 +319,11 @@ class DataWriter(Generic[T]):
             check_ret(lib.int2dds_datawriter_qos_get_history(handle, hist_kind, depth))
             frag = ffi.new("int32_t *")
             check_ret(lib.int2dds_datawriter_qos_get_data_frag(handle, frag))
+            max_samples = ffi.new("int32_t *")
+            max_instances = ffi.new("int32_t *")
+            max_per_instance = ffi.new("int32_t *")
+            check_ret(lib.int2dds_datawriter_qos_get_resource_limits(
+                handle, max_samples, max_instances, max_per_instance))
         finally:
             lib.int2dds_datawriter_qos_destroy(handle)
 
@@ -323,6 +334,11 @@ class DataWriter(Generic[T]):
             ),
             durability=Durability(kind=DurabilityKind(dur_kind[0]).name),
             history=History(kind=HistoryKind(hist_kind[0]).name, depth=depth[0]),
+            resource_limits=ResourceLimits(
+                max_samples=max_samples[0],
+                max_instances=max_instances[0],
+                max_samples_per_instance=max_per_instance[0],
+            ),
             data_frag=frag[0],
         )
 
@@ -361,7 +377,8 @@ class DataWriter(Generic[T]):
         key_len = 0
 
         check_ret(
-            lib.int2dds_write_serialized(self._handle, data_ptr, len(data), key_ptr, key_len)
+            lib.int2dds_datawriter_write_serialized(
+                self._handle, data_ptr, len(data), key_ptr, key_len)
         )
     def register_instance(self, sample: T) -> bytes:
         """
@@ -484,10 +501,9 @@ class DataWriter(Generic[T]):
         Returns:
             Tuple of (total_count, current_count) indicating matched readers
         """
-        total_out = ffi.new("int32_t *")
-        current_out = ffi.new("int32_t *")
-        check_ret(lib.int2dds_get_publication_matched_status(self._handle, total_out, current_out))
-        return total_out[0], current_out[0]
+        status = ffi.new("Int2DdsPublicationMatchedStatus *")
+        check_ret(lib.int2dds_datawriter_get_publication_matched_status(self._handle, status))
+        return status.total_count, status.current_count
 
     def get_statuscondition(self) -> StatusCondition:
         """Get the StatusCondition associated with this DataWriter."""
@@ -577,16 +593,16 @@ class DataWriter(Generic[T]):
         data_out = ffi.new("uint8_t **")
         cap_out = ffi.new("size_t *")
         loan_out = ffi.new("Int2DdsSerializedWriteLoan **")
-        check_ret(lib.int2dds_prepare_serialized_write(
+        check_ret(lib.int2dds_datawriter_prepare_serialized_write(
             self._handle, len(data), data_out, cap_out, loan_out))
         loan = loan_out[0]
         try:
             ffi.memmove(data_out[0], data, len(data))
             key_ptr = ffi.from_buffer(key) if key else ffi.NULL
-            check_ret(lib.int2dds_commit_serialized_write(
+            check_ret(lib.int2dds_datawriter_commit_serialized_write(
                 self._handle, loan, len(data), key_ptr, len(key)))
         except BaseException:
-            lib.int2dds_abort_serialized_write(loan)
+            lib.int2dds_datawriter_abort_serialized_write(loan)
             raise
 
     def get_statuscondition(self) -> StatusCondition:

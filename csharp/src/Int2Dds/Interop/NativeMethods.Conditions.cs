@@ -6,16 +6,16 @@ namespace Int2Dds.Interop
     internal static partial class NativeMethods
     {
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern int int2dds_guard_condition_new(out IntPtr condition_out);
+        internal static extern int int2dds_guardcondition_new(out IntPtr condition_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern int int2dds_guard_condition_set_trigger_value(IntPtr condition, [MarshalAs(UnmanagedType.U1)] bool value);
+        internal static extern int int2dds_guardcondition_set_trigger_value(IntPtr condition, [MarshalAs(UnmanagedType.U1)] bool value);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern int int2dds_guard_condition_get_trigger_value(IntPtr condition, [MarshalAs(UnmanagedType.U1)] out bool value_out);
+        internal static extern int int2dds_guardcondition_get_trigger_value(IntPtr condition, [MarshalAs(UnmanagedType.U1)] out bool value_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern int int2dds_guard_condition_delete(IntPtr condition);
+        internal static extern int int2dds_guardcondition_delete(IntPtr condition);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_datareader_get_statuscondition(IntPtr reader, out IntPtr condition_out);
@@ -86,11 +86,11 @@ namespace Int2Dds.Interop
         internal static extern int int2dds_readcondition_delete(IntPtr condition);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern int int2dds_datareader_take_w_readcondition(
+        internal static extern int int2dds_datareader_take_serialized_batch_w_readcondition(
             IntPtr reader, IntPtr condition, int max_samples, out IntPtr seq_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern int int2dds_datareader_read_w_readcondition(
+        internal static extern int int2dds_datareader_read_serialized_batch_w_readcondition(
             IntPtr reader, IntPtr condition, int max_samples, out IntPtr seq_out);
     }
 }

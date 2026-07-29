@@ -2,6 +2,7 @@ using System;
 using Int2Dds.Core;
 using Int2Dds.Exceptions;
 using Int2Dds.Interop;
+using Int2Dds.Qos;
 
 namespace Int2Dds.Xtypes
 {
@@ -30,6 +31,23 @@ namespace Int2Dds.Xtypes
         {
             ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_dynamic_writer_publication_matched_count(_handle, out int count));
             return count;
+        }
+
+        /// <summary>
+        /// Returns the QoS actually in force on this writer — the value the native layer
+        /// resolved, which may come from a QoS profile rather than from the caller.
+        /// </summary>
+        public DataWriterQos GetQos()
+        {
+            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_dynamic_writer_get_qos(_handle, out var qosHandle));
+            try
+            {
+                return QosMarshal.ReadWriterQos(qosHandle);
+            }
+            finally
+            {
+                NativeMethods.int2dds_datawriter_qos_destroy(qosHandle);
+            }
         }
 
         public void Dispose()
@@ -70,6 +88,23 @@ namespace Int2Dds.Xtypes
         {
             ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_dynamic_reader_subscription_matched_count(_handle, out int count));
             return count;
+        }
+
+        /// <summary>
+        /// Returns the QoS actually in force on this reader — the value the native layer
+        /// resolved, which may come from a QoS profile rather than from the caller.
+        /// </summary>
+        public DataReaderQos GetQos()
+        {
+            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_dynamic_reader_get_qos(_handle, out var qosHandle));
+            try
+            {
+                return QosMarshal.ReadReaderQos(qosHandle);
+            }
+            finally
+            {
+                NativeMethods.int2dds_datareader_qos_destroy(qosHandle);
+            }
         }
 
         public void Dispose()

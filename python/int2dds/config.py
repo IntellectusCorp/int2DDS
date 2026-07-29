@@ -51,13 +51,13 @@ def load_profiles(paths: list[str] | str) -> None:
         paths = [paths]
     encoded = [ffi.new("char[]", str(p).encode()) for p in paths]
     arr = ffi.new("char *[]", encoded)
-    check_ret(lib.int2dds_load_profiles(_get_factory().handle, arr, len(encoded)))
+    check_ret(lib.int2dds_load_profiles(arr, len(encoded)))
 
 
 def get_dynamic_type_support(type_name: str) -> DynamicTypeSupport:
     """Build a :class:`DynamicTypeSupport` for a type from a loaded ``<types>`` section."""
     out = ffi.new("Int2DdsDynamicTypeSupport **")
-    check_ret(lib.int2dds_get_dynamic_type_support(_get_factory().handle, _cstr(type_name), out))
+    check_ret(lib.int2dds_get_dynamic_type_support(_cstr(type_name), out))
     return DynamicTypeSupport(out[0])
 
 

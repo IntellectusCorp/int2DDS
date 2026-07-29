@@ -454,7 +454,7 @@ def wait_for_type_object(
     name_buf = ffi.new("char[256]")
     out_len = ffi.new("uintptr_t*")
     check_ret(
-        lib.int2dds_wait_for_type_object(
+        lib.int2dds_participant_wait_for_type_object(
             participant.handle, _cstr(topic_name), timeout_ms, obj_out, name_buf, 256, out_len
         )
     )

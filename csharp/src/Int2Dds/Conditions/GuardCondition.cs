@@ -19,7 +19,7 @@ namespace Int2Dds.Conditions
         /// </summary>
         public GuardCondition()
         {
-            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_guard_condition_new(out _handle));
+            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_guardcondition_new(out _handle));
         }
 
         /// <summary>
@@ -43,14 +43,14 @@ namespace Int2Dds.Conditions
             {
                 if (_disposed) throw new ObjectDisposedException(GetType().Name);
                 ReturnCodeHelper.CheckReturn(
-                    NativeMethods.int2dds_guard_condition_get_trigger_value(_handle, out bool value));
+                    NativeMethods.int2dds_guardcondition_get_trigger_value(_handle, out bool value));
                 return value;
             }
             set
             {
                 if (_disposed) throw new ObjectDisposedException(GetType().Name);
                 ReturnCodeHelper.CheckReturn(
-                    NativeMethods.int2dds_guard_condition_set_trigger_value(_handle, value));
+                    NativeMethods.int2dds_guardcondition_set_trigger_value(_handle, value));
             }
         }
 
@@ -71,7 +71,7 @@ namespace Int2Dds.Conditions
 
             if (_handle != IntPtr.Zero)
             {
-                NativeMethods.int2dds_guard_condition_delete(_handle);
+                NativeMethods.int2dds_guardcondition_delete(_handle);
                 _handle = IntPtr.Zero;
             }
         }

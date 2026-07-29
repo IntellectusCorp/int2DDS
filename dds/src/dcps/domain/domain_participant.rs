@@ -1567,6 +1567,29 @@ impl DomainParticipant {
     /// * The QoS policies are inconsistent
     /// * Type registration fails
     /// * A topic with the same name but different type already exists
+    /// Resolution chain for `QosKind::Default`: registered default → configured
+    /// default profile → spec default. `QosKind::Specific` is used as-is.
+    ///
+    /// Shared by `create_topic` and `create_topic_dynamic` so both entry points
+    /// resolve the default sentinel identically.
+    fn resolve_topic_qos(&self, qos: QosKind<TopicQos>) -> TopicQos {
+        match qos {
+            QosKind::Specific(q) => q,
+            QosKind::Default => {
+                if let Some(registered) = self.default_topic_qos.lock().ok().and_then(|g| g.clone())
+                {
+                    registered
+                } else if let Ok(profile_qos) =
+                    DomainParticipantFactory::get_instance().get_topic_qos_from_profile("")
+                {
+                    profile_qos
+                } else {
+                    TopicQos::default()
+                }
+            }
+        }
+    }
+
     pub fn create_topic<Foo>(
         &self,
         topic_name: &str,
@@ -1583,21 +1606,7 @@ impl DomainParticipant {
         }
         self.is_deleted()?;
 
-        let qos = match qos.into() {
-            QosKind::Specific(q) => q,
-            QosKind::Default => {
-                if let Some(registered) = self.default_topic_qos.lock().ok().and_then(|g| g.clone())
-                {
-                    registered
-                } else if let Ok(profile_qos) =
-                    DomainParticipantFactory::get_instance().get_topic_qos_from_profile("")
-                {
-                    profile_qos
-                } else {
-                    TopicQos::default()
-                }
-            }
-        };
+        let qos = self.resolve_topic_qos(qos.into());
 
         qos.is_consistent()?;
         let handle = self.create_instance_handle()?;
@@ -2612,7 +2621,7 @@ impl DomainParticipant {
         &self,
         topic_name: &str,
         type_support: Arc<crate::xtypes::DynamicTypeSupport>,
-        qos: TopicQos,
+        qos: impl Into<QosKind<TopicQos>>,
         listener: Option<Arc<dyn TopicListener>>,
         mask: StatusMask,
     ) -> DdsResult<Topic> {
@@ -2620,6 +2629,12 @@ impl DomainParticipant {
             return Err(DdsError::PreconditionNotMet);
         }
         self.is_deleted()?;
+
+        // Same default-resolution chain as the typed create_topic: a caller that wants
+        // the QoS profile applied passes TOPIC_QOS_DEFAULT. Passing a concrete TopicQos
+        // still means "use exactly this" via the blanket From<T> for QosKind<T>, so
+        // existing callers are unaffected.
+        let qos = self.resolve_topic_qos(qos.into());
 
         qos.is_consistent()?;
         let handle = self.create_instance_handle()?;
@@ -2764,8 +2779,9 @@ impl DomainParticipant {
         Ok(obj.clone())
     }
 
-    /// Resolve the TypeObject for `topic_name`
-    fn discovered_type_object(&self, topic_name: &str) -> DdsResult<crate::xtypes::TypeObject> {
+    /// Resolve the TypeObject for `topic_name`. Triggers a TypeLookup fetch and
+    /// returns `PreconditionNotMet` while the reply is pending; retry until Ok.
+    pub fn discovered_type_object(&self, topic_name: &str) -> DdsResult<crate::xtypes::TypeObject> {
         let rtps_participant = self.get_rtps_participant()?;
 
         // Inline TypeObject advertised by a remote publication/subscription. The
