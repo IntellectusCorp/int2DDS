@@ -20,14 +20,14 @@ fail=0
 
 # Cargo.toml — only the version key under [workspace.package].
 # Anchored at line start so it does not pick up rust-version in the same file.
-cargo_version="$(grep -m1 -E '^version[[:space:]]*=' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+cargo_version="$(grep -m1 -E '^version[[:space:]]*=' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/' || true)"
 if [[ "$cargo_version" != "$base_version" ]]; then
   echo "ERROR: Cargo.toml version '$cargo_version' != tag version '$base_version'" >&2
   fail=1
 fi
 
 # python/pyproject.toml — hardcoded, so it can drift away from Cargo.toml.
-py_version="$(grep -m1 -E '^version[[:space:]]*=' python/pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+py_version="$(grep -m1 -E '^version[[:space:]]*=' python/pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/' || true)"
 if [[ "$py_version" != "$base_version" ]]; then
   echo "ERROR: python/pyproject.toml version '$py_version' != tag version '$base_version'" >&2
   fail=1
@@ -36,7 +36,7 @@ fi
 # csharp/Directory.Build.props reads Cargo.toml with a regex that takes the first
 # match in the file, and rust-version matches the same pattern. Confirm that the
 # first version match in Cargo.toml really is the workspace version.
-first_match="$(grep -m1 -E 'version[[:space:]]*=[[:space:]]*"' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+first_match="$(grep -m1 -E 'version[[:space:]]*=[[:space:]]*"' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/' || true)"
 if [[ "$first_match" != "$base_version" ]]; then
   echo "ERROR: the first 'version = \"...\"' match in Cargo.toml is '$first_match', not '$base_version'." >&2
   echo "       csharp/Directory.Build.props reads that first match, so the C# package version would be wrong." >&2
