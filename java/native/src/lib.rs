@@ -11,6 +11,7 @@ use std::sync::OnceLock;
 
 pub mod buffer;
 pub mod gen;
+mod generated;
 pub mod generated_support;
 pub mod strings;
 
