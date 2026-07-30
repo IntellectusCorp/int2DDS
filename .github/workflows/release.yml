@@ -79,7 +79,11 @@ jobs:
           apt-get install -y --no-install-recommends \
             curl ca-certificates build-essential git pkg-config cmake perl file binutils
           if [ "${{ matrix.triple }}" = "armv7-unknown-linux-gnueabihf" ]; then
-            apt-get install -y --no-install-recommends gcc-arm-linux-gnueabihf
+            # libc6-dev-armhf-cross is only a *recommended* dep of the cross gcc,
+            # so --no-install-recommends leaves the armhf libc headers out and
+            # C deps such as ring fail to compile. Name it explicitly.
+            apt-get install -y --no-install-recommends \
+              gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
           fi
 
       - uses: actions/checkout@v4
