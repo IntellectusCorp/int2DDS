@@ -1,24 +1,6 @@
 <Project>
-  <!--
-    .NET Framework (net45/net48) does not do RID-graph based asset selection, so
-    the native library under runtimes/{rid}/native/ is not copied automatically.
-    Copy it here instead.
-
-    This target must be a no-op when the native file is absent, since the file is
-    included in every consumer's build.
-  -->
-  <PropertyGroup>
-    <_Int2DdsNativeRid Condition="'$(Platform)' == 'x86'">win-x86</_Int2DdsNativeRid>
-    <_Int2DdsNativeRid Condition="'$(Platform)' == 'ARM64'">win-arm64</_Int2DdsNativeRid>
-    <_Int2DdsNativeRid Condition="'$(_Int2DdsNativeRid)' == ''">win-x64</_Int2DdsNativeRid>
-    <_Int2DdsNativeSource>$(MSBuildThisFileDirectory)../../runtimes/$(_Int2DdsNativeRid)/native/int2dds_ffi.dll</_Int2DdsNativeSource>
-  </PropertyGroup>
-
-  <ItemGroup Condition="Exists('$(_Int2DdsNativeSource)')">
-    <None Include="$(_Int2DdsNativeSource)">
-      <Link>int2dds_ffi.dll</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <Visible>false</Visible>
-    </None>
-  </ItemGroup>
+  <!-- The actual logic lives in the file shared by net45/net48: NuGet only
+       auto-imports through the build/<tfm>/<PackageId>.targets name and location
+       convention, so this file itself must not be removed. -->
+  <Import Project="$(MSBuildThisFileDirectory)../Int2Dds.Native.targets" />
 </Project>

@@ -82,6 +82,11 @@ if [[ "$lib_file" == "libint2dds_ffi.so" ]]; then
     [[ -n "$glibc" ]] || glibc="unknown"
     echo "min_glibc: \"$glibc\"" >> "$manifest"
 
+    if [[ "$glibc" == "unknown" ]]; then
+      echo "ERROR: could not determine min_glibc for $real_lib (readelf missing, or not a glibc object?)" >&2
+      exit 1
+    fi
+
     # glibc baseline regression guard: fail if it exceeds 2.35 (ubuntu 22.04).
     if [[ "$glibc" != "unknown" ]] && \
        [[ "$(printf '%s\n2.35\n' "$glibc" | sort -V | tail -1)" != "2.35" ]]; then
