@@ -1248,6 +1248,8 @@ mod tests {
             b_user_tx,
             None,
             TcpSocketTuning::default(),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
             CancellationToken::new(),
         )
         .expect("listener bind_and_spawn");
@@ -1288,6 +1290,8 @@ mod tests {
             b_user_tx,
             None,
             TcpSocketTuning::default(),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
             CancellationToken::new(),
         )
         .expect("listener bind_and_spawn");
@@ -1432,6 +1436,8 @@ mod tests {
             b_user_tx,
             None,
             TcpSocketTuning::default(),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
             CancellationToken::new(),
         )
         .expect("listener bind_and_spawn");
@@ -1875,6 +1881,8 @@ mod tests {
             b_user_tx,
             None,
             TcpSocketTuning::default(),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
             CancellationToken::new(),
         )
         .expect("listener bind_and_spawn");
@@ -1990,6 +1998,8 @@ mod tests {
             b_user_tx,
             None,
             TcpSocketTuning::default(),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
             CancellationToken::new(),
         )
         .expect("listener bind_and_spawn");
@@ -2046,6 +2056,8 @@ mod tests {
             b_user_tx,
             None,
             TcpSocketTuning::default(),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
             CancellationToken::new(),
         )
         .expect("listener bind_and_spawn");
@@ -2251,6 +2263,8 @@ mod tests {
             b_user_tx,
             None,
             TcpSocketTuning::default(),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
             CancellationToken::new(),
         )
         .expect("listener bind_and_spawn");
