@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Inject the native library into the pure Python wheel and give it a platform tag.
 #
-# Usage: ci/repack-wheels.sh <version> <native_root>
+# Usage: .github/scripts/ci/repack-wheels.sh <version> <native_root>
 #   Assumes native_root holds one directory per dist name, each containing the
 #   extracted archive (lib/, bin/ ...).
 set -euo pipefail
@@ -10,16 +10,16 @@ version="${1:?usage: repack-wheels.sh <version> <native_root>}"
 native_root="${2:?}"
 
 # Archive paths under native_root are named with the full tag version (prerelease
-# suffix included, e.g. 0.2.0-rc.1), because ci/stage-native.sh takes that value
+# suffix included, e.g. 0.2.0-rc.1), because stage-native.sh takes that value
 # straight into the filename. The wheel/sdist filenames and the directory name
 # inside the wheel, on the other hand, come from the static version field in
 # python/pyproject.toml (the base version without a suffix, enforced by
-# ci/check-version.sh). Both forms are therefore used below: $version (full) to
+# check-version.sh). Both forms are therefore used below: $version (full) to
 # look up native paths, $base_version (suffix stripped) for wheel filenames and
 # the internal directory name.
 base_version="${version%%-*}"
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 out_dir="$repo_root/dist/wheels"
 work="$repo_root/dist/wheel-work"
 
