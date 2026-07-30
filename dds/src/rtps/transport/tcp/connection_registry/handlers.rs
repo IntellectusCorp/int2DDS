@@ -20,10 +20,7 @@ use crate::rtps::transport::tcp::protocol::{
     ERR_CODE_MISSING_LOCATOR, MSG_PEER_HELLO, MSG_PORT_BIND, MSG_PORT_RESERVE,
 };
 
-use super::{
-    addr_to_guid, send_control, ConnectionId, ConnectionRegistry, ConnectionState,
-    PeerConnectionGroup,
-};
+use super::{addr_to_guid, send_control, ConnectionId, ConnectionRegistry, ConnectionState};
 
 impl ConnectionRegistry {
     // ── dispatch — entry point from connection_tasks::reader_task ──────────────────
@@ -124,8 +121,8 @@ impl ConnectionRegistry {
 
                 let synthetic_guid = addr_to_guid(addr);
                 let mut pc = self.peer_connections.lock().expect("peer_connections lock");
-                let group = pc.entry(synthetic_guid).or_insert_with(PeerConnectionGroup::new);
-                group.control_conn = Some(conn_id);
+                let group = pc.entry(synthetic_guid).or_default();
+                group.control_conns.push(conn_id);
 
                 if let Some(mut conn) = self.connections.get_mut(&conn_id) {
                     conn.remote_guid_prefix = Some(synthetic_guid);
@@ -362,12 +359,12 @@ impl ConnectionRegistry {
 
         if let Some(guid) = group_guid {
             let mut pc = self.peer_connections.lock().expect("peer_connections lock");
-            let group = pc.entry(guid).or_insert_with(PeerConnectionGroup::new);
+            let group = pc.entry(guid).or_default();
 
             if PortManager::is_discovery_unicast_port_logically(self.domain_id, logical_port) {
-                group.discovery_conn = Some(conn_id);
+                group.discovery_conns.push(conn_id);
             } else {
-                group.user_data_conn = Some(conn_id);
+                group.user_data_conns.push(conn_id);
             }
 
             if let Some(mut conn) = self.connections.get_mut(&conn_id) {

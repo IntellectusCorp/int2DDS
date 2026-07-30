@@ -106,6 +106,17 @@ namespace Int2Dds.Qos
         }
     }
 
+    public class LifespanReference
+    {
+        public LifespanReferenceKind Kind { get; set; } = LifespanReferenceKind.BySource;
+
+        public LifespanReference() { }
+        public LifespanReference(LifespanReferenceKind kind = LifespanReferenceKind.BySource)
+        {
+            Kind = kind;
+        }
+    }
+
     public class LatencyBudget
     {
         public TimeSpan? Duration { get; set; }

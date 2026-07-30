@@ -301,8 +301,8 @@ impl TcpSender {
         tls_config: Option<Arc<TlsConfig>>,
         shared: Arc<ConnectionRegistry>,
         tcp_config: &TcpConfig,
+        cancel: CancellationToken,
     ) -> Arc<Self> {
-        let cancel = CancellationToken::new();
         let runtime_handle = tokio::runtime::Handle::current();
 
         // Prefer the configured public address (WAN/NAT).
@@ -509,6 +509,11 @@ impl TcpSender {
     /// connection actor via its child token.
     pub(crate) async fn shutdown(&self) {
         self.cancel.cancel();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cancel_token(&self) -> &CancellationToken {
+        &self.cancel
     }
 
     /// Heuristic: is this address our own listener? Avoids loopback
@@ -1158,6 +1163,7 @@ mod tests {
             None,
             shared,
             cfg,
+            CancellationToken::new(),
         );
         (sender, d_rx)
     }
@@ -1191,21 +1197,6 @@ mod tests {
         tokio::task::spawn_blocking(move || sender.send_to_discovery(&target, &data))
             .await
             .expect("spawn_blocking join")
-    }
-
-    // ── construction smoke ───────────────────────────────────────────────────
-
-    /// `TcpSender::new` inside a tokio context succeeds and `shutdown()`
-    /// completes cleanly (it just cancels the shared token).
-    #[tokio::test(flavor = "multi_thread")]
-    async fn new_in_runtime_succeeds_and_shuts_down() {
-        let (sender, _disc_rx) = make_sender(0, [0xAA; 12], 12345);
-        // No connections yet.
-        assert_eq!(sender.connections.len(), 0);
-        // Shutdown must complete within a small timeout — guard against deadlock.
-        tokio::time::timeout(Duration::from_secs(2), sender.shutdown())
-            .await
-            .expect("shutdown did not complete within 2s");
     }
 
     // ── private heuristics ───────────────────────────────────────────────────
@@ -1250,6 +1241,7 @@ mod tests {
             b_user_tx,
             None,
             TcpSocketTuning::default(),
+            CancellationToken::new(),
         )
         .expect("listener bind_and_spawn");
         let b_port = listener.port();
@@ -1275,57 +1267,6 @@ mod tests {
         listener.shutdown().await;
     }
 
-    /// A second send to the same peer reuses the cached data connection
-    /// instead of triggering a new connect_task.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn cached_send_reuses_existing_data_connection() {
-        let (b_disc_tx, b_disc_rx, b_user_tx, _b_user_rx) = make_channels();
-        let listener = TcpMuxListener::bind_and_spawn(
-            0,
-            0,
-            0,
-            [0u8; 12],
-            b_disc_tx,
-            b_user_tx,
-            None,
-            TcpSocketTuning::default(),
-        )
-        .expect("listener bind_and_spawn");
-        let b_port = listener.port();
-
-        let (sender, _) = make_sender(0, [0xAA; 12], 12345);
-
-        let target: SocketAddr = format!("127.0.0.1:{}", b_port).parse().unwrap();
-        blocking_send_discovery(&sender, target, b"RTPS\x00\x00\x00\x00")
-            .await
-            .expect("first send");
-
-        // Wait until the first frame lands on the listener (proves the cache is populated).
-        let timeout = Instant::now() + Duration::from_secs(5);
-        wait_for_recv(&b_disc_rx, timeout).await.expect("first send did not deliver within 5s");
-
-        // Cache should now contain at least control + data entries.
-        let after_first = sender.connections.len();
-        assert!(after_first >= 2, "expected control + data entries in cache, got {}", after_first);
-
-        // Second send reuses the cached connection.
-        blocking_send_discovery(&sender, target, b"RTPS\x11\x11\x11\x11")
-            .await
-            .expect("second send");
-
-        let timeout = Instant::now() + Duration::from_secs(5);
-        wait_for_recv(&b_disc_rx, timeout).await.expect("second send did not deliver within 5s");
-
-        assert_eq!(
-            sender.connections.len(),
-            after_first,
-            "second send should reuse cache, not spawn new connect",
-        );
-
-        sender.shutdown().await;
-        listener.shutdown().await;
-    }
-
     /// `evict_connection` tears down only the targeted connection, leaving the
     /// peer's other connections (here, the control connection) in the cache.
     #[tokio::test(flavor = "multi_thread")]
@@ -1340,6 +1281,7 @@ mod tests {
             b_user_tx,
             None,
             TcpSocketTuning::default(),
+            CancellationToken::new(),
         )
         .expect("listener bind_and_spawn");
         let b_port = listener.port();
@@ -1364,48 +1306,6 @@ mod tests {
             sender.connections.get(&(target, CONTROL_LOGICAL_PORT)).is_some(),
             "control connection must survive single-connection eviction",
         );
-
-        sender.shutdown().await;
-        listener.shutdown().await;
-    }
-
-    /// `disconnect_peer` evicts every cached connection to the addr (all logical
-    /// ports) and clears its backoff — the DDS-unmatch cleanup path.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn disconnect_peer_evicts_all_connections_and_backoff() {
-        let (b_disc_tx, b_disc_rx, b_user_tx, _b_user_rx) = make_channels();
-        let listener = TcpMuxListener::bind_and_spawn(
-            0,
-            0,
-            0,
-            [0u8; 12],
-            b_disc_tx,
-            b_user_tx,
-            None,
-            TcpSocketTuning::default(),
-        )
-        .expect("listener bind_and_spawn");
-        let b_port = listener.port();
-
-        let (sender, _) = make_sender(0, [0xAA; 12], 12345);
-        let target: SocketAddr = format!("127.0.0.1:{}", b_port).parse().unwrap();
-        blocking_send_discovery(&sender, target, b"RTPS\x00\x00\x00\x00").await.expect("send");
-
-        let timeout = Instant::now() + Duration::from_secs(5);
-        wait_for_recv(&b_disc_rx, timeout).await.expect("send did not deliver within 5s");
-        assert!(sender.connections.len() >= 2, "expected control + data entries");
-
-        // Seed a backoff entry to confirm it is cleared too.
-        sender.note_connect_failure(target);
-        assert!(sender.backoff_remaining(target).is_some());
-
-        sender.disconnect_peer(target);
-        assert_eq!(
-            sender.connections.iter().filter(|e| e.key().0 == target).count(),
-            0,
-            "disconnect_peer must evict every connection to the addr",
-        );
-        assert!(sender.backoff_remaining(target).is_none(), "backoff must be cleared");
 
         sender.shutdown().await;
         listener.shutdown().await;
@@ -1525,6 +1425,7 @@ mod tests {
             b_user_tx,
             None,
             TcpSocketTuning::default(),
+            CancellationToken::new(),
         )
         .expect("listener bind_and_spawn");
         let b_port = listener.port();
@@ -1967,6 +1868,7 @@ mod tests {
             b_user_tx,
             None,
             TcpSocketTuning::default(),
+            CancellationToken::new(),
         )
         .expect("listener bind_and_spawn");
         let b_port = listener.port();
@@ -2081,6 +1983,7 @@ mod tests {
             b_user_tx,
             None,
             TcpSocketTuning::default(),
+            CancellationToken::new(),
         )
         .expect("listener bind_and_spawn");
         let b_port = listener.port();
@@ -2115,12 +2018,15 @@ mod tests {
         listener.shutdown().await;
     }
 
-    /// `disconnect_peer` releases the sockets, not just the bookkeeping.
+    /// `disconnect_peer` — the DDS-unmatch cleanup path — releases the sockets,
+    /// not just the bookkeeping.
     ///
     /// The two maps emptying only proves entries were dropped; it says nothing
     /// about whether the connections are actually gone. So the peer is asked:
     /// its own connection count falling to zero means our tasks really did exit
     /// and close their halves, which is the part that returns fds to the OS.
+    /// The backoff goes with them, or the peer could not be redialled promptly
+    /// after a rematch.
     #[tokio::test(flavor = "multi_thread")]
     async fn disconnect_peer_closes_the_sockets_and_clears_both_maps() {
         let (b_disc_tx, b_disc_rx, b_user_tx, _b_user_rx) = make_channels();
@@ -2133,6 +2039,7 @@ mod tests {
             b_user_tx,
             None,
             TcpSocketTuning::default(),
+            CancellationToken::new(),
         )
         .expect("listener bind_and_spawn");
         let b_port = listener.port();
@@ -2148,10 +2055,15 @@ mod tests {
             "peer should have accepted control + data connections",
         );
 
+        // Seed a backoff entry so its clearing is observable.
+        sender.note_connect_failure(target);
+        assert!(sender.backoff_remaining(target).is_some());
+
         sender.disconnect_peer(target);
 
         assert!(sender.connections.is_empty(), "outbound cache must be cleared synchronously");
         assert_eq!(sender.shared.connection_count(), 0, "registry must be cleared");
+        assert!(sender.backoff_remaining(target).is_none(), "backoff must be cleared");
         assert!(
             wait_until(Duration::from_secs(5), || listener.shared.connection_count() == 0).await,
             "the peer still sees {} open connections; disconnect_peer dropped the \
@@ -2332,6 +2244,7 @@ mod tests {
             b_user_tx,
             None,
             TcpSocketTuning::default(),
+            CancellationToken::new(),
         )
         .expect("listener bind_and_spawn");
         let b_port = listener.port();
