@@ -552,6 +552,13 @@ jobs:
           python -c "import ast,sys; [ast.parse(open(f).read()) for f in ['python/examples/hello_world_pub.py','python/examples/hello_world_sub.py']]"
           python -c "import int2dds; print('python binding import ok')"
 
+      - name: Python unit tests
+        env:
+          INT2DDS_FFI_PATH: ${{ github.workspace }}/target/release
+        run: |
+          python -m pip install --quiet pytest
+          python -m pytest python/tests/test_libpath.py -q
+
   release:
     needs: [prepare, native-linux-gnu, native-linux-musl, native-windows, native-macos, csharp, python, verify-examples]
     runs-on: ubuntu-latest
@@ -571,12 +578,35 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release create "${{ github.ref_name }}" \
-            --draft \
-            --title "int2DDS ${{ needs.prepare.outputs.version }}" \
-            --notes-file artifacts/release-notes/release-notes.md \
-            ${{ needs.prepare.outputs.is_prerelease == 'true' && '--prerelease' || '' }} \
-            dist/release/*
+          tag="${{ github.ref_name }}"
+          # Rerun handling: if any of the 25 asset uploads fails the job fails, but
+          # the draft release itself already exists. On a rerun in that state
+          # `gh release create` dies with "release already exists", so upload
+          # (clobbering) instead of creating when the release is already there.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" --clobber dist/release/*
+          else
+            notes="artifacts/release-notes/release-notes.md"
+            if [[ "${{ needs.prepare.outputs.is_prerelease }}" == "true" ]]; then
+              {
+                echo ""
+                echo "## ⚠️ Prerelease package filename warning"
+                echo ""
+                echo "This release was built from the prerelease tag \`${{ needs.prepare.outputs.version }}\`."
+                echo "The 13 native archives carry the full tag version in their filenames, but the"
+                echo "11 NuGet/wheel/sdist packages use the base version from the source metadata"
+                echo "(\`${{ needs.prepare.outputs.base_version }}\`) — those filenames will collide with the same packages in"
+                echo "the eventual stable release \`v${{ needs.prepare.outputs.base_version }}\`, so never use the NuGet/wheel/sdist"
+                echo "packages from this prerelease in production."
+              } >> "$notes"
+            fi
+            gh release create "$tag" \
+              --draft \
+              --title "int2DDS ${{ needs.prepare.outputs.version }}" \
+              --notes-file "$notes" \
+              ${{ needs.prepare.outputs.is_prerelease == 'true' && '--prerelease' || '' }} \
+              dist/release/*
+          fi
 
       - name: Dry run summary
         if: github.event_name == 'workflow_dispatch'
