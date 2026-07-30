@@ -608,6 +608,47 @@ impl From<qos_policy::DestinationOrderQosPolicy> for DestinationOrderQosPolicy {
     }
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub(crate) struct LifespanReferenceQosPolicy {
+    pub(crate) kind: LifespanReferenceQosPolicyKind,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub(crate) enum LifespanReferenceQosPolicyKind {
+    #[default]
+    #[serde(rename = "BY_SOURCE")]
+    BySourceTimestampLifespanReferenceQos,
+    #[serde(rename = "BY_RECEPTION")]
+    ByReceptionTimestampLifespanReferenceQos,
+}
+
+impl From<LifespanReferenceQosPolicy> for qos_policy::LifespanReferenceQosPolicy {
+    fn from(external: LifespanReferenceQosPolicy) -> Self {
+        match external.kind {
+            LifespanReferenceQosPolicyKind::BySourceTimestampLifespanReferenceQos => {
+                Self { kind: qos_policy::LifespanReferenceQosPolicyKind::BySourceTimestamp }
+            }
+            LifespanReferenceQosPolicyKind::ByReceptionTimestampLifespanReferenceQos => {
+                Self { kind: qos_policy::LifespanReferenceQosPolicyKind::ByReceptionTimestamp }
+            }
+        }
+    }
+}
+
+impl From<qos_policy::LifespanReferenceQosPolicy> for LifespanReferenceQosPolicy {
+    fn from(internal: qos_policy::LifespanReferenceQosPolicy) -> Self {
+        match internal.kind {
+            qos_policy::LifespanReferenceQosPolicyKind::BySourceTimestamp => {
+                Self { kind: LifespanReferenceQosPolicyKind::BySourceTimestampLifespanReferenceQos }
+            }
+            qos_policy::LifespanReferenceQosPolicyKind::ByReceptionTimestamp => Self {
+                kind: LifespanReferenceQosPolicyKind::ByReceptionTimestampLifespanReferenceQos,
+            },
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct WriterReliabilityExtensionQosPolicy {

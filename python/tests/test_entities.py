@@ -304,6 +304,12 @@ class KeyedType:
     _extensibility: ClassVar[Extensibility] = Extensibility.FINAL
     _has_key: ClassVar[bool] = True
 
+    # A keyed topic needs field metadata to advertise a TypeObject (#347).
+    _dds_type_info_fields: ClassVar[list] = [
+        ("field", "sensor_id", 9, 0, 1),   # u32, key
+        ("field", "value", 12, 0, 0),      # f64
+    ]
+
     sensor_id: int = 0    # @key u32
     value: float = 0.0    # f64
 
@@ -982,7 +988,7 @@ class TestInstance:
 
     def test_dispose_valid_data_false(self, domain_id: int):
         """After dispose, reader should receive a sample with valid_data=False."""
-        from int2dds import DdsTimeout
+        from int2dds import DdsTimeout, NOT_ALIVE_DISPOSED_INSTANCE_STATE
         from int2dds.core.qos import DataWriterQos, DataReaderQos, Reliability
         from int2dds.core.conditions import STATUS_SUBSCRIPTION_MATCHED, STATUS_DATA_AVAILABLE
 
@@ -1037,6 +1043,68 @@ class TestInstance:
             samples = reader.take()
             assert len(samples) > 0
             assert not samples[0].valid_data  # disposed = invalid data
+            # instance_state tells a dispose apart from an unregister
+            assert samples[0].instance_state == NOT_ALIVE_DISPOSED_INSTANCE_STATE
+
+    def test_unregister_instance_state(self, domain_id: int):
+        """An unregister surfaces as NOT_ALIVE_NO_WRITERS, not as a dispose."""
+        from int2dds import DdsTimeout, NOT_ALIVE_NO_WRITERS_INSTANCE_STATE
+        from int2dds.core.qos import (
+            DataWriterQos, DataReaderQos, Reliability, WriterDataLifecycle,
+        )
+        from int2dds.core.conditions import STATUS_SUBSCRIPTION_MATCHED, STATUS_DATA_AVAILABLE
+
+        with DomainParticipant(domain_id=domain_id) as dp:
+            topic = dp.create_topic("Instance_UnregisterState_Topic", KeyedType)
+            pub = dp.create_publisher()
+            sub = dp.create_subscriber()
+
+            # autodispose off, otherwise the unregister arrives as a dispose
+            writer_qos = DataWriterQos(
+                reliability=Reliability("RELIABLE"),
+                writer_data_lifecycle=WriterDataLifecycle(
+                    autodispose_unregistered_instances=False),
+            )
+            reader_qos = DataReaderQos(reliability=Reliability("RELIABLE"))
+
+            writer = pub.create_datawriter(topic, qos=writer_qos)
+            reader = sub.create_datareader(topic, qos=reader_qos)
+
+            status_cond = reader.get_statuscondition()
+            status_cond.set_enabled_statuses(STATUS_SUBSCRIPTION_MATCHED)
+            waitset = WaitSet()
+            waitset.attach(status_cond)
+
+            deadline = 5.0
+            while writer.matched_readers == 0 and deadline > 0:
+                try:
+                    waitset.wait(timeout=1.0)
+                except DdsTimeout:
+                    pass
+                deadline -= 1.0
+            assert writer.matched_readers > 0
+
+            sample = KeyedType(sensor_id=5, value=50.0)
+            handle = writer.register_instance(sample)
+            writer.write(sample)
+
+            status_cond.set_enabled_statuses(STATUS_DATA_AVAILABLE)
+            try:
+                waitset.wait(timeout=5.0)
+            except DdsTimeout:
+                pass
+            assert any(s.valid_data for s in reader.take())
+
+            writer.unregister_instance(sample, handle)
+            try:
+                waitset.wait(timeout=5.0)
+            except DdsTimeout:
+                pass
+
+            samples = reader.take()
+            assert len(samples) > 0
+            assert not samples[0].valid_data
+            assert samples[0].instance_state == NOT_ALIVE_NO_WRITERS_INSTANCE_STATE
 
 
 class TestCommunication:

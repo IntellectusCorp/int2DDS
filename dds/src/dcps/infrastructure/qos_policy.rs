@@ -113,6 +113,7 @@ const WRITER_RELIABILITY_EXTENSION_QOS_POLICY_NAME: &str = "WriterReliabilityExt
 const READER_RELIABILITY_EXTENSION_QOS_POLICY_NAME: &str = "ReaderReliabilityExtension";
 const PROPERTY_QOS_POLICY_NAME: &str = "Property";
 const DATA_FRAG_QOS_POLICY_NAME: &str = "DataFrag";
+const LIFESPAN_REFERENCE_QOS_POLICY_NAME: &str = "LifespanReference";
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash, Readable, Writable)]
 pub enum QosPolicyId {
@@ -1959,6 +1960,75 @@ impl QosPolicy for DestinationOrderQosPolicy {
     }
 }
 
+/// int2DDS extension: reference timestamp for a reader's Lifespan expiry.
+/// Reader-local; not wire-propagated.
+#[derive(DdsType, PartialEq, Default, Copy, Eq)]
+#[dds_type(crate_path = "crate", no_default, no_partialeq)]
+pub enum LifespanReferenceQosPolicyKind {
+    /// Expire relative to the writer's source timestamp (default).
+    #[default]
+    BySourceTimestamp,
+    /// Expire relative to this reader's reception timestamp (clock-skew immune).
+    ByReceptionTimestamp,
+}
+
+impl ConstDefault for LifespanReferenceQosPolicyKind {
+    const DEFAULT: Self = LifespanReferenceQosPolicyKind::BySourceTimestamp;
+}
+
+/// Reader-local policy selecting the Lifespan expiry reference timestamp.
+/// `ByReceptionTimestamp` is immune to writer/reader clock skew. Mutable at
+/// runtime; not RxO and not wire-propagated.
+///
+/// # Example
+/// ```no_run
+/// use int2dds::{
+///     infrastructure::{
+///         qos_policy::{LifespanReferenceQosPolicy, LifespanReferenceQosPolicyKind},
+///         status::StatusMask,
+///     },
+///     subscription::qos::{DataReaderQos, SubscriberQos},
+/// #     domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
+/// #     topic::{qos::TopicQos, type_support::DdsType},
+/// };
+/// #
+/// # #[derive(DdsType)]
+/// # #[dds_type(crate_path = "int2dds")]
+/// # struct HelloWorldType { index: u32, message: String }
+/// #
+/// # let factory = DomainParticipantFactory::get_instance();
+/// # let participant = factory.create_participant(0, DomainParticipantQos::default(), None, StatusMask::default()).unwrap();
+/// # let topic = participant.create_topic::<HelloWorldType>("topic", "HelloWorld", TopicQos::default(), None, StatusMask::default()).unwrap();
+///
+/// let subscriber = participant
+///     .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+///     .unwrap();
+///
+/// // Expire samples relative to this reader's reception time (immune to clock skew).
+/// let reader_qos = DataReaderQos {
+///     lifespan_reference: LifespanReferenceQosPolicy {
+///         kind: LifespanReferenceQosPolicyKind::ByReceptionTimestamp,
+///     },
+///     ..Default::default()
+/// };
+///
+/// let _reader = subscriber
+///     .create_datareader::<HelloWorldType>(&topic, reader_qos, None, StatusMask::default())
+///     .unwrap();
+/// ```
+#[derive(DdsType, ConstDefault, Copy, Eq)]
+#[dds_type(crate_path = "crate")]
+pub struct LifespanReferenceQosPolicy {
+    /// Expiry reference timestamp selection.
+    pub kind: LifespanReferenceQosPolicyKind,
+}
+
+impl QosPolicy for LifespanReferenceQosPolicy {
+    fn name(&self) -> &str {
+        LIFESPAN_REFERENCE_QOS_POLICY_NAME
+    }
+}
+
 /// Data representation identifiers for DDS-XTypes.
 ///
 /// Specifies the encoding format used for data serialization.
@@ -2469,5 +2539,23 @@ mod property_qos_tests {
         assert_eq!(QosPolicyId::Property.as_u32(), 25);
         assert_eq!(QosPolicyId::from_u32(25), Some(QosPolicyId::Property));
         assert_eq!(QosPolicyId::Property.as_str(), "Property");
+    }
+}
+
+#[cfg(test)]
+mod lifespan_reference_tests {
+    use super::*;
+
+    #[test]
+    fn default_reference_is_by_source_timestamp() {
+        // Backward compatibility: default keeps writer-timestamp semantics.
+        assert_eq!(
+            LifespanReferenceQosPolicy::default().kind,
+            LifespanReferenceQosPolicyKind::BySourceTimestamp
+        );
+        assert_eq!(
+            LifespanReferenceQosPolicyKind::DEFAULT,
+            LifespanReferenceQosPolicyKind::BySourceTimestamp
+        );
     }
 }

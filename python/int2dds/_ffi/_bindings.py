@@ -335,6 +335,9 @@ ffi.cdef("""
     Int2DdsRet int2dds_datawriter_qos_get_data_frag(
         const Int2DdsDataWriterQos *qos, int32_t *value_out
     );
+    Int2DdsRet int2dds_datawriter_qos_get_lifespan(
+        const Int2DdsDataWriterQos *qos, int64_t *duration_ns_out
+    );
     Int2DdsRet int2dds_datawriter_qos_get_resource_limits(
         const Int2DdsDataWriterQos *qos,
         int32_t *max_samples_out, int32_t *max_instances_out, int32_t *max_per_instance_out
@@ -350,6 +353,9 @@ ffi.cdef("""
     );
     Int2DdsRet int2dds_datareader_qos_get_history(
         const Int2DdsDataReaderQos *qos, int32_t *kind_out, int32_t *depth_out
+    );
+    Int2DdsRet int2dds_datareader_qos_get_lifespan_reference(
+        const Int2DdsDataReaderQos *qos, int32_t *kind_out
     );
     Int2DdsRet int2dds_datareader_qos_get_resource_limits(
         const Int2DdsDataReaderQos *qos,
@@ -717,6 +723,10 @@ ffi.cdef("""
         int32_t max_samples_per_instance
     );
     Int2DdsRet int2dds_datareader_qos_set_destination_order(
+        Int2DdsDataReaderQos *qos,
+        int32_t kind
+    );
+    Int2DdsRet int2dds_datareader_qos_set_lifespan_reference(
         Int2DdsDataReaderQos *qos,
         int32_t kind
     );
@@ -1355,6 +1365,22 @@ ffi.cdef("""
         int32_t absolute_generation_rank;
         bool valid_data;
     } Int2DdsSampleInfo;
+
+    /* Single-sample read/take carrying the full SampleInfo */
+    Int2DdsRet int2dds_datareader_take_serialized_w_info(
+        const Int2DdsDataReader *reader,
+        uint8_t *buffer,
+        size_t buffer_capacity,
+        size_t *actual_size_out,
+        Int2DdsSampleInfo *info_out
+    );
+    Int2DdsRet int2dds_datareader_read_serialized_w_info(
+        const Int2DdsDataReader *reader,
+        uint8_t *buffer,
+        size_t buffer_capacity,
+        size_t *actual_size_out,
+        Int2DdsSampleInfo *info_out
+    );
 
     /* SampleSeq (batch read/take results) */
     size_t int2dds_sample_seq_length(const Int2DdsSampleSeq *seq);
