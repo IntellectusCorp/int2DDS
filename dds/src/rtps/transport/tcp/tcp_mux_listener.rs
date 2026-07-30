@@ -46,6 +46,7 @@ impl TcpMuxListener {
         user_data_tx: flume::Sender<IncomingMessage>,
         tls_config: Option<Arc<TlsConfig>>,
         tuning: TcpSocketTuning,
+        cancel: CancellationToken,
     ) -> io::Result<Self> {
         let std_listener = bind_listener(port)?;
         let actual_port = std_listener.local_addr()?.port();
@@ -58,7 +59,6 @@ impl TcpMuxListener {
             discovery_tx,
             user_data_tx,
         ));
-        let cancel = CancellationToken::new();
 
         let mut handles = Vec::with_capacity(1);
         handles.push(tokio::spawn(accept_loop_task(
@@ -248,6 +248,11 @@ mod tests {
 
     /// Helper: standard listener with no TLS.
     fn make_listener() -> TcpMuxListener {
+        make_listener_with_cancel(CancellationToken::new())
+    }
+
+    /// Helper: standard listener whose cancel token the caller keeps a handle on.
+    fn make_listener_with_cancel(cancel: CancellationToken) -> TcpMuxListener {
         let (d_tx, _d_rx, u_tx, _u_rx) = make_channels();
         TcpMuxListener::bind_and_spawn(
             0,
@@ -258,6 +263,7 @@ mod tests {
             u_tx,
             None,
             TcpSocketTuning::default(),
+            cancel,
         )
         .expect("bind_and_spawn")
     }
@@ -307,18 +313,21 @@ mod tests {
             .expect("shutdown did not complete within 2s");
     }
 
-    /// Dropping the listener (without explicit shutdown) cancels the cancel
-    /// token so any clones observe cancellation.
+    /// Dropping the listener (without explicit shutdown) cancels the token it
+    /// was handed — and nothing above it, so a component sharing the same root
+    /// keeps running.
     #[tokio::test(flavor = "multi_thread")]
     async fn drop_cancels_tasks() {
-        let listener = make_listener();
-        let cancel_clone = listener.cancel.clone();
+        let root = CancellationToken::new();
+        let cancel_clone = root.child_token();
+        let listener = make_listener_with_cancel(cancel_clone.clone());
         drop(listener);
 
         // The token must be cancelled even though we did not await shutdown.
         // (Underlying task handles are leaked here — that is acceptable for
         // best-effort Drop; tests using `shutdown()` get clean teardown.)
         assert!(cancel_clone.is_cancelled(), "Drop should fire cancel");
+        assert!(!root.is_cancelled(), "Drop must not reach past the listener's own token");
     }
 
     // ── accept + register ────────────────────────────────────────────────────
