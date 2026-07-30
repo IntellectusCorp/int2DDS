@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 #
 # Run one hello_world publisher/subscriber pair and report whether the subscriber
-# received a sample carrying the publisher's language tag.
+# received samples carrying the publisher's language tag.
 #
 #   hello_world_pair.sh <pub-lang> <sub-lang> <domain-id> <log-dir>
 #
-# Languages: rust | c | python | csharp. Exits 0 on a received sample, 1 otherwise.
+# Languages: rust | c | python | csharp. Exits 0 once HW_PAIR_SAMPLES samples have
+# arrived, 1 otherwise.
 
 set -uo pipefail
 
@@ -17,10 +18,14 @@ LOG_DIR="$4"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DEADLINE_SECS="${HW_PAIR_TIMEOUT:-40}"
 DOTNET_TFM="${HW_DOTNET_TFM:-net8.0}"
+# Every publisher writes one sample per second once matched, so N samples cost about
+# N seconds on top of discovery -- DEADLINE_SECS has to stay well clear of that.
+REQUIRED_SAMPLES="${HW_PAIR_SAMPLES:-10}"
 
 mkdir -p "$LOG_DIR"
-PUB_LOG="$LOG_DIR/${PUB_LANG}_to_${SUB_LANG}.pub.log"
-SUB_LOG="$LOG_DIR/${PUB_LANG}_to_${SUB_LANG}.sub.log"
+# Named after the process that wrote it: <owner>_<role>_<peer>_<peer-role>.log
+PUB_LOG="$LOG_DIR/${PUB_LANG}_pub_${SUB_LANG}_sub.log"
+SUB_LOG="$LOG_DIR/${SUB_LANG}_sub_${PUB_LANG}_pub.log"
 
 # The C examples carry an rpath from CMake, and Python/C# are handed an explicit
 # path, so these exports are only a fallback -- which matters on macOS, where SIP
@@ -101,10 +106,13 @@ build_cmd "$PUB_LANG" pub || exit 1
 "${CMD[@]}" -d "$DOMAIN" --reliable >"$PUB_LOG" 2>&1 &
 PUB_PID=$!
 
-# The index is deliberately not pinned: only the payload has to match.
+# Counting lines counts samples: every subscriber takes rather than reads, so one
+# sample cannot be reported twice. The index is deliberately not pinned.
 status=1
+got=0
 for _ in $(seq 1 $((DEADLINE_SECS * 2))); do
-    if grep -qF "$PAYLOAD" "$SUB_LOG" 2>/dev/null; then
+    got=$(grep -cF "$PAYLOAD" "$SUB_LOG" 2>/dev/null) || got=0
+    if [ "$got" -ge "$REQUIRED_SAMPLES" ]; then
         status=0
         break
     fi
@@ -118,9 +126,9 @@ wait "$PUB_PID" 2>/dev/null
 wait "$SUB_PID" 2>/dev/null
 
 if [ "$status" -eq 0 ]; then
-    echo "PASS  $PUB_LANG -> $SUB_LANG (domain $DOMAIN)"
+    echo "PASS  $PUB_LANG -> $SUB_LANG (domain $DOMAIN, $got/$REQUIRED_SAMPLES samples)"
 else
-    echo "FAIL  $PUB_LANG -> $SUB_LANG (domain $DOMAIN), expected payload $PAYLOAD"
+    echo "FAIL  $PUB_LANG -> $SUB_LANG (domain $DOMAIN), got $got/$REQUIRED_SAMPLES samples of $PAYLOAD"
     echo "--- publisher log ---"
     cat "$PUB_LOG"
     echo "--- subscriber log ---"
