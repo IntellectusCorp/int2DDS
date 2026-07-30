@@ -83,6 +83,9 @@ def _apply_datareader_qos(handle: CData, qos: "DataReaderQos") -> None:
     if qos.destination_order is not None:
         check_ret(lib.int2dds_datareader_qos_set_destination_order(
             handle, qos.destination_order._kind_int))
+    if qos.lifespan_reference is not None:
+        check_ret(lib.int2dds_datareader_qos_set_lifespan_reference(
+            handle, qos.lifespan_reference._kind_int))
     if qos.time_based_filter is not None:
         check_ret(lib.int2dds_datareader_qos_set_time_based_filter(
             handle, qos.time_based_filter._minimum_separation_ns))
@@ -722,8 +725,8 @@ class DataReader(Generic[T]):
     def get_qos(self) -> "DataReaderQos":
         """Return the effective QoS (reliability, durability, history) in force."""
         from int2dds.core.qos import (
-            DataReaderQos, Reliability, Durability, History, ResourceLimits,
-            ReliabilityKind, DurabilityKind, HistoryKind,
+            DataReaderQos, Reliability, Durability, History, LifespanReference, ResourceLimits,
+            ReliabilityKind, DurabilityKind, HistoryKind, LifespanReferenceKind,
         )
 
         qos_ptr = ffi.new("Int2DdsDataReaderQos **")
@@ -738,6 +741,8 @@ class DataReader(Generic[T]):
             hist_kind = ffi.new("int32_t *")
             depth = ffi.new("int32_t *")
             check_ret(lib.int2dds_datareader_qos_get_history(handle, hist_kind, depth))
+            lifespan_ref_kind = ffi.new("int32_t *")
+            check_ret(lib.int2dds_datareader_qos_get_lifespan_reference(handle, lifespan_ref_kind))
             max_samples = ffi.new("int32_t *")
             max_instances = ffi.new("int32_t *")
             max_per_instance = ffi.new("int32_t *")
@@ -753,6 +758,8 @@ class DataReader(Generic[T]):
             ),
             durability=Durability(kind=DurabilityKind(dur_kind[0]).name),
             history=History(kind=HistoryKind(hist_kind[0]).name, depth=depth[0]),
+            lifespan_reference=LifespanReference(
+                kind=LifespanReferenceKind(lifespan_ref_kind[0]).name),
             resource_limits=ResourceLimits(
                 max_samples=max_samples[0],
                 max_instances=max_instances[0],
@@ -944,7 +951,7 @@ class DataReader(Generic[T]):
         if not self._closed and self._handle is not None:
             if self._listener_ctx_id is not None:
                 _remove_listener(self._listener_ctx_id)
-                self._listener_ctx_id = None        
+                self._listener_ctx_id = None
             check_ret(lib.int2dds_delete_datareader(self._handle))
             self._handle = None
             self._closed = True

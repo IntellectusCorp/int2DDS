@@ -8,6 +8,7 @@ namespace Int2Dds.Qos
         public Ownership? Ownership { get; set; }
         public ResourceLimits? ResourceLimits { get; set; }
         public DestinationOrder? DestinationOrder { get; set; }
+        public LifespanReference? LifespanReference { get; set; }
         public TimeBasedFilter? TimeBasedFilter { get; set; }
         public LatencyBudget? LatencyBudget { get; set; }
         public UserData? UserData { get; set; }
