@@ -4,10 +4,10 @@ use crate::{
     config::types::qos_policy::{
         DataFragQosPolicy, DataRepresentationQosPolicy, DestinationOrderQosPolicy,
         DurabilityQosPolicy, DurabilityServiceQosPolicy, GroupDataQosPolicy, HistoryQosPolicy,
-        LivelinessQosPolicy, OwnershipQosPolicy, PartitionQosPolicy, PresentationQosPolicy,
-        PropertyQosPolicy, ReaderReliabilityExtensionQosPolicy, ReliabilityQosPolicy,
-        TopicDataQosPolicy, TypeConsistencyEnforcementQosPolicy, UserDataQosPolicy,
-        WriterReliabilityExtensionQosPolicy, DEFAULT_MAX_BLOCKING_TIME,
+        LifespanReferenceQosPolicy, LivelinessQosPolicy, OwnershipQosPolicy, PartitionQosPolicy,
+        PresentationQosPolicy, PropertyQosPolicy, ReaderReliabilityExtensionQosPolicy,
+        ReliabilityQosPolicy, TopicDataQosPolicy, TypeConsistencyEnforcementQosPolicy,
+        UserDataQosPolicy, WriterReliabilityExtensionQosPolicy, DEFAULT_MAX_BLOCKING_TIME,
     },
     domain,
     infrastructure::qos_policy as internal_qos_policy,
@@ -244,6 +244,8 @@ pub(crate) struct DataReaderQos {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) destination_order: Option<DestinationOrderQosPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) lifespan_reference: Option<LifespanReferenceQosPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) history: Option<HistoryQosPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) resource_limits: Option<ResourceLimitsQosPolicy>,
@@ -279,6 +281,7 @@ impl MergeQos for DataReaderQos {
             ownership: self.ownership.clone().or(base.ownership.clone()),
             time_based_filter: self.time_based_filter.or(base.time_based_filter),
             reader_data_lifecycle: self.reader_data_lifecycle.or(base.reader_data_lifecycle),
+            lifespan_reference: self.lifespan_reference.clone().or(base.lifespan_reference.clone()),
             reader_reliability_extension: self
                 .reader_reliability_extension
                 .clone()
@@ -369,6 +372,10 @@ impl From<DataReaderQos> for subscription::qos::DataReaderQos {
             qos.reader_data_lifecycle = reader_data_lifecycle;
         }
 
+        if let Some(lifespan_reference) = external.lifespan_reference {
+            qos.lifespan_reference = lifespan_reference.into();
+        }
+
         if let Some(reader_reliability_extension) = external.reader_reliability_extension {
             qos.reader_reliability_extension = reader_reliability_extension.into();
         }
@@ -401,6 +408,7 @@ impl From<subscription::qos::DataReaderQos> for DataReaderQos {
             ownership: Some(internal.ownership.into()),
             time_based_filter: Some(internal.time_based_filter),
             reader_data_lifecycle: Some(internal.reader_data_lifecycle),
+            lifespan_reference: Some(internal.lifespan_reference.into()),
             reader_reliability_extension: Some(internal.reader_reliability_extension.into()),
             data_representation: Some(internal.data_representation.into()),
             type_consistency_enforcement: Some(internal.type_consistency_enforcement.into()),
@@ -890,5 +898,24 @@ mod property_qos_config_tests {
         let external: DomainParticipantQos = internal.clone().into();
         let internal2: domain::qos::DomainParticipantQos = external.into();
         assert_eq!(internal2, internal);
+    }
+
+    #[test]
+    fn datareader_qos_lifespan_reference_round_trips_through_json() {
+        // XML config is fed to serde as JSON; verify the vendor-extension policy parses,
+        // converts to the internal kind, and survives the reverse conversion.
+        let json = r#"{
+            "lifespan_reference": { "kind": "BY_RECEPTION" }
+        }"#;
+        let parsed: DataReaderQos = serde_json::from_str(json).expect("parse");
+        let internal: subscription::qos::DataReaderQos = parsed.into();
+        assert_eq!(
+            internal.lifespan_reference.kind,
+            internal_qos_policy::LifespanReferenceQosPolicyKind::ByReceptionTimestamp
+        );
+
+        let external: DataReaderQos = internal.clone().into();
+        let internal2: subscription::qos::DataReaderQos = external.into();
+        assert_eq!(internal2.lifespan_reference.kind, internal.lifespan_reference.kind);
     }
 }

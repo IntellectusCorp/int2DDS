@@ -1,0 +1,6 @@
+<Project>
+  <!-- The actual logic lives in the file shared by net45/net48: NuGet only
+       auto-imports through the build/<tfm>/<PackageId>.targets name and location
+       convention, so this file itself must not be removed. -->
+  <Import Project="$(MSBuildThisFileDirectory)../Int2Dds.Native.targets" />
+</Project>

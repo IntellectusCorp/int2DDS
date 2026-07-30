@@ -6,10 +6,6 @@ Uses ABI mode for simplicity and cross-platform compatibility.
 
 from __future__ import annotations
 
-import os
-import sys
-from pathlib import Path
-
 import cffi
 
 ffi = cffi.FFI()
@@ -339,6 +335,9 @@ ffi.cdef("""
     Int2DdsRet int2dds_datawriter_qos_get_data_frag(
         const Int2DdsDataWriterQos *qos, int32_t *value_out
     );
+    Int2DdsRet int2dds_datawriter_qos_get_lifespan(
+        const Int2DdsDataWriterQos *qos, int64_t *duration_ns_out
+    );
     Int2DdsRet int2dds_datawriter_qos_get_resource_limits(
         const Int2DdsDataWriterQos *qos,
         int32_t *max_samples_out, int32_t *max_instances_out, int32_t *max_per_instance_out
@@ -354,6 +353,9 @@ ffi.cdef("""
     );
     Int2DdsRet int2dds_datareader_qos_get_history(
         const Int2DdsDataReaderQos *qos, int32_t *kind_out, int32_t *depth_out
+    );
+    Int2DdsRet int2dds_datareader_qos_get_lifespan_reference(
+        const Int2DdsDataReaderQos *qos, int32_t *kind_out
     );
     Int2DdsRet int2dds_datareader_qos_get_resource_limits(
         const Int2DdsDataReaderQos *qos,
@@ -721,6 +723,10 @@ ffi.cdef("""
         int32_t max_samples_per_instance
     );
     Int2DdsRet int2dds_datareader_qos_set_destination_order(
+        Int2DdsDataReaderQos *qos,
+        int32_t kind
+    );
+    Int2DdsRet int2dds_datareader_qos_set_lifespan_reference(
         Int2DdsDataReaderQos *qos,
         int32_t kind
     );
@@ -1360,6 +1366,22 @@ ffi.cdef("""
         bool valid_data;
     } Int2DdsSampleInfo;
 
+    /* Single-sample read/take carrying the full SampleInfo */
+    Int2DdsRet int2dds_datareader_take_serialized_w_info(
+        const Int2DdsDataReader *reader,
+        uint8_t *buffer,
+        size_t buffer_capacity,
+        size_t *actual_size_out,
+        Int2DdsSampleInfo *info_out
+    );
+    Int2DdsRet int2dds_datareader_read_serialized_w_info(
+        const Int2DdsDataReader *reader,
+        uint8_t *buffer,
+        size_t buffer_capacity,
+        size_t *actual_size_out,
+        Int2DdsSampleInfo *info_out
+    );
+
     /* SampleSeq (batch read/take results) */
     size_t int2dds_sample_seq_length(const Int2DdsSampleSeq *seq);
     Int2DdsRet int2dds_sample_seq_get_data(
@@ -1519,57 +1541,7 @@ ffi.cdef("""
 """)
 
 
-def _find_library() -> str:
-    """Find the int2dds_ffi library path."""
-    # Library names by platform
-    if sys.platform == "win32":
-        lib_name = "int2dds_ffi.dll"
-    elif sys.platform == "darwin":
-        lib_name = "libint2dds_ffi.dylib"
-    else:
-        lib_name = "libint2dds_ffi.so"
-
-    # Search paths in order of priority
-    search_paths = []
-
-    # 1. Environment variable
-    env_path = os.environ.get("INT2DDS_FFI_PATH")
-    if env_path:
-        search_paths.append(Path(env_path))
-
-    # 2. Relative to this package (for development)
-    package_dir = Path(__file__).resolve().parent.parent.parent
-    search_paths.extend([
-        package_dir / lib_name,
-        package_dir.parent / "target" / "release" / lib_name,
-        package_dir.parent / "target" / "debug" / lib_name,
-        package_dir.parent / "ffi" / "target" / "release" / lib_name,
-        package_dir.parent / "ffi" / "target" / "debug" / lib_name,
-    ])
-
-    # 3. System library paths
-    if sys.platform == "win32":
-        system_paths = os.environ.get("PATH", "").split(os.pathsep)
-    else:
-        system_paths = [
-            "/usr/local/lib",
-            "/usr/lib",
-            os.path.expanduser("~/.local/lib"),
-        ]
-        ld_path = os.environ.get("LD_LIBRARY_PATH", "")
-        if ld_path:
-            system_paths = ld_path.split(os.pathsep) + system_paths
-
-    for path in system_paths:
-        search_paths.append(Path(path) / lib_name)
-
-    # Search for the library
-    for path in search_paths:
-        if path.exists():
-            return str(path)
-
-    # If not found, try loading by name (system library loader)
-    return lib_name
+from ._libpath import find_library as _find_library
 
 
 # Load the library

@@ -143,12 +143,7 @@ fn main() {
         .unwrap();
 
     let rqos = reader.get_qos().unwrap();
-    println!(
-        "[subscriber INFO] domain_id: {}, hostname: {:?}, topic: {}",
-        domain_id,
-        hostname::get().unwrap(),
-        TOPIC_NAME
-    );
+    println!("[subscriber INFO] domain_id: {}, topic: {}", domain_id, TOPIC_NAME);
     println!(
         "[subscriber qos] reliability: {:?}, durability: {:?}, history: {:?}",
         rqos.reliability.kind, rqos.durability.kind, rqos.history.kind

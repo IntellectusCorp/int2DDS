@@ -18,6 +18,19 @@ from hello_world_type import HelloWorld
 
 from int2dds import DomainParticipant, WaitSet, DataWriterQos, Reliability
 
+TOPIC_NAME = "hello_world_topic"
+
+
+def _kind_name(kind: str) -> str:
+    """Render a QoS kind the way the Rust example's Debug output does."""
+    return "".join(part.capitalize() for part in kind.split("_"))
+
+
+def _history_name(history) -> str:
+    if history.kind == "KEEP_ALL":
+        return "KeepAll"
+    return f"KeepLast({history.depth})"
+
 
 def main() -> None:
     # Reliability and domain are selectable on the CLI, matching the Rust/C#/C examples.
@@ -27,16 +40,10 @@ def main() -> None:
                         help="Use RELIABLE reliability (default BEST_EFFORT)")
     args = parser.parse_args()
 
-    print("=== HelloWorld Publisher (Python) ===")
-    print(f"QoS: {'RELIABLE' if args.reliable else 'BEST_EFFORT'}")
-
     # Create domain participant
     with DomainParticipant(domain_id=args.domain, name="PythonPublisher") as dp:
-        print(f"Created participant on domain {dp.domain_id}")
-
         # Create topic
-        topic = dp.create_topic("hello_world_topic", HelloWorld)
-        print(f"Created topic: {topic.name} ({topic.type_name})")
+        topic = dp.create_topic(TOPIC_NAME, HelloWorld)
 
         # Create publisher and data writer (BEST_EFFORT by default, --reliable for RELIABLE)
         pub = dp.create_publisher()
@@ -46,10 +53,16 @@ def main() -> None:
             else Reliability("BEST_EFFORT")
         )
         writer = pub.create_datawriter(topic, DataWriterQos(reliability=reliability))
-        print("Created publisher and data writer")
+
+        wqos = writer.get_qos()
+        print(f"[publisher INFO] domain_id: {args.domain}, topic: {TOPIC_NAME}")
+        print(
+            f"[publisher qos] reliability: {_kind_name(wqos.reliability.kind)}, "
+            f"durability: {_kind_name(wqos.durability.kind)}, "
+            f"history: {_history_name(wqos.history)}"
+        )
 
         # Wait for subscriber to connect
-        print("Waiting for subscriber...")
         waitset = WaitSet()
         waitset.attach(writer)
 
@@ -62,14 +75,14 @@ def main() -> None:
                 except Exception:
                     pass  # Timeout, check again
 
-            print(f"Matched {writer.matched_readers} reader(s)")
+            print("Subscriber matched!")
 
             # Publish samples until Ctrl-C, like the Rust/C#/C examples
-            i = 0
+            i = 1
             while True:
-                sample = HelloWorld(index=i, message=f"Hello from Python! ({i})")
+                sample = HelloWorld(index=i, message=f"[Python]HelloWorld_d{args.domain}")
                 writer.write(sample)
-                print(f"Published: index={sample.index}, message='{sample.message}'")
+                print(f'Published HelloWorld {{ index: {sample.index}, message: "{sample.message}" }}')
                 time.sleep(1.0)
                 i += 1
         except KeyboardInterrupt:

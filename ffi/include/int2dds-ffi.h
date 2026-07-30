@@ -103,6 +103,10 @@
 
 #define INT2DDS_QOS_DEST_ORDER_BY_SOURCE 1
 
+#define INT2DDS_QOS_LIFESPAN_REF_BY_SOURCE 0
+
+#define INT2DDS_QOS_LIFESPAN_REF_BY_RECEPTION 1
+
 #define INT2DDS_STATUS_INCONSISTENT_TOPIC (1 << 0)
 
 #define INT2DDS_STATUS_OFFERED_DEADLINE_MISSED (1 << 1)
@@ -2883,6 +2887,12 @@ Int2DdsRet int2dds_datareader_qos_get_resource_limits(const struct Int2DdsDataRe
 
 Int2DdsRet int2dds_datareader_qos_get_destination_order(const struct Int2DdsDataReaderQos *qos,
                                                         int32_t *kind_out);
+
+Int2DdsRet int2dds_datareader_qos_set_lifespan_reference(struct Int2DdsDataReaderQos *qos,
+                                                         int32_t kind);
+
+Int2DdsRet int2dds_datareader_qos_get_lifespan_reference(const struct Int2DdsDataReaderQos *qos,
+                                                         int32_t *kind_out);
 
 Int2DdsRet int2dds_datareader_qos_get_deadline(const struct Int2DdsDataReaderQos *qos,
                                                int64_t *period_ns_out);

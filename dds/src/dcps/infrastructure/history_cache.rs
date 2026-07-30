@@ -19,6 +19,7 @@ use crate::{
         error::{DdsError, DdsResult},
         time::Duration,
     },
+    infrastructure::qos_policy::LifespanReferenceQosPolicyKind,
     rtps::{
         common::{
             guid::{Guid, GuidPrefix},
@@ -28,6 +29,19 @@ use crate::{
     },
     utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
 };
+
+// Lifespan expiry instant from the chosen reference timestamp; None if absent (caller preserves).
+pub(crate) fn sample_expiry(
+    change: &CacheChange,
+    lifespan: Duration,
+    reference: LifespanReferenceQosPolicyKind,
+) -> Option<RtpsTime> {
+    let base = match reference {
+        LifespanReferenceQosPolicyKind::BySourceTimestamp => change.source_timestamp(),
+        LifespanReferenceQosPolicyKind::ByReceptionTimestamp => change.reception_timestamp(),
+    };
+    base.map(|ts| ts.add_nanos(lifespan.as_nanos().max(0) as u64))
+}
 
 pub(crate) trait HistoryCache {
     fn get_changes(&self) -> Vec<Arc<CacheChange>>;
@@ -191,11 +205,13 @@ pub(crate) trait HistoryCache {
             if change.writer_guid() != writer_guid {
                 continue;
             }
-            let Some(source_ts) = change.source_timestamp() else {
-                expired.push(change.clone());
+            let Some(expiry) = sample_expiry(
+                change,
+                lifespan_duration,
+                LifespanReferenceQosPolicyKind::BySourceTimestamp,
+            ) else {
                 continue;
             };
-            let expiry = source_ts.add_nanos(lifespan_duration.as_nanos().max(0) as u64);
             if now >= expiry {
                 expired.push(change.clone());
             } else {
@@ -257,8 +273,11 @@ pub(crate) trait HistoryCache {
             if lifespan.is_infinite() {
                 continue;
             }
-            let Some(source_ts) = change.source_timestamp() else { continue };
-            let expiry = source_ts.add_nanos(lifespan.as_nanos().max(0) as u64);
+            let Some(expiry) =
+                sample_expiry(change, lifespan, LifespanReferenceQosPolicyKind::BySourceTimestamp)
+            else {
+                continue;
+            };
             if now >= expiry {
                 to_remove.push(change.clone());
             }
@@ -268,5 +287,43 @@ pub(crate) trait HistoryCache {
             let _ = self.remove_change(change);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod sample_expiry_tests {
+    use super::*;
+    use crate::infrastructure::qos_policy::LifespanReferenceQosPolicyKind;
+    use crate::rtps::common::{
+        entity_id::EntityId, entity_kind::EntityKind, guid::Guid, sequence::SequenceNumber,
+        types::ChangeKind,
+    };
+
+    // source=10s, reception=40s, lifespan=5s.
+    fn change_with(source: Option<u64>, reception: Option<u64>) -> CacheChange {
+        let mut c = CacheChange::new(
+            ChangeKind::Alive,
+            Guid::new([1; 12], EntityId::new([0, 0, 1], EntityKind::USER_DEFINED_WRITER_WITH_KEY)),
+            InstanceHandle::new([1; 16]),
+            SequenceNumber::from_i64(1),
+            vec![0u8; 4],
+            source.map(RtpsTime::from_nanos),
+        );
+        if let Some(r) = reception {
+            c.set_reception_timestamp(RtpsTime::from_nanos(r));
+        }
+        c
+    }
+
+    const S: u64 = 1_000_000_000; // one second in nanos
+    const LIFESPAN: Duration = Duration { sec: 5, nanosec: 0 };
+
+    #[test]
+    fn by_reception_uses_reception_timestamp() {
+        // ByReception selects reception (40s), not source (10s): expiry = 40 + 5 = 45s.
+        let c = change_with(Some(10 * S), Some(40 * S));
+        let expiry =
+            sample_expiry(&c, LIFESPAN, LifespanReferenceQosPolicyKind::ByReceptionTimestamp);
+        assert_eq!(expiry, Some(RtpsTime::from_nanos(45 * S)));
     }
 }

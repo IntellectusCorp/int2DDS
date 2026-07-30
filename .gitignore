@@ -161,3 +161,7 @@ int2DDS-shapes-demo
 project.lock.json
 project.fragment.lock.json
 artifacts/
+csharp/src/Int2Dds/runtimes/
+# Un-ignore: collides with the "# Python" build/ rule above, but this build/ holds
+# tracked MSBuild .targets files for NuGet packaging (see Int2Dds.csproj).
+!csharp/src/Int2Dds/build/
