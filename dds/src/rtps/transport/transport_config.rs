@@ -14,11 +14,11 @@ use std::time::Duration;
 
 use crate::dcps::infrastructure::qos_policy::{
     PropertyQosPolicy, PROP_ACCEPT_UNDEFINED_PEERS, PROP_INITIAL_PEERS, PROP_MULTICAST_TTL,
-    PROP_TCP_ASYNC_WORKERS, PROP_TCP_BIND_PORT, PROP_TCP_BIND_TIMEOUT_MS,
-    PROP_TCP_CONGESTION_MISS_THRESHOLD, PROP_TCP_CONNECT_TIMEOUT_MS,
-    PROP_TCP_KEEPALIVE_INTERVAL_MS, PROP_TCP_KEEPALIVE_MAX_MISSES, PROP_TCP_KEEPALIVE_TIMEOUT_MS,
-    PROP_TCP_NODELAY, PROP_TCP_PUBLIC_ADDRESS, PROP_TCP_SEND_DEADLINE_MS, PROP_TCP_SO_RCVBUF,
-    PROP_TCP_SO_SNDBUF, PROP_TCP_UNACKED_TIMEOUT_MS, PROP_TRANSPORT,
+    PROP_TCP_ASYNC_WORKERS, PROP_TCP_BIND_PORT, PROP_TCP_CONGESTION_MISS_THRESHOLD,
+    PROP_TCP_CONNECT_TIMEOUT_MS, PROP_TCP_KEEPALIVE_INTERVAL_MS, PROP_TCP_KEEPALIVE_MAX_MISSES,
+    PROP_TCP_KEEPALIVE_TIMEOUT_MS, PROP_TCP_NODELAY, PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS,
+    PROP_TCP_PUBLIC_ADDRESS, PROP_TCP_SEND_DEADLINE_MS, PROP_TCP_SO_RCVBUF, PROP_TCP_SO_SNDBUF,
+    PROP_TCP_TLS_HANDSHAKE_TIMEOUT_MS, PROP_TCP_UNACKED_TIMEOUT_MS, PROP_TRANSPORT,
 };
 use crate::rtps::transport::TransportType;
 
@@ -74,7 +74,8 @@ pub(crate) struct TcpConfig {
     pub accept_undefined_peers: bool,
     pub nodelay: bool,
     pub connect_timeout: Duration,
-    pub bind_timeout: Duration,
+    pub peer_handshake_timeout: Duration,
+    pub tls_handshake_timeout: Duration,
     pub unacked_timeout: Option<Duration>,
     pub keepalive_interval: Duration,
     pub keepalive_timeout: Duration,
@@ -106,7 +107,8 @@ impl TransportConfig for TcpConfig {
                 .unwrap_or(false),
             nodelay: prop_parse::<bool>(property, PROP_TCP_NODELAY).unwrap_or(true),
             connect_timeout: ms(PROP_TCP_CONNECT_TIMEOUT_MS, 5_000),
-            bind_timeout: ms(PROP_TCP_BIND_TIMEOUT_MS, 5_000),
+            peer_handshake_timeout: ms(PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS, 5_000),
+            tls_handshake_timeout: ms(PROP_TCP_TLS_HANDSHAKE_TIMEOUT_MS, 5_000),
             unacked_timeout: match prop_parse::<u64>(property, PROP_TCP_UNACKED_TIMEOUT_MS) {
                 Some(0) => None,
                 Some(v) => Some(Duration::from_millis(v)),
@@ -225,7 +227,8 @@ mod tests {
         assert_eq!(cfg.public_address, None);
         assert!(cfg.nodelay);
         assert_eq!(cfg.connect_timeout, Duration::from_millis(5_000));
-        assert_eq!(cfg.bind_timeout, Duration::from_millis(5_000));
+        assert_eq!(cfg.peer_handshake_timeout, Duration::from_millis(5_000));
+        assert_eq!(cfg.tls_handshake_timeout, Duration::from_millis(5_000));
         assert_eq!(cfg.unacked_timeout, Some(Duration::from_millis(25_000)));
         assert_eq!(cfg.keepalive_interval, Duration::from_millis(10_000));
         assert_eq!(cfg.keepalive_timeout, Duration::from_millis(5_000));
@@ -240,7 +243,8 @@ mod tests {
         let mut p = PropertyQosPolicy::default();
         p.add_property(PROP_TCP_BIND_PORT, "17400", false);
         p.add_property(PROP_TCP_NODELAY, "false", false);
-        p.add_property(PROP_TCP_BIND_TIMEOUT_MS, "2222", false);
+        p.add_property(PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS, "2222", false);
+        p.add_property(PROP_TCP_TLS_HANDSHAKE_TIMEOUT_MS, "3333", false);
         p.add_property(PROP_TCP_KEEPALIVE_MAX_MISSES, "7", false);
         p.add_property(PROP_TCP_PUBLIC_ADDRESS, "203.0.113.5:7400", false);
         // Invalid value must be ignored (falls back to default), not panic.
@@ -249,7 +253,8 @@ mod tests {
         let cfg = TcpConfig::from_property(&p);
         assert_eq!(cfg.bind_port, Some(17400));
         assert!(!cfg.nodelay);
-        assert_eq!(cfg.bind_timeout, Duration::from_millis(2222));
+        assert_eq!(cfg.peer_handshake_timeout, Duration::from_millis(2222));
+        assert_eq!(cfg.tls_handshake_timeout, Duration::from_millis(3333));
         assert_eq!(cfg.keepalive_max_misses, 7);
         assert_eq!(cfg.public_address, Some("203.0.113.5:7400".parse().unwrap()));
         assert_eq!(cfg.so_rcvbuf, None);
