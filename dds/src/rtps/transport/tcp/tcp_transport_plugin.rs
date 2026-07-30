@@ -9,7 +9,7 @@
 //! `tokio::spawn`, which needs a runtime context.
 
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 
 use flume::bounded;
@@ -159,6 +159,9 @@ impl TcpTransportPlugin {
             }),
         };
 
+        let allowed_source_ips =
+            inbound_allowlist(&initial_peers, tcp_config.accept_undefined_peers);
+
         let cancel = CancellationToken::new();
 
         // Build listener + sender inside a runtime context
@@ -176,6 +179,7 @@ impl TcpTransportPlugin {
                 tuning,
                 tcp_config.tls_handshake_timeout,
                 tcp_config.peer_handshake_timeout,
+                allowed_source_ips,
                 listener_cancel,
             )
             .map_err(|e| {
@@ -425,6 +429,25 @@ impl Drop for TcpTransportPlugin {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+/// Source IPs the listener admits, or `None` to admit any. Mirrors `should_dial`,
+/// so the two directions open and close together.
+///
+/// Matching is on the address half only: an inbound connection carries the peer's
+/// ephemeral source port, which never equals the listener port declared in
+/// `initial_peers`.
+fn inbound_allowlist(
+    initial_peers: &[SocketAddr],
+    accept_undefined_peers: bool,
+) -> Option<Vec<IpAddr>> {
+    if accept_undefined_peers || initial_peers.is_empty() {
+        return None;
+    }
+    let mut ips: Vec<IpAddr> = initial_peers.iter().map(|addr| addr.ip()).collect();
+    ips.sort_unstable();
+    ips.dedup();
+    Some(ips)
+}
+
 /// Default tokio worker thread count when `TcpConfig.async_workers` is unset:
 /// `min(4, available_parallelism)`.
 fn default_worker_count() -> usize {
@@ -545,6 +568,31 @@ mod tests {
         );
 
         drop(client);
+    }
+
+    /// The inbound allowlist mirrors the dial gate: one entry per host (not per
+    /// declared address), and both dial-all conditions leave it open.
+    #[test]
+    fn inbound_allowlist_mirrors_the_dial_gate() {
+        let peers: Vec<SocketAddr> = vec![
+            "10.0.0.5:7400".parse().unwrap(),
+            "10.0.0.5:7401".parse().unwrap(),
+            "10.0.0.6:7400".parse().unwrap(),
+        ];
+
+        let allowed = inbound_allowlist(&peers, false).expect("gate is closed");
+        assert_eq!(allowed.len(), 2, "two hosts across three declared addresses");
+        assert!(allowed.contains(&"10.0.0.5".parse::<IpAddr>().unwrap()));
+        assert!(allowed.contains(&"10.0.0.6".parse::<IpAddr>().unwrap()));
+
+        assert!(
+            inbound_allowlist(&peers, true).is_none(),
+            "accept_undefined_peers must open the inbound gate"
+        );
+        assert!(
+            inbound_allowlist(&[], false).is_none(),
+            "no declared peers must open the inbound gate"
+        );
     }
 
     /// `close()` is idempotent and does not hang on the second call.

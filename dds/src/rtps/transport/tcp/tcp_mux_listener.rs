@@ -4,7 +4,7 @@
 //! `ConnectionRegistry` via `shared()`.
 
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -50,6 +50,7 @@ impl TcpMuxListener {
         tuning: TcpSocketTuning,
         tls_handshake_timeout: Duration,
         peer_handshake_timeout: Duration,
+        allowed_source_ips: Option<Vec<IpAddr>>,
         cancel: CancellationToken,
     ) -> io::Result<Self> {
         let std_listener = bind_listener(port)?;
@@ -71,6 +72,7 @@ impl TcpMuxListener {
             tls_config,
             tls_handshake_timeout,
             peer_handshake_timeout,
+            allowed_source_ips,
             cancel.clone(),
         )));
 
@@ -134,14 +136,16 @@ fn bind_listener(port: u16) -> io::Result<std::net::TcpListener> {
 ///
 /// Converts the sync listener to async then loops on `tokio::select!` between
 /// `listener.accept()` and `cancel.cancelled()`. Each accepted connection is
-/// handed off to a spawned `handshake_and_register_task` so a slow TLS
-/// handshake does not stall new accepts.
+/// screened against `allowed_source_ips`, then handed off to a spawned
+/// `handshake_and_register_task` so a slow TLS handshake does not stall new
+/// accepts.
 async fn accept_loop_task(
     std_listener: std::net::TcpListener,
     shared: Arc<ConnectionRegistry>,
     tls_config: Option<Arc<TlsConfig>>,
     tls_handshake_timeout: Duration,
     peer_handshake_timeout: Duration,
+    allowed_source_ips: Option<Vec<IpAddr>>,
     cancel: CancellationToken,
 ) {
     let listener = match TcpListener::from_std(std_listener) {
@@ -157,22 +161,35 @@ async fn accept_loop_task(
             res = listener.accept() => {
                 match res {
                     Ok((tcp, addr)) => {
-                        debug!("Accepted from {:?}", addr);
+                        if source_is_allowed(&allowed_source_ips, addr.ip()) {
+                            debug!("Accepted from {:?}", addr);
 
-                        apply_socket_tuning(&tcp, &shared.tuning);
+                            apply_socket_tuning(&tcp, &shared.tuning);
 
-                        let shared = shared.clone();
-                        let tls = tls_config.clone();
-                        let parent_cancel = cancel.clone();
-                        tokio::spawn(handshake_and_register_task(
-                            tcp,
-                            addr,
-                            shared,
-                            tls,
-                            tls_handshake_timeout,
-                            peer_handshake_timeout,
-                            parent_cancel,
-                        ));
+                            let shared = shared.clone();
+                            let tls = tls_config.clone();
+                            let parent_cancel = cancel.clone();
+                            tokio::spawn(handshake_and_register_task(
+                                tcp,
+                                addr,
+                                shared,
+                                tls,
+                                tls_handshake_timeout,
+                                peer_handshake_timeout,
+                                parent_cancel,
+                            ));
+                        } else {
+                            // Dropping the stream is the whole rejection: no socket
+                            // tuning, no TLS, no task pair, no registry entry — so an
+                            // undeclared source costs one accept() and nothing more.
+                            debug!(
+                                "TcpMuxListener [{}]: closing inbound from {} — \
+                                 source is not a declared peer",
+                                TransportErrorCode::TcpInboundRejected,
+                                addr
+                            );
+                            drop(tcp);
+                        }
                     }
                     Err(e) => {
                         warn!("accept error: {:?}", e);
@@ -184,6 +201,20 @@ async fn accept_loop_task(
                 break;
             }
         }
+    }
+}
+
+/// Whether an accepted source may proceed to the handshake. `None` admits any
+/// source — set when `accept_undefined_peers` is on, or when no peers were
+/// declared.
+///
+/// Matching is on the address half only: an inbound connection carries the peer's
+/// ephemeral source port, which never equals the listener port declared in
+/// `initial_peers`.
+fn source_is_allowed(allowed: &Option<Vec<IpAddr>>, ip: IpAddr) -> bool {
+    match allowed {
+        Some(list) => list.contains(&ip),
+        None => true,
     }
 }
 
@@ -318,7 +349,28 @@ mod tests {
             TcpSocketTuning::default(),
             Duration::from_secs(5),
             peer_handshake_timeout,
+            None,
             cancel,
+        )
+        .expect("bind_and_spawn")
+    }
+
+    /// Helper: listener that only admits the given source IPs.
+    fn make_listener_with_allowlist(allowed: Vec<IpAddr>) -> TcpMuxListener {
+        let (d_tx, _d_rx, u_tx, _u_rx) = make_channels();
+        TcpMuxListener::bind_and_spawn(
+            0,
+            0,
+            0,
+            [0u8; 12],
+            d_tx,
+            u_tx,
+            None,
+            TcpSocketTuning::default(),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            Some(allowed),
+            CancellationToken::new(),
         )
         .expect("bind_and_spawn")
     }
@@ -407,6 +459,60 @@ mod tests {
 
         listener.shutdown().await;
         let _ = client.await;
+    }
+
+    // ── inbound admission ────────────────────────────────────────────────────
+
+    /// A source outside the declared peer list is closed at accept, before any
+    /// registration — so no TLS handshake and no task pair ever run for it.
+    ///
+    /// The kernel completes the TCP handshake before the listener gets to screen
+    /// the source, so the rejection reaches the peer as an immediate EOF rather
+    /// than a refusal.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn undeclared_source_is_closed_without_registering() {
+        let listener = make_listener_with_allowlist(vec!["10.255.255.1".parse().unwrap()]);
+        let port = listener.port();
+
+        let mut client = TcpStream::connect(("127.0.0.1", port)).await.expect("client connect");
+
+        let mut buf = [0u8; 1];
+        let read = tokio::time::timeout(Duration::from_secs(3), client.read(&mut buf))
+            .await
+            .expect("listener did not close the socket in time");
+        assert_eq!(read.expect("read"), 0, "expected EOF on the rejected connection");
+        assert_eq!(listener.shared().connection_count(), 0, "no entry may be registered");
+
+        listener.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn declared_source_is_admitted() {
+        let listener = make_listener_with_allowlist(vec!["127.0.0.1".parse().unwrap()]);
+        let port = listener.port();
+
+        let _client = TcpStream::connect(("127.0.0.1", port)).await.expect("client connect");
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        assert!(
+            wait_until(deadline, || listener.shared().connection_count() == 1).await,
+            "a declared source must reach registration"
+        );
+
+        listener.shutdown().await;
+    }
+
+    /// An absent allowlist is the dial-all fallback and admits any source; an
+    /// empty one admits nobody. The two must not collapse into each other.
+    #[test]
+    fn source_is_allowed_matches_the_gate_semantics() {
+        let listed: IpAddr = "10.0.0.5".parse().unwrap();
+        let other: IpAddr = "10.0.0.6".parse().unwrap();
+
+        assert!(source_is_allowed(&None, other), "no allowlist admits any source");
+        assert!(source_is_allowed(&Some(vec![listed]), listed));
+        assert!(!source_is_allowed(&Some(vec![listed]), other));
+        assert!(!source_is_allowed(&Some(vec![]), listed), "an empty list admits nobody");
     }
 
     // ── handshake state machine ──────────────────────────────────────────────

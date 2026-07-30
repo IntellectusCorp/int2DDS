@@ -850,10 +850,15 @@ pub const PROP_TRANSPORT: &str = "int2dds.transport";
 /// `INT2DDS_INITIAL_PEERS` env var when absent.
 pub const PROP_INITIAL_PEERS: &str = "int2dds.initial_peers";
 
-/// Whether to dial peers discovered at runtime that are NOT in `initial_peers`.
-/// `false` (default): only dial `initial_peers` (or every advertised locator when
-/// `initial_peers` is empty).
-/// `true`: also dial runtime-discovered peers.
+/// Whether to admit peers that are NOT in `initial_peers`, in both directions.
+/// `false` (default): only dial `initial_peers`, and close an accepted connection
+/// whose source IP is not one of them. An empty `initial_peers` opens both gates
+/// (dial every advertised locator, admit any source).
+/// `true`: also dial runtime-discovered peers, and admit any source.
+///
+/// The inbound half is an application-level check, so it runs after the kernel has
+/// completed the TCP handshake. Blocking a source before that requires a host
+/// firewall rule.
 pub const PROP_ACCEPT_UNDEFINED_PEERS: &str = "int2dds.accept_undefined_peers";
 
 /// ---------TCP QoS ----------

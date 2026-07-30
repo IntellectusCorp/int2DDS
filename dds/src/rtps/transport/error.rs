@@ -81,6 +81,9 @@ pub enum TransportErrorCode {
     TcpReadError = 771,
     /// Failed to send a control response to a connected peer.
     TcpControlSendFailed = 772,
+    /// An accepted connection was closed before any handshake because its source
+    /// IP is not a declared peer.
+    TcpInboundRejected = 773,
 
     // ── 780: TLS configuration and handshake ────────────────────────────
     /// A required TLS property is missing in the participant QoS.
@@ -127,6 +130,7 @@ impl TransportErrorCode {
             Self::TcpAcceptFailed => io::ErrorKind::ConnectionAborted,
             Self::TcpReadError => io::ErrorKind::ConnectionReset,
             Self::TcpControlSendFailed => io::ErrorKind::BrokenPipe,
+            Self::TcpInboundRejected => io::ErrorKind::ConnectionRefused,
 
             Self::TlsMissingProperty => io::ErrorKind::InvalidInput,
             Self::TlsFileIoError => io::ErrorKind::NotFound,
@@ -161,6 +165,7 @@ impl TransportErrorCode {
             Self::TcpAcceptFailed => "TCP accept failed",
             Self::TcpReadError => "TCP read error on accepted connection",
             Self::TcpControlSendFailed => "TCP control response send failed",
+            Self::TcpInboundRejected => "TCP inbound connection rejected",
 
             Self::TlsMissingProperty => "TLS required property missing",
             Self::TlsFileIoError => "TLS PEM file I/O error",
