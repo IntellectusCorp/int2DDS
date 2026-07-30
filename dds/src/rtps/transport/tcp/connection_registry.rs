@@ -418,6 +418,42 @@ impl ConnectionRegistry {
         conn_id
     }
 
+    pub(crate) fn inbound_handshake_complete(&self, conn_id: ConnectionId) -> bool {
+        let (state, guid) = match self.connections.get(&conn_id) {
+            Some(entry) => (entry.state, entry.remote_guid_prefix),
+            None => return true,
+        };
+
+        match state {
+            ConnectionState::AwaitingFirstMessage => false,
+            ConnectionState::Active => true,
+            ConnectionState::Control => {
+                let Some(guid) = guid else { return false };
+
+                // Collect first, then release the lock: `remove_connection` takes
+                // these two in the opposite order.
+                let data_conns: Vec<ConnectionId> = {
+                    let pc = self.peer_connections.lock().expect("peer_connections lock");
+                    match pc.get(&guid) {
+                        Some(group) => group
+                            .discovery_conns
+                            .iter()
+                            .chain(&group.user_data_conns)
+                            .copied()
+                            .collect(),
+                        None => return false,
+                    }
+                };
+
+                data_conns.iter().any(|id| {
+                    self.connections
+                        .get(id)
+                        .is_some_and(|e| e.direction == ConnectionDirection::Inbound)
+                })
+            }
+        }
+    }
+
     // ── connection / peer cleanup ────────────────────────────────────────────
 
     /// Update peer_connections bookkeeping then remove the connection entry.
