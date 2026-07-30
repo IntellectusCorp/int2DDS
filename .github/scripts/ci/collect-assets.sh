@@ -2,7 +2,7 @@
 # Gather the downloaded artifacts into one directory, generate SHA256SUMS and
 # verify the count.
 #
-# Usage: ci/collect-assets.sh <version> <artifact_root> <out_dir>
+# Usage: .github/scripts/ci/collect-assets.sh <version> <artifact_root> <out_dir>
 set -euo pipefail
 
 version="${1:?usage: collect-assets.sh <version> <artifact_root> <out_dir>}"

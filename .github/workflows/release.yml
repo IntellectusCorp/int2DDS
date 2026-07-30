@@ -36,7 +36,7 @@ jobs:
         shell: bash
         run: |
           tag="${{ github.event_name == 'workflow_dispatch' && inputs.dry_run_tag || github.ref_name }}"
-          version="$(./ci/check-version.sh "$tag")"
+          version="$(./.github/scripts/ci/check-version.sh "$tag")"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           # Package filenames (nupkg/snupkg/wheel/sdist) come from the static
           # version fields in Cargo.toml and pyproject.toml, and check-version.sh
@@ -54,7 +54,7 @@ jobs:
 
       - name: Extract release notes
         shell: bash
-        run: ./ci/extract-notes.sh "${{ steps.check.outputs.version }}" > release-notes.md
+        run: ./.github/scripts/ci/extract-notes.sh "${{ steps.check.outputs.version }}" > release-notes.md
 
       - uses: actions/upload-artifact@v4
         with:
@@ -106,7 +106,7 @@ jobs:
         run: git diff --exit-code ffi/include/int2dds-ffi.h
 
       - name: Stage archive
-        run: ./ci/stage-native.sh "${{ matrix.triple }}" "${{ matrix.dist }}" "${{ needs.prepare.outputs.version }}" gnu
+        run: ./.github/scripts/ci/stage-native.sh "${{ matrix.triple }}" "${{ matrix.dist }}" "${{ needs.prepare.outputs.version }}" gnu
 
       - uses: actions/upload-artifact@v4
         with:
@@ -170,7 +170,7 @@ jobs:
           fi
 
       - name: Stage archive
-        run: ./ci/stage-native.sh "${{ matrix.triple }}" "${{ matrix.dist }}" "${{ needs.prepare.outputs.version }}" musl
+        run: ./.github/scripts/ci/stage-native.sh "${{ matrix.triple }}" "${{ matrix.dist }}" "${{ needs.prepare.outputs.version }}" musl
 
       - uses: actions/upload-artifact@v4
         with:
@@ -216,7 +216,7 @@ jobs:
 
       - name: Stage archive
         shell: pwsh
-        run: ./ci/stage-native.ps1 -Triple "${{ matrix.triple }}" -DistName "${{ matrix.dist }}" -Version "${{ needs.prepare.outputs.version }}"
+        run: ./.github/scripts/ci/stage-native.ps1 -Triple "${{ matrix.triple }}" -DistName "${{ matrix.dist }}" -Version "${{ needs.prepare.outputs.version }}"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -270,9 +270,9 @@ jobs:
 
       - name: Stage archives
         run: |
-          ./ci/stage-native.sh x86_64-apple-darwin     macos-x86_64     "${{ needs.prepare.outputs.version }}"
-          MACOSX_DEPLOYMENT_TARGET=11.0 ./ci/stage-native.sh aarch64-apple-darwin macos-arm64 "${{ needs.prepare.outputs.version }}"
-          ./ci/stage-native.sh universal2-apple-darwin macos-universal2 "${{ needs.prepare.outputs.version }}"
+          ./.github/scripts/ci/stage-native.sh x86_64-apple-darwin     macos-x86_64     "${{ needs.prepare.outputs.version }}"
+          MACOSX_DEPLOYMENT_TARGET=11.0 ./.github/scripts/ci/stage-native.sh aarch64-apple-darwin macos-arm64 "${{ needs.prepare.outputs.version }}"
+          ./.github/scripts/ci/stage-native.sh universal2-apple-darwin macos-universal2 "${{ needs.prepare.outputs.version }}"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -470,7 +470,7 @@ jobs:
           ls -1 native-root
 
       - name: Build wheels
-        run: ./ci/repack-wheels.sh "${{ needs.prepare.outputs.version }}" native-root
+        run: ./.github/scripts/ci/repack-wheels.sh "${{ needs.prepare.outputs.version }}" native-root
 
       - name: Verify wheel count
         shell: bash
@@ -570,7 +570,7 @@ jobs:
           path: artifacts
 
       - name: Collect assets and generate checksums
-        run: ./ci/collect-assets.sh "${{ needs.prepare.outputs.version }}" artifacts dist/release
+        run: ./.github/scripts/ci/collect-assets.sh "${{ needs.prepare.outputs.version }}" artifacts dist/release
 
       - name: Create draft release
         if: github.event_name == 'push'

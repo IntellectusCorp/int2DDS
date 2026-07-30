@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Extract the section for a given version from CHANGELOG.md.
 #
-# Usage: ci/extract-notes.sh 0.1.1
+# Usage: .github/scripts/ci/extract-notes.sh 0.1.1
+# Reads CHANGELOG.md relative to the working directory, so it has to be run from
+# the repo root.
 set -euo pipefail
 
 version="${1:?usage: extract-notes.sh <version>}"

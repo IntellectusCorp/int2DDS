@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Stage the built native artifacts into a release archive (Linux / macOS).
 #
-# Usage: ci/stage-native.sh <triple> <dist_name> <version> [<libc>]
-#   e.g. ci/stage-native.sh x86_64-unknown-linux-gnu linux-x86_64 0.1.1 gnu
-#        ci/stage-native.sh aarch64-apple-darwin macos-arm64 0.1.1
+# Usage: .github/scripts/ci/stage-native.sh <triple> <dist_name> <version> [<libc>]
+#   e.g. .github/scripts/ci/stage-native.sh x86_64-unknown-linux-gnu linux-x86_64 0.1.1 gnu
+#        .github/scripts/ci/stage-native.sh aarch64-apple-darwin macos-arm64 0.1.1
 set -euo pipefail
 
 triple="${1:?usage: stage-native.sh <triple> <dist_name> <version> [libc]}"
@@ -11,7 +11,7 @@ dist_name="${2:?}"
 version="${3:?}"
 libc="${4:-}"
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 build_dir="$repo_root/target/$triple/release"
 stage="$repo_root/dist/stage/int2dds-$version-$dist_name"
 out_dir="$repo_root/dist"

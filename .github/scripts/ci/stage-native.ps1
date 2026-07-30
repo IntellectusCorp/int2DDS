@@ -2,7 +2,7 @@
 .SYNOPSIS
     Stage the built Windows native artifacts into a release archive.
 .EXAMPLE
-    ci/stage-native.ps1 -Triple x86_64-pc-windows-msvc -DistName windows-x86_64 -Version 0.1.1
+    .github/scripts/ci/stage-native.ps1 -Triple x86_64-pc-windows-msvc -DistName windows-x86_64 -Version 0.1.1
 #>
 param(
     [Parameter(Mandatory)][string]$Triple,
@@ -11,7 +11,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-$RepoRoot = Split-Path -Parent $PSScriptRoot
+$RepoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 $BuildDir = Join-Path $RepoRoot "target\$Triple\release"
 $Stage    = Join-Path $RepoRoot "dist\stage\int2dds-$Version-$DistName"
 $OutDir   = Join-Path $RepoRoot "dist"
