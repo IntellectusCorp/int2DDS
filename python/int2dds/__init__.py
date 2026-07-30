@@ -19,6 +19,7 @@ try:
         History,
         LatencyBudget,
         Lifespan,
+        LifespanReference,
         Liveliness,
         Ownership,
         OwnershipStrength,

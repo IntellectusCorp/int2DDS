@@ -301,7 +301,7 @@ class DataWriter(Generic[T]):
     def get_qos(self) -> "DataWriterQos":
         """Return the effective QoS (reliability, durability, history) in force."""
         from int2dds.core.qos import (
-            DataWriterQos, Reliability, Durability, History, ResourceLimits,
+            DataWriterQos, Reliability, Durability, History, Lifespan, ResourceLimits,
             ReliabilityKind, DurabilityKind, HistoryKind,
         )
 
@@ -319,6 +319,8 @@ class DataWriter(Generic[T]):
             check_ret(lib.int2dds_datawriter_qos_get_history(handle, hist_kind, depth))
             frag = ffi.new("int32_t *")
             check_ret(lib.int2dds_datawriter_qos_get_data_frag(handle, frag))
+            lifespan_ns = ffi.new("int64_t *")
+            check_ret(lib.int2dds_datawriter_qos_get_lifespan(handle, lifespan_ns))
             max_samples = ffi.new("int32_t *")
             max_instances = ffi.new("int32_t *")
             max_per_instance = ffi.new("int32_t *")
@@ -340,6 +342,7 @@ class DataWriter(Generic[T]):
                 max_samples_per_instance=max_per_instance[0],
             ),
             data_frag=frag[0],
+            lifespan=Lifespan.from_ns(lifespan_ns[0]),
         )
 
     def set_qos(self, qos: "DataWriterQos") -> None:

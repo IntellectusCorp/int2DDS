@@ -28,11 +28,11 @@ use crate::{
         types::LENGTH_UNLIMITED,
     },
     infrastructure::{
-        history_cache::HistoryCache,
+        history_cache::{sample_expiry, HistoryCache},
         qos_policy::{
             DestinationOrderQosPolicyKind, HistoryQosPolicy, HistoryQosPolicyKind,
-            OwnershipQosPolicyKind, ReliabilityQosPolicy, ReliabilityQosPolicyKind,
-            ResourceLimitsQosPolicy,
+            LifespanReferenceQosPolicyKind, OwnershipQosPolicyKind, ReliabilityQosPolicy,
+            ReliabilityQosPolicyKind, ResourceLimitsQosPolicy,
         },
         status::{SampleRejectedStatus, SampleRejectedStatusKind, StatusInfo, StatusKind},
     },
@@ -172,17 +172,26 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
         Ok(map.get(&instance_handle).map_or(0, |v| v.len()))
     }
 
-    // Buckets are DESTINATION_ORDER sorted, not globally source-timestamp ordered. Each BY_SOURCE
-    // bucket is source-sorted, so early-break within it; BY_RECEPTION buckets are arrival order, so
-    // full-scan. Earliest survivor is tracked across buckets for the next timer.
+    // Buckets are DESTINATION_ORDER sorted, not globally ordered. Early-break within a bucket is
+    // valid only when the bucket ordering matches the lifespan expiry basis (see can_early_break);
+    // otherwise full-scan. Earliest survivor is tracked across buckets for the next timer.
     fn collect_lifespan_expired(
         &self,
         writer_guid: Guid,
         lifespan_duration: Duration,
         now: RtpsTime,
     ) -> (Vec<Arc<CacheChange>>, Option<RtpsTime>) {
-        let source_ordered =
-            self.destination_order_kind == DestinationOrderQosPolicyKind::BySourceTimestamp;
+        let reference = self.reader_lifespan_reference();
+        let can_early_break = matches!(
+            (self.destination_order_kind, reference),
+            (
+                DestinationOrderQosPolicyKind::BySourceTimestamp,
+                LifespanReferenceQosPolicyKind::BySourceTimestamp
+            ) | (
+                DestinationOrderQosPolicyKind::ByReceptionTimestamp,
+                LifespanReferenceQosPolicyKind::ByReceptionTimestamp
+            )
+        );
         let mut expired = Vec::new();
         let mut earliest_survivor: Option<RtpsTime> = None;
         if let Ok(map) = self.instance_map.lock() {
@@ -191,11 +200,9 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
                     if change.writer_guid() != writer_guid {
                         continue;
                     }
-                    let Some(source_ts) = change.source_timestamp() else {
-                        expired.push(change.clone());
+                    let Some(expiry) = sample_expiry(change, lifespan_duration, reference) else {
                         continue;
                     };
-                    let expiry = source_ts.add_nanos(lifespan_duration.as_nanos().max(0) as u64);
                     if now >= expiry {
                         expired.push(change.clone());
                     } else {
@@ -203,7 +210,7 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
                             Some(e) if e <= expiry => e,
                             _ => expiry,
                         });
-                        if source_ordered {
+                        if can_early_break {
                             break;
                         }
                     }
@@ -211,6 +218,28 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
             }
         }
         (expired, earliest_survivor)
+    }
+
+    // Reader override: enforce Lifespan at read time using the live reference mode.
+    fn purge_expired_on_read(&mut self) -> DdsResult<()> {
+        let now = RtpsTime::now();
+        let reference = self.reader_lifespan_reference();
+        let mut to_remove = Vec::new();
+        for change in self.get_changes().iter() {
+            let Some(lifespan) = change.lifespan_duration() else { continue };
+            if lifespan.is_infinite() {
+                continue;
+            }
+            let Some(expiry) = sample_expiry(change, lifespan, reference) else { continue };
+            if now >= expiry {
+                to_remove.push(change.clone());
+            }
+        }
+        for change in to_remove {
+            // Best-effort, matching the generic purge: a read must not fail on a purge hiccup.
+            let _ = self.remove_change(change);
+        }
+        Ok(())
     }
 
     // Returns the map of lifespan timers keyed by writer GUID.
@@ -911,6 +940,15 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
             .unwrap_or_else(|| Duration::new(0, 0))
     }
 
+    // Live reader-QoS read (BySourceTimestamp if unavailable) so set_qos applies next evaluation.
+    fn reader_lifespan_reference(&self) -> LifespanReferenceQosPolicyKind {
+        self.data_reader
+            .upgrade()
+            .and_then(|data_reader| data_reader.get_qos_arc().ok())
+            .map(|qos| qos.lifespan_reference.kind)
+            .unwrap_or(LifespanReferenceQosPolicyKind::BySourceTimestamp)
+    }
+
     // Schedule a one-shot timer to deliver the instance's held sample after the window elapses.
     fn schedule_tbf_timer(&self, instance_handle: InstanceHandle, delay: std::time::Duration) {
         let Some(data_reader) = self.data_reader.upgrade() else { return };
@@ -1050,8 +1088,8 @@ mod tests {
     use super::*;
     use crate::dcps::topic::type_support::DdsType;
     use crate::infrastructure::qos_policy::{
-        OwnershipQosPolicy, PresentationQosAccessScopeKind, PresentationQosPolicy,
-        ReliabilityQosPolicyKind,
+        LifespanReferenceQosPolicy, LifespanReferenceQosPolicyKind, OwnershipQosPolicy,
+        PresentationQosAccessScopeKind, PresentationQosPolicy, ReliabilityQosPolicyKind,
     };
     use crate::rtps::entities::history::cache_change::PresentationInfo;
     use crate::{
@@ -3459,5 +3497,124 @@ mod tests {
             participant.delete_contained_entities().unwrap();
             DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
         }
+    }
+
+    const NS: u64 = 1_000_000_000; // one second in nanos
+    const LIFESPAN_10S: Duration = Duration { sec: 10, nanosec: 0 };
+
+    fn writer_guid_for_tests() -> Guid {
+        Guid::new([1; 12], EntityId::new([0, 0, 1], EntityKind::USER_DEFINED_WRITER_WITH_KEY))
+    }
+
+    // Build a keyed Alive change with explicit source/reception timestamps and a 10s lifespan.
+    fn skew_change(seq: i64, source: Option<u64>, reception: u64) -> Arc<CacheChange> {
+        let mut c = CacheChange::new(
+            ChangeKind::Alive,
+            writer_guid_for_tests(),
+            InstanceHandle::new([1; 16]),
+            SequenceNumber::from_i64(seq),
+            vec![
+                0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0, 20,
+                0, 0, 0, 0, 0, 0, 0,
+            ],
+            source.map(RtpsTime::from_nanos),
+        );
+        c.set_reception_timestamp(RtpsTime::from_nanos(reception));
+        c.set_lifespan_duration(Some(LIFESPAN_10S));
+        Arc::new(c)
+    }
+
+    fn reader_qos_with_reference(kind: LifespanReferenceQosPolicyKind) -> DataReaderQos {
+        DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            lifespan_reference: LifespanReferenceQosPolicy { kind },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn collect_reader_ahead_by_reception_keeps_by_source_expires() {
+        // Reader clock ahead of writer by 40s (source looks old); now = 100s, lifespan 10s.
+        // BySource expiry = 60+10 = 70 <= 100 -> expired.
+        // ByReception expiry = 100+10 = 110 > 100 -> alive.
+        let now = RtpsTime::from_nanos(100 * NS);
+        let guid = writer_guid_for_tests();
+
+        for (kind, expect_expired) in [
+            (LifespanReferenceQosPolicyKind::BySourceTimestamp, 1usize),
+            (LifespanReferenceQosPolicyKind::ByReceptionTimestamp, 0usize),
+        ] {
+            let (participant, reader) = create_with_key_datareader_in_subscriber(
+                SubscriberQos::default(),
+                reader_qos_with_reference(kind),
+            );
+            let cache_arc = reader.get_datareader_cache().unwrap();
+            {
+                let mut cache = cache_arc.lock().unwrap();
+                cache.insert_change_sorted(skew_change(1, Some(60 * NS), 100 * NS));
+                let (expired, _) = cache.collect_lifespan_expired(guid, LIFESPAN_10S, now);
+                assert_eq!(expired.len(), expect_expired, "kind={:?}", kind);
+            }
+            participant.delete_contained_entities().unwrap();
+            DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
+        }
+    }
+
+    #[test]
+    fn collect_absent_source_is_preserved_by_source_mode() {
+        // BySource with no source_timestamp -> preserved (unified absent handling), even at a
+        // far-future now.
+        let now = RtpsTime::from_nanos(1_000 * NS);
+        let guid = writer_guid_for_tests();
+        let (participant, reader) = create_with_key_datareader_in_subscriber(
+            SubscriberQos::default(),
+            reader_qos_with_reference(LifespanReferenceQosPolicyKind::BySourceTimestamp),
+        );
+        let cache_arc = reader.get_datareader_cache().unwrap();
+        {
+            let mut cache = cache_arc.lock().unwrap();
+            cache.insert_change_sorted(skew_change(1, None, 10 * NS));
+            let (expired, _) = cache.collect_lifespan_expired(guid, LIFESPAN_10S, now);
+            assert_eq!(expired.len(), 0, "absent source must be preserved");
+        }
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn purge_reflects_runtime_set_qos_switch() {
+        // Live mode: switching lifespan_reference via set_qos changes the next purge outcome.
+        // Anchored to the real clock (10s lifespan gives a wide margin): a source 40s in the
+        // past is BySource-expired, while reception "now" is ByReception-alive.
+        let source = RtpsTime::now().to_nanos() - 40 * NS;
+        let (participant, reader) = create_with_key_datareader_in_subscriber(
+            SubscriberQos::default(),
+            reader_qos_with_reference(LifespanReferenceQosPolicyKind::BySourceTimestamp),
+        );
+        let cache_arc = reader.get_datareader_cache().unwrap();
+
+        // BySource: source 40s ago + 10s lifespan < now -> expired.
+        {
+            let mut cache = cache_arc.lock().unwrap();
+            cache.insert_change_sorted(skew_change(1, Some(source), RtpsTime::now().to_nanos()));
+            cache.purge_expired_on_read().unwrap();
+            assert_eq!(cache.get_changes().len(), 0, "BySource should expire");
+        }
+
+        // Switch to ByReception at runtime; a freshly inserted sample must now be preserved.
+        reader
+            .set_qos(reader_qos_with_reference(
+                LifespanReferenceQosPolicyKind::ByReceptionTimestamp,
+            ))
+            .unwrap();
+        {
+            let mut cache = cache_arc.lock().unwrap();
+            cache.insert_change_sorted(skew_change(2, Some(source), RtpsTime::now().to_nanos()));
+            cache.purge_expired_on_read().unwrap();
+            assert_eq!(cache.get_changes().len(), 1, "ByReception should preserve");
+        }
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 }
