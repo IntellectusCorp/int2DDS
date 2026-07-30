@@ -46,13 +46,16 @@ class Sample(Generic[T]):
     Attributes:
         data: The deserialized data (None if not valid_data)
         valid_data: True if this is a valid data sample (not dispose/unregister)
-        instance_handle: The 16-byte instance handle, when available (the
-            SampleSeq-based read/take paths populate it; ``None`` otherwise).
+        instance_handle: The 16-byte instance handle, when available.
+        instance_state: ALIVE / NOT_ALIVE_DISPOSED / NOT_ALIVE_NO_WRITERS
+            (see ``int2dds.core.conditions``); tells a dispose apart from an
+            unregister on a metadata-only sample.
     """
 
     data: T | None
     valid_data: bool
     instance_handle: bytes | None = None
+    instance_state: int | None = None
 
 
 def _apply_datareader_qos(handle: CData, qos: "DataReaderQos") -> None:
@@ -80,6 +83,9 @@ def _apply_datareader_qos(handle: CData, qos: "DataReaderQos") -> None:
     if qos.destination_order is not None:
         check_ret(lib.int2dds_datareader_qos_set_destination_order(
             handle, qos.destination_order._kind_int))
+    if qos.lifespan_reference is not None:
+        check_ret(lib.int2dds_datareader_qos_set_lifespan_reference(
+            handle, qos.lifespan_reference._kind_int))
     if qos.time_based_filter is not None:
         check_ret(lib.int2dds_datareader_qos_set_time_based_filter(
             handle, qos.time_based_filter._minimum_separation_ns))
@@ -333,11 +339,11 @@ class DataReader(Generic[T]):
 
     def _take_or_read_one(self, native_fn) -> Sample[T] | None:
         actual_size = ffi.new("size_t *")
-        valid_data = ffi.new("bool *")
+        info = ffi.new("Int2DdsSampleInfo *")
 
         while True:
             ret = native_fn(
-                self._handle, self._buffer, self._buffer_size, actual_size, valid_data
+                self._handle, self._buffer, self._buffer_size, actual_size, info
             )
 
             if ret == INT2DDS_RET_BUFFER_TOO_SMALL:
@@ -347,19 +353,22 @@ class DataReader(Generic[T]):
                 return None
             check_ret(ret)
 
-            if valid_data[0]:
+            handle = bytes(ffi.buffer(info.instance_handle, 16))
+            if info.valid_data:
                 data_bytes = ffi.buffer(self._buffer, actual_size[0])[:]
                 data = self._topic.type_class._deserialize_cdr(data_bytes)
-                return Sample(data=data, valid_data=True)
-            return Sample(data=None, valid_data=False)
+                return Sample(data=data, valid_data=True, instance_handle=handle,
+                              instance_state=info.instance_state)
+            return Sample(data=None, valid_data=False, instance_handle=handle,
+                          instance_state=info.instance_state)
 
     def _take_one(self) -> Sample[T] | None:
         """Take a single sample from the reader."""
-        return self._take_or_read_one(lib.int2dds_datareader_take_serialized)
+        return self._take_or_read_one(lib.int2dds_datareader_take_serialized_w_info)
 
     def _read_one(self) -> Sample[T] | None:
         """Read a single sample without removing it from the cache."""
-        return self._take_or_read_one(lib.int2dds_datareader_read_serialized)
+        return self._take_or_read_one(lib.int2dds_datareader_read_serialized_w_info)
 
     def take(self) -> list[Sample[T]]:
         """
@@ -490,7 +499,8 @@ class DataReader(Generic[T]):
                 check_ret(lib.int2dds_sample_seq_get_info(seq, i, info))
                 handle = bytes(ffi.buffer(info.instance_handle, 16))
                 if not info.valid_data:
-                    samples.append(Sample(data=None, valid_data=False, instance_handle=handle))
+                    samples.append(Sample(data=None, valid_data=False, instance_handle=handle,
+                                          instance_state=info.instance_state))
                     continue
                 # Copy the serialized bytes, growing the shared buffer if needed.
                 while True:
@@ -505,7 +515,8 @@ class DataReader(Generic[T]):
                     check_ret(ret)
                 data_bytes = ffi.buffer(self._buffer, actual_size[0])[:]
                 data = self._topic.type_class._deserialize_cdr(data_bytes)
-                samples.append(Sample(data=data, valid_data=True, instance_handle=handle))
+                samples.append(Sample(data=data, valid_data=True, instance_handle=handle,
+                                      instance_state=info.instance_state))
             return samples
         finally:
             lib.int2dds_sample_seq_delete(seq)
@@ -568,7 +579,8 @@ class DataReader(Generic[T]):
                 check_ret(lib.int2dds_sample_seq_get_info(seq, i, info))
                 handle = bytes(ffi.buffer(info.instance_handle, 16))
                 if not info.valid_data:
-                    samples.append(Sample(data=None, valid_data=False, instance_handle=handle))
+                    samples.append(Sample(data=None, valid_data=False, instance_handle=handle,
+                                          instance_state=info.instance_state))
                     continue
                 while True:
                     ret = lib.int2dds_sample_seq_get_data(
@@ -581,7 +593,8 @@ class DataReader(Generic[T]):
                     check_ret(ret)
                 data_bytes = ffi.buffer(self._buffer, actual_size[0])[:]
                 data = self._topic.type_class._deserialize_cdr(data_bytes)
-                samples.append(Sample(data=data, valid_data=True, instance_handle=handle))
+                samples.append(Sample(data=data, valid_data=True, instance_handle=handle,
+                                      instance_state=info.instance_state))
             return samples
         finally:
             lib.int2dds_sample_seq_delete(seq)
@@ -617,7 +630,8 @@ class DataReader(Generic[T]):
                 check_ret(lib.int2dds_sample_seq_get_info(seq, i, info))
                 handle = bytes(ffi.buffer(info.instance_handle, 16))
                 if not info.valid_data:
-                    samples.append(Sample(data=None, valid_data=False, instance_handle=handle))
+                    samples.append(Sample(data=None, valid_data=False, instance_handle=handle,
+                                          instance_state=info.instance_state))
                     continue
                 while True:
                     ret = lib.int2dds_sample_seq_get_data(
@@ -630,7 +644,8 @@ class DataReader(Generic[T]):
                     check_ret(ret)
                 data_bytes = ffi.buffer(self._buffer, actual_size[0])[:]
                 data = self._topic.type_class._deserialize_cdr(data_bytes)
-                samples.append(Sample(data=data, valid_data=True, instance_handle=handle))
+                samples.append(Sample(data=data, valid_data=True, instance_handle=handle,
+                                      instance_state=info.instance_state))
             return samples
         finally:
             lib.int2dds_sample_seq_delete(seq)
@@ -710,8 +725,8 @@ class DataReader(Generic[T]):
     def get_qos(self) -> "DataReaderQos":
         """Return the effective QoS (reliability, durability, history) in force."""
         from int2dds.core.qos import (
-            DataReaderQos, Reliability, Durability, History, ResourceLimits,
-            ReliabilityKind, DurabilityKind, HistoryKind,
+            DataReaderQos, Reliability, Durability, History, LifespanReference, ResourceLimits,
+            ReliabilityKind, DurabilityKind, HistoryKind, LifespanReferenceKind,
         )
 
         qos_ptr = ffi.new("Int2DdsDataReaderQos **")
@@ -726,6 +741,8 @@ class DataReader(Generic[T]):
             hist_kind = ffi.new("int32_t *")
             depth = ffi.new("int32_t *")
             check_ret(lib.int2dds_datareader_qos_get_history(handle, hist_kind, depth))
+            lifespan_ref_kind = ffi.new("int32_t *")
+            check_ret(lib.int2dds_datareader_qos_get_lifespan_reference(handle, lifespan_ref_kind))
             max_samples = ffi.new("int32_t *")
             max_instances = ffi.new("int32_t *")
             max_per_instance = ffi.new("int32_t *")
@@ -741,6 +758,8 @@ class DataReader(Generic[T]):
             ),
             durability=Durability(kind=DurabilityKind(dur_kind[0]).name),
             history=History(kind=HistoryKind(hist_kind[0]).name, depth=depth[0]),
+            lifespan_reference=LifespanReference(
+                kind=LifespanReferenceKind(lifespan_ref_kind[0]).name),
             resource_limits=ResourceLimits(
                 max_samples=max_samples[0],
                 max_instances=max_instances[0],
@@ -932,7 +951,7 @@ class DataReader(Generic[T]):
         if not self._closed and self._handle is not None:
             if self._listener_ctx_id is not None:
                 _remove_listener(self._listener_ctx_id)
-                self._listener_ctx_id = None        
+                self._listener_ctx_id = None
             check_ret(lib.int2dds_delete_datareader(self._handle))
             self._handle = None
             self._closed = True

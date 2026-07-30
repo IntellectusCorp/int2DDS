@@ -179,6 +179,12 @@ namespace Int2Dds.Interop
         internal static extern int int2dds_datareader_qos_get_destination_order(IntPtr qos, out int kind);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datareader_qos_set_lifespan_reference(IntPtr qos, int kind);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datareader_qos_get_lifespan_reference(IntPtr qos, out int kind);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_datareader_qos_get_deadline(IntPtr qos, out long period_ns);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
