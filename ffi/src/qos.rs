@@ -27,8 +27,8 @@ use int2dds::{
     domain::qos::DomainParticipantQos,
     infrastructure::qos_policy::{
         DataRepresentationId, DataRepresentationQosPolicy, DestinationOrderQosPolicyKind,
-        DurabilityQosPolicyKind, HistoryQosPolicyKind, LivelinessQosPolicyKind,
-        OwnershipQosPolicyKind, ReliabilityQosPolicyKind,
+        DurabilityQosPolicyKind, HistoryQosPolicyKind, LifespanReferenceQosPolicyKind,
+        LivelinessQosPolicyKind, OwnershipQosPolicyKind, ReliabilityQosPolicyKind,
     },
     publication::qos::{DataWriterQos, PublisherQos},
     subscription::qos::{DataReaderQos, SubscriberQos},
@@ -89,6 +89,10 @@ pub const INT2DDS_QOS_OWNERSHIP_EXCLUSIVE: i32 = 1;
 // DestinationOrder kinds
 pub const INT2DDS_QOS_DEST_ORDER_BY_RECEPTION: i32 = 0;
 pub const INT2DDS_QOS_DEST_ORDER_BY_SOURCE: i32 = 1;
+
+// LifespanReference kinds
+pub const INT2DDS_QOS_LIFESPAN_REF_BY_SOURCE: i32 = 0;
+pub const INT2DDS_QOS_LIFESPAN_REF_BY_RECEPTION: i32 = 1;
 
 /// Opaque QoS handle for DataWriter
 pub struct Int2DdsDataWriterQos {
@@ -1107,6 +1111,44 @@ pub unsafe extern "C" fn int2dds_datareader_qos_get_destination_order(
     *kind_out = match (*qos).inner.destination_order.kind {
         DestinationOrderQosPolicyKind::ByReceptionTimestamp => INT2DDS_QOS_DEST_ORDER_BY_RECEPTION,
         DestinationOrderQosPolicyKind::BySourceTimestamp => INT2DDS_QOS_DEST_ORDER_BY_SOURCE,
+    };
+    INT2DDS_RET_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_qos_set_lifespan_reference(
+    qos: *mut Int2DdsDataReaderQos,
+    kind: i32,
+) -> Int2DdsRet {
+    check_null!(qos);
+
+    let qos_ref = &mut *qos;
+
+    let reference_kind = match kind {
+        INT2DDS_QOS_LIFESPAN_REF_BY_SOURCE => LifespanReferenceQosPolicyKind::BySourceTimestamp,
+        INT2DDS_QOS_LIFESPAN_REF_BY_RECEPTION => {
+            LifespanReferenceQosPolicyKind::ByReceptionTimestamp
+        }
+        _ => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    qos_ref.inner.lifespan_reference.kind = reference_kind;
+
+    INT2DDS_RET_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_qos_get_lifespan_reference(
+    qos: *const Int2DdsDataReaderQos,
+    kind_out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(kind_out);
+    *kind_out = match (*qos).inner.lifespan_reference.kind {
+        LifespanReferenceQosPolicyKind::BySourceTimestamp => INT2DDS_QOS_LIFESPAN_REF_BY_SOURCE,
+        LifespanReferenceQosPolicyKind::ByReceptionTimestamp => {
+            INT2DDS_QOS_LIFESPAN_REF_BY_RECEPTION
+        }
     };
     INT2DDS_RET_OK
 }
