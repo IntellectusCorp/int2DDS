@@ -10,6 +10,9 @@ on:
 env:
   # The examples declare net45..net10.0; pin the single TFM the runner's SDK has.
   HW_DOTNET_TFM: net8.0
+  # Samples a subscriber must take before its cell counts as a pass. Read by both
+  # the pair script and the report, so the table cannot claim a different number.
+  HW_PAIR_SAMPLES: 10
 
 jobs:
   build:
@@ -203,6 +206,7 @@ jobs:
           LANGS = ["rust", "c", "python", "csharp"]
           LABEL = {"rust": "Rust", "c": "C", "python": "Python", "csharp": "C#"}
           MARK = {"PASS": "✅", "FAIL": "❌"}
+          NEEDED = os.environ.get("HW_PAIR_SAMPLES", "10")
 
           results = {}
           for pub in LANGS:
@@ -232,7 +236,7 @@ jobs:
           out += [
               "</table>",
               "",
-              "✅ sample received &nbsp;|&nbsp; ❌ no sample received "
+              f"✅ {NEEDED} samples received &nbsp;|&nbsp; ❌ fewer than {NEEDED} "
               "&nbsp;|&nbsp; ⚠️ pair did not run",
           ]
 
