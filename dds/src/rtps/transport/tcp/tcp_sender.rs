@@ -256,7 +256,8 @@ pub(crate) struct TcpSender {
     local_guid_prefix: GuidPrefix,
 
     connect_timeout: Duration,
-    handshake_timeout: Duration,
+    peer_handshake_timeout: Duration,
+    tls_handshake_timeout: Duration,
 
     send_deadline: Option<Duration>,
     send_probe_deadline: Duration,
@@ -327,7 +328,8 @@ impl TcpSender {
             public_addr,
             local_guid_prefix,
             connect_timeout: tcp_config.connect_timeout,
-            handshake_timeout: tcp_config.bind_timeout,
+            peer_handshake_timeout: tcp_config.peer_handshake_timeout,
+            tls_handshake_timeout: tcp_config.tls_handshake_timeout,
             send_deadline: tcp_config.send_deadline,
             send_probe_deadline,
             congestion_miss_threshold: tcp_config.congestion_miss_threshold,
@@ -740,7 +742,7 @@ async fn do_connect_control(sender: &Arc<TcpSender>, addr: SocketAddr) -> io::Re
             IpAddr::V6(_) => [0u8; 16], // TCPv6: Unsupported
         }
     };
-    peer_hello_handshake(&mut stream, locator, sender.handshake_timeout).await?;
+    peer_hello_handshake(&mut stream, locator, sender.peer_handshake_timeout).await?;
 
     // 3. Control inbox + cancel + pending_ack mailbox. The handshake is done and
     //    a control connection carries only protocol frames, so its `writer_task`
@@ -847,20 +849,25 @@ async fn do_connect_data(
 
     // 2. PORT_RESERVE round-trip → cookie. A failure here means the control
     //    connection itself is unusable, so it is evicted.
-    let cookie =
-        match port_reserve_round_trip(&control, logical_port, sender.handshake_timeout).await {
-            Ok(cookie) => cookie,
-            Err(e) => {
-                sender.evict_connection(addr, CONTROL_LOGICAL_PORT);
-                return Err(e);
-            }
-        };
+    let cookie = match port_reserve_round_trip(
+        &control,
+        logical_port,
+        sender.peer_handshake_timeout,
+    )
+    .await
+    {
+        Ok(cookie) => cookie,
+        Err(e) => {
+            sender.evict_connection(addr, CONTROL_LOGICAL_PORT);
+            return Err(e);
+        }
+    };
 
     // 3. Open a TCP for the data connection.
     let mut stream = create_stream(sender, addr).await?;
 
     // 4. PORT_BIND + PORT_BIND_ACK (inline, before the tasks).
-    port_bind_handshake(&mut stream, cookie, sender.handshake_timeout).await?;
+    port_bind_handshake(&mut stream, cookie, sender.peer_handshake_timeout).await?;
 
     // 5. Flush the connect-window buffer + go Ready, then register (before the
     //    reader starts) and spawn the reader task. No writer task: a data
@@ -995,7 +1002,7 @@ async fn create_stream(sender: &Arc<TcpSender>, addr: SocketAddr) -> io::Result<
         let sni = cfg.server_name().to_string();
 
         let stream = tokio::time::timeout(
-            sender.handshake_timeout,
+            sender.tls_handshake_timeout,
             connect_tls_async(tcp, client_cfg, &sni),
         )
         .await
