@@ -2119,6 +2119,19 @@ Int2DdsRet int2dds_datawriter_get_qos(const struct Int2DdsDataWriter *writer,
                                       struct Int2DdsDataWriterQos **qos_out);
 
 /**
+ * Effective data representation of a DataWriter (`INT2DDS_QOS_DATA_REPR_*`).
+ *
+ * Resolves an unset (empty) DataRepresentation QoS to the library default, so
+ * generated serializers can encode exactly what the writer advertises over
+ * discovery. Falls back to the library default if the writer is null or its
+ * QoS cannot be read.
+ *
+ * # Safety
+ * - `writer` must be null or a valid datawriter
+ */
+int32_t int2dds_datawriter_data_representation(const struct Int2DdsDataWriter *writer);
+
+/**
  * Get the 16-byte RTPS GUID of a DataWriter.
  *
  * Writes the writer's endpoint GUID (the same value advertised over SEDP

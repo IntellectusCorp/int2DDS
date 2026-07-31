@@ -234,6 +234,36 @@ pub unsafe extern "C" fn int2dds_datawriter_get_qos(
     INT2DDS_RET_OK
 }
 
+/// Effective data representation of a DataWriter (`INT2DDS_QOS_DATA_REPR_*`).
+///
+/// Resolves an unset (empty) DataRepresentation QoS to the library default, so
+/// generated serializers can encode exactly what the writer advertises over
+/// discovery. Falls back to the library default if the writer is null or its
+/// QoS cannot be read.
+///
+/// # Safety
+/// - `writer` must be null or a valid datawriter
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_data_representation(
+    writer: *const Int2DdsDataWriter,
+) -> i32 {
+    use int2dds::infrastructure::qos_policy::DataRepresentationId;
+
+    if writer.is_null() {
+        return crate::qos::int2dds_default_data_representation();
+    }
+    match (&*writer).inner.get_qos() {
+        Ok(qos) => match qos.data_representation.value.first() {
+            Some(DataRepresentationId::XcdrDataRepresentation) => {
+                crate::qos::INT2DDS_QOS_DATA_REPR_XCDR1
+            }
+            Some(_) => crate::qos::INT2DDS_QOS_DATA_REPR_XCDR2,
+            None => crate::qos::int2dds_default_data_representation(),
+        },
+        Err(_) => crate::qos::int2dds_default_data_representation(),
+    }
+}
+
 /// Get the 16-byte RTPS GUID of a DataWriter.
 ///
 /// Writes the writer's endpoint GUID (the same value advertised over SEDP

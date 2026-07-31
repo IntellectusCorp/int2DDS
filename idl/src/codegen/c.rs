@@ -459,6 +459,10 @@ impl<'a> CGen<'a> {
         self.emit_serialize_cdr(s);
         self.raw("\n");
 
+        // writer-anchored serialize: xcdr2 follows the writer's effective DataRepresentation
+        self.emit_serialize_for_fn(s);
+        self.raw("\n");
+
         // deserialize_cdr
         self.emit_deserialize_cdr(s);
         self.raw("\n");
@@ -653,10 +657,16 @@ impl<'a> CGen<'a> {
                 self.raw("    }\n");
             }
             ExtensibilityKind::Mutable => {
-                self.raw("    size_t dh;\n");
-                self.raw("    int2dds_cdr_write_dheader_begin(&w, &dh);\n");
+                self.raw("    size_t dh = 0;\n");
+                self.raw("    if (w.xcdr2) {\n");
+                self.raw("        int2dds_cdr_write_dheader_begin(&w, &dh);\n");
+                self.raw("    }\n");
                 self.emit_serialize_fields_mutable(s, "val");
-                self.raw("    int2dds_cdr_write_dheader_finalize(&w, dh);\n");
+                self.raw("    if (w.xcdr2) {\n");
+                self.raw("        int2dds_cdr_write_dheader_finalize(&w, dh);\n");
+                self.raw("    } else {\n");
+                self.raw("        int2dds_cdr_write_pid_sentinel(&w);\n");
+                self.raw("    }\n");
             }
         }
 
@@ -686,11 +696,8 @@ impl<'a> CGen<'a> {
                 self.raw("    }\n");
             }
             ExtensibilityKind::Mutable => {
-                self.raw("    uint32_t obj_size;\n    size_t start_pos;\n");
-                self.raw("    int2dds_cdr_read_dheader(&r, &obj_size, &start_pos);\n");
                 self.raw("    memset(val_out, 0, sizeof(*val_out));\n");
                 self.emit_deserialize_fields_mutable(s, "val_out");
-                self.raw("    int2dds_cdr_read_dheader_end(&r, obj_size, start_pos);\n");
             }
         }
 
@@ -730,15 +737,33 @@ impl<'a> CGen<'a> {
                 self.raw("    }\n");
             }
             ExtensibilityKind::Mutable => {
-                // Mutable always requires XCDR2 (DHEADER + EMHEADER, DHEADER-bounded, no sentinel)
-                self.raw("    size_t dh;\n");
-                self.raw("    int2dds_cdr_write_dheader_begin(&w, &dh);\n");
+                // XCDR2: DHEADER + EMHEADER (DHEADER-bounded, no sentinel)
+                // XCDR1: PL_CDR parameter list (PID headers, sentinel-terminated)
+                self.raw("    size_t dh = 0;\n");
+                self.raw("    if (w.xcdr2) {\n");
+                self.raw("        int2dds_cdr_write_dheader_begin(&w, &dh);\n");
+                self.raw("    }\n");
                 self.emit_serialize_fields_mutable(s, "val");
-                self.raw("    int2dds_cdr_write_dheader_finalize(&w, dh);\n");
+                self.raw("    if (w.xcdr2) {\n");
+                self.raw("        int2dds_cdr_write_dheader_finalize(&w, dh);\n");
+                self.raw("    } else {\n");
+                self.raw("        int2dds_cdr_write_pid_sentinel(&w);\n");
+                self.raw("    }\n");
             }
         }
 
         self.raw("    return w.error == INT2DDS_CDR_OK ? int2dds_cdr_writer_size(&w) : 0;\n}\n");
+    }
+
+    fn emit_serialize_for_fn(&mut self, s: &ResolvedStruct) {
+        self.raw(&format!(
+            "static inline size_t {}_serialize_for(\n    const Int2DdsDataWriter *writer,\n    const {} *val,\n    uint8_t *buf,\n    size_t capacity)\n{{\n",
+            s.name, s.name
+        ));
+        self.raw(&format!(
+            "    return {}_serialize_cdr(val, buf, capacity,\n        int2dds_datawriter_data_representation(writer) == INT2DDS_QOS_DATA_REPR_XCDR2);\n}}\n",
+            s.name
+        ));
     }
 
     fn make_field_accessor(&self, m: &ResolvedMember, prefix: &str, field_name: &str) -> String {
@@ -781,16 +806,28 @@ impl<'a> CGen<'a> {
     fn emit_serialize_fields_mutable(&mut self, s: &ResolvedStruct, prefix: &str) {
         for (i, m) in s.members.iter().enumerate() {
             let id = m.member_id.unwrap_or(i as u32);
+            let mu = if m.must_understand { "true" } else { "false" };
             let field_name = naming::escape_keyword(&m.name, naming::TargetLang::C);
             let accessor = self.make_field_accessor(m, prefix, &field_name);
             self.raw("    {\n");
             self.raw("        size_t em;\n");
+            self.raw("        if (w.xcdr2) {\n");
             self.raw(&format!(
-                "        int2dds_cdr_write_emheader_begin(&w, {}, false, &em);\n",
-                id
+                "            int2dds_cdr_write_emheader_begin(&w, {}, {}, &em);\n",
+                id, mu
             ));
+            self.raw("        } else {\n");
+            self.raw(&format!("            int2dds_cdr_write_pid_begin(&w, {}, &em);\n", id));
+            self.raw("        }\n");
             self.emit_write_field_indented(&m.resolved_type, &accessor, "        ");
-            self.raw("        int2dds_cdr_write_emheader_finalize(&w, em);\n");
+            self.raw("        if (w.xcdr2) {\n");
+            self.raw("            int2dds_cdr_write_emheader_finalize(&w, em);\n");
+            self.raw("        } else {\n");
+            self.raw(&format!(
+                "            int2dds_cdr_write_pid_finalize(&w, {}, {}, em);\n",
+                id, mu
+            ));
+            self.raw("        }\n");
             self.raw("    }\n");
         }
     }
@@ -981,11 +1018,8 @@ impl<'a> CGen<'a> {
                 self.raw("    }\n");
             }
             ExtensibilityKind::Mutable => {
-                self.raw("    uint32_t obj_size;\n    size_t start_pos;\n");
-                self.raw("    int2dds_cdr_read_dheader(&r, &obj_size, &start_pos);\n");
                 self.raw("    memset(val_out, 0, sizeof(*val_out));\n");
                 self.emit_deserialize_fields_mutable(s, "val_out");
-                self.raw("    int2dds_cdr_read_dheader_end(&r, obj_size, start_pos);\n");
             }
         }
 
@@ -1012,28 +1046,48 @@ impl<'a> CGen<'a> {
     }
 
     fn emit_deserialize_fields_mutable(&mut self, s: &ResolvedStruct, prefix: &str) {
-        self.raw("    size_t _d_end = start_pos + obj_size;\n");
-        self.raw("    while (int2dds_cdr_reader_position(&r) < _d_end) {\n");
-        self.raw("        uint32_t mid, dlen;\n        bool mu;\n");
+        self.raw("    if (r.xcdr2) {\n");
+        self.raw("        uint32_t obj_size;\n        size_t start_pos;\n");
+        self.raw("        int2dds_cdr_read_dheader(&r, &obj_size, &start_pos);\n");
+        self.raw("        size_t _d_end = start_pos + obj_size;\n");
+        self.raw("        while (int2dds_cdr_reader_position(&r) < _d_end) {\n");
+        self.raw("            uint32_t mid, dlen;\n            bool mu;\n");
         self.raw(
-            "        if (!int2dds_cdr_read_emheader(&r, &mid, &dlen, &mu))\n            return false;\n",
+            "            if (!int2dds_cdr_read_emheader(&r, &mid, &dlen, &mu))\n                break;\n",
         );
-        self.raw("        switch (mid) {\n");
+        self.emit_mutable_member_switch(s, prefix, "            ");
+        self.raw("        }\n");
+        self.raw("        int2dds_cdr_read_dheader_end(&r, obj_size, start_pos);\n");
+        self.raw("    } else {\n");
+        self.raw("        for (;;) {\n");
+        self.raw("            uint32_t mid, dlen;\n            bool sen;\n");
+        self.raw(
+            "            if (!int2dds_cdr_read_pid_header(&r, &mid, &dlen, &sen) || sen)\n                break;\n",
+        );
+        self.raw("            size_t mstart = int2dds_cdr_reader_position(&r);\n");
+        self.emit_mutable_member_switch(s, prefix, "            ");
+        self.raw("            size_t mused = int2dds_cdr_reader_position(&r) - mstart;\n");
+        self.raw("            if (mused < dlen) {\n");
+        self.raw("                int2dds_cdr_skip_bytes(&r, dlen - mused);\n");
+        self.raw("            }\n");
+        self.raw("        }\n");
+        self.raw("    }\n");
+    }
 
+    fn emit_mutable_member_switch(&mut self, s: &ResolvedStruct, prefix: &str, indent: &str) {
+        self.raw(&format!("{}switch (mid) {{\n", indent));
         for (i, m) in s.members.iter().enumerate() {
             let id = m.member_id.unwrap_or(i as u32);
             let field_name = naming::escape_keyword(&m.name, naming::TargetLang::C);
             let accessor = self.make_field_accessor(m, prefix, &field_name);
-            self.raw(&format!("        case {}:\n", id));
-            self.emit_read_field_indented(&m.resolved_type, &accessor, "            ");
-            self.raw("            break;\n");
+            self.raw(&format!("{}case {}:\n", indent, id));
+            self.emit_read_field_indented(&m.resolved_type, &accessor, &format!("{}    ", indent));
+            self.raw(&format!("{}    break;\n", indent));
         }
-
-        self.raw("        default:\n");
-        self.raw("            int2dds_cdr_skip_bytes(&r, dlen);\n");
-        self.raw("            break;\n");
-        self.raw("        }\n");
-        self.raw("    }\n");
+        self.raw(&format!("{}default:\n", indent));
+        self.raw(&format!("{}    int2dds_cdr_skip_bytes(&r, dlen);\n", indent));
+        self.raw(&format!("{}    break;\n", indent));
+        self.raw(&format!("{}}}\n", indent));
     }
 
     fn emit_read_field(&mut self, ty: &ResolvedType, accessor: &str) {
@@ -1912,6 +1966,10 @@ mod tests {
         assert!(code.contains("int2dds_cdr_write_u32(&w, val->index)"));
         assert!(code.contains("int2dds_cdr_write_string(&w, val->message)"));
         assert!(code.contains("HelloWorld_deserialize_cdr("));
+        assert!(code.contains("HelloWorld_serialize_for("));
+        assert!(code.contains(
+            "int2dds_datawriter_data_representation(writer) == INT2DDS_QOS_DATA_REPR_XCDR2"
+        ));
         // No key helper is emitted: the core derives the canonical key from the
         // full serialized sample (see the Python/C# generators).
         assert!(!code.contains("HelloWorld_serialize_key("));
@@ -1965,6 +2023,11 @@ mod tests {
         assert!(code.contains("case 0:"));
         assert!(code.contains("case 1:"));
         assert!(code.contains("int2dds_cdr_reader_position(&r) < _d_end"));
+        // PL_CDR1 (XCDR1 mutable) branch
+        assert!(code.contains("int2dds_cdr_write_pid_begin(&w, 0, &em)"));
+        assert!(code.contains("int2dds_cdr_write_pid_finalize(&w, 1, false, em)"));
+        assert!(code.contains("int2dds_cdr_write_pid_sentinel(&w)"));
+        assert!(code.contains("int2dds_cdr_read_pid_header(&r, &mid, &dlen, &sen)"));
     }
 
     #[test]
@@ -2373,8 +2436,8 @@ mod tests {
 
         assert!(code.contains("int32_t data;"));
         assert!(code.contains("int32_t sensor_id;"));
-        assert!(!code.contains("data_"));
-        assert!(!code.contains("sensor_id_"));
+        assert!(!code.contains("->data_"));
+        assert!(!code.contains("->sensor_id_"));
     }
 
     #[test]
