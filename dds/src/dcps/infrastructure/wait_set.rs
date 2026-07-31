@@ -58,7 +58,7 @@ use crate::{
         error::{DdsError, DdsResult},
         time::Duration,
     },
-    infrastructure::{condition::Condition, guard_condition::GuardCondition},
+    infrastructure::condition::Condition,
     rtps::common::time::RtpsDuration,
 };
 
@@ -133,22 +133,13 @@ impl WaitSet {
             .lock()
             .map_err(|e| DdsError::Error(format!("Failed to lock conditions: {}", e)))?;
 
-        // Check for duplicate condition handles. GuardCondition debug output only reflects
-        // trigger state, so distinct guard conditions can look identical while representing
-        // different waitable entities.
-        for existing_condition in conditions.iter() {
-            if Arc::ptr_eq(existing_condition, &new_condition)
-                || std::ptr::eq(
-                    existing_condition.as_ref() as *const dyn Condition as *const (),
-                    new_condition.as_ref() as *const dyn Condition as *const (),
-                )
-                || (!existing_condition.as_any().is::<GuardCondition>()
-                    && !new_condition.as_any().is::<GuardCondition>()
-                    && format!("{:?}", existing_condition) == format!("{:?}", new_condition))
-            {
-                debug!("[WaitSet-{}] Condition already attached, skipping", self.instance_id);
-                return Ok(());
-            }
+        // Check for duplicate condition handles by object identity. Debug output is not an
+        // identity: distinct conditions in the same state render identically, and comparing
+        // the rendered strings costs two allocations per element on every attach.
+        let new_identity = new_condition.identity();
+        if conditions.iter().any(|existing| existing.identity() == new_identity) {
+            debug!("[WaitSet-{}] Condition already attached, skipping", self.instance_id);
+            return Ok(());
         }
 
         // Check trigger value and notify only when waiting threads exist
@@ -190,18 +181,11 @@ impl WaitSet {
             .lock()
             .map_err(|e| DdsError::Error(format!("Failed to lock conditions: {}", e)))?;
 
-        // Remove only the same condition handle. GuardCondition debug output is not a stable
-        // identity because two false guard conditions print the same.
-        let pos = conditions.iter().position(|c| {
-            Arc::ptr_eq(c, &remove_condition)
-                || std::ptr::eq(
-                    c.as_ref() as *const dyn Condition as *const (),
-                    remove_condition.as_ref() as *const dyn Condition as *const (),
-                )
-                || (!c.as_any().is::<GuardCondition>()
-                    && !remove_condition.as_any().is::<GuardCondition>()
-                    && format!("{:?}", c) == format!("{:?}", remove_condition))
-        });
+        // Remove only the condition that was asked for. Matching on Debug output would remove
+        // whichever attached condition happens to render the same, which for conditions in the
+        // same state is the first one in the list rather than the requested one.
+        let remove_identity = remove_condition.identity();
+        let pos = conditions.iter().position(|c| c.identity() == remove_identity);
 
         if let Some(pos) = pos {
             conditions[pos].set_waitset_callback(None);
@@ -409,6 +393,8 @@ impl WaitSet {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use crate::{
         common::instance_handle::InstanceHandle,
         core::{error::DdsError, time::Duration},
@@ -419,6 +405,7 @@ mod tests {
                 ReliabilityQosPolicyKind,
             },
             status::StatusMask,
+            status_condition::StatusCondition,
             wait_set::WaitSet,
         },
         publication::qos::{DataWriterQos, PublisherQos},
@@ -432,6 +419,47 @@ mod tests {
     struct HelloWorldType {
         index: u32,
         message: String,
+    }
+
+    /// Two distinct conditions that happen to be in the same state are
+    /// indistinguishable through `Debug`, so identity must come from the
+    /// condition object itself. Detaching one must leave the other attached.
+    #[test]
+    fn detach_removes_the_requested_condition_not_a_look_alike() {
+        let first = StatusCondition::<DataReaderQos>::new(None);
+        let second = StatusCondition::<DataReaderQos>::new(None);
+
+        let wait_set = WaitSet::new();
+        wait_set.attach_condition(first.clone()).unwrap();
+        wait_set.attach_condition(second.clone()).unwrap();
+        assert_eq!(wait_set.get_conditions().unwrap().len(), 2);
+
+        wait_set.detach_condition(second.clone()).unwrap();
+
+        let remaining = wait_set.get_conditions().unwrap();
+        assert_eq!(remaining.len(), 1);
+        let survivor = remaining[0]
+            .as_any()
+            .downcast_ref::<StatusCondition<DataReaderQos>>()
+            .expect("survivor should still be a StatusCondition");
+        assert!(
+            Arc::ptr_eq(&survivor.enabled_statuses, &first.enabled_statuses),
+            "detaching `second` removed `first` instead"
+        );
+    }
+
+    /// The same condition handed in twice must attach once. Every
+    /// `Into<Arc<dyn Condition>>` allocates a fresh Arc, so pointer equality on
+    /// the trait object cannot be what decides this.
+    #[test]
+    fn attaching_the_same_condition_twice_attaches_it_once() {
+        let condition = StatusCondition::<DataReaderQos>::new(None);
+
+        let wait_set = WaitSet::new();
+        wait_set.attach_condition(condition.clone()).unwrap();
+        wait_set.attach_condition(condition.clone()).unwrap();
+
+        assert_eq!(wait_set.get_conditions().unwrap().len(), 1);
     }
 
     #[test]
