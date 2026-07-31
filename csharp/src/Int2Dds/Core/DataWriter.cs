@@ -156,16 +156,8 @@ namespace Int2Dds.Core
         // SEDP advertises — a profile may select XCDR2 even when the library default is XCDR1.
         private bool ResolveEffectiveXcdr2()
         {
-            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_get_qos(_handle, out var qosHandle));
-            try
-            {
-                NativeMethods.int2dds_datawriter_qos_get_data_representation(qosHandle, out var reprKind);
-                return reprKind == (int)Qos.DataRepresentationKind.Xcdr2;
-            }
-            finally
-            {
-                NativeMethods.int2dds_datawriter_qos_destroy(qosHandle);
-            }
+            return NativeMethods.int2dds_datawriter_data_representation(_handle)
+                == (int)Qos.DataRepresentationKind.Xcdr2;
         }
 
         /// <summary>

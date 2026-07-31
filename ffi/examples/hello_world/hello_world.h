@@ -79,6 +79,16 @@ static inline size_t HelloWorld_serialize_cdr(
     return w.error == INT2DDS_CDR_OK ? int2dds_cdr_writer_size(&w) : 0;
 }
 
+static inline size_t HelloWorld_serialize_for(
+    const Int2DdsDataWriter *writer,
+    const HelloWorld *val,
+    uint8_t *buf,
+    size_t capacity)
+{
+    return HelloWorld_serialize_cdr(val, buf, capacity,
+        int2dds_datawriter_data_representation(writer) == INT2DDS_QOS_DATA_REPR_XCDR2);
+}
+
 static inline bool HelloWorld_deserialize_cdr(
     const uint8_t *buf,
     size_t len,

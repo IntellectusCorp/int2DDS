@@ -50,6 +50,9 @@ namespace Int2Dds.Interop
         internal static extern int int2dds_datawriter_get_qos(IntPtr writer, out IntPtr qos_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datawriter_data_representation(IntPtr writer);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_delete_datawriter(IntPtr writer);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]

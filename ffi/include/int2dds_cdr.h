@@ -80,6 +80,11 @@ typedef enum Int2DdsCdrError {
 /** EMHEADER sentinel member_id (legacy — XCDR2 spec 7.4.3.4 uses DHEADER for end-of-struct; removal scheduled for Tier 2) */
 #define INT2DDS_CDR_MEMBER_ID_SENTINEL 0x3F02
 
+/** PL_CDR1 (XCDR1 mutable) reserved parameter IDs */
+#define INT2DDS_CDR_PID_EXTENDED     0x3F01
+#define INT2DDS_CDR_PID_SENTINEL     0x3F02
+#define INT2DDS_CDR_PID_MAX_SHORT_ID 0x3F00
+
 /* ========================================================================
  * Writer Struct
  * ======================================================================== */
@@ -148,6 +153,11 @@ INT2DDS_CDR_DEF bool int2dds_cdr_write_emheader_begin(Int2DdsCdrWriter *w, uint3
 INT2DDS_CDR_DEF bool int2dds_cdr_write_emheader_finalize(Int2DdsCdrWriter *w, size_t token);
 INT2DDS_CDR_DEF bool int2dds_cdr_write_sentinel(Int2DdsCdrWriter *w);
 
+/* PL_CDR1 (XCDR1 mutable) parameter headers */
+INT2DDS_CDR_DEF bool int2dds_cdr_write_pid_begin(Int2DdsCdrWriter *w, uint32_t member_id, size_t *token_out);
+INT2DDS_CDR_DEF bool int2dds_cdr_write_pid_finalize(Int2DdsCdrWriter *w, uint32_t member_id, bool must_understand, size_t token);
+INT2DDS_CDR_DEF bool int2dds_cdr_write_pid_sentinel(Int2DdsCdrWriter *w);
+
 /* Enum (i32 wrapper) */
 INT2DDS_CDR_DEF bool int2dds_cdr_write_enum(Int2DdsCdrWriter *w, int32_t discriminant);
 
@@ -189,6 +199,9 @@ INT2DDS_CDR_DEF bool int2dds_cdr_read_dheader_end(Int2DdsCdrReader *r, uint32_t 
 INT2DDS_CDR_DEF bool int2dds_cdr_read_emheader(Int2DdsCdrReader *r, uint32_t *member_id_out, uint32_t *data_length_out, bool *must_understand_out);
 INT2DDS_CDR_DEF bool int2dds_cdr_is_sentinel(const Int2DdsCdrReader *r);
 INT2DDS_CDR_DEF bool int2dds_cdr_skip_bytes(Int2DdsCdrReader *r, size_t nbytes);
+
+/* PL_CDR1 (XCDR1 mutable) parameter headers */
+INT2DDS_CDR_DEF bool int2dds_cdr_read_pid_header(Int2DdsCdrReader *r, uint32_t *member_id_out, uint32_t *data_length_out, bool *sentinel_out);
 
 /* Enum (i32 wrapper) */
 INT2DDS_CDR_DEF bool int2dds_cdr_read_enum(Int2DdsCdrReader *r, int32_t *discriminant_out);
@@ -359,6 +372,8 @@ INT2DDS_CDR_DEF bool int2dds_cdr_write_encapsulation(Int2DdsCdrWriter *w, int ex
             encap_id = w->little_endian ? INT2DDS_CDR_ENCAP_CDR2_LE : INT2DDS_CDR_ENCAP_CDR2_BE;
             break;
         }
+    } else if (extensibility == INT2DDS_CDR_MUTABLE) {
+        encap_id = w->little_endian ? INT2DDS_CDR_ENCAP_PL_CDR_LE : INT2DDS_CDR_ENCAP_PL_CDR_BE;
     } else {
         encap_id = w->little_endian ? INT2DDS_CDR_ENCAP_CDR_LE : INT2DDS_CDR_ENCAP_CDR_BE;
     }
@@ -546,6 +561,51 @@ INT2DDS_CDR_DEF bool int2dds_cdr_write_emheader_finalize(Int2DdsCdrWriter *w, si
 INT2DDS_CDR_DEF bool int2dds_cdr_write_sentinel(Int2DdsCdrWriter *w) {
     uint32_t header = (uint32_t)INT2DDS_CDR_MEMBER_ID_SENTINEL & 0x0FFFFFFFu;
     return int2dds_cdr_write_u32(w, header);
+}
+
+/* ---- PL_CDR1 (XCDR1 mutable) Parameter Headers ------------------------ */
+
+INT2DDS_CDR_DEF bool int2dds_cdr_write_pid_begin(Int2DdsCdrWriter *w, uint32_t member_id, size_t *token_out) {
+    if (!int2dds_cdr_write_align(w, 4)) return false;
+    size_t reserve = (member_id <= INT2DDS_CDR_PID_MAX_SHORT_ID) ? 4 : 12;
+    if (!_int2dds_cdr_w_ensure(w, reserve)) return false;
+    *token_out = w->pos;
+    memset(w->buf + w->pos, 0, reserve);
+    w->pos += reserve;
+    return true;
+}
+
+INT2DDS_CDR_DEF bool int2dds_cdr_write_pid_finalize(Int2DdsCdrWriter *w, uint32_t member_id, bool must_understand, size_t token) {
+    if (!_int2dds_cdr_w_ok(w)) return false;
+    uint16_t flags = must_understand ? 0x4000 : 0;
+    bool short_hdr = member_id <= INT2DDS_CDR_PID_MAX_SHORT_ID;
+    size_t content_len = w->pos - token - (short_hdr ? 4 : 12);
+
+    if (short_hdr && content_len <= 0xFFFF) {
+        _int2dds_put_u16(w->buf + token, (uint16_t)(flags | (member_id & 0x3FFFu)), w->little_endian);
+        _int2dds_put_u16(w->buf + token + 2, (uint16_t)content_len, w->little_endian);
+        return true;
+    }
+    if (short_hdr) {
+        /* Length outgrew the short header: widen to the extended form in place */
+        if (!_int2dds_cdr_w_ensure(w, 8)) return false;
+        memmove(w->buf + token + 12, w->buf + token + 4, content_len);
+        w->pos += 8;
+    }
+    _int2dds_put_u16(w->buf + token, (uint16_t)(flags | INT2DDS_CDR_PID_EXTENDED), w->little_endian);
+    _int2dds_put_u16(w->buf + token + 2, 8, w->little_endian);
+    _int2dds_put_u32(w->buf + token + 4, member_id, w->little_endian);
+    _int2dds_put_u32(w->buf + token + 8, (uint32_t)content_len, w->little_endian);
+    return true;
+}
+
+INT2DDS_CDR_DEF bool int2dds_cdr_write_pid_sentinel(Int2DdsCdrWriter *w) {
+    if (!int2dds_cdr_write_align(w, 4)) return false;
+    if (!_int2dds_cdr_w_ensure(w, 4)) return false;
+    _int2dds_put_u16(w->buf + w->pos, INT2DDS_CDR_PID_SENTINEL, w->little_endian);
+    _int2dds_put_u16(w->buf + w->pos + 2, 0, w->little_endian);
+    w->pos += 4;
+    return true;
 }
 
 /* ---- Enum Write ------------------------------------------------------- */
@@ -854,6 +914,32 @@ INT2DDS_CDR_DEF bool int2dds_cdr_is_sentinel(const Int2DdsCdrReader *r) {
     uint32_t header = _int2dds_get_u32(r->buf + r->pos, r->little_endian);
     uint32_t member_id = header & 0x0FFFFFFFu;
     return member_id == INT2DDS_CDR_MEMBER_ID_SENTINEL;
+}
+
+INT2DDS_CDR_DEF bool int2dds_cdr_read_pid_header(Int2DdsCdrReader *r, uint32_t *member_id_out, uint32_t *data_length_out, bool *sentinel_out) {
+    *member_id_out = 0;
+    *data_length_out = 0;
+    *sentinel_out = false;
+    if (!int2dds_cdr_read_align(r, 4)) return false;
+    if (!_int2dds_cdr_r_ensure(r, 4)) return false;
+    uint16_t pid = _int2dds_get_u16(r->buf + r->pos, r->little_endian);
+    uint16_t len = _int2dds_get_u16(r->buf + r->pos + 2, r->little_endian);
+    r->pos += 4;
+    uint16_t raw = pid & 0x3FFFu;
+    if (raw == (INT2DDS_CDR_PID_SENTINEL & 0x3FFFu)) {
+        *sentinel_out = true;
+        return true;
+    }
+    if (raw == (INT2DDS_CDR_PID_EXTENDED & 0x3FFFu)) {
+        if (!_int2dds_cdr_r_ensure(r, 8)) return false;
+        *member_id_out = _int2dds_get_u32(r->buf + r->pos, r->little_endian);
+        *data_length_out = _int2dds_get_u32(r->buf + r->pos + 4, r->little_endian);
+        r->pos += 8;
+        return true;
+    }
+    *member_id_out = raw;
+    *data_length_out = len;
+    return true;
 }
 
 INT2DDS_CDR_DEF bool int2dds_cdr_skip_bytes(Int2DdsCdrReader *r, size_t nbytes) {

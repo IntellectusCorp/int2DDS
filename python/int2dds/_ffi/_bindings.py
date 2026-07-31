@@ -295,6 +295,7 @@ ffi.cdef("""
     );
 
     /* Effective QoS query */
+    int32_t int2dds_datawriter_data_representation(const Int2DdsDataWriter *writer);
     Int2DdsRet int2dds_datawriter_get_qos(
         const Int2DdsDataWriter *writer,
         Int2DdsDataWriterQos **qos_out

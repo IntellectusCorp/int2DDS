@@ -210,8 +210,9 @@ int main(int argc, char* argv[]) {
         hw.index = i;
         snprintf(hw.message, sizeof(hw.message), "[C]HelloWorld_d%d", domain_id);
 
-        /* Serialize to CDR bytes */
-        size_t serialized_len = HelloWorld_serialize_cdr(&hw, buf, sizeof(buf), false);
+        /* Serialize to CDR bytes — the XCDR version follows the writer's
+           effective DataRepresentation QoS (library default when unset) */
+        size_t serialized_len = HelloWorld_serialize_for(writer, &hw, buf, sizeof(buf));
         if (serialized_len == 0) {
             fprintf(stderr, "Serialization failed\n");
             continue;
