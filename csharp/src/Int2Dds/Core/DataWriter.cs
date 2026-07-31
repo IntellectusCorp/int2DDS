@@ -192,18 +192,15 @@ namespace Int2Dds.Core
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
             var data = sample.SerializeCdr(_xcdr2);
-            byte[] key = null;
 
             unsafe
             {
                 fixed (byte* pData = data)
-                fixed (byte* pKey = key)
                 {
                     ReturnCodeHelper.CheckReturn(
                         NativeMethods.int2dds_datawriter_write_serialized(
                             _handle,
-                            pData, (UIntPtr)data.Length,
-                            pKey, key != null ? (UIntPtr)key.Length : UIntPtr.Zero));
+                            pData, (UIntPtr)data.Length));
                 }
             }
         }
@@ -218,7 +215,6 @@ namespace Int2Dds.Core
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
             var data = sample.SerializeCdr(_xcdr2);
-            byte[] key = null;
 
             var epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
             var elapsed = timestamp.ToUniversalTime() - epoch;
@@ -228,13 +224,11 @@ namespace Int2Dds.Core
             unsafe
             {
                 fixed (byte* pData = data)
-                fixed (byte* pKey = key)
                 {
                     ReturnCodeHelper.CheckReturn(
                         NativeMethods.int2dds_datawriter_write_serialized_w_timestamp(
                             _handle,
                             pData, (UIntPtr)data.Length,
-                            pKey, key != null ? (UIntPtr)key.Length : UIntPtr.Zero,
                             sec, nanosec));
                 }
             }
@@ -488,7 +482,7 @@ namespace Int2Dds.Core
         /// (prepare a native buffer, copy into it, then commit). Aborts the loan
         /// on failure.
         /// </summary>
-        public unsafe void WriteSerializedStaged(byte[] data, byte[] key = null)
+        public unsafe void WriteSerializedStaged(byte[] data)
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
             if (data == null) throw new ArgumentNullException(nameof(data));
@@ -501,13 +495,9 @@ namespace Int2Dds.Core
             try
             {
                 System.Runtime.InteropServices.Marshal.Copy(data, 0, (IntPtr)buffer, data.Length);
-                fixed (byte* pKey = key)
-                {
-                    ReturnCodeHelper.CheckReturn(
-                        NativeMethods.int2dds_datawriter_commit_serialized_write(
-                            _handle, loan, (UIntPtr)data.Length,
-                            pKey, key != null ? (UIntPtr)key.Length : UIntPtr.Zero));
-                }
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_datawriter_commit_serialized_write(
+                        _handle, loan, (UIntPtr)data.Length));
             }
             catch
             {
