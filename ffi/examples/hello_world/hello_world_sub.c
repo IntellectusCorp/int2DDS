@@ -179,9 +179,7 @@ int main(int argc, char* argv[]) {
     /* Loop until a publisher actually matches; the finite timeout keeps Ctrl-C responsive */
     struct Int2DdsSubscriptionMatchedStatus matched = {0};
     do {
-        struct Int2DdsConditionSeq *triggered = NULL;
-        ret = int2dds_waitset_wait_ex(waitset, 1000, &triggered);
-        int2dds_condition_seq_delete(triggered);
+        ret = int2dds_waitset_wait_ex(waitset, 1000, NULL);
         if (ret != INT2DDS_RET_OK && ret != INT2DDS_RET_TIMEOUT) {
             fprintf(stderr, "WaitSet wait failed: %d\n", ret);
             goto cleanup;
@@ -220,9 +218,7 @@ int main(int argc, char* argv[]) {
             }
         } else if (ret == INT2DDS_RET_NO_DATA) {
             /* No data yet - wait for data available */
-            struct Int2DdsConditionSeq *triggered = NULL;
-            int2dds_waitset_wait_ex(waitset, 1000, &triggered);
-            int2dds_condition_seq_delete(triggered);
+            int2dds_waitset_wait_ex(waitset, 1000, NULL);
         }
     }
 

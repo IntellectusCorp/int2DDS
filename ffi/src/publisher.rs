@@ -738,21 +738,18 @@ pub unsafe extern "C" fn int2dds_publisher_delete_contained_entities(
 /// - `writer`: A valid datawriter
 /// - `data`: Pointer to the CDR-serialized byte buffer
 /// - `data_len`: Length of the serialized data in bytes
-/// - `key`: Ignored, retained for ABI compatibility. The instance key and KeyHash are
-///   derived canonically from `data` (the full serialized sample); pass null/0.
-/// - `key_len`: Ignored, retained for ABI compatibility
+///
+/// The instance key and KeyHash are derived canonically from `data`
+/// (the full serialized sample).
 ///
 /// # Safety
 /// - `writer` must be a valid datawriter
 /// - `data` must point to at least `data_len` readable bytes
-/// - If `key` is not null, it must point to at least `key_len` readable bytes
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datawriter_write_serialized(
     writer: *const Int2DdsDataWriter,
     data: *const u8,
     data_len: usize,
-    key: *const u8,
-    key_len: usize,
 ) -> Int2DdsRet {
     check_null!(writer);
     check_null!(data);
@@ -760,13 +757,7 @@ pub unsafe extern "C" fn int2dds_datawriter_write_serialized(
     let writer_ref = &*writer;
     let serialized_data = std::slice::from_raw_parts(data, data_len);
 
-    let serialized_key = if key.is_null() || key_len == 0 {
-        None
-    } else {
-        Some(std::slice::from_raw_parts(key, key_len))
-    };
-
-    match writer_ref.inner.write_serialized(serialized_data, serialized_key) {
+    match writer_ref.inner.write_serialized(serialized_data, None) {
         Ok(()) => INT2DDS_RET_OK,
         Err(e) => dds_error_to_code(&e),
     }
@@ -820,8 +811,6 @@ pub unsafe extern "C" fn int2dds_datawriter_commit_serialized_write(
     writer: *const Int2DdsDataWriter,
     loan: *mut Int2DdsSerializedWriteLoan,
     actual_size: usize,
-    key: *const u8,
-    key_len: usize,
 ) -> Int2DdsRet {
     check_null!(writer);
     check_null!(loan);
@@ -837,13 +826,7 @@ pub unsafe extern "C" fn int2dds_datawriter_commit_serialized_write(
         }
     };
 
-    let serialized_key = if key.is_null() || key_len == 0 {
-        None
-    } else {
-        Some(std::slice::from_raw_parts(key, key_len))
-    };
-
-    match writer_ref.inner.commit_serialized_write(loan_inner, actual_size, serialized_key) {
+    match writer_ref.inner.commit_serialized_write(loan_inner, actual_size, None) {
         Ok(()) => INT2DDS_RET_OK,
         Err(e) => {
             // Write failed. The loan buffer was consumed by the core, so `inner` is
@@ -874,23 +857,20 @@ pub unsafe extern "C" fn int2dds_datawriter_abort_serialized_write(
 /// - `writer`: A valid datawriter
 /// - `data`: Pointer to the CDR-serialized byte buffer
 /// - `data_len`: Length of the serialized data in bytes
-/// - `key`: Ignored, retained for ABI compatibility. The instance key and KeyHash are
-///   derived canonically from `data` (the full serialized sample); pass null/0.
-/// - `key_len`: Ignored, retained for ABI compatibility
 /// - `timestamp_sec`: Seconds component of the source timestamp
 /// - `timestamp_nanosec`: Nanoseconds component of the source timestamp
+///
+/// The instance key and KeyHash are derived canonically from `data`
+/// (the full serialized sample).
 ///
 /// # Safety
 /// - `writer` must be a valid datawriter
 /// - `data` must point to at least `data_len` readable bytes
-/// - If `key` is not null, it must point to at least `key_len` readable bytes
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datawriter_write_serialized_w_timestamp(
     writer: *const Int2DdsDataWriter,
     data: *const u8,
     data_len: usize,
-    key: *const u8,
-    key_len: usize,
     timestamp_sec: i32,
     timestamp_nanosec: u32,
 ) -> Int2DdsRet {
@@ -900,16 +880,9 @@ pub unsafe extern "C" fn int2dds_datawriter_write_serialized_w_timestamp(
     let writer_ref = &*writer;
     let serialized_data = std::slice::from_raw_parts(data, data_len);
 
-    let serialized_key = if key.is_null() || key_len == 0 {
-        None
-    } else {
-        Some(std::slice::from_raw_parts(key, key_len))
-    };
-
     let timestamp = Time { sec: timestamp_sec, nanosec: timestamp_nanosec };
 
-    match writer_ref.inner.write_serialized_w_timestamp(serialized_data, serialized_key, timestamp)
-    {
+    match writer_ref.inner.write_serialized_w_timestamp(serialized_data, None, timestamp) {
         Ok(()) => INT2DDS_RET_OK,
         Err(e) => dds_error_to_code(&e),
     }
@@ -1014,9 +987,14 @@ pub unsafe extern "C" fn int2dds_datawriter_register_instance(
 /// (int2dds_create_topic_with_type_info / _with_field_descriptors), otherwise this
 /// returns INT2DDS_RET_PRECONDITION_NOT_MET.
 ///
+/// `key` may be null when `handle` carries a valid instance handle (e.g. from
+/// `int2dds_datawriter_register_instance`); the serialized key is then looked up
+/// from the writer's instance registry. A null `key` with a nil/unknown handle
+/// returns INT2DDS_RET_BAD_PARAMETER.
+///
 /// # Safety
 /// - `writer` must be a valid datawriter
-/// - `key` must point to at least `key_len` readable bytes
+/// - If `key` is not null, it must point to at least `key_len` readable bytes
 /// - `handle` must be a valid pointer to a 16-byte instance handle (or null for NIL)
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datawriter_dispose(
@@ -1026,12 +1004,16 @@ pub unsafe extern "C" fn int2dds_datawriter_dispose(
     handle: *const [u8; 16],
 ) -> Int2DdsRet {
     check_null!(writer);
-    check_null!(key);
 
     let writer_ref = &*writer;
-    let key_bytes = std::slice::from_raw_parts(key, key_len);
     let instance_handle = handle_from_c(handle);
 
+    if key.is_null() {
+        ffi_try!(writer_ref.inner.dispose_serialized_by_handle(instance_handle));
+        return INT2DDS_RET_OK;
+    }
+
+    let key_bytes = std::slice::from_raw_parts(key, key_len);
     ffi_try!(writer_ref.inner.dispose_serialized(key_bytes, instance_handle));
 
     INT2DDS_RET_OK
@@ -1043,9 +1025,14 @@ pub unsafe extern "C" fn int2dds_datawriter_dispose(
 /// (int2dds_create_topic_with_type_info / _with_field_descriptors), otherwise this
 /// returns INT2DDS_RET_PRECONDITION_NOT_MET.
 ///
+/// `key` may be null when `handle` carries a valid instance handle (e.g. from
+/// `int2dds_datawriter_register_instance`); the serialized key is then looked up
+/// from the writer's instance registry. A null `key` with a nil/unknown handle
+/// returns INT2DDS_RET_BAD_PARAMETER.
+///
 /// # Safety
 /// - `writer` must be a valid datawriter
-/// - `key` must point to at least `key_len` readable bytes
+/// - If `key` is not null, it must point to at least `key_len` readable bytes
 /// - `handle` must be a valid pointer to a 16-byte instance handle (or null for NIL)
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datawriter_unregister_instance(
@@ -1055,12 +1042,16 @@ pub unsafe extern "C" fn int2dds_datawriter_unregister_instance(
     handle: *const [u8; 16],
 ) -> Int2DdsRet {
     check_null!(writer);
-    check_null!(key);
 
     let writer_ref = &*writer;
-    let key_bytes = std::slice::from_raw_parts(key, key_len);
     let instance_handle = handle_from_c(handle);
 
+    if key.is_null() {
+        ffi_try!(writer_ref.inner.unregister_instance_serialized_by_handle(instance_handle));
+        return INT2DDS_RET_OK;
+    }
+
+    let key_bytes = std::slice::from_raw_parts(key, key_len);
     ffi_try!(writer_ref.inner.unregister_instance_serialized(key_bytes, instance_handle));
 
     INT2DDS_RET_OK

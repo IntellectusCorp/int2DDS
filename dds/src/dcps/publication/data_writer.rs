@@ -1125,6 +1125,37 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         self.unregister_instance_inner(serialized_key, resolved_handle, timestamp, None)
     }
 
+    /// Dispose an instance identified only by its handle; the serialized key is
+    /// looked up from the writer's instance registry.
+    pub fn dispose_serialized_by_handle(&self, handle: InstanceHandle) -> DdsResult<()> {
+        let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
+        self.is_enabled()?;
+        Self::validate_timestamp(&timestamp)?;
+
+        if handle.is_nil() {
+            return Err(DdsError::BadParameter);
+        }
+        let serialized_key = self.get_key_value_serialized(handle)?;
+        self.dispose_inner(serialized_key, handle, timestamp, None)
+    }
+
+    /// Unregister an instance identified only by its handle; the serialized key is
+    /// looked up from the writer's instance registry.
+    pub fn unregister_instance_serialized_by_handle(
+        &self,
+        handle: InstanceHandle,
+    ) -> DdsResult<()> {
+        let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
+        self.is_enabled()?;
+        Self::validate_timestamp(&timestamp)?;
+
+        if handle.is_nil() {
+            return Err(DdsError::BadParameter);
+        }
+        let serialized_key = self.get_key_value_serialized(handle)?;
+        self.unregister_instance_inner(serialized_key, handle, timestamp, None)
+    }
+
     /// Lookup an instance handle from a full serialized sample.
     pub fn lookup_instance_serialized(&self, sample: &[u8]) -> DdsResult<InstanceHandle> {
         let serialized_key = match self.serialized_key_info(sample)? {
