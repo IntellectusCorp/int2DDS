@@ -1,0 +1,623 @@
+name: Release
+run-name: "Release ${{ github.ref_name }}"
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run_tag:
+        description: "Tag to use for the dry run (no release is created)"
+        required: true
+        default: "v0.1.1"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  RUST_TOOLCHAIN: "1.89.0"
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      base_version: ${{ steps.check.outputs.base_version }}
+      is_prerelease: ${{ steps.check.outputs.is_prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify version consistency
+        id: check
+        shell: bash
+        run: |
+          tag="${{ github.event_name == 'workflow_dispatch' && inputs.dry_run_tag || github.ref_name }}"
+          version="$(./.github/scripts/ci/check-version.sh "$tag")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # Package filenames (nupkg/snupkg/wheel/sdist) come from the static
+          # version fields in Cargo.toml and pyproject.toml, and check-version.sh
+          # keeps those equal to the base version with the prerelease suffix
+          # stripped. Native archives, on the other hand, are named with the full
+          # tag version (suffix included). Output both so each job can use the one
+          # it needs.
+          base_version="${version%%-*}"
+          echo "base_version=$base_version" >> "$GITHUB_OUTPUT"
+          if [[ "$version" == *-* ]]; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Extract release notes
+        shell: bash
+        run: ./.github/scripts/ci/extract-notes.sh "${{ steps.check.outputs.version }}" > release-notes.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: release-notes.md
+
+  native-linux-gnu:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { triple: x86_64-unknown-linux-gnu,        dist: linux-x86_64, runner: ubuntu-latest }
+          - { triple: aarch64-unknown-linux-gnu,       dist: linux-aarch64, runner: ubuntu-24.04-arm }
+          - { triple: armv7-unknown-linux-gnueabihf,   dist: linux-armhf,  runner: ubuntu-latest }
+    runs-on: ${{ matrix.runner }}
+    container: ubuntu:22.04
+    steps:
+      - name: Install build prerequisites
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            curl ca-certificates build-essential git pkg-config cmake perl file binutils
+          if [ "${{ matrix.triple }}" = "armv7-unknown-linux-gnueabihf" ]; then
+            # libc6-dev-armhf-cross is only a *recommended* dep of the cross gcc,
+            # so --no-install-recommends leaves the armhf libc headers out and
+            # C deps such as ring fail to compile. Name it explicitly.
+            apt-get install -y --no-install-recommends \
+              gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Mark workspace as a safe git directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --no-modify-path --profile minimal \
+                       --default-toolchain "$RUST_TOOLCHAIN"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Add target
+        run: rustup target add "${{ matrix.triple }}"
+
+      - name: Build
+        env:
+          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
+        run: cargo build --release --locked --target "${{ matrix.triple }}" -p int2dds-ffi -p int2dds-idl
+
+      - name: Fail if the committed cbindgen header is stale
+        run: git diff --exit-code ffi/include/int2dds-ffi.h
+
+      - name: Stage archive
+        run: ./.github/scripts/ci/stage-native.sh "${{ matrix.triple }}" "${{ matrix.dist }}" "${{ needs.prepare.outputs.version }}" gnu
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.dist }}
+          path: dist/int2dds-*-${{ matrix.dist }}.tar.gz
+          if-no-files-found: error
+
+  native-linux-musl:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { triple: x86_64-unknown-linux-musl,  dist: linux-x86_64-musl,  runner: ubuntu-latest,    image: "alpine:3.20" }
+          - { triple: aarch64-unknown-linux-musl, dist: linux-aarch64-musl, runner: ubuntu-24.04-arm, image: "alpine:3.20" }
+          - { triple: armv7-unknown-linux-musleabihf, dist: linux-armhf-musl, runner: ubuntu-latest, image: "ghcr.io/cross-rs/armv7-unknown-linux-musleabihf:main" }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build in container
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.triple }}" = "armv7-unknown-linux-musleabihf" ]; then
+            # The cross-rs image already carries the musl cross toolchain.
+            # This target has no rustc host toolchain, so cross-compile on x86_64.
+            docker run --rm -v "$PWD":/src -w /src \
+              -e CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER=arm-linux-musleabihf-gcc \
+              -e RUSTFLAGS="-Ctarget-feature=-crt-static" \
+              "${{ matrix.image }}" \
+              bash -c '
+                set -eu
+                curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
+                  | sh -s -- -y --no-modify-path --profile minimal --default-toolchain '"$RUST_TOOLCHAIN"'
+                . "$HOME/.cargo/env"
+                rustup target add armv7-unknown-linux-musleabihf
+                cargo build --release --locked --target armv7-unknown-linux-musleabihf -p int2dds-ffi -p int2dds-idl
+              '
+          else
+            # Alpine is musl itself, so this is a native build. crt-static has to
+            # be off for rustc to emit a cdylib (.so) instead of a static library.
+            docker run --rm -v "$PWD":/src -w /src \
+              -e RUSTFLAGS="-Ctarget-feature=-crt-static" \
+              -e CARGO_TARGET_DIR=/src/target/${{ matrix.triple }}-tmp \
+              "${{ matrix.image }}" \
+              sh -c '
+                set -eu
+                apk add --no-cache build-base cmake perl nasm clang clang-dev llvm-dev \
+                                   pkgconf linux-headers libgcc curl bash binutils file rustup
+                rustup-init -y --no-modify-path --profile minimal --default-toolchain '"$RUST_TOOLCHAIN"'
+                export PATH=/root/.cargo/bin:$PATH
+                cargo build --release --locked -p int2dds-ffi -p int2dds-idl
+                mkdir -p /src/target/${{ matrix.triple }}/release
+                cp /src/target/${{ matrix.triple }}-tmp/release/libint2dds_ffi.so \
+                   /src/target/${{ matrix.triple }}/release/
+                cp /src/target/${{ matrix.triple }}-tmp/release/int2dds-idl \
+                   /src/target/${{ matrix.triple }}/release/
+              '
+          fi
+
+      - name: Stage archive
+        run: ./.github/scripts/ci/stage-native.sh "${{ matrix.triple }}" "${{ matrix.dist }}" "${{ needs.prepare.outputs.version }}" musl
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.dist }}
+          path: dist/int2dds-*-${{ matrix.dist }}.tar.gz
+          if-no-files-found: error
+
+  native-windows:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { triple: x86_64-pc-windows-msvc,  dist: windows-x86_64 }
+          - { triple: i686-pc-windows-msvc,    dist: windows-i686 }
+          - { triple: aarch64-pc-windows-msvc, dist: windows-aarch64 }
+          - { triple: x86_64-pc-windows-gnu,   dist: windows-x86_64-gnu }
+    runs-on: windows-2022
+    steps:
+      - name: Disable Windows Defender realtime monitoring
+        run: Set-MpPreference -DisableRealtimeMonitoring $true
+        shell: powershell
+
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "1.89.0"
+          target: ${{ matrix.triple }}
+          rustflags: ""
+          cache: false
+
+      - name: Build
+        shell: bash
+        env:
+          # MSVC targets use lld-link to cut link time. Not applied to MinGW.
+          RUSTFLAGS: ${{ endsWith(matrix.triple, '-msvc') && '-C linker=lld-link' || '' }}
+        run: cargo build --release --locked --target "${{ matrix.triple }}" -p int2dds-ffi -p int2dds-idl
+
+      - name: Fail if the committed cbindgen header is stale
+        shell: bash
+        run: git diff --exit-code ffi/include/int2dds-ffi.h
+
+      - name: Stage archive
+        shell: pwsh
+        run: ./.github/scripts/ci/stage-native.ps1 -Triple "${{ matrix.triple }}" -DistName "${{ matrix.dist }}" -Version "${{ needs.prepare.outputs.version }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.dist }}
+          path: dist/int2dds-*-${{ matrix.dist }}.zip
+          if-no-files-found: error
+
+  native-macos:
+    needs: prepare
+    runs-on: macos-latest
+    env:
+      # Default deployment target for the x86_64 slice. aarch64 (Apple Silicon)
+      # hardware does not support anything below macOS 11.0 (Big Sur), so passing
+      # this value through makes the linker either reject it or silently promote it
+      # to 11.0 (depending on the toolchain), leaving the manifest out of sync with
+      # the actual binary. The aarch64 commands below override it to 11.0
+      # explicitly.
+      MACOSX_DEPLOYMENT_TARGET: "10.12"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "1.89.0"
+          target: x86_64-apple-darwin,aarch64-apple-darwin
+          rustflags: ""
+          cache: false
+
+      - name: Build both slices
+        run: |
+          cargo build --release --locked --target x86_64-apple-darwin  -p int2dds-ffi -p int2dds-idl
+          MACOSX_DEPLOYMENT_TARGET=11.0 cargo build --release --locked --target aarch64-apple-darwin -p int2dds-ffi -p int2dds-idl
+
+      - name: Fail if the committed cbindgen header is stale
+        run: git diff --exit-code ffi/include/int2dds-ffi.h
+
+      - name: Create universal2 slices
+        run: |
+          set -euo pipefail
+          mkdir -p target/universal2-apple-darwin/release
+          lipo -create \
+            target/x86_64-apple-darwin/release/libint2dds_ffi.dylib \
+            target/aarch64-apple-darwin/release/libint2dds_ffi.dylib \
+            -output target/universal2-apple-darwin/release/libint2dds_ffi.dylib
+          lipo -create \
+            target/x86_64-apple-darwin/release/int2dds-idl \
+            target/aarch64-apple-darwin/release/int2dds-idl \
+            -output target/universal2-apple-darwin/release/int2dds-idl
+          echo "== universal2 slices =="
+          lipo -info target/universal2-apple-darwin/release/libint2dds_ffi.dylib
+
+      - name: Stage archives
+        run: |
+          ./.github/scripts/ci/stage-native.sh x86_64-apple-darwin     macos-x86_64     "${{ needs.prepare.outputs.version }}"
+          MACOSX_DEPLOYMENT_TARGET=11.0 ./.github/scripts/ci/stage-native.sh aarch64-apple-darwin macos-arm64 "${{ needs.prepare.outputs.version }}"
+          ./.github/scripts/ci/stage-native.sh universal2-apple-darwin macos-universal2 "${{ needs.prepare.outputs.version }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-macos-x86_64
+          path: dist/int2dds-*-macos-x86_64.tar.gz
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-macos-arm64
+          path: dist/int2dds-*-macos-arm64.tar.gz
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-macos-universal2
+          path: dist/int2dds-*-macos-universal2.tar.gz
+          if-no-files-found: error
+
+  csharp:
+    needs: [prepare, native-linux-gnu, native-linux-musl, native-windows, native-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: native-artifacts
+
+      - name: Unpack native archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p native-unpacked
+          for f in native-artifacts/*/*.tar.gz; do tar -xzf "$f" -C native-unpacked; done
+          for f in native-artifacts/*/*.zip;    do unzip -q -o "$f" -d native-unpacked; done
+          ls -1 native-unpacked
+
+      - name: Place natives into runtimes/
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          root="csharp/src/Int2Dds/runtimes"
+          # "RID | dist name | path inside the archive | destination filename"
+          entries=(
+            "win-x64|windows-x86_64|bin/int2dds_ffi.dll|int2dds_ffi.dll"
+            "win-x86|windows-i686|bin/int2dds_ffi.dll|int2dds_ffi.dll"
+            "win-arm64|windows-aarch64|bin/int2dds_ffi.dll|int2dds_ffi.dll"
+            "linux-x64|linux-x86_64|lib/libint2dds_ffi.so.$VERSION|libint2dds_ffi.so"
+            "linux-arm64|linux-aarch64|lib/libint2dds_ffi.so.$VERSION|libint2dds_ffi.so"
+            "linux-arm|linux-armhf|lib/libint2dds_ffi.so.$VERSION|libint2dds_ffi.so"
+            "linux-musl-x64|linux-x86_64-musl|lib/libint2dds_ffi.so.$VERSION|libint2dds_ffi.so"
+            "linux-musl-arm64|linux-aarch64-musl|lib/libint2dds_ffi.so.$VERSION|libint2dds_ffi.so"
+            "osx-x64|macos-x86_64|lib/libint2dds_ffi.dylib|libint2dds_ffi.dylib"
+            "osx-arm64|macos-arm64|lib/libint2dds_ffi.dylib|libint2dds_ffi.dylib"
+          )
+          for e in "${entries[@]}"; do
+            IFS='|' read -r rid dist rel dest <<< "$e"
+            src="native-unpacked/int2dds-$VERSION-$dist/$rel"
+            if [[ ! -f "$src" ]]; then
+              echo "ERROR: missing native for RID $rid at $src" >&2
+              exit 1
+            fi
+            mkdir -p "$root/$rid/native"
+            cp "$src" "$root/$rid/native/$dest"
+          done
+          find "$root" -type f | sort
+
+      - name: Pack
+        run: dotnet pack csharp/src/Int2Dds/Int2Dds.csproj -c Release -o dist/nuget
+
+      - name: Verify package contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          # dotnet pack names the nupkg/snupkg from the version in
+          # Directory.Build.props (which reads Cargo.toml). That version is always
+          # the base version without a prerelease suffix (enforced by
+          # check-version.sh), so use base_version here, not the full tag version.
+          pkg="dist/nuget/Int2Dds.${{ needs.prepare.outputs.base_version }}.nupkg"
+          listing="$(unzip -l "$pkg")"
+          # A bare grep -c still returns "10" for a broken layout with nested paths
+          # like runtimes/{rid}/native/{rid}/native/..., so counting alone misses it
+          # (this actually happened: the PackagePath="runtimes/%(RecursiveDir)" bug
+          # double-nested the paths and the count was still 10). Check the exact
+          # path of each of the 10 RIDs first, then the total count to catch
+          # duplicate or missing entries.
+          rids=(
+            "win-x64|int2dds_ffi.dll"
+            "win-x86|int2dds_ffi.dll"
+            "win-arm64|int2dds_ffi.dll"
+            "linux-x64|libint2dds_ffi.so"
+            "linux-arm64|libint2dds_ffi.so"
+            "linux-arm|libint2dds_ffi.so"
+            "linux-musl-x64|libint2dds_ffi.so"
+            "linux-musl-arm64|libint2dds_ffi.so"
+            "osx-x64|libint2dds_ffi.dylib"
+            "osx-arm64|libint2dds_ffi.dylib"
+          )
+          for entry in "${rids[@]}"; do
+            IFS='|' read -r rid fname <<< "$entry"
+            path="runtimes/$rid/native/$fname"
+            if ! grep -qF "$path" <<< "$listing"; then
+              echo "ERROR: nupkg missing exact entry $path" >&2
+              echo "$listing" >&2
+              exit 1
+            fi
+          done
+          count="$(grep -c 'runtimes/.*/native/' <<< "$listing")"
+          if [[ "$count" -ne 10 ]]; then
+            echo "ERROR: expected 10 native RIDs in the nupkg, found $count" >&2
+            exit 1
+          fi
+          test -f "dist/nuget/Int2Dds.${{ needs.prepare.outputs.base_version }}.snupkg"
+
+      - name: Build dotnet-libs zip
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          dotnet build csharp/src/Int2Dds/Int2Dds.csproj -c Release
+          stage="dist/dotnet-libs/Int2Dds-$VERSION-dotnet-libs"
+          mkdir -p "$stage"
+          for tfm in net45 net48 netstandard2.0 netstandard2.1 net6.0 net8.0 net10.0; do
+            src="csharp/src/Int2Dds/bin/Release/$tfm"
+            if [[ ! -f "$src/Int2Dds.dll" ]]; then
+              echo "ERROR: missing build output for $tfm" >&2
+              exit 1
+            fi
+            mkdir -p "$stage/$tfm"
+            cp "$src/Int2Dds.dll" "$stage/$tfm/"
+            if [[ -f "$src/Int2Dds.pdb" ]]; then
+              cp "$src/Int2Dds.pdb" "$stage/$tfm/"
+            fi
+          done
+          cat > "$stage/README.txt" <<'EOF'
+          Int2Dds managed assemblies, one folder per target framework.
+
+          These are AnyCPU assemblies and are architecture independent. The native
+          library (int2dds_ffi.dll / libint2dds_ffi.so / libint2dds_ffi.dylib) is
+          NOT included here — download the archive for your architecture from the
+          same release and place the native library next to your executable, or
+          point INT2DDS_FFI_PATH at its directory.
+          EOF
+          ( cd dist/dotnet-libs && zip -qr "../Int2Dds-$VERSION-dotnet-libs.zip" "Int2Dds-$VERSION-dotnet-libs" )
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages-csharp
+          path: |
+            dist/nuget/*.nupkg
+            dist/nuget/*.snupkg
+            dist/Int2Dds-*-dotnet-libs.zip
+          if-no-files-found: error
+
+  python:
+    needs: [prepare, native-linux-gnu, native-linux-musl, native-windows, native-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: native-artifacts
+
+      - name: Unpack native archives into per-dist directories
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          for f in native-artifacts/*/*.tar.gz; do
+            dist="$(basename "$f" .tar.gz)"; dist="${dist#int2dds-"$VERSION"-}"
+            mkdir -p "native-root/$dist" && tar -xzf "$f" -C "native-root/$dist"
+          done
+          for f in native-artifacts/*/*.zip; do
+            dist="$(basename "$f" .zip)"; dist="${dist#int2dds-"$VERSION"-}"
+            mkdir -p "native-root/$dist" && unzip -q -o "$f" -d "native-root/$dist"
+          done
+          ls -1 native-root
+
+      - name: Build wheels
+        run: ./.github/scripts/ci/repack-wheels.sh "${{ needs.prepare.outputs.version }}" native-root
+
+      - name: Verify wheel count
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          whls=(dist/wheels/*.whl)
+          count="${#whls[@]}"
+          if [[ "$count" -ne 7 ]]; then
+            echo "ERROR: expected 7 wheels (6 platform + 1 fallback), found $count" >&2
+            ls -1 dist/wheels
+            exit 1
+          fi
+          # The sdist filename uses base_version for the same reason as the nupkg:
+          # python -m build names it from the static version in pyproject.toml,
+          # which is always the base version without a suffix.
+          test -f "dist/wheels/int2dds-${{ needs.prepare.outputs.base_version }}.tar.gz"
+
+      - name: Smoke test the linux x86_64 wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install --quiet \
+            dist/wheels/int2dds-*-py3-none-manylinux_2_35_x86_64.whl
+          env -u INT2DDS_FFI_PATH /tmp/venv/bin/python -c "import int2dds; print('bundled native loaded')"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages-python
+          path: |
+            dist/wheels/*.whl
+            dist/wheels/*.tar.gz
+          if-no-files-found: error
+
+  verify-examples:
+    needs: [prepare, native-linux-gnu]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "1.89.0"
+          rustflags: ""
+          cache: false
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build the FFI library for C and Python examples
+        run: cargo build --release --locked -p int2dds-ffi
+
+      - name: Rust examples
+        run: cargo build --release --locked -p int2dds --example hello_world_pub --example hello_world_sub
+
+      - name: C examples
+        run: |
+          cmake -S ffi/examples -B /tmp/cbuild -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/cbuild
+
+      - name: C# examples
+        run: |
+          dotnet build csharp/examples/HelloWorldPub/HelloWorldPub.csproj -c Release
+          dotnet build csharp/examples/HelloWorldSub/HelloWorldSub.csproj -c Release
+
+      - name: Python examples
+        env:
+          INT2DDS_FFI_PATH: ${{ github.workspace }}/target/release
+        run: |
+          python -m pip install --quiet ./python
+          python -c "import ast,sys; [ast.parse(open(f).read()) for f in ['python/examples/hello_world_pub.py','python/examples/hello_world_sub.py']]"
+          python -c "import int2dds; print('python binding import ok')"
+
+      - name: Python unit tests
+        env:
+          INT2DDS_FFI_PATH: ${{ github.workspace }}/target/release
+        run: |
+          python -m pip install --quiet pytest
+          python -m pytest python/tests/test_libpath.py -q
+
+  release:
+    needs: [prepare, native-linux-gnu, native-linux-musl, native-windows, native-macos, csharp, python, verify-examples]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect assets and generate checksums
+        run: ./.github/scripts/ci/collect-assets.sh "${{ needs.prepare.outputs.version }}" artifacts dist/release
+
+      - name: Create draft release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ github.ref_name }}"
+          # Rerun handling: if any of the 25 asset uploads fails the job fails, but
+          # the draft release itself already exists. On a rerun in that state
+          # `gh release create` dies with "release already exists", so upload
+          # (clobbering) instead of creating when the release is already there.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" --clobber dist/release/*
+          else
+            notes="artifacts/release-notes/release-notes.md"
+            if [[ "${{ needs.prepare.outputs.is_prerelease }}" == "true" ]]; then
+              {
+                echo ""
+                echo "## ⚠️ Prerelease package filename warning"
+                echo ""
+                echo "This release was built from the prerelease tag \`${{ needs.prepare.outputs.version }}\`."
+                echo "The 13 native archives carry the full tag version in their filenames, but the"
+                echo "11 NuGet/wheel/sdist packages use the base version from the source metadata"
+                echo "(\`${{ needs.prepare.outputs.base_version }}\`) — those filenames will collide with the same packages in"
+                echo "the eventual stable release \`v${{ needs.prepare.outputs.base_version }}\`, so never use the NuGet/wheel/sdist"
+                echo "packages from this prerelease in production."
+              } >> "$notes"
+            fi
+            gh release create "$tag" \
+              --draft \
+              --title "int2DDS ${{ needs.prepare.outputs.version }}" \
+              --notes-file "$notes" \
+              ${{ needs.prepare.outputs.is_prerelease == 'true' && '--prerelease' || '' }} \
+              dist/release/*
+          fi
+
+      - name: Dry run summary
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          {
+            echo "### Dry run — no release created"
+            echo '```'
+            ls -1 dist/release
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

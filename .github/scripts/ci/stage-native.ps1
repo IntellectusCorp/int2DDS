@@ -1,0 +1,117 @@
+<#
+.SYNOPSIS
+    Stage the built Windows native artifacts into a release archive.
+.EXAMPLE
+    .github/scripts/ci/stage-native.ps1 -Triple x86_64-pc-windows-msvc -DistName windows-x86_64 -Version 0.1.1
+#>
+param(
+    [Parameter(Mandatory)][string]$Triple,
+    [Parameter(Mandatory)][string]$DistName,
+    [Parameter(Mandatory)][string]$Version
+)
+$ErrorActionPreference = 'Stop'
+
+$RepoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
+$BuildDir = Join-Path $RepoRoot "target\$Triple\release"
+$Stage    = Join-Path $RepoRoot "dist\stage\int2dds-$Version-$DistName"
+$OutDir   = Join-Path $RepoRoot "dist"
+
+if (Test-Path $Stage) { Remove-Item -Recurse -Force $Stage }
+foreach ($d in 'bin','lib','include','src') {
+    New-Item -ItemType Directory -Force -Path (Join-Path $Stage $d) | Out-Null
+}
+New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+
+$dll = Join-Path $BuildDir 'int2dds_ffi.dll'
+if (-not (Test-Path $dll)) { throw "int2dds_ffi.dll not found at $dll" }
+Copy-Item $dll (Join-Path $Stage 'bin\int2dds_ffi.dll')
+
+$exe = Join-Path $BuildDir 'int2dds-idl.exe'
+if (-not (Test-Path $exe)) { throw "int2dds-idl.exe not found at $exe" }
+Copy-Item $exe (Join-Path $Stage 'bin\int2dds-idl.exe')
+
+# import lib: int2dds_ffi.dll.lib on MSVC, libint2dds_ffi.dll.a on MinGW.
+# It is a DLL entry-point stub, not a static library; C integration is impossible
+# without it.
+$importLib = if ($Triple -like '*-gnu') { 'libint2dds_ffi.dll.a' } else { 'int2dds_ffi.dll.lib' }
+$importPath = Join-Path $BuildDir $importLib
+if (-not (Test-Path $importPath)) { throw "import library not found at $importPath" }
+Copy-Item $importPath (Join-Path $Stage "lib\$importLib")
+
+# PDBs are produced for MSVC targets only; their absence is normal on MinGW.
+$pdb = Join-Path $BuildDir 'int2dds_ffi.pdb'
+if (Test-Path $pdb) {
+    Copy-Item $pdb (Join-Path $Stage 'bin\int2dds_ffi.pdb')
+} elseif ($Triple -notlike '*-gnu') {
+    throw "int2dds_ffi.pdb not found for MSVC target $Triple"
+}
+
+Copy-Item (Join-Path $RepoRoot 'ffi\include\int2dds-ffi.h') (Join-Path $Stage 'include\')
+Copy-Item (Join-Path $RepoRoot 'ffi\include\int2dds_cdr.h') (Join-Path $Stage 'include\')
+Copy-Item (Join-Path $RepoRoot 'ffi\src\cdr_utils.c')       (Join-Path $Stage 'src\')
+foreach ($f in 'LICENSE','NOTICE','Third_Party_Licenses.md') {
+    Copy-Item (Join-Path $RepoRoot $f) $Stage
+}
+
+$sha = (Get-FileHash (Join-Path $Stage 'bin\int2dds_ffi.dll') -Algorithm SHA256).Hash.ToLower()
+$fileVersion = (Get-Item (Join-Path $Stage 'bin\int2dds_ffi.dll')).VersionInfo.FileVersion
+@(
+    "name: int2dds"
+    "version: `"$Version`""
+    "api_header: int2dds-ffi.h"
+    "license: Apache-2.0"
+    "triple: $Triple"
+    "dist: $DistName"
+    "sha256: $sha"
+    "import_lib: $importLib"
+    "pe_file_version: `"$fileVersion`""
+) | Set-Content -Path (Join-Path $Stage 'manifest.txt') -Encoding utf8
+
+$archive = Join-Path $OutDir "int2dds-$Version-$DistName.zip"
+if (Test-Path $archive) { Remove-Item -Force $archive }
+
+# Compress-Archive writes zip entry names with literal backslash separators on
+# Windows, which violates the ZIP spec: entry names must use '/'. That breaks
+# extraction on Linux/macOS (e.g. Python's zipfile only normalizes backslashes
+# on extract, and only when os.sep -ne '/', so listing/reading the raw name is
+# unaffected but extractall() on a non-Windows host produces a flat pile of
+# files with literal backslashes instead of the bin/lib/include/src tree).
+#
+# [System.IO.Compression.ZipFile]::CreateFromDirectory() is not a safe fix either:
+# verified empirically that its separator behavior differs by .NET runtime --
+# forward slashes under .NET (Core) 8, but literal backslashes under .NET
+# Framework 4.x (the CLR behind Windows PowerShell 5.1). Since this script runs
+# under `shell: pwsh` in CI but may be invoked under either host elsewhere, we
+# cannot rely on that convenience API's internal path handling.
+#
+# Building each entry with the low-level ZipArchive API and a self-computed
+# forward-slash-only name has no such dependency: CreateEntry() writes exactly
+# the string it is given. Verified by raw central-directory byte inspection
+# (independent of any zip-reading library's own normalization) to produce '/'
+# on both .NET Framework 4.0.30319 (Windows PowerShell 5.1) and .NET 8.0.25.
+Add-Type -AssemblyName System.IO.Compression -ErrorAction SilentlyContinue
+
+$topDir = Split-Path -Leaf $Stage
+$archiveStream = [System.IO.File]::Open($archive, [System.IO.FileMode]::CreateNew)
+try {
+    $zip = New-Object System.IO.Compression.ZipArchive($archiveStream, [System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+        Get-ChildItem -Path $Stage -Recurse -File | ForEach-Object {
+            $relative = $_.FullName.Substring($Stage.Length).Replace([char]0x5C, [char]0x2F).Trim([char]0x2F)
+            $entryName = "$topDir/$relative"
+            $entry = $zip.CreateEntry($entryName, [System.IO.Compression.CompressionLevel]::Optimal)
+            $entryStream = $entry.Open()
+            try {
+                $fileStream = [System.IO.File]::OpenRead($_.FullName)
+                try { $fileStream.CopyTo($entryStream) } finally { $fileStream.Dispose() }
+            } finally { $entryStream.Dispose() }
+        }
+    } finally { $zip.Dispose() }
+} finally { $archiveStream.Dispose() }
+
+Write-Host "== manifest =="
+Get-Content (Join-Path $Stage 'manifest.txt')
+Write-Host "== archive =="
+Expand-Archive -Path $archive -DestinationPath (Join-Path $env:TEMP "verify-$DistName") -Force
+Get-ChildItem -Recurse (Join-Path $env:TEMP "verify-$DistName") | Select-Object -ExpandProperty FullName
+Write-Output $archive

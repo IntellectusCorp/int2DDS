@@ -239,23 +239,20 @@ async fn handshake_and_register_task(
     let conn_id = shared.register_inbound_connection(addr, conn_cancel.clone());
     spawn_tasks(read_half, conn_id, shared.clone(), conn_cancel.clone(), tx, rx, write_half);
 
-    // Check for success after waiting for the handshake timeout
-    // period (clean up connections stalled at the handshake).
-    tokio::select! {
-        _ = tokio::time::sleep(peer_handshake_timeout) => {
-            if !shared.inbound_handshake_complete(conn_id) {
-                warn!(
-                    "TcpMuxListener [{}]: conn {} from {:?} did not finish the handshake \
-                     within {:?} — closing",
-                    TransportErrorCode::TcpHandshakeHelloFailed,
-                    conn_id,
-                    addr,
-                    peer_handshake_timeout
-                );
-                conn_cancel.cancel();
-            }
-        }
-        _ = conn_cancel.cancelled() => {}
+    if tokio::time::timeout(peer_handshake_timeout, conn_cancel.cancelled()).await.is_err()
+        && !shared.inbound_handshake_complete(conn_id)
+    {
+        // This branch will be entered when the connection operation fails
+        // with an error(disable to recover), not timeout.
+        warn!(
+            "TcpMuxListener [{}]: conn {} from {:?} did not finish the handshake \
+             within {:?} — closing",
+            TransportErrorCode::TcpHandshakeHelloFailed,
+            conn_id,
+            addr,
+            peer_handshake_timeout
+        );
+        conn_cancel.cancel();
     }
 }
 
