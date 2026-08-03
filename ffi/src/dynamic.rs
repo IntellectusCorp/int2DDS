@@ -12,7 +12,7 @@ use int2dds::common::builtin::topic::publication_builtin_topic_data::Publication
 use int2dds::xtypes::{
     deserialize_dynamic_data, CompleteStructType, CompleteTypeObject, DynamicData,
     DynamicTypeSupport, DynamicValue, ExtensibilityKind, FromDynamicValue, TypeIdentifier,
-    TypeObject,
+    TypeObject, TypeRegistry,
 };
 use std::ffi::CStr;
 use std::os::raw::c_char;
@@ -79,13 +79,25 @@ fn type_identifier_to_kind(id: &TypeIdentifier) -> Option<i32> {
 /// Opaque handle wrapping a discovered TypeObject.
 pub struct Int2DdsTypeObject {
     pub(crate) inner: TypeObject,
+    /// Nested-type dependency closure (content-hash id -> TypeObject) so the flat decode
+    /// path resolves array/sequence/struct-of-nested members via a TypeRegistry.
+    pub(crate) deps: Vec<(TypeIdentifier, TypeObject)>,
 }
 
 impl Int2DdsTypeObject {
-    /// Construct an Int2DdsTypeObject from a raw `TypeObject`.
+    /// Construct an Int2DdsTypeObject from a raw `TypeObject` (no nested dependencies).
     #[doc(hidden)]
     pub fn from_type_object(to: TypeObject) -> Self {
-        Int2DdsTypeObject { inner: to }
+        Int2DdsTypeObject { inner: to, deps: Vec::new() }
+    }
+
+    /// Construct with a nested-type dependency closure for registry-backed flat decode.
+    #[doc(hidden)]
+    pub fn from_type_object_with_deps(
+        to: TypeObject,
+        deps: Vec<(TypeIdentifier, TypeObject)>,
+    ) -> Self {
+        Int2DdsTypeObject { inner: to, deps }
     }
 
     /// Return a reference to the inner CompleteStructType, or None if the
@@ -98,26 +110,9 @@ impl Int2DdsTypeObject {
     }
 }
 
-/// Opaque handle wrapping a discovered PublicationBuiltinTopicData sample.
-/// Owned by the caller; destroy via `int2dds_publication_data_destroy`.
-pub struct Int2DdsPublicationBuiltinData {
-    pub(crate) inner: PublicationBuiltinTopicData,
-}
-
-unsafe impl Send for Int2DdsPublicationBuiltinData {}
-unsafe impl Sync for Int2DdsPublicationBuiltinData {}
-
-/// Destroy a publication builtin data handle. Safe to call with null.
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_publication_data_destroy(p: *mut Int2DdsPublicationBuiltinData) {
-    if !p.is_null() {
-        drop(Box::from_raw(p));
-    }
-}
-
 /// Helper: copy a Rust &str into a caller-supplied C buffer.
 /// Writes required length (without the NUL) into *out_len and returns
-/// DYNAMIC_DECODE_ERROR if the supplied buffer is too small.
+/// BUFFER_TOO_SMALL if the supplied buffer is too small.
 pub(crate) unsafe fn copy_str_to_c(
     s: &str,
     buf: *mut c_char,
@@ -136,54 +131,9 @@ pub(crate) unsafe fn copy_str_to_c(
     INT2DDS_RET_OK
 }
 
-/// Copy the topic name of a discovered publication into `buf`.
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_publication_data_topic_name(
-    p: *const Int2DdsPublicationBuiltinData,
-    buf: *mut c_char,
-    buf_len: usize,
-    out_len: *mut usize,
-) -> Int2DdsRet {
-    check_null!(p);
-    let name = (*p).inner.topic_name();
-    copy_str_to_c(&name, buf, buf_len, out_len)
-}
-
-/// Copy the type name of a discovered publication into `buf`.
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_publication_data_type_name(
-    p: *const Int2DdsPublicationBuiltinData,
-    buf: *mut c_char,
-    buf_len: usize,
-    out_len: *mut usize,
-) -> Int2DdsRet {
-    check_null!(p);
-    let name = (*p).inner.type_name();
-    copy_str_to_c(&name, buf, buf_len, out_len)
-}
-
-/// Take a clone of the TypeObject embedded in a publication discovery sample.
-/// Caller owns the returned handle and must destroy it via `int2dds_type_object_destroy`.
-/// Returns DYNAMIC_FIELD_NOT_FOUND if the publication did not carry a TypeObject.
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_publication_data_take_type_object(
-    p: *const Int2DdsPublicationBuiltinData,
-    out: *mut *mut Int2DdsTypeObject,
-) -> Int2DdsRet {
-    check_null!(p);
-    check_null!(out);
-    let to = match (*p).inner.type_object() {
-        Some(t) => t.clone(),
-        None => return INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND,
-    };
-    let h = Box::new(Int2DdsTypeObject { inner: to });
-    *out = Box::into_raw(h);
-    INT2DDS_RET_OK
-}
-
 /// Get the builtin subscriber for discovery topics.
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_get_builtin_subscriber(
+pub unsafe extern "C" fn int2dds_participant_get_builtin_subscriber(
     participant: *const Int2DdsParticipant,
     out: *mut *mut Int2DdsSubscriber,
 ) -> Int2DdsRet {
@@ -198,13 +148,14 @@ pub unsafe extern "C" fn int2dds_get_builtin_subscriber(
 
 /// Take one DCPSPublication discovery sample, optionally filtered by topic
 /// name. Blocks up to `timeout_ms` milliseconds (negative = infinite). Returns
-/// DYNAMIC_TIMEOUT on no match.
+/// DYNAMIC_TIMEOUT on no match. Destroy the result via
+/// `int2dds_publication_builtin_topic_data_destroy`.
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_take_publication_data(
+pub unsafe extern "C" fn int2dds_subscriber_take_publication_data(
     builtin_sub: *const Int2DdsSubscriber,
     topic_name_filter: *const c_char,
     timeout_ms: i32,
-    out: *mut *mut Int2DdsPublicationBuiltinData,
+    out: *mut *mut crate::discovery::Int2DdsPublicationBuiltinTopicData,
 ) -> Int2DdsRet {
     use int2dds::core::time::Duration;
     use int2dds::infrastructure::status::StatusMask;
@@ -254,7 +205,9 @@ pub unsafe extern "C" fn int2dds_take_publication_data(
                             continue;
                         }
                     }
-                    let h = Box::new(Int2DdsPublicationBuiltinData { inner: data });
+                    let h = Box::new(crate::discovery::Int2DdsPublicationBuiltinTopicData {
+                        inner: data,
+                    });
                     *out = Box::into_raw(h);
                     return INT2DDS_RET_OK;
                 }
@@ -283,7 +236,7 @@ pub unsafe extern "C" fn int2dds_take_publication_data(
 /// High-level helper: wait until a publication for `topic_name` is discovered
 /// AND its TypeObject is present, then return the TypeObject and type name.
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_wait_for_type_object(
+pub unsafe extern "C" fn int2dds_participant_wait_for_type_object(
     participant: *const Int2DdsParticipant,
     topic_name: *const c_char,
     timeout_ms: i32,
@@ -298,8 +251,13 @@ pub unsafe extern "C" fn int2dds_wait_for_type_object(
     check_null!(type_name_buf);
     check_null!(out_len);
 
+    let topic_str = match CStr::from_ptr(topic_name).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
     let mut builtin: *mut Int2DdsSubscriber = std::ptr::null_mut();
-    let r = int2dds_get_builtin_subscriber(participant, &mut builtin);
+    let r = int2dds_participant_get_builtin_subscriber(participant, &mut builtin);
     if r != INT2DDS_RET_OK {
         return r;
     }
@@ -322,8 +280,10 @@ pub unsafe extern "C" fn int2dds_wait_for_type_object(
             }
         };
 
-        let mut pdata: *mut Int2DdsPublicationBuiltinData = std::ptr::null_mut();
-        let r = int2dds_take_publication_data(builtin, topic_name, remaining_ms, &mut pdata);
+        let mut pdata: *mut crate::discovery::Int2DdsPublicationBuiltinTopicData =
+            std::ptr::null_mut();
+        let r =
+            int2dds_subscriber_take_publication_data(builtin, topic_name, remaining_ms, &mut pdata);
         if r == INT2DDS_RET_DYNAMIC_TIMEOUT {
             break INT2DDS_RET_DYNAMIC_TIMEOUT;
         }
@@ -331,25 +291,29 @@ pub unsafe extern "C" fn int2dds_wait_for_type_object(
             break r;
         }
 
-        let mut to: *mut Int2DdsTypeObject = std::ptr::null_mut();
-        let rt = int2dds_publication_data_take_type_object(pdata, &mut to);
-        if rt == INT2DDS_RET_OK {
-            let r2 = int2dds_publication_data_type_name(
-                pdata,
-                type_name_buf,
-                type_name_buf_len,
-                out_len,
-            );
-            int2dds_publication_data_destroy(pdata);
-            if r2 != INT2DDS_RET_OK {
-                int2dds_type_object_destroy(to);
-                break r2;
+        // SEDP no longer carries inline TypeObjects; discovered_type_object()
+        // triggers the on-demand TypeLookup fetch and errors until the reply lands.
+        match (*participant).inner.discovered_type_object(topic_str) {
+            Ok(obj) => {
+                let r2 = copy_str_to_c(
+                    &(*pdata).inner.type_name(),
+                    type_name_buf,
+                    type_name_buf_len,
+                    out_len,
+                );
+                drop(Box::from_raw(pdata));
+                if r2 != INT2DDS_RET_OK {
+                    break r2;
+                }
+                let h = Box::new(Int2DdsTypeObject { inner: obj, deps: Vec::new() });
+                *type_obj_out = Box::into_raw(h);
+                break INT2DDS_RET_OK;
             }
-            *type_obj_out = to;
-            break INT2DDS_RET_OK;
+            Err(_) => {
+                drop(Box::from_raw(pdata));
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
         }
-        int2dds_publication_data_destroy(pdata);
-        // No type_object on this publication — keep waiting.
     };
 
     // Drop the builtin subscriber handle wrapper (decrements Arc; underlying
@@ -462,14 +426,7 @@ pub unsafe extern "C" fn int2dds_type_object_member_name(
         Some(m) => m,
         None => return INT2DDS_RET_INVALID_ARGUMENT,
     };
-    let name = m.detail.name.as_bytes();
-    *out_len = name.len();
-    if buf_len < name.len() + 1 {
-        return INT2DDS_RET_DYNAMIC_DECODE_ERROR;
-    }
-    std::ptr::copy_nonoverlapping(name.as_ptr() as *const c_char, buf, name.len());
-    *buf.add(name.len()) = 0;
-    INT2DDS_RET_OK
+    copy_str_to_c(&m.detail.name, buf, buf_len, out_len)
 }
 
 /// Find a member index by name.
@@ -500,12 +457,13 @@ pub unsafe extern "C" fn int2dds_type_object_find_member(
 }
 
 use int2dds::common::instance_handle::InstanceHandle;
+use int2dds::infrastructure::qos_kind::QosKind;
 use int2dds::infrastructure::status::StatusMask;
-use int2dds::publication::{data_writer::DataWriter, qos::DataWriterQos};
+use int2dds::publication::data_writer::DataWriter;
 use int2dds::serialize::cdr::ExtensibilityKind as CdrExtensibilityKind;
+use int2dds::subscription::data_reader::DataReader;
 use int2dds::subscription::sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind};
-use int2dds::subscription::{data_reader::DataReader, qos::DataReaderQos};
-use int2dds::topic::{qos::TopicQos, TypeSupport};
+use int2dds::topic::TypeSupport;
 
 use crate::data::Int2DdsData;
 use crate::qos::{Int2DdsDataReaderQos, Int2DdsDataWriterQos, Int2DdsTopicQos};
@@ -568,7 +526,10 @@ pub unsafe extern "C" fn int2dds_create_topic_with_type_object(
 
     ffi_try!(p.inner.register_type_support(type_support as Arc<dyn TypeSupport>, type_name_str));
 
-    let topic_qos = if qos.is_null() { TopicQos::default() } else { (*qos).inner.clone() };
+    // NULL qos → default sentinel (engages the QoS-profile fallback chain).
+    // Non-NULL → use as-is. Mirrors the typed create_topic FFI.
+    let topic_qos =
+        if qos.is_null() { QosKind::Default } else { QosKind::Specific((*qos).inner.clone()) };
 
     let topic = ffi_try!(p.inner.create_topic::<Int2DdsData>(
         topic_name_str,
@@ -585,8 +546,19 @@ pub unsafe extern "C" fn int2dds_create_topic_with_type_object(
 }
 
 fn decode_flat(bytes: &[u8], type_obj: &Int2DdsTypeObject) -> Result<DynamicData, Int2DdsRet> {
-    let support = DynamicTypeSupport::from_type_object(type_obj.inner.clone())
-        .map_err(|_| INT2DDS_RET_DYNAMIC_UNSUPPORTED_TYPE)?;
+    let support = if type_obj.deps.is_empty() {
+        DynamicTypeSupport::from_type_object(type_obj.inner.clone())
+            .map_err(|_| INT2DDS_RET_DYNAMIC_UNSUPPORTED_TYPE)?
+    } else {
+        // Register the nested dependency closure so array/sequence/struct-of-nested members
+        // resolve. Mirrors RawTypeSupport::with_type_info_and_deps (raw_type_support.rs).
+        let mut registry = TypeRegistry::new();
+        for (id, obj) in &type_obj.deps {
+            registry.register_type_object_with_id(id, obj.clone());
+        }
+        DynamicTypeSupport::from_type_object_with_registry(type_obj.inner.clone(), &registry)
+            .map_err(|_| INT2DDS_RET_DYNAMIC_UNSUPPORTED_TYPE)?
+    };
     deserialize_dynamic_data(bytes, support.dynamic_type())
         .map_err(|_| INT2DDS_RET_DYNAMIC_DECODE_ERROR)
 }
@@ -964,7 +936,10 @@ pub unsafe extern "C" fn int2dds_create_topic_dynamic(
     };
     let support = (*type_support).inner.clone();
     let type_name = support.get_type_name().to_string();
-    let topic_qos = if qos.is_null() { TopicQos::default() } else { (*qos).inner.clone() };
+    // NULL qos → default sentinel (engages the QoS-profile fallback chain).
+    // Non-NULL → use as-is. Mirrors the typed create_topic FFI.
+    let topic_qos =
+        if qos.is_null() { QosKind::Default } else { QosKind::Specific((*qos).inner.clone()) };
 
     let topic = ffi_try!(p.inner.create_topic_dynamic(
         topic_name_str,
@@ -992,7 +967,10 @@ pub unsafe extern "C" fn int2dds_create_datawriter_dynamic(
     check_null!(out);
 
     let support = (*type_support).inner.clone();
-    let writer_qos = if qos.is_null() { DataWriterQos::default() } else { (*qos).inner.clone() };
+    // NULL qos → default sentinel (engages the QoS-profile fallback chain).
+    // Non-NULL → use as-is. Mirrors the typed create_datawriter FFI.
+    let writer_qos =
+        if qos.is_null() { QosKind::Default } else { QosKind::Specific((*qos).inner.clone()) };
     let writer = ffi_try!((*publisher).inner.create_datawriter_dynamic(
         (*topic).inner.as_ref(),
         support,
@@ -1019,7 +997,10 @@ pub unsafe extern "C" fn int2dds_create_datareader_dynamic(
     check_null!(out);
 
     let support = (*type_support).inner.clone();
-    let reader_qos = if qos.is_null() { DataReaderQos::default() } else { (*qos).inner.clone() };
+    // NULL qos → default sentinel (engages the QoS-profile fallback chain).
+    // Non-NULL → use as-is. Mirrors the typed create_datareader FFI.
+    let reader_qos =
+        if qos.is_null() { QosKind::Default } else { QosKind::Specific((*qos).inner.clone()) };
     let reader = ffi_try!((*subscriber).inner.create_datareader_dynamic(
         (*topic).inner.as_ref(),
         support,
@@ -1045,6 +1026,57 @@ pub unsafe extern "C" fn int2dds_dynamic_reader_destroy(r: *mut Int2DdsDynamicDa
     if !r.is_null() {
         drop(Box::from_raw(r));
     }
+}
+
+/// Get the effective QoS of a dynamic DataWriter.
+///
+/// A dynamic writer handle is `Int2DdsDynamicDataWriter`, a different type from the
+/// typed `Int2DdsDataWriter`, so `int2dds_datawriter_get_qos` cannot be used on it.
+/// The QoS handle written to `qos_out` is the *same* `Int2DdsDataWriterQos` type the
+/// typed path returns, so every `int2dds_datawriter_qos_get_*` accessor applies.
+/// The caller owns it and must release it with `int2dds_datawriter_qos_destroy`.
+///
+/// # Safety
+///
+/// `writer` must be a valid handle from `int2dds_create_datawriter_dynamic` and
+/// `qos_out` must point to writable storage for one pointer.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_dynamic_writer_get_qos(
+    writer: *const Int2DdsDynamicDataWriter,
+    qos_out: *mut *mut Int2DdsDataWriterQos,
+) -> Int2DdsRet {
+    check_null!(writer);
+    check_null!(qos_out);
+
+    let qos = ffi_try!((*writer).inner.get_qos());
+    *qos_out = Box::into_raw(Box::new(Int2DdsDataWriterQos { inner: qos }));
+
+    INT2DDS_RET_OK
+}
+
+/// Get the effective QoS of a dynamic DataReader.
+///
+/// Counterpart to `int2dds_dynamic_writer_get_qos`. The handle written to `qos_out`
+/// is the same `Int2DdsDataReaderQos` type the typed path returns, so every
+/// `int2dds_datareader_qos_get_*` accessor applies. The caller owns it and must
+/// release it with `int2dds_datareader_qos_destroy`.
+///
+/// # Safety
+///
+/// `reader` must be a valid handle from `int2dds_create_datareader_dynamic` and
+/// `qos_out` must point to writable storage for one pointer.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_dynamic_reader_get_qos(
+    reader: *const Int2DdsDynamicDataReader,
+    qos_out: *mut *mut Int2DdsDataReaderQos,
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(qos_out);
+
+    let qos = ffi_try!((*reader).inner.get_qos());
+    *qos_out = Box::into_raw(Box::new(Int2DdsDataReaderQos { inner: qos }));
+
+    INT2DDS_RET_OK
 }
 
 /// Current number of DataReaders matched to this dynamic writer.
@@ -1235,7 +1267,7 @@ mod tests {
         let flags = TypeFlag::new(ExtensibilityKind::Mutable, false, false);
         let st = CompleteStructType::new(flags, "T".to_string(), None);
         let to = TypeObject::Complete(CompleteTypeObject::Struct(st));
-        let handle = Box::into_raw(Box::new(Int2DdsTypeObject { inner: to }));
+        let handle = Box::into_raw(Box::new(Int2DdsTypeObject { inner: to, deps: Vec::new() }));
 
         let mut ext: i32 = -1;
         let ret = unsafe { int2dds_type_object_extensibility(handle, &mut ext) };
@@ -1264,7 +1296,7 @@ mod tests {
             ));
         }
         let to = TypeObject::Complete(CompleteTypeObject::Struct(st));
-        let handle = Box::into_raw(Box::new(Int2DdsTypeObject { inner: to }));
+        let handle = Box::into_raw(Box::new(Int2DdsTypeObject { inner: to, deps: Vec::new() }));
 
         let mut count: u32 = 0;
         let ret = unsafe { int2dds_type_object_member_count(handle, &mut count) };
@@ -1295,7 +1327,7 @@ mod tests {
             st.add_member(CompleteStructMember::new(*id, mf, ty.clone(), name.to_string()));
         }
         let to = TypeObject::Complete(CompleteTypeObject::Struct(st));
-        let h = Box::into_raw(Box::new(Int2DdsTypeObject { inner: to }));
+        let h = Box::into_raw(Box::new(Int2DdsTypeObject { inner: to, deps: Vec::new() }));
 
         let mut count = 0u32;
         assert_eq!(unsafe { int2dds_type_object_member_count(h, &mut count) }, INT2DDS_RET_OK);
@@ -1361,7 +1393,7 @@ mod tests {
     fn type_object_of<T: HasTypeObject>() -> *mut Int2DdsTypeObject {
         let cto: XtCompleteTypeObject = T::complete_type_object();
         let to = TypeObject::Complete(cto);
-        Box::into_raw(Box::new(Int2DdsTypeObject { inner: to }))
+        Box::into_raw(Box::new(Int2DdsTypeObject { inner: to, deps: Vec::new() }))
     }
 
     #[derive(DdsType)]
@@ -1396,6 +1428,71 @@ mod tests {
             int2dds_dynamic_sample_get_i32(bytes.as_ptr(), bytes.len(), h, c.as_ptr(), &mut out)
         };
         (r, out)
+    }
+
+    fn flat_f64(h: *const Int2DdsTypeObject, bytes: &[u8], field: &str) -> (Int2DdsRet, f64) {
+        let c = std::ffi::CString::new(field).unwrap();
+        let mut out = 0f64;
+        let r = unsafe {
+            int2dds_dynamic_sample_get_f64(bytes.as_ptr(), bytes.len(), h, c.as_ptr(), &mut out)
+        };
+        (r, out)
+    }
+
+    // The read-path fix: to_type_object carries the nested dependency closure, and decode_flat
+    // registers it so `sequence<Nested>` element fields resolve via indexed/dotted paths. The
+    // control (no deps) reproduces the pre-fix failure, proving the closure is what enables it.
+    #[test]
+    fn dynamic_sample_sequence_of_nested_struct() {
+        use crate::type_info::Int2DdsTypeInfo;
+
+        #[derive(DdsType)]
+        #[dds_type(crate_path = "int2dds", extensibility = "Final")]
+        struct ElemPt {
+            x: f64,
+            y: f64,
+        }
+        #[derive(DdsType)]
+        #[dds_type(crate_path = "int2dds", extensibility = "Final")]
+        struct SeqOfPt {
+            pts: Vec<ElemPt>,
+        }
+
+        let v = SeqOfPt { pts: vec![ElemPt { x: 1.5, y: 2.5 }, ElemPt { x: 3.5, y: 4.5 }] };
+        let bytes = serialize_with_header(&v, CdrExtKind::Final);
+
+        // Build via the FFI type_info path (mirrors the generated C / rmw): element type_info,
+        // then a sequence-of-nested field on the container.
+        let mut elem = Int2DdsTypeInfo::new("ElemPt".to_string(), CdrExtKind::Final);
+        elem.push_field("x".to_string(), TypeIdentifier::Float64, 0);
+        elem.push_field("y".to_string(), TypeIdentifier::Float64, 0);
+        let mut cont = Int2DdsTypeInfo::new("SeqOfPt".to_string(), CdrExtKind::Final);
+        cont.push_sequence_of_nested_field("pts".to_string(), &elem, 0, 0);
+
+        let to = cont.build_type_object();
+        let deps = cont.dependency_closure();
+        assert!(!deps.is_empty(), "sequence-of-nested must carry a dependency closure");
+
+        // With the closure: nested element fields resolve.
+        let h = Box::into_raw(Box::new(Int2DdsTypeObject::from_type_object_with_deps(
+            to.clone(),
+            deps,
+        )));
+        assert_eq!(flat_f64(h, &bytes, "pts[0].x"), (INT2DDS_RET_OK, 1.5));
+        assert_eq!(flat_f64(h, &bytes, "pts[0].y"), (INT2DDS_RET_OK, 2.5));
+        assert_eq!(flat_f64(h, &bytes, "pts[1].x"), (INT2DDS_RET_OK, 3.5));
+        assert_eq!(flat_f64(h, &bytes, "pts[1].y"), (INT2DDS_RET_OK, 4.5));
+
+        // Control: without the closure the nested element cannot resolve (pre-fix behavior).
+        let h_nodeps = Box::into_raw(Box::new(Int2DdsTypeObject::from_type_object(to)));
+        assert_ne!(
+            flat_f64(h_nodeps, &bytes, "pts[0].x").0,
+            INT2DDS_RET_OK,
+            "without the dependency closure the nested element must NOT resolve (control)"
+        );
+
+        unsafe { int2dds_type_object_destroy(h) };
+        unsafe { int2dds_type_object_destroy(h_nodeps) };
     }
 
     #[test]

@@ -94,7 +94,7 @@ impl Socket {
         // Some environments, notably WSL, attach non-127/8 addresses to `lo`.
         // Treat those as loopback-interface addresses unless loopback use is explicit.
         if ips.is_empty() {
-            if let Ok(ifaces) = get_if_addrs::get_if_addrs() {
+            if let Ok(ifaces) = if_addrs::get_if_addrs() {
                 for iface in ifaces {
                     let is_loopback_interface = Self::is_loopback_interface_name(&iface.name);
                     if is_loopback_interface && !use_loopback {
@@ -166,6 +166,12 @@ impl Socket {
                 self.working_ips.ips[0]
             );
             return self.working_ips.ips[0].clone();
+        }
+
+        // loopback-only multicast egress when opted in.
+        if crate::common::env::get_force_loopback_multicast() {
+            log::debug!("FORCE_LOOPBACK_MULTICAST: forcing multicast interface IP to 127.0.0.1");
+            return "127.0.0.1".to_string();
         }
 
         // Probe the OS routing table by connecting to a public address.

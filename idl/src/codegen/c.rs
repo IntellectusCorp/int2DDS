@@ -463,12 +463,12 @@ impl<'a> CGen<'a> {
         self.emit_deserialize_cdr(s);
         self.raw("\n");
 
-        // serialize_key
-        self.emit_serialize_key(s);
-        self.raw("\n");
-
         // type_info builder (for DDS-XTypes discovery)
         self.emit_type_info_fn(s);
+        self.raw("\n");
+
+        // create_topic helper (extensibility carried by the type, no arg)
+        self.emit_create_topic_fn(s);
     }
 
     fn emit_struct_typedef(&mut self, s: &ResolvedStruct) {
@@ -1243,40 +1243,6 @@ impl<'a> CGen<'a> {
         }
     }
 
-    // ---- Key Serialization ----
-
-    fn emit_serialize_key(&mut self, s: &ResolvedStruct) {
-        let key_fields: Vec<&ResolvedMember> = s.members.iter().filter(|m| m.is_key).collect();
-
-        self.raw(&format!(
-            "static inline size_t {}_serialize_key(\n    const {} *val,\n    uint8_t *buf,\n    size_t capacity)\n{{\n",
-            s.name, s.name
-        ));
-
-        if key_fields.is_empty() {
-            // No key fields -> empty key (key=NULL, key_len=0 in FFI)
-            self.raw("    (void)val; (void)buf; (void)capacity;\n");
-            self.raw("    return 0;\n");
-        } else {
-            // Key serialization: big-endian, XCDR2, no encapsulation header
-            self.raw("    Int2DdsCdrWriter w;\n");
-            self.raw("    int2dds_cdr_writer_init(&w, buf, capacity, false, true); /* BE, XCDR2, no header */\n");
-
-            // Sort by member_id if present
-            let mut sorted_keys = key_fields;
-            sorted_keys.sort_by_key(|m| m.member_id.unwrap_or(u32::MAX));
-
-            for m in &sorted_keys {
-                let field_name = naming::escape_keyword(&m.name, naming::TargetLang::C);
-                let accessor = self.make_field_accessor(m, "val", &field_name);
-                self.emit_write_field_indented(&m.resolved_type, &accessor, "    ");
-            }
-
-            self.raw("    return w.error == INT2DDS_CDR_OK ? int2dds_cdr_writer_size(&w) : 0;\n");
-        }
-        self.raw("}\n");
-    }
-
     // ---- Type Info (DDS-XTypes discovery) ----
 
     /// Check if a sequence needs an outer DHEADER in XCDR2.
@@ -1718,6 +1684,25 @@ impl<'a> CGen<'a> {
         self.raw("    return ti;\n}\n");
     }
 
+    /// Emit a `{Name}_create_topic` convenience wrapper. Extensibility is carried by the
+    /// type through `{Name}_type_info()`, so C callers create a topic without passing an
+    /// extensibility argument — parity with the Python/C# bindings, where extensibility is
+    /// a property of the type rather than a `create_topic` parameter. Works for keyed types
+    /// too, since the type-info path derives the key from the TypeObject. Requires
+    /// `int2dds-ffi.h` (same prerequisite as `{Name}_type_info`).
+    fn emit_create_topic_fn(&mut self, s: &ResolvedStruct) {
+        self.raw(&format!(
+            "static inline Int2DdsRet {}_create_topic(const Int2DdsParticipant *participant, const char *topic_name, const Int2DdsTopicQos *qos, Int2DdsTopic **topic_out) {{\n",
+            s.name
+        ));
+        self.raw(&format!("    Int2DdsTypeInfo *ti = {}_type_info();\n", s.name));
+        self.raw(
+            "    Int2DdsRet ret = int2dds_create_topic_with_type_info(participant, topic_name, ti, qos, topic_out);\n",
+        );
+        self.raw("    int2dds_type_info_destroy(ti);\n");
+        self.raw("    return ret;\n}\n");
+    }
+
     // ---- Memory Management (Pointer mode) ----
 
     fn type_needs_cleanup(&self, ty: &ResolvedType) -> bool {
@@ -1927,8 +1912,9 @@ mod tests {
         assert!(code.contains("int2dds_cdr_write_u32(&w, val->index)"));
         assert!(code.contains("int2dds_cdr_write_string(&w, val->message)"));
         assert!(code.contains("HelloWorld_deserialize_cdr("));
-        assert!(code.contains("HelloWorld_serialize_key("));
-        assert!(code.contains("return 0;"));
+        // No key helper is emitted: the core derives the canonical key from the
+        // full serialized sample (see the Python/C# generators).
+        assert!(!code.contains("HelloWorld_serialize_key("));
     }
 
     #[test]
@@ -1946,7 +1932,12 @@ mod tests {
         let model = resolve(defs).unwrap();
         let code = generate(&model, "SensorData.idl", &COptions::default());
 
-        assert!(code.contains("int2dds_cdr_writer_init(&w, buf, capacity, false, true)"));
+        // The key is carried by the advertised TypeObject, not by a generated
+        // key-serialization helper.
+        assert!(code.contains(
+            "int2dds_type_info_add_field(ti, \"sensor_id\", INT2DDS_FIELD_INT32, INT2DDS_MEMBER_KEY)"
+        ));
+        assert!(!code.contains("SensorData_serialize_key("));
         assert!(code.contains("int2dds_cdr_write_i32(&w, val->sensor_id)"));
         assert!(code.contains("char location[129];")); // 128 + 1
     }

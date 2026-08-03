@@ -8,24 +8,21 @@ namespace HelloWorldPub
 {
     class Program
     {
+        const string TopicName = "hello_world_topic";
+
         static void Main(string[] args)
         {
             // Reliability is selectable on the CLI (default BEST_EFFORT, --reliable for RELIABLE)
             bool reliable = Array.IndexOf(args, "--reliable") >= 0;
             // Domain id is selectable on the CLI (-d/--domain, default 0), matching the Rust example.
             int domainId = ParseDomain(args);
-            Console.WriteLine("=== HelloWorld Publisher (C#) ===");
-            Console.WriteLine($"QoS: {(reliable ? "RELIABLE" : "BEST_EFFORT")}");
-
             // Run until Ctrl-C, then clean up gracefully (matches the Rust example).
             using var stop = new ManualResetEventSlim(false);
             Console.CancelKeyPress += (_, e) => { e.Cancel = true; stop.Set(); };
 
             using var dp = new DomainParticipant(domainId: domainId, name: "CSharpPublisher");
-            Console.WriteLine($"Created participant on domain {dp.DomainId}");
 
-            using var topic = dp.CreateTopic<HelloWorld>("hello_world_topic");
-            Console.WriteLine($"Created topic: {topic.Name} ({topic.TypeName})");
+            using var topic = dp.CreateTopic<HelloWorld>(TopicName);
 
             using var pub = dp.CreatePublisher();
             var writerQos = new DataWriterQos
@@ -35,10 +32,12 @@ namespace HelloWorldPub
                     reliable ? TimeSpan.FromMilliseconds(100) : (TimeSpan?)null),
             };
             using var writer = pub.CreateDataWriter(topic, writerQos);
-            Console.WriteLine("Created publisher and data writer");
+
+            var wqos = writer.GetQos();
+            Console.WriteLine($"[publisher INFO] domain_id: {domainId}, topic: {TopicName}");
+            Console.WriteLine($"[publisher qos] reliability: {wqos.Reliability?.Kind}, durability: {wqos.Durability?.Kind}, history: {HistoryText(wqos.History)}");
 
             // Wait for subscriber to connect
-            Console.WriteLine("Waiting for subscriber...");
             using var statusCondition = writer.GetStatusCondition();
             statusCondition.EnabledStatuses = StatusMask.PublicationMatched;
             using var waitset = new WaitSet();
@@ -55,18 +54,25 @@ namespace HelloWorldPub
                 return;
             }
 
-            Console.WriteLine($"Matched {writer.MatchedReaders} reader(s)");
+            Console.WriteLine("Subscriber matched!");
 
             // Publish samples until Ctrl-C
-            uint i = 0;
+            uint i = 1;
             while (!stop.IsSet)
             {
-                var sample = new HelloWorld { Index = i, Message = $"Hello from C#! ({i})" };
+                var sample = new HelloWorld { Index = i, Message = $"[C#]HelloWorld_d{domainId}" };
                 writer.Write(sample);
-                Console.WriteLine($"Published: index={sample.Index}, message='{sample.Message}'");
+                Console.WriteLine($"Published HelloWorld {{ index: {sample.Index}, message: \"{sample.Message}\" }}");
                 stop.Wait(TimeSpan.FromSeconds(1));
                 i++;
             }
+        }
+
+        // Render History the way the Rust example's Debug output does.
+        static string HistoryText(History? history)
+        {
+            if (history == null) return "KeepLast(1)";
+            return history.Kind == HistoryKind.KeepAll ? "KeepAll" : $"KeepLast({history.Depth})";
         }
 
         // Parse "-d N" / "--domain N" from the CLI, defaulting to 0 (mirrors the Rust example's -d/--domain).

@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - develop
+      - main
   workflow_dispatch:
 
 jobs:
@@ -17,10 +18,8 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - name: Checkout develop
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: develop
 
       - name: Disable Windows Defender realtime monitoring
         if: runner.os == 'Windows'

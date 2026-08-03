@@ -53,14 +53,19 @@ namespace Int2Dds.Discovery
             get
             {
                 if (_disposed) throw new ObjectDisposedException(GetType().Name);
-                UIntPtr size;
                 var buf = new byte[256];
+                UIntPtr size;
+                int ret;
                 fixed (byte* p = buf)
+                    ret = NativeMethods.int2dds_publication_builtin_topic_data_get_topic_name(_handle, p, (UIntPtr)buf.Length, out size);
+                if (ret == ReturnCode.NoData || (uint)size == 0) return string.Empty;
+                if (ret == ReturnCode.BufferTooSmall)
                 {
-                    int ret = NativeMethods.int2dds_publication_builtin_topic_data_get_topic_name(_handle, p, (UIntPtr)256, out size);
-                    if (ret == ReturnCode.NoData || (uint)size == 0) return string.Empty;
-                    ReturnCodeHelper.CheckReturn(ret);
+                    buf = new byte[(int)(uint)size];
+                    fixed (byte* p = buf)
+                        ret = NativeMethods.int2dds_publication_builtin_topic_data_get_topic_name(_handle, p, (UIntPtr)buf.Length, out size);
                 }
+                ReturnCodeHelper.CheckReturn(ret);
                 int len = (int)(uint)size;
                 if (len > 0 && buf[len - 1] == 0) len--;
                 return Encoding.UTF8.GetString(buf, 0, len);
@@ -72,14 +77,19 @@ namespace Int2Dds.Discovery
             get
             {
                 if (_disposed) throw new ObjectDisposedException(GetType().Name);
-                UIntPtr size;
                 var buf = new byte[256];
+                UIntPtr size;
+                int ret;
                 fixed (byte* p = buf)
+                    ret = NativeMethods.int2dds_publication_builtin_topic_data_get_type_name(_handle, p, (UIntPtr)buf.Length, out size);
+                if (ret == ReturnCode.NoData || (uint)size == 0) return string.Empty;
+                if (ret == ReturnCode.BufferTooSmall)
                 {
-                    int ret = NativeMethods.int2dds_publication_builtin_topic_data_get_type_name(_handle, p, (UIntPtr)256, out size);
-                    if (ret == ReturnCode.NoData || (uint)size == 0) return string.Empty;
-                    ReturnCodeHelper.CheckReturn(ret);
+                    buf = new byte[(int)(uint)size];
+                    fixed (byte* p = buf)
+                        ret = NativeMethods.int2dds_publication_builtin_topic_data_get_type_name(_handle, p, (UIntPtr)buf.Length, out size);
                 }
+                ReturnCodeHelper.CheckReturn(ret);
                 int len = (int)(uint)size;
                 if (len > 0 && buf[len - 1] == 0) len--;
                 return Encoding.UTF8.GetString(buf, 0, len);

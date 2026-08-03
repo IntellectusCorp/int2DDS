@@ -11,8 +11,8 @@
 //!
 //! Both are `Condition`s: attach them to a WaitSet with
 //! `int2dds_waitset_attach_readcondition` to wait for matching data, and read
-//! the matching samples with `int2dds_datareader_take_w_readcondition` /
-//! `int2dds_datareader_read_w_readcondition`.
+//! the matching samples with `int2dds_datareader_take_serialized_batch_w_readcondition` /
+//! `int2dds_datareader_read_serialized_batch_w_readcondition`.
 //!
 //! ## Content filtering scope
 //!
@@ -31,7 +31,7 @@ use int2dds::subscription::sample_info::{InstanceStateKind, SampleStateKind, Vie
 use super::{error::*, types::*};
 
 /// Build the single-element state-mask slices used by the whole FFI, matching
-/// the convention in `int2dds_take_serialized_w_condition`.
+/// the convention in `int2dds_datareader_take_serialized_w_states`.
 #[inline]
 fn state_masks(
     sample_state_mask: u32,
@@ -258,7 +258,7 @@ pub unsafe extern "C" fn int2dds_readcondition_delete(
 /// - `seq_out` must be a valid pointer to a null pointer
 /// - The returned sequence must be freed with `int2dds_sample_seq_delete`
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_datareader_take_w_readcondition(
+pub unsafe extern "C" fn int2dds_datareader_take_serialized_batch_w_readcondition(
     reader: *const Int2DdsDataReader,
     condition: *const Int2DdsReadCondition,
     max_samples: i32,
@@ -270,9 +270,9 @@ pub unsafe extern "C" fn int2dds_datareader_take_w_readcondition(
 /// Read samples matching a Read/QueryCondition (samples remain in the cache).
 ///
 /// # Safety
-/// - Same as `int2dds_datareader_take_w_readcondition`
+/// - Same as `int2dds_datareader_take_serialized_batch_w_readcondition`
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_datareader_read_w_readcondition(
+pub unsafe extern "C" fn int2dds_datareader_read_serialized_batch_w_readcondition(
     reader: *const Int2DdsDataReader,
     condition: *const Int2DdsReadCondition,
     max_samples: i32,

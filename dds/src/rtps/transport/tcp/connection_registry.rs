@@ -4,7 +4,7 @@
 //! see the same connection state. `ConnectionRegistry` is that single source of truth:
 //! held in an `Arc`, it keeps one `ConnectionEntry` per connection (state,
 //! remote addr, writer inbox, cancel token) and routes inbound frames via
-//! `dispatch` — RTPS data to the DDS layer through the crossbeam senders,
+//! `dispatch` — RTPS data to the DDS layer through the channel senders,
 //! control frames to their handlers. A connection is torn down by firing its
 //! `CancellationToken`.
 
@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::Sender;
 use dashmap::DashMap;
+use flume::Sender;
 use log::{debug, warn};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -56,26 +56,23 @@ pub(crate) enum ConnectionDirection {
 /// participant for per-connection bookkeeping and lookup.
 #[derive(Debug, Default)]
 pub(crate) struct PeerConnectionGroup {
-    pub(crate) control_conn: Option<ConnectionId>,
-    pub(crate) discovery_conn: Option<ConnectionId>,
-    pub(crate) user_data_conn: Option<ConnectionId>,
+    pub(crate) control_conns: Vec<ConnectionId>,
+    pub(crate) discovery_conns: Vec<ConnectionId>,
+    pub(crate) user_data_conns: Vec<ConnectionId>,
 }
 
 impl PeerConnectionGroup {
-    fn new() -> Self {
-        Self { control_conn: None, discovery_conn: None, user_data_conn: None }
-    }
-
     pub(crate) fn all_conns(&self) -> Vec<ConnectionId> {
-        [self.control_conn, self.discovery_conn, self.user_data_conn]
+        self.control_conns
             .iter()
-            .flatten()
+            .chain(&self.discovery_conns)
+            .chain(&self.user_data_conns)
             .copied()
             .collect()
     }
 
     pub(crate) fn has_data_conns(&self) -> bool {
-        self.discovery_conn.is_some() || self.user_data_conn.is_some()
+        !self.discovery_conns.is_empty() || !self.user_data_conns.is_empty()
     }
 }
 
@@ -86,8 +83,6 @@ pub(crate) struct ConnectionEntry {
     pub(crate) direction: ConnectionDirection,
     pub(crate) bound_logical_port: Option<u16>,
     pub(crate) remote_guid_prefix: Option<GuidPrefix>,
-    /// writer inbox: pushing a frame here sends it on this connection.
-    pub(crate) writer_tx: mpsc::Sender<Vec<u8>>,
     /// Child token for the actor pair; cancelling it tears the pair down.
     pub(crate) cancel: CancellationToken,
     pub(crate) pending_ack: Option<Arc<Mutex<Option<oneshot::Sender<ControlMsg>>>>>,
@@ -320,7 +315,6 @@ impl ConnectionRegistry {
     pub(crate) fn register_inbound_connection(
         &self,
         remote_addr: SocketAddr,
-        writer_tx: mpsc::Sender<Vec<u8>>,
         cancel: CancellationToken,
     ) -> ConnectionId {
         let conn_id = self.next_conn_id.fetch_add(1, Ordering::SeqCst);
@@ -332,7 +326,6 @@ impl ConnectionRegistry {
                 direction: ConnectionDirection::Inbound,
                 bound_logical_port: None,
                 remote_guid_prefix: None,
-                writer_tx,
                 cancel,
                 // Inbound connections never await outbound responses — slot stays None.
                 pending_ack: None,
@@ -353,7 +346,6 @@ impl ConnectionRegistry {
     pub(crate) fn register_outbound_control_connection(
         &self,
         remote_addr: SocketAddr,
-        writer_tx: mpsc::Sender<Vec<u8>>,
         cancel: CancellationToken,
         pending_ack: Arc<Mutex<Option<oneshot::Sender<ControlMsg>>>>,
     ) -> ConnectionId {
@@ -368,15 +360,14 @@ impl ConnectionRegistry {
                 direction: ConnectionDirection::Outbound,
                 bound_logical_port: None,
                 remote_guid_prefix: Some(synthetic_guid),
-                writer_tx,
                 cancel,
                 pending_ack: Some(pending_ack),
             },
         );
 
         let mut pc = self.peer_connections.lock().expect("peer_connections lock");
-        let group = pc.entry(synthetic_guid).or_insert_with(PeerConnectionGroup::new);
-        group.control_conn = Some(conn_id);
+        let group = pc.entry(synthetic_guid).or_default();
+        group.control_conns.push(conn_id);
 
         debug!(
             "TcpMuxListener: Registered outbound control conn {} (addr={:?})",
@@ -388,13 +379,12 @@ impl ConnectionRegistry {
     /// Register an outbound **data** connection that has just completed the
     /// PORT_BIND handshake. Starts in `Active` state with `bound_logical_port`
     /// already set, so `dispatch` routes inbound RTPS data straight to the
-    /// crossbeam channels. No `pending_ack` — data connections don't expect
+    /// inbound channels. No `pending_ack` — data connections don't expect
     /// control responses.
     pub(crate) fn register_outbound_data_connection(
         &self,
         remote_addr: SocketAddr,
         logical_port: u16,
-        writer_tx: mpsc::Sender<Vec<u8>>,
         cancel: CancellationToken,
     ) -> ConnectionId {
         let conn_id = self.next_conn_id.fetch_add(1, Ordering::SeqCst);
@@ -408,18 +398,17 @@ impl ConnectionRegistry {
                 direction: ConnectionDirection::Outbound,
                 bound_logical_port: Some(logical_port),
                 remote_guid_prefix: Some(synthetic_guid),
-                writer_tx,
                 cancel,
                 pending_ack: None,
             },
         );
 
         let mut pc = self.peer_connections.lock().expect("peer_connections lock");
-        let group = pc.entry(synthetic_guid).or_insert_with(PeerConnectionGroup::new);
+        let group = pc.entry(synthetic_guid).or_default();
         if PortManager::is_discovery_unicast_port_logically(self.domain_id, logical_port) {
-            group.discovery_conn = Some(conn_id);
+            group.discovery_conns.push(conn_id);
         } else {
-            group.user_data_conn = Some(conn_id);
+            group.user_data_conns.push(conn_id);
         }
 
         debug!(
@@ -429,26 +418,62 @@ impl ConnectionRegistry {
         conn_id
     }
 
+    pub(crate) fn inbound_handshake_complete(&self, conn_id: ConnectionId) -> bool {
+        let (state, guid) = match self.connections.get(&conn_id) {
+            Some(entry) => (entry.state, entry.remote_guid_prefix),
+            None => return true,
+        };
+
+        match state {
+            ConnectionState::AwaitingFirstMessage => false,
+            ConnectionState::Active => true,
+            ConnectionState::Control => {
+                let Some(guid) = guid else { return false };
+
+                // Collect first, then release the lock: `remove_connection` takes
+                // these two in the opposite order.
+                let data_conns: Vec<ConnectionId> = {
+                    let pc = self.peer_connections.lock().expect("peer_connections lock");
+                    match pc.get(&guid) {
+                        Some(group) => group
+                            .discovery_conns
+                            .iter()
+                            .chain(&group.user_data_conns)
+                            .copied()
+                            .collect(),
+                        None => return false,
+                    }
+                };
+
+                data_conns.iter().any(|id| {
+                    self.connections
+                        .get(id)
+                        .is_some_and(|e| e.direction == ConnectionDirection::Inbound)
+                })
+            }
+        }
+    }
+
     // ── connection / peer cleanup ────────────────────────────────────────────
 
     /// Update peer_connections bookkeeping then remove the connection entry.
     pub(crate) fn remove_connection(&self, conn_id: ConnectionId) {
         let guid_opt = self.connections.get(&conn_id).and_then(|e| e.remote_guid_prefix);
         if let Some(guid) = guid_opt {
-            let mut control_removed = false;
+            // A cookie is not attributable to the control connection that issued
+            // it, so it may only be purged once the peer has no control
+            // connection left to answer for it.
+            let mut last_control_gone = false;
             {
                 let mut pc = self.peer_connections.lock().expect("peer_connections lock");
                 if let Some(group) = pc.get_mut(&guid) {
-                    if group.control_conn == Some(conn_id) {
-                        group.control_conn = None;
-                        control_removed = true;
-                    }
-                    if group.discovery_conn == Some(conn_id) {
-                        group.discovery_conn = None;
-                    }
-                    if group.user_data_conn == Some(conn_id) {
-                        group.user_data_conn = None;
-                    }
+                    let control_before = group.control_conns.len();
+                    group.control_conns.retain(|id| *id != conn_id);
+                    last_control_gone = group.control_conns.len() != control_before
+                        && group.control_conns.is_empty();
+
+                    group.discovery_conns.retain(|id| *id != conn_id);
+                    group.user_data_conns.retain(|id| *id != conn_id);
 
                     if group.all_conns().is_empty() {
                         pc.remove(&guid);
@@ -456,7 +481,7 @@ impl ConnectionRegistry {
                 }
             }
 
-            if control_removed {
+            if last_control_gone {
                 self.purge_cookies_for_guid(guid);
             }
         }
@@ -528,39 +553,197 @@ fn send_control(writer_tx: &mpsc::Sender<Vec<u8>>, msg: &ControlMsg) {
 mod tests {
     use super::*;
 
+    fn test_registry(domain_id: u32) -> ConnectionRegistry {
+        let (d_tx, _d_rx) = flume::bounded(8);
+        let (u_tx, _u_rx) = flume::bounded(8);
+        ConnectionRegistry::new(domain_id, 0, [0u8; 12], TcpSocketTuning::default(), d_tx, u_tx)
+    }
+
     /// `PeerConnectionGroup` tracks occupied roles and reports `has_data_conns`.
     #[test]
     fn peer_connection_group_all_tokens() {
-        let mut group = PeerConnectionGroup::new();
+        let mut group = PeerConnectionGroup::default();
         assert!(group.all_conns().is_empty());
         assert!(!group.has_data_conns());
 
-        group.control_conn = Some(100);
+        group.control_conns.push(100);
         assert_eq!(group.all_conns().len(), 1);
         assert!(!group.has_data_conns());
 
-        group.discovery_conn = Some(101);
-        group.user_data_conn = Some(102);
+        group.discovery_conns.push(101);
+        group.user_data_conns.push(102);
         assert_eq!(group.all_conns().len(), 3);
         assert!(group.has_data_conns());
+    }
+
+    /// Two participants that dial each other end up with one connection we
+    /// opened and one the peer opened under the same peer group and the same
+    /// role. Neither may displace the other: a connection dropped from the group
+    /// is no longer listed by `all_conns`, so nothing can ever tear it down, and
+    /// the group itself can be discarded while it is still live.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bidirectional_control_conns_both_stay_in_the_peer_group() {
+        use crate::rtps::transport::tcp::protocol::encode_locator;
+        use std::net::Ipv4Addr;
+
+        let registry = test_registry(0);
+        let peer_listener: SocketAddr = "127.0.0.1:7400".parse().unwrap();
+        let guid = addr_to_guid(peer_listener);
+
+        let outbound_id = registry.register_outbound_control_connection(
+            peer_listener,
+            CancellationToken::new(),
+            Arc::new(Mutex::new(None)),
+        );
+
+        // The peer dials back: the accepted socket carries its ephemeral source
+        // port, but the PEER_HELLO advertises the listener address we dialed, so
+        // both connections resolve to the same synthetic guid.
+        let inbound_id = registry.register_inbound_connection(
+            "127.0.0.1:54321".parse().unwrap(),
+            CancellationToken::new(),
+        );
+        let (writer_tx, _writer_rx) = mpsc::channel(8);
+        let hello =
+            ControlMsg::PeerHello { locator: encode_locator(Ipv4Addr::new(127, 0, 0, 1), 7400) };
+        registry.dispatch(inbound_id, hello.to_bytes(), &writer_tx).await;
+
+        {
+            let pc = registry.peer_connections.lock().unwrap();
+            let group = pc.get(&guid).expect("both control conns group under the listener addr");
+            let all = group.all_conns();
+            assert!(all.contains(&outbound_id), "outbound control conn dropped: {:?}", all);
+            assert!(all.contains(&inbound_id), "inbound control conn dropped: {:?}", all);
+        }
+
+        registry.remove_connection(outbound_id);
+        {
+            let pc = registry.peer_connections.lock().unwrap();
+            let group = pc.get(&guid).expect("group must outlive one of its connections");
+            assert_eq!(group.all_conns(), vec![inbound_id]);
+        }
+        assert!(registry.connections.get(&inbound_id).is_some());
+
+        // The surviving connection is still reachable from the unmatch path.
+        registry.remove_peer_by_addr(peer_listener);
+        assert_eq!(registry.connection_count(), 0);
+        assert_eq!(registry.peer_count(), 0);
+    }
+
+    /// Same collision one layer down: an inbound PORT_BIND inherits the guid the
+    /// cookie was issued under, which is the group holding our own outbound data
+    /// connection for that role.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bidirectional_data_conns_both_stay_in_the_peer_group() {
+        let registry = test_registry(0);
+        let peer_listener: SocketAddr = "127.0.0.1:7400".parse().unwrap();
+        let guid = addr_to_guid(peer_listener);
+
+        let discovery_port = PortManager::get_discovery_traffic_unicast_port(0, 0);
+        assert!(PortManager::is_discovery_unicast_port_logically(0, discovery_port));
+
+        let outbound_id = registry.register_outbound_data_connection(
+            peer_listener,
+            discovery_port,
+            CancellationToken::new(),
+        );
+
+        let cookie = [7u8; 16];
+        registry.cookie_to_port.insert(cookie, discovery_port);
+        registry.cookie_to_guid.insert(cookie, guid);
+        let inbound_id = registry.register_inbound_connection(
+            "127.0.0.1:54322".parse().unwrap(),
+            CancellationToken::new(),
+        );
+        let (writer_tx, _writer_rx) = mpsc::channel(8);
+        registry.dispatch(inbound_id, ControlMsg::PortBind { cookie }.to_bytes(), &writer_tx).await;
+
+        {
+            let pc = registry.peer_connections.lock().unwrap();
+            let group = pc.get(&guid).expect("both data conns group under the listener addr");
+            assert_eq!(group.discovery_conns, vec![outbound_id, inbound_id]);
+        }
+
+        registry.remove_peer_by_addr(peer_listener);
+        assert_eq!(registry.connection_count(), 0);
+        assert_eq!(registry.peer_count(), 0);
+    }
+
+    /// The tuning reaches the socket.
+    ///
+    /// Every timeout that lets a dead peer be noticed is a kernel setting, so if
+    /// these silently fail to apply there is nothing of ours left to observe: the
+    /// connection would just hang on the OS defaults (~15 min for unacked data,
+    /// keepalive off) and look healthy. What the kernel then does with them is
+    /// its own business — an expiry surfaces as an ordinary read/write error.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn socket_tuning_is_applied_to_the_stream() {
+        let tuning = TcpSocketTuning {
+            nodelay: true,
+            so_rcvbuf: None,
+            so_sndbuf: None,
+            unacked_timeout: Some(Duration::from_secs(7)),
+            keepalive: Some(KeepaliveParams {
+                time: Duration::from_secs(11),
+                interval: Duration::from_secs(3),
+                retries: 4,
+            }),
+        };
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept = tokio::spawn(async move { listener.accept().await.unwrap() });
+        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let _accepted = accept.await.unwrap();
+
+        apply_socket_tuning(&tcp, &tuning);
+
+        let sock = socket2::SockRef::from(&tcp);
+        assert!(tcp.nodelay().unwrap(), "nodelay must be set");
+        assert!(sock.keepalive().unwrap(), "keepalive must be enabled");
+        // The time/interval/retries getters exist only where the OS can read
+        // the values back; on Windows the keepalive params are write-only, so
+        // there it verifies keepalive is enabled and nothing further.
+        #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+        {
+            assert_eq!(sock.keepalive_time().unwrap(), Duration::from_secs(11));
+            assert_eq!(sock.keepalive_interval().unwrap(), Duration::from_secs(3));
+            assert_eq!(sock.keepalive_retries().unwrap(), 4);
+        }
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        assert_eq!(sock.tcp_user_timeout().unwrap(), Some(Duration::from_secs(7)));
+    }
+
+    /// `None` leaves the OS defaults alone rather than applying a zero.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn default_tuning_leaves_keepalive_off() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept = tokio::spawn(async move { listener.accept().await.unwrap() });
+        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let _accepted = accept.await.unwrap();
+
+        apply_socket_tuning(&tcp, &TcpSocketTuning::default());
+
+        let sock = socket2::SockRef::from(&tcp);
+        assert!(!sock.keepalive().unwrap(), "default tuning must not enable keepalive");
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        assert_eq!(
+            sock.tcp_user_timeout().unwrap(),
+            None,
+            "unacked timeout must be left at the OS default",
+        );
     }
 
     /// Removing a control connection purges its pending PORT_RESERVE cookies
     /// (reserved but never bound), without touching another peer's cookies.
     #[test]
     fn remove_control_connection_purges_pending_cookies() {
-        use crossbeam_channel::bounded;
-
-        let (d_tx, _d_rx) = bounded(8);
-        let (u_tx, _u_rx) = bounded(8);
-        let shared =
-            ConnectionRegistry::new(0, 0, [0u8; 12], TcpSocketTuning::default(), d_tx, u_tx);
+        let shared = test_registry(0);
 
         let addr: SocketAddr = "127.0.0.1:7400".parse().unwrap();
-        let (tx, _rx) = mpsc::channel::<Vec<u8>>(8);
         let conn_id = shared.register_outbound_control_connection(
             addr,
-            tx,
             CancellationToken::new(),
             Arc::new(Mutex::new(None)),
         );

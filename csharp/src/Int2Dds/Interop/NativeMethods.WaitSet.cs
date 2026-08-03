@@ -9,9 +9,6 @@ namespace Int2Dds.Interop
         internal static extern int int2dds_waitset_new(out IntPtr waitset_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern int int2dds_waitset_wait(IntPtr waitset, long timeout_ms);
-
-        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_waitset_wait_ex(IntPtr waitset, long timeout_ms, out IntPtr conditions_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
@@ -21,28 +18,16 @@ namespace Int2Dds.Interop
         internal static extern int int2dds_waitset_delete(IntPtr waitset);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern int int2dds_waitset_attach_guard_condition(IntPtr waitset, IntPtr condition);
+        internal static extern int int2dds_waitset_attach_guardcondition(IntPtr waitset, IntPtr condition);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern int int2dds_waitset_detach_guard_condition(IntPtr waitset, IntPtr condition);
+        internal static extern int int2dds_waitset_detach_guardcondition(IntPtr waitset, IntPtr condition);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern int int2dds_waitset_attach_condition(IntPtr waitset, IntPtr condition);
+        internal static extern int int2dds_waitset_attach_statuscondition(IntPtr waitset, IntPtr condition);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern int int2dds_waitset_detach_condition(IntPtr waitset, IntPtr condition);
-
-        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern int int2dds_waitset_attach_datareader(IntPtr waitset, IntPtr reader);
-
-        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern int int2dds_waitset_detach_datareader(IntPtr waitset, IntPtr reader);
-
-        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern int int2dds_waitset_attach_datawriter(IntPtr waitset, IntPtr writer);
-
-        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern int int2dds_waitset_detach_datawriter(IntPtr waitset, IntPtr writer);
+        internal static extern int int2dds_waitset_detach_statuscondition(IntPtr waitset, IntPtr condition);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_waitset_attach_readcondition(IntPtr waitset, IntPtr condition);

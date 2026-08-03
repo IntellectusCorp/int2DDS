@@ -20,6 +20,16 @@ pub trait Condition: ConditionInternal {
 pub(crate) trait ConditionInternal: Debug {
     fn set_waitset_callback(&self, f: Option<Arc<dyn Fn() + Send + Sync>>);
     fn as_any(&self) -> &dyn Any;
+
+    /// Stable identity of the underlying condition object.
+    ///
+    /// A condition reaches a WaitSet as `Arc<dyn Condition>`, and every
+    /// `Into<Arc<dyn Condition + Send + Sync>>` allocates a *fresh* Arc, so
+    /// pointer equality on the trait object says nothing about whether two
+    /// handles denote the same condition. Cloning a condition shares its inner
+    /// `Arc` fields instead, so the address of `waitset_callback` identifies
+    /// the condition across handles, and does so without allocating.
+    fn identity(&self) -> *const ();
 }
 
 macro_rules! impl_dds_condition_impl {
@@ -41,6 +51,10 @@ macro_rules! impl_dds_condition_impl {
 
             fn as_any(&self) -> &dyn Any {
                 self
+            }
+
+            fn identity(&self) -> *const () {
+                ::std::sync::Arc::as_ptr(&self.waitset_callback) as *const ()
             }
         }
         impl<$($impl_generics)*> $type

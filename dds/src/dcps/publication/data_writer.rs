@@ -1858,22 +1858,19 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 extensibility,
             )?
         };
-        match format {
-            SerializationFormat::Cdr => {
-                let mut payload = Vec::with_capacity(serialized_key.len() + 4);
-                payload.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // CDR_BE, no options
-                payload.extend_from_slice(serialized_key);
-                Ok(Arc::from(payload))
+        // Encode the key as a wire serializedKey in `format` via the type support, so the
+        // encapsulation header and body alignment always agree (XCDR1 => 8-byte max
+        // alignment, XCDR2 => max-align-4). The previous inline CDR arm reused the
+        // max-align-4 KeyHash body under an XCDR1 (CDR_BE) header, which a spec-compliant
+        // peer misparses for keys carrying an 8-byte member at a 4-but-not-8 offset.
+        match typed {
+            // Have the value: encode the key straight to `format`.
+            Some(data) => self.type_support.serialize_key_payload(data as &dyn Any, &format),
+            // Only the headerless big-endian key bytes: decode them, then re-encode in `format`.
+            None => {
+                let key_any = self.type_support.deserialize_key(serialized_key)?;
+                self.type_support.serialize_key_payload(&*key_any, &format)
             }
-            SerializationFormat::Xcdr { .. } => match typed {
-                // Have the value: encode the key straight to XCDR2.
-                Some(data) => self.type_support.serialize_key_payload(data as &dyn Any, &format),
-                // Only the big-endian key bytes: decode them, then re-encode as XCDR2.
-                None => {
-                    let key_any = self.type_support.deserialize_key(serialized_key)?;
-                    self.type_support.serialize_key_payload(&*key_any, &format)
-                }
-            },
         }
     }
 

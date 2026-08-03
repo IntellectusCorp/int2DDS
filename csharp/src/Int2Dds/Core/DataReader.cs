@@ -51,40 +51,43 @@ namespace Int2Dds.Core
             _topic = topic;
             _buffer = ArrayPool<byte>.Shared.Rent(DefaultBufferSize);
 
-            // Always create a QoS handle so that the native layer receives the
-            // correct DataRepresentation default even when the caller does not
-            // supply an explicit QoS object.
+            // With an explicit QoS, build a handle and apply it (Specific). With
+            // no QoS, pass NULL so the native layer engages QosKind::Default — the
+            // QoS-profile / spec-default resolution chain — instead of overriding
+            // it with a bare default handle.
             IntPtr qosHandle = IntPtr.Zero;
-            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_create_default(out qosHandle));
-            try
+            if (qos != null)
             {
-                if (qos != null)
-                    ApplyReaderQos(qosHandle, qos);
-
-                // Advertise the core default (single source of truth) rather than
-                // a hardcoded value, so reader/writer stay compatible if it changes.
-                if (qos?.DataRepresentation == null)
-                    ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_set_data_representation(
-                        qosHandle, NativeMethods.int2dds_default_data_representation()));
-            }
-            catch
-            {
-                NativeMethods.int2dds_datareader_qos_destroy(qosHandle);
-                throw;
-            }
-
-            try
-            {
-                if (listener != null)
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_create_default(out qosHandle));
+                try
                 {
-                    unsafe
+                    QosMarshal.ApplyReaderQos(qosHandle, qos);
+
+                    // Advertise the core default (single source of truth) rather than
+                    // a hardcoded value, so reader/writer stay compatible if it changes.
+                    if (qos.DataRepresentation == null)
+                        ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_set_data_representation(
+                            qosHandle, NativeMethods.int2dds_default_data_representation()));
+                }
+                catch
+                {
+                    NativeMethods.int2dds_datareader_qos_destroy(qosHandle);
+                    throw;
+                }
+            }
+
+            try
+            {
+                unsafe
+                {
+                    if (listener != null)
                     {
                         var (nativeListener, contextHandle) = ListenerRegistry.CreateReaderListener(listener, this);
                         _listenerContextHandle = contextHandle;
                         try
                         {
                             ReturnCodeHelper.CheckReturn(
-                                NativeMethods.int2dds_create_datareader_with_listener(
+                                NativeMethods.int2dds_create_datareader(
                                     subscriber.Handle, topic.Handle, qosHandle, &nativeListener, statusMask, out _handle));
                         }
                         catch
@@ -94,16 +97,18 @@ namespace Int2Dds.Core
                             throw;
                         }
                     }
-                }
-                else
-                {
-                    ReturnCodeHelper.CheckReturn(
-                        NativeMethods.int2dds_create_datareader(subscriber.Handle, topic.Handle, qosHandle, out _handle));
+                    else
+                    {
+                        ReturnCodeHelper.CheckReturn(
+                            NativeMethods.int2dds_create_datareader(
+                                subscriber.Handle, topic.Handle, qosHandle, null, 0, out _handle));
+                    }
                 }
             }
             finally
             {
-                NativeMethods.int2dds_datareader_qos_destroy(qosHandle);
+                if (qosHandle != IntPtr.Zero)
+                    NativeMethods.int2dds_datareader_qos_destroy(qosHandle);
             }
         }
 
@@ -129,7 +134,7 @@ namespace Int2Dds.Core
                         try
                         {
                             ReturnCodeHelper.CheckReturn(
-                                NativeMethods.int2dds_create_datareader_with_profile_and_listener(
+                                NativeMethods.int2dds_create_datareader_with_profile(
                                     subscriber.Handle, topic.Handle, pQos, &nativeListener, statusMask, out _handle));
                         }
                         catch
@@ -143,7 +148,7 @@ namespace Int2Dds.Core
                     {
                         ReturnCodeHelper.CheckReturn(
                             NativeMethods.int2dds_create_datareader_with_profile(
-                                subscriber.Handle, topic.Handle, pQos, out _handle));
+                                subscriber.Handle, topic.Handle, pQos, null, 0, out _handle));
                     }
                 }
             }
@@ -269,7 +274,7 @@ namespace Int2Dds.Core
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
-            var ret = NativeMethods.int2dds_take_serialized_batch(_handle, maxSamples, out var seqHandle);
+            var ret = NativeMethods.int2dds_datareader_take_serialized_batch(_handle, maxSamples, out var seqHandle);
             if (ret == ReturnCode.NoData)
                 return Int2Dds.Internal.EmptyArrayHolder<(Sample<T>, SampleInfo)>.Value;
             ReturnCodeHelper.CheckReturn(ret);
@@ -294,7 +299,7 @@ namespace Int2Dds.Core
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
-            var ret = NativeMethods.int2dds_read_serialized_batch(_handle, maxSamples, out var seqHandle);
+            var ret = NativeMethods.int2dds_datareader_read_serialized_batch(_handle, maxSamples, out var seqHandle);
             if (ret == ReturnCode.NoData)
                 return Int2Dds.Internal.EmptyArrayHolder<(Sample<T>, SampleInfo)>.Value;
             ReturnCodeHelper.CheckReturn(ret);
@@ -327,9 +332,13 @@ namespace Int2Dds.Core
         public (int totalCount, int currentCount) GetSubscriptionMatchedStatus()
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
-            ReturnCodeHelper.CheckReturn(
-                NativeMethods.int2dds_get_subscription_matched_status(_handle, out var total, out var current));
-            return (total, current);
+            unsafe
+            {
+                NativeSubscriptionMatchedStatus native;
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_datareader_get_subscription_matched_status(_handle, &native));
+                return (native.TotalCount, native.CurrentCount);
+            }
         }
 
         /// <summary>
@@ -556,7 +565,7 @@ namespace Int2Dds.Core
             UIntPtr size;
             bool validData;
             IntPtr loan;
-            int ret = NativeMethods.int2dds_take_serialized_loaned(_handle, out data, out size, out validData, out loan);
+            int ret = NativeMethods.int2dds_datareader_take_serialized_loaned(_handle, out data, out size, out validData, out loan);
             if (ret == ReturnCode.NoData) return null;
             ReturnCodeHelper.CheckReturn(ret);
 
@@ -570,7 +579,7 @@ namespace Int2Dds.Core
             finally
             {
                 if (loan != IntPtr.Zero)
-                    NativeMethods.int2dds_return_serialized_loan(loan);
+                    NativeMethods.int2dds_datareader_return_serialized_loan(loan);
             }
         }
 
@@ -584,7 +593,7 @@ namespace Int2Dds.Core
             ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_get_qos(_handle, out var qosHandle));
             try
             {
-                return ReadReaderQos(qosHandle);
+                return QosMarshal.ReadReaderQos(qosHandle);
             }
             finally
             {
@@ -605,7 +614,7 @@ namespace Int2Dds.Core
             ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_get_qos(_handle, out var qosHandle));
             try
             {
-                ApplyReaderQos(qosHandle, qos);
+                QosMarshal.ApplyReaderQos(qosHandle, qos);
                 ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_set_qos(_handle, qosHandle));
             }
             finally
@@ -747,8 +756,8 @@ namespace Int2Dds.Core
 
             IntPtr seqHandle;
             var ret = take
-                ? NativeMethods.int2dds_datareader_take_w_readcondition(_handle, condition.Handle, maxSamples, out seqHandle)
-                : NativeMethods.int2dds_datareader_read_w_readcondition(_handle, condition.Handle, maxSamples, out seqHandle);
+                ? NativeMethods.int2dds_datareader_take_serialized_batch_w_readcondition(_handle, condition.Handle, maxSamples, out seqHandle)
+                : NativeMethods.int2dds_datareader_read_serialized_batch_w_readcondition(_handle, condition.Handle, maxSamples, out seqHandle);
 
             if (ret == ReturnCode.NoData)
             {
@@ -806,8 +815,8 @@ namespace Int2Dds.Core
                 fixed (byte* pHandle = handle)
                 {
                     ret = take
-                        ? NativeMethods.int2dds_take_instance_serialized_batch(_handle, pHandle, maxSamples, sampleStates, viewStates, instanceStates, out seqHandle)
-                        : NativeMethods.int2dds_read_instance_serialized_batch(_handle, pHandle, maxSamples, sampleStates, viewStates, instanceStates, out seqHandle);
+                        ? NativeMethods.int2dds_datareader_take_instance_serialized_batch(_handle, pHandle, maxSamples, sampleStates, viewStates, instanceStates, out seqHandle)
+                        : NativeMethods.int2dds_datareader_read_instance_serialized_batch(_handle, pHandle, maxSamples, sampleStates, viewStates, instanceStates, out seqHandle);
                 }
             }
 
@@ -876,7 +885,7 @@ namespace Int2Dds.Core
                 {
                     fixed (byte* pBuffer = _buffer)
                     {
-                        var ret = NativeMethods.int2dds_take_serialized(
+                        var ret = NativeMethods.int2dds_datareader_take_serialized(
                             _handle, pBuffer, (UIntPtr)_buffer.Length, out var actualSize, out var validData);
 
                         if (ret == ReturnCode.BufferTooSmall)
@@ -907,7 +916,7 @@ namespace Int2Dds.Core
                 {
                     fixed (byte* pBuffer = _buffer)
                     {
-                        var ret = NativeMethods.int2dds_read_serialized(
+                        var ret = NativeMethods.int2dds_datareader_read_serialized(
                             _handle, pBuffer, (UIntPtr)_buffer.Length, out var actualSize, out var validData);
 
                         if (ret == ReturnCode.BufferTooSmall)
@@ -939,7 +948,7 @@ namespace Int2Dds.Core
                     fixed (byte* pBuffer = _buffer)
                     {
                         NativeSampleInfo nativeInfo;
-                        var ret = NativeMethods.int2dds_take_serialized_w_info(
+                        var ret = NativeMethods.int2dds_datareader_take_serialized_w_info(
                             _handle, pBuffer, (UIntPtr)_buffer.Length, out var actualSize, &nativeInfo);
 
                         if (ret == ReturnCode.BufferTooSmall)
@@ -972,7 +981,7 @@ namespace Int2Dds.Core
                     fixed (byte* pBuffer = _buffer)
                     {
                         NativeSampleInfo nativeInfo;
-                        var ret = NativeMethods.int2dds_read_serialized_w_info(
+                        var ret = NativeMethods.int2dds_datareader_read_serialized_w_info(
                             _handle, pBuffer, (UIntPtr)_buffer.Length, out var actualSize, &nativeInfo);
 
                         if (ret == ReturnCode.BufferTooSmall)
@@ -1061,105 +1070,6 @@ namespace Int2Dds.Core
                 native.GenerationRank,
                 native.AbsoluteGenerationRank,
                 native.ValidData);
-        }
-
-        private static void ApplyReaderQos(IntPtr qosHandle, DataReaderQos qos)
-        {
-            if (qos.Reliability != null)
-                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_set_reliability(
-                    qosHandle, (int)qos.Reliability.Kind, qos.Reliability.MaxBlockingTimeNs));
-
-            if (qos.Durability != null)
-                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_set_durability(
-                    qosHandle, (int)qos.Durability.Kind));
-
-            if (qos.History != null)
-                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_set_history(
-                    qosHandle, (int)qos.History.Kind, qos.History.Depth));
-
-            if (qos.Ownership != null)
-                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_set_ownership(
-                    qosHandle, (int)qos.Ownership.Kind));
-
-            if (qos.ResourceLimits != null)
-                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_set_resource_limits(
-                    qosHandle, qos.ResourceLimits.MaxSamples, qos.ResourceLimits.MaxInstances,
-                    qos.ResourceLimits.MaxSamplesPerInstance));
-
-            if (qos.DestinationOrder != null)
-                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_set_destination_order(
-                    qosHandle, (int)qos.DestinationOrder.Kind));
-
-            if (qos.TimeBasedFilter != null)
-                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_set_time_based_filter(
-                    qosHandle, qos.TimeBasedFilter.MinimumSeparationNs));
-
-            if (qos.LatencyBudget != null)
-                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_set_latency_budget(
-                    qosHandle, qos.LatencyBudget.DurationNs));
-
-            if (qos.UserData != null && qos.UserData.Data != null && qos.UserData.Data.Length > 0)
-            {
-                unsafe
-                {
-                    fixed (byte* pData = qos.UserData.Data)
-                    {
-                        ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_set_user_data(
-                            qosHandle, pData, (UIntPtr)qos.UserData.Data.Length));
-                    }
-                }
-            }
-
-            if (qos.ReaderDataLifecycle != null)
-                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_set_reader_data_lifecycle(
-                    qosHandle, qos.ReaderDataLifecycle.AutopurgeNowriterNs,
-                    qos.ReaderDataLifecycle.AutopurgeDisposedNs));
-
-            if (qos.DataRepresentation != null)
-                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_set_data_representation(
-                    qosHandle, (int)qos.DataRepresentation.Kind));
-
-            if (qos.Deadline != null)
-                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_set_deadline(
-                    qosHandle, qos.Deadline.PeriodNs));
-
-            if (qos.Liveliness != null)
-                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_set_liveliness(
-                    qosHandle, (int)qos.Liveliness.Kind, qos.Liveliness.LeaseDurationNs));
-        }
-
-        private static DataReaderQos ReadReaderQos(IntPtr h)
-        {
-            NativeMethods.int2dds_datareader_qos_get_reliability(h, out var relKind, out var relTime);
-            NativeMethods.int2dds_datareader_qos_get_durability(h, out var durKind);
-            NativeMethods.int2dds_datareader_qos_get_history(h, out var histKind, out var histDepth);
-            NativeMethods.int2dds_datareader_qos_get_ownership(h, out var ownKind);
-            NativeMethods.int2dds_datareader_qos_get_resource_limits(h, out var maxS, out var maxI, out var maxPI);
-            NativeMethods.int2dds_datareader_qos_get_destination_order(h, out var destKind);
-            NativeMethods.int2dds_datareader_qos_get_deadline(h, out var deadlineNs);
-            NativeMethods.int2dds_datareader_qos_get_liveliness(h, out var liveKind, out var liveNs);
-            NativeMethods.int2dds_datareader_qos_get_data_representation(h, out var reprKind);
-            NativeMethods.int2dds_datareader_qos_get_latency_budget(h, out var latNs);
-            NativeMethods.int2dds_datareader_qos_get_time_based_filter(h, out var tbfNs);
-            NativeMethods.int2dds_datareader_qos_get_reader_data_lifecycle(h, out var purgeNowriterNs, out var purgeDisposedNs);
-
-            return new DataReaderQos
-            {
-                Reliability = new Reliability((ReliabilityKind)relKind, TimeSpan.FromTicks(relTime / 100)),
-                Durability = new Durability((DurabilityKind)durKind),
-                History = new History((HistoryKind)histKind, histDepth),
-                Ownership = new Ownership((OwnershipKind)ownKind),
-                ResourceLimits = new ResourceLimits(maxS, maxI, maxPI),
-                DestinationOrder = new DestinationOrder((DestinationOrderKind)destKind),
-                Deadline = new Deadline(TimeSpan.FromTicks(deadlineNs / 100)),
-                Liveliness = new Liveliness((LivelinessKind)liveKind, TimeSpan.FromTicks(liveNs / 100)),
-                DataRepresentation = new DataRepresentation((DataRepresentationKind)reprKind),
-                LatencyBudget = new LatencyBudget(TimeSpan.FromTicks(latNs / 100)),
-                TimeBasedFilter = new TimeBasedFilter(TimeSpan.FromTicks(tbfNs / 100)),
-                ReaderDataLifecycle = new ReaderDataLifecycle(
-                    TimeSpan.FromTicks(purgeNowriterNs / 100),
-                    TimeSpan.FromTicks(purgeDisposedNs / 100)),
-            };
         }
 
         /// <summary>

@@ -83,6 +83,13 @@ namespace Int2Dds.Core
                 }
                 else
                 {
+                    // A keyed topic needs field metadata to advertise a TypeObject for a
+                    // spec-conformant KeyHash; the name-only keyed path was removed (#334).
+                    if (hasKey)
+                        throw new NotSupportedException(
+                            $"Keyed topic '{topicName}' (type '{_typeName}') needs DdsTypeInfoFields " +
+                            "metadata to advertise a TypeObject for a spec-conformant KeyHash (#334).");
+
                     unsafe
                     {
                         var topicNameBytes = Encoding.UTF8.GetBytes(topicName + '\0');
@@ -92,12 +99,11 @@ namespace Int2Dds.Core
                         fixed (byte* pTypeName = typeNameBytes)
                         {
                             ReturnCodeHelper.CheckReturn(
-                                NativeMethods.int2dds_create_topic_keyed(
+                                NativeMethods.int2dds_create_topic(
                                     participant.Handle,
                                     pTopicName,
                                     pTypeName,
                                     extensibility,
-                                    hasKey,
                                     qosHandle,
                                     out _handle));
                         }
@@ -120,8 +126,14 @@ namespace Int2Dds.Core
             _name = topicName;
             var attr = typeof(T).GetCustomAttribute<DdsTypeAttribute>();
             _typeName = attr?.TypeName ?? typeof(T).Name;
-            var extensibility = attr?.Extensibility ?? 0;
+            var extensibility = attr?.Extensibility ?? NativeMethods.int2dds_default_extensibility();
             var hasKey = attr?.HasKey ?? false;
+
+            // Keyed topics need a full TypeObject, which the profile path cannot build (#334).
+            if (hasKey)
+                throw new NotSupportedException(
+                    $"Keyed topic '{topicName}' cannot be created from a QoS profile; keyed topics " +
+                    "need field metadata for a spec-conformant KeyHash (#334).");
 
             unsafe
             {
@@ -139,7 +151,6 @@ namespace Int2Dds.Core
                             pTopicName,
                             pTypeName,
                             (int)extensibility,
-                            hasKey,
                             pQos,
                             out _handle));
                 }
