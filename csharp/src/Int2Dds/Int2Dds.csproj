@@ -63,4 +63,32 @@
     <Compile Remove="Async/**/*.cs" />
   </ItemGroup>
 
+  <!--
+    Native library packaging.
+    runtimes/{rid}/native/ is the standard RID asset selection path on .NET Core/5+.
+    CI fills runtimes/ before a release build. Local development builds have no
+    such directory, so this is conditional to keep pack from breaking.
+  -->
+  <ItemGroup>
+    <None Include="runtimes/**/native/*"
+          Pack="true"
+          PackagePath="runtimes/"
+          Visible="false"
+          Condition="Exists('$(MSBuildThisFileDirectory)runtimes')" />
+  </ItemGroup>
+
+  <!-- Native copy logic for .NET Framework consumers. The net45/net48 files stay
+       as they are because their name and location are the NuGet auto-import
+       convention; the shared file holding the actual logic is packed alongside. -->
+  <ItemGroup>
+    <None Include="build/net45/Int2Dds.targets" Pack="true" PackagePath="build/net45/" Visible="false" />
+    <None Include="build/net48/Int2Dds.targets" Pack="true" PackagePath="build/net48/" Visible="false" />
+    <None Include="build/Int2Dds.Native.targets" Pack="true" PackagePath="build/" Visible="false" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
 </Project>
