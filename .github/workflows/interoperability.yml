@@ -204,21 +204,12 @@ jobs:
       - name: Summarize failures
         run: |
           python3 repo/.github/scripts/summarize_failures.py \
-            junit_interoperability_report.xml failures.txt summary.txt
-          echo "=== new failures vs baseline ==="
-          if [ -f repo/.github/interop_known_failures.txt ]; then
-            comm -23 failures.txt <(sort repo/.github/interop_known_failures.txt) \
-              | tee new_failures.txt
-          else
-            echo "no baseline committed yet"
-          fi
+            junit_interoperability_report.xml summary.txt
       - name: Upload failure summary
         uses: actions/upload-artifact@v4
         with:
           name: failure_summary
-          path: |
-            failures.txt
-            summary.txt
+          path: summary.txt
       - name: Create test logs archive
         run: |
           if [ -d "./logs" ] && [ "$(ls -A ./logs)" ]; then
