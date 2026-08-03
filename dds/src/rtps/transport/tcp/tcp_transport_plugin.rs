@@ -174,6 +174,8 @@ impl TcpTransportPlugin {
                 user_data_tx,
                 tls_config.clone(),
                 tuning,
+                tcp_config.tls_handshake_timeout,
+                tcp_config.peer_handshake_timeout,
                 listener_cancel,
             )
             .map_err(|e| {

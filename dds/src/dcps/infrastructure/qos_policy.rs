@@ -866,8 +866,16 @@ pub const PROP_TCP_PUBLIC_ADDRESS: &str = "int2dds.transport.TCPv4.public_addres
 pub const PROP_TCP_NODELAY: &str = "int2dds.transport.TCPv4.nodelay";
 /// Outbound connect timeout, milliseconds. Default `5000`.
 pub const PROP_TCP_CONNECT_TIMEOUT_MS: &str = "int2dds.transport.TCPv4.connect_timeout_ms";
-/// BIND handshake response timeout, milliseconds. Default `5000`.
-pub const PROP_TCP_BIND_TIMEOUT_MS: &str = "int2dds.transport.TCPv4.bind_timeout_ms";
+/// Peer handshake timeout, milliseconds. Covers the PEER_HELLO / PORT_RESERVE /
+/// PORT_BIND exchange, not the TCP connect — that one is
+/// [`PROP_TCP_CONNECT_TIMEOUT_MS`]. Outbound it bounds each response wait;
+/// inbound it bounds the window an accepted connection has to finish the
+/// exchange before it is closed. Default `5000`.
+pub const PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS: &str =
+    "int2dds.transport.TCPv4.peer_handshake_timeout_ms";
+/// TLS handshake timeout, milliseconds. Default `5000`.
+pub const PROP_TCP_TLS_HANDSHAKE_TIMEOUT_MS: &str =
+    "int2dds.transport.TCPv4.tls_handshake_timeout_ms";
 /// Max time (ms) unacknowledged data may stay outstanding before the OS drops
 /// the connection (`TCP_USER_TIMEOUT`), so a dead link surfaces as a write error
 /// instead of blocking the sender ~indefinitely. When keepalive is also set,
