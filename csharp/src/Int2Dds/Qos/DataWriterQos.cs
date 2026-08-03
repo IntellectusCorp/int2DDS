@@ -18,6 +18,9 @@ namespace Int2Dds.Qos
         public Deadline? Deadline { get; set; }
         public Liveliness? Liveliness { get; set; }
 
+        /// <summary>DATA_FRAG max fragment size in bytes (int2DDS extension).</summary>
+        public int? DataFrag { get; set; }
+
         public DataWriterQos() { }
     }
 }

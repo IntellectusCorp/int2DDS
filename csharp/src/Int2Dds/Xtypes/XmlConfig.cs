@@ -27,7 +27,6 @@ namespace Int2Dds.Xtypes
             if (paths == null || paths.Length == 0)
                 throw new ArgumentException("at least one path is required", nameof(paths));
 
-            var factory = DomainParticipantFactory.Instance;
             var ptrs = new IntPtr[paths.Length];
             try
             {
@@ -41,7 +40,7 @@ namespace Int2Dds.Xtypes
                     ptrs[i] = mem;
                 }
                 ReturnCodeHelper.CheckReturn(
-                    NativeMethods.int2dds_load_profiles(factory.Handle, ptrs, (UIntPtr)paths.Length));
+                    NativeMethods.int2dds_load_profiles(ptrs, (UIntPtr)paths.Length));
             }
             finally
             {
@@ -56,12 +55,11 @@ namespace Int2Dds.Xtypes
         /// </summary>
         public static unsafe DynamicTypeSupport GetDynamicTypeSupport(string typeName)
         {
-            var factory = DomainParticipantFactory.Instance;
             var nb = NativeString.ToCStr(typeName);
             fixed (byte* p = nb)
             {
                 ReturnCodeHelper.CheckReturn(
-                    NativeMethods.int2dds_get_dynamic_type_support(factory.Handle, p, out IntPtr h));
+                    NativeMethods.int2dds_get_dynamic_type_support(p, out IntPtr h));
                 return new DynamicTypeSupport(h);
             }
         }

@@ -1,0 +1,38 @@
+<Project>
+  <!--
+    .NET Framework (net45/net48) does not do RID-graph based asset selection, so
+    the native library under runtimes/{rid}/native/ is not copied automatically.
+    Copy it here instead.
+
+    build/<tfm>/Int2Dds.targets for net45 and net48 both <Import> this file.
+    NuGet auto-import only works through the build/<tfm>/<PackageId>.targets name
+    and location convention, so those two files stay, while the actual logic lives
+    here in one place.
+
+    The RID is chosen from $(PlatformTarget). Most .NET Framework projects have
+    $(Platform) set to AnyCPU, which alone cannot identify a RID. On top of that,
+    the Visual Studio EXE template turns on <Prefer32Bit>true</Prefer32Bit> by
+    default and runs an AnyCPU exe as a 32-bit process, so win-x86 must be chosen
+    when PlatformTarget is empty but Prefer32Bit is true — otherwise the x64 DLL
+    is copied into a 32-bit process and the first P/Invoke throws
+    BadImageFormatException (see the bitness warning in README.md).
+
+    This target must be a no-op when the native file is absent, since the file is
+    included in every consumer's build.
+  -->
+  <PropertyGroup>
+    <_Int2DdsNativeRid Condition="'$(PlatformTarget)' == 'x86'">win-x86</_Int2DdsNativeRid>
+    <_Int2DdsNativeRid Condition="'$(PlatformTarget)' == 'ARM64'">win-arm64</_Int2DdsNativeRid>
+    <_Int2DdsNativeRid Condition="'$(_Int2DdsNativeRid)' == '' AND '$(Prefer32Bit)' == 'true'">win-x86</_Int2DdsNativeRid>
+    <_Int2DdsNativeRid Condition="'$(_Int2DdsNativeRid)' == ''">win-x64</_Int2DdsNativeRid>
+    <_Int2DdsNativeSource>$(MSBuildThisFileDirectory)../runtimes/$(_Int2DdsNativeRid)/native/int2dds_ffi.dll</_Int2DdsNativeSource>
+  </PropertyGroup>
+
+  <ItemGroup Condition="Exists('$(_Int2DdsNativeSource)')">
+    <None Include="$(_Int2DdsNativeSource)">
+      <Link>int2dds_ffi.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+  </ItemGroup>
+</Project>

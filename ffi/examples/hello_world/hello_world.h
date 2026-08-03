@@ -100,21 +100,19 @@ static inline bool HelloWorld_deserialize_cdr(
     return int2dds_cdr_reader_error(&r) == INT2DDS_CDR_OK;
 }
 
-static inline size_t HelloWorld_serialize_key(
-    const HelloWorld *val,
-    uint8_t *buf,
-    size_t capacity)
-{
-    (void)val; (void)buf; (void)capacity;
-    return 0;
-}
-
 static inline Int2DdsTypeInfo* HelloWorld_type_info(void) {
     Int2DdsTypeInfo *ti;
     int2dds_type_info_create("HelloWorld", 1, &ti);
     int2dds_type_info_add_field(ti, "index", INT2DDS_FIELD_UINT32, 0);
     int2dds_type_info_add_string_field(ti, "message", 0, 0);
     return ti;
+}
+
+static inline Int2DdsRet HelloWorld_create_topic(const Int2DdsParticipant *participant, const char *topic_name, const Int2DdsTopicQos *qos, Int2DdsTopic **topic_out) {
+    Int2DdsTypeInfo *ti = HelloWorld_type_info();
+    Int2DdsRet ret = int2dds_create_topic_with_type_info(participant, topic_name, ti, qos, topic_out);
+    int2dds_type_info_destroy(ti);
+    return ret;
 }
 
 #endif /* HELLO_WORLD_IDL_H */

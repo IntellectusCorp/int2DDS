@@ -512,11 +512,9 @@ pub unsafe extern "C" fn int2dds_type_info_create(
 
     let name_str = cstr_arg!(type_name);
 
-    let ext_kind = match extensibility {
-        0 => ExtensibilityKind::Final,
-        1 => ExtensibilityKind::Appendable,
-        2 => ExtensibilityKind::Mutable,
-        _ => return INT2DDS_RET_INVALID_ARGUMENT,
+    let ext_kind = match crate::topic::resolve_extensibility(extensibility) {
+        Some(k) => k,
+        None => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
     let ti = Box::new(Int2DdsTypeInfo::new(name_str.to_string(), ext_kind));
@@ -872,7 +870,10 @@ pub unsafe extern "C" fn int2dds_type_info_to_type_object(
     check_null!(type_info);
     check_null!(out);
     let to = (*type_info).build_type_object();
-    *out = Box::into_raw(Box::new(crate::dynamic::Int2DdsTypeObject::from_type_object(to)));
+    let deps = (*type_info).dependency_closure();
+    *out = Box::into_raw(Box::new(crate::dynamic::Int2DdsTypeObject::from_type_object_with_deps(
+        to, deps,
+    )));
     INT2DDS_RET_OK
 }
 

@@ -9,7 +9,7 @@
 
     The soname is embedded by ffi/build.rs as libint2dds_ffi.so.<major>,
     derived from the workspace version in the repo-root Cargo.toml. For version
-    0.0.1 the expected soname is therefore "libint2dds_ffi.so.0".
+    0.1.1 the expected soname is therefore "libint2dds_ffi.so.0".
 
     Handles both 64-bit (x86_64, aarch64) and 32-bit (armhf) ELF objects.
 
@@ -23,7 +23,7 @@
     .\ffi\docker\check-soname.ps1
 
 .EXAMPLE
-    .\ffi\docker\check-soname.ps1 -Path .\ffi\dist\linux-x86_64\libint2dds_ffi.so.0.0.1
+    .\ffi\docker\check-soname.ps1 -Path .\ffi\dist\linux-x86_64\libint2dds_ffi.so.0.1.1
 #>
 [CmdletBinding()]
 param(

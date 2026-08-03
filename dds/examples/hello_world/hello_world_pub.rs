@@ -67,9 +67,9 @@ impl DataWriterListener for PubListener {
         status: &int2dds::infrastructure::status::PublicationMatchedStatus,
     ) {
         if status.current_count() > 0 {
-            info!("Subscriber matched!");
+            println!("Subscriber matched!");
         } else {
-            info!("No subscribers.");
+            println!("No subscribers.");
         }
     }
 
@@ -127,14 +127,9 @@ fn main() {
         .unwrap();
 
     let wqos = writer.get_qos().unwrap();
+    println!("[publisher INFO] domain_id: {}, topic: {}", domain_id, TOPIC_NAME);
     println!(
-        "[publisher INFO] domain_id: {}, hostname: {:?}, topic: {}",
-        domain_id,
-        hostname::get().unwrap(),
-        TOPIC_NAME
-    );
-    println!(
-        "[publisher qos] reliability: {:?}, durability: {:?}, history: {:?} ",
+        "[publisher qos] reliability: {:?}, durability: {:?}, history: {:?}",
         wqos.reliability.kind, wqos.durability.kind, wqos.history.kind
     );
 
@@ -152,12 +147,9 @@ fn main() {
 
     let mut index = 1;
     while !shutdown.is_stopped() {
-        let data = HelloWorld {
-            index,
-            message: format!("[{:?}]HelloWorld_d{}", hostname::get().unwrap(), domain_id),
-        };
+        let data = HelloWorld { index, message: format!("[Rust]HelloWorld_d{}", domain_id) };
         writer.write(&data, InstanceHandle::NIL).unwrap();
-        info!("Published {:?}", data);
+        println!("Published {:?}", data);
         if shutdown.wait_timeout(PUBLISH_INTERVAL) {
             break;
         }

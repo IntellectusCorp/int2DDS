@@ -27,8 +27,8 @@ use int2dds::{
     domain::qos::DomainParticipantQos,
     infrastructure::qos_policy::{
         DataRepresentationId, DataRepresentationQosPolicy, DestinationOrderQosPolicyKind,
-        DurabilityQosPolicyKind, HistoryQosPolicyKind, LivelinessQosPolicyKind,
-        OwnershipQosPolicyKind, ReliabilityQosPolicyKind,
+        DurabilityQosPolicyKind, HistoryQosPolicyKind, LifespanReferenceQosPolicyKind,
+        LivelinessQosPolicyKind, OwnershipQosPolicyKind, ReliabilityQosPolicyKind,
     },
     publication::qos::{DataWriterQos, PublisherQos},
     subscription::qos::{DataReaderQos, SubscriberQos},
@@ -89,6 +89,10 @@ pub const INT2DDS_QOS_OWNERSHIP_EXCLUSIVE: i32 = 1;
 // DestinationOrder kinds
 pub const INT2DDS_QOS_DEST_ORDER_BY_RECEPTION: i32 = 0;
 pub const INT2DDS_QOS_DEST_ORDER_BY_SOURCE: i32 = 1;
+
+// LifespanReference kinds
+pub const INT2DDS_QOS_LIFESPAN_REF_BY_SOURCE: i32 = 0;
+pub const INT2DDS_QOS_LIFESPAN_REF_BY_RECEPTION: i32 = 1;
 
 /// Opaque QoS handle for DataWriter
 pub struct Int2DdsDataWriterQos {
@@ -271,6 +275,25 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_set_ownership_strength(
 
     let qos_ref = &mut *qos;
     qos_ref.inner.ownership_strength.value = value;
+
+    INT2DDS_RET_OK
+}
+
+/// Set the DataFrag QoS (per-writer RTPS DATA_FRAG fragment size, in bytes) for
+/// DataWriter. Values `> 65000` are clamped and `<= 0` falls back to the 65000
+/// default at write time.
+///
+/// # Safety
+/// - `qos` must be a valid QoS handle
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_qos_set_data_frag(
+    qos: *mut Int2DdsDataWriterQos,
+    value: i32,
+) -> Int2DdsRet {
+    check_null!(qos);
+
+    let qos_ref = &mut *qos;
+    qos_ref.inner.data_frag.max_size = value;
 
     INT2DDS_RET_OK
 }
@@ -506,6 +529,18 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_get_ownership_strength(
     check_null!(qos);
     check_null!(value_out);
     *value_out = (*qos).inner.ownership_strength.value;
+    INT2DDS_RET_OK
+}
+
+/// Get the DataFrag QoS (fragment size, in bytes) from a DataWriter QoS handle.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_qos_get_data_frag(
+    qos: *const Int2DdsDataWriterQos,
+    value_out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(value_out);
+    *value_out = (*qos).inner.data_frag.max_size;
     INT2DDS_RET_OK
 }
 
@@ -1076,6 +1111,44 @@ pub unsafe extern "C" fn int2dds_datareader_qos_get_destination_order(
     *kind_out = match (*qos).inner.destination_order.kind {
         DestinationOrderQosPolicyKind::ByReceptionTimestamp => INT2DDS_QOS_DEST_ORDER_BY_RECEPTION,
         DestinationOrderQosPolicyKind::BySourceTimestamp => INT2DDS_QOS_DEST_ORDER_BY_SOURCE,
+    };
+    INT2DDS_RET_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_qos_set_lifespan_reference(
+    qos: *mut Int2DdsDataReaderQos,
+    kind: i32,
+) -> Int2DdsRet {
+    check_null!(qos);
+
+    let qos_ref = &mut *qos;
+
+    let reference_kind = match kind {
+        INT2DDS_QOS_LIFESPAN_REF_BY_SOURCE => LifespanReferenceQosPolicyKind::BySourceTimestamp,
+        INT2DDS_QOS_LIFESPAN_REF_BY_RECEPTION => {
+            LifespanReferenceQosPolicyKind::ByReceptionTimestamp
+        }
+        _ => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    qos_ref.inner.lifespan_reference.kind = reference_kind;
+
+    INT2DDS_RET_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_qos_get_lifespan_reference(
+    qos: *const Int2DdsDataReaderQos,
+    kind_out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(kind_out);
+    *kind_out = match (*qos).inner.lifespan_reference.kind {
+        LifespanReferenceQosPolicyKind::BySourceTimestamp => INT2DDS_QOS_LIFESPAN_REF_BY_SOURCE,
+        LifespanReferenceQosPolicyKind::ByReceptionTimestamp => {
+            INT2DDS_QOS_LIFESPAN_REF_BY_RECEPTION
+        }
     };
     INT2DDS_RET_OK
 }

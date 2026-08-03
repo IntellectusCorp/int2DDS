@@ -9,16 +9,16 @@
 //!
 //! ## Data Type
 //!
-//! The FFI uses raw bytes mode: C users serialize data with IDL-generated code
-//! and pass CDR bytes directly via `int2dds_write_serialized` / `int2dds_take_serialized`.
+//! The FFI uses raw bytes mode: C users serialize data with IDL-generated code and pass
+//! CDR bytes directly via `int2dds_datawriter_write_serialized` /
+//! `int2dds_datareader_take_serialized`.
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::sync::Arc;
 
 use int2dds::{
-    infrastructure::status::StatusMask, serialize::cdr::ExtensibilityKind, topic::qos::TopicQos,
-    topic::TypeSupport,
+    infrastructure::status::StatusMask, serialize::cdr::ExtensibilityKind, topic::TypeSupport,
 };
 
 use crate::data::Int2DdsData;
@@ -61,6 +61,24 @@ unsafe fn finalize_topic(
     INT2DDS_RET_OK
 }
 
+/// Map the raw-path FFI `extensibility` code to an `ExtensibilityKind`.
+///
+/// `-1` selects the library default via the single source of truth
+/// (`int2dds_default_extensibility`, currently Appendable); `0`/`1`/`2` map to
+/// Final/Appendable/Mutable. Any other value yields `None`, which callers translate
+/// to `INT2DDS_RET_INVALID_ARGUMENT`. Resolving `-1` through
+/// `int2dds_default_extensibility` keeps the raw path aligned with the Python/C#
+/// bindings, which already fall back to that same default when a type omits one.
+pub(crate) fn resolve_extensibility(code: i32) -> Option<ExtensibilityKind> {
+    let code = if code == -1 { crate::qos::int2dds_default_extensibility() } else { code };
+    match code {
+        0 => Some(ExtensibilityKind::Final),
+        1 => Some(ExtensibilityKind::Appendable),
+        2 => Some(ExtensibilityKind::Mutable),
+        _ => None,
+    }
+}
+
 /// Map a `create_topic_with_field_descriptors` field-type code (scalar-only, and a
 /// distinct encoding from the `INT2DDS_FIELD_*` constants) to its CDR descriptor type
 /// and XTypes `TypeIdentifier`. Returns `None` for unsupported codes.
@@ -86,15 +104,18 @@ fn field_descriptor_type(
 
 /// Create a Topic
 ///
-/// Creates a topic with RawTypeSupport for use with `int2dds_write_serialized()`
-/// and `int2dds_take_serialized()`. C users handle CDR serialization themselves
-/// using IDL-generated code.
+/// Creates a topic with RawTypeSupport for use with `int2dds_datawriter_write_serialized()`
+/// and `int2dds_datareader_take_serialized()`. C users handle CDR serialization themselves
+/// using IDL-generated code. Keyed topics require a full TypeObject; use
+/// `int2dds_create_topic_with_type_info` or `int2dds_create_topic_with_field_descriptors`.
 ///
 /// # Safety
 /// - `participant` must be a valid participant
 /// - `topic_name` must be a valid null-terminated C string
 /// - `dds_type_name` must be a valid null-terminated C string (DDS registration name)
-/// - `extensibility`: 0 = Final, 1 = Appendable, 2 = Mutable
+/// - `extensibility`: -1 = library default (Appendable per spec; frames a DHEADER, so
+///   pass an explicit value or use the type-info path for a Final remote),
+///   0 = Final, 1 = Appendable, 2 = Mutable
 /// - `qos` can be null for default QoS
 /// - `topic_out` must be a valid pointer to a null pointer
 /// - The returned topic must be freed with `int2dds_delete_topic`
@@ -104,42 +125,6 @@ pub unsafe extern "C" fn int2dds_create_topic(
     topic_name: *const std::os::raw::c_char,
     dds_type_name: *const std::os::raw::c_char,
     extensibility: i32,
-    qos: *const Int2DdsTopicQos,
-    topic_out: *mut *mut Int2DdsTopic,
-) -> Int2DdsRet {
-    int2dds_create_topic_keyed(
-        participant,
-        topic_name,
-        dds_type_name,
-        extensibility,
-        false,
-        qos,
-        topic_out,
-    )
-}
-
-/// Create a Topic with key support
-///
-/// Same as `int2dds_create_topic` but with an explicit `has_key` parameter.
-/// Use this when the data type has key fields for instance management
-/// (register_instance, unregister_instance, dispose, lookup_instance).
-///
-/// # Safety
-/// - `participant` must be a valid participant
-/// - `topic_name` must be a valid null-terminated C string
-/// - `dds_type_name` must be a valid null-terminated C string (DDS registration name)
-/// - `extensibility`: 0 = Final, 1 = Appendable, 2 = Mutable
-/// - `has_key`: whether the data type has key fields
-/// - `qos` can be null for default QoS
-/// - `topic_out` must be a valid pointer to a null pointer
-/// - The returned topic must be freed with `int2dds_delete_topic`
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_create_topic_keyed(
-    participant: *const Int2DdsParticipant,
-    topic_name: *const std::os::raw::c_char,
-    dds_type_name: *const std::os::raw::c_char,
-    extensibility: i32,
-    has_key: bool,
     qos: *const Int2DdsTopicQos,
     topic_out: *mut *mut Int2DdsTopic,
 ) -> Int2DdsRet {
@@ -160,61 +145,35 @@ pub unsafe extern "C" fn int2dds_create_topic_keyed(
         Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
-    let ext_kind = match extensibility {
-        0 => ExtensibilityKind::Final,
-        1 => ExtensibilityKind::Appendable,
-        2 => ExtensibilityKind::Mutable,
-        _ => return INT2DDS_RET_INVALID_ARGUMENT,
+    let ext_kind = match resolve_extensibility(extensibility) {
+        Some(k) => k,
+        None => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
-    // Keyed topics require a full TypeObject to compute a spec-conformant KeyHash; the
-    // flat key parser was removed (#334). Reject at creation rather than silently yielding
-    // NIL instance handles at register/dispose/unregister/lookup time.
-    if has_key {
-        return INT2DDS_RET_UNSUPPORTED;
-    }
-    // Create RawTypeSupport
     let type_support =
-        Arc::new(RawTypeSupport::new_with_key(dds_type_name_str.to_string(), ext_kind, has_key));
+        Arc::new(RawTypeSupport::new_with_key(dds_type_name_str.to_string(), ext_kind, false));
 
-    // Register the RawTypeSupport with the participant
-    ffi_try!(participant_ref
-        .inner
-        .register_type_support(type_support as Arc<dyn TypeSupport>, dds_type_name_str));
-
-    // NULL qos → default sentinel (engages profile fallback). Non-NULL → use as-is.
-    let topic_qos = if qos.is_null() {
-        int2dds::infrastructure::qos_kind::QosKind::Default
-    } else {
-        int2dds::infrastructure::qos_kind::QosKind::Specific((*qos).inner.clone())
-    };
-
-    let topic = ffi_try!(participant_ref.inner.create_topic::<Int2DdsData>(
+    finalize_topic(
+        participant_ref,
         topic_name_str,
         dds_type_name_str,
-        topic_qos,
-        None,
-        StatusMask::default()
-    ));
-
-    let topic_handle =
-        Box::new(Int2DdsTopic { inner: Arc::new(topic), type_name: dds_type_name_str.to_string() });
-
-    *topic_out = Box::into_raw(topic_handle);
-
-    INT2DDS_RET_OK
+        type_support as Arc<dyn TypeSupport>,
+        qos,
+        topic_out,
+    )
 }
 
 /// Create a Topic using a QoS profile path
 ///
-/// Same as `int2dds_create_topic_keyed` but uses a QoS profile path instead of a QoS handle.
+/// Same as `int2dds_create_topic` but uses a QoS profile path instead of a QoS handle.
 ///
 /// # Safety
 /// - `participant` must be a valid participant
 /// - `topic_name` must be a valid null-terminated C string
 /// - `dds_type_name` must be a valid null-terminated C string (DDS registration name)
-/// - `extensibility`: 0 = Final, 1 = Appendable, 2 = Mutable
-/// - `has_key`: whether the data type has key fields
+/// - `extensibility`: -1 = library default (Appendable per spec; frames a DHEADER, so
+///   pass an explicit value or use the type-info path for a Final remote),
+///   0 = Final, 1 = Appendable, 2 = Mutable
 /// - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
 /// - `topic_out` must be a valid pointer to a null pointer
 /// - The returned topic must be freed with `int2dds_delete_topic`
@@ -224,7 +183,6 @@ pub unsafe extern "C" fn int2dds_create_topic_with_profile(
     topic_name: *const std::os::raw::c_char,
     dds_type_name: *const std::os::raw::c_char,
     extensibility: i32,
-    has_key: bool,
     qos_path: *const std::os::raw::c_char,
     topic_out: *mut *mut Int2DdsTopic,
 ) -> Int2DdsRet {
@@ -251,24 +209,14 @@ pub unsafe extern "C" fn int2dds_create_topic_with_profile(
         Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
-    let ext_kind = match extensibility {
-        0 => ExtensibilityKind::Final,
-        1 => ExtensibilityKind::Appendable,
-        2 => ExtensibilityKind::Mutable,
-        _ => return INT2DDS_RET_INVALID_ARGUMENT,
+    let ext_kind = match resolve_extensibility(extensibility) {
+        Some(k) => k,
+        None => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
-    // Keyed topics require a full TypeObject to compute a spec-conformant KeyHash; the
-    // flat key parser was removed (#334). Reject at creation rather than silently yielding
-    // NIL instance handles at register/dispose/unregister/lookup time.
-    if has_key {
-        return INT2DDS_RET_UNSUPPORTED;
-    }
-    // Create RawTypeSupport
     let type_support =
-        Arc::new(RawTypeSupport::new_with_key(dds_type_name_str.to_string(), ext_kind, has_key));
+        Arc::new(RawTypeSupport::new_with_key(dds_type_name_str.to_string(), ext_kind, false));
 
-    // Register the RawTypeSupport with the participant
     ffi_try!(participant_ref
         .inner
         .register_type_support(type_support as Arc<dyn TypeSupport>, dds_type_name_str));
@@ -748,101 +696,14 @@ pub unsafe extern "C" fn int2dds_contentfilteredtopic_set_enabled(
     }
 }
 
-/// Create a Topic with key field metadata for compute_key() support.
-///
-/// Deprecated flat key-field path. Canonical instance keys require a full TypeObject
-/// (use int2dds_create_topic_with_type_info / int2dds_create_topic_with_field_descriptors);
-/// the flat CdrFieldType key parser has been removed. With field_count == 0 this behaves
-/// exactly like int2dds_create_topic_keyed; with field_count > 0 it returns
-/// INT2DDS_RET_UNSUPPORTED rather than silently computing NIL instance handles.
-///
-/// # Safety
-/// - Same as int2dds_create_topic_keyed
-/// - field_indices/field_types must point to field_count elements, or be null if field_count is 0
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_create_topic_keyed_with_key_fields(
-    participant: *const Int2DdsParticipant,
-    topic_name: *const std::os::raw::c_char,
-    dds_type_name: *const std::os::raw::c_char,
-    extensibility: i32,
-    has_key: bool,
-    qos: *const Int2DdsTopicQos,
-    _field_indices: *const u32,
-    _field_types: *const u32,
-    field_count: usize,
-    topic_out: *mut *mut Int2DdsTopic,
-) -> Int2DdsRet {
-    check_null!(participant);
-    check_null!(topic_name);
-    check_null!(dds_type_name);
-    check_null!(topic_out);
-
-    // Fail loud rather than silently ignoring flat key fields: canonical keys require a
-    // full TypeObject (int2dds_create_topic_with_type_info / _with_field_descriptors), so
-    // a caller that supplies key fields here would otherwise get NIL instance handles.
-    if field_count > 0 {
-        return INT2DDS_RET_UNSUPPORTED;
-    }
-
-    let participant_ref = &*participant;
-
-    let topic_name_str = match CStr::from_ptr(topic_name).to_str() {
-        Ok(s) => s,
-        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
-    };
-
-    let dds_type_name_str = match CStr::from_ptr(dds_type_name).to_str() {
-        Ok(s) => s,
-        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
-    };
-
-    let ext_kind = match extensibility {
-        0 => ExtensibilityKind::Final,
-        1 => ExtensibilityKind::Appendable,
-        2 => ExtensibilityKind::Mutable,
-        _ => return INT2DDS_RET_INVALID_ARGUMENT,
-    };
-
-    // Name-only keyed topic (field_count == 0): equivalent to int2dds_create_topic_keyed.
-    // A keyed topic needs a full TypeObject for a spec-conformant KeyHash; reject rather
-    // than silently yield NIL instance handles.
-    if has_key {
-        return INT2DDS_RET_UNSUPPORTED;
-    }
-    let type_support =
-        RawTypeSupport::new_with_key(dds_type_name_str.to_string(), ext_kind, has_key);
-
-    // Register the RawTypeSupport with the participant
-    ffi_try!(participant_ref
-        .inner
-        .register_type_support(Arc::new(type_support) as Arc<dyn TypeSupport>, dds_type_name_str));
-
-    let topic_qos = if qos.is_null() { TopicQos::default() } else { (*qos).inner.clone() };
-
-    let topic = ffi_try!(participant_ref.inner.create_topic::<Int2DdsData>(
-        topic_name_str,
-        dds_type_name_str,
-        topic_qos,
-        None,
-        StatusMask::default()
-    ));
-
-    let topic_handle =
-        Box::new(Int2DdsTopic { inner: Arc::new(topic), type_name: dds_type_name_str.to_string() });
-
-    *topic_out = Box::into_raw(topic_handle);
-
-    INT2DDS_RET_OK
-}
-
 /// Create a Topic with full field descriptors for reader-side CFT filtering.
 ///
-/// Extends int2dds_create_topic_keyed_with_key_fields by also providing
-/// all field metadata (name, type) needed for get_field_value() support.
-/// This enables ContentFilteredTopic reader-side filtering in the serialized path.
+/// Extends int2dds_create_topic by also providing all field metadata (name, type)
+/// needed for get_field_value() support. This enables ContentFilteredTopic
+/// reader-side filtering in the serialized path.
 ///
 /// # Safety
-/// - Same as int2dds_create_topic_keyed
+/// - Same as int2dds_create_topic
 /// - field_names: array of null-terminated C strings (field_count elements)
 /// - field_types: array of u32 type IDs (field_count elements)
 /// - field_is_key: array of bool (field_count elements)
@@ -853,7 +714,6 @@ pub unsafe extern "C" fn int2dds_create_topic_with_field_descriptors(
     topic_name: *const std::os::raw::c_char,
     dds_type_name: *const std::os::raw::c_char,
     extensibility: i32,
-    has_key: bool,
     qos: *const Int2DdsTopicQos,
     field_names: *const *const std::os::raw::c_char,
     field_types: *const u32,
@@ -878,24 +738,17 @@ pub unsafe extern "C" fn int2dds_create_topic_with_field_descriptors(
         Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
-    let ext_kind = match extensibility {
-        0 => ExtensibilityKind::Final,
-        1 => ExtensibilityKind::Appendable,
-        2 => ExtensibilityKind::Mutable,
-        _ => return INT2DDS_RET_INVALID_ARGUMENT,
+    let ext_kind = match resolve_extensibility(extensibility) {
+        Some(k) => k,
+        None => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
     // No field structure provided: keep the prior name-only behavior (advertise no type
     // info) rather than a bogus empty-struct TypeObject that could turn a name match into
     // a structural mismatch against a real multi-field peer.
     if field_count == 0 {
-        // Name-only: no field structure => no TypeObject => no spec-conformant KeyHash.
-        // A keyed topic here would silently yield NIL instance handles, so reject it.
-        if has_key {
-            return INT2DDS_RET_UNSUPPORTED;
-        }
         let type_support =
-            RawTypeSupport::new_with_key(dds_type_name_str.to_string(), ext_kind, has_key);
+            RawTypeSupport::new_with_key(dds_type_name_str.to_string(), ext_kind, false);
         return finalize_topic(
             participant_ref,
             topic_name_str,
@@ -942,6 +795,7 @@ pub unsafe extern "C" fn int2dds_create_topic_with_field_descriptors(
     // Advertise TypeIdentifier/TypeObject (0x0075) like the derive macro, while keeping
     // CDR field descriptors for ContentFilteredTopic. Instance keys are computed from the
     // full TypeObject via the canonical DynamicData path.
+    let has_key = all_fields.iter().any(|f| f.is_key);
     let mut type_support = RawTypeSupport::with_type_info(
         dds_type_name_str.to_string(),
         ext_kind,

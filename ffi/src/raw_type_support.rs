@@ -2,7 +2,7 @@
 //!
 //! `RawTypeSupport` implements the `TypeSupport` trait with stub serialize/deserialize
 //! methods. It is used when C users handle serialization themselves via
-//! `int2dds_write_serialized()` / `int2dds_take_serialized()`.
+//! `int2dds_datawriter_write_serialized()` / `int2dds_datareader_take_serialized()`.
 //!
 //! This allows topic creation and DDS discovery without the full dynamic type system.
 

@@ -113,6 +113,7 @@ const WRITER_RELIABILITY_EXTENSION_QOS_POLICY_NAME: &str = "WriterReliabilityExt
 const READER_RELIABILITY_EXTENSION_QOS_POLICY_NAME: &str = "ReaderReliabilityExtension";
 const PROPERTY_QOS_POLICY_NAME: &str = "Property";
 const DATA_FRAG_QOS_POLICY_NAME: &str = "DataFrag";
+const LIFESPAN_REFERENCE_QOS_POLICY_NAME: &str = "LifespanReference";
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash, Readable, Writable)]
 pub enum QosPolicyId {
@@ -865,11 +866,23 @@ pub const PROP_TCP_PUBLIC_ADDRESS: &str = "int2dds.transport.TCPv4.public_addres
 pub const PROP_TCP_NODELAY: &str = "int2dds.transport.TCPv4.nodelay";
 /// Outbound connect timeout, milliseconds. Default `5000`.
 pub const PROP_TCP_CONNECT_TIMEOUT_MS: &str = "int2dds.transport.TCPv4.connect_timeout_ms";
-/// BIND handshake response timeout, milliseconds. Default `5000`.
-pub const PROP_TCP_BIND_TIMEOUT_MS: &str = "int2dds.transport.TCPv4.bind_timeout_ms";
+/// Peer handshake timeout, milliseconds. Covers the PEER_HELLO / PORT_RESERVE /
+/// PORT_BIND exchange, not the TCP connect — that one is
+/// [`PROP_TCP_CONNECT_TIMEOUT_MS`]. Outbound it bounds each response wait;
+/// inbound it bounds the window an accepted connection has to finish the
+/// exchange before it is closed. Default `5000`.
+pub const PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS: &str =
+    "int2dds.transport.TCPv4.peer_handshake_timeout_ms";
+/// TLS handshake timeout, milliseconds. Default `5000`.
+pub const PROP_TCP_TLS_HANDSHAKE_TIMEOUT_MS: &str =
+    "int2dds.transport.TCPv4.tls_handshake_timeout_ms";
 /// Max time (ms) unacknowledged data may stay outstanding before the OS drops
-/// the connection, so a dead link surfaces as a write error instead of blocking
-/// the sender ~indefinitely. Default `5000`; `0` uses the OS default.
+/// the connection (`TCP_USER_TIMEOUT`), so a dead link surfaces as a write error
+/// instead of blocking the sender ~indefinitely. When keepalive is also set,
+/// `TCP_USER_TIMEOUT` bounds the keepalive sequence too, so keep this aligned
+/// with the keepalive schedule
+/// (`keepalive_interval + keepalive_timeout * keepalive_max_misses`).
+/// Default `25000`. `0` uses the OS default (no bound).
 pub const PROP_TCP_UNACKED_TIMEOUT_MS: &str = "int2dds.transport.TCPv4.unacked_timeout_ms";
 /// OS keepalive idle time before the first probe (`TCP_KEEPIDLE`), ms. Default `10000`.
 pub const PROP_TCP_KEEPALIVE_INTERVAL_MS: &str = "int2dds.transport.TCPv4.keepalive_interval_ms";
@@ -883,6 +896,18 @@ pub const PROP_TCP_SO_RCVBUF: &str = "int2dds.transport.TCPv4.so_rcvbuf";
 pub const PROP_TCP_SO_SNDBUF: &str = "int2dds.transport.TCPv4.so_sndbuf";
 /// Tokio worker thread count for the TCP runtime.
 pub const PROP_TCP_ASYNC_WORKERS: &str = "int2dds.transport.TCPv4.async_workers";
+/// User-data wire-write deadline, milliseconds. A send waits up to this long for
+/// the previous frame to reach the socket, then drops the frame rather than
+/// delay sends to other peers. `-1` blocks until it completes (no pre-wire drop,
+/// congestion isolation off); `0` is a try-lock (take the lock if free, else drop
+/// at once, isolation off). Default `1000` — generous by design; lower it to
+/// trade flow-control fidelity for tighter HOL isolation.
+pub const PROP_TCP_SEND_DEADLINE_MS: &str = "int2dds.transport.TCPv4.send_deadline_ms";
+/// Consecutive send-deadline misses before a connection is marked congested and
+/// its writes drop to the short probe deadline, isolating a slow/stalled peer
+/// from the fan-out. Min 1. Default `1`.
+pub const PROP_TCP_CONGESTION_MISS_THRESHOLD: &str =
+    "int2dds.transport.TCPv4.congestion_miss_threshold";
 
 /// Generic name/value extension channel for QoS-driven configuration.
 ///
@@ -1943,6 +1968,75 @@ impl QosPolicy for DestinationOrderQosPolicy {
     }
 }
 
+/// int2DDS extension: reference timestamp for a reader's Lifespan expiry.
+/// Reader-local; not wire-propagated.
+#[derive(DdsType, PartialEq, Default, Copy, Eq)]
+#[dds_type(crate_path = "crate", no_default, no_partialeq)]
+pub enum LifespanReferenceQosPolicyKind {
+    /// Expire relative to the writer's source timestamp (default).
+    #[default]
+    BySourceTimestamp,
+    /// Expire relative to this reader's reception timestamp (clock-skew immune).
+    ByReceptionTimestamp,
+}
+
+impl ConstDefault for LifespanReferenceQosPolicyKind {
+    const DEFAULT: Self = LifespanReferenceQosPolicyKind::BySourceTimestamp;
+}
+
+/// Reader-local policy selecting the Lifespan expiry reference timestamp.
+/// `ByReceptionTimestamp` is immune to writer/reader clock skew. Mutable at
+/// runtime; not RxO and not wire-propagated.
+///
+/// # Example
+/// ```no_run
+/// use int2dds::{
+///     infrastructure::{
+///         qos_policy::{LifespanReferenceQosPolicy, LifespanReferenceQosPolicyKind},
+///         status::StatusMask,
+///     },
+///     subscription::qos::{DataReaderQos, SubscriberQos},
+/// #     domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
+/// #     topic::{qos::TopicQos, type_support::DdsType},
+/// };
+/// #
+/// # #[derive(DdsType)]
+/// # #[dds_type(crate_path = "int2dds")]
+/// # struct HelloWorldType { index: u32, message: String }
+/// #
+/// # let factory = DomainParticipantFactory::get_instance();
+/// # let participant = factory.create_participant(0, DomainParticipantQos::default(), None, StatusMask::default()).unwrap();
+/// # let topic = participant.create_topic::<HelloWorldType>("topic", "HelloWorld", TopicQos::default(), None, StatusMask::default()).unwrap();
+///
+/// let subscriber = participant
+///     .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+///     .unwrap();
+///
+/// // Expire samples relative to this reader's reception time (immune to clock skew).
+/// let reader_qos = DataReaderQos {
+///     lifespan_reference: LifespanReferenceQosPolicy {
+///         kind: LifespanReferenceQosPolicyKind::ByReceptionTimestamp,
+///     },
+///     ..Default::default()
+/// };
+///
+/// let _reader = subscriber
+///     .create_datareader::<HelloWorldType>(&topic, reader_qos, None, StatusMask::default())
+///     .unwrap();
+/// ```
+#[derive(DdsType, ConstDefault, Copy, Eq)]
+#[dds_type(crate_path = "crate")]
+pub struct LifespanReferenceQosPolicy {
+    /// Expiry reference timestamp selection.
+    pub kind: LifespanReferenceQosPolicyKind,
+}
+
+impl QosPolicy for LifespanReferenceQosPolicy {
+    fn name(&self) -> &str {
+        LIFESPAN_REFERENCE_QOS_POLICY_NAME
+    }
+}
+
 /// Data representation identifiers for DDS-XTypes.
 ///
 /// Specifies the encoding format used for data serialization.
@@ -2453,5 +2547,23 @@ mod property_qos_tests {
         assert_eq!(QosPolicyId::Property.as_u32(), 25);
         assert_eq!(QosPolicyId::from_u32(25), Some(QosPolicyId::Property));
         assert_eq!(QosPolicyId::Property.as_str(), "Property");
+    }
+}
+
+#[cfg(test)]
+mod lifespan_reference_tests {
+    use super::*;
+
+    #[test]
+    fn default_reference_is_by_source_timestamp() {
+        // Backward compatibility: default keeps writer-timestamp semantics.
+        assert_eq!(
+            LifespanReferenceQosPolicy::default().kind,
+            LifespanReferenceQosPolicyKind::BySourceTimestamp
+        );
+        assert_eq!(
+            LifespanReferenceQosPolicyKind::DEFAULT,
+            LifespanReferenceQosPolicyKind::BySourceTimestamp
+        );
     }
 }

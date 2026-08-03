@@ -10,7 +10,7 @@
 //! ## Data Format
 //!
 //! C users serialize data with IDL-generated code and pass CDR bytes
-//! directly via `int2dds_write_serialized`.
+//! directly via `int2dds_datawriter_write_serialized`.
 
 use std::ffi::CStr;
 use std::sync::{Arc, RwLock};
@@ -35,6 +35,7 @@ use super::{
     status::{
         Int2DdsLivelinessLostStatus, Int2DdsOfferedDeadlineMissedStatus,
         Int2DdsOfferedIncompatibleQosStatus, Int2DdsOfferedIncompatibleTypeStatus,
+        Int2DdsPublicationMatchedStatus,
     },
     types::*,
 };
@@ -43,58 +44,30 @@ use super::{
 ///
 /// # Safety
 /// - `participant` must be a valid participant
-/// - `qos` can be null for default QoS
+/// - `qos` can be null for the default QoS (engages the core resolution chain:
+///   registered default → configured default profile → spec default)
 /// - `publisher_out` must be a valid pointer to a null pointer
 /// - The returned publisher must be freed with `int2dds_delete_publisher`
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_create_publisher(
     participant: *const Int2DdsParticipant,
-    publisher_out: *mut *mut Int2DdsPublisher,
-) -> Int2DdsRet {
-    check_null!(participant);
-    check_null!(publisher_out);
-
-    let participant_ref = &*participant;
-
-    // Pass the default sentinel so the core resolution chain (registered
-    // default → configured default profile → spec default) is engaged.
-    let publisher = ffi_try!(participant_ref.inner.create_publisher(
-        int2dds::publication::qos::PUBLISHER_QOS_DEFAULT,
-        None,
-        StatusMask::default()
-    ));
-
-    // Wrap publisher in Arc
-    let publisher_arc = Arc::new(publisher);
-
-    let publisher_handle = Box::new(Int2DdsPublisher { inner: publisher_arc });
-
-    *publisher_out = Box::into_raw(publisher_handle);
-
-    INT2DDS_RET_OK
-}
-
-/// Create a Publisher with QoS
-///
-/// # Safety
-/// - `participant` must be a valid participant
-/// - `qos` must be a valid publisher QoS handle
-/// - `publisher_out` must be a valid pointer to a null pointer
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_create_publisher_with_qos(
-    participant: *const Int2DdsParticipant,
     qos: *const Int2DdsPublisherQos,
     publisher_out: *mut *mut Int2DdsPublisher,
 ) -> Int2DdsRet {
     check_null!(participant);
-    check_null!(qos);
     check_null!(publisher_out);
 
     let participant_ref = &*participant;
-    let qos_ref = &*qos;
+
+    // NULL qos → default sentinel (engages profile fallback). Non-NULL → use as-is.
+    let publisher_qos = if qos.is_null() {
+        int2dds::infrastructure::qos_kind::QosKind::Default
+    } else {
+        int2dds::infrastructure::qos_kind::QosKind::Specific((*qos).inner.clone())
+    };
 
     let publisher = ffi_try!(participant_ref.inner.create_publisher(
-        qos_ref.inner.clone(),
+        publisher_qos,
         None,
         StatusMask::default()
     ));
@@ -322,63 +295,62 @@ pub unsafe extern "C" fn int2dds_delete_publisher(publisher: *mut Int2DdsPublish
     }
 }
 
+/// Attach FFI listener callbacks to a freshly created writer handle, then re-notify
+/// for events that may have fired between entity creation and listener registration
+/// (the SEDP matching race).
+unsafe fn attach_writer_listener(
+    writer_handle: &Arc<Int2DdsDataWriter>,
+    listener: *const Int2DdsDataWriterListener,
+    mask: u32,
+) -> Int2DdsRet {
+    if listener.is_null() {
+        return INT2DDS_RET_OK;
+    }
+
+    let weak = Arc::downgrade(writer_handle);
+    let listener_arc = Arc::new(FfiDataWriterListener::new(*listener, weak));
+
+    let listener_clone = listener_arc.clone()
+        as Arc<
+            dyn int2dds::publication::data_writer_listener::DataWriterListener<Foo = Int2DdsData>,
+        >;
+    ffi_try!(writer_handle
+        .inner
+        .set_listener(Some(listener_clone), StatusMask::from_bits_truncate(mask)));
+
+    *writer_handle.listener.write().unwrap() = Some(listener_arc.clone());
+
+    if mask & crate::status_condition::INT2DDS_STATUS_PUBLICATION_MATCHED != 0 {
+        if let Ok(status) = writer_handle.inner.get_publication_matched_status() {
+            if status.current_count() > 0 {
+                listener_arc.on_publication_matched(&writer_handle.inner, &status);
+            }
+        }
+    }
+    if mask & crate::status_condition::INT2DDS_STATUS_OFFERED_INCOMPATIBLE_QOS != 0 {
+        if let Ok(status) = writer_handle.inner.get_offered_incompatible_qos_status() {
+            if status.total_count() > 0 {
+                listener_arc.on_offered_incompatible_qos(&writer_handle.inner, &status);
+            }
+        }
+    }
+
+    INT2DDS_RET_OK
+}
+
 /// Create a DataWriter
 ///
 /// # Safety
 /// - `publisher` must be a valid publisher
 /// - `topic` must be a valid topic
 /// - `qos` can be null for default QoS
-/// - `writer_out` must be a valid pointer to a null pointer
-/// - The returned writer must be freed with `int2dds_delete_datawriter`
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_create_datawriter(
-    publisher: *const Int2DdsPublisher,
-    topic: *const Int2DdsTopic,
-    qos: *const Int2DdsDataWriterQos,
-    writer_out: *mut *mut Int2DdsDataWriter,
-) -> Int2DdsRet {
-    check_null!(publisher);
-    check_null!(topic);
-    check_null!(writer_out);
-
-    let publisher_ref = &*publisher;
-    let topic_ref = &*topic;
-
-    // NULL qos → default sentinel (engages profile fallback). Non-NULL → use as-is.
-    let writer_qos = if qos.is_null() {
-        int2dds::infrastructure::qos_kind::QosKind::Default
-    } else {
-        int2dds::infrastructure::qos_kind::QosKind::Specific((*qos).inner.clone())
-    };
-
-    // Create DataWriter<Int2DdsData>
-    let writer = ffi_try!(publisher_ref.inner.create_datawriter::<Int2DdsData>(
-        &topic_ref.inner,
-        writer_qos,
-        None,
-        StatusMask::default()
-    ));
-
-    let writer_handle = Arc::new(Int2DdsDataWriter { inner: writer, listener: RwLock::new(None) });
-
-    *writer_out = Arc::into_raw(writer_handle) as *mut Int2DdsDataWriter;
-
-    INT2DDS_RET_OK
-}
-
-/// Create a DataWriter with listener callbacks
-///
-/// # Safety
-/// - `publisher` must be a valid publisher
-/// - `topic` must be a valid topic
-/// - `qos` can be null for default QoS
-/// - `listener` can be null for no listener
-/// - `mask` specifies which status changes trigger callbacks
+/// - `listener` can be null for no listener; `mask` specifies which status
+///   changes trigger callbacks (pass 0 with a null listener)
 /// - `writer_out` must be a valid pointer to a null pointer
 /// - The returned writer must be freed with `int2dds_delete_datawriter`
 /// - Listener callbacks must be thread-safe and remain valid until writer is deleted
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_create_datawriter_with_listener(
+pub unsafe extern "C" fn int2dds_create_datawriter(
     publisher: *const Int2DdsPublisher,
     topic: *const Int2DdsTopic,
     qos: *const Int2DdsDataWriterQos,
@@ -400,7 +372,6 @@ pub unsafe extern "C" fn int2dds_create_datawriter_with_listener(
         int2dds::infrastructure::qos_kind::QosKind::Specific((*qos).inner.clone())
     };
 
-    // Create DataWriter<Int2DdsData> first without listener
     let writer = ffi_try!(publisher_ref.inner.create_datawriter::<Int2DdsData>(
         &topic_ref.inner,
         writer_qos,
@@ -408,44 +379,11 @@ pub unsafe extern "C" fn int2dds_create_datawriter_with_listener(
         StatusMask::from_bits_truncate(mask)
     ));
 
-    // Create writer_handle with the actual writer
     let writer_handle = Arc::new(Int2DdsDataWriter { inner: writer, listener: RwLock::new(None) });
 
-    // If listener is provided, set it now
-    if !listener.is_null() {
-        let weak = Arc::downgrade(&writer_handle);
-        let listener_arc = Arc::new(FfiDataWriterListener::new(*listener, weak));
-
-        // Set the listener on the writer
-        let listener_clone = listener_arc.clone()
-            as Arc<
-                dyn int2dds::publication::data_writer_listener::DataWriterListener<
-                    Foo = Int2DdsData,
-                >,
-            >;
-        ffi_try!(writer_handle
-            .inner
-            .set_listener(Some(listener_clone), StatusMask::from_bits_truncate(mask)));
-
-        *writer_handle.listener.write().unwrap() = Some(listener_arc.clone());
-
-        // Check if matching already occurred before the listener was set.
-        // This handles the race condition where SEDP matching completes between
-        // create_datawriter() and set_listener().
-        if mask & crate::status_condition::INT2DDS_STATUS_PUBLICATION_MATCHED != 0 {
-            if let Ok(status) = writer_handle.inner.get_publication_matched_status() {
-                if status.current_count() > 0 {
-                    listener_arc.on_publication_matched(&writer_handle.inner, &status);
-                }
-            }
-        }
-        if mask & crate::status_condition::INT2DDS_STATUS_OFFERED_INCOMPATIBLE_QOS != 0 {
-            if let Ok(status) = writer_handle.inner.get_offered_incompatible_qos_status() {
-                if status.total_count() > 0 {
-                    listener_arc.on_offered_incompatible_qos(&writer_handle.inner, &status);
-                }
-            }
-        }
+    let ret = attach_writer_listener(&writer_handle, listener, mask);
+    if ret != INT2DDS_RET_OK {
+        return ret;
     }
 
     *writer_out = Arc::into_raw(writer_handle) as *mut Int2DdsDataWriter;
@@ -459,55 +397,13 @@ pub unsafe extern "C" fn int2dds_create_datawriter_with_listener(
 /// - `publisher` must be a valid publisher
 /// - `topic` must be a valid topic
 /// - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
-/// - `writer_out` must be a valid pointer to a null pointer
-/// - The returned writer must be freed with `int2dds_delete_datawriter`
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_create_datawriter_with_profile(
-    publisher: *const Int2DdsPublisher,
-    topic: *const Int2DdsTopic,
-    qos_path: *const std::os::raw::c_char,
-    writer_out: *mut *mut Int2DdsDataWriter,
-) -> Int2DdsRet {
-    check_null!(publisher);
-    check_null!(topic);
-    check_null!(qos_path);
-    check_null!(writer_out);
-
-    let publisher_ref = &*publisher;
-    let topic_ref = &*topic;
-
-    let qos_path_str = match CStr::from_ptr(qos_path).to_str() {
-        Ok(s) => s,
-        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
-    };
-
-    let writer = ffi_try!(publisher_ref.inner.create_datawriter_with_profile::<Int2DdsData>(
-        &topic_ref.inner,
-        qos_path_str,
-        None,
-        StatusMask::default()
-    ));
-
-    let writer_handle = Arc::new(Int2DdsDataWriter { inner: writer, listener: RwLock::new(None) });
-
-    *writer_out = Arc::into_raw(writer_handle) as *mut Int2DdsDataWriter;
-
-    INT2DDS_RET_OK
-}
-
-/// Create a DataWriter with listener callbacks using a QoS profile path
-///
-/// # Safety
-/// - `publisher` must be a valid publisher
-/// - `topic` must be a valid topic
-/// - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
-/// - `listener` can be null for no listener
-/// - `mask` specifies which status changes trigger callbacks
+/// - `listener` can be null for no listener; `mask` specifies which status
+///   changes trigger callbacks (pass 0 with a null listener)
 /// - `writer_out` must be a valid pointer to a null pointer
 /// - The returned writer must be freed with `int2dds_delete_datawriter`
 /// - Listener callbacks must be thread-safe and remain valid until writer is deleted
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_create_datawriter_with_profile_and_listener(
+pub unsafe extern "C" fn int2dds_create_datawriter_with_profile(
     publisher: *const Int2DdsPublisher,
     topic: *const Int2DdsTopic,
     qos_path: *const std::os::raw::c_char,
@@ -528,7 +424,6 @@ pub unsafe extern "C" fn int2dds_create_datawriter_with_profile_and_listener(
         Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
-    // Create DataWriter<Int2DdsData> first without listener
     let writer = ffi_try!(publisher_ref.inner.create_datawriter_with_profile::<Int2DdsData>(
         &topic_ref.inner,
         qos_path_str,
@@ -536,42 +431,11 @@ pub unsafe extern "C" fn int2dds_create_datawriter_with_profile_and_listener(
         StatusMask::from_bits_truncate(mask)
     ));
 
-    // Create writer_handle with the actual writer
     let writer_handle = Arc::new(Int2DdsDataWriter { inner: writer, listener: RwLock::new(None) });
 
-    // If listener is provided, set it now
-    if !listener.is_null() {
-        let weak = Arc::downgrade(&writer_handle);
-        let listener_arc = Arc::new(FfiDataWriterListener::new(*listener, weak));
-
-        // Set the listener on the writer
-        let listener_clone = listener_arc.clone()
-            as Arc<
-                dyn int2dds::publication::data_writer_listener::DataWriterListener<
-                    Foo = Int2DdsData,
-                >,
-            >;
-        ffi_try!(writer_handle
-            .inner
-            .set_listener(Some(listener_clone), StatusMask::from_bits_truncate(mask)));
-
-        *writer_handle.listener.write().unwrap() = Some(listener_arc.clone());
-
-        // Check if matching already occurred before the listener was set.
-        if mask & crate::status_condition::INT2DDS_STATUS_PUBLICATION_MATCHED != 0 {
-            if let Ok(status) = writer_handle.inner.get_publication_matched_status() {
-                if status.current_count() > 0 {
-                    listener_arc.on_publication_matched(&writer_handle.inner, &status);
-                }
-            }
-        }
-        if mask & crate::status_condition::INT2DDS_STATUS_OFFERED_INCOMPATIBLE_QOS != 0 {
-            if let Ok(status) = writer_handle.inner.get_offered_incompatible_qos_status() {
-                if status.total_count() > 0 {
-                    listener_arc.on_offered_incompatible_qos(&writer_handle.inner, &status);
-                }
-            }
-        }
+    let ret = attach_writer_listener(&writer_handle, listener, mask);
+    if ret != INT2DDS_RET_OK {
+        return ret;
     }
 
     *writer_out = Arc::into_raw(writer_handle) as *mut Int2DdsDataWriter;
@@ -691,30 +555,24 @@ pub unsafe extern "C" fn int2dds_delete_datawriter(writer: *mut Int2DdsDataWrite
     }
 }
 
-/// Get publication matched status
-///
-/// Returns the number of matched readers for this DataWriter.
+/// Get publication matched status for a DataWriter
 ///
 /// # Safety
 /// - `writer` must be a valid datawriter
-/// - `total_count_out` must be a valid pointer
-/// - `current_count_out` must be a valid pointer
+/// - `status_out` must be a valid pointer
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_get_publication_matched_status(
+pub unsafe extern "C" fn int2dds_datawriter_get_publication_matched_status(
     writer: *const Int2DdsDataWriter,
-    total_count_out: *mut i32,
-    current_count_out: *mut i32,
+    status_out: *mut Int2DdsPublicationMatchedStatus,
 ) -> Int2DdsRet {
     check_null!(writer);
-    check_null!(total_count_out);
-    check_null!(current_count_out);
+    check_null!(status_out);
 
     let writer_ref = &*writer;
 
     match writer_ref.inner.get_publication_matched_status() {
         Ok(status) => {
-            *total_count_out = status.total_count();
-            *current_count_out = status.current_count();
+            *status_out = Int2DdsPublicationMatchedStatus::from(&status);
             INT2DDS_RET_OK
         }
         Err(e) => dds_error_to_code(&e),
@@ -859,7 +717,7 @@ pub unsafe extern "C" fn int2dds_publisher_delete_contained_entities(
 /// - `data` must point to at least `data_len` readable bytes
 /// - If `key` is not null, it must point to at least `key_len` readable bytes
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_write_serialized(
+pub unsafe extern "C" fn int2dds_datawriter_write_serialized(
     writer: *const Int2DdsDataWriter,
     data: *const u8,
     data_len: usize,
@@ -885,7 +743,7 @@ pub unsafe extern "C" fn int2dds_write_serialized(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_prepare_serialized_write(
+pub unsafe extern "C" fn int2dds_datawriter_prepare_serialized_write(
     writer: *const Int2DdsDataWriter,
     capacity: usize,
     data_out: *mut *mut u8,
@@ -919,16 +777,16 @@ pub unsafe extern "C" fn int2dds_prepare_serialized_write(
 /// # Ownership
 /// On success the loan is consumed and `loan` is freed — do not use or abort it.
 /// On failure the loan handle is left valid: the caller must release it with
-/// `int2dds_abort_serialized_write` (or discard it after a subsequent successful
+/// `int2dds_datawriter_abort_serialized_write` (or discard it after a subsequent successful
 /// path). This makes the common binding idiom (`commit`; on error `abort`)
 /// memory-safe rather than a double-free.
 ///
 /// # Safety
 /// - `writer` must be a valid datawriter
-/// - `loan` must be a valid loan from `int2dds_prepare_serialized_write` that has
+/// - `loan` must be a valid loan from `int2dds_datawriter_prepare_serialized_write` that has
 ///   not already been committed or aborted
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_commit_serialized_write(
+pub unsafe extern "C" fn int2dds_datawriter_commit_serialized_write(
     writer: *const Int2DdsDataWriter,
     loan: *mut Int2DdsSerializedWriteLoan,
     actual_size: usize,
@@ -968,7 +826,7 @@ pub unsafe extern "C" fn int2dds_commit_serialized_write(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_abort_serialized_write(
+pub unsafe extern "C" fn int2dds_datawriter_abort_serialized_write(
     loan: *mut Int2DdsSerializedWriteLoan,
 ) -> Int2DdsRet {
     if !loan.is_null() {
@@ -979,7 +837,7 @@ pub unsafe extern "C" fn int2dds_abort_serialized_write(
 
 /// Write pre-serialized data with an explicit source timestamp.
 ///
-/// Same as `int2dds_write_serialized`, but allows the caller to specify a
+/// Same as `int2dds_datawriter_write_serialized`, but allows the caller to specify a
 /// source timestamp instead of using the current time.
 ///
 /// # Parameters
@@ -997,7 +855,7 @@ pub unsafe extern "C" fn int2dds_abort_serialized_write(
 /// - `data` must point to at least `data_len` readable bytes
 /// - If `key` is not null, it must point to at least `key_len` readable bytes
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_write_serialized_w_timestamp(
+pub unsafe extern "C" fn int2dds_datawriter_write_serialized_w_timestamp(
     writer: *const Int2DdsDataWriter,
     data: *const u8,
     data_len: usize,
@@ -1284,13 +1142,13 @@ mod tests {
             context::int2dds_domain_participant_factory_get_instance(&mut factory as *mut _);
             participant::int2dds_create_participant(
                 factory,
-                ptr::null(),
                 0,
+                ptr::null(),
                 &mut participant as *mut _,
             );
 
             // Create publisher
-            let ret = int2dds_create_publisher(participant, &mut publisher as *mut _);
+            let ret = int2dds_create_publisher(participant, ptr::null(), &mut publisher as *mut _);
             assert_eq!(ret, INT2DDS_RET_OK);
             assert!(!publisher.is_null());
 

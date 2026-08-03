@@ -135,13 +135,29 @@ fn generate_key_impls_from_fields(
             use #crate_path::serialize::BufferManager;
 
             match format {
-                // XCDR1 CDR_BE: header + headerless big-endian key (KeyHash format).
+                // XCDR1 CDR_BE: 4-byte encapsulation header + key members in classic CDR
+                // (8-byte max alignment), symmetric with the receive path's CdrDeserializer
+                // arm. KeyHolder is always FINAL, so no DHEADER. Re-encode the key here
+                // rather than reusing the max-align-4 KeyHash body, whose alignment would
+                // disagree with the CDR_BE header for keys carrying an 8-byte member at a
+                // 4-but-not-8 offset (a compliant peer would misparse it).
                 SerializationFormat::Cdr => {
-                    let key = self.serialize_key(data)?;
-                    let mut payload = Vec::with_capacity(key.len() + 4);
-                    payload.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
-                    payload.extend_from_slice(&key);
-                    Ok(std::sync::Arc::from(payload))
+                    use #crate_path::serialize::cdr::{CdrSerialize, CdrSerializer};
+                    let typed_data = data.downcast_ref::<#full_type>().ok_or_else(|| {
+                        #crate_path::dcps::core::error::DdsError::Error(
+                            "Type mismatch for key payload serialization".to_string(),
+                        )
+                    })?;
+                    let mut serializer = CdrSerializer::with_capacity(false, 64);
+                    serializer.write_encapsulation_header()
+                        .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+                    #(
+                        CdrSerialize::serialize_cdr(&typed_data.#key_fields, &mut serializer)
+                            .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(
+                                format!("Failed to serialize field {}: {}", stringify!(#key_fields), e)
+                            ))?;
+                    )*
+                    Ok(std::sync::Arc::from(serializer.into_bytes().into_boxed_slice()))
                 }
                 // XCDR2: PLAIN_CDR2 (Final) or DELIMITED_CDR2 (Appendable/Mutable) key members.
                 SerializationFormat::Xcdr { extensibility_kind, .. } => {

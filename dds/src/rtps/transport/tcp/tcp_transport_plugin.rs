@@ -1,8 +1,8 @@
 //! Sync facade over the async tcp stack.
 //!
 //! Owns a dedicated runtime and bundles the inbound `TcpMuxListener`, the
-//! outbound `TcpSender`, and the three crossbeam channels (discovery / user
-//! data / dead peer) that bridge async tasks back to the sync DDS layer.
+//! outbound `TcpSender`, and the three channels (discovery / user data / dead
+//! peer) that bridge async tasks back to the sync DDS layer.
 //!
 //! The `TransportPlugin` trait is sync. Construction runs inside
 //! `runtime.block_on(...)` because the listener / sender constructors call
@@ -12,8 +12,9 @@ use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 
-use crossbeam_channel::bounded;
+use flume::bounded;
 use log::{debug, info};
+use tokio_util::sync::CancellationToken;
 
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::locator::Locator;
@@ -26,12 +27,12 @@ use crate::rtps::transport::tcp::tcp_sender::TcpSender;
 use crate::rtps::transport::tcp::tls::TlsConfig;
 use crate::rtps::transport::{TcpConfig, TransportType};
 
-/// Crossbeam capacity for discovery + dead-peer channels.
-const CHANNEL_BUFFER_SIZE: usize = 512;
+/// Capacity of inbound discovery channels.
+const DISCOVERY_CHANNEL_CAPACITY: usize = 512;
 
-/// Crossbeam capacity for the inbound user_data channel. Sized to absorb
-/// short consumer stalls under bursty fragmented workloads.
-const USER_CHANNEL_CAPACITY: usize = 1024;
+/// Capacity of the inbound user_data channel. Single-slot so a full channel
+/// blocks the router at once, pushing backpressure onto the TCP window.
+const USER_CHANNEL_CAPACITY: usize = 1;
 
 // ── TcpTransportPlugin ──────────────────────────────────────────────────
 
@@ -55,9 +56,10 @@ pub(crate) struct TcpTransportPlugin {
     /// Dial peers discovered at runtime that are not in `initial_peers`
     accept_undefined_peers: bool,
 
-    /// runtime isolating tcp tasks. Dropped last (after listener
-    /// and sender) so tasks can drain on shutdown.
-    runtime: Arc<tokio::runtime::Runtime>,
+    /// Root of the whole plugin's cancellation tree. The listener and the
+    /// sender each own a child of it, so one cancel reaches both sides
+    /// regardless of which half is still reachable.
+    cancel: CancellationToken,
 
     /// Outbound side. `Arc` because send paths and connect tasks hold clones.
     sender: Arc<TcpSender>,
@@ -67,8 +69,12 @@ pub(crate) struct TcpTransportPlugin {
     mux_listener: Mutex<Option<TcpMuxListener>>,
 
     /// Take-once receivers handed out via `take_*_source()`.
-    discovery_rx: Mutex<Option<crossbeam_channel::Receiver<IncomingMessage>>>,
-    user_data_rx: Mutex<Option<crossbeam_channel::Receiver<IncomingMessage>>>,
+    discovery_rx: Mutex<Option<flume::Receiver<IncomingMessage>>>,
+    user_data_rx: Mutex<Option<flume::Receiver<IncomingMessage>>>,
+
+    /// runtime isolating tcp tasks. Dropped last (after listener
+    /// and sender) so tasks can drain on shutdown.
+    runtime: Arc<tokio::runtime::Runtime>,
 }
 
 impl TcpTransportPlugin {
@@ -122,8 +128,8 @@ impl TcpTransportPlugin {
             ));
         }
 
-        // Crossbeam bridges async → sync.
-        let (discovery_tx, discovery_rx) = bounded::<IncomingMessage>(CHANNEL_BUFFER_SIZE);
+        // Bridge async → sync.
+        let (discovery_tx, discovery_rx) = bounded::<IncomingMessage>(DISCOVERY_CHANNEL_CAPACITY);
         let (user_data_tx, user_data_rx) = bounded::<IncomingMessage>(USER_CHANNEL_CAPACITY);
 
         let worker_threads = tcp_config.async_workers.unwrap_or_else(default_worker_count);
@@ -153,7 +159,11 @@ impl TcpTransportPlugin {
             }),
         };
 
+        let cancel = CancellationToken::new();
+
         // Build listener + sender inside a runtime context
+        let listener_cancel = cancel.child_token();
+        let sender_cancel = cancel.child_token();
         let (mux_listener, sender) = runtime.block_on(async {
             let listener = TcpMuxListener::bind_and_spawn(
                 physical_port,
@@ -164,6 +174,9 @@ impl TcpTransportPlugin {
                 user_data_tx,
                 tls_config.clone(),
                 tuning,
+                tcp_config.tls_handshake_timeout,
+                tcp_config.peer_handshake_timeout,
+                listener_cancel,
             )
             .map_err(|e| {
                 log::error!(
@@ -199,6 +212,7 @@ impl TcpTransportPlugin {
                 tls_config,
                 shared,
                 &tcp_config,
+                sender_cancel,
             );
 
             Ok::<_, io::Error>((listener, sender))
@@ -219,11 +233,12 @@ impl TcpTransportPlugin {
             initial_peers,
             public_address: tcp_config.public_address,
             accept_undefined_peers: tcp_config.accept_undefined_peers,
-            runtime,
+            cancel,
             sender,
             mux_listener: Mutex::new(Some(mux_listener)),
             discovery_rx: Mutex::new(Some(discovery_rx)),
             user_data_rx: Mutex::new(Some(user_data_rx)),
+            runtime,
         })
     }
 
@@ -352,7 +367,11 @@ impl TransportPlugin for TcpTransportPlugin {
     }
 
     fn close(&self) {
-        // 1. Take the listener out and await its tasks under block_on.
+        // 1. One cancel covers both halves, so every task is told to stop
+        //    before either side is awaited.
+        self.cancel.cancel();
+
+        // 2. Take the listener out and await its tasks under block_on.
         //    NOTE: block_on panics if called from inside a tokio runtime
         //    context. The TransportPlugin contract is that close() runs
         //    from the sync DDS shutdown path, never from inside our runtime.
@@ -362,7 +381,7 @@ impl TransportPlugin for TcpTransportPlugin {
             }
         }
 
-        // 2. Cancel the sender's shared token, tearing down every connection actor.
+        // 3. Await the outbound tasks the cancel above already woke.
         self.runtime.block_on(self.sender.shutdown());
 
         debug!("[TcpTransportPlugin] Closed");
@@ -390,15 +409,17 @@ impl Drop for TcpTransportPlugin {
     fn drop(&mut self) {
         // Best-effort fallback when close() was not called explicitly.
         // We cannot `block_on` inside Drop safely (it panics if Drop runs
-        // inside the runtime). Just fire cancellation: TcpMuxListener::Drop
-        // and TcpSender::Drop both cancel their tokens, and the runtime's
-        // own Drop drains or aborts the remaining tasks.
+        // inside the runtime), so cancellation is all we can do. Firing the
+        // root reaches both halves without depending on the listener still
+        // being in its slot or on the last sender Arc dying here; the
+        // runtime's own Drop then drains or aborts the remaining tasks.
+        self.cancel.cancel();
+
         if let Ok(mut guard) = self.mux_listener.lock() {
             if let Some(listener) = guard.take() {
                 drop(listener);
             }
         }
-        // sender's cancel fires via its Drop when the last Arc is dropped.
     }
 }
 
@@ -430,6 +451,11 @@ mod tests {
         // satisfy the pure-TCP initial-peers requirement with a dummy peer.
         let mut cfg = TcpConfig::default();
         cfg.initial_peers = vec!["127.0.0.1:7400".parse().unwrap()];
+        // Bind an ephemeral port rather than the domain-derived fixed port: the
+        // latter lingers in TIME_WAIT and makes back-to-back suite runs fail with
+        // AddrInUse. The tests below check against the *actual* listener port, so
+        // the ephemeral choice is transparent to them.
+        cfg.bind_port = Some(0);
         TcpTransportPlugin::new(
             domain,
             0,
@@ -476,6 +502,49 @@ mod tests {
         let plugin = make_plugin(next_test_domain());
         assert!(plugin.take_discovery_multicast_source().is_none());
         plugin.close();
+    }
+
+    /// Dropping the plugin cancels both halves through the one root, even when
+    /// neither half's own `Drop` can do it: the listener has already left its
+    /// slot and an outside `Arc` keeps the sender alive past the plugin.
+    #[test]
+    fn drop_cancels_both_sides_through_the_root() {
+        let plugin = make_plugin(next_test_domain());
+        let port = plugin.tcp_listener_port().expect("listener port");
+
+        // An inbound connection gives us a token from the listener's subtree.
+        let client =
+            std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).expect("client connect");
+
+        let listener = plugin.mux_listener.lock().expect("listener lock").take().expect("listener");
+        let shared = Arc::clone(listener.shared());
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let inbound = loop {
+            if let Some(entry) = shared.connections.iter().next() {
+                break entry.cancel.clone();
+            }
+            assert!(std::time::Instant::now() < deadline, "inbound connection never registered");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+
+        // Leak the listener rather than dropping it: dropping would fire its
+        // token, which is exactly the path this test must not rely on.
+        std::mem::forget(listener);
+
+        let sender = Arc::clone(&plugin.sender);
+        assert!(!inbound.is_cancelled());
+        assert!(!sender.cancel_token().is_cancelled());
+
+        drop(plugin);
+
+        assert!(inbound.is_cancelled(), "plugin Drop must cancel the inbound side via the root");
+        assert!(
+            sender.cancel_token().is_cancelled(),
+            "plugin Drop must cancel the outbound side via the root"
+        );
+
+        drop(client);
     }
 
     /// `close()` is idempotent and does not hang on the second call.

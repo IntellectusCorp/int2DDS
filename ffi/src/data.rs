@@ -47,7 +47,8 @@ pub struct CdrFieldDescriptor {
 ///
 /// This type exists solely to satisfy the `DdsType` trait bound on
 /// `DataWriter<T>` and `DataReader<T>`. All actual data flows through
-/// raw serialized bytes via `int2dds_write_serialized` / `int2dds_take_serialized`.
+/// raw serialized bytes via `int2dds_datawriter_write_serialized` /
+/// `int2dds_datareader_take_serialized`.
 #[derive(Debug, Clone)]
 pub struct Int2DdsData {
     /// Raw CDR bytes stored during deserialize() for compute_key() fallback
