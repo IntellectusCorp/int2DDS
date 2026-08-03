@@ -239,21 +239,11 @@ async fn handshake_and_register_task(
     let conn_id = shared.register_inbound_connection(addr, conn_cancel.clone());
     spawn_tasks(read_half, conn_id, shared.clone(), conn_cancel.clone(), tx, rx, write_half);
 
-    // Give the peer a bounded window to finish the handshake, then close the
-    // connection if it never got there. Cancellation wins the race: if the
-    // connection is torn down first the timeout resolves early and nothing is
-    // checked.
-    //
-    // Deliberately a `timeout` around the cancellation future rather than a
-    // `select!` over `sleep` and `cancelled()`. The two are equivalent, but the
-    // `select!` form makes this async fn's state machine large enough that
-    // rustc 1.89.0 (LLVM 20.1) segfaults in LLVM's BranchProbabilityInfo pass
-    // when compiling for aarch64-unknown-linux-gnu at opt-level=3 — on any
-    // host, so cross-compiling does not avoid it. Keep this shape until the
-    // toolchain is known to have the fix.
     if tokio::time::timeout(peer_handshake_timeout, conn_cancel.cancelled()).await.is_err()
         && !shared.inbound_handshake_complete(conn_id)
     {
+        // This branch will be entered when the connection operation fails
+        // with an error(disable to recover), not timeout.
         warn!(
             "TcpMuxListener [{}]: conn {} from {:?} did not finish the handshake \
              within {:?} — closing",
