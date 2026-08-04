@@ -2,6 +2,7 @@ package com.intellectus.int2dds.internal.ffi;
 
 import com.intellectus.int2dds.internal.NativeLoader;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 
 /**
  * Package-visible bridge to the generated {@link Ffi} declarations.
@@ -60,5 +61,274 @@ public final class FfiAccess {
     /** Releases a dynamic value handle. */
     public static void dynamicValueDestroy(long value) {
         Ffi.int2dds_dynamic_value_destroy(value);
+    }
+
+    /** Creates a standalone DomainParticipant QoS handle, or 0 on failure. */
+    public static long createParticipantQos() {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_participant_qos_create_default(directBufferAddress(slot));
+        return rc != 0 ? 0L : slot.getLong(0);
+    }
+
+    /** Releases a QoS handle from {@link #createParticipantQos()}. */
+    public static void destroyParticipantQos(long handle) {
+        Ffi.int2dds_participant_qos_destroy(handle);
+    }
+
+    /** Creates a standalone Publisher QoS handle, or 0 on failure. */
+    public static long createPublisherQos() {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_publisher_qos_create_default(directBufferAddress(slot));
+        return rc != 0 ? 0L : slot.getLong(0);
+    }
+
+    /** Releases a QoS handle from {@link #createPublisherQos()}. */
+    public static void destroyPublisherQos(long handle) {
+        Ffi.int2dds_publisher_qos_destroy(handle);
+    }
+
+    /** Creates a standalone Subscriber QoS handle, or 0 on failure. */
+    public static long createSubscriberQos() {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_subscriber_qos_create_default(directBufferAddress(slot));
+        return rc != 0 ? 0L : slot.getLong(0);
+    }
+
+    /** Releases a QoS handle from {@link #createSubscriberQos()}. */
+    public static void destroySubscriberQos(long handle) {
+        Ffi.int2dds_subscriber_qos_destroy(handle);
+    }
+
+    /** Creates a standalone Topic QoS handle, or 0 on failure. */
+    public static long createTopicQos() {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_topic_qos_create_default(directBufferAddress(slot));
+        return rc != 0 ? 0L : slot.getLong(0);
+    }
+
+    /** Releases a QoS handle from {@link #createTopicQos()}. */
+    public static void destroyTopicQos(long handle) {
+        Ffi.int2dds_topic_qos_destroy(handle);
+    }
+
+    /** Creates a standalone DataWriter QoS handle, or 0 on failure. */
+    public static long createDataWriterQos() {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_datawriter_qos_create_default(directBufferAddress(slot));
+        return rc != 0 ? 0L : slot.getLong(0);
+    }
+
+    /** Releases a QoS handle from {@link #createDataWriterQos()}. */
+    public static void destroyDataWriterQos(long handle) {
+        Ffi.int2dds_datawriter_qos_destroy(handle);
+    }
+
+    /** Creates a standalone DataReader QoS handle, or 0 on failure. */
+    public static long createDataReaderQos() {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_datareader_qos_create_default(directBufferAddress(slot));
+        return rc != 0 ? 0L : slot.getLong(0);
+    }
+
+    /** Releases a QoS handle from {@link #createDataReaderQos()}. */
+    public static void destroyDataReaderQos(long handle) {
+        Ffi.int2dds_datareader_qos_destroy(handle);
+    }
+
+    // --- Topic QoS setters ---
+
+    public static int topicQosSetReliability(long qos, int kind, long maxBlockingTimeNs) {
+        return Ffi.int2dds_topic_qos_set_reliability(qos, kind, maxBlockingTimeNs);
+    }
+
+    public static int topicQosSetDurability(long qos, int kind) {
+        return Ffi.int2dds_topic_qos_set_durability(qos, kind);
+    }
+
+    public static int topicQosSetHistory(long qos, int kind, int depth) {
+        return Ffi.int2dds_topic_qos_set_history(qos, kind, depth);
+    }
+
+    public static int topicQosSetDeadline(long qos, long periodNs) {
+        return Ffi.int2dds_topic_qos_set_deadline(qos, periodNs);
+    }
+
+    public static int topicQosSetLiveliness(long qos, int kind, long leaseDurationNs) {
+        return Ffi.int2dds_topic_qos_set_liveliness(qos, kind, leaseDurationNs);
+    }
+
+    public static int topicQosSetDestinationOrder(long qos, int kind) {
+        return Ffi.int2dds_topic_qos_set_destination_order(qos, kind);
+    }
+
+    public static int topicQosSetResourceLimits(
+            long qos, int maxSamples, int maxInstances, int maxSamplesPerInstance) {
+        return Ffi.int2dds_topic_qos_set_resource_limits(
+                qos, maxSamples, maxInstances, maxSamplesPerInstance);
+    }
+
+    public static int topicQosSetTransportPriority(long qos, int priority) {
+        return Ffi.int2dds_topic_qos_set_transport_priority(qos, priority);
+    }
+
+    public static int topicQosSetLifespan(long qos, long durationNs) {
+        return Ffi.int2dds_topic_qos_set_lifespan(qos, durationNs);
+    }
+
+    public static int topicQosSetOwnership(long qos, int kind) {
+        return Ffi.int2dds_topic_qos_set_ownership(qos, kind);
+    }
+
+    public static int topicQosSetDataRepresentation(long qos, int kind) {
+        return Ffi.int2dds_topic_qos_set_data_representation(qos, kind);
+    }
+
+    // --- DataWriter QoS setters ---
+
+    public static int writerQosSetReliability(long qos, int kind, long maxBlockingTimeNs) {
+        return Ffi.int2dds_datawriter_qos_set_reliability(qos, kind, maxBlockingTimeNs);
+    }
+
+    public static int writerQosSetDurability(long qos, int kind) {
+        return Ffi.int2dds_datawriter_qos_set_durability(qos, kind);
+    }
+
+    public static int writerQosSetHistory(long qos, int kind, int depth) {
+        return Ffi.int2dds_datawriter_qos_set_history(qos, kind, depth);
+    }
+
+    public static int writerQosSetOwnership(long qos, int kind) {
+        return Ffi.int2dds_datawriter_qos_set_ownership(qos, kind);
+    }
+
+    public static int writerQosSetOwnershipStrength(long qos, int value) {
+        return Ffi.int2dds_datawriter_qos_set_ownership_strength(qos, value);
+    }
+
+    public static int writerQosSetResourceLimits(
+            long qos, int maxSamples, int maxInstances, int maxSamplesPerInstance) {
+        return Ffi.int2dds_datawriter_qos_set_resource_limits(
+                qos, maxSamples, maxInstances, maxSamplesPerInstance);
+    }
+
+    public static int writerQosSetLifespan(long qos, long durationNs) {
+        return Ffi.int2dds_datawriter_qos_set_lifespan(qos, durationNs);
+    }
+
+    public static int writerQosSetDestinationOrder(long qos, int kind) {
+        return Ffi.int2dds_datawriter_qos_set_destination_order(qos, kind);
+    }
+
+    public static int writerQosSetLatencyBudget(long qos, long durationNs) {
+        return Ffi.int2dds_datawriter_qos_set_latency_budget(qos, durationNs);
+    }
+
+    public static int writerQosSetTransportPriority(long qos, int priority) {
+        return Ffi.int2dds_datawriter_qos_set_transport_priority(qos, priority);
+    }
+
+    public static int writerQosSetUserData(long qos, long dataAddr, long dataLen) {
+        return Ffi.int2dds_datawriter_qos_set_user_data(qos, dataAddr, dataLen);
+    }
+
+    public static int writerQosSetWriterDataLifecycle(long qos, boolean autodispose) {
+        return Ffi.int2dds_datawriter_qos_set_writer_data_lifecycle(qos, autodispose);
+    }
+
+    public static int writerQosSetDataRepresentation(long qos, int kind) {
+        return Ffi.int2dds_datawriter_qos_set_data_representation(qos, kind);
+    }
+
+    public static int writerQosSetDeadline(long qos, long periodNs) {
+        return Ffi.int2dds_datawriter_qos_set_deadline(qos, periodNs);
+    }
+
+    public static int writerQosSetLiveliness(long qos, int kind, long leaseDurationNs) {
+        return Ffi.int2dds_datawriter_qos_set_liveliness(qos, kind, leaseDurationNs);
+    }
+
+    /** DATA_FRAG max fragment size, an int2DDS extension. */
+    public static int writerQosSetDataFrag(long qos, int value) {
+        return Ffi.int2dds_datawriter_qos_set_data_frag(qos, value);
+    }
+
+    // --- DataReader QoS setters ---
+
+    public static int readerQosSetReliability(long qos, int kind, long maxBlockingTimeNs) {
+        return Ffi.int2dds_datareader_qos_set_reliability(qos, kind, maxBlockingTimeNs);
+    }
+
+    public static int readerQosSetDurability(long qos, int kind) {
+        return Ffi.int2dds_datareader_qos_set_durability(qos, kind);
+    }
+
+    public static int readerQosSetHistory(long qos, int kind, int depth) {
+        return Ffi.int2dds_datareader_qos_set_history(qos, kind, depth);
+    }
+
+    public static int readerQosSetOwnership(long qos, int kind) {
+        return Ffi.int2dds_datareader_qos_set_ownership(qos, kind);
+    }
+
+    public static int readerQosSetResourceLimits(
+            long qos, int maxSamples, int maxInstances, int maxSamplesPerInstance) {
+        return Ffi.int2dds_datareader_qos_set_resource_limits(
+                qos, maxSamples, maxInstances, maxSamplesPerInstance);
+    }
+
+    public static int readerQosSetDestinationOrder(long qos, int kind) {
+        return Ffi.int2dds_datareader_qos_set_destination_order(qos, kind);
+    }
+
+    public static int readerQosSetTimeBasedFilter(long qos, long minimumSeparationNs) {
+        return Ffi.int2dds_datareader_qos_set_time_based_filter(qos, minimumSeparationNs);
+    }
+
+    public static int readerQosSetLatencyBudget(long qos, long durationNs) {
+        return Ffi.int2dds_datareader_qos_set_latency_budget(qos, durationNs);
+    }
+
+    public static int readerQosSetUserData(long qos, long dataAddr, long dataLen) {
+        return Ffi.int2dds_datareader_qos_set_user_data(qos, dataAddr, dataLen);
+    }
+
+    public static int readerQosSetReaderDataLifecycle(
+            long qos, long autopurgeNowriterNs, long autopurgeDisposedNs) {
+        return Ffi.int2dds_datareader_qos_set_reader_data_lifecycle(
+                qos, autopurgeNowriterNs, autopurgeDisposedNs);
+    }
+
+    public static int readerQosSetDataRepresentation(long qos, int kind) {
+        return Ffi.int2dds_datareader_qos_set_data_representation(qos, kind);
+    }
+
+    public static int readerQosSetDeadline(long qos, long periodNs) {
+        return Ffi.int2dds_datareader_qos_set_deadline(qos, periodNs);
+    }
+
+    public static int readerQosSetLiveliness(long qos, int kind, long leaseDurationNs) {
+        return Ffi.int2dds_datareader_qos_set_liveliness(qos, kind, leaseDurationNs);
+    }
+
+    // --- DomainParticipant QoS setters ---
+
+    public static int participantQosSetUserData(long qos, long dataAddr, long dataLen) {
+        return Ffi.int2dds_participant_qos_set_user_data(qos, dataAddr, dataLen);
+    }
+
+    /** Adds or overwrites one text property entry (PropertyQosPolicy). */
+    public static int participantQosAddProperty(
+            long qos, byte[] name, byte[] value, boolean propagate) {
+        return Ffi.int2dds_participant_qos_add_property(qos, name, value, propagate);
+    }
+
+    // --- Publisher / Subscriber QoS setters ---
+
+    public static int publisherQosSetPartition(long qos, byte[][] names, long count) {
+        return Ffi.int2dds_publisher_qos_set_partition(qos, names, count);
+    }
+
+    public static int subscriberQosSetPartition(long qos, byte[][] names, long count) {
+        return Ffi.int2dds_subscriber_qos_set_partition(qos, names, count);
     }
 }
