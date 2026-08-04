@@ -82,7 +82,7 @@ class CdrWriterBufferTest {
         // it — covered by paddingBytesAreZeroEvenInAReusedBuffer in the next
         // task.
         try (CdrWriter w = CdrWriter.acquire(Extensibility.FINAL, true, true)) {
-            w.writeRawForTest(new byte[] {(byte) 0xAA, (byte) 0xBB, (byte) 0xCC, (byte) 0xDD});
+            w.writeBytes(new byte[] {(byte) 0xAA, (byte) 0xBB, (byte) 0xCC, (byte) 0xDD});
         }
         try (CdrWriter w = CdrWriter.acquire(Extensibility.FINAL, true, true)) {
             byte[] fresh = w.toBytes();
@@ -99,7 +99,7 @@ class CdrWriterBufferTest {
             for (int i = 0; i < big.length; i++) {
                 big[i] = (byte) i;
             }
-            w.writeRawForTest(big);
+            w.writeBytes(big);
             byte[] out = w.toBytes();
             assertEquals(4 + big.length, out.length);
             for (int i = 0; i < big.length; i++) {
@@ -114,7 +114,7 @@ class CdrWriterBufferTest {
     void growthPastTheCapIsRejected() {
         try (CdrWriter w = CdrWriter.acquire(Extensibility.FINAL, true, true)) {
             assertThrows(CdrOverflowException.class,
-                    () -> w.writeRawForTest(new byte[CdrWriter.MAX_CAPACITY + 1]));
+                    () -> w.writeBytes(new byte[CdrWriter.MAX_CAPACITY + 1]));
         }
     }
 

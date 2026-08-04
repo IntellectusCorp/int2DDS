@@ -4,6 +4,7 @@ import com.intellectus.int2dds.internal.ffi.FfiAccess;
 import java.nio.Buffer;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.Charset;
 import java.util.ArrayDeque;
 
 /**
@@ -23,6 +24,8 @@ public final class CdrWriter implements AutoCloseable {
     /** Growth ceiling. A malformed or hostile sample must not be able to
      *  consume unbounded native memory. */
     public static final int MAX_CAPACITY = 64 * 1024 * 1024;
+
+    private static final Charset UTF8 = Charset.forName("UTF-8");
 
     private static final int DEFAULT_CAPACITY = 256;
     private static final int POOL_LIMIT = 4;
@@ -202,12 +205,6 @@ public final class CdrWriter implements AutoCloseable {
         pos += len;
     }
 
-    /** Test-only seam so the buffer machinery is testable before Task 4 adds
-     *  {@code writeBytes}. Task 4 deletes this. */
-    void writeRawForTest(byte[] data) {
-        putBulk(data, 0, data.length);
-    }
-
     // ---- alignment ------------------------------------------------------
 
     /**
@@ -291,6 +288,87 @@ public final class CdrWriter implements AutoCloseable {
 
     public void writeF64(double value) {
         writeI64(Double.doubleToRawLongBits(value));
+    }
+
+    // ---- strings, sequences, raw bytes -----------------------------------
+
+    /**
+     * Writes a CDR string: a uint32 length that includes the terminator, the
+     * UTF-8 bytes, then a NUL.
+     *
+     * <p>Length counts bytes, not characters. An interior NUL is preserved —
+     * CDR strings are length-prefixed, so it is legal payload.
+     */
+    public void writeString(String s) {
+        if (s == null) {
+            s = "";
+        }
+        int n = s.length();
+        int ascii = asciiPrefixLength(s, n);
+        if (ascii == n) {
+            // Fast path: one byte per char, no intermediate array.
+            writeU32(n + 1);
+            ensure(n + 1);
+            ByteBuffer b = pooled.buffer;
+            for (int i = 0; i < n; i++) {
+                b.put(pos + i, (byte) s.charAt(i));
+            }
+            b.put(pos + n, (byte) 0);
+            pos += n + 1;
+            return;
+        }
+        byte[] utf8 = s.getBytes(UTF8);
+        writeU32(utf8.length + 1);
+        putBulk(utf8, 0, utf8.length);
+        ensure(1);
+        pooled.buffer.put(pos, (byte) 0);
+        pos += 1;
+    }
+
+    /** Index of the first char at or above U+0080, or {@code n} if all ASCII. */
+    private static int asciiPrefixLength(String s, int n) {
+        for (int i = 0; i < n; i++) {
+            if (s.charAt(i) >= 0x80) {
+                return i;
+            }
+        }
+        return n;
+    }
+
+    /**
+     * Writes a CDR wstring: a uint32 count of UTF-16 code units including the
+     * terminator, then each unit as a u16, then a zero unit.
+     */
+    public void writeWString(String s) {
+        if (s == null) {
+            s = "";
+        }
+        int n = s.length();
+        writeU32(n + 1);
+        for (int i = 0; i < n; i++) {
+            writeU16(s.charAt(i));
+        }
+        writeU16(0);
+    }
+
+    /** Writes a sequence header: the element count as a uint32. */
+    public void writeSeqHeader(int count) {
+        writeU32(count);
+    }
+
+    /** Writes raw bytes with no alignment and no length prefix. */
+    public void writeBytes(byte[] data) {
+        writeBytes(data, 0, data.length);
+    }
+
+    /** Writes raw bytes with no alignment and no length prefix. */
+    public void writeBytes(byte[] data, int offset, int length) {
+        putBulk(data, offset, length);
+    }
+
+    /** Writes an enum discriminant as a signed 32-bit integer. */
+    public void writeEnum(int discriminant) {
+        writeI32(discriminant);
     }
 
     // ---- encapsulation header -------------------------------------------
