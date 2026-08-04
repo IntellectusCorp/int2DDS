@@ -107,6 +107,26 @@ impl<Q: Debug> StatusCondition<Q> {
             *enabled_statuses = mask;
         }
 
+        // The trigger value is `enabled_statuses & status_changes`, so widening the mask can make
+        // an already-attached condition triggered without any further status change. Nothing else
+        // will notice: `add_communication_status` only fires when a status arrives, and a thread
+        // already blocked in `WaitSet::wait` has passed its immediate check. Re-evaluate here and
+        // wake it, or the wake-up is lost until the next unrelated status change.
+        //
+        // Reads the two masks separately, matching the lock ordering `get_trigger_value` and
+        // `add_communication_status` use, and holds neither while invoking the callback.
+        let enabled_statuses = self.get_enabled_statuses()?;
+        let status_changes = self.get_status_changes()?;
+
+        if !(enabled_statuses & status_changes).is_empty() {
+            debug!("set_enabled_statuses made the condition triggered, notifying");
+            if let Ok(callback) = self.waitset_callback.lock() {
+                if let Some(callback) = callback.as_ref() {
+                    callback();
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -198,13 +218,54 @@ mod tests {
     use std::time::Duration;
 
     use crate::{
+        core::time::Duration as DdsDuration,
         domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
-        infrastructure::status::{StatusKind, StatusMask},
+        infrastructure::{
+            status::{StatusKind, StatusMask},
+            status_condition::StatusCondition,
+            wait_set::WaitSet,
+        },
         subscription::qos::{DataReaderQos, SubscriberQos},
         test_utils::unique_domain_id,
         topic::qos::TopicQos,
         DdsType,
     };
+
+    /// Widening the enabled mask can make an attached condition triggered with no further status
+    /// change. A thread already blocked in `WaitSet::wait` has passed its immediate check, so
+    /// unless `set_enabled_statuses` notifies, that wake-up is lost until an unrelated status
+    /// arrives -- and with `Duration::infinite()` it is lost for good.
+    #[test]
+    fn widening_the_enabled_mask_wakes_a_blocked_waitset() {
+        // The status is already latched, but not enabled, so the condition is not triggered yet.
+        let condition = StatusCondition::<DataReaderQos>::new(None);
+        condition.set_enabled_statuses(StatusMask::empty()).unwrap();
+        condition.set_communication_status(&StatusKind::DATA_AVAILABLE, true).unwrap();
+        assert!(!condition.get_trigger_value().unwrap());
+
+        let wait_set = std::sync::Arc::new(WaitSet::new());
+        wait_set.attach_condition(condition.clone()).unwrap();
+
+        let waiter = {
+            let wait_set = wait_set.clone();
+            std::thread::spawn(move || wait_set.wait(DdsDuration::from_seconds(30)))
+        };
+
+        // Far beyond the park latency, so the notification lands while the waiter is genuinely
+        // blocked on the condvar rather than in the window before it parks.
+        std::thread::sleep(Duration::from_millis(300));
+
+        let start = std::time::Instant::now();
+        condition.set_enabled_statuses(StatusKind::DATA_AVAILABLE).unwrap();
+
+        let triggered = waiter.join().unwrap().expect("widening the mask must wake the waiter");
+        assert_eq!(triggered.len(), 1);
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "waiter was not woken by the mask change; took {:?}",
+            start.elapsed()
+        );
+    }
 
     #[derive(DdsType)]
     #[dds_type(crate_path = "crate")]
