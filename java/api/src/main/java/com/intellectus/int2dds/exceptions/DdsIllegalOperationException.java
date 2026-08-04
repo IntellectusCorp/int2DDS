@@ -5,6 +5,6 @@ public class DdsIllegalOperationException extends DdsException {
     private static final long serialVersionUID = 1L;
 
     public DdsIllegalOperationException() {
-        super("DDS illegal operation.", ReturnCodeValues.ILLEGAL_OPERATION);
+        super("DDS illegal operation.", RET_ILLEGAL_OPERATION);
     }
 }

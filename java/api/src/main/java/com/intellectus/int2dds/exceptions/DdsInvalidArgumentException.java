@@ -5,6 +5,6 @@ public class DdsInvalidArgumentException extends DdsException {
     private static final long serialVersionUID = 1L;
 
     public DdsInvalidArgumentException() {
-        super("DDS invalid argument.", ReturnCodeValues.INVALID_ARGUMENT);
+        super("DDS invalid argument.", RET_INVALID_ARGUMENT);
     }
 }

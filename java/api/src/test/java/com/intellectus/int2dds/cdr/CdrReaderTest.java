@@ -167,6 +167,31 @@ class CdrReaderTest {
     }
 
     @Test
+    void readSeqHeaderRejectsANegativeCount() {
+        // -1 as a wire int32, little-endian.
+        CdrReader r = CdrReader.of(new byte[] {
+                0x00, 0x01, 0x00, 0x00,
+                (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF});
+        assertThrows(CdrUnderflowException.class, r::readSeqHeader);
+    }
+
+    @Test
+    void readSeqHeaderRejectsACountLargerThanTheBuffer() {
+        // Claims 1000 elements but only 4 bytes remain.
+        CdrReader r = CdrReader.of(new byte[] {
+                0x00, 0x01, 0x00, 0x00,
+                (byte) 0xE8, 0x03, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00});
+        assertThrows(CdrUnderflowException.class, r::readSeqHeader);
+    }
+
+    @Test
+    void skipRejectsANegativeCount() {
+        CdrReader r = CdrReader.of(new byte[] {0x00, 0x01, 0x00, 0x00, 0x01});
+        assertThrows(CdrUnderflowException.class, () -> r.skip(-1));
+    }
+
+    @Test
     void readerDoesNotDisturbCallerBuffer() {
         ByteBuffer b = ByteBuffer.wrap(new byte[] {0x00, 0x01, 0x00, 0x00, 0x04, 0x03, 0x02, 0x01});
         int originalPos = b.position();

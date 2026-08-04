@@ -5,6 +5,6 @@ public class DdsUnsupportedException extends DdsException {
     private static final long serialVersionUID = 1L;
 
     public DdsUnsupportedException() {
-        super("DDS operation not supported.", ReturnCodeValues.UNSUPPORTED);
+        super("DDS operation not supported.", RET_UNSUPPORTED);
     }
 }

@@ -5,6 +5,6 @@ public class DdsNullPointerException extends DdsException {
     private static final long serialVersionUID = 1L;
 
     public DdsNullPointerException() {
-        super("DDS null pointer.", ReturnCodeValues.NULL_POINTER);
+        super("DDS null pointer.", RET_NULL_POINTER);
     }
 }

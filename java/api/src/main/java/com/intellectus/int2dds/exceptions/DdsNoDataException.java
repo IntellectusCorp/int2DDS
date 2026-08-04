@@ -5,6 +5,6 @@ public class DdsNoDataException extends DdsException {
     private static final long serialVersionUID = 1L;
 
     public DdsNoDataException() {
-        super("DDS no data available.", ReturnCodeValues.NO_DATA);
+        super("DDS no data available.", RET_NO_DATA);
     }
 }

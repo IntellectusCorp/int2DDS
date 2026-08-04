@@ -5,6 +5,6 @@ public class DdsTimeoutException extends DdsException {
     private static final long serialVersionUID = 1L;
 
     public DdsTimeoutException() {
-        super("DDS operation timed out.", ReturnCodeValues.TIMEOUT);
+        super("DDS operation timed out.", RET_TIMEOUT);
     }
 }

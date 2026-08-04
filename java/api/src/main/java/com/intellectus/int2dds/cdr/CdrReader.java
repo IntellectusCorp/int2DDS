@@ -127,6 +127,9 @@ public final class CdrReader {
     }
 
     private void require(int count) {
+        if (count < 0) {
+            throw new CdrUnderflowException("Negative byte count: " + count);
+        }
         if ((long) pos + count > limit) {
             throw new CdrUnderflowException(
                     "Need " + count + " bytes but only " + remaining() + " remaining.");
@@ -245,9 +248,23 @@ public final class CdrReader {
         return new String(chars);
     }
 
-    /** Reads a sequence header and returns the element count. */
+    /**
+     * Reads a sequence header and returns the element count.
+     *
+     * <p>Every element costs at least one byte on the wire, so a count
+     * exceeding the remaining bytes cannot be genuine; rejected alongside a
+     * negative count.
+     */
     public int readSeqHeader() {
-        return readI32();
+        int count = readI32();
+        if (count < 0) {
+            throw new CdrUnderflowException("Invalid sequence count: " + count);
+        }
+        if (count > remaining()) {
+            throw new CdrUnderflowException(
+                    "Sequence count " + count + " exceeds " + remaining() + " remaining bytes.");
+        }
+        return count;
     }
 
     /** Reads raw bytes with no alignment. */
@@ -286,20 +303,33 @@ public final class CdrReader {
         }
     }
 
-    /** Reads a DHEADER. */
+    /**
+     * Reads a DHEADER. Under XCDR1, where there is no DHEADER on the wire,
+     * nothing is consumed and {@code objectSize} is {@code 0} — matching
+     * {@code CdrReader.ReadDheader} in the C# implementation. Mirrors {@link
+     * CdrWriter#dheaderBegin()}, so version-agnostic caller code needs no
+     * branch here either.
+     */
     public Dheader readDheader() {
+        if (!xcdr2) {
+            return new Dheader(0, pos);
+        }
         int size = readI32();
         return new Dheader(size, pos);
     }
 
     /**
-     * Skips to the end of a DHEADER-delimited aggregate.
+     * Skips to the end of a DHEADER-delimited aggregate. A no-op under
+     * XCDR1, mirroring {@link CdrWriter#dheaderFinalize(int)}.
      *
      * <p>This is what makes APPENDABLE work: a writer that added members this
      * reader does not know about leaves bytes behind, and this steps over them
      * instead of decoding them.
      */
     public void readDheaderEnd(Dheader d) {
+        if (!xcdr2) {
+            return;
+        }
         long end = (long) d.startPos + d.objectSize;
         if (d.objectSize < 0 || end > limit) {
             throw new CdrUnderflowException(

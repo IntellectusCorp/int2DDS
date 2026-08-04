@@ -77,17 +77,27 @@ public class CdrEncodeBenchmark {
     }
 
     @Benchmark
-    public void directBuffer(Blackhole bh) {
+    public int directBuffer(Blackhole bh) {
         try (CdrWriter w = CdrWriter.acquire(Extensibility.APPENDABLE, true, true)) {
             encode(w, name, blob);
             // w.address() and w.length() do not depend on the bytes actually
             // stored: address is a field cached at allocation time and length
             // is a counter advanced by arithmetic independent of the store
-            // instructions. A sink built from either would not force the
-            // encode's writes to happen, so a sufficiently aggressive JIT
-            // could in principle eliminate them as dead code. Consuming the
-            // buffer view instead forces a real read over the encoded range.
-            bh.consume(w.buffer());
+            // instructions. Consuming a view object (an earlier version of
+            // this benchmark did `bh.consume(w.buffer())`) does not help
+            // either: Blackhole.consume(Object) never dereferences its
+            // argument, so the view's bytes are never actually read and the
+            // encode's stores remain eligible for elimination. The bulk
+            // `get` below is what forces the read — it is the same copy
+            // heapThenStage performs, so both arms pay for exactly one real
+            // read of the encoded bytes. A per-byte checksum loop on top of
+            // that would add cost the other arm does not pay, so consuming a
+            // single element of the filled array is enough to keep the `get`
+            // itself from being elided.
+            int len = w.length();
+            w.buffer().get(heapBuffer, 0, len);
+            bh.consume(heapBuffer[0]);
+            return len;
         }
     }
 

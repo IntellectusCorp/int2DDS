@@ -5,6 +5,6 @@ public class DdsOutOfResourcesException extends DdsException {
     private static final long serialVersionUID = 1L;
 
     public DdsOutOfResourcesException() {
-        super("DDS out of resources.", ReturnCodeValues.OUT_OF_RESOURCES);
+        super("DDS out of resources.", RET_OUT_OF_RESOURCES);
     }
 }

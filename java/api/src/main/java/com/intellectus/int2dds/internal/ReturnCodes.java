@@ -15,7 +15,6 @@ import com.intellectus.int2dds.exceptions.DdsOutOfResourcesException;
 import com.intellectus.int2dds.exceptions.DdsPreconditionNotMetException;
 import com.intellectus.int2dds.exceptions.DdsTimeoutException;
 import com.intellectus.int2dds.exceptions.DdsUnsupportedException;
-import com.intellectus.int2dds.exceptions.ReturnCodeValues;
 import com.intellectus.int2dds.internal.ffi.FfiAccess;
 import java.nio.charset.Charset;
 import java.util.function.ToIntFunction;
@@ -23,10 +22,10 @@ import java.util.function.ToIntFunction;
 /**
  * Turns {@code Int2DdsRet} values into exceptions.
  *
- * <p>The numeric values switched on below are {@link ReturnCodeValues}, which
- * is transcribed from the {@code INT2DDS_RET_*} constants in {@code
- * ffi/src/error.rs} — the single source of truth for this mapping, and the
- * only place the numbers are written down. If a code is added there, add a
+ * <p>The numeric values switched on below are {@link DdsException}'s
+ * {@code RET_*} constants, transcribed from the {@code INT2DDS_RET_*}
+ * constants in {@code ffi/src/error.rs} — the single source of truth for
+ * this mapping, and the only place the numbers are written down. If a code is added there, add a
  * case here — the fallback keeps working but loses the specific type. A
  * handful of codes in that file (the {@code INT2DDS_RET_DYNAMIC_*} family,
  * 200-204, for dynamic-type reflection) have no dedicated exception type yet
@@ -42,7 +41,7 @@ public final class ReturnCodes {
 
     /** Throws the exception matching {@code ret}, or returns for OK. */
     public static void check(int ret) {
-        if (ret == ReturnCodeValues.OK) {
+        if (ret == DdsException.RET_OK) {
             return;
         }
         throw toException(ret);
@@ -51,10 +50,10 @@ public final class ReturnCodes {
     /** True for OK, false for NO_DATA, throws for anything else.
      *  Read and take need to report "nothing available" without an exception. */
     public static boolean checkOrNoData(int ret) {
-        if (ret == ReturnCodeValues.OK) {
+        if (ret == DdsException.RET_OK) {
             return true;
         }
-        if (ret == ReturnCodeValues.NO_DATA) {
+        if (ret == DdsException.RET_NO_DATA) {
             return false;
         }
         throw toException(ret);
@@ -105,33 +104,33 @@ public final class ReturnCodes {
 
     private static DdsException toException(int ret) {
         switch (ret) {
-            case ReturnCodeValues.ERROR:
+            case DdsException.RET_ERROR:
                 return new DdsErrorException(lastErrorMessage());
-            case ReturnCodeValues.TIMEOUT:
+            case DdsException.RET_TIMEOUT:
                 return new DdsTimeoutException();
-            case ReturnCodeValues.UNSUPPORTED:
+            case DdsException.RET_UNSUPPORTED:
                 return new DdsUnsupportedException();
-            case ReturnCodeValues.INVALID_ARGUMENT:
+            case DdsException.RET_INVALID_ARGUMENT:
                 return new DdsInvalidArgumentException();
-            case ReturnCodeValues.ALREADY_DELETED:
+            case DdsException.RET_ALREADY_DELETED:
                 return new DdsAlreadyDeletedException();
-            case ReturnCodeValues.NOT_ENABLED:
+            case DdsException.RET_NOT_ENABLED:
                 return new DdsNotEnabledException();
-            case ReturnCodeValues.IMMUTABLE_POLICY:
+            case DdsException.RET_IMMUTABLE_POLICY:
                 return new DdsImmutablePolicyException();
-            case ReturnCodeValues.INCONSISTENT_POLICY:
+            case DdsException.RET_INCONSISTENT_POLICY:
                 return new DdsInconsistentPolicyException();
-            case ReturnCodeValues.PRECONDITION_NOT_MET:
+            case DdsException.RET_PRECONDITION_NOT_MET:
                 return new DdsPreconditionNotMetException();
-            case ReturnCodeValues.OUT_OF_RESOURCES:
+            case DdsException.RET_OUT_OF_RESOURCES:
                 return new DdsOutOfResourcesException();
-            case ReturnCodeValues.ILLEGAL_OPERATION:
+            case DdsException.RET_ILLEGAL_OPERATION:
                 return new DdsIllegalOperationException();
-            case ReturnCodeValues.NO_DATA:
+            case DdsException.RET_NO_DATA:
                 return new DdsNoDataException();
-            case ReturnCodeValues.NULL_POINTER:
+            case DdsException.RET_NULL_POINTER:
                 return new DdsNullPointerException();
-            case ReturnCodeValues.BUFFER_TOO_SMALL:
+            case DdsException.RET_BUFFER_TOO_SMALL:
                 return new DdsBufferTooSmallException();
             default:
                 return new DdsException(

@@ -7,13 +7,13 @@ public class DdsErrorException extends DdsException {
     private static final String DEFAULT_MESSAGE = "DDS operation failed.";
 
     public DdsErrorException() {
-        super(DEFAULT_MESSAGE, ReturnCodeValues.ERROR);
+        super(DEFAULT_MESSAGE, RET_ERROR);
     }
 
     /** Uses the native error message when present, falling back to the
      *  default when {@code message} is null or empty. */
     public DdsErrorException(String message) {
         super((message == null || message.isEmpty()) ? DEFAULT_MESSAGE : message,
-                ReturnCodeValues.ERROR);
+                RET_ERROR);
     }
 }

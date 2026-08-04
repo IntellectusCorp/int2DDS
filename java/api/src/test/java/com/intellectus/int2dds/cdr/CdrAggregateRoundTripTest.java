@@ -31,6 +31,29 @@ class CdrAggregateRoundTripTest {
     }
 
     @Test
+    void dheaderIsANoOpUnderXcdr1() {
+        // Version-agnostic caller code: same readDheader/readDheaderEnd
+        // sequence as the XCDR2 test above, but against an XCDR1 writer.
+        // CdrWriter.dheaderBegin() returns -1 and dheaderFinalize() is a
+        // no-op under XCDR1; the reader must mirror that so nothing is
+        // consumed and the payload survives untouched.
+        try (CdrWriter w = CdrWriter.acquire(Extensibility.APPENDABLE, true, false)) {
+            int t = w.dheaderBegin();
+            w.writeI32(7);
+            w.writeI32(8);
+            w.dheaderFinalize(t);
+
+            CdrReader r = CdrReader.of(w.toBytes());
+            assertFalse(r.isXcdr2());
+            CdrReader.Dheader d = r.readDheader();
+            assertEquals(7, r.readI32());
+            assertEquals(8, r.readI32());
+            r.readDheaderEnd(d);
+            assertEquals(0, r.remaining());
+        }
+    }
+
+    @Test
     void unknownTrailingMembersAreSkippedByDheaderEnd() {
         // A newer writer appended a field this reader does not know about.
         // APPENDABLE exists so that reader can still move on cleanly.
@@ -307,10 +330,5 @@ class CdrAggregateRoundTripTest {
         CdrReader r = CdrReader.of(buf);
         assertThrows(CdrUnderflowException.class, () -> r.readParameterHeader(),
                 "Negative length in extended form should throw");
-    }
-
-    /** Helper to get current position for test assertions. */
-    private static class PositionCapture {
-        int pos;
     }
 }

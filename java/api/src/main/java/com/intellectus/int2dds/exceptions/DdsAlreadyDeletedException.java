@@ -5,6 +5,6 @@ public class DdsAlreadyDeletedException extends DdsException {
     private static final long serialVersionUID = 1L;
 
     public DdsAlreadyDeletedException() {
-        super("DDS entity already deleted.", ReturnCodeValues.ALREADY_DELETED);
+        super("DDS entity already deleted.", RET_ALREADY_DELETED);
     }
 }

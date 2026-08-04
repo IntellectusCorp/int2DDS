@@ -5,6 +5,6 @@ public class DdsNotEnabledException extends DdsException {
     private static final long serialVersionUID = 1L;
 
     public DdsNotEnabledException() {
-        super("DDS entity not enabled.", ReturnCodeValues.NOT_ENABLED);
+        super("DDS entity not enabled.", RET_NOT_ENABLED);
     }
 }
