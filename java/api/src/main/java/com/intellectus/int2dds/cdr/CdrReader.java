@@ -127,7 +127,7 @@ public final class CdrReader {
     }
 
     private void require(int count) {
-        if (pos + count > limit) {
+        if ((long) pos + count > limit) {
             throw new CdrUnderflowException(
                     "Need " + count + " bytes but only " + remaining() + " remaining.");
         }
@@ -231,6 +231,11 @@ public final class CdrReader {
         if (unitsWithNul <= 0) {
             throw new CdrUnderflowException("Invalid wstring length: " + unitsWithNul);
         }
+        long needed = 2L * unitsWithNul;
+        if (needed > remaining()) {
+            throw new CdrUnderflowException(
+                    "wstring claims " + unitsWithNul + " units but only " + remaining() + " bytes remain");
+        }
         int units = unitsWithNul - 1;
         char[] chars = new char[units];
         for (int i = 0; i < units; i++) {
@@ -247,6 +252,9 @@ public final class CdrReader {
 
     /** Reads raw bytes with no alignment. */
     public byte[] readBytes(int length) {
+        if (length < 0) {
+            throw new CdrUnderflowException("negative byte count: " + length);
+        }
         require(length);
         byte[] out = new byte[length];
         for (int i = 0; i < length; i++) {

@@ -48,44 +48,64 @@ class CdrRoundTripTest {
     @Test
     void stringsRoundTripIncludingNonAsciiAndSupplementary() {
         String[] cases = {"", "abc", "센서/온도", "🌡", "a\0b", "mixed 한글 and ASCII"};
-        for (String s : cases) {
-            try (CdrWriter w = CdrWriter.acquire(Extensibility.FINAL, true, false)) {
-                w.writeString(s);
-                assertEquals(s, reread(w).readString(), "case: " + s);
+        for (boolean le : new boolean[] {true, false}) {
+            for (boolean x2 : new boolean[] {true, false}) {
+                for (String s : cases) {
+                    try (CdrWriter w = CdrWriter.acquire(Extensibility.FINAL, le, x2)) {
+                        w.writeString(s);
+                        String at = "case: " + s + " (le=" + le + " xcdr2=" + x2 + ")";
+                        assertEquals(s, reread(w).readString(), at);
+                    }
+                }
             }
         }
     }
 
     @Test
     void wstringsRoundTrip() {
-        try (CdrWriter w = CdrWriter.acquire(Extensibility.FINAL, true, false)) {
-            w.writeWString("ab한");
-            assertEquals("ab한", reread(w).readWString());
+        for (boolean le : new boolean[] {true, false}) {
+            for (boolean x2 : new boolean[] {true, false}) {
+                try (CdrWriter w = CdrWriter.acquire(Extensibility.FINAL, le, x2)) {
+                    w.writeWString("ab한");
+                    String at = "le=" + le + " xcdr2=" + x2;
+                    assertEquals("ab한", reread(w).readWString(), at);
+                }
+            }
         }
     }
 
     @Test
     void sequencesAndRawBytesRoundTrip() {
         byte[] blob = {1, 2, 3, 4, 5};
-        try (CdrWriter w = CdrWriter.acquire(Extensibility.FINAL, true, false)) {
-            w.writeSeqHeader(blob.length);
-            w.writeBytes(blob);
-            CdrReader r = reread(w);
-            assertEquals(blob.length, r.readSeqHeader());
-            assertArrayEquals(blob, r.readBytes(blob.length));
+        for (boolean le : new boolean[] {true, false}) {
+            for (boolean x2 : new boolean[] {true, false}) {
+                try (CdrWriter w = CdrWriter.acquire(Extensibility.FINAL, le, x2)) {
+                    w.writeSeqHeader(blob.length);
+                    w.writeBytes(blob);
+                    CdrReader r = reread(w);
+                    String at = "le=" + le + " xcdr2=" + x2;
+                    assertEquals(blob.length, r.readSeqHeader(), at);
+                    assertArrayEquals(blob, r.readBytes(blob.length), at);
+                }
+            }
         }
     }
 
     @Test
     void enumsRoundTripIncludingNegatives() {
-        try (CdrWriter w = CdrWriter.acquire(Extensibility.FINAL, true, false)) {
-            w.writeEnum(-1);
-            w.writeEnum(0);
-            w.writeEnum(7);
-            CdrReader r = reread(w);
-            assertEquals(-1, r.readEnum());
-            assertEquals(0, r.readEnum());
-            assertEquals(7, r.readEnum());
+        for (boolean le : new boolean[] {true, false}) {
+            for (boolean x2 : new boolean[] {true, false}) {
+                try (CdrWriter w = CdrWriter.acquire(Extensibility.FINAL, le, x2)) {
+                    w.writeEnum(-1);
+                    w.writeEnum(0);
+                    w.writeEnum(7);
+                    CdrReader r = reread(w);
+                    String at = "le=" + le + " xcdr2=" + x2;
+                    assertEquals(-1, r.readEnum(), at);
+                    assertEquals(0, r.readEnum(), at);
+                    assertEquals(7, r.readEnum(), at);
+                }
+            }
         }
     }
 
@@ -125,5 +145,43 @@ class CdrRoundTripTest {
                 0x64, 0x00, 0x00, 0x00,
                 'a', 'b'});
         assertThrows(CdrUnderflowException.class, r::readString);
+    }
+
+    @Test
+    void aWstringWithLargeUnitCountDoesNotAllocateBeforeBoundsCheckingIt() {
+        // A wstring claiming 100,000,000 units (200 MB) against a tiny buffer.
+        // The bounds check must fire before the allocation.
+        byte[] hostile = new byte[16];
+        // Encapsulation header (LE XCDR1)
+        hostile[0] = 0x00; hostile[1] = 0x01;
+        hostile[2] = 0x00; hostile[3] = 0x00;
+        // Length: 100,000,000 in LE
+        hostile[4] = (byte) 0x00; hostile[5] = (byte) 0xE1; hostile[6] = (byte) 0xF5; hostile[7] = (byte) 0x05;
+        CdrReader r = CdrReader.of(hostile);
+        assertThrows(CdrUnderflowException.class, r::readWString);
+    }
+
+    @Test
+    void aStringWithMaxIntLengthPrefixUnderflowsRatherThanAllocatingOrHanging() {
+        // Length prefix is 0x7FFFFFFF (Integer.MAX_VALUE) against a short buffer.
+        // This would wrap in 32-bit arithmetic. The fixed require() in long arithmetic
+        // must catch it.
+        byte[] hostile = new byte[16];
+        // Encapsulation header (LE XCDR1)
+        hostile[0] = 0x00; hostile[1] = 0x01;
+        hostile[2] = 0x00; hostile[3] = 0x00;
+        // Length: 0x7FFFFFFF in LE
+        hostile[4] = (byte) 0xFF; hostile[5] = (byte) 0xFF; hostile[6] = (byte) 0xFF; hostile[7] = (byte) 0x7F;
+        CdrReader r = CdrReader.of(hostile);
+        assertThrows(CdrUnderflowException.class, r::readString);
+    }
+
+    @Test
+    void readBytesWithNegativeLengthThrowsCdrUnderflowExceptionNotNegativeArraySizeException() {
+        try (CdrWriter w = CdrWriter.acquire(Extensibility.FINAL, true, false)) {
+            w.writeBytes(new byte[] {1, 2});
+            CdrReader r = reread(w);
+            assertThrows(CdrUnderflowException.class, () -> r.readBytes(-1));
+        }
     }
 }
