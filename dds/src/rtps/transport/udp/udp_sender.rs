@@ -78,7 +78,12 @@ impl UdpSender {
     ) -> std::io::Result<Self> {
         let socket = Socket2::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
 
-        let mc_addr: Ipv4Addr = multicast_if_ip.parse().unwrap();
+        let mc_addr: Ipv4Addr = multicast_if_ip.parse().map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid multicast interface address '{multicast_if_ip}': {e}"),
+            )
+        })?;
         socket.set_multicast_if_v4(&mc_addr)?;
         socket.set_multicast_ttl_v4(udp_config.multicast_ttl as u32)?;
 

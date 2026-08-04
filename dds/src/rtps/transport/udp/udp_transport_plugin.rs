@@ -23,6 +23,7 @@ pub(crate) struct UdpTransportPlugin {
     domain_id: u32,
     participant_id: u32,
     working_ips: Vec<String>,
+    multicast_if_ip: Ipv4Addr,
 
     // Listeners created during construction, taken once during init.
     discovery_multicast_listener: Mutex<Option<UdpListener>>,
@@ -44,13 +45,18 @@ impl UdpTransportPlugin {
         working_ips: Vec<String>,
         udp_config: UdpConfig,
     ) -> io::Result<Self> {
+        let egress_if: Ipv4Addr = multicast_if_ip.parse().map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid multicast interface address '{multicast_if_ip}': {e}"),
+            )
+        })?;
         let sender = UdpSender::new(bind_ip, multicast_if_ip, udp_config)?;
 
-        // Create multicast listeners (shared ports, no conflict)
         let discovery_mc_port = PortManager::get_discovery_traffic_multicast_port(domain_id);
-        let user_mc_port = PortManager::get_user_traffic_multicast_port(domain_id);
-        let discovery_mc = UdpListener::new_multicast(discovery_mc_port, &working_ips).ok();
-        let user_mc = UdpListener::new_multicast(user_mc_port, &working_ips).ok();
+        let discovery_mc =
+            UdpListener::new_discovery_multicast(discovery_mc_port, &working_ips, Some(egress_if))
+                .ok();
 
         // Create unicast listeners — both discovery_uc and user_uc must bind at
         // the same participant_id (matches develop's Socket contract). If either
@@ -91,28 +97,12 @@ impl UdpTransportPlugin {
             domain_id,
             participant_id,
             working_ips,
+            multicast_if_ip: egress_if,
             discovery_multicast_listener: Mutex::new(discovery_mc),
             discovery_unicast_listener: Mutex::new(discovery_uc),
-            user_multicast_listener: Mutex::new(user_mc),
+            user_multicast_listener: Mutex::new(None),
             user_unicast_listener: Mutex::new(user_uc),
         })
-    }
-
-    /// Take the discovery multicast listener (UDP-specific).
-    ///
-    /// Multicast listening is a UDP concept — not part of TransportPlugin trait.
-    /// Called once during initialization by DcpsBridge to create
-    /// the DiscoveryMulticastListeningTask.
-    pub(crate) fn take_discovery_multicast_listener(&self) -> Option<UdpListener> {
-        self.discovery_multicast_listener.lock().expect("lock poisoned").take()
-    }
-
-    /// Take the user data multicast listener (UDP-specific).
-    ///
-    /// Called once during initialization by DcpsBridge to create
-    /// the UserMulticastListeningTask.
-    pub(crate) fn take_user_multicast_listener(&self) -> Option<UdpListener> {
-        self.user_multicast_listener.lock().expect("lock poisoned").take()
     }
 
     /// Expand a single UDP port into per-NIC IPv4 locators using the
@@ -193,6 +183,27 @@ impl TransportPlugin for UdpTransportPlugin {
     fn take_user_data_unicast_source(&self) -> Option<MessageSource> {
         let listener = self.user_unicast_listener.lock().expect("lock poisoned").take()?;
         Some(MessageSource::MioPoll { listener })
+    }
+
+    fn take_user_data_multicast_source(&self) -> Option<MessageSource> {
+        let listener = self.user_multicast_listener.lock().expect("lock poisoned").take()?;
+        Some(MessageSource::MioPoll { listener })
+    }
+
+    fn ensure_user_multicast_listener(&self) -> io::Result<()> {
+        let mut guard = self.user_multicast_listener.lock().expect("lock poisoned");
+        if guard.is_none() {
+            let user_mc_port = PortManager::get_user_traffic_multicast_port(self.domain_id);
+            *guard = Some(UdpListener::new_user_multicast(
+                user_mc_port,
+                &self.working_ips,
+                self.multicast_if_ip,
+            )?);
+            log::info!(
+                "[UdpTransportPlugin] user data multicast listener bound on port {user_mc_port}"
+            );
+        }
+        Ok(())
     }
 
     fn port(&self) -> u16 {

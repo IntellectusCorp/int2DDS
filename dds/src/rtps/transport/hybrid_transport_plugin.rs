@@ -57,11 +57,13 @@ impl HybridTransportPlugin {
         guid_prefix: GuidPrefix,
         hybrid_config: HybridConfig,
     ) -> io::Result<Self> {
+        let egress_if = multicast_if_ip.parse::<std::net::Ipv4Addr>().ok();
         let udp_sender = UdpSender::new(bind_ip.clone(), multicast_if_ip, hybrid_config.udp)?;
 
         // Multicast first (domain-wide port, no per-participant collision).
         let discovery_mc_port = PortManager::get_discovery_traffic_multicast_port(domain_id);
-        let discovery_mc = UdpListener::new_multicast(discovery_mc_port, &working_ips).ok();
+        let discovery_mc =
+            UdpListener::new_discovery_multicast(discovery_mc_port, &working_ips, egress_if).ok();
 
         // UDP unicast: retry on AddrInUse with incremented participant_id, just
         // like UdpTransportPlugin and ShmTransportPlugin. Without this, two

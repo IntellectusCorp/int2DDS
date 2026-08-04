@@ -84,7 +84,38 @@ impl UdpListener {
         interface_address_list.clone().map(|a| Locator::from_ip_and_port(&a, port as u32)).collect()
     }
 
-    pub(crate) fn new_multicast(port: u16, working_ips: &[String]) -> std::io::Result<Self> {
+    /// Multicast listener for discovery traffic.
+    ///
+    /// Every participant needs discovery reception, so a failed join on the
+    /// sending interface is reported but still leaves the remaining interfaces
+    /// receiving.
+    pub(crate) fn new_discovery_multicast(
+        port: u16,
+        working_ips: &[String],
+        send_interface_ip: Option<Ipv4Addr>,
+    ) -> std::io::Result<Self> {
+        Self::new_multicast(port, working_ips, send_interface_ip, false)
+    }
+
+    /// Multicast listener for user data.
+    ///
+    /// Created only when a DataReader asks for multicast reception, so failing
+    /// to join on the sending interface fails construction instead of handing
+    /// back a listener that receives nothing.
+    pub(crate) fn new_user_multicast(
+        port: u16,
+        working_ips: &[String],
+        send_interface_ip: Ipv4Addr,
+    ) -> std::io::Result<Self> {
+        Self::new_multicast(port, working_ips, Some(send_interface_ip), true)
+    }
+
+    fn new_multicast(
+        port: u16,
+        working_ips: &[String],
+        send_interface_ip: Option<Ipv4Addr>,
+        send_interface_required: bool,
+    ) -> std::io::Result<Self> {
         let socket = Socket2::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
         socket.set_reuse_address(true)?;
         socket.set_broadcast(true)?;
@@ -98,11 +129,28 @@ impl UdpListener {
             let _ = socket.set_recv_buffer_size(new_size);
         }
 
+        // The interface multicast is sent from must be joined considering the self-transmission
+        // and reception case. Sending and receiving on different interfaces
+        // looks like a successful send that nobody ever receives.
+        // However, this policy is not mandatory for multicast discovery.
+        if let Some(addr) = send_interface_ip {
+            if let Err(e) = socket.join_multicast_v4(&MULTICAST_IP, &addr) {
+                if send_interface_required {
+                    return Err(e);
+                }
+                error!("Fail - join_multicast_v4 on sending interface : {:?} {:?}", e, addr);
+            }
+        }
+
         // Join multicast group on each working interface individually,
         // so multicast works regardless of OS default route availability.
         for ip in working_ips {
             match ip.parse::<std::net::Ipv4Addr>() {
                 Ok(addr) => {
+                    // Joining twice on one interface fails; it is already done above.
+                    if Some(addr) == send_interface_ip {
+                        continue;
+                    }
                     socket.join_multicast_v4(&MULTICAST_IP, &addr).unwrap_or_else(|e| {
                         error!("Fail - join_multicast_v4 : {:?} {:?}", e, addr);
                     });

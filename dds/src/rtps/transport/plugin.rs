@@ -129,6 +129,24 @@ pub(crate) trait TransportPlugin: Send + Sync {
     /// is moved into `UserUnicastListeningTask`.
     fn take_user_data_unicast_source(&self) -> Option<MessageSource>;
 
+    /// Take ownership of the user data multicast message source.
+    ///
+    /// Returns `None` if the transport has no user data multicast source.
+    /// Called once during initialization. The returned `MessageSource`
+    /// is moved into `UserMulticastListeningTask`.
+    fn take_user_data_multicast_source(&self) -> Option<MessageSource> {
+        None
+    }
+
+    /// Create the user data multicast listener and join the group.
+    ///
+    /// Called when a DataReader asks for multicast reception. Only the first
+    /// call creates anything; later ones leave the existing listener alone.
+    /// Transports without multicast do nothing.
+    fn ensure_user_multicast_listener(&self) -> io::Result<()> {
+        Ok(())
+    }
+
     /// Get the local port number used by this transport's sender.
     fn port(&self) -> u16;
 

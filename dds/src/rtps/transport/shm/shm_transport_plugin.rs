@@ -53,14 +53,17 @@ impl ShmTransportPlugin {
         working_ips: Vec<String>,
         udp_config: UdpConfig,
     ) -> io::Result<Self> {
+        let egress_if = multicast_if_ip.parse::<std::net::Ipv4Addr>().ok();
         let udp_sender = UdpSender::new(bind_ip, multicast_if_ip, udp_config)?;
         let shm_sender = ShmSender::new(domain_id)?;
 
         // Create UDP multicast listeners (shared ports, no per-pid collision).
         let discovery_mc_port = PortManager::get_discovery_traffic_multicast_port(domain_id);
         let user_mc_port = PortManager::get_user_traffic_multicast_port(domain_id);
-        let discovery_mc = UdpListener::new_multicast(discovery_mc_port, &working_ips).ok();
-        let user_mc = UdpListener::new_multicast(user_mc_port, &working_ips).ok();
+        let discovery_mc =
+            UdpListener::new_discovery_multicast(discovery_mc_port, &working_ips, egress_if).ok();
+        let user_mc = egress_if
+            .and_then(|ip| UdpListener::new_user_multicast(user_mc_port, &working_ips, ip).ok());
 
         // Unicast listeners — both must bind at the same participant_id
         // (matches develop's Socket contract). If either fails, close any
