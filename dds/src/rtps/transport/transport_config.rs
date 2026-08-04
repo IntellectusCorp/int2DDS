@@ -9,15 +9,16 @@
 //! `dcps::infrastructure::qos_policy` module so they form the public API surface
 //! alongside the property setter helpers; this file just consumes them.
 
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use crate::dcps::infrastructure::qos_policy::{
-    PropertyQosPolicy, PROP_ACCEPT_UNDEFINED_PEERS, PROP_INITIAL_PEERS, PROP_MULTICAST_TTL,
-    PROP_TCP_ASYNC_WORKERS, PROP_TCP_BIND_PORT, PROP_TCP_CONGESTION_MISS_THRESHOLD,
-    PROP_TCP_CONNECT_TIMEOUT_MS, PROP_TCP_KEEPALIVE_INTERVAL_MS, PROP_TCP_KEEPALIVE_MAX_MISSES,
-    PROP_TCP_KEEPALIVE_TIMEOUT_MS, PROP_TCP_NODELAY, PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS,
-    PROP_TCP_PUBLIC_ADDRESS, PROP_TCP_SEND_DEADLINE_MS, PROP_TCP_SO_RCVBUF, PROP_TCP_SO_SNDBUF,
+    PropertyQosPolicy, PROP_ACCEPT_UNDEFINED_PEERS, PROP_INITIAL_PEERS, PROP_MULTICAST_INTERFACE,
+    PROP_MULTICAST_TTL, PROP_TCP_ASYNC_WORKERS, PROP_TCP_BIND_PORT,
+    PROP_TCP_CONGESTION_MISS_THRESHOLD, PROP_TCP_CONNECT_TIMEOUT_MS,
+    PROP_TCP_KEEPALIVE_INTERVAL_MS, PROP_TCP_KEEPALIVE_MAX_MISSES, PROP_TCP_KEEPALIVE_TIMEOUT_MS,
+    PROP_TCP_NODELAY, PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS, PROP_TCP_PUBLIC_ADDRESS,
+    PROP_TCP_SEND_DEADLINE_MS, PROP_TCP_SO_RCVBUF, PROP_TCP_SO_SNDBUF,
     PROP_TCP_TLS_HANDSHAKE_TIMEOUT_MS, PROP_TCP_UNACKED_TIMEOUT_MS, PROP_TRANSPORT,
 };
 use crate::rtps::transport::TransportType;
@@ -38,6 +39,7 @@ pub(crate) trait TransportConfig {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct UdpConfig {
     pub multicast_ttl: u8,
+    pub multicast_interface: Option<Ipv4Addr>,
 }
 
 impl TransportConfig for UdpConfig {
@@ -60,7 +62,26 @@ impl TransportConfig for UdpConfig {
             })
             .or_else(crate::common::env::get_multicast_ttl_override)
             .unwrap_or(DEFAULT_MULTICAST_TTL);
-        Self { multicast_ttl }
+
+        // The socket option takes an interface address, not an interface name,
+        // so anything that is not an IPv4 address falls back to auto selection.
+        let multicast_interface = property.find_property(PROP_MULTICAST_INTERFACE).and_then(|v| {
+            match v.parse::<Ipv4Addr>() {
+                Ok(ip) => Some(ip),
+                Err(e) => {
+                    log::warn!(
+                        "invalid {} property value '{}': {}. Falling back to automatic \
+                             interface selection.",
+                        PROP_MULTICAST_INTERFACE,
+                        v,
+                        e
+                    );
+                    None
+                }
+            }
+        });
+
+        Self { multicast_ttl, multicast_interface }
     }
 }
 

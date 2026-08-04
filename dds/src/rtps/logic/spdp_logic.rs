@@ -235,7 +235,7 @@ mod tests {
             domain_id,
             socket.participant_id(),
             socket.get_sender_bind_addr(),
-            socket.get_sender_multicast_if_addr(),
+            socket.get_sender_multicast_if_addr(None),
             socket.working_ips().iter().map(|ip| ip.to_string()).collect(),
             GUIDPREFIX_UNKNOWN,
             None,

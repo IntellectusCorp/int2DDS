@@ -842,6 +842,9 @@ pub struct BinaryProperty {
 /// reader lives in `rtps::transport::transport_config`.
 pub const PROP_MULTICAST_TTL: &str = "int2dds.transport.UDPv4.multicast_ttl";
 
+/// Property key for the IPv4 address of the interface multicast is sent out of.
+pub const PROP_MULTICAST_INTERFACE: &str = "int2dds.transport.UDPv4.multicast_interface";
+
 /// Transport selection (`udp` | `tcp` | `hybrid` | `shm`). Falls back to the
 /// `INT2DDS_TRANSPORT` env var when absent.
 pub const PROP_TRANSPORT: &str = "int2dds.transport";
@@ -1010,6 +1013,10 @@ impl PropertyQosPolicy {
     /// Equivalent to `add_property(PROP_MULTICAST_TTL, ttl.to_string(), false)`.
     pub fn set_multicast_ttl(&mut self, ttl: u8) {
         self.add_property(PROP_MULTICAST_TTL, ttl.to_string(), false);
+    }
+
+    pub fn set_multicast_interface(&mut self, ip: String) {
+        self.add_property(PROP_MULTICAST_INTERFACE, ip, false);
     }
 
     /// Convenience setter for the TCP listen (server bind) port. Pin a distinct

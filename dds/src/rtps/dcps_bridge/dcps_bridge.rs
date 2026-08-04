@@ -52,6 +52,7 @@ use crate::{
         transport::{
             plugin::{TransportPlugin, TransportPluginFactory},
             socket::Socket,
+            TransportConfig as _, UdpConfig,
         },
     },
     utils::timer::timer_handler::TimerHandler,
@@ -108,7 +109,8 @@ impl DcpsBridge {
         };
 
         let bind_ip = socket.get_sender_bind_addr();
-        let multicast_if_ip = socket.get_sender_multicast_if_addr();
+        let multicast_if_ip = socket
+            .get_sender_multicast_if_addr(UdpConfig::from_property(property).multicast_interface);
         let working_ips: Vec<String> =
             socket.working_ips().iter().map(|ip| ip.to_string()).collect();
 
