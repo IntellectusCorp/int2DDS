@@ -14,7 +14,10 @@
 use std::{
     any::Any,
     fmt::Debug,
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc, Mutex, Weak,
+    },
 };
 
 use log::debug;
@@ -30,11 +33,29 @@ use crate::{
 
 use super::{condition::Condition, entity::Entity, status::StatusKind};
 
+/// `StatusMask` is `bitflags` over `u32`, and `bits()` / `from_bits_retain()` are exact inverses,
+/// so a mask round-trips through an `AtomicU32` unchanged. `from_bits_truncate` is deliberately
+/// not used: it would drop bits the previous `Mutex<StatusMask>` stored verbatim.
+#[inline]
+fn load_mask(cell: &AtomicU32) -> StatusMask {
+    StatusMask::from_bits_retain(cell.load(Ordering::Acquire))
+}
+
 #[derive(Clone)]
 pub struct StatusCondition<Q> {
     entity: Option<Weak<dyn EntityInternal<Qos = Q> + Send + Sync>>,
-    pub(crate) enabled_statuses: Arc<Mutex<StatusMask>>, // mask (list of enabled statuses)
-    pub(crate) status_changes: Arc<Mutex<StatusMask>>,
+    /// Raw bits of the enabled-status mask (the list of statuses this condition monitors).
+    ///
+    /// Not behind a `Mutex` because `WaitSet::check_triggered_conditions` reads it once per
+    /// attached condition on every wake-up. A mutex makes each of those reads a lock-prefixed
+    /// read-modify-write, so at 400 conditions the scanning thread writes to 400 cache lines it
+    /// only wanted to read, evicting them from every core that touches the same conditions. As an
+    /// atomic it is genuinely read-only in steady state and the lines stay shared.
+    pub(crate) enabled_statuses: Arc<AtomicU32>,
+    /// Raw bits of the changed-status mask. Same reasoning, plus this one is also written by every
+    /// reader under a participant, twice per received sample, on the participant's shared
+    /// condition.
+    pub(crate) status_changes: Arc<AtomicU32>,
     #[allow(clippy::type_complexity)]
     waitset_callback: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
 }
@@ -51,8 +72,8 @@ impl<Q> Debug for StatusCondition<Q> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StatusCondition")
             .field("entity", &self.entity.as_ref().map(|_| "Weak<EntityInternal>"))
-            .field("enabled_statuses", &self.enabled_statuses.lock().unwrap())
-            .field("status_changes", &self.status_changes.lock().unwrap())
+            .field("enabled_statuses", &load_mask(&self.enabled_statuses))
+            .field("status_changes", &load_mask(&self.status_changes))
             .field(
                 "waitset_callback",
                 &self.waitset_callback.lock().unwrap().as_ref().map(|_| "Arc<dyn Fn(bool)>"),
@@ -91,21 +112,16 @@ impl<Q: Debug> StatusCondition<Q> {
     pub(crate) fn new(entity: Option<Weak<dyn EntityInternal<Qos = Q> + Send + Sync>>) -> Self {
         Self {
             entity,
-            enabled_statuses: Arc::new(Mutex::new(StatusMask::default())),
-            status_changes: Arc::new(Mutex::new(StatusMask::empty())),
+            // Routed through `StatusMask::default()` rather than a literal so `status.rs` stays
+            // the single source of truth: the default is every status, not none.
+            enabled_statuses: Arc::new(AtomicU32::new(StatusMask::default().bits())),
+            status_changes: Arc::new(AtomicU32::new(StatusMask::empty().bits())),
             waitset_callback: Arc::new(Mutex::new(None)),
         }
     }
 
     pub fn set_enabled_statuses(&self, mask: StatusMask) -> DdsResult<()> {
-        {
-            let mut enabled_statuses = match self.enabled_statuses.lock() {
-                Ok(guard) => guard,
-                Err(e) => return Err(DdsError::Error(e.to_string())),
-            };
-
-            *enabled_statuses = mask;
-        }
+        self.enabled_statuses.store(mask.bits(), Ordering::Release);
 
         // The trigger value is `enabled_statuses & status_changes`, so widening the mask can make
         // an already-attached condition triggered without any further status change. Nothing else
@@ -131,9 +147,7 @@ impl<Q: Debug> StatusCondition<Q> {
     }
 
     pub fn get_enabled_statuses(&self) -> DdsResult<StatusMask> {
-        let enabled_statuses =
-            self.enabled_statuses.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-        Ok(*enabled_statuses)
+        Ok(load_mask(&self.enabled_statuses))
     }
 
     pub fn get_entity(&self) -> DdsResult<Box<dyn Entity<Qos = Q> + Send + Sync>> {
@@ -148,13 +162,9 @@ impl<Q: Debug> StatusCondition<Q> {
     }
 
     pub(crate) fn get_status_changes(&self) -> DdsResult<StatusMask> {
-        match self.status_changes.lock() {
-            Ok(status_changes) => {
-                debug!("get_status_changes called: {:?}", *status_changes);
-                Ok(*status_changes)
-            }
-            Err(e) => Err(DdsError::Error(e.to_string())),
-        }
+        let status_changes = load_mask(&self.status_changes);
+        debug!("get_status_changes called: {:?}", status_changes);
+        Ok(status_changes)
     }
 
     pub(crate) fn set_communication_status(
@@ -171,33 +181,26 @@ impl<Q: Debug> StatusCondition<Q> {
     }
 
     fn remove_communication_status(&self, status: &StatusKind) -> DdsResult<()> {
-        match self.status_changes.lock() {
-            Ok(mut status_changes) => {
-                status_changes.remove(*status); //.retain(|x| x != status);
-                debug!("removed status_changes: {:?}", status_changes);
-                Ok(())
-            }
-            Err(e) => Err(DdsError::Error(e.to_string())),
-        }
+        // `StatusMask::remove` is `bits & !other.bits()` on the raw integer, not `self & !other`:
+        // the `!` operator truncates to known bits first, so it is a different function.
+        let previous = self.status_changes.fetch_and(!status.bits(), Ordering::AcqRel);
+        debug!(
+            "removed status_changes: {:?}",
+            StatusMask::from_bits_retain(previous & !status.bits())
+        );
+        Ok(())
     }
 
     fn add_communication_status(&self, status: &StatusKind) -> DdsResult<()> {
-        {
-            match self.status_changes.lock() {
-                Ok(mut status_changes) => {
-                    status_changes.insert(*status);
-                    debug!("status_changes: {:?}", status_changes);
-                }
-                Err(e) => return Err(DdsError::Error(e.to_string())),
-            }
-        }
+        // fetch_or, never load-then-store: every DataReader forwards both DATA_ON_READERS and
+        // DATA_AVAILABLE to the participant's shared condition from unsynchronised threads, so a
+        // non-atomic update would drop one bit and one wake-up with it.
+        let previous = self.status_changes.fetch_or(status.bits(), Ordering::AcqRel);
+        debug!("status_changes: {:?}", StatusMask::from_bits_retain(previous | status.bits()));
 
-        // Match get_trigger_value lock ordering by never holding status_changes
-        // while checking enabled_statuses.
-        let should_trigger = match self.enabled_statuses.lock() {
-            Ok(enabled_statuses) => enabled_statuses.contains(*status),
-            Err(e) => return Err(DdsError::Error(e.to_string())),
-        };
+        // `contains` is all-of: fire only when every bit of `status` is enabled. Deliberately not
+        // the any-of test `get_trigger_value` uses.
+        let should_trigger = load_mask(&self.enabled_statuses).contains(*status);
 
         // Call callback only when a status of interest is added.
         if should_trigger {
