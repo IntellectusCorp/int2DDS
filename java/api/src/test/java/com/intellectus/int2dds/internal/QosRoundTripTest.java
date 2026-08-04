@@ -21,6 +21,15 @@ class QosRoundTripTest {
         sent.setResourceLimits(new ResourceLimits(100, 10, 5));
         sent.setTransportPriority(new TransportPriority(3));
         sent.setDestinationOrder(new DestinationOrder(DestinationOrderKind.BY_SOURCE));
+        sent.setLifespan(new Lifespan(Duration.ofSeconds(30)));
+        sent.setLatencyBudget(new LatencyBudget(Duration.ofMillis(15)));
+        sent.setDeadline(new Deadline(Duration.ofSeconds(5)));
+        sent.setLiveliness(
+                new Liveliness(LivelinessKind.MANUAL_BY_PARTICIPANT, Duration.ofSeconds(9)));
+        // The field's default is true; sending false is the only value that
+        // actually proves the *mut bool byte was read rather than assumed.
+        sent.setWriterDataLifecycle(new WriterDataLifecycle(false));
+        sent.setDataFrag(4096);
 
         long h = FfiAccess.createDataWriterQos();
         DataWriterQos back;
@@ -44,6 +53,14 @@ class QosRoundTripTest {
         assertEquals(5, back.getResourceLimits().getMaxSamplesPerInstance());
         assertEquals(3, back.getTransportPriority().getValue());
         assertEquals(DestinationOrderKind.BY_SOURCE, back.getDestinationOrder().getKind());
+        assertEquals(Duration.ofSeconds(30), back.getLifespan().getDuration());
+        assertEquals(Duration.ofMillis(15), back.getLatencyBudget().getDuration());
+        assertEquals(Duration.ofSeconds(5), back.getDeadline().getPeriod());
+        assertEquals(LivelinessKind.MANUAL_BY_PARTICIPANT, back.getLiveliness().getKind());
+        assertEquals(Duration.ofSeconds(9), back.getLiveliness().getLeaseDuration());
+        assertEquals(
+                false, back.getWriterDataLifecycle().isAutodisposeUnregisteredInstances());
+        assertEquals(4096, back.getDataFrag());
     }
 
     @Test
@@ -52,6 +69,14 @@ class QosRoundTripTest {
         sent.setReliability(new Reliability(ReliabilityKind.BEST_EFFORT));
         sent.setHistory(new History(HistoryKind.KEEP_ALL, 1));
         sent.setDurability(new Durability(DurabilityKind.VOLATILE));
+        sent.setTimeBasedFilter(new TimeBasedFilter(Duration.ofMillis(50)));
+        sent.setLatencyBudget(new LatencyBudget(Duration.ofMillis(20)));
+        // Distinct, asymmetric values so a transposition between the two
+        // delays is visible rather than silently passing.
+        sent.setReaderDataLifecycle(
+                new ReaderDataLifecycle(Duration.ofSeconds(12), Duration.ofSeconds(34)));
+        sent.setDeadline(new Deadline(Duration.ofSeconds(7)));
+        sent.setLiveliness(new Liveliness(LivelinessKind.MANUAL_BY_TOPIC, Duration.ofSeconds(11)));
 
         long h = FfiAccess.createDataReaderQos();
         DataReaderQos back;
@@ -65,6 +90,17 @@ class QosRoundTripTest {
         assertEquals(ReliabilityKind.BEST_EFFORT, back.getReliability().getKind());
         assertEquals(HistoryKind.KEEP_ALL, back.getHistory().getKind());
         assertEquals(DurabilityKind.VOLATILE, back.getDurability().getKind());
+        assertEquals(Duration.ofMillis(50), back.getTimeBasedFilter().getMinimumSeparation());
+        assertEquals(Duration.ofMillis(20), back.getLatencyBudget().getDuration());
+        assertEquals(
+                Duration.ofSeconds(12),
+                back.getReaderDataLifecycle().getAutopurgeNowriterSamplesDelay());
+        assertEquals(
+                Duration.ofSeconds(34),
+                back.getReaderDataLifecycle().getAutopurgeDisposedSamplesDelay());
+        assertEquals(Duration.ofSeconds(7), back.getDeadline().getPeriod());
+        assertEquals(LivelinessKind.MANUAL_BY_TOPIC, back.getLiveliness().getKind());
+        assertEquals(Duration.ofSeconds(11), back.getLiveliness().getLeaseDuration());
     }
 
     @Test
