@@ -114,4 +114,66 @@ class CdrReaderTest {
                 0x00, 0x00, (byte) 0x80, 0x3F});
         assertEquals(1.0f, r.readF32(), 0.0f);
     }
+
+    @Test
+    void heapBufferAtNonZeroPositionReadsFromTheWindowStart() {
+        // Create a 20-byte array with a valid little-endian header and i32 at offset 10.
+        byte[] buffer = new byte[20];
+        buffer[10] = 0x00;
+        buffer[11] = 0x01;
+        buffer[12] = 0x00;
+        buffer[13] = 0x00;
+        buffer[14] = 0x04;
+        buffer[15] = 0x03;
+        buffer[16] = 0x02;
+        buffer[17] = 0x01;
+
+        ByteBuffer b = ByteBuffer.wrap(buffer);
+        ((java.nio.Buffer) b).position(10);
+        ((java.nio.Buffer) b).limit(18);
+
+        CdrReader r = CdrReader.of(b);
+        assertEquals(0x01020304, r.readI32());
+    }
+
+    @Test
+    void directBufferAtNonZeroPositionReadsFromTheWindowStart() {
+        // Direct buffer starting at position 10 within a larger allocated region.
+        ByteBuffer large = ByteBuffer.allocateDirect(20);
+        large.put(new byte[10]); // Write 10 padding bytes
+        large.put(new byte[] {0x00, 0x01, 0x00, 0x00, 0x04, 0x03, 0x02, 0x01});
+        ((java.nio.Buffer) large).position(10);
+        ((java.nio.Buffer) large).limit(18);
+
+        CdrReader r = CdrReader.of(large);
+        assertEquals(0x01020304, r.readI32());
+    }
+
+    @Test
+    void rawReaderAtNonZeroPositionReadsFromTheWindowStart() {
+        // ofRaw with no header, positioned at offset 10 in a larger buffer.
+        byte[] buffer = new byte[20];
+        buffer[10] = 0x04;
+        buffer[11] = 0x03;
+        buffer[12] = 0x02;
+        buffer[13] = 0x01;
+
+        ByteBuffer b = ByteBuffer.wrap(buffer);
+        ((java.nio.Buffer) b).position(10);
+        ((java.nio.Buffer) b).limit(14);
+
+        CdrReader r = CdrReader.ofRaw(b, true, false);
+        assertEquals(0x01020304, r.readI32());
+    }
+
+    @Test
+    void readerDoesNotDisturbCallerBuffer() {
+        ByteBuffer b = ByteBuffer.wrap(new byte[] {0x00, 0x01, 0x00, 0x00, 0x04, 0x03, 0x02, 0x01});
+        int originalPos = b.position();
+
+        CdrReader r = CdrReader.of(b);
+        r.readI32();
+
+        assertEquals(originalPos, b.position(), "Reader should not modify caller's buffer position");
+    }
 }

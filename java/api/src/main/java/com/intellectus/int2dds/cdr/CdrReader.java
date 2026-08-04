@@ -1,6 +1,5 @@
 package com.intellectus.int2dds.cdr;
 
-import java.nio.Buffer;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
@@ -32,9 +31,9 @@ public final class CdrReader {
     private int pos;
 
     private CdrReader(ByteBuffer data, boolean littleEndian, boolean xcdr2, int headerSize) {
-        this.data = data.duplicate();
+        this.data = data.slice();
         this.data.order(littleEndian ? ByteOrder.LITTLE_ENDIAN : ByteOrder.BIG_ENDIAN);
-        this.limit = data.remaining();
+        this.limit = this.data.remaining();
         this.xcdr2 = xcdr2;
         this.headerSize = headerSize;
         this.pos = headerSize;
@@ -42,13 +41,13 @@ public final class CdrReader {
 
     /** Parses the 4-byte encapsulation header to pick endianness and version. */
     public static CdrReader of(ByteBuffer data) {
-        ByteBuffer view = data.duplicate();
-        if (view.remaining() < 4) {
+        ByteBuffer slice = data.slice();
+        if (slice.remaining() < 4) {
             throw new CdrUnderflowException("Data too short for encapsulation header.");
         }
-        int base = view.position();
         // The encapsulation id is always big-endian, whatever follows it is not.
-        int encapId = ((view.get(base) & 0xFF) << 8) | (view.get(base + 1) & 0xFF);
+        // Read from indices 0 and 1 of the slice, where 0 is the window's start.
+        int encapId = ((slice.get(0) & 0xFF) << 8) | (slice.get(1) & 0xFF);
 
         boolean littleEndian;
         boolean xcdr2;
@@ -80,7 +79,7 @@ public final class CdrReader {
                         "Unrecognized encapsulation ID: 0x"
                                 + String.format("%04X", encapId));
         }
-        return new CdrReader(view, littleEndian, xcdr2, 4);
+        return new CdrReader(slice, littleEndian, xcdr2, 4);
     }
 
     /** Convenience for a {@code byte[]} payload. */
@@ -90,7 +89,7 @@ public final class CdrReader {
 
     /** A reader over data with no encapsulation header, e.g. a serialized key. */
     public static CdrReader ofRaw(ByteBuffer data, boolean littleEndian, boolean xcdr2) {
-        return new CdrReader(data.duplicate(), littleEndian, xcdr2, 0);
+        return new CdrReader(data, littleEndian, xcdr2, 0);
     }
 
     public int remaining() {
