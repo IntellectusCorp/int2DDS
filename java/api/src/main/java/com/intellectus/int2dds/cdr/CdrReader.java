@@ -300,11 +300,13 @@ public final class CdrReader {
      * instead of decoding them.
      */
     public void readDheaderEnd(Dheader d) {
-        int end = d.startPos + d.objectSize;
-        if (end > limit) {
-            throw new CdrUnderflowException("DHEADER end exceeds buffer.");
+        long end = (long) d.startPos + d.objectSize;
+        if (d.objectSize < 0 || end > limit) {
+            throw new CdrUnderflowException(
+                    "DHEADER claims " + d.objectSize + " bytes from " + d.startPos
+                            + " but the buffer ends at " + limit);
         }
-        pos = end;
+        pos = (int) end;
     }
 
     /** A decoded EMHEADER. */
@@ -324,28 +326,61 @@ public final class CdrReader {
      * Reads an EMHEADER and its length.
      *
      * <p>Length codes 0..3 encode the length implicitly; 4 puts it in a
-     * following NEXTINT word. This writer only emits 4, but a peer may use any
-     * of them, so all are decoded.
+     * following NEXTINT word. Length codes 5, 6, 7 peek their NEXTINT without
+     * consuming, as those bytes belong to the member's data. This writer only
+     * emits 4, but a peer may use any of them, so all are decoded.
      */
     public Emheader readEmheader() {
         int header = readI32();
         boolean mustUnderstand = (header & 0x80000000) != 0;
         int lc = (header >>> 28) & 0x07;
         int memberId = header & 0x0FFFFFFF;
-        int dataLength;
+        long dataLength;
         switch (lc) {
             case 0: dataLength = 1; break;
             case 1: dataLength = 2; break;
             case 2: dataLength = 4; break;
             case 3: dataLength = 8; break;
-            default:
+            case 4:
+                // Length is a NEXTINT: consume and validate.
                 dataLength = readI32();
-                if (dataLength < 0 || pos + dataLength > limit) {
-                    throw new CdrUnderflowException("NEXTINT extends beyond buffer.");
+                if (dataLength < 0 || (long) pos + dataLength > limit) {
+                    throw new CdrUnderflowException("EMHEADER NEXTINT extends beyond buffer.");
                 }
                 break;
+            case 5:
+                // Length is the NEXTINT value; peek it without consuming.
+                require(4);
+                dataLength = Integer.toUnsignedLong(data.getInt(pos));
+                if ((long) pos + dataLength > limit) {
+                    throw new CdrUnderflowException("EMHEADER LC 5 length extends beyond buffer.");
+                }
+                break;
+            case 6:
+                // Length is 4 + 4 * NEXTINT; peek it without consuming.
+                require(4);
+                long count6 = Integer.toUnsignedLong(data.getInt(pos));
+                dataLength = 4 + 4 * count6;
+                if ((long) pos + dataLength > limit) {
+                    throw new CdrUnderflowException("EMHEADER LC 6 length extends beyond buffer.");
+                }
+                break;
+            case 7:
+                // Length is 4 + 8 * NEXTINT; peek it without consuming.
+                require(4);
+                long count7 = Integer.toUnsignedLong(data.getInt(pos));
+                dataLength = 4 + 8 * count7;
+                if ((long) pos + dataLength > limit) {
+                    throw new CdrUnderflowException("EMHEADER LC 7 length extends beyond buffer.");
+                }
+                break;
+            default:
+                throw new CdrUnderflowException("Unrecognized EMHEADER length code: " + lc);
         }
-        return new Emheader(memberId, dataLength, mustUnderstand);
+        if (dataLength > Integer.MAX_VALUE) {
+            throw new CdrUnderflowException("EMHEADER length overflows int: " + dataLength);
+        }
+        return new Emheader(memberId, (int) dataLength, mustUnderstand);
     }
 
     /** True when the next word is the XCDR2 sentinel. Does not consume. */
@@ -392,6 +427,11 @@ public final class CdrReader {
             }
             int fullId = readI32();
             int fullLen = readI32();
+            if (fullLen < 0 || (long) pos + fullLen > limit) {
+                throw new CdrUnderflowException(
+                        "PL_CDR extended header length is negative or extends beyond buffer: "
+                                + fullLen);
+            }
             return new ParameterHeader(fullId, fullLen, mustUnderstand, false);
         }
         return new ParameterHeader(id, len, mustUnderstand, false);
