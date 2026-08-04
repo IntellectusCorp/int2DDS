@@ -905,13 +905,24 @@ impl<'a> CGen<'a> {
                     "{}int2dds_cdr_write_seq_header(&w, {}.length);\n",
                     indent, accessor
                 ));
-                self.raw(&format!(
-                    "{}for (uint32_t _i = 0; _i < {}.length; _i++) {{\n",
-                    indent, accessor
-                ));
-                let elem_accessor = format!("{}.data[_i]", accessor);
-                self.emit_write_field_indented(element, &elem_accessor, &format!("{}    ", indent));
-                self.raw(&format!("{}}}\n", indent));
+                if Self::sequence_element_is_raw_byte(element) {
+                    self.raw(&format!(
+                        "{}int2dds_cdr_write_bytes(&w, {}.data, {}.length);\n",
+                        indent, accessor, accessor
+                    ));
+                } else {
+                    self.raw(&format!(
+                        "{}for (uint32_t _i = 0; _i < {}.length; _i++) {{\n",
+                        indent, accessor
+                    ));
+                    let elem_accessor = format!("{}.data[_i]", accessor);
+                    self.emit_write_field_indented(
+                        element,
+                        &elem_accessor,
+                        &format!("{}    ", indent),
+                    );
+                    self.raw(&format!("{}}}\n", indent));
+                }
             }
             ResolvedType::Array { element, size } => {
                 self.raw(&format!("{}for (uint32_t _i = 0; _i < {}; _i++) {{\n", indent, size));
@@ -1181,6 +1192,8 @@ impl<'a> CGen<'a> {
                     indent, accessor
                 ));
 
+                let raw_bytes = Self::sequence_element_is_raw_byte(element);
+
                 // Pointer mode + unbounded: auto-allocate the data array
                 if self.opts.string_mode == StringMode::Pointer && bound.is_none() {
                     let elem_c = self.type_to_c_base(element);
@@ -1190,21 +1203,33 @@ impl<'a> CGen<'a> {
                         indent, accessor, elem_c, accessor, elem_c
                     ));
                     self.raw(&format!("{}    if ({}.data) {{\n", indent, accessor));
-                    self.raw(&format!(
-                        "{}        for (uint32_t _i = 0; _i < {}.length; _i++) {{\n",
-                        indent, accessor
-                    ));
-                    let elem_accessor = format!("{}.data[_i]", accessor);
-                    self.emit_read_field_indented(
-                        element,
-                        &elem_accessor,
-                        &format!("{}            ", indent),
-                    );
-                    self.raw(&format!("{}        }}\n", indent));
+                    if raw_bytes {
+                        self.raw(&format!(
+                            "{}        int2dds_cdr_read_bytes(&r, {}.data, {}.length);\n",
+                            indent, accessor, accessor
+                        ));
+                    } else {
+                        self.raw(&format!(
+                            "{}        for (uint32_t _i = 0; _i < {}.length; _i++) {{\n",
+                            indent, accessor
+                        ));
+                        let elem_accessor = format!("{}.data[_i]", accessor);
+                        self.emit_read_field_indented(
+                            element,
+                            &elem_accessor,
+                            &format!("{}            ", indent),
+                        );
+                        self.raw(&format!("{}        }}\n", indent));
+                    }
                     self.raw(&format!("{}    }}\n", indent));
                     self.raw(&format!("{}}}\n", indent));
-                } else {
+                } else if raw_bytes {
                     // Bounded or FixedArray mode: data is inline array or pre-allocated
+                    self.raw(&format!(
+                        "{}int2dds_cdr_read_bytes(&r, {}.data, {}.length);\n",
+                        indent, accessor, accessor
+                    ));
+                } else {
                     self.raw(&format!(
                         "{}for (uint32_t _i = 0; _i < {}.length; _i++) {{\n",
                         indent, accessor
@@ -1298,6 +1323,16 @@ impl<'a> CGen<'a> {
     }
 
     // ---- Type Info (DDS-XTypes discovery) ----
+
+    /// Whether a sequence's elements form a contiguous byte run on the wire.
+    ///
+    /// `octet` and `uint8` have alignment 1, so CDR lays them out with no inter-element
+    /// padding and no byte-order transform. That makes a bulk memcpy byte-identical to a
+    /// per-element loop, which matters for large payloads: the loop costs a bounds check
+    /// per byte and blocks vectorization.
+    fn sequence_element_is_raw_byte(element: &ResolvedType) -> bool {
+        matches!(element, ResolvedType::U8 | ResolvedType::UInt8)
+    }
 
     /// Check if a sequence needs an outer DHEADER in XCDR2.
     fn sequence_element_needs_dheader(element: &ResolvedType) -> bool {
