@@ -197,4 +197,67 @@ public final class CdrReader {
     public double readF64() {
         return Double.longBitsToDouble(readI64());
     }
+
+    // ---- strings, sequences, raw bytes -----------------------------------
+
+    private static final java.nio.charset.Charset UTF8 =
+            java.nio.charset.Charset.forName("UTF-8");
+
+    /**
+     * Reads a CDR string: a uint32 length including the terminator, then that
+     * many bytes, of which the trailing NUL is dropped.
+     */
+    public String readString() {
+        int lenWithNul = readI32();
+        if (lenWithNul <= 0) {
+            throw new CdrUnderflowException("Invalid string length: " + lenWithNul);
+        }
+        require(lenWithNul);
+        int contentLen = lenWithNul - 1;
+        byte[] bytes = new byte[contentLen];
+        for (int i = 0; i < contentLen; i++) {
+            bytes[i] = data.get(pos + i);
+        }
+        pos += lenWithNul;   // includes the terminator
+        return new String(bytes, UTF8);
+    }
+
+    /**
+     * Reads a CDR wstring: a uint32 count of UTF-16 units including the
+     * terminator, then that many u16 units, of which the trailing zero is dropped.
+     */
+    public String readWString() {
+        int unitsWithNul = readI32();
+        if (unitsWithNul <= 0) {
+            throw new CdrUnderflowException("Invalid wstring length: " + unitsWithNul);
+        }
+        int units = unitsWithNul - 1;
+        char[] chars = new char[units];
+        for (int i = 0; i < units; i++) {
+            chars[i] = (char) readU16();
+        }
+        readU16();   // terminator
+        return new String(chars);
+    }
+
+    /** Reads a sequence header and returns the element count. */
+    public int readSeqHeader() {
+        return readI32();
+    }
+
+    /** Reads raw bytes with no alignment. */
+    public byte[] readBytes(int length) {
+        require(length);
+        byte[] out = new byte[length];
+        for (int i = 0; i < length; i++) {
+            out[i] = data.get(pos + i);
+        }
+        pos += length;
+        return out;
+    }
+
+    /** Reads an enum discriminant. */
+    public int readEnum() {
+        return readI32();
+    }
 }
