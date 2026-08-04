@@ -68,7 +68,7 @@ use crate::{
             EnableChild, Entity, EntityInternal, UpdateStatus,
         },
         history_cache::HistoryCache as DcpsHistoryCache,
-        qos_policy::{HistoryQosPolicyKind, PresentationQosAccessScopeKind, Qos},
+        qos_policy::{HistoryQosPolicyKind, Qos},
         status::{
             LivelinessChangedStatus, RequestedDeadlineMissedStatus, RequestedIncompatibleQosStatus,
             RequestedIncompatibleTypeStatus, SampleLostStatus, SampleRejectedStatus, StatusInfo,
@@ -1508,12 +1508,12 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         if let Some(listener) = self.get_listener()? {
             listener.on_data_available(self);
         }
-        let subscriber = self.get_subscriber()?;
+        let subscriber = self.subscriber_arc()?;
         if let Some(listener) = subscriber.get_listener()? {
             listener.on_data_available(self);
             listener.on_data_on_readers(&subscriber);
         }
-        let participant = subscriber.get_participant()?;
+        let participant = subscriber.participant_arc()?;
         if let Some(listener) = participant.get_listener()? {
             listener.on_data_available(self);
             listener.on_data_on_readers(&subscriber);
@@ -1649,10 +1649,10 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         // 1. DataReader StatusCondition
         self.set_communication_status(status_kind, trigger_value)?;
         // 2. Subscriber StatusCondition
-        let subscriber = self.get_subscriber()?;
+        let subscriber = self.subscriber_arc()?;
         subscriber.set_communication_status(status_kind, trigger_value)?;
         // 3. DomainParticipant StatusCondition
-        subscriber.get_participant()?.set_communication_status(status_kind, trigger_value)?;
+        subscriber.participant_arc()?.set_communication_status(status_kind, trigger_value)?;
 
         Ok(())
     }
@@ -1662,12 +1662,12 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         self.set_communication_status(&StatusKind::DATA_AVAILABLE, trigger_value)?;
 
         // 2. Subscriber StatusCondition
-        let subscriber = self.get_subscriber()?;
+        let subscriber = self.subscriber_arc()?;
         subscriber.set_communication_status(&StatusKind::DATA_ON_READERS, trigger_value)?;
         subscriber.set_communication_status(&StatusKind::DATA_AVAILABLE, trigger_value)?;
 
         // 3. DomainParticipant StatusCondition
-        let participant = subscriber.get_participant()?;
+        let participant = subscriber.participant_arc()?;
         participant.set_communication_status(&StatusKind::DATA_ON_READERS, trigger_value)?;
         participant.set_communication_status(&StatusKind::DATA_AVAILABLE, trigger_value)?;
 
@@ -1697,21 +1697,27 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         }
     }
 
+    /// Upgraded parent handle without the deep clone [`DataReaderBase::get_subscriber`] performs.
+    ///
+    /// Same failure modes and messages -- `AlreadyDeleted` when this reader is deleted, `Error`
+    /// when the parent `Weak` has expired -- but two atomic read-modify-writes instead of ~28.
+    /// Needs no drop guard, unlike the participant equivalent: the value inside the `Arc` has
+    /// `self_ref: None`, so `Drop for Subscriber` early-returns either way.
+    ///
+    /// Only for internal call sites that never read `Subscriber::self_ref`.
+    pub(crate) fn subscriber_arc(&self) -> DdsResult<Arc<Subscriber>> {
+        self.is_deleted()?;
+        self.subscriber.as_ref().and_then(|weak_ref| weak_ref.upgrade()).ok_or_else(|| {
+            DdsError::Error("Subscriber reference is invalid or expired".to_string())
+        })
+    }
+
     fn subscriber_topic_ordered(&self) -> bool {
-        self.get_subscriber()
-            .and_then(|s| s.get_qos_arc())
-            .map(|q| {
-                q.presentation.ordered_access
-                    && q.presentation.access_scope == PresentationQosAccessScopeKind::Topic
-            })
-            .unwrap_or(false)
+        self.subscriber_arc().and_then(|s| s.presentation_topic_ordered()).unwrap_or(false)
     }
 
     pub(crate) fn is_subscriber_coherent(&self) -> bool {
-        self.get_subscriber()
-            .and_then(|s| s.get_qos_arc())
-            .map(|q| q.presentation.coherent_access)
-            .unwrap_or(false)
+        self.subscriber_arc().and_then(|s| s.presentation_coherent_access()).unwrap_or(false)
     }
 
     pub fn has_cached_data(&self) -> DdsResult<bool> {
