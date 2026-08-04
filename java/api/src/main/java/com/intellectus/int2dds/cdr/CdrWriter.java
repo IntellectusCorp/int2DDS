@@ -487,4 +487,70 @@ public final class CdrWriter implements AutoCloseable {
         // is what makes back-patching possible.
         return mu | (4 << 28) | (memberId & MAX_MEMBER_ID);
     }
+
+    // ---- XCDR1 PL_CDR member headers -------------------------------------
+
+    private static final int PID_EXTENDED = 0x3F01;
+    private static final int MAX_SHORT_MEMBER_ID = 0x3F00;
+    private static final int MAX_SHORT_LENGTH = 0xFFFF;
+    private static final int MU_FLAG = 0x4000;
+
+    /**
+     * Begins a PL_CDR member: aligns to 4 and reserves the header. Returns the
+     * header position for {@link #memberV1Finalize(int, int, boolean)}.
+     *
+     * <p>Reserves 4 bytes for an id that fits the short form, 12 otherwise. If
+     * the content later overruns the short form's 16-bit length, finalize
+     * promotes it.
+     */
+    public int memberV1Begin(int memberId) {
+        requireMemberId(memberId);
+        align(4);
+        int headerPos = pos;
+        zeroFill(memberId <= MAX_SHORT_MEMBER_ID ? 4 : 12);
+        return headerPos;
+    }
+
+    /** Back-patches a PL_CDR member header, promoting to the long form if needed. */
+    public void memberV1Finalize(int headerPos, int memberId, boolean mustUnderstand) {
+        int flags = mustUnderstand ? MU_FLAG : 0;
+        boolean shortReserved = memberId <= MAX_SHORT_MEMBER_ID;
+        int contentStart = headerPos + (shortReserved ? 4 : 12);
+        int contentLen = pos - contentStart;
+
+        if (shortReserved && contentLen <= MAX_SHORT_LENGTH) {
+            pooled.buffer.putShort(headerPos, (short) (flags | (memberId & 0x3FFF)));
+            pooled.buffer.putShort(headerPos + 2, (short) contentLen);
+            return;
+        }
+
+        if (shortReserved) {
+            // Content outgrew the short form. Make room for 8 more header bytes
+            // by shifting the content forward, walking backwards so overlapping
+            // ranges do not clobber themselves.
+            ensure(8);
+            ByteBuffer b = pooled.buffer;
+            int from = headerPos + 4;
+            int count = pos - from;
+            for (int i = count - 1; i >= 0; i--) {
+                b.put(from + 8 + i, b.get(from + i));
+            }
+            for (int i = 0; i < 8; i++) {
+                b.put(from + i, (byte) 0);
+            }
+            pos += 8;
+        }
+
+        pooled.buffer.putShort(headerPos, (short) (flags | PID_EXTENDED));
+        pooled.buffer.putShort(headerPos + 2, (short) 8);
+        pooled.buffer.putInt(headerPos + 4, memberId);
+        pooled.buffer.putInt(headerPos + 8, pos - (headerPos + 12));
+    }
+
+    /** Writes the PL_CDR sentinel that terminates an XCDR1 mutable struct. */
+    public void endMutableStruct() {
+        align(4);
+        writeU16(MEMBER_ID_SENTINEL);
+        writeU16(0);
+    }
 }
