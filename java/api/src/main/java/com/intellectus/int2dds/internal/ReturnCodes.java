@@ -18,6 +18,7 @@ import com.intellectus.int2dds.exceptions.DdsUnsupportedException;
 import com.intellectus.int2dds.exceptions.ReturnCodeValues;
 import com.intellectus.int2dds.internal.ffi.FfiAccess;
 import java.nio.charset.Charset;
+import java.util.function.ToIntFunction;
 
 /**
  * Turns {@code Int2DdsRet} values into exceptions.
@@ -62,22 +63,42 @@ public final class ReturnCodes {
     /**
      * The native layer's last error message for this thread, or an empty string.
      *
-     * <p>The FFI returns the message's full length even when the buffer was too
-     * small, so a single retry with the exact size always succeeds.
+     * <p>The FFI ({@code ffi/src/last_error.rs}) reserves the buffer's last byte
+     * for a NUL terminator, so an N-byte buffer only ever receives N-1 message
+     * bytes, and it always returns the message's full pre-truncation length. A
+     * retry therefore needs a buffer one byte larger than that full length, not
+     * equal to it.
      */
     public static String lastErrorMessage() {
+        return readMessage(FfiAccess::lastErrorMessage);
+    }
+
+    /**
+     * Buffer-growth logic behind {@link #lastErrorMessage()}, factored out so it
+     * can be tested against a stub that mimics the native contract without a
+     * message long enough to trip it actually existing in the FFI today.
+     *
+     * @param reader mirrors {@code FfiAccess.lastErrorMessage(byte[])}: writes as
+     *     much of the message plus a NUL as fits, always returns the message's
+     *     full pre-truncation byte length
+     */
+    static String readMessage(ToIntFunction<byte[]> reader) {
         byte[] buf = new byte[FIRST_TRY_BYTES];
-        int len = FfiAccess.lastErrorMessage(buf);
+        int len = reader.applyAsInt(buf);
         if (len <= 0) {
             return "";
         }
-        if (len > buf.length) {
-            buf = new byte[len];
-            len = FfiAccess.lastErrorMessage(buf);
+        // buf holds at most buf.length - 1 message bytes (the last byte is
+        // reserved for NUL); len >= buf.length means the message did not fit,
+        // including the case where it fit the reserved capacity exactly.
+        if (len >= buf.length) {
+            int fullLen = len;
+            buf = new byte[fullLen + 1];
+            len = reader.applyAsInt(buf);
             if (len <= 0) {
                 return "";
             }
-            len = Math.min(len, buf.length);
+            len = Math.min(len, buf.length - 1);
         }
         return new String(buf, 0, len, UTF8);
     }
