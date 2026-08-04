@@ -2,21 +2,45 @@ package com.intellectus.int2dds.internal;
 
 import com.intellectus.int2dds.internal.ffi.FfiAccess;
 import com.intellectus.int2dds.qos.DataReaderQos;
+import com.intellectus.int2dds.qos.DataRepresentation;
+import com.intellectus.int2dds.qos.DataRepresentationKind;
 import com.intellectus.int2dds.qos.DataWriterQos;
+import com.intellectus.int2dds.qos.Deadline;
+import com.intellectus.int2dds.qos.DestinationOrder;
+import com.intellectus.int2dds.qos.DestinationOrderKind;
+import com.intellectus.int2dds.qos.Durability;
+import com.intellectus.int2dds.qos.DurabilityKind;
+import com.intellectus.int2dds.qos.History;
+import com.intellectus.int2dds.qos.HistoryKind;
+import com.intellectus.int2dds.qos.LatencyBudget;
+import com.intellectus.int2dds.qos.Lifespan;
+import com.intellectus.int2dds.qos.Liveliness;
+import com.intellectus.int2dds.qos.LivelinessKind;
+import com.intellectus.int2dds.qos.Ownership;
+import com.intellectus.int2dds.qos.OwnershipKind;
+import com.intellectus.int2dds.qos.OwnershipStrength;
 import com.intellectus.int2dds.qos.ParticipantQos;
 import com.intellectus.int2dds.qos.Partition;
 import com.intellectus.int2dds.qos.PropertyEntry;
 import com.intellectus.int2dds.qos.PublisherQos;
+import com.intellectus.int2dds.qos.ReaderDataLifecycle;
+import com.intellectus.int2dds.qos.Reliability;
+import com.intellectus.int2dds.qos.ReliabilityKind;
 import com.intellectus.int2dds.qos.ResourceLimits;
 import com.intellectus.int2dds.qos.SubscriberQos;
+import com.intellectus.int2dds.qos.TimeBasedFilter;
 import com.intellectus.int2dds.qos.TopicQos;
+import com.intellectus.int2dds.qos.TransportPriority;
 import com.intellectus.int2dds.qos.UserData;
+import com.intellectus.int2dds.qos.WriterDataLifecycle;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.Charset;
+import java.time.Duration;
 
 /**
- * Writes QoS objects onto native QoS handles.
+ * Writes QoS objects onto native QoS handles, and reads writer/reader QoS
+ * back off them.
  *
  * <p>Only non-null policies are applied. A null means "leave it to the core",
  * which keeps the DDS defaults defined in exactly one place — the Rust core —
@@ -32,6 +56,54 @@ import java.nio.charset.Charset;
  * class directly: {@code Ffi}'s native declarations are package-visible to
  * {@code com.intellectus.int2dds.internal.ffi} only, and this class lives one
  * package up, so {@link FfiAccess} is the only way in.
+ *
+ * <h2>Null means opposite things going in versus coming out</h2>
+ *
+ * <p>On the way in (the {@code apply*} methods), null means "leave it to the
+ * core" — the field is simply not sent. On the way out ({@link
+ * #readWriterQos} / {@link #readReaderQos}), null means "no getter exists for
+ * this policy" — the FFI cannot report what was set. A caller who reads a QoS
+ * back and passes it forward unchanged would silently drop every set-only
+ * policy below, because each one reads back as null regardless of what was
+ * actually configured on the handle.
+ *
+ * <h2>Set-only, no getter — not round-trip verifiable</h2>
+ *
+ * <p>The FFI has 44 QoS setters and 28 getters (not the same shape: one
+ * getter, {@code int2dds_participant_qos_get_properties_with_prefix}, has no
+ * corresponding setter, so the gap below is 17 entries rather than the 44-28
+ * arithmetic difference of 16). Output of:
+ *
+ * <pre>{@code
+ * comm -23 \
+ *   <(grep -oE 'int2dds_[a-z]+_qos_set_[a-z_]+' ffi/src/qos.rs | sed 's/_set_/_/' | sort -u) \
+ *   <(grep -oE 'int2dds_[a-z]+_qos_get_[a-z_]+' ffi/src/qos.rs | sed 's/_get_/_/' | sort -u)
+ * }</pre>
+ *
+ * <pre>
+ * int2dds_datareader_qos_user_data
+ * int2dds_datawriter_qos_user_data
+ * int2dds_participant_qos_multicast_ttl
+ * int2dds_participant_qos_user_data
+ * int2dds_publisher_qos_partition
+ * int2dds_subscriber_qos_partition
+ * int2dds_topic_qos_data_representation
+ * int2dds_topic_qos_deadline
+ * int2dds_topic_qos_destination_order
+ * int2dds_topic_qos_durability
+ * int2dds_topic_qos_history
+ * int2dds_topic_qos_lifespan
+ * int2dds_topic_qos_liveliness
+ * int2dds_topic_qos_ownership
+ * int2dds_topic_qos_reliability
+ * int2dds_topic_qos_resource_limits
+ * int2dds_topic_qos_transport_priority
+ * </pre>
+ *
+ * <p>None of these seventeen policies can be round-trip verified; a test can
+ * only assert the setter call returned OK. If the FFI ever grows a getter for
+ * one of them, this list — and {@link #readWriterQos} / {@link
+ * #readReaderQos} — should be updated to match.
  */
 public final class QosMarshal {
 
@@ -228,6 +300,134 @@ public final class QosMarshal {
             ReturnCodes.check(FfiAccess.readerQosSetLiveliness(
                     h, q.getLiveliness().getKind().value(), q.getLiveliness().leaseDurationNs()));
         }
+    }
+
+    /**
+     * Reads back the DataWriter policies the FFI exposes getters for.
+     *
+     * <p>Policies with no getter — see the set-only list in this class's
+     * javadoc — stay null in the result. A null here means "not readable, no
+     * getter exists," which is the opposite of what null means in {@link
+     * #applyWriterQos}, where it means "leave it to the core." A caller that
+     * reads a QoS back and passes it forward unchanged would silently drop
+     * every set-only policy.
+     */
+    public static DataWriterQos readWriterQos(long h) {
+        DataWriterQos q = new DataWriterQos();
+
+        ByteBuffer slot = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder());
+        long addr = FfiAccess.directBufferAddress(slot);
+
+        ReturnCodes.check(FfiAccess.writerQosGetReliability(h, addr, addr + 8));
+        q.setReliability(new Reliability(
+                ReliabilityKind.fromValue(slot.getInt(0)), Duration.ofNanos(slot.getLong(8))));
+
+        ReturnCodes.check(FfiAccess.writerQosGetDurability(h, addr));
+        q.setDurability(new Durability(DurabilityKind.fromValue(slot.getInt(0))));
+
+        ReturnCodes.check(FfiAccess.writerQosGetHistory(h, addr, addr + 4));
+        q.setHistory(new History(HistoryKind.fromValue(slot.getInt(0)), slot.getInt(4)));
+
+        ReturnCodes.check(FfiAccess.writerQosGetOwnership(h, addr));
+        q.setOwnership(new Ownership(OwnershipKind.fromValue(slot.getInt(0))));
+
+        ReturnCodes.check(FfiAccess.writerQosGetOwnershipStrength(h, addr));
+        q.setOwnershipStrength(new OwnershipStrength(slot.getInt(0)));
+
+        ReturnCodes.check(FfiAccess.writerQosGetResourceLimits(h, addr, addr + 4, addr + 8));
+        q.setResourceLimits(
+                new ResourceLimits(slot.getInt(0), slot.getInt(4), slot.getInt(8)));
+
+        ReturnCodes.check(FfiAccess.writerQosGetLifespan(h, addr));
+        q.setLifespan(new Lifespan(Duration.ofNanos(slot.getLong(0))));
+
+        ReturnCodes.check(FfiAccess.writerQosGetDestinationOrder(h, addr));
+        q.setDestinationOrder(new DestinationOrder(DestinationOrderKind.fromValue(slot.getInt(0))));
+
+        ReturnCodes.check(FfiAccess.writerQosGetLatencyBudget(h, addr));
+        q.setLatencyBudget(new LatencyBudget(Duration.ofNanos(slot.getLong(0))));
+
+        ReturnCodes.check(FfiAccess.writerQosGetTransportPriority(h, addr));
+        q.setTransportPriority(new TransportPriority(slot.getInt(0)));
+
+        ReturnCodes.check(FfiAccess.writerQosGetWriterDataLifecycle(h, addr));
+        q.setWriterDataLifecycle(new WriterDataLifecycle(slot.get(0) != 0));
+
+        ReturnCodes.check(FfiAccess.writerQosGetDataRepresentation(h, addr));
+        q.setDataRepresentation(
+                new DataRepresentation(DataRepresentationKind.fromValue(slot.getInt(0))));
+
+        ReturnCodes.check(FfiAccess.writerQosGetDeadline(h, addr));
+        q.setDeadline(new Deadline(Duration.ofNanos(slot.getLong(0))));
+
+        ReturnCodes.check(FfiAccess.writerQosGetLiveliness(h, addr, addr + 8));
+        q.setLiveliness(new Liveliness(
+                LivelinessKind.fromValue(slot.getInt(0)), Duration.ofNanos(slot.getLong(8))));
+
+        ReturnCodes.check(FfiAccess.writerQosGetDataFrag(h, addr));
+        q.setDataFrag(slot.getInt(0));
+
+        return q;
+    }
+
+    /**
+     * Reads back the DataReader policies the FFI exposes getters for.
+     *
+     * <p>Policies with no getter — see the set-only list in this class's
+     * javadoc — stay null in the result. A null here means "not readable, no
+     * getter exists," which is the opposite of what null means in {@link
+     * #applyReaderQos}, where it means "leave it to the core." A caller that
+     * reads a QoS back and passes it forward unchanged would silently drop
+     * every set-only policy.
+     */
+    public static DataReaderQos readReaderQos(long h) {
+        DataReaderQos q = new DataReaderQos();
+
+        ByteBuffer slot = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder());
+        long addr = FfiAccess.directBufferAddress(slot);
+
+        ReturnCodes.check(FfiAccess.readerQosGetReliability(h, addr, addr + 8));
+        q.setReliability(new Reliability(
+                ReliabilityKind.fromValue(slot.getInt(0)), Duration.ofNanos(slot.getLong(8))));
+
+        ReturnCodes.check(FfiAccess.readerQosGetDurability(h, addr));
+        q.setDurability(new Durability(DurabilityKind.fromValue(slot.getInt(0))));
+
+        ReturnCodes.check(FfiAccess.readerQosGetHistory(h, addr, addr + 4));
+        q.setHistory(new History(HistoryKind.fromValue(slot.getInt(0)), slot.getInt(4)));
+
+        ReturnCodes.check(FfiAccess.readerQosGetOwnership(h, addr));
+        q.setOwnership(new Ownership(OwnershipKind.fromValue(slot.getInt(0))));
+
+        ReturnCodes.check(FfiAccess.readerQosGetResourceLimits(h, addr, addr + 4, addr + 8));
+        q.setResourceLimits(
+                new ResourceLimits(slot.getInt(0), slot.getInt(4), slot.getInt(8)));
+
+        ReturnCodes.check(FfiAccess.readerQosGetDestinationOrder(h, addr));
+        q.setDestinationOrder(new DestinationOrder(DestinationOrderKind.fromValue(slot.getInt(0))));
+
+        ReturnCodes.check(FfiAccess.readerQosGetTimeBasedFilter(h, addr));
+        q.setTimeBasedFilter(new TimeBasedFilter(Duration.ofNanos(slot.getLong(0))));
+
+        ReturnCodes.check(FfiAccess.readerQosGetLatencyBudget(h, addr));
+        q.setLatencyBudget(new LatencyBudget(Duration.ofNanos(slot.getLong(0))));
+
+        ReturnCodes.check(FfiAccess.readerQosGetReaderDataLifecycle(h, addr, addr + 8));
+        q.setReaderDataLifecycle(new ReaderDataLifecycle(
+                Duration.ofNanos(slot.getLong(0)), Duration.ofNanos(slot.getLong(8))));
+
+        ReturnCodes.check(FfiAccess.readerQosGetDataRepresentation(h, addr));
+        q.setDataRepresentation(
+                new DataRepresentation(DataRepresentationKind.fromValue(slot.getInt(0))));
+
+        ReturnCodes.check(FfiAccess.readerQosGetDeadline(h, addr));
+        q.setDeadline(new Deadline(Duration.ofNanos(slot.getLong(0))));
+
+        ReturnCodes.check(FfiAccess.readerQosGetLiveliness(h, addr, addr + 8));
+        q.setLiveliness(new Liveliness(
+                LivelinessKind.fromValue(slot.getInt(0)), Duration.ofNanos(slot.getLong(8))));
+
+        return q;
     }
 
     /** A native setter taking the address and length of a direct byte buffer. */

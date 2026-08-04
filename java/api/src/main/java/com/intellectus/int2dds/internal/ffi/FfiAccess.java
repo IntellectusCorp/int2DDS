@@ -252,6 +252,71 @@ public final class FfiAccess {
         return Ffi.int2dds_datawriter_qos_set_data_frag(qos, value);
     }
 
+    // --- DataWriter QoS getters ---
+
+    public static int writerQosGetReliability(long qos, long kindOut, long maxBlockingTimeNsOut) {
+        return Ffi.int2dds_datawriter_qos_get_reliability(qos, kindOut, maxBlockingTimeNsOut);
+    }
+
+    public static int writerQosGetDurability(long qos, long kindOut) {
+        return Ffi.int2dds_datawriter_qos_get_durability(qos, kindOut);
+    }
+
+    public static int writerQosGetHistory(long qos, long kindOut, long depthOut) {
+        return Ffi.int2dds_datawriter_qos_get_history(qos, kindOut, depthOut);
+    }
+
+    public static int writerQosGetOwnership(long qos, long kindOut) {
+        return Ffi.int2dds_datawriter_qos_get_ownership(qos, kindOut);
+    }
+
+    public static int writerQosGetOwnershipStrength(long qos, long valueOut) {
+        return Ffi.int2dds_datawriter_qos_get_ownership_strength(qos, valueOut);
+    }
+
+    public static int writerQosGetResourceLimits(
+            long qos, long maxSamplesOut, long maxInstancesOut, long maxPerInstanceOut) {
+        return Ffi.int2dds_datawriter_qos_get_resource_limits(
+                qos, maxSamplesOut, maxInstancesOut, maxPerInstanceOut);
+    }
+
+    public static int writerQosGetLifespan(long qos, long durationNsOut) {
+        return Ffi.int2dds_datawriter_qos_get_lifespan(qos, durationNsOut);
+    }
+
+    public static int writerQosGetDestinationOrder(long qos, long kindOut) {
+        return Ffi.int2dds_datawriter_qos_get_destination_order(qos, kindOut);
+    }
+
+    public static int writerQosGetLatencyBudget(long qos, long durationNsOut) {
+        return Ffi.int2dds_datawriter_qos_get_latency_budget(qos, durationNsOut);
+    }
+
+    public static int writerQosGetTransportPriority(long qos, long valueOut) {
+        return Ffi.int2dds_datawriter_qos_get_transport_priority(qos, valueOut);
+    }
+
+    public static int writerQosGetWriterDataLifecycle(long qos, long autodisposeOut) {
+        return Ffi.int2dds_datawriter_qos_get_writer_data_lifecycle(qos, autodisposeOut);
+    }
+
+    public static int writerQosGetDataRepresentation(long qos, long kindOut) {
+        return Ffi.int2dds_datawriter_qos_get_data_representation(qos, kindOut);
+    }
+
+    public static int writerQosGetDeadline(long qos, long periodNsOut) {
+        return Ffi.int2dds_datawriter_qos_get_deadline(qos, periodNsOut);
+    }
+
+    public static int writerQosGetLiveliness(long qos, long kindOut, long leaseDurationNsOut) {
+        return Ffi.int2dds_datawriter_qos_get_liveliness(qos, kindOut, leaseDurationNsOut);
+    }
+
+    /** DATA_FRAG max fragment size, an int2DDS extension. */
+    public static int writerQosGetDataFrag(long qos, long valueOut) {
+        return Ffi.int2dds_datawriter_qos_get_data_frag(qos, valueOut);
+    }
+
     // --- DataReader QoS setters ---
 
     public static int readerQosSetReliability(long qos, int kind, long maxBlockingTimeNs) {
@@ -308,6 +373,60 @@ public final class FfiAccess {
 
     public static int readerQosSetLiveliness(long qos, int kind, long leaseDurationNs) {
         return Ffi.int2dds_datareader_qos_set_liveliness(qos, kind, leaseDurationNs);
+    }
+
+    // --- DataReader QoS getters ---
+
+    public static int readerQosGetReliability(long qos, long kindOut, long maxBlockingTimeNsOut) {
+        return Ffi.int2dds_datareader_qos_get_reliability(qos, kindOut, maxBlockingTimeNsOut);
+    }
+
+    public static int readerQosGetDurability(long qos, long kindOut) {
+        return Ffi.int2dds_datareader_qos_get_durability(qos, kindOut);
+    }
+
+    public static int readerQosGetHistory(long qos, long kindOut, long depthOut) {
+        return Ffi.int2dds_datareader_qos_get_history(qos, kindOut, depthOut);
+    }
+
+    public static int readerQosGetOwnership(long qos, long kindOut) {
+        return Ffi.int2dds_datareader_qos_get_ownership(qos, kindOut);
+    }
+
+    public static int readerQosGetResourceLimits(
+            long qos, long maxSamplesOut, long maxInstancesOut, long maxPerInstanceOut) {
+        return Ffi.int2dds_datareader_qos_get_resource_limits(
+                qos, maxSamplesOut, maxInstancesOut, maxPerInstanceOut);
+    }
+
+    public static int readerQosGetDestinationOrder(long qos, long kindOut) {
+        return Ffi.int2dds_datareader_qos_get_destination_order(qos, kindOut);
+    }
+
+    public static int readerQosGetTimeBasedFilter(long qos, long minSeparationNsOut) {
+        return Ffi.int2dds_datareader_qos_get_time_based_filter(qos, minSeparationNsOut);
+    }
+
+    public static int readerQosGetLatencyBudget(long qos, long durationNsOut) {
+        return Ffi.int2dds_datareader_qos_get_latency_budget(qos, durationNsOut);
+    }
+
+    public static int readerQosGetReaderDataLifecycle(
+            long qos, long autopurgeNowriterNsOut, long autopurgeDisposedNsOut) {
+        return Ffi.int2dds_datareader_qos_get_reader_data_lifecycle(
+                qos, autopurgeNowriterNsOut, autopurgeDisposedNsOut);
+    }
+
+    public static int readerQosGetDataRepresentation(long qos, long kindOut) {
+        return Ffi.int2dds_datareader_qos_get_data_representation(qos, kindOut);
+    }
+
+    public static int readerQosGetDeadline(long qos, long periodNsOut) {
+        return Ffi.int2dds_datareader_qos_get_deadline(qos, periodNsOut);
+    }
+
+    public static int readerQosGetLiveliness(long qos, long kindOut, long leaseDurationNsOut) {
+        return Ffi.int2dds_datareader_qos_get_liveliness(qos, kindOut, leaseDurationNsOut);
     }
 
     // --- DomainParticipant QoS setters ---
