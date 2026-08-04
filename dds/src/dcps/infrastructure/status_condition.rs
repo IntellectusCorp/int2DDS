@@ -328,4 +328,91 @@ mod tests {
         participant.delete_contained_entities().unwrap();
         factory.delete_participant(participant).unwrap();
     }
+
+    /// A fresh StatusCondition monitors every status: `StatusMask::default()` is
+    /// `StatusKind::all()` (0x7FFF), not `empty()`. Backing the mask with a zero-initialised
+    /// integer would silently disable every WaitSet notification, and nothing else in the suite
+    /// would notice -- every other test sets an explicit mask before it waits on anything.
+    #[test]
+    fn enabled_statuses_default_to_every_status() {
+        let condition = StatusCondition::<DataReaderQos>::new(None);
+        assert_eq!(condition.get_enabled_statuses().unwrap(), StatusMask::ALL);
+        assert_eq!(condition.get_enabled_statuses().unwrap().bits(), 0x7FFF);
+    }
+
+    /// The observable consequence of that default, which the value assertion alone does not pin.
+    #[test]
+    fn an_unconfigured_condition_triggers_on_any_status() {
+        let condition = StatusCondition::<DataReaderQos>::new(None);
+        assert!(!condition.get_trigger_value().unwrap());
+
+        condition.set_communication_status(&StatusKind::SUBSCRIPTION_MATCHED, true).unwrap();
+        assert!(condition.get_trigger_value().unwrap());
+    }
+
+    /// Clearing one status must leave the others latched. `StatusMask::remove` is
+    /// `bits & !other.bits()` on the raw integer, which is not the same as `self & !other`: the
+    /// `!` operator truncates to known bits first.
+    #[test]
+    fn removing_one_status_leaves_the_others() {
+        let condition = StatusCondition::<DataReaderQos>::new(None);
+        condition.set_communication_status(&StatusKind::DATA_AVAILABLE, true).unwrap();
+        condition.set_communication_status(&StatusKind::SUBSCRIPTION_MATCHED, true).unwrap();
+        condition.set_communication_status(&StatusKind::DATA_AVAILABLE, false).unwrap();
+
+        let changes = condition.get_status_changes().unwrap();
+        assert!(!changes.contains(StatusKind::DATA_AVAILABLE));
+        assert!(changes.contains(StatusKind::SUBSCRIPTION_MATCHED));
+    }
+
+    /// Every DataReader forwards DATA_ON_READERS and DATA_AVAILABLE to the participant's single
+    /// StatusCondition, so concurrent additions from unsynchronised threads are the normal case at
+    /// 400 readers, not an edge case. A read-modify-write that is not atomic drops one of them,
+    /// and with it a wake-up.
+    #[test]
+    fn concurrent_status_additions_are_not_lost() {
+        const ITERATIONS: usize = 2_000;
+
+        let condition = std::sync::Arc::new(StatusCondition::<DataReaderQos>::new(None));
+        let kinds = [
+            StatusKind::DATA_ON_READERS,
+            StatusKind::DATA_AVAILABLE,
+            StatusKind::SUBSCRIPTION_MATCHED,
+            StatusKind::LIVELINESS_CHANGED,
+        ];
+
+        let handles: Vec<_> = kinds
+            .iter()
+            .map(|kind| {
+                let condition = condition.clone();
+                let kind = *kind;
+                std::thread::spawn(move || {
+                    for _ in 0..ITERATIONS {
+                        condition.set_communication_status(&kind, true).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let changes = condition.get_status_changes().unwrap();
+        for kind in kinds {
+            assert!(changes.contains(kind), "lost {:?}; got {:?}", kind, changes);
+        }
+    }
+
+    /// Masks must keep rendering as status names. Storing them as raw integers would degrade every
+    /// log line in this module.
+    #[test]
+    fn debug_renders_masks_as_status_names() {
+        let condition = StatusCondition::<DataReaderQos>::new(None);
+        condition.set_enabled_statuses(StatusKind::DATA_AVAILABLE).unwrap();
+        condition.set_communication_status(&StatusKind::SUBSCRIPTION_MATCHED, true).unwrap();
+
+        let rendered = format!("{:?}", condition);
+        assert!(rendered.contains("DATA_AVAILABLE"), "got: {rendered}");
+        assert!(rendered.contains("SUBSCRIPTION_MATCHED"), "got: {rendered}");
+    }
 }
