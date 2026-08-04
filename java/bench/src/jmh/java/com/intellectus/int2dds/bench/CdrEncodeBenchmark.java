@@ -10,11 +10,24 @@ import org.openjdk.jmh.infra.Blackhole;
 /**
  * Encodes a representative record and reports throughput.
  *
- * <p>The two candidates are compared end to end: the direct-buffer path stops
- * once the bytes are encoded, because they are already at a native address; the
- * byte[] path must additionally copy into a reusable direct staging buffer,
- * because a Java array has no stable native address for the FFI to read.
- * Leaving that copy out would compare the two unfairly.
+ * <p><b>What this measures:</b> the cost of {@code encode(...)} against the
+ * cost of {@code encode(...)} plus a copy-out into a heap array and a copy-in
+ * to a reusable direct staging buffer — both arms encode into the same
+ * direct-backed {@link CdrWriter}, because no {@code byte[]}-backed writer
+ * exists in this codebase to measure directly.
+ *
+ * <p><b>What this does not measure:</b> a comparison of two backing stores.
+ * {@code heapThenStage} is not a stand-in for a real {@code byte[]}-backed
+ * writer — a real one would encode with plain array stores (cheaper than the
+ * direct-buffer writes measured here) and pay a single copy into staging, not
+ * an extra {@code duplicate()}/{@code asReadOnlyBuffer()}/{@code slice()} plus
+ * two bulk copies. Because both arms share the identical direct-backed
+ * encode and {@code heapThenStage} only ever adds work on top of it,
+ * {@code heapThenStage} cannot beat {@code directBuffer} in this benchmark
+ * regardless of how a genuine {@code byte[]} writer would perform. Do not
+ * read a {@code directBuffer} win here as evidence that direct is faster than
+ * a real {@code byte[]} design — that question is still open and needs an
+ * actual {@code byte[]}-backed {@code CdrWriter} to answer.
  */
 @BenchmarkMode(Mode.Throughput)
 @OutputTimeUnit(TimeUnit.MICROSECONDS)
@@ -64,11 +77,17 @@ public class CdrEncodeBenchmark {
     }
 
     @Benchmark
-    public long directBuffer() {
+    public void directBuffer(Blackhole bh) {
         try (CdrWriter w = CdrWriter.acquire(Extensibility.APPENDABLE, true, true)) {
             encode(w, name, blob);
-            // Already at a native address: nothing further to do.
-            return w.address() + w.length();
+            // w.address() and w.length() do not depend on the bytes actually
+            // stored: address is a field cached at allocation time and length
+            // is a counter advanced by arithmetic independent of the store
+            // instructions. A sink built from either would not force the
+            // encode's writes to happen, so a sufficiently aggressive JIT
+            // could in principle eliminate them as dead code. Consuming the
+            // buffer view instead forces a real read over the encoded range.
+            bh.consume(w.buffer());
         }
     }
 
