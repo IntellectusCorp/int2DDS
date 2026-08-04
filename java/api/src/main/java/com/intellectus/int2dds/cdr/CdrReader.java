@@ -268,4 +268,132 @@ public final class CdrReader {
     public int readEnum() {
         return readI32();
     }
+
+    // ---- aggregates ------------------------------------------------------
+
+    private static final int MEMBER_ID_SENTINEL = 0x3F02;
+    private static final int PID_EXTENDED = 0x3F01;
+    private static final int MU_FLAG = 0x4000;
+
+    /** A DHEADER's declared size and the position immediately after it. */
+    public static final class Dheader {
+        public final int objectSize;
+        public final int startPos;
+
+        Dheader(int objectSize, int startPos) {
+            this.objectSize = objectSize;
+            this.startPos = startPos;
+        }
+    }
+
+    /** Reads a DHEADER. */
+    public Dheader readDheader() {
+        int size = readI32();
+        return new Dheader(size, pos);
+    }
+
+    /**
+     * Skips to the end of a DHEADER-delimited aggregate.
+     *
+     * <p>This is what makes APPENDABLE work: a writer that added members this
+     * reader does not know about leaves bytes behind, and this steps over them
+     * instead of decoding them.
+     */
+    public void readDheaderEnd(Dheader d) {
+        int end = d.startPos + d.objectSize;
+        if (end > limit) {
+            throw new CdrUnderflowException("DHEADER end exceeds buffer.");
+        }
+        pos = end;
+    }
+
+    /** A decoded EMHEADER. */
+    public static final class Emheader {
+        public final int memberId;
+        public final int dataLength;
+        public final boolean mustUnderstand;
+
+        Emheader(int memberId, int dataLength, boolean mustUnderstand) {
+            this.memberId = memberId;
+            this.dataLength = dataLength;
+            this.mustUnderstand = mustUnderstand;
+        }
+    }
+
+    /**
+     * Reads an EMHEADER and its length.
+     *
+     * <p>Length codes 0..3 encode the length implicitly; 4 puts it in a
+     * following NEXTINT word. This writer only emits 4, but a peer may use any
+     * of them, so all are decoded.
+     */
+    public Emheader readEmheader() {
+        int header = readI32();
+        boolean mustUnderstand = (header & 0x80000000) != 0;
+        int lc = (header >>> 28) & 0x07;
+        int memberId = header & 0x0FFFFFFF;
+        int dataLength;
+        switch (lc) {
+            case 0: dataLength = 1; break;
+            case 1: dataLength = 2; break;
+            case 2: dataLength = 4; break;
+            case 3: dataLength = 8; break;
+            default:
+                dataLength = readI32();
+                if (dataLength < 0 || pos + dataLength > limit) {
+                    throw new CdrUnderflowException("NEXTINT extends beyond buffer.");
+                }
+                break;
+        }
+        return new Emheader(memberId, dataLength, mustUnderstand);
+    }
+
+    /** True when the next word is the XCDR2 sentinel. Does not consume. */
+    public boolean isSentinel() {
+        int streamPos = pos - headerSize;
+        int aligned = ((streamPos + 3) & ~3) + headerSize;
+        if (aligned + 4 > limit) {
+            return false;
+        }
+        int header = data.getInt(aligned);
+        return (header & 0x0FFFFFFF) == MEMBER_ID_SENTINEL;
+    }
+
+    /** A decoded XCDR1 PL_CDR parameter header. */
+    public static final class ParameterHeader {
+        public final int memberId;
+        public final int length;
+        public final boolean mustUnderstand;
+        public final boolean sentinel;
+
+        ParameterHeader(int memberId, int length, boolean mustUnderstand, boolean sentinel) {
+            this.memberId = memberId;
+            this.length = length;
+            this.mustUnderstand = mustUnderstand;
+            this.sentinel = sentinel;
+        }
+    }
+
+    /** Reads an XCDR1 PL_CDR parameter header, short or extended form. */
+    public ParameterHeader readParameterHeader() {
+        align(4);
+        require(4);
+        int pid = readU16();
+        int len = readU16();
+        boolean mustUnderstand = (pid & MU_FLAG) != 0;
+        int id = pid & 0x3FFF;
+
+        if (id == MEMBER_ID_SENTINEL) {
+            return new ParameterHeader(id, 0, mustUnderstand, true);
+        }
+        if (id == PID_EXTENDED) {
+            if (pos + 8 > limit) {
+                throw new CdrUnderflowException("PL_CDR long member header extends beyond buffer.");
+            }
+            int fullId = readI32();
+            int fullLen = readI32();
+            return new ParameterHeader(fullId, fullLen, mustUnderstand, false);
+        }
+        return new ParameterHeader(id, len, mustUnderstand, false);
+    }
 }
