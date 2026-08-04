@@ -1293,6 +1293,12 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         };
 
         // Listener
+        // StatusCondition. DDS 1.4 2.2.4.1: the flag becomes TRUE when the status
+        // changes, which is before any listener runs, so a thread already blocked in
+        // WaitSet::wait observes the change instead of it being published only after
+        // the listener has already consumed and cleared the status.
+        self.set_communication_status_propagation(&StatusKind::REQUESTED_DEADLINE_MISSED, true)?;
+
         let mask = self.get_listener_mask()?;
         if mask.contains(StatusKind::REQUESTED_DEADLINE_MISSED) {
             let mut listener_called = false;
@@ -1313,11 +1319,13 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
             if listener_called {
                 let _ = self.take_requested_deadline_missed_status()?;
+                // DDS 1.4 2.2.4.1: the StatusChangedFlag is reset to FALSE when the
+                // listener returns. Only this entity's flag -- the Subscriber and
+                // DomainParticipant own theirs and may still hold unconsumed events
+                // from sibling readers.
+                self.set_communication_status(&StatusKind::REQUESTED_DEADLINE_MISSED, false)?;
             }
         }
-
-        // StatusCondition
-        self.set_communication_status_propagation(&StatusKind::REQUESTED_DEADLINE_MISSED, true)?;
 
         // Ownership is lost when deadline is missed
         if let Ok(datareader_cache) = self.datareader_cache.lock() {
@@ -1344,6 +1352,12 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         };
 
         // Listener
+        // StatusCondition. DDS 1.4 2.2.4.1: the flag becomes TRUE when the status
+        // changes, which is before any listener runs, so a thread already blocked in
+        // WaitSet::wait observes the change instead of it being published only after
+        // the listener has already consumed and cleared the status.
+        self.set_communication_status_propagation(&StatusKind::REQUESTED_INCOMPATIBLE_QOS, true)?;
+
         let mask = self.get_listener_mask()?;
         if mask.contains(StatusKind::REQUESTED_INCOMPATIBLE_QOS) {
             let mut listener_called = false;
@@ -1364,11 +1378,13 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
             if listener_called {
                 let _ = self.take_requested_incompatible_qos_status()?;
+                // DDS 1.4 2.2.4.1: the StatusChangedFlag is reset to FALSE when the
+                // listener returns. Only this entity's flag -- the Subscriber and
+                // DomainParticipant own theirs and may still hold unconsumed events
+                // from sibling readers.
+                self.set_communication_status(&StatusKind::REQUESTED_INCOMPATIBLE_QOS, false)?;
             }
         }
-
-        // StatusCondition
-        self.set_communication_status_propagation(&StatusKind::REQUESTED_INCOMPATIBLE_QOS, true)?;
 
         Ok(())
     }
@@ -1402,6 +1418,12 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         };
 
         // Listener
+        // StatusCondition. DDS 1.4 2.2.4.1: the flag becomes TRUE when the status
+        // changes, which is before any listener runs, so a thread already blocked in
+        // WaitSet::wait observes the change instead of it being published only after
+        // the listener has already consumed and cleared the status.
+        self.set_communication_status_propagation(&StatusKind::SAMPLE_LOST, true)?;
+
         let mask = self.get_listener_mask()?;
         if mask.contains(StatusKind::SAMPLE_LOST) {
             let mut listener_called = false;
@@ -1422,11 +1444,13 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
             if listener_called {
                 let _ = self.take_sample_lost_status()?;
+                // DDS 1.4 2.2.4.1: the StatusChangedFlag is reset to FALSE when the
+                // listener returns. Only this entity's flag -- the Subscriber and
+                // DomainParticipant own theirs and may still hold unconsumed events
+                // from sibling readers.
+                self.set_communication_status(&StatusKind::SAMPLE_LOST, false)?;
             }
         }
-
-        // StatusCondition
-        self.set_communication_status_propagation(&StatusKind::SAMPLE_LOST, true)?;
 
         Ok(())
     }
@@ -1443,6 +1467,12 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         };
 
         // Listener
+        // StatusCondition. DDS 1.4 2.2.4.1: the flag becomes TRUE when the status
+        // changes, which is before any listener runs, so a thread already blocked in
+        // WaitSet::wait observes the change instead of it being published only after
+        // the listener has already consumed and cleared the status.
+        self.set_communication_status_propagation(&StatusKind::SAMPLE_REJECTED, true)?;
+
         let mask = self.get_listener_mask()?;
         if mask.contains(StatusKind::SAMPLE_REJECTED) {
             let mut listener_called = false;
@@ -1463,11 +1493,13 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
             if listener_called {
                 let _ = self.take_sample_rejected_status()?;
+                // DDS 1.4 2.2.4.1: the StatusChangedFlag is reset to FALSE when the
+                // listener returns. Only this entity's flag -- the Subscriber and
+                // DomainParticipant own theirs and may still hold unconsumed events
+                // from sibling readers.
+                self.set_communication_status(&StatusKind::SAMPLE_REJECTED, false)?;
             }
         }
-
-        // StatusCondition
-        self.set_communication_status_propagation(&StatusKind::SAMPLE_REJECTED, true)?;
 
         Ok(())
     }
@@ -1514,6 +1546,12 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         };
 
         // Listener
+        // StatusCondition. DDS 1.4 2.2.4.1: the flag becomes TRUE when the status
+        // changes, which is before any listener runs, so a thread already blocked in
+        // WaitSet::wait observes the change instead of it being published only after
+        // the listener has already consumed and cleared the status.
+        self.set_communication_status_propagation(&StatusKind::LIVELINESS_CHANGED, true)?;
+
         let mask = self.get_listener_mask()?;
         if mask.contains(StatusKind::LIVELINESS_CHANGED) {
             let mut listener_called = false;
@@ -1534,11 +1572,13 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
             if listener_called {
                 let _ = self.take_liveliness_changed_status()?;
+                // DDS 1.4 2.2.4.1: the StatusChangedFlag is reset to FALSE when the
+                // listener returns. Only this entity's flag -- the Subscriber and
+                // DomainParticipant own theirs and may still hold unconsumed events
+                // from sibling readers.
+                self.set_communication_status(&StatusKind::LIVELINESS_CHANGED, false)?;
             }
         }
-
-        // StatusCondition
-        self.set_communication_status_propagation(&StatusKind::LIVELINESS_CHANGED, true)?;
 
         Ok(())
     }
@@ -1564,6 +1604,12 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         };
 
         // Listener
+        // StatusCondition. DDS 1.4 2.2.4.1: the flag becomes TRUE when the status
+        // changes, which is before any listener runs, so a thread already blocked in
+        // WaitSet::wait observes the change instead of it being published only after
+        // the listener has already consumed and cleared the status.
+        self.set_communication_status_propagation(&StatusKind::SUBSCRIPTION_MATCHED, true)?;
+
         let mask = self.get_listener_mask()?;
         if mask.contains(StatusKind::SUBSCRIPTION_MATCHED) {
             let mut listener_called = false;
@@ -1584,11 +1630,13 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
             if listener_called {
                 let _ = self.take_subscription_matched_status()?;
+                // DDS 1.4 2.2.4.1: the StatusChangedFlag is reset to FALSE when the
+                // listener returns. Only this entity's flag -- the Subscriber and
+                // DomainParticipant own theirs and may still hold unconsumed events
+                // from sibling readers.
+                self.set_communication_status(&StatusKind::SUBSCRIPTION_MATCHED, false)?;
             }
         }
-
-        // StatusCondition
-        self.set_communication_status_propagation(&StatusKind::SUBSCRIPTION_MATCHED, true)?;
 
         Ok(())
     }
