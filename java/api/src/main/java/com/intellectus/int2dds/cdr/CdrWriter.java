@@ -1,0 +1,245 @@
+package com.intellectus.int2dds.cdr;
+
+import com.intellectus.int2dds.internal.ffi.FfiAccess;
+import java.nio.Buffer;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.util.ArrayDeque;
+
+/**
+ * CDR encoder over a pooled direct {@link ByteBuffer}.
+ *
+ * <p>The buffer is direct so the serialized bytes already sit at a native
+ * address and the FFI write needs no copy. Direct allocation is expensive
+ * (malloc plus cleaner registration), so buffers are pooled per thread and
+ * handed back by {@link #close()}.
+ *
+ * <p>Missing a {@code close()} costs performance, not correctness: the buffer
+ * simply does not return to the pool and the JVM reclaims it when the reference
+ * drops. Use try-with-resources.
+ */
+public final class CdrWriter implements AutoCloseable {
+
+    /** Growth ceiling. A malformed or hostile sample must not be able to
+     *  consume unbounded native memory. */
+    public static final int MAX_CAPACITY = 64 * 1024 * 1024;
+
+    private static final int DEFAULT_CAPACITY = 256;
+    private static final int POOL_LIMIT = 4;
+
+    // Encapsulation ids, big-endian on the wire.
+    private static final int ENCAP_CDR_BE = 0x0000;
+    private static final int ENCAP_CDR_LE = 0x0001;
+    private static final int ENCAP_PL_CDR_BE = 0x0002;
+    private static final int ENCAP_PL_CDR_LE = 0x0003;
+    private static final int ENCAP_CDR2_BE = 0x0006;
+    private static final int ENCAP_CDR2_LE = 0x0007;
+    private static final int ENCAP_D_CDR2_BE = 0x0008;
+    private static final int ENCAP_D_CDR2_LE = 0x0009;
+    private static final int ENCAP_PL_CDR2_BE = 0x000A;
+    private static final int ENCAP_PL_CDR2_LE = 0x000B;
+
+    private static final ThreadLocal<ArrayDeque<Pooled>> POOL =
+            new ThreadLocal<ArrayDeque<Pooled>>() {
+                @Override
+                protected ArrayDeque<Pooled> initialValue() {
+                    return new ArrayDeque<Pooled>();
+                }
+            };
+
+    /** A direct buffer paired with its native address. The address is cached
+     *  because {@code directBufferAddress} is a JNI call — recomputing it per
+     *  sample would give back what the zero-copy buffer saves. */
+    private static final class Pooled {
+        ByteBuffer buffer;
+        long address;
+    }
+
+    private Pooled pooled;
+    private int pos;
+    private int headerSize;
+    private final boolean littleEndian;
+    private final boolean xcdr2;
+
+    private CdrWriter(boolean littleEndian, boolean xcdr2) {
+        this.littleEndian = littleEndian;
+        this.xcdr2 = xcdr2;
+        this.pooled = take(DEFAULT_CAPACITY);
+        this.pooled.buffer.order(littleEndian ? ByteOrder.LITTLE_ENDIAN : ByteOrder.BIG_ENDIAN);
+        this.pos = 0;
+        this.headerSize = 0;
+    }
+
+    /** A writer that starts with the 4-byte encapsulation header. */
+    public static CdrWriter acquire(Extensibility extensibility, boolean littleEndian,
+            boolean xcdr2) {
+        CdrWriter w = new CdrWriter(littleEndian, xcdr2);
+        w.writeEncapsulationHeader(extensibility);
+        return w;
+    }
+
+    /** A writer with no encapsulation header, for key serialization. */
+    public static CdrWriter acquireRaw(boolean littleEndian, boolean xcdr2) {
+        return new CdrWriter(littleEndian, xcdr2);
+    }
+
+    public int length() {
+        return pos;
+    }
+
+    public boolean isXcdr2() {
+        return xcdr2;
+    }
+
+    /** Native address of the encoded bytes. Stable until the next write that grows. */
+    public long address() {
+        return pooled.address;
+    }
+
+    /** A read-only view over {@code [0, length())}. Does not copy. */
+    public ByteBuffer buffer() {
+        ByteBuffer view = pooled.buffer.duplicate().asReadOnlyBuffer();
+        ((Buffer) view).position(0);
+        ((Buffer) view).limit(pos);
+        return view.slice();
+    }
+
+    /** A copy of the encoded bytes. Allocates — never call this on a hot path. */
+    public byte[] toBytes() {
+        byte[] out = new byte[pos];
+        ByteBuffer dup = pooled.buffer.duplicate();
+        ((Buffer) dup).position(0);
+        ((Buffer) dup).limit(pos);
+        dup.get(out);
+        return out;
+    }
+
+    @Override
+    public void close() {
+        if (pooled == null) {
+            return;
+        }
+        ArrayDeque<Pooled> pool = POOL.get();
+        if (pool.size() < POOL_LIMIT) {
+            pool.push(pooled);
+        }
+        pooled = null;
+    }
+
+    // ---- buffer management ---------------------------------------------
+
+    private static Pooled take(int minCapacity) {
+        ArrayDeque<Pooled> pool = POOL.get();
+        Pooled p = pool.poll();
+        if (p != null && p.buffer.capacity() >= minCapacity) {
+            return p;
+        }
+        if (p != null) {
+            // Too small: drop it and allocate. Its memory is reclaimed normally.
+            p = null;
+        }
+        return allocate(Math.max(minCapacity, DEFAULT_CAPACITY));
+    }
+
+    private static Pooled allocate(int capacity) {
+        Pooled p = new Pooled();
+        p.buffer = ByteBuffer.allocateDirect(capacity);
+        p.address = FfiAccess.directBufferAddress(p.buffer);
+        if (p.address == 0L) {
+            throw new CdrException("allocateDirect did not produce a direct buffer");
+        }
+        return p;
+    }
+
+    /** Guarantees {@code additional} more bytes past {@code pos}. */
+    private void ensure(int additional) {
+        long required = (long) pos + additional;
+        if (required > MAX_CAPACITY) {
+            throw new CdrOverflowException(
+                    "CDR writer would exceed the " + MAX_CAPACITY + " byte cap: " + required);
+        }
+        if (required <= pooled.buffer.capacity()) {
+            return;
+        }
+        int capacity = pooled.buffer.capacity();
+        while (capacity < required) {
+            capacity = (int) Math.min((long) capacity * 2, MAX_CAPACITY);
+        }
+        Pooled bigger = allocate(capacity);
+        bigger.buffer.order(pooled.buffer.order());
+        ByteBuffer src = pooled.buffer.duplicate();
+        ((Buffer) src).position(0);
+        ((Buffer) src).limit(pos);
+        ((Buffer) bigger.buffer).position(0);
+        bigger.buffer.put(src);
+        ((Buffer) bigger.buffer).position(0);
+        pooled = bigger;
+    }
+
+    /**
+     * Writes {@code count} zero bytes at {@code pos} and advances.
+     *
+     * <p>Required, not cosmetic. A pooled buffer arrives holding the previous
+     * sample's bytes; any span the encoder reserves but does not fill —
+     * alignment padding, a back-patched header — would otherwise carry that
+     * content onto the wire.
+     */
+    private void zeroFill(int count) {
+        ensure(count);
+        ByteBuffer b = pooled.buffer;
+        for (int i = 0; i < count; i++) {
+            b.put(pos + i, (byte) 0);
+        }
+        pos += count;
+    }
+
+    private void putBulk(byte[] src, int off, int len) {
+        ensure(len);
+        ByteBuffer b = pooled.buffer;
+        ((Buffer) b).position(pos);
+        b.put(src, off, len);
+        ((Buffer) b).position(0);
+        pos += len;
+    }
+
+    /** Test-only seam so the buffer machinery is testable before Task 4 adds
+     *  {@code writeBytes}. Task 4 deletes this. */
+    void writeRawForTest(byte[] data) {
+        putBulk(data, 0, data.length);
+    }
+
+    // ---- encapsulation header -------------------------------------------
+
+    private void writeEncapsulationHeader(Extensibility extensibility) {
+        int encapId;
+        if (xcdr2) {
+            switch (extensibility) {
+                case FINAL:
+                    encapId = littleEndian ? ENCAP_CDR2_LE : ENCAP_CDR2_BE;
+                    break;
+                case MUTABLE:
+                    encapId = littleEndian ? ENCAP_PL_CDR2_LE : ENCAP_PL_CDR2_BE;
+                    break;
+                case APPENDABLE:
+                default:
+                    encapId = littleEndian ? ENCAP_D_CDR2_LE : ENCAP_D_CDR2_BE;
+                    break;
+            }
+        } else if (extensibility == Extensibility.MUTABLE) {
+            // XCDR1 mutable is PL_CDR with PID member headers, not PLAIN_CDR.
+            encapId = littleEndian ? ENCAP_PL_CDR_LE : ENCAP_PL_CDR_BE;
+        } else {
+            encapId = littleEndian ? ENCAP_CDR_LE : ENCAP_CDR_BE;
+        }
+
+        ensure(4);
+        ByteBuffer b = pooled.buffer;
+        // Always big-endian, independent of the payload's byte order.
+        b.put(pos, (byte) (encapId >>> 8));
+        b.put(pos + 1, (byte) encapId);
+        b.put(pos + 2, (byte) 0);
+        b.put(pos + 3, (byte) 0);
+        pos += 4;
+        headerSize = 4;
+    }
+}
