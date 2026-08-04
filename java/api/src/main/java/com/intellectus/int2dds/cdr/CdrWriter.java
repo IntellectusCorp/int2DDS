@@ -208,6 +208,91 @@ public final class CdrWriter implements AutoCloseable {
         putBulk(data, 0, data.length);
     }
 
+    // ---- alignment ------------------------------------------------------
+
+    /**
+     * Pads to the next {@code alignment} boundary measured from the start of
+     * the encapsulated stream, not from the start of the buffer — the 4-byte
+     * encapsulation header does not count toward alignment.
+     *
+     * <p>XCDR2 caps the maximum alignment at 4, so an 8-byte value aligns to 4.
+     */
+    private void align(int alignment) {
+        if (alignment <= 1) {
+            return;
+        }
+        int actual = xcdr2 ? Math.min(alignment, 4) : alignment;
+        int streamPos = pos - headerSize;
+        int aligned = (streamPos + actual - 1) & ~(actual - 1);
+        int padding = aligned - streamPos;
+        if (padding > 0) {
+            zeroFill(padding);
+        }
+    }
+
+    // ---- primitives -----------------------------------------------------
+
+    public void writeBool(boolean value) {
+        ensure(1);
+        pooled.buffer.put(pos, value ? (byte) 1 : (byte) 0);
+        pos += 1;
+    }
+
+    public void writeI8(byte value) {
+        ensure(1);
+        pooled.buffer.put(pos, value);
+        pos += 1;
+    }
+
+    /** Writes the low 8 bits of {@code value}. */
+    public void writeU8(int value) {
+        writeI8((byte) value);
+    }
+
+    public void writeI16(short value) {
+        align(2);
+        ensure(2);
+        pooled.buffer.putShort(pos, value);
+        pos += 2;
+    }
+
+    /** Writes the low 16 bits of {@code value}. */
+    public void writeU16(int value) {
+        writeI16((short) value);
+    }
+
+    public void writeI32(int value) {
+        align(4);
+        ensure(4);
+        pooled.buffer.putInt(pos, value);
+        pos += 4;
+    }
+
+    /** Writes all 32 bits of {@code value}; the caller supplies the bit pattern. */
+    public void writeU32(int value) {
+        writeI32(value);
+    }
+
+    public void writeI64(long value) {
+        align(8);
+        ensure(8);
+        pooled.buffer.putLong(pos, value);
+        pos += 8;
+    }
+
+    /** Writes all 64 bits of {@code value}; the caller supplies the bit pattern. */
+    public void writeU64(long value) {
+        writeI64(value);
+    }
+
+    public void writeF32(float value) {
+        writeI32(Float.floatToRawIntBits(value));
+    }
+
+    public void writeF64(double value) {
+        writeI64(Double.doubleToRawLongBits(value));
+    }
+
     // ---- encapsulation header -------------------------------------------
 
     private void writeEncapsulationHeader(Extensibility extensibility) {
