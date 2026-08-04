@@ -405,4 +405,86 @@ public final class CdrWriter implements AutoCloseable {
         pos += 4;
         headerSize = 4;
     }
+
+    // ---- XCDR2 aggregates ------------------------------------------------
+
+    private static final int MEMBER_ID_SENTINEL = 0x3F02;
+    private static final int MAX_MEMBER_ID = 0x0FFFFFFF;
+
+    private void requireXcdr2(String what) {
+        if (!xcdr2) {
+            throw new IllegalStateException(what + " is XCDR2-only; this writer is XCDR1. "
+                    + "XCDR1 mutable types use PL_CDR PID member headers, not EMHEADER.");
+        }
+    }
+
+    private static void requireMemberId(int memberId) {
+        if (memberId < 0 || memberId > MAX_MEMBER_ID) {
+            throw new IllegalArgumentException(
+                    "member id exceeds 28 bits: 0x" + Integer.toHexString(memberId));
+        }
+    }
+
+    /**
+     * Reserves a DHEADER and returns a token for {@link #dheaderFinalize(int)}.
+     * Returns {@code -1} under XCDR1, where there is no DHEADER; passing that
+     * token back is a no-op, so callers need no version branch.
+     */
+    public int dheaderBegin() {
+        if (!xcdr2) {
+            return -1;
+        }
+        align(4);
+        int token = pos;
+        writeU32(0);
+        return token;
+    }
+
+    /** Back-patches the DHEADER with the size of everything written since. */
+    public void dheaderFinalize(int token) {
+        if (!xcdr2) {
+            return;
+        }
+        // Excludes the DHEADER word itself.
+        pooled.buffer.putInt(token, pos - token - 4);
+    }
+
+    /** Writes an EMHEADER with a already-known data length, in NEXTINT form. */
+    public void writeEmheader(int memberId, int dataLength, boolean mustUnderstand) {
+        requireXcdr2("EMHEADER");
+        requireMemberId(memberId);
+        writeU32(emheaderWord(memberId, mustUnderstand));
+        writeU32(dataLength);
+    }
+
+    /**
+     * Writes an EMHEADER whose data length is not yet known, reserving the
+     * NEXTINT word. Returns a token for {@link #emheaderFinalize(int)}.
+     */
+    public int emheaderBegin(int memberId, boolean mustUnderstand) {
+        requireXcdr2("EMHEADER");
+        requireMemberId(memberId);
+        writeU32(emheaderWord(memberId, mustUnderstand));
+        int token = pos;
+        writeU32(0);
+        return token;
+    }
+
+    /** Back-patches an EMHEADER with the length of the member that followed. */
+    public void emheaderFinalize(int token) {
+        pooled.buffer.putInt(token, pos - token - 4);
+    }
+
+    /** Writes the sentinel that terminates an XCDR2 mutable aggregate. */
+    public void writeSentinel() {
+        requireXcdr2("Sentinel");
+        writeU32(MEMBER_ID_SENTINEL);
+    }
+
+    private static int emheaderWord(int memberId, boolean mustUnderstand) {
+        int mu = mustUnderstand ? 0x80000000 : 0;
+        // LC=4 always: the NEXTINT form carries an explicit 4-byte length, which
+        // is what makes back-patching possible.
+        return mu | (4 << 28) | (memberId & MAX_MEMBER_ID);
+    }
 }
