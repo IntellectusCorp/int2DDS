@@ -119,9 +119,11 @@ class CdrWriterPlCdrTest {
     }
 
     @Test
-    void reservedHeaderBytesAreZeroBeforeBackPatchingInAReusedBuffer() {
-        // The pool hands back a dirty buffer; the reserved header span must not
-        // show the previous sample through the bytes the short form leaves unset.
+    void shortFormHeaderIsCorrectFromAReusedPoolSlot() {
+        // Acquiring a dirty pooled buffer still yields a correct PID and
+        // length for a short-form member: the finalize writes cover all four
+        // reserved header bytes unconditionally, regardless of what a prior
+        // sample left behind in the slot.
         try (CdrWriter dirty = CdrWriter.acquire(Extensibility.MUTABLE, true, false)) {
             dirty.writeBytes(new byte[] {(byte) 0xEE, (byte) 0xEE, (byte) 0xEE, (byte) 0xEE,
                     (byte) 0xEE, (byte) 0xEE, (byte) 0xEE, (byte) 0xEE});

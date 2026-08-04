@@ -502,6 +502,12 @@ public final class CdrWriter implements AutoCloseable {
      * <p>Reserves 4 bytes for an id that fits the short form, 12 otherwise. If
      * the content later overruns the short form's 16-bit length, finalize
      * promotes it.
+     *
+     * <p>{@code zeroFill} is what reserves the span — it is the mechanism that
+     * advances {@code pos}, not just hygiene. Its zeroing is redundant on the
+     * normal path, since {@link #memberV1Finalize(int, int, boolean)} always
+     * overwrites the whole span; it is belt-and-braces for a caller that
+     * begins a member and abandons it without finalizing.
      */
     public int memberV1Begin(int memberId) {
         requireMemberId(memberId);
@@ -535,9 +541,9 @@ public final class CdrWriter implements AutoCloseable {
             for (int i = count - 1; i >= 0; i--) {
                 b.put(from + 8 + i, b.get(from + i));
             }
-            for (int i = 0; i < 8; i++) {
-                b.put(from + i, (byte) 0);
-            }
+            // No need to zero [from, from + 8): the four writes below cover
+            // [headerPos, headerPos + 12) unconditionally and contiguously,
+            // so nothing can observe whatever was left in the vacated span.
             pos += 8;
         }
 
