@@ -34,6 +34,7 @@
 //! |--------|-------------|---------------|
 //! | [`WriterReliabilityExtensionQosPolicy`] | Writer reliability options | DataWriter |
 //! | [`ReaderReliabilityExtensionQosPolicy`] | Reader reliability options | DataReader |
+//! | [`ReaderMulticastExtensionQosPolicy`] | User-data multicast enabling option | DataReader |
 //!
 //! # Unsupported QoS Policies
 //!
@@ -111,6 +112,7 @@ const DATAREPRESENTATION_QOS_POLICY_NAME: &str = "DataRepresentation";
 const TYPECONSISTENCYENFORCEMENT_QOS_POLICY_NAME: &str = "TypeConsistencyEnforcement";
 const WRITER_RELIABILITY_EXTENSION_QOS_POLICY_NAME: &str = "WriterReliabilityExtension";
 const READER_RELIABILITY_EXTENSION_QOS_POLICY_NAME: &str = "ReaderReliabilityExtension";
+const READER_MULTICAST_EXTENSION_QOS_POLICY_NAME: &str = "ReaderMulticastExtension";
 const PROPERTY_QOS_POLICY_NAME: &str = "Property";
 const DATA_FRAG_QOS_POLICY_NAME: &str = "DataFrag";
 const LIFESPAN_REFERENCE_QOS_POLICY_NAME: &str = "LifespanReference";
@@ -2463,6 +2465,33 @@ impl ConstDefault for ReaderReliabilityExtensionQosPolicy {
 impl QosPolicy for ReaderReliabilityExtensionQosPolicy {
     fn name(&self) -> &str {
         READER_RELIABILITY_EXTENSION_QOS_POLICY_NAME
+    }
+}
+
+/// Extension for int2DDS-specific user-data multicast reception on a DataReader.
+///
+/// # Default
+/// - `address: None` - multicast reception disabled; user data is received on unicast only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReaderMulticastExtensionQosPolicy {
+    /// Multicast group address the reader receives user data on.
+    /// `None` keeps multicast reception disabled.
+    pub address: Option<String>,
+}
+
+impl Default for ReaderMulticastExtensionQosPolicy {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl ConstDefault for ReaderMulticastExtensionQosPolicy {
+    const DEFAULT: Self = Self { address: None };
+}
+
+impl QosPolicy for ReaderMulticastExtensionQosPolicy {
+    fn name(&self) -> &str {
+        READER_MULTICAST_EXTENSION_QOS_POLICY_NAME
     }
 }
 

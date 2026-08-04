@@ -33,9 +33,10 @@ use crate::{
         DurabilityQosPolicy, EntityFactoryQosPolicy, GroupDataQosPolicy, HistoryQosPolicy,
         LatencyBudgetQosPolicy, LifespanReferenceQosPolicy, LivelinessQosPolicy,
         OwnershipQosPolicy, PartitionQosPolicy, PresentationQosPolicy, Qos,
-        ReaderDataLifecycleQosPolicy, ReaderReliabilityExtensionQosPolicy, ReliabilityQosPolicy,
-        ReliabilityQosPolicyKind, ResourceLimitsQosPolicy, TimeBasedFilterQosPolicy,
-        TypeConsistencyEnforcementQosPolicy, UserDataQosPolicy,
+        ReaderDataLifecycleQosPolicy, ReaderMulticastExtensionQosPolicy,
+        ReaderReliabilityExtensionQosPolicy, ReliabilityQosPolicy, ReliabilityQosPolicyKind,
+        ResourceLimitsQosPolicy, TimeBasedFilterQosPolicy, TypeConsistencyEnforcementQosPolicy,
+        UserDataQosPolicy,
     },
 };
 use const_default::ConstDefault;
@@ -62,6 +63,7 @@ pub struct DataReaderQos {
     pub data_representation: DataRepresentationQosPolicy,
     pub type_consistency_enforcement: TypeConsistencyEnforcementQosPolicy,
     pub reader_reliability_extension: ReaderReliabilityExtensionQosPolicy,
+    pub reader_multicast_extension: ReaderMulticastExtensionQosPolicy,
 }
 
 impl Default for DataReaderQos {
@@ -86,6 +88,7 @@ impl Default for DataReaderQos {
             data_representation: DataRepresentationQosPolicy::default(),
             type_consistency_enforcement: TypeConsistencyEnforcementQosPolicy::default(),
             reader_reliability_extension: ReaderReliabilityExtensionQosPolicy::default(),
+            reader_multicast_extension: ReaderMulticastExtensionQosPolicy::default(),
         }
     }
 }
@@ -111,6 +114,7 @@ impl ConstDefault for DataReaderQos {
         data_representation: DataRepresentationQosPolicy::DEFAULT,
         type_consistency_enforcement: TypeConsistencyEnforcementQosPolicy::DEFAULT,
         reader_reliability_extension: ReaderReliabilityExtensionQosPolicy::DEFAULT,
+        reader_multicast_extension: ReaderMulticastExtensionQosPolicy::DEFAULT,
     };
 }
 
@@ -151,6 +155,7 @@ impl Qos for DataReaderQos {
             || self.destination_order != new_qos.destination_order
             || self.data_representation != new_qos.data_representation
             || self.reader_reliability_extension != new_qos.reader_reliability_extension
+            || self.reader_multicast_extension != new_qos.reader_multicast_extension
         {
             return Err(DdsError::ImmutablePolicy);
         }
