@@ -71,10 +71,16 @@ class CdrWriterBufferTest {
     }
 
     @Test
-    void reusedBuffersDoNotLeakPreviousContent() {
-        // The pool hands back a dirty buffer. Anything the encoder does not
-        // explicitly write must still read as zero, or a previous sample's
-        // bytes end up on the wire inside padding.
+    void reacquiredWriterStartsAtAFreshHeader() {
+        // Checks that reacquiring a pooled buffer yields a writer whose visible
+        // content is exactly its own header, with no carry-over into
+        // [0, length()). This does NOT exercise zeroFill: toBytes() is bounded
+        // to [0, pos), so bytes the dirty writer left past its own pos (here,
+        // offsets 4-7) are outside what this test can observe. The real
+        // zero-fill-of-reserved-spans guarantee becomes observable once
+        // alignment padding exists, inside [0, pos) where toBytes() can see
+        // it — covered by paddingBytesAreZeroEvenInAReusedBuffer in the next
+        // task.
         try (CdrWriter w = CdrWriter.acquire(Extensibility.FINAL, true, true)) {
             w.writeRawForTest(new byte[] {(byte) 0xAA, (byte) 0xBB, (byte) 0xCC, (byte) 0xDD});
         }
@@ -88,6 +94,7 @@ class CdrWriterBufferTest {
     @Test
     void growthPreservesContentAndUpdatesTheAddress() {
         try (CdrWriter w = CdrWriter.acquire(Extensibility.FINAL, true, true)) {
+            long before = w.address();
             byte[] big = new byte[4096];
             for (int i = 0; i < big.length; i++) {
                 big[i] = (byte) i;
@@ -98,7 +105,8 @@ class CdrWriterBufferTest {
             for (int i = 0; i < big.length; i++) {
                 assertEquals((byte) i, out[4 + i], "byte " + i + " survived the grow");
             }
-            assertNotEquals(0L, w.address());
+            assertNotEquals(before, w.address(),
+                    "growth allocates a new direct buffer; a stale cached address is a bug");
         }
     }
 
