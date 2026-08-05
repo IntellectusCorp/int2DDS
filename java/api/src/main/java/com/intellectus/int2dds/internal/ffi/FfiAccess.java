@@ -190,6 +190,54 @@ public final class FfiAccess {
         Ffi.int2dds_datareader_qos_destroy(handle);
     }
 
+    // --- Topic / Publisher ---
+
+    /**
+     * Creates a topic. Returns the C ABI status code and, only on success,
+     * writes the new handle to {@code handleOut[0]}; on failure {@code
+     * handleOut} is left untouched — the same shape as {@link
+     * #createParticipant}, which explains why a status code travels
+     * alongside the handle here too. {@code topicName} and {@code typeName}
+     * cross as UTF-8 {@code byte[]}, never {@code String}: JNI's modified
+     * UTF-8 would corrupt either one. {@code qos} is {@code 0L} for the
+     * core's default Topic QoS.
+     */
+    public static int createTopic(long participant, byte[] topicName, byte[] typeName,
+            int extensibility, long qos, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_create_topic(
+                participant, topicName, typeName, extensibility, qos, directBufferAddress(slot));
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Releases a topic. Returns the C ABI status code. */
+    public static int deleteTopic(long topic) {
+        return Ffi.int2dds_delete_topic(topic);
+    }
+
+    /**
+     * Creates a publisher. Returns the C ABI status code and, only on
+     * success, writes the new handle to {@code handleOut[0]}; on failure
+     * {@code handleOut} is left untouched. {@code qos} is {@code 0L} for the
+     * core's default Publisher QoS.
+     */
+    public static int createPublisher(long participant, long qos, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_create_publisher(participant, qos, directBufferAddress(slot));
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Releases a publisher. Returns the C ABI status code. */
+    public static int deletePublisher(long publisher) {
+        return Ffi.int2dds_delete_publisher(publisher);
+    }
+
     // --- Topic QoS setters ---
 
     public static int topicQosSetReliability(long qos, int kind, long maxBlockingTimeNs) {

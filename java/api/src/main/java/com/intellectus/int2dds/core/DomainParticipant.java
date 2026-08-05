@@ -6,12 +6,15 @@ import com.intellectus.int2dds.internal.QosMarshal;
 import com.intellectus.int2dds.internal.ReturnCodes;
 import com.intellectus.int2dds.internal.ffi.FfiAccess;
 import com.intellectus.int2dds.qos.ParticipantQos;
+import com.intellectus.int2dds.qos.PublisherQos;
+import com.intellectus.int2dds.qos.TopicQos;
+import com.intellectus.int2dds.types.IDdsType;
 import java.util.Objects;
 
 /**
- * The local application's membership in a DDS domain, and (once the
- * remaining write-path entities exist) the factory for {@code Topic}, {@code
- * Publisher} and {@code DataWriter}.
+ * The local application's membership in a DDS domain, and the factory for
+ * {@code Topic} and {@code Publisher} (and, once it exists, {@code
+ * DataWriter}).
  *
  * <p>A root {@link NativeEntity}: {@link #parent()} is always null, and
  * {@link #close()} — inherited unchanged — closes every live child of this
@@ -68,6 +71,33 @@ public final class DomainParticipant extends NativeEntity {
     /** The domain id this participant was constructed with. */
     public int domainId() {
         return domainId;
+    }
+
+    /**
+     * Creates a topic named {@code name} for {@code prototype}'s type, with
+     * the core's default QoS. {@code prototype} supplies the type name and
+     * extensibility that {@link Topic#typeName()} / {@link
+     * Topic#extensibility()} report afterward — an instance rather than
+     * {@code Class<T>}, since {@code Class.newInstance()} is both deprecated
+     * and unnecessary here.
+     */
+    public <T extends IDdsType> Topic<T> createTopic(String name, T prototype) {
+        return new Topic<T>(this, name, prototype, null);
+    }
+
+    /** Creates a topic named {@code name} for {@code prototype}'s type, with an explicit QoS. */
+    public <T extends IDdsType> Topic<T> createTopic(String name, T prototype, TopicQos qos) {
+        return new Topic<T>(this, name, prototype, Objects.requireNonNull(qos, "qos"));
+    }
+
+    /** Creates a publisher with the core's default QoS. */
+    public Publisher createPublisher() {
+        return new Publisher(this, null);
+    }
+
+    /** Creates a publisher with an explicit QoS. */
+    public Publisher createPublisher(PublisherQos qos) {
+        return new Publisher(this, Objects.requireNonNull(qos, "qos"));
     }
 
     /**
