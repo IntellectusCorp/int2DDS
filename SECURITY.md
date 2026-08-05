@@ -2,13 +2,13 @@
 
 ## Supported Versions
 
-int2DDS is currently in early development (`0.0.x`). Security fixes are
+int2DDS is currently in early development (`0.1.x`). Security fixes are
 applied to the latest released version on the `main` branch only.
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.0.x   | :white_check_mark: |
-| < 0.0.1 | :x:                |
+| 0.1.x   | :white_check_mark: |
+| < 0.1.0 | :x:                |
 
 ## Reporting a Vulnerability
 

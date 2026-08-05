@@ -54,7 +54,12 @@ tokio-util = { version = "0.7.18", features = ["rt"] }
 futures-util = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-get_if_addrs = "0.5.3"
+# Successor of the unmaintained `get_if_addrs`, same authors and same OS calls
+# (getifaddrs / GetAdaptersAddresses). Its Windows bindings are windows-sys
+# instead of winapi 0.2.8, which has no aarch64 support.
+# Keep the `link-local` feature off: disabled it drops fe80::/10 and 169.254/16
+# exactly like `get_if_addrs` did.
+if-addrs = "0.15"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "2"
 crossbeam-channel = "0.5.15"
