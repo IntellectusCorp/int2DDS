@@ -226,13 +226,30 @@ impl MessageReceiver {
 
         // info!("#### header {:?}", message);
 
-        // submessage loop
+        // Submessage loop. Submessages are located only by walking the submessageLength
+        // chain, so a submessage that cannot be framed also hides where the next one starts.
+        // Such a message is invalid from that point on, but the submessages already parsed
+        // keep their effect.
         while !submessages_buffer.is_empty() {
+            let remaining_before = submessages_buffer.len();
+
             if let Ok(Some(submessage)) =
                 Submessage::read_from_buffer(self, &mut submessages_buffer)
             {
                 // info!("#### submessage {:?}", submessage);
                 message.submessages.push(submessage);
+            }
+
+            // `read_from_buffer` advances the buffer only once it has framed a submessage.
+            // Both framing failures - a header shorter than four bytes, and a declared
+            // submessageLength larger than the bytes remaining - return before that point
+            // and consume nothing, which would leave this loop condition unchanged forever.
+            if submessages_buffer.len() >= remaining_before {
+                debug!(
+                    "Malformed submessage framing from {}: discarding the trailing {} byte(s)",
+                    self.sender_addr, remaining_before
+                );
+                break;
             }
         }
 
@@ -684,4 +701,168 @@ impl MessageReceiver {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+    use std::sync::mpsc::{sync_channel, RecvTimeoutError};
+    use std::time::Duration;
+
+    /// A valid 20-byte RTPS header. `Header::is_valid` requires the "RTPS" magic and
+    /// a major protocol version of at most 2.
+    const HDR: [u8; 20] = [
+        0x52, 0x54, 0x50, 0x53, // protocol  = "RTPS"
+        0x02, 0x03, // version   = 2.3
+        0x01, 0x03, // vendorId
+        0x01, 0x02, 0x03, 0x04, // guidPrefix[0..4]
+        0x05, 0x06, 0x07, 0x08, // guidPrefix[4..8]
+        0x09, 0x0A, 0x0B, 0x0C, // guidPrefix[8..12]
+    ];
+
+    /// A well-formed little-endian INFO_DST. Its body is exactly a 12-byte GuidPrefix,
+    /// so it needs no other submessage deserializer to be correct.
+    const INFO_DST: [u8; 16] = [
+        0x0E, // submessageId       = INFO_DST
+        0x01, // flags              = E (little-endian)
+        0x0C, 0x00, // octetsToNextHeader = 12, little-endian
+        0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, // guidPrefix[0..6]
+        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, // guidPrefix[6..12]
+    ];
+
+    const TIMEOUT: Duration = Duration::from_secs(2);
+
+    fn datagram(parts: &[&[u8]]) -> Vec<u8> {
+        let mut v = HDR.to_vec();
+        for p in parts {
+            v.extend_from_slice(p);
+        }
+        v
+    }
+
+    /// Runs `MessageReceiver::init` on a worker thread and fails if it does not return
+    /// within `TIMEOUT`. Returns the submessage ids that were parsed, or `None` if `init`
+    /// rejected the datagram outright.
+    ///
+    /// A runaway thread cannot be killed in Rust: if `init` spins, the worker keeps burning
+    /// one core until the test binary exits. That is the accepted cost of being able to
+    /// report a single failure instead of wedging the whole `cargo test` run.
+    fn init_ids_within(datagram: Vec<u8>) -> Option<Vec<u8>> {
+        let (tx, rx) = sync_channel::<Option<Vec<u8>>>(1);
+        std::thread::Builder::new()
+            .name("rtps-init-under-test".into())
+            .spawn(move || {
+                let addr: SocketAddr = "127.0.0.1:7400".parse().unwrap();
+                let mut receiver = MessageReceiver::new(GUIDPREFIX_UNKNOWN, &addr);
+                let ids = receiver.init(&Bytes::from(datagram)).ok().map(|message| {
+                    message.submessages.iter().map(|s| s.header.submessage_id().as_u8()).collect()
+                });
+                let _ = tx.send(ids);
+            })
+            .expect("failed to spawn worker thread");
+
+        match rx.recv_timeout(TIMEOUT) {
+            Ok(ids) => ids,
+            Err(RecvTimeoutError::Timeout) => panic!(
+                "MessageReceiver::init did not return within {TIMEOUT:?}: \
+                 the submessage parsing loop never terminated"
+            ),
+            Err(RecvTimeoutError::Disconnected) => panic!("MessageReceiver::init panicked"),
+        }
+    }
+
+    /// The parsing loop can only terminate if every `read_from_buffer` call either consumes
+    /// bytes or makes the caller stop. This pins the half of that contract that lives in
+    /// `read_from_buffer`: on a framing error it consumes nothing, which is exactly why the
+    /// caller has to detect the lack of progress. A single call, so it cannot hang.
+    #[test]
+    fn framing_error_consumes_nothing_so_caller_must_stop() {
+        let cases: [(&str, Vec<u8>); 4] = [
+            ("1 trailing byte", vec![0x0E]),
+            ("2 trailing bytes", vec![0x0E, 0x01]),
+            ("3 trailing bytes", vec![0x0E, 0x01, 0x0C]),
+            // HEARTBEAT declaring 65535 body bytes with none following.
+            ("declared length overruns", vec![0x07, 0x01, 0xFF, 0xFF]),
+        ];
+
+        for (name, bytes) in cases {
+            let addr: SocketAddr = "127.0.0.1:7400".parse().unwrap();
+            let mut receiver = MessageReceiver::new(GUIDPREFIX_UNKNOWN, &addr);
+            let mut buffer = Bytes::from(bytes);
+            let before = buffer.len();
+
+            let result = Submessage::read_from_buffer(&mut receiver, &mut buffer);
+
+            assert!(result.is_err(), "{name}: expected a framing error");
+            assert_eq!(
+                buffer.len(),
+                before,
+                "{name}: read_from_buffer consumed bytes on a framing error. The progress \
+                 check in MessageReceiver::init relies on it not doing so; if this changed \
+                 deliberately, revisit that check."
+            );
+        }
+    }
+
+    /// One to three bytes left over is too few for a 4-byte submessage header. The valid
+    /// submessages that preceded them must still be reported.
+    #[test]
+    fn trailing_bytes_do_not_hang() {
+        for n in 1..=3usize {
+            let ids = init_ids_within(datagram(&[&INFO_DST, &vec![0xAB; n]]));
+            assert_eq!(
+                ids,
+                Some(vec![0x0E]),
+                "{n} trailing byte(s): the preceding INFO_DST must survive"
+            );
+        }
+    }
+
+    /// A submessage whose declared `octetsToNextHeader` exceeds the bytes actually present
+    /// cannot be framed, and neither can anything after it.
+    #[test]
+    fn declared_length_overrunning_buffer_does_not_hang() {
+        // HEARTBEAT, E=1, octetsToNextHeader = 0xFFFF, no body bytes follow.
+        let ids = init_ids_within(datagram(&[&[0x07, 0x01, 0xFF, 0xFF]]));
+        assert_eq!(ids, Some(vec![]), "no submessage in this datagram is parseable");
+
+        // Same, but preceded by a valid submessage: the prefix must be kept.
+        let ids = init_ids_within(datagram(&[&INFO_DST, &[0x15, 0x01, 0x00, 0x10]]));
+        assert_eq!(
+            ids,
+            Some(vec![0x0E]),
+            "a DATA claiming 4096 body bytes with none present must not discard the INFO_DST"
+        );
+    }
+
+    #[test]
+    fn garbage_tail_after_valid_submessages_does_not_hang() {
+        let ids = init_ids_within(datagram(&[&INFO_DST, &INFO_DST, &[0x00, 0x00]]));
+        assert_eq!(ids, Some(vec![0x0E, 0x0E]));
+    }
+
+    #[test]
+    fn wellformed_multi_submessage_datagram_parses_fully() {
+        let ids = init_ids_within(datagram(&[&INFO_DST, &INFO_DST, &INFO_DST]));
+        assert_eq!(ids, Some(vec![0x0E, 0x0E, 0x0E]));
+    }
+
+    /// `octetsToNextHeader == 0` on the last submessage means it extends to the end of the
+    /// message. This is how submessages larger than 64 KiB are sent, and the parser handles
+    /// it deliberately for OpenDDS interoperability. Pins the case that a naive "reject a
+    /// declared length of zero" fix would destroy.
+    #[test]
+    fn zero_length_last_submessage_extends_to_end_of_message() {
+        let mut tail = vec![0x0E, 0x01, 0x00, 0x00]; // INFO_DST, E=1, octetsToNextHeader = 0
+        tail.extend_from_slice(&INFO_DST[4..]); // followed by its 12-byte GuidPrefix
+        let ids = init_ids_within(datagram(&[&tail]));
+        assert_eq!(ids, Some(vec![0x0E]));
+    }
+
+    /// A submessage id this implementation does not know must be skipped using its declared
+    /// length, and parsing must continue with the next one. Vendor-specific ids in the
+    /// 0x80..=0xFF range rely on this.
+    #[test]
+    fn vendor_specific_submessage_is_skipped_and_parsing_continues() {
+        let vendor = [0x80, 0x01, 0x04, 0x00, 0xDE, 0xAD, 0xBE, 0xEF];
+        let ids = init_ids_within(datagram(&[&vendor, &INFO_DST]));
+        assert_eq!(ids, Some(vec![0x0E]), "the INFO_DST after the vendor submessage is lost");
+    }
+}
