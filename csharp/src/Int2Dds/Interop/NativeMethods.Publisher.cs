@@ -50,13 +50,16 @@ namespace Int2Dds.Interop
         internal static extern int int2dds_datawriter_get_qos(IntPtr writer, out IntPtr qos_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datawriter_data_representation(IntPtr writer);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_delete_datawriter(IntPtr writer);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static unsafe extern int int2dds_datawriter_write_serialized(IntPtr writer, byte* data, UIntPtr data_len, byte* key, UIntPtr key_len);
+        internal static unsafe extern int int2dds_datawriter_write_serialized(IntPtr writer, byte* data, UIntPtr data_len);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static unsafe extern int int2dds_datawriter_write_serialized_w_timestamp(IntPtr writer, byte* data, UIntPtr data_len, byte* key, UIntPtr key_len, int timestamp_sec, uint timestamp_nanosec);
+        internal static unsafe extern int int2dds_datawriter_write_serialized_w_timestamp(IntPtr writer, byte* data, UIntPtr data_len, int timestamp_sec, uint timestamp_nanosec);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_datawriter_wait_for_acknowledgments(IntPtr writer, long timeout_ms);
@@ -95,7 +98,7 @@ namespace Int2Dds.Interop
         internal static unsafe extern int int2dds_datawriter_prepare_serialized_write(IntPtr writer, UIntPtr capacity, out byte* data_out, out UIntPtr capacity_out, out IntPtr loan_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static unsafe extern int int2dds_datawriter_commit_serialized_write(IntPtr writer, IntPtr loan, UIntPtr actual_size, byte* key, UIntPtr key_len);
+        internal static extern int int2dds_datawriter_commit_serialized_write(IntPtr writer, IntPtr loan, UIntPtr actual_size);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_datawriter_abort_serialized_write(IntPtr loan);

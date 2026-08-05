@@ -80,6 +80,11 @@ typedef enum Int2DdsCdrError {
 /** EMHEADER sentinel member_id (legacy — XCDR2 spec 7.4.3.4 uses DHEADER for end-of-struct; removal scheduled for Tier 2) */
 #define INT2DDS_CDR_MEMBER_ID_SENTINEL 0x3F02
 
+/** PL_CDR1 (XCDR1 mutable) reserved parameter IDs */
+#define INT2DDS_CDR_PID_EXTENDED     0x3F01
+#define INT2DDS_CDR_PID_SENTINEL     0x3F02
+#define INT2DDS_CDR_PID_MAX_SHORT_ID 0x3F00
+
 /* ========================================================================
  * Writer Struct
  * ======================================================================== */
@@ -138,6 +143,13 @@ INT2DDS_CDR_DEF bool int2dds_cdr_write_string(Int2DdsCdrWriter *w, const char *s
 INT2DDS_CDR_DEF bool int2dds_cdr_write_seq_header(Int2DdsCdrWriter *w, uint32_t count);
 INT2DDS_CDR_DEF bool int2dds_cdr_write_bytes(Int2DdsCdrWriter *w, const uint8_t *data, size_t len);
 
+/* Bulk primitive array/sequence body. `elem_size` must be 1, 2, 4 or 8 and must equal
+ * sizeof(*data). Aligns once, then copies the whole run — byte-identical to writing the
+ * elements one at a time, because CDR lays out same-width primitives with no inter-element
+ * padding. A zero count writes nothing at all (not even alignment padding), matching a
+ * per-element loop that never executes. */
+INT2DDS_CDR_DEF bool int2dds_cdr_write_prim_array(Int2DdsCdrWriter *w, const void *data, size_t count, size_t elem_size);
+
 /* XCDR2 DHEADER */
 INT2DDS_CDR_DEF bool int2dds_cdr_write_dheader_begin(Int2DdsCdrWriter *w, size_t *token_out);
 INT2DDS_CDR_DEF bool int2dds_cdr_write_dheader_finalize(Int2DdsCdrWriter *w, size_t token);
@@ -147,6 +159,11 @@ INT2DDS_CDR_DEF bool int2dds_cdr_write_emheader(Int2DdsCdrWriter *w, uint32_t me
 INT2DDS_CDR_DEF bool int2dds_cdr_write_emheader_begin(Int2DdsCdrWriter *w, uint32_t member_id, bool must_understand, size_t *token_out);
 INT2DDS_CDR_DEF bool int2dds_cdr_write_emheader_finalize(Int2DdsCdrWriter *w, size_t token);
 INT2DDS_CDR_DEF bool int2dds_cdr_write_sentinel(Int2DdsCdrWriter *w);
+
+/* PL_CDR1 (XCDR1 mutable) parameter headers */
+INT2DDS_CDR_DEF bool int2dds_cdr_write_pid_begin(Int2DdsCdrWriter *w, uint32_t member_id, size_t *token_out);
+INT2DDS_CDR_DEF bool int2dds_cdr_write_pid_finalize(Int2DdsCdrWriter *w, uint32_t member_id, bool must_understand, size_t token);
+INT2DDS_CDR_DEF bool int2dds_cdr_write_pid_sentinel(Int2DdsCdrWriter *w);
 
 /* Enum (i32 wrapper) */
 INT2DDS_CDR_DEF bool int2dds_cdr_write_enum(Int2DdsCdrWriter *w, int32_t discriminant);
@@ -181,6 +198,15 @@ INT2DDS_CDR_DEF bool int2dds_cdr_read_string_copy(Int2DdsCdrReader *r, char *buf
 INT2DDS_CDR_DEF bool int2dds_cdr_read_seq_header(Int2DdsCdrReader *r, uint32_t *count_out);
 INT2DDS_CDR_DEF bool int2dds_cdr_read_bytes(Int2DdsCdrReader *r, uint8_t *out, size_t len);
 
+/* Bulk counterpart of int2dds_cdr_write_prim_array. */
+INT2DDS_CDR_DEF bool int2dds_cdr_read_prim_array(Int2DdsCdrReader *r, void *out, size_t count, size_t elem_size);
+
+/* Bulk boolean read. Not a plain copy: the wire may carry any octet, and storing anything
+ * other than 0 or 1 in a C `bool` is undefined, so each octet is normalized the way
+ * int2dds_cdr_read_bool() does. Booleans are written with int2dds_cdr_write_prim_array()
+ * instead — a valid `bool` already holds 0 or 1, so there is nothing to normalize. */
+INT2DDS_CDR_DEF bool int2dds_cdr_read_bool_array(Int2DdsCdrReader *r, bool *out, size_t count);
+
 /* XCDR2 DHEADER */
 INT2DDS_CDR_DEF bool int2dds_cdr_read_dheader(Int2DdsCdrReader *r, uint32_t *object_size_out, size_t *start_pos_out);
 INT2DDS_CDR_DEF bool int2dds_cdr_read_dheader_end(Int2DdsCdrReader *r, uint32_t object_size, size_t start_pos);
@@ -189,6 +215,9 @@ INT2DDS_CDR_DEF bool int2dds_cdr_read_dheader_end(Int2DdsCdrReader *r, uint32_t 
 INT2DDS_CDR_DEF bool int2dds_cdr_read_emheader(Int2DdsCdrReader *r, uint32_t *member_id_out, uint32_t *data_length_out, bool *must_understand_out);
 INT2DDS_CDR_DEF bool int2dds_cdr_is_sentinel(const Int2DdsCdrReader *r);
 INT2DDS_CDR_DEF bool int2dds_cdr_skip_bytes(Int2DdsCdrReader *r, size_t nbytes);
+
+/* PL_CDR1 (XCDR1 mutable) parameter headers */
+INT2DDS_CDR_DEF bool int2dds_cdr_read_pid_header(Int2DdsCdrReader *r, uint32_t *member_id_out, uint32_t *data_length_out, bool *sentinel_out);
 
 /* Enum (i32 wrapper) */
 INT2DDS_CDR_DEF bool int2dds_cdr_read_enum(Int2DdsCdrReader *r, int32_t *discriminant_out);
@@ -290,6 +319,39 @@ static inline uint64_t _int2dds_get_u64(const uint8_t *src, bool le) {
                 | ((uint64_t)src[6] << 8) | (uint64_t)src[7];
 }
 
+/* ---- Bulk primitive copy helpers -------------------------------------- */
+
+/* Host byte order, resolved at compile time where the toolchain exposes it and by a
+ * folded runtime probe otherwise. Used to decide whether a primitive run can go out
+ * as a straight memcpy or has to be swapped element by element. */
+#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__)
+  #define INT2DDS_CDR_HOST_LE (__BYTE_ORDER__ != __ORDER_BIG_ENDIAN__)
+#elif defined(_MSC_VER)
+  #define INT2DDS_CDR_HOST_LE 1  /* every MSVC target is little-endian */
+#else
+static inline bool _int2dds_cdr_host_le_probe(void) {
+    const uint16_t one = 1;
+    return *(const uint8_t *)&one != 0;
+}
+  #define INT2DDS_CDR_HOST_LE _int2dds_cdr_host_le_probe()
+#endif
+
+/* CDR encodes boolean as a single octet, and the bulk bool paths stride by 1.
+ * Every ABI int2DDS targets has sizeof(bool) == 1; fail the build rather than
+ * mis-stride if that ever stops holding. */
+typedef char _int2dds_cdr_bool_is_one_byte[(sizeof(bool) == 1) ? 1 : -1];
+
+/* Reverse each element while copying. Only reached when the stream byte order differs
+ * from the host, which cannot happen on the common LE-host/LE-wire path. */
+static inline void _int2dds_cdr_swap_copy(uint8_t *dst, const uint8_t *src,
+                                          size_t count, size_t elem_size) {
+    for (size_t i = 0; i < count; i++) {
+        const uint8_t *s = src + i * elem_size;
+        uint8_t       *d = dst + (i + 1) * elem_size;
+        for (size_t b = 0; b < elem_size; b++) *(--d) = *s++;
+    }
+}
+
 /* ---- Writer Init ------------------------------------------------------ */
 
 INT2DDS_CDR_DEF void int2dds_cdr_writer_init(Int2DdsCdrWriter *w, uint8_t *buf, size_t capacity, bool little_endian, bool xcdr2) {
@@ -359,6 +421,8 @@ INT2DDS_CDR_DEF bool int2dds_cdr_write_encapsulation(Int2DdsCdrWriter *w, int ex
             encap_id = w->little_endian ? INT2DDS_CDR_ENCAP_CDR2_LE : INT2DDS_CDR_ENCAP_CDR2_BE;
             break;
         }
+    } else if (extensibility == INT2DDS_CDR_MUTABLE) {
+        encap_id = w->little_endian ? INT2DDS_CDR_ENCAP_PL_CDR_LE : INT2DDS_CDR_ENCAP_PL_CDR_BE;
     } else {
         encap_id = w->little_endian ? INT2DDS_CDR_ENCAP_CDR_LE : INT2DDS_CDR_ENCAP_CDR_BE;
     }
@@ -481,6 +545,29 @@ INT2DDS_CDR_DEF bool int2dds_cdr_write_bytes(Int2DdsCdrWriter *w, const uint8_t 
     return true;
 }
 
+INT2DDS_CDR_DEF bool int2dds_cdr_write_prim_array(Int2DdsCdrWriter *w, const void *data,
+                                                  size_t count, size_t elem_size) {
+    if (!_int2dds_cdr_w_ok(w)) return false;
+    /* No element means nothing to align to: a per-element loop would emit no padding. */
+    if (count == 0) return true;
+    if (count > (size_t)-1 / elem_size) {
+        w->error = INT2DDS_CDR_ERR_OVERFLOW;
+        return false;
+    }
+    if (elem_size > 1 && !int2dds_cdr_write_align(w, elem_size)) return false;
+
+    size_t n = count * elem_size;
+    if (!_int2dds_cdr_w_ensure(w, n)) return false;
+    if (elem_size == 1 || w->little_endian == INT2DDS_CDR_HOST_LE) {
+        memcpy(w->buf + w->pos, data, n);
+    } else {
+        _int2dds_cdr_swap_copy(w->buf + w->pos, (const uint8_t *)data, count, elem_size);
+    }
+    w->pos += n;
+    return true;
+}
+
+
 /* ---- XCDR2 DHEADER Write ---------------------------------------------- */
 
 INT2DDS_CDR_DEF bool int2dds_cdr_write_dheader_begin(Int2DdsCdrWriter *w, size_t *token_out) {
@@ -546,6 +633,51 @@ INT2DDS_CDR_DEF bool int2dds_cdr_write_emheader_finalize(Int2DdsCdrWriter *w, si
 INT2DDS_CDR_DEF bool int2dds_cdr_write_sentinel(Int2DdsCdrWriter *w) {
     uint32_t header = (uint32_t)INT2DDS_CDR_MEMBER_ID_SENTINEL & 0x0FFFFFFFu;
     return int2dds_cdr_write_u32(w, header);
+}
+
+/* ---- PL_CDR1 (XCDR1 mutable) Parameter Headers ------------------------ */
+
+INT2DDS_CDR_DEF bool int2dds_cdr_write_pid_begin(Int2DdsCdrWriter *w, uint32_t member_id, size_t *token_out) {
+    if (!int2dds_cdr_write_align(w, 4)) return false;
+    size_t reserve = (member_id <= INT2DDS_CDR_PID_MAX_SHORT_ID) ? 4 : 12;
+    if (!_int2dds_cdr_w_ensure(w, reserve)) return false;
+    *token_out = w->pos;
+    memset(w->buf + w->pos, 0, reserve);
+    w->pos += reserve;
+    return true;
+}
+
+INT2DDS_CDR_DEF bool int2dds_cdr_write_pid_finalize(Int2DdsCdrWriter *w, uint32_t member_id, bool must_understand, size_t token) {
+    if (!_int2dds_cdr_w_ok(w)) return false;
+    uint16_t flags = must_understand ? 0x4000 : 0;
+    bool short_hdr = member_id <= INT2DDS_CDR_PID_MAX_SHORT_ID;
+    size_t content_len = w->pos - token - (short_hdr ? 4 : 12);
+
+    if (short_hdr && content_len <= 0xFFFF) {
+        _int2dds_put_u16(w->buf + token, (uint16_t)(flags | (member_id & 0x3FFFu)), w->little_endian);
+        _int2dds_put_u16(w->buf + token + 2, (uint16_t)content_len, w->little_endian);
+        return true;
+    }
+    if (short_hdr) {
+        /* Length outgrew the short header: widen to the extended form in place */
+        if (!_int2dds_cdr_w_ensure(w, 8)) return false;
+        memmove(w->buf + token + 12, w->buf + token + 4, content_len);
+        w->pos += 8;
+    }
+    _int2dds_put_u16(w->buf + token, (uint16_t)(flags | INT2DDS_CDR_PID_EXTENDED), w->little_endian);
+    _int2dds_put_u16(w->buf + token + 2, 8, w->little_endian);
+    _int2dds_put_u32(w->buf + token + 4, member_id, w->little_endian);
+    _int2dds_put_u32(w->buf + token + 8, (uint32_t)content_len, w->little_endian);
+    return true;
+}
+
+INT2DDS_CDR_DEF bool int2dds_cdr_write_pid_sentinel(Int2DdsCdrWriter *w) {
+    if (!int2dds_cdr_write_align(w, 4)) return false;
+    if (!_int2dds_cdr_w_ensure(w, 4)) return false;
+    _int2dds_put_u16(w->buf + w->pos, INT2DDS_CDR_PID_SENTINEL, w->little_endian);
+    _int2dds_put_u16(w->buf + w->pos + 2, 0, w->little_endian);
+    w->pos += 4;
+    return true;
 }
 
 /* ---- Enum Write ------------------------------------------------------- */
@@ -775,6 +907,40 @@ INT2DDS_CDR_DEF bool int2dds_cdr_read_bytes(Int2DdsCdrReader *r, uint8_t *out, s
     return true;
 }
 
+INT2DDS_CDR_DEF bool int2dds_cdr_read_prim_array(Int2DdsCdrReader *r, void *out,
+                                                 size_t count, size_t elem_size) {
+    if (!_int2dds_cdr_r_ok(r)) return false;
+    if (count == 0) return true;
+    if (count > (size_t)-1 / elem_size) {
+        r->error = INT2DDS_CDR_ERR_UNDERFLOW;
+        return false;
+    }
+    if (elem_size > 1 && !int2dds_cdr_read_align(r, elem_size)) return false;
+
+    size_t n = count * elem_size;
+    if (!_int2dds_cdr_r_ensure(r, n)) return false;
+    if (elem_size == 1 || r->little_endian == INT2DDS_CDR_HOST_LE) {
+        memcpy(out, r->buf + r->pos, n);
+    } else {
+        _int2dds_cdr_swap_copy((uint8_t *)out, r->buf + r->pos, count, elem_size);
+    }
+    r->pos += n;
+    return true;
+}
+
+INT2DDS_CDR_DEF bool int2dds_cdr_read_bool_array(Int2DdsCdrReader *r, bool *out, size_t count) {
+    if (!_int2dds_cdr_r_ok(r)) return false;
+    if (count == 0) return true;
+    if (!_int2dds_cdr_r_ensure(r, count)) return false;
+
+    /* Same normalization as int2dds_cdr_read_bool(): any nonzero octet reads as true. */
+    uint8_t *dst = (uint8_t *)out;
+    memcpy(dst, r->buf + r->pos, count);
+    for (size_t i = 0; i < count; i++) dst[i] = dst[i] != 0 ? 1 : 0;
+    r->pos += count;
+    return true;
+}
+
 /* ---- XCDR2 DHEADER Read ----------------------------------------------- */
 
 INT2DDS_CDR_DEF bool int2dds_cdr_read_dheader(Int2DdsCdrReader *r, uint32_t *object_size_out, size_t *start_pos_out) {
@@ -854,6 +1020,32 @@ INT2DDS_CDR_DEF bool int2dds_cdr_is_sentinel(const Int2DdsCdrReader *r) {
     uint32_t header = _int2dds_get_u32(r->buf + r->pos, r->little_endian);
     uint32_t member_id = header & 0x0FFFFFFFu;
     return member_id == INT2DDS_CDR_MEMBER_ID_SENTINEL;
+}
+
+INT2DDS_CDR_DEF bool int2dds_cdr_read_pid_header(Int2DdsCdrReader *r, uint32_t *member_id_out, uint32_t *data_length_out, bool *sentinel_out) {
+    *member_id_out = 0;
+    *data_length_out = 0;
+    *sentinel_out = false;
+    if (!int2dds_cdr_read_align(r, 4)) return false;
+    if (!_int2dds_cdr_r_ensure(r, 4)) return false;
+    uint16_t pid = _int2dds_get_u16(r->buf + r->pos, r->little_endian);
+    uint16_t len = _int2dds_get_u16(r->buf + r->pos + 2, r->little_endian);
+    r->pos += 4;
+    uint16_t raw = pid & 0x3FFFu;
+    if (raw == (INT2DDS_CDR_PID_SENTINEL & 0x3FFFu)) {
+        *sentinel_out = true;
+        return true;
+    }
+    if (raw == (INT2DDS_CDR_PID_EXTENDED & 0x3FFFu)) {
+        if (!_int2dds_cdr_r_ensure(r, 8)) return false;
+        *member_id_out = _int2dds_get_u32(r->buf + r->pos, r->little_endian);
+        *data_length_out = _int2dds_get_u32(r->buf + r->pos + 4, r->little_endian);
+        r->pos += 8;
+        return true;
+    }
+    *member_id_out = raw;
+    *data_length_out = len;
+    return true;
 }
 
 INT2DDS_CDR_DEF bool int2dds_cdr_skip_bytes(Int2DdsCdrReader *r, size_t nbytes) {
