@@ -6,7 +6,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.intellectus.int2dds.internal.ffi.Ffi;
 import java.io.DataInputStream;
+import java.io.File;
 import java.io.InputStream;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
+import java.util.jar.Manifest;
 import org.junit.jupiter.api.Test;
 
 class JarLayoutTest {
@@ -41,6 +45,66 @@ class JarLayoutTest {
                     m.getName() + " must not return String");
             for (Class<?> p : m.getParameterTypes()) {
                 assertTrue(p != String.class, m.getName() + " must not take String");
+            }
+        }
+    }
+
+    /**
+     * The other tests in this class read compiled classes straight off the
+     * test classpath, which is an exploded directory, not the packaged jar
+     * — no multi-release resolution happens there regardless of which JDK
+     * runs the test (confirmed directly: {@code NativeKeepAlive.class}
+     * reads back as major version 52, the {@code --release 8} fallback,
+     * even under a JDK 17 test run). Whether the {@code java9} source set
+     * actually reaches a real consumer at all depends entirely on the
+     * <em>packaged</em> jar being built correctly, which nothing else here
+     * checks — a {@code build.gradle.kts} edit that dropped the
+     * versioned-entry wiring, or a plain compile error in {@code
+     * src/main/java9}, would go undetected by every other test in this
+     * module until someone actually published the artifact.
+     *
+     * <p>{@code int2dds.built.jar} (set in {@code build.gradle.kts}, off the
+     * {@code jar} task's own lazily-configured {@code archiveFile}, with the
+     * {@code test} task wired to depend on {@code jar} so this can never
+     * read a stale artifact from a previous build) points at the actual
+     * packaged jar. Opened with the plain, pre-9 {@code JarFile}
+     * constructor — the only one available at this module's own
+     * {@code --release 8} — so this test's own bytecode stays 8-compatible
+     * even though what it is inspecting is not.
+     *
+     * <p>The versioned entry is looked up by its literal {@code
+     * META-INF/versions/9/...} path rather than the unprefixed base name:
+     * confirmed directly that a plain {@code JarFile} does not runtime-
+     * version-resolve the unprefixed name on its own (the two-argument-or-
+     * fewer constructors do not opt into that), so only the literal,
+     * always-present versioned path is a reliable, JDK-version-independent
+     * way to reach it — which is also the more direct assertion of what
+     * this test actually wants to know.
+     */
+    @Test
+    void packagedJarIsMultiReleaseWithTheJdk9KeepAliveOverride() throws Exception {
+        String jarPath = System.getProperty("int2dds.built.jar");
+        assertNotNull(jarPath, "int2dds.built.jar system property must be set by the Gradle build");
+        File jarFile = new File(jarPath);
+        assertTrue(jarFile.isFile(),
+                "built jar not found at " + jarPath + " -- did the jar task actually run?");
+
+        try (JarFile jar = new JarFile(jarFile)) {
+            Manifest manifest = jar.getManifest();
+            assertEquals("true", manifest.getMainAttributes().getValue("Multi-Release"),
+                    "the manifest must declare Multi-Release: true");
+
+            String versionedPath =
+                    "META-INF/versions/9/com/intellectus/int2dds/core/NativeKeepAlive.class";
+            JarEntry entry = jar.getJarEntry(versionedPath);
+            assertNotNull(entry,
+                    versionedPath + " must be present -- the JDK 9+ NativeKeepAlive override");
+
+            try (DataInputStream d = new DataInputStream(jar.getInputStream(entry))) {
+                assertEquals(0xCAFEBABE, d.readInt(), "class file magic");
+                d.readUnsignedShort(); // minor
+                assertEquals(53, d.readUnsignedShort(),
+                        "the versioned override must be compiled at Java 9 (major version 53)");
             }
         }
     }

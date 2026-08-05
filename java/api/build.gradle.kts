@@ -46,6 +46,17 @@ dependencies {
 // Tests load the native library built by `cargo build --release -p int2dds-java`.
 // Overridable so CI can point at a downloaded artifact instead.
 tasks.withType<Test>().configureEach {
+    // JarLayoutTest's multi-release check inspects the packaged jar itself,
+    // not the exploded classes this task otherwise runs against -- without
+    // this dependency it could read a stale jar from a previous build (or
+    // none at all on a clean checkout) and silently pass or silently fail
+    // for the wrong reason. int2dds.built.jar hands it that jar's actual,
+    // freshly-configured location; archiveFile is exactly what the jar task
+    // itself will produce, so this can never point somewhere the jar task
+    // didn't actually write to.
+    dependsOn(tasks.jar)
+    systemProperty("int2dds.built.jar", tasks.jar.get().archiveFile.get().asFile.absolutePath)
+
     val fromEnv = System.getenv("INT2DDS_JAVA_LIB")
     val builtName = when {
         org.gradle.internal.os.OperatingSystem.current().isWindows -> "int2dds_java.dll"

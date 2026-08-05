@@ -1,6 +1,5 @@
 package com.intellectus.int2dds.core;
 
-import static com.intellectus.int2dds.core.DomainParticipantTest.awaitReaped;
 import static com.intellectus.int2dds.core.DomainParticipantTest.testDomain;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -130,37 +129,93 @@ class EntityTreeTest {
      * NativeKeepAlive} itself (store, then immediately clear, the sink) —
      * see that class's doc — so this test needs no workaround of its own
      * anymore.
+     *
+     * <p>A later version of this test also relied on {@code
+     * DomainParticipantTest.awaitReaped}, which compares against the
+     * process-global {@code reapedCount()}. That counter is shared with
+     * every other test in the module: three reaps from anywhere else in the
+     * suite would satisfy a {@code baseline + 3} target without this
+     * specific tree draining at all. Sequential JUnit execution makes that
+     * unlikely in practice, but "unlikely" is weak footing for the one test
+     * that proves the corrected design actually works, and an exact
+     * alternative is available now that {@link DomainParticipant#createForTest},
+     * {@link Topic#createForTest} and {@link Publisher#createForTest} all
+     * exist: each of this tree's three handles is built with its own
+     * counting deleter instead, so the oracle below is about these three
+     * handles specifically, not the shared global gauge.
      */
     @Test
     void anAbandonedTreeIsEventuallyFullyReleased() throws InterruptedException {
-        long reapedBefore = NativeCleaner.reapedCount();
         long deferredBefore = NativeCleaner.deferredCount();
 
-        buildAndAbandonTree();
+        AtomicInteger participantDeletes = new AtomicInteger();
+        AtomicInteger topicDeletes = new AtomicInteger();
+        AtomicInteger publisherDeletes = new AtomicInteger();
+        buildAndAbandonTree(participantDeletes, topicDeletes, publisherDeletes);
 
-        awaitReaped(reapedBefore, 3);
-        // awaitReaped only demands that reapedCount reach its target; a
-        // deferred entry's own bookkeeping (DEFERRED.decrementAndGet())
-        // runs a moment after the matching REAPED increment inside
-        // NativeCleaner's sweep, so this polls rather than asserting
-        // immediately — the same caution
-        // NativeCleanerTest.aRefusedParentIsRetriedAndSucceedsOnceTheChildReleases
-        // takes for an identical trailing-update race.
+        awaitCondition(
+                () -> participantDeletes.get() == 1 && topicDeletes.get() == 1
+                        && publisherDeletes.get() == 1,
+                "not all three handles in the abandoned tree released within the timeout: "
+                        + "participant=" + participantDeletes.get()
+                        + " topic=" + topicDeletes.get()
+                        + " publisher=" + publisherDeletes.get());
+        // Each counter above increments from inside its own handle's
+        // State.release() (see countOnSuccess), which is called by
+        // attempt()/sweepDeferred() *before* either of those does its own
+        // DEFERRED/REAPED bookkeeping (NativeCleaner.sweepDeferred: it.remove()
+        // and DEFERRED.decrementAndGet() run first, then REAPED.incrementAndGet()
+        // only if the outcome was RELEASED). So deferredCount() can still
+        // show a stale, not-yet-decremented entry for a moment after the
+        // three counters above already confirm success -- poll rather than
+        // assert immediately.
         awaitCondition(() -> NativeCleaner.deferredCount() == deferredBefore,
                 "deferredCount() never returned to its baseline of " + deferredBefore
                         + " after the tree was abandoned; still at "
                         + NativeCleaner.deferredCount());
-        assertEquals(deferredBefore, NativeCleaner.deferredCount(),
-                "every refused delete in the tree must eventually leave the deferred list");
     }
 
-    private static void buildAndAbandonTree() {
-        DomainParticipant p = new DomainParticipant(testDomain());
-        Topic<ConformanceRecord> t = p.createTopic("tree_abandoned", new ConformanceRecord());
-        Publisher pub = p.createPublisher();
+    private static void buildAndAbandonTree(AtomicInteger participantDeletes,
+            AtomicInteger topicDeletes, AtomicInteger publisherDeletes) {
+        DomainParticipant p = DomainParticipant.createForTest(
+                testDomain(), countOnSuccess(participantDeletes, FfiAccess::deleteParticipant));
+        Topic<ConformanceRecord> t = Topic.createForTest(p, "tree_abandoned",
+                new ConformanceRecord(), countOnSuccess(topicDeletes, FfiAccess::deleteTopic));
+        Publisher pub = Publisher.createForTest(
+                p, countOnSuccess(publisherDeletes, FfiAccess::deletePublisher));
         assertNotEquals(0L, t.handle());
         assertNotEquals(0L, pub.handle());
         // all three go out of scope here with no close()
+    }
+
+    /**
+     * Wraps {@code real} so {@code counter} increments only when a delete
+     * attempt actually succeeds ({@code rc == 0}), never on a refusal or any
+     * other failed attempt. This distinction is load-bearing here, unlike in
+     * {@code closingAParticipantClosesItsChildrenFirst}'s inline counters:
+     * that test's explicit cascade guarantees every delete's first attempt
+     * already succeeds, so counting attempts and counting successes agree.
+     * Nothing here controls the order the reaper tries this tree's three
+     * handles in, so a handle can legitimately be refused
+     * (PRECONDITION_NOT_MET) one or more times before it finally succeeds —
+     * {@code NativeCleaner.State.release()} invokes {@code real} on every
+     * attempt, not only the last one — and counting every attempt would make
+     * {@code == 1} the wrong assertion for exactly the scenario this test
+     * exists to exercise. A handle can only ever reach {@code CLOSED} once,
+     * so counting only successes is both correct and still exactly the
+     * "released exactly once" property being tested; the same
+     * attempts-vs-successes distinction {@code
+     * NativeCleanerTest.registerAbandonedParent} draws for the same reason.
+     */
+    private static NativeCleaner.Deleter countOnSuccess(
+            AtomicInteger counter, NativeCleaner.Deleter real) {
+        return handle -> {
+            int rc = real.delete(handle);
+            if (rc == 0) {
+                counter.incrementAndGet();
+            }
+            return rc;
+        };
     }
 
     /**
@@ -185,12 +240,24 @@ class EntityTreeTest {
 
     @Test
     void manyChildrenDoNotAccumulateDeadReferences() {
-        // The parent keeps weak references to its children and sweeps them
-        // periodically. Creating and abandoning far more than the sweep
-        // interval must not grow without bound, and must not disturb the
-        // close -- a failure in either the loop or the final close() throws
-        // and fails this test on its own, the same reasoning as the other
-        // explicit-close tests above.
+        // The parent keeps a weak reference to each child, but a child's own
+        // close() does not deregister it from the parent -- only the
+        // parent's own close() cascade does that (removeChildLocked), or a
+        // sweep that finds the referent already collected (every
+        // SWEEP_INTERVAL additions, and only for entries the GC has actually
+        // cleared by then). Nothing here forces a GC mid-loop, so most of
+        // these 200 weak references are plausibly still sitting in the
+        // registry, un-swept, when the loop ends -- this does not observe
+        // that registry's length directly (private, no test-only accessor),
+        // so what it actually proves is narrower than the name suggests:
+        // creating and individually closing far more children than the
+        // sweep interval does not corrupt the sweep or the registry, and
+        // closing the parent afterward -- which reattempts every
+        // still-listed child, even ones already closed individually -- is
+        // harmless, since NativeHandle.close() is idempotent. A failure in
+        // either the loop or the final close() throws and fails this test
+        // on its own, the same reasoning as the other explicit-close tests
+        // above.
         DomainParticipant p = new DomainParticipant(testDomain());
         try {
             for (int i = 0; i < 200; i++) {
@@ -208,10 +275,16 @@ class EntityTreeTest {
      * {@code int2dds_create_participant} range-checks nothing, so no test
      * anywhere yet proved that a bad argument makes a native <em>create</em>
      * fail. {@code int2dds_create_topic} does validate its QoS —
-     * {@code TopicQos::is_consistent()} (dds/src/dcps/topic/qos/mod.rs)
-     * rejects {@code resource_limits.max_samples < max_samples_per_instance}
-     * before any topic is created — so this is a real native-side rejection
-     * of bad input, not a fabricated one.
+     * {@code TopicQos::is_consistent()} (dds/src/dcps/topic/qos/mod.rs) calls
+     * {@code ResourceLimitsQosPolicy::is_consistent()}
+     * (dds/src/dcps/infrastructure/qos_policy.rs), which rejects {@code
+     * max_samples != UNLIMITED && (max_samples_per_instance == UNLIMITED ||
+     * max_samples < max_samples_per_instance)} — two disjuncts, not one: a
+     * bounded {@code max_samples} needs a {@code max_samples_per_instance}
+     * that is both itself bounded <em>and</em> no greater. The values below
+     * (1, unlimited instances, 10) trip the second disjunct specifically
+     * ({@code 1 < 10}), not the first — before any topic is created, so this
+     * is a real native-side rejection of bad input, not a fabricated one.
      *
      * <p>The two mechanisms guessed as this gap's likely shape — a duplicate
      * topic name, or a topic name that does not match an existing topic's
