@@ -477,6 +477,15 @@ public final class FfiAccess {
         Ffi.int2dds_type_info_destroy(typeInfo);
     }
 
+    /**
+     * Releases a type object built by {@link #typeInfoToTypeObject}. This is a
+     * distinct native allocation from the builder that produced it — both
+     * must be released.
+     */
+    public static void typeObjectDestroy(long typeObject) {
+        Ffi.int2dds_type_object_destroy(typeObject);
+    }
+
     /** Decodes one i32 field out of a serialized sample. */
     public static int dynamicSampleGetI32(long bytes, long len, long typeObj,
             byte[] fieldName, long out) {

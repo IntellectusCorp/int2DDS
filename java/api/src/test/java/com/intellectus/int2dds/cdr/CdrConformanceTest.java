@@ -5,7 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 import com.intellectus.int2dds.internal.ffi.FfiAccess;
 import com.intellectus.int2dds.types.ConformanceRecord;
-import java.nio.Buffer;
+import com.intellectus.int2dds.types.IDdsType;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.Charset;
@@ -56,6 +56,10 @@ class CdrConformanceTest {
 
     @AfterEach
     void releaseTypeInfo() {
+        if (typeObject != 0L) {
+            FfiAccess.typeObjectDestroy(typeObject);
+            typeObject = 0L;
+        }
         if (typeInfo != 0L) {
             FfiAccess.typeInfoDestroy(typeInfo);
             typeInfo = 0L;
@@ -165,6 +169,86 @@ class CdrConformanceTest {
             int rc = FfiAccess.dynamicSampleGetI32(
                     w.address(), w.length() - 4, typeObject, utf8("id"), outAddr);
             assertNotEquals(0, rc, "a short buffer must fail rather than decode");
+        }
+    }
+
+    @Test
+    void aLeadingDoubleFieldIsDecodedAtItsCappedAlignment() {
+        // ConformanceRecord cannot expose a lost XCDR2 alignment cap: its
+        // double sits at stream offset 8 (4-byte DHEADER + 4-byte id), a
+        // multiple of both 4 and 8, so capping the alignment at 4
+        // (CdrWriter.align: Math.min(alignment, 4)) and not capping it pad
+        // identically. AlignmentProbe's double is the struct's only field, so
+        // it sits right after the DHEADER at offset 4 — a multiple of 4 but
+        // not of 8 — which is exactly where the two rules disagree: capped,
+        // no padding and the double starts at 4; uncapped, four bytes of
+        // padding and it starts at 8.
+        long probeTypeInfo = FfiAccess.typeInfoCreate(utf8("AlignmentProbe"),
+                Extensibility.APPENDABLE.value());
+        assertNotEquals(0L, probeTypeInfo, "type info handle");
+        assertEquals(0,
+                FfiAccess.typeInfoAddField(probeTypeInfo, utf8("value"), FIELD_FLOAT64, 0));
+        long probeTypeObject = FfiAccess.typeInfoToTypeObject(probeTypeInfo);
+        assertNotEquals(0L, probeTypeObject, "type object handle");
+
+        try {
+            AlignmentProbe probe = new AlignmentProbe();
+            probe.value = -1234.5d;
+
+            try (CdrWriter w = CdrWriter.acquire(Extensibility.APPENDABLE, true, true)) {
+                probe.serializeCdr(w);
+
+                ByteBuffer out = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+                long outAddr = FfiAccess.directBufferAddress(out);
+                int rc = FfiAccess.dynamicSampleGetF64(
+                        w.address(), w.length(), probeTypeObject, utf8("value"), outAddr);
+                assertEquals(0, rc, "the core must accept our encoding");
+                assertEquals(-1234.5d, out.getDouble(0), 0.0d);
+            }
+        } finally {
+            FfiAccess.typeObjectDestroy(probeTypeObject);
+            FfiAccess.typeInfoDestroy(probeTypeInfo);
+        }
+    }
+
+    /**
+     * A probe for the XCDR2 alignment cap — not a stand-in for generated
+     * code, so it stays local to this one test rather than joining
+     * {@code types/}.
+     *
+     * <p>A single leading {@code double} is the smallest layout in which
+     * losing the cap is observable: the field sits at stream offset 4, right
+     * after the DHEADER, which is a multiple of 4 but not of 8, so the capped
+     * and uncapped alignment rules disagree about where it starts. A record
+     * whose first field is an {@code i32} — like {@link ConformanceRecord} —
+     * cannot see this, because that pushes the double to offset 8, which both
+     * rules agree on.
+     */
+    private static final class AlignmentProbe implements IDdsType {
+        double value;
+
+        @Override
+        public void serializeCdr(CdrWriter writer) {
+            int token = writer.dheaderBegin();
+            writer.writeF64(value);
+            writer.dheaderFinalize(token);
+        }
+
+        @Override
+        public void deserializeCdr(CdrReader reader) {
+            CdrReader.Dheader d = reader.readDheader();
+            value = reader.readF64();
+            reader.readDheaderEnd(d);
+        }
+
+        @Override
+        public String typeName() {
+            return "AlignmentProbe";
+        }
+
+        @Override
+        public Extensibility extensibility() {
+            return Extensibility.APPENDABLE;
         }
     }
 }
