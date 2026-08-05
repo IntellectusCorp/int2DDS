@@ -68,7 +68,7 @@ use crate::{
             EnableChild, Entity, EntityInternal, UpdateStatus,
         },
         history_cache::HistoryCache as DcpsHistoryCache,
-        qos_policy::{HistoryQosPolicyKind, PresentationQosAccessScopeKind, Qos},
+        qos_policy::{HistoryQosPolicyKind, Qos},
         status::{
             LivelinessChangedStatus, RequestedDeadlineMissedStatus, RequestedIncompatibleQosStatus,
             RequestedIncompatibleTypeStatus, SampleLostStatus, SampleRejectedStatus, StatusInfo,
@@ -1293,6 +1293,12 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         };
 
         // Listener
+        // StatusCondition. DDS 1.4 2.2.4.1: the flag becomes TRUE when the status
+        // changes, which is before any listener runs, so a thread already blocked in
+        // WaitSet::wait observes the change instead of it being published only after
+        // the listener has already consumed and cleared the status.
+        self.set_communication_status_propagation(&StatusKind::REQUESTED_DEADLINE_MISSED, true)?;
+
         let mask = self.get_listener_mask()?;
         if mask.contains(StatusKind::REQUESTED_DEADLINE_MISSED) {
             let mut listener_called = false;
@@ -1313,11 +1319,13 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
             if listener_called {
                 let _ = self.take_requested_deadline_missed_status()?;
+                // DDS 1.4 2.2.4.1: the StatusChangedFlag is reset to FALSE when the
+                // listener returns. Only this entity's flag -- the Subscriber and
+                // DomainParticipant own theirs and may still hold unconsumed events
+                // from sibling readers.
+                self.set_communication_status(&StatusKind::REQUESTED_DEADLINE_MISSED, false)?;
             }
         }
-
-        // StatusCondition
-        self.set_communication_status_propagation(&StatusKind::REQUESTED_DEADLINE_MISSED, true)?;
 
         // Ownership is lost when deadline is missed
         if let Ok(datareader_cache) = self.datareader_cache.lock() {
@@ -1344,6 +1352,12 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         };
 
         // Listener
+        // StatusCondition. DDS 1.4 2.2.4.1: the flag becomes TRUE when the status
+        // changes, which is before any listener runs, so a thread already blocked in
+        // WaitSet::wait observes the change instead of it being published only after
+        // the listener has already consumed and cleared the status.
+        self.set_communication_status_propagation(&StatusKind::REQUESTED_INCOMPATIBLE_QOS, true)?;
+
         let mask = self.get_listener_mask()?;
         if mask.contains(StatusKind::REQUESTED_INCOMPATIBLE_QOS) {
             let mut listener_called = false;
@@ -1364,11 +1378,13 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
             if listener_called {
                 let _ = self.take_requested_incompatible_qos_status()?;
+                // DDS 1.4 2.2.4.1: the StatusChangedFlag is reset to FALSE when the
+                // listener returns. Only this entity's flag -- the Subscriber and
+                // DomainParticipant own theirs and may still hold unconsumed events
+                // from sibling readers.
+                self.set_communication_status(&StatusKind::REQUESTED_INCOMPATIBLE_QOS, false)?;
             }
         }
-
-        // StatusCondition
-        self.set_communication_status_propagation(&StatusKind::REQUESTED_INCOMPATIBLE_QOS, true)?;
 
         Ok(())
     }
@@ -1402,6 +1418,12 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         };
 
         // Listener
+        // StatusCondition. DDS 1.4 2.2.4.1: the flag becomes TRUE when the status
+        // changes, which is before any listener runs, so a thread already blocked in
+        // WaitSet::wait observes the change instead of it being published only after
+        // the listener has already consumed and cleared the status.
+        self.set_communication_status_propagation(&StatusKind::SAMPLE_LOST, true)?;
+
         let mask = self.get_listener_mask()?;
         if mask.contains(StatusKind::SAMPLE_LOST) {
             let mut listener_called = false;
@@ -1422,11 +1444,13 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
             if listener_called {
                 let _ = self.take_sample_lost_status()?;
+                // DDS 1.4 2.2.4.1: the StatusChangedFlag is reset to FALSE when the
+                // listener returns. Only this entity's flag -- the Subscriber and
+                // DomainParticipant own theirs and may still hold unconsumed events
+                // from sibling readers.
+                self.set_communication_status(&StatusKind::SAMPLE_LOST, false)?;
             }
         }
-
-        // StatusCondition
-        self.set_communication_status_propagation(&StatusKind::SAMPLE_LOST, true)?;
 
         Ok(())
     }
@@ -1443,6 +1467,12 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         };
 
         // Listener
+        // StatusCondition. DDS 1.4 2.2.4.1: the flag becomes TRUE when the status
+        // changes, which is before any listener runs, so a thread already blocked in
+        // WaitSet::wait observes the change instead of it being published only after
+        // the listener has already consumed and cleared the status.
+        self.set_communication_status_propagation(&StatusKind::SAMPLE_REJECTED, true)?;
+
         let mask = self.get_listener_mask()?;
         if mask.contains(StatusKind::SAMPLE_REJECTED) {
             let mut listener_called = false;
@@ -1463,11 +1493,13 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
             if listener_called {
                 let _ = self.take_sample_rejected_status()?;
+                // DDS 1.4 2.2.4.1: the StatusChangedFlag is reset to FALSE when the
+                // listener returns. Only this entity's flag -- the Subscriber and
+                // DomainParticipant own theirs and may still hold unconsumed events
+                // from sibling readers.
+                self.set_communication_status(&StatusKind::SAMPLE_REJECTED, false)?;
             }
         }
-
-        // StatusCondition
-        self.set_communication_status_propagation(&StatusKind::SAMPLE_REJECTED, true)?;
 
         Ok(())
     }
@@ -1476,12 +1508,12 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         if let Some(listener) = self.get_listener()? {
             listener.on_data_available(self);
         }
-        let subscriber = self.get_subscriber()?;
+        let subscriber = self.subscriber_arc()?;
         if let Some(listener) = subscriber.get_listener()? {
             listener.on_data_available(self);
             listener.on_data_on_readers(&subscriber);
         }
-        let participant = subscriber.get_participant()?;
+        let participant = subscriber.participant_arc()?;
         if let Some(listener) = participant.get_listener()? {
             listener.on_data_available(self);
             listener.on_data_on_readers(&subscriber);
@@ -1514,6 +1546,12 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         };
 
         // Listener
+        // StatusCondition. DDS 1.4 2.2.4.1: the flag becomes TRUE when the status
+        // changes, which is before any listener runs, so a thread already blocked in
+        // WaitSet::wait observes the change instead of it being published only after
+        // the listener has already consumed and cleared the status.
+        self.set_communication_status_propagation(&StatusKind::LIVELINESS_CHANGED, true)?;
+
         let mask = self.get_listener_mask()?;
         if mask.contains(StatusKind::LIVELINESS_CHANGED) {
             let mut listener_called = false;
@@ -1534,11 +1572,13 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
             if listener_called {
                 let _ = self.take_liveliness_changed_status()?;
+                // DDS 1.4 2.2.4.1: the StatusChangedFlag is reset to FALSE when the
+                // listener returns. Only this entity's flag -- the Subscriber and
+                // DomainParticipant own theirs and may still hold unconsumed events
+                // from sibling readers.
+                self.set_communication_status(&StatusKind::LIVELINESS_CHANGED, false)?;
             }
         }
-
-        // StatusCondition
-        self.set_communication_status_propagation(&StatusKind::LIVELINESS_CHANGED, true)?;
 
         Ok(())
     }
@@ -1564,6 +1604,12 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         };
 
         // Listener
+        // StatusCondition. DDS 1.4 2.2.4.1: the flag becomes TRUE when the status
+        // changes, which is before any listener runs, so a thread already blocked in
+        // WaitSet::wait observes the change instead of it being published only after
+        // the listener has already consumed and cleared the status.
+        self.set_communication_status_propagation(&StatusKind::SUBSCRIPTION_MATCHED, true)?;
+
         let mask = self.get_listener_mask()?;
         if mask.contains(StatusKind::SUBSCRIPTION_MATCHED) {
             let mut listener_called = false;
@@ -1584,11 +1630,13 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
             if listener_called {
                 let _ = self.take_subscription_matched_status()?;
+                // DDS 1.4 2.2.4.1: the StatusChangedFlag is reset to FALSE when the
+                // listener returns. Only this entity's flag -- the Subscriber and
+                // DomainParticipant own theirs and may still hold unconsumed events
+                // from sibling readers.
+                self.set_communication_status(&StatusKind::SUBSCRIPTION_MATCHED, false)?;
             }
         }
-
-        // StatusCondition
-        self.set_communication_status_propagation(&StatusKind::SUBSCRIPTION_MATCHED, true)?;
 
         Ok(())
     }
@@ -1601,10 +1649,10 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         // 1. DataReader StatusCondition
         self.set_communication_status(status_kind, trigger_value)?;
         // 2. Subscriber StatusCondition
-        let subscriber = self.get_subscriber()?;
+        let subscriber = self.subscriber_arc()?;
         subscriber.set_communication_status(status_kind, trigger_value)?;
         // 3. DomainParticipant StatusCondition
-        subscriber.get_participant()?.set_communication_status(status_kind, trigger_value)?;
+        subscriber.participant_arc()?.set_communication_status(status_kind, trigger_value)?;
 
         Ok(())
     }
@@ -1614,12 +1662,12 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         self.set_communication_status(&StatusKind::DATA_AVAILABLE, trigger_value)?;
 
         // 2. Subscriber StatusCondition
-        let subscriber = self.get_subscriber()?;
+        let subscriber = self.subscriber_arc()?;
         subscriber.set_communication_status(&StatusKind::DATA_ON_READERS, trigger_value)?;
         subscriber.set_communication_status(&StatusKind::DATA_AVAILABLE, trigger_value)?;
 
         // 3. DomainParticipant StatusCondition
-        let participant = subscriber.get_participant()?;
+        let participant = subscriber.participant_arc()?;
         participant.set_communication_status(&StatusKind::DATA_ON_READERS, trigger_value)?;
         participant.set_communication_status(&StatusKind::DATA_AVAILABLE, trigger_value)?;
 
@@ -1649,21 +1697,27 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         }
     }
 
+    /// Upgraded parent handle without the deep clone [`DataReaderBase::get_subscriber`] performs.
+    ///
+    /// Same failure modes and messages -- `AlreadyDeleted` when this reader is deleted, `Error`
+    /// when the parent `Weak` has expired -- but two atomic read-modify-writes instead of ~28.
+    /// Needs no drop guard, unlike the participant equivalent: the value inside the `Arc` has
+    /// `self_ref: None`, so `Drop for Subscriber` early-returns either way.
+    ///
+    /// Only for internal call sites that never read `Subscriber::self_ref`.
+    pub(crate) fn subscriber_arc(&self) -> DdsResult<Arc<Subscriber>> {
+        self.is_deleted()?;
+        self.subscriber.as_ref().and_then(|weak_ref| weak_ref.upgrade()).ok_or_else(|| {
+            DdsError::Error("Subscriber reference is invalid or expired".to_string())
+        })
+    }
+
     fn subscriber_topic_ordered(&self) -> bool {
-        self.get_subscriber()
-            .and_then(|s| s.get_qos_arc())
-            .map(|q| {
-                q.presentation.ordered_access
-                    && q.presentation.access_scope == PresentationQosAccessScopeKind::Topic
-            })
-            .unwrap_or(false)
+        self.subscriber_arc().and_then(|s| s.presentation_topic_ordered()).unwrap_or(false)
     }
 
     pub(crate) fn is_subscriber_coherent(&self) -> bool {
-        self.get_subscriber()
-            .and_then(|s| s.get_qos_arc())
-            .map(|q| q.presentation.coherent_access)
-            .unwrap_or(false)
+        self.subscriber_arc().and_then(|s| s.presentation_coherent_access()).unwrap_or(false)
     }
 
     pub fn has_cached_data(&self) -> DdsResult<bool> {
@@ -4104,6 +4158,23 @@ pub(crate) mod tests {
         factory.delete_participant(participant).unwrap();
     }
 
+    /// Listener mask for the counting listeners below. Deliberately not `StatusMask::default()`,
+    /// which is `ALL`.
+    ///
+    /// DDS 1.4 2.2.4.1: a plain communication status is consumed by the listener that handles it,
+    /// and its StatusChangedFlag is reset when that listener returns. A reader whose mask enables
+    /// SUBSCRIPTION_MATCHED therefore never leaves the status latched for a StatusCondition, so
+    /// these tests -- which use the listener only to count `on_data_available` but wait on the
+    /// reader's own condition for the discovery handshake -- would block in
+    /// `WaitSet::wait(Duration::infinite())` forever. LIVELINESS_CHANGED is the same story for
+    /// `test_take_next_instance_surfaces_no_writers_after_writer_deleted`.
+    ///
+    /// The mask is what separates the two mechanisms: the listener takes data notifications, the
+    /// WaitSet takes everything else. Note that `handle_data_available_status` invokes the listener
+    /// without consulting the mask, so DATA_AVAILABLE is named here for intent rather than because
+    /// omitting it would silence the counter.
+    const DATA_ONLY_LISTENER_MASK: StatusMask = StatusMask::DATA_AVAILABLE;
+
     struct SubListener {
         counter_sender: SyncSender<()>,
     }
@@ -4181,7 +4252,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -4293,7 +4364,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -4417,7 +4488,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -4538,7 +4609,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -4660,7 +4731,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -4766,7 +4837,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -4927,7 +4998,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -5055,7 +5126,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -5205,7 +5276,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -5286,7 +5357,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -5404,7 +5475,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -5537,7 +5608,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -5681,7 +5752,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -5798,7 +5869,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -5948,7 +6019,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -6073,7 +6144,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -6197,7 +6268,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -6333,7 +6404,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -6484,7 +6555,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -6601,7 +6672,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
