@@ -669,4 +669,69 @@ public final class FfiAccess {
             byte[] fieldName, long out) {
         return Ffi.int2dds_dynamic_sample_get_f64(bytes, len, typeObj, fieldName, out);
     }
+
+    // --- Subscriber / DataReader (raw receive side, for WritePathEndToEndTest only) ---
+    //
+    // No Subscriber or DataReader Java entity exists yet -- the read branch
+    // owns that. These five mirror the create/delete/take_serialized C ABI
+    // directly, folding a failed create into a 0 handle the same way
+    // createParticipantQos and typeInfoCreate already do above, rather than
+    // the (int rc, long[] handleOut) shape createParticipant/createTopic/
+    // createPublisher/createDataWriter use: those exist to hand a real,
+    // per-code status to a NativeEntity constructor for ReturnCodes.check to
+    // map to a specific exception, and nothing here feeds a NativeEntity --
+    // the caller is a test that releases these handles by hand and only ever
+    // needs to know success from failure.
+
+    /** Creates a subscriber, or 0 on failure. {@code qos} is {@code 0L} for the core's default. */
+    public static long createSubscriber(long participant, long qos) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_create_subscriber(participant, qos, directBufferAddress(slot));
+        // slot is read below only on the rc == 0 path; on rc != 0 nothing else
+        // touches it, so without this fence the JIT could treat it as dead
+        // before the native call above actually finishes using the address it
+        // was handed. Same hazard, same fence as createDataWriter's.
+        NativeKeepAlive.keepAlive(slot);
+        return rc == 0 ? slot.getLong(0) : 0L;
+    }
+
+    /** Releases a subscriber. Returns the C ABI status code. */
+    public static int deleteSubscriber(long subscriber) {
+        return Ffi.int2dds_delete_subscriber(subscriber);
+    }
+
+    /**
+     * Creates a datareader, or 0 on failure. {@code qos} is {@code 0L} for the
+     * core's default. {@code listener} is {@code 0L} and {@code mask} is
+     * {@code 0} — this branch does not add listener support.
+     */
+    public static long createDataReader(long subscriber, long topic, long qos, long listener,
+            int mask) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_create_datareader(
+                subscriber, topic, qos, listener, mask, directBufferAddress(slot));
+        // See createSubscriber just above for why this fence is here.
+        NativeKeepAlive.keepAlive(slot);
+        return rc == 0 ? slot.getLong(0) : 0L;
+    }
+
+    /** Releases a datareader. Returns the C ABI status code. */
+    public static int deleteDataReader(long reader) {
+        return Ffi.int2dds_delete_datareader(reader);
+    }
+
+    /**
+     * Takes one serialized sample into a caller-supplied buffer. Returns the
+     * C ABI status code — {@code NO_DATA} when nothing is queued, not a
+     * loan-based signal: unlike the loaned variants, this copies into {@code
+     * buffer} and hands back nothing to return. {@code validDataOut} points
+     * at a single {@code bool} (one byte), not an {@code int} — reading it as
+     * four bytes picks up three unrelated adjacent ones, the same shape of
+     * mistake the QoS read-back hit on the previous branch.
+     */
+    public static int datareaderTakeSerialized(long reader, long buffer, long bufferCapacity,
+            long actualSizeOut, long validDataOut) {
+        return Ffi.int2dds_datareader_take_serialized(
+                reader, buffer, bufferCapacity, actualSizeOut, validDataOut);
+    }
 }
