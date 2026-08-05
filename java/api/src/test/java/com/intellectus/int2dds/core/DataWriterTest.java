@@ -112,7 +112,8 @@ class DataWriterTest {
             // CdrWriter.writeEncapsulationHeader's own mapping for exactly
             // the (extensibility, littleEndian, xcdr2) combination write()
             // itself would use here. A wrong xcdr2 flag would instead
-            // produce 0x0006/0x0007 (ENCAP_CDR2_*); a wrong endianness would
+            // produce 0x0009 (ENCAP_D_CDR2_LE) for this APPENDABLE topic --
+            // 0x0006/0x0007 is the FINAL-only branch; a wrong endianness would
             // produce 0x0000; a MUTABLE-extensibility mixup would produce
             // 0x0003 (ENCAP_PL_CDR_LE).
             assertTrue(bytes.length > 4, "expected at least the 4-byte encapsulation header");

@@ -94,18 +94,34 @@ class JarLayoutTest {
             assertEquals("true", manifest.getMainAttributes().getValue("Multi-Release"),
                     "the manifest must declare Multi-Release: true");
 
-            String versionedPath =
-                    "META-INF/versions/9/com/intellectus/int2dds/internal/NativeKeepAlive.class";
-            JarEntry entry = jar.getJarEntry(versionedPath);
-            assertNotNull(entry,
-                    versionedPath + " must be present -- the JDK 9+ NativeKeepAlive override");
+            // Derived from the class itself, never written out as a literal. A
+            // literal would still name a real, major-53 entry after someone moved
+            // the base class to another package without moving the java9 source
+            // alongside it -- so the test would pass green while the override had
+            // stopped shadowing anything. That exact move happened once already.
+            String basePath =
+                    com.intellectus.int2dds.internal.NativeKeepAlive.class.getName()
+                            .replace('.', '/') + ".class";
+            String versionedPath = "META-INF/versions/9/" + basePath;
 
-            try (DataInputStream d = new DataInputStream(jar.getInputStream(entry))) {
-                assertEquals(0xCAFEBABE, d.readInt(), "class file magic");
-                d.readUnsignedShort(); // minor
-                assertEquals(53, d.readUnsignedShort(),
-                        "the versioned override must be compiled at Java 9 (major version 53)");
-            }
+            assertNotNull(jar.getJarEntry(basePath),
+                    basePath + " must be present -- the Java 8 NativeKeepAlive the override shadows");
+            assertEquals(52, majorVersionOf(jar, basePath),
+                    "the base NativeKeepAlive must stay compiled at Java 8 (major version 52)");
+
+            assertNotNull(jar.getJarEntry(versionedPath),
+                    versionedPath + " must be present -- the JDK 9+ NativeKeepAlive override");
+            assertEquals(53, majorVersionOf(jar, versionedPath),
+                    "the versioned override must be compiled at Java 9 (major version 53)");
+        }
+    }
+
+    /** Reads a jar entry's class-file major version, checking the magic first. */
+    private static int majorVersionOf(JarFile jar, String path) throws Exception {
+        try (DataInputStream d = new DataInputStream(jar.getInputStream(jar.getJarEntry(path)))) {
+            assertEquals(0xCAFEBABE, d.readInt(), "class file magic for " + path);
+            d.readUnsignedShort(); // minor
+            return d.readUnsignedShort();
         }
     }
 }
