@@ -865,4 +865,24 @@ mod tests {
         let ids = init_ids_within(datagram(&[&vendor, &INFO_DST]));
         assert_eq!(ids, Some(vec![0x0E]), "the INFO_DST after the vendor submessage is lost");
     }
+
+    /// `octetsToNextHeader` is encoded in the endianness announced by the EndiannessFlag of
+    /// the very same header, so a peer that clears that flag sends it big-endian. Reading it
+    /// little-endian regardless turns a length of 12 into 3072 and loses the submessage.
+    #[test]
+    fn big_endian_submessage_length_is_honoured() {
+        let mut big_endian = vec![0x0E, 0x00, 0x00, 0x0C]; // INFO_DST, E=0, length 12 big-endian
+        big_endian.extend_from_slice(&INFO_DST[4..]); // followed by its 12-byte GuidPrefix
+        let ids = init_ids_within(datagram(&[&big_endian]));
+        assert_eq!(ids, Some(vec![0x0E]));
+    }
+
+    /// A big-endian submessage must not swallow whatever follows it either.
+    #[test]
+    fn big_endian_submessage_does_not_hide_the_next_one() {
+        let mut big_endian = vec![0x0E, 0x00, 0x00, 0x0C];
+        big_endian.extend_from_slice(&INFO_DST[4..]);
+        let ids = init_ids_within(datagram(&[&big_endian, &INFO_DST]));
+        assert_eq!(ids, Some(vec![0x0E, 0x0E]));
+    }
 }
