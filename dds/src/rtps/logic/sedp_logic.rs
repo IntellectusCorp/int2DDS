@@ -1034,32 +1034,6 @@ impl SedpLogic {
                 subscription_builtin_topic_data.clone(),
             ));
         }
-        for locator in subscription_builtin_topic_data.multicast_locator_list() {
-            // Note: Currently, builtin_topic_data is sent via unicast only.
-            // Multicast support for builtin topics may be added in the future if needed.
-            // The following code is kept for reference:
-            // if !writer.multicast_locator_list().contains(&locator) {
-            //     writer.add_multicast_locator(locator.clone());
-            // }
-            if !(locator.kind() == LOCATOR_KIND_UDP_V4
-                || locator.kind() == LOCATOR_KIND_UDP_V6
-                || locator.kind() == LOCATOR_KIND_TCP_V4
-                || locator.kind() == LOCATOR_KIND_TCP_V6
-                || locator.kind() == LOCATOR_KIND_SHM)
-            {
-                continue;
-            }
-
-            let reader_locator = ReaderLocator::new(
-                locator.clone(),
-                highest_sent_change_sn,
-                false,
-                subscription_builtin_topic_data.endpoint_guid().prefix(),
-                subscription_builtin_topic_data.endpoint_guid().entity_id(),
-                subscription_builtin_topic_data.clone(),
-            );
-            writer.reader_locator_add(reader_locator);
-        }
 
         writer.update_publication_matched_status(
             1,
