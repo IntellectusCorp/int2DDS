@@ -59,7 +59,17 @@ abstract class NativeEntity implements AutoCloseable {
         }
     }
 
-    /** The raw native handle. Throws once this entity is closed. */
+    /**
+     * The raw native handle. Throws once this entity is closed.
+     *
+     * <p>A caller that passes the returned value into a native call must keep
+     * this entity reachable for the duration of that call — see {@link
+     * NativeKeepAlive}. Nothing about the returned value itself keeps this
+     * entity, or the native object it names, alive once this method has
+     * returned: if this was the entity's last reference, the reaper can
+     * enqueue and release it while a native call still using the bare {@code
+     * long} is in flight.
+     */
     final long handle() {
         return handle.value();
     }
@@ -98,35 +108,92 @@ abstract class NativeEntity implements AutoCloseable {
     }
 
     /**
+     * Removes {@code child}'s own entry from the registry. Called only after
+     * {@code child} has actually, successfully closed — a child that fails to
+     * close stays registered, so a later retry of {@link #close()} can still
+     * reach it. At most one entry can match, since {@link #addChild} runs
+     * exactly once per child, during that child's construction.
+     */
+    private void removeChildLocked(NativeEntity child) {
+        Iterator<WeakReference<NativeEntity>> it = children.iterator();
+        while (it.hasNext()) {
+            if (it.next().get() == child) {
+                it.remove();
+                return;
+            }
+        }
+    }
+
+    /**
      * Closes every live child, then this entity.
      *
-     * <p>Children go first because the native layer refuses to delete a parent
-     * that still has them. Nothing calls
+     * <p>Children are closed in the reverse of the order they were added, not
+     * insertion order. The native layer can refuse a delete for reasons that
+     * cross the Java ownership tree, not just direct parent/child
+     * containment — deleting a Topic is refused while any DataWriter still
+     * uses it, even though a DataWriter's Java parent is the Publisher, not
+     * the Topic. The natural create order is Topic, then Publisher, then
+     * (inside the Publisher) its DataWriter, so closing in reverse closes the
+     * Publisher — which cascades to its own DataWriter first — before the
+     * Topic, satisfying both constraints.
+     *
+     * <p>Each child is closed in its own {@code try}. One child failing does
+     * not stop the rest: every live child gets a chance, failures are
+     * collected, and the first is rethrown with the others attached via
+     * {@link Throwable#addSuppressed}. A child is removed from this entity's
+     * registry only once it has actually, successfully closed, so a child
+     * that fails or throws stays reachable from here for a later retry. If
+     * any child failed, this entity's own handle is left completely
+     * untouched — still open, still retryable — rather than spent on a
+     * native delete that a live child would just get refused again anyway.
+     *
+     * <p>Nothing calls
      * {@code int2dds_participant_delete_contained_entities}: it would free
      * handles this side still owns, and the reaper would later release them a
      * second time.
      *
-     * <p>Idempotent. Throws the mapped {@code DdsException} if the native
-     * delete reports a failure, which is unchecked, so callers are not forced
-     * to handle it in try-with-resources.
+     * <p>Idempotent. Throws the mapped {@code DdsException} (or, if one or
+     * more children failed, the first such failure with the rest suppressed)
+     * if a delete reports a failure. Unchecked, so callers are not forced to
+     * handle it in try-with-resources.
      */
     @Override
     public final void close() {
         List<NativeEntity> live;
         synchronized (childLock) {
             live = new ArrayList<NativeEntity>(children.size());
-            for (WeakReference<NativeEntity> ref : children) {
-                NativeEntity child = ref.get();
-                if (child != null) {
+            for (Iterator<WeakReference<NativeEntity>> it = children.iterator(); it.hasNext();) {
+                NativeEntity child = it.next().get();
+                if (child == null) {
+                    // Already collected: nothing to close, nothing to retry.
+                    it.remove();
+                } else {
                     live.add(child);
                 }
             }
-            children.clear();
             sinceSweep = 0;
         }
-        for (NativeEntity child : live) {
-            child.close();
+
+        RuntimeException firstFailure = null;
+        for (int i = live.size() - 1; i >= 0; i--) {
+            NativeEntity child = live.get(i);
+            try {
+                child.close();
+                synchronized (childLock) {
+                    removeChildLocked(child);
+                }
+            } catch (RuntimeException e) {
+                if (firstFailure == null) {
+                    firstFailure = e;
+                } else {
+                    firstFailure.addSuppressed(e);
+                }
+            }
         }
+        if (firstFailure != null) {
+            throw firstFailure;
+        }
+
         int rc = handle.close();
         ReturnCodes.check(rc);
     }

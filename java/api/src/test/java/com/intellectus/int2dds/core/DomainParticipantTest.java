@@ -8,7 +8,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 import com.intellectus.int2dds.internal.NativeCleaner;
+import com.intellectus.int2dds.internal.ffi.FfiAccess;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
 class DomainParticipantTest {
@@ -68,28 +72,29 @@ class DomainParticipantTest {
 
     @Test
     void closingTwiceIsHarmless() {
-        long releasedBefore = NativeCleaner.releasedCount();
-        DomainParticipant p = new DomainParticipant(testDomain());
+        // A local call counter, wired through the package-private
+        // deleter-seam constructor, the same pattern
+        // NativeCleanerTest.anExplicitCloseReleasesExactlyOnce uses -- immune
+        // to any other test's background retry activity, unlike a shared
+        // NativeCleaner counter, and able to prove the deleter runs exactly
+        // once rather than only that this entity stayed closed. The counting
+        // deleter still delegates to the real delete, so the native
+        // participant this creates is actually released, not leaked.
+        AtomicInteger calls = new AtomicInteger();
+        DomainParticipant p = DomainParticipant.createForTest(testDomain(), handle -> {
+            calls.incrementAndGet();
+            return FfiAccess.deleteParticipant(handle);
+        });
 
         p.close();
         assertTrue(p.isClosed());
-        assertTrue(NativeCleaner.releasedCount() >= releasedBefore + 1,
-                "the first close must actually release the handle");
+        assertEquals(1, calls.get(), "the first close must release the handle exactly once");
 
-        // Idempotent: NativeHandle's CAS (OPEN -> RELEASING -> CLOSED) means a
-        // second close() short-circuits to ALREADY_HANDLED without reaching
-        // the deleter again. That exactly-once guarantee is proved directly,
-        // with a call counter local to the test, by
-        // NativeCleanerTest.anExplicitCloseReleasesExactlyOnce; DomainParticipant
-        // has no seam to inject a counting deleter the same way (its deleter
-        // is always the real FfiAccess::deleteParticipant), so this only
-        // shows close() defers to the same NativeHandle both times, which
-        // "stays closed and does not throw" already demonstrates. A second
-        // exact-equality read of the global releasedCount() would add a
-        // flaky window - a background retry elsewhere can move it between
-        // the two close() calls - without proving anything stronger.
+        // The native delete reclaims a strong reference; a second call
+        // reaching the deleter would be a double free.
         p.close();
         assertTrue(p.isClosed());
+        assertEquals(1, calls.get(), "closing an already-closed handle must not release again");
     }
 
     @Test
@@ -110,10 +115,13 @@ class DomainParticipantTest {
         // deferredCount(), not failedCount(), is what actually distinguishes
         // "released" from "stuck": a refusal (RET_PRECONDITION_NOT_MET) is
         // counted only by deferredCount(), and this participant has no live
-        // child to refuse it, so it must be back at baseline - released on
-        // the reaper's first attempt, not deferred and retried.
+        // child to refuse it. The assertion only shows the gauge is back at
+        // baseline by the time awaitReaped returns -- consistent with never
+        // having been refused at all, but equally consistent with a refusal
+        // that was deferred and then itself retried successfully within the
+        // same window; it does not distinguish the two, and does not need to.
         assertEquals(deferredBefore, NativeCleaner.deferredCount(),
-                "a childless participant should never be refused, so nothing should be deferred");
+                "a childless participant should never end up stuck in the deferred list");
     }
 
     private static void createAndAbandonParticipant() {
@@ -142,6 +150,23 @@ class DomainParticipantTest {
         try {
             assertNotEquals(0L, p.handle());
             assertEquals(-1, p.domainId(), "domainId() reports the raw constructor argument");
+
+            // The stronger half: not just "didn't throw", but "actually
+            // joined this run's isolated domain". The Gradle test task
+            // exports DDS_DOMAIN_ID as the same random value it publishes
+            // via int2dds.test.domain (see build.gradle.kts), so the core's
+            // own sentinel resolution -- domain_participant_factory.rs
+            // resolving -1 through DDS_DOMAIN_ID before ever constructing
+            // the participant -- lands this participant on testDomain(),
+            // not on the real default domain. int2dds_participant_get_domain_id
+            // reads the resolved value back off the core's own participant
+            // object, not the -1 this constructor was called with.
+            ByteBuffer domainIdOut = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
+            int rc = FfiAccess.participantGetDomainId(
+                    p.handle(), FfiAccess.directBufferAddress(domainIdOut));
+            assertEquals(0, rc, "get_domain_id must succeed on a live participant");
+            assertEquals(testDomain(), domainIdOut.getInt(0),
+                    "the sentinel must resolve to this run's isolated domain, via DDS_DOMAIN_ID");
         } finally {
             p.close();
         }

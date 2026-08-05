@@ -106,6 +106,18 @@ public final class FfiAccess {
         return Ffi.int2dds_delete_participant(participant);
     }
 
+    /**
+     * Reads a participant's resolved domain id into {@code domainIdOut}
+     * (a direct address, at least 4 bytes) and returns the C ABI status
+     * code. "Resolved" matters specifically for {@code DEFAULT_DOMAIN_ID}
+     * (-1): the core substitutes {@code DDS_DOMAIN_ID} (or 0) for -1 before
+     * ever constructing the participant, so this reads back that
+     * substituted value, not -1 itself.
+     */
+    public static int participantGetDomainId(long participant, long domainIdOut) {
+        return Ffi.int2dds_participant_get_domain_id(participant, domainIdOut);
+    }
+
     /** Creates a standalone DomainParticipant QoS handle, or 0 on failure. */
     public static long createParticipantQos() {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());

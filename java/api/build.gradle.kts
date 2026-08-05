@@ -40,12 +40,38 @@ tasks.withType<Test>().configureEach {
     val built = rootProject.file("../target/release/$builtName")
     environment("INT2DDS_JAVA_LIB", fromEnv ?: built.absolutePath)
 
-    // Entity tests create real participants. Force multicast egress through
-    // loopback so a test run cannot discover — or be discovered by — anything
-    // else on the subnet, and pick one domain id per JVM well away from the
-    // default 0 and from the low numbers people choose by hand.
+    // Entity tests create real participants. INT2DDS_FORCE_LOOPBACK_MULTICAST
+    // alone only forces the *egress* interface to 127.0.0.1 -- the receive
+    // side still joins the SPDP group on every working IP and binds 0.0.0.0.
+    // Pairing it with INT2DDS_USE_LOOPBACK_INTERFACE puts 127.0.0.1 in that
+    // working-IP list too, so loopback-sent multicast is actually received
+    // rather than sent into a void (docs/guide/env.md, "Interaction with
+    // Other Settings"). Without both, a run cannot discover -- or be
+    // discovered by -- anything else on the subnet. testDomain also picks
+    // one domain id per JVM well away from the default 0 and the low numbers
+    // people choose by hand, and is exported as DDS_DOMAIN_ID so that a
+    // participant constructed with the -1 (DEFAULT_DOMAIN_ID) sentinel
+    // resolves into this run's isolated domain too, rather than escaping to
+    // the real default domain.
+    val testDomain = (100..199).random()
     environment("INT2DDS_FORCE_LOOPBACK_MULTICAST", "true")
-    systemProperty("int2dds.test.domain", (100..199).random().toString())
+    environment("INT2DDS_USE_LOOPBACK_INTERFACE", "true")
+    environment("DDS_DOMAIN_ID", testDomain.toString())
+    systemProperty("int2dds.test.domain", testDomain.toString())
+
+    // testDomain is randomized per Gradle invocation (configuration time),
+    // which today happens to make this task's input hash differ every run
+    // and so it is never seen as UP-TO-DATE or restored from the build
+    // cache -- but that is a side effect of a changing input, not a
+    // decision, and it would silently stop working the moment Gradle's
+    // configuration cache (not enabled in this build, but a future option)
+    // froze testDomain along with the rest of the configuration, turning
+    // "one random domain per run" into "one random domain forever". State
+    // the real requirement directly instead: this task must always execute.
+    doNotTrackState(
+        "creates real participants with a per-run random domain id; " +
+            "must always re-run, never be treated as up-to-date or cached"
+    )
 }
 
 tasks.jar {
