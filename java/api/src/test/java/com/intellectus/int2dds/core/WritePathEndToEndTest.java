@@ -4,12 +4,13 @@ import static com.intellectus.int2dds.core.DomainParticipantTest.testDomain;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 import com.intellectus.int2dds.cdr.CdrReader;
 import com.intellectus.int2dds.cdr.CdrWriter;
 import com.intellectus.int2dds.cdr.Extensibility;
+import com.intellectus.int2dds.exceptions.DdsException;
+import com.intellectus.int2dds.internal.NativeKeepAlive;
 import com.intellectus.int2dds.internal.ffi.FfiAccess;
 import com.intellectus.int2dds.qos.DataWriterQos;
 import com.intellectus.int2dds.qos.Reliability;
@@ -40,11 +41,26 @@ class WritePathEndToEndTest {
     }
 
     /**
-     * Takes one sample, polling until the deadline. Returns the bytes, or fails.
+     * Takes one sample if one is already available, polling until the
+     * deadline. Returns the bytes, or {@code null} if nothing arrived within
+     * {@code millis}.
      *
      * <p>A poll with a deadline rather than a fixed sleep: discovery takes an
      * unpredictable moment, and a sleep long enough to be reliable is also long
      * enough to make the suite slow.
+     *
+     * <p>{@code null} means "not yet," not a failure: the caller retries by
+     * publishing again and calling this again. A sample that actually arrives
+     * with {@code valid_data == false}, by contrast, is a real assertion
+     * failure that this method lets propagate rather than folding into the
+     * same "not yet" signal — {@code take} has already removed that sample
+     * from the reader's cache, so there is nothing to retry, and silently
+     * discarding it here would leave a later, unrelated timeout reporting the
+     * wrong cause to whoever debugs it. An earlier version of this method
+     * called {@code fail(...)} on a plain timeout and let the caller catch
+     * the resulting {@code AssertionError} as its retry signal, which caught
+     * this real failure the same way; see the task report for why that was
+     * wrong.
      */
     private static byte[] takeWithin(long reader, long millis) throws InterruptedException {
         ByteBuffer buffer = ByteBuffer.allocateDirect(4096).order(ByteOrder.nativeOrder());
@@ -58,8 +74,18 @@ class WritePathEndToEndTest {
         while (System.nanoTime() < deadline) {
             int rc = FfiAccess.datareaderTakeSerialized(
                     reader, bufAddr, buffer.capacity(), sizeAddr, validAddr);
+            // buffer/size/valid are read below only on the rc == 0 path, and
+            // even then only after this call returns; on rc != 0 they are not
+            // touched again before the next iteration re-derives bufAddr's
+            // (already-extracted) value. Without this fence the JIT could
+            // treat any of the three as dead while this native call is still
+            // writing through the raw addresses it was handed.
+            NativeKeepAlive.keepAlive(buffer);
+            NativeKeepAlive.keepAlive(size);
+            NativeKeepAlive.keepAlive(valid);
             if (rc == 0) {
-                // valid_data_out is *mut bool — one byte, not four.
+                // valid_data_out is *mut bool — one byte, not four. A real
+                // assertion, not a retry signal -- see this method's own doc.
                 assertNotEquals((byte) 0, valid.get(0), "sample must carry valid data");
                 int n = (int) size.getLong(0);
                 byte[] out = new byte[n];
@@ -70,7 +96,6 @@ class WritePathEndToEndTest {
             }
             Thread.sleep(20);
         }
-        fail("no sample arrived within " + millis + " ms");
         return null;
     }
 
@@ -136,6 +161,7 @@ class WritePathEndToEndTest {
         long subscriber = 0L;
         long reader = 0L;
         long typeInfo = 0L;
+        long typeObject = 0L;
         try {
             ConformanceRecord proto = new ConformanceRecord();
             Topic<ConformanceRecord> topic = p.createTopic("e2e_topic", proto);
@@ -156,16 +182,17 @@ class WritePathEndToEndTest {
             sent.label = "센서/온도";
 
             // Publish repeatedly: the reader may not have matched on the first
-            // write, and RELIABLE only helps once the match exists.
+            // write, and RELIABLE only helps once the match exists. No
+            // try/catch around takeWithin: it returns null for "not yet,"
+            // and lets a real content assertion (e.g. valid_data == false)
+            // propagate as the test failure it actually is, rather than
+            // being caught here and silently retried into a misleading
+            // "nothing was received" timeout. See takeWithin's own doc.
             byte[] received = null;
             long deadline = System.nanoTime() + 10_000L * 1_000_000L;
             while (System.nanoTime() < deadline && received == null) {
                 writer.write(sent);
-                try {
-                    received = takeWithin(reader, 300);
-                } catch (AssertionError retry) {
-                    received = null;
-                }
+                received = takeWithin(reader, 300);
             }
             if (received == null) {
                 fail("nothing was received within 10 seconds");
@@ -208,7 +235,7 @@ class WritePathEndToEndTest {
             assertEquals(0, FfiAccess.typeInfoAddField(typeInfo, utf8("id"), FIELD_INT32, 0));
             assertEquals(0, FfiAccess.typeInfoAddField(typeInfo, utf8("value"), FIELD_FLOAT64, 0));
             assertEquals(0, FfiAccess.typeInfoAddField(typeInfo, utf8("label"), FIELD_STRING, 0));
-            long typeObject = FfiAccess.typeInfoToTypeObject(typeInfo);
+            typeObject = FfiAccess.typeInfoToTypeObject(typeInfo);
             assertNotEquals(0L, typeObject);
 
             ByteBuffer payload = ByteBuffer.allocateDirect(received.length)
@@ -221,14 +248,21 @@ class WritePathEndToEndTest {
                     utf8("id"), FfiAccess.directBufferAddress(field)));
             assertEquals(4242, field.getInt(0));
         } finally {
+            // typeObject is a distinct native allocation from typeInfo --
+            // FfiAccess.typeObjectDestroy's own doc says both must be
+            // released -- and destroyed first, matching
+            // CdrConformanceTest.releaseTypeInfo's order.
+            if (typeObject != 0L) {
+                FfiAccess.typeObjectDestroy(typeObject);
+            }
             if (typeInfo != 0L) {
                 FfiAccess.typeInfoDestroy(typeInfo);
             }
             if (reader != 0L) {
-                FfiAccess.deleteDataReader(reader);
+                assertEquals(0, FfiAccess.deleteDataReader(reader), "deleteDataReader must succeed");
             }
             if (subscriber != 0L) {
-                FfiAccess.deleteSubscriber(subscriber);
+                assertEquals(0, FfiAccess.deleteSubscriber(subscriber), "deleteSubscriber must succeed");
             }
             p.close();
         }
@@ -243,7 +277,9 @@ class WritePathEndToEndTest {
             Topic<ConformanceRecord> topic =
                     p.createTopic("e2e_empty", new ConformanceRecord());
             subscriber = FfiAccess.createSubscriber(p.handle(), 0L);
+            assertNotEquals(0L, subscriber);
             reader = FfiAccess.createDataReader(subscriber, topic.handle(), 0L, 0L, 0);
+            assertNotEquals(0L, reader);
 
             ByteBuffer buffer = ByteBuffer.allocateDirect(256).order(ByteOrder.nativeOrder());
             ByteBuffer size = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -252,13 +288,28 @@ class WritePathEndToEndTest {
                     FfiAccess.directBufferAddress(buffer), buffer.capacity(),
                     FfiAccess.directBufferAddress(size),
                     FfiAccess.directBufferAddress(valid));
-            assertTrue(rc != 0, "an empty reader must report a status, not a phantom sample");
+            // buffer/size/valid are not touched again after this call --
+            // without this fence the JIT could treat any of them as dead
+            // while the native call above is still writing through the raw
+            // addresses it was handed.
+            NativeKeepAlive.keepAlive(buffer);
+            NativeKeepAlive.keepAlive(size);
+            NativeKeepAlive.keepAlive(valid);
+            // The specific code, not merely "nonzero": if reader were 0 (a
+            // bug that left it uncreated), the native side's own
+            // check_null!(reader) would return RET_NULL_POINTER -- also
+            // nonzero -- and a bare rc != 0 check would pass vacuously
+            // without a reader ever having existed. assertNotEquals(0L,
+            // reader) above already guards that specific case, and pinning
+            // the code to RET_NO_DATA guards every other wrong-code case too.
+            assertEquals(DdsException.RET_NO_DATA, rc,
+                    "an empty reader must report NO_DATA specifically, not merely a nonzero code");
         } finally {
             if (reader != 0L) {
-                FfiAccess.deleteDataReader(reader);
+                assertEquals(0, FfiAccess.deleteDataReader(reader), "deleteDataReader must succeed");
             }
             if (subscriber != 0L) {
-                FfiAccess.deleteSubscriber(subscriber);
+                assertEquals(0, FfiAccess.deleteSubscriber(subscriber), "deleteSubscriber must succeed");
             }
             p.close();
         }
