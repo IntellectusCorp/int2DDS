@@ -1,176 +1,117 @@
+use crate::serialize::cdr::prim_bulk::{read_prim_vec, NativeBytes};
 use crate::serialize::cdr::{CdrDeserializer, CdrError, Xcdr2Deserializer};
 
-use crate::serialize::{
-    from_bytes_f32, from_bytes_f64, from_bytes_i16, from_bytes_i32, from_bytes_i64, from_bytes_u16,
-    from_bytes_u32, from_bytes_u64,
-};
-
 impl<'a> CdrDeserializer<'a> {
+    /// Read a whole run of same-width primitives in one copy.
+    ///
+    /// Alignment is skipped on an empty run, mirroring the write path: CDR aligns before a
+    /// primitive, so a zero-length sequence is just its 4-byte length.
+    ///
+    /// The copy goes through `CdrInput`, which may be a chain of fragment buffers — hence
+    /// the fill closure rather than a direct slice.
+    pub(super) fn read_prim_run<T: NativeBytes>(
+        &mut self,
+        count: usize,
+    ) -> Result<Vec<T>, CdrError> {
+        let elem_size = std::mem::size_of::<T>();
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        self.align(elem_size);
+        // Validates the wire-declared count against the bytes actually left before allocating.
+        let count = self.checked_capacity(count, elem_size)?;
+
+        let (endianness, pos) = (self.endianness, self.position);
+        let input = &self.input;
+        let result = read_prim_vec::<T>(count, endianness, |dst| input.copy_to(pos, dst));
+        self.position = pos + count * elem_size;
+        Ok(result)
+    }
+
+    /// Read a run of octets, then map each one. Used for the element types whose Rust
+    /// representation is not its wire byte (`bool` normalization, `char` widening).
+    pub(super) fn read_octet_run<T>(
+        &mut self,
+        count: usize,
+        map: impl Fn(u8) -> T,
+    ) -> Result<Vec<T>, CdrError> {
+        self.check_available(count)?;
+        let bytes = self.input.copy_to_vec(self.position, count);
+        self.position += count;
+        Ok(bytes.into_iter().map(map).collect())
+    }
+
     /// Deserialize byte sequence with length prefix
     pub fn deserialize_byte_sequence(&mut self) -> Result<Vec<u8>, CdrError> {
         let length = self.deserialize_u32()? as usize;
-        self.check_available(length)?;
-
-        let result = self.input.copy_to_vec(self.position, length);
-        self.position += length;
-
-        Ok(result)
+        self.read_prim_run(length)
     }
 
     /// Deserialize u16 sequence with length prefix
     pub fn deserialize_u16_sequence(&mut self) -> Result<Vec<u16>, CdrError> {
         let length = self.deserialize_u32()? as usize;
-        self.align(2);
-        let mut result = Vec::with_capacity(self.checked_capacity(length, 2)?);
-        for _ in 0..length {
-            self.check_available(2)?;
-            let bytes = self.input.read_array::<2>(self.position);
-            let value = from_bytes_u16(bytes, self.endianness);
-            result.push(value);
-            self.position += 2;
-        }
-        Ok(result)
+        self.read_prim_run(length)
     }
 
     /// Deserialize u32 sequence with length prefix
     pub fn deserialize_u32_sequence(&mut self) -> Result<Vec<u32>, CdrError> {
         let length = self.deserialize_u32()? as usize;
-        self.align(4);
-        let mut result = Vec::with_capacity(self.checked_capacity(length, 4)?);
-        for _ in 0..length {
-            self.check_available(4)?;
-            let bytes = self.input.read_array::<4>(self.position);
-            let value = from_bytes_u32(bytes, self.endianness);
-            result.push(value);
-            self.position += 4;
-        }
-        Ok(result)
+        self.read_prim_run(length)
     }
 
     /// Deserialize u64 sequence with length prefix
     pub fn deserialize_u64_sequence(&mut self) -> Result<Vec<u64>, CdrError> {
         let length = self.deserialize_u32()? as usize;
-        self.align(8);
-        let mut result = Vec::with_capacity(self.checked_capacity(length, 8)?);
-        for _ in 0..length {
-            self.check_available(8)?;
-            let bytes = self.input.read_array::<8>(self.position);
-            let value = from_bytes_u64(bytes, self.endianness);
-            result.push(value);
-            self.position += 8;
-        }
-        Ok(result)
+        self.read_prim_run(length)
     }
 
     /// Deserialize i8 sequence with length prefix
     pub fn deserialize_i8_sequence(&mut self) -> Result<Vec<i8>, CdrError> {
         let length = self.deserialize_u32()? as usize;
-        self.check_available(length)?;
-        let mut result = Vec::with_capacity(length);
-        for _ in 0..length {
-            result.push(self.input.read_byte(self.position) as i8);
-            self.position += 1;
-        }
-        Ok(result)
+        self.read_prim_run(length)
     }
 
     /// Deserialize i16 sequence with length prefix
     pub fn deserialize_i16_sequence(&mut self) -> Result<Vec<i16>, CdrError> {
         let length = self.deserialize_u32()? as usize;
-        self.align(2);
-        let mut result = Vec::with_capacity(self.checked_capacity(length, 2)?);
-        for _ in 0..length {
-            self.check_available(2)?;
-            let bytes = self.input.read_array::<2>(self.position);
-            let value = from_bytes_i16(bytes, self.endianness);
-            result.push(value);
-            self.position += 2;
-        }
-        Ok(result)
+        self.read_prim_run(length)
     }
 
     /// Deserialize i32 sequence with length prefix
     pub fn deserialize_i32_sequence(&mut self) -> Result<Vec<i32>, CdrError> {
         let length = self.deserialize_u32()? as usize;
-        self.align(4);
-        let mut result = Vec::with_capacity(self.checked_capacity(length, 4)?);
-        for _ in 0..length {
-            self.check_available(4)?;
-            let bytes = self.input.read_array::<4>(self.position);
-            let value = from_bytes_i32(bytes, self.endianness);
-            result.push(value);
-            self.position += 4;
-        }
-        Ok(result)
+        self.read_prim_run(length)
     }
 
     /// Deserialize i64 sequence with length prefix
     pub fn deserialize_i64_sequence(&mut self) -> Result<Vec<i64>, CdrError> {
         let length = self.deserialize_u32()? as usize;
-        self.align(8);
-        let mut result = Vec::with_capacity(self.checked_capacity(length, 8)?);
-        for _ in 0..length {
-            self.check_available(8)?;
-            let bytes = self.input.read_array::<8>(self.position);
-            let value = from_bytes_i64(bytes, self.endianness);
-            result.push(value);
-            self.position += 8;
-        }
-        Ok(result)
+        self.read_prim_run(length)
     }
 
     /// Deserialize f32 sequence with length prefix
     pub fn deserialize_f32_sequence(&mut self) -> Result<Vec<f32>, CdrError> {
         let length = self.deserialize_u32()? as usize;
-        self.align(4);
-        let mut result = Vec::with_capacity(self.checked_capacity(length, 4)?);
-        for _ in 0..length {
-            self.check_available(4)?;
-            let bytes = self.input.read_array::<4>(self.position);
-            let value = from_bytes_f32(bytes, self.endianness);
-            result.push(value);
-            self.position += 4;
-        }
-        Ok(result)
+        self.read_prim_run(length)
     }
 
     /// Deserialize f64 sequence with length prefix
     pub fn deserialize_f64_sequence(&mut self) -> Result<Vec<f64>, CdrError> {
         let length = self.deserialize_u32()? as usize;
-        self.align(8);
-        let mut result = Vec::with_capacity(self.checked_capacity(length, 8)?);
-        for _ in 0..length {
-            self.check_available(8)?;
-            let bytes = self.input.read_array::<8>(self.position);
-            let value = from_bytes_f64(bytes, self.endianness);
-            result.push(value);
-            self.position += 8;
-        }
-        Ok(result)
+        self.read_prim_run(length)
     }
 
-    /// Deserialize bool sequence with length prefix
+    /// Deserialize bool sequence with length prefix.
+    /// The wire may carry any octet; anything nonzero is `true`.
     pub fn deserialize_bool_sequence(&mut self) -> Result<Vec<bool>, CdrError> {
         let length = self.deserialize_u32()? as usize;
-        self.check_available(length)?;
-        let mut result = Vec::with_capacity(length);
-        for _ in 0..length {
-            result.push(self.input.read_byte(self.position) != 0);
-            self.position += 1;
-        }
-        Ok(result)
+        self.read_octet_run(length, |b| b != 0)
     }
 
     /// Deserialize char sequence with length prefix
     pub fn deserialize_char_sequence(&mut self) -> Result<Vec<char>, CdrError> {
         let length = self.deserialize_u32()? as usize;
-        self.check_available(length)?;
-        let mut result = Vec::with_capacity(length);
-        for _ in 0..length {
-            result.push(self.input.read_byte(self.position) as char);
-            self.position += 1;
-        }
-        Ok(result)
+        self.read_octet_run(length, |b| b as char)
     }
 
     /// Deserialize string sequence with length prefix
@@ -215,173 +156,96 @@ impl<'a> CdrDeserializer<'a> {
 
 // Xcdr2Deserializer uses the same sequence deserialization logic
 impl<'a> Xcdr2Deserializer<'a> {
+    /// XCDR2 counterpart of `CdrDeserializer::read_prim_run`. Backed by a plain slice
+    /// rather than a fragment chain, so the fill is a straight `copy_from_slice`.
+    pub(super) fn read_prim_run<T: NativeBytes>(
+        &mut self,
+        count: usize,
+    ) -> Result<Vec<T>, CdrError> {
+        let elem_size = std::mem::size_of::<T>();
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        self.align(elem_size);
+        let count = self.checked_capacity(count, elem_size)?;
+
+        let (endianness, pos) = (self.endianness, self.position);
+        let len = count * elem_size;
+        let src = &self.data[pos..pos + len];
+        let result = read_prim_vec::<T>(count, endianness, |dst| dst.copy_from_slice(src));
+        self.position = pos + len;
+        Ok(result)
+    }
+
+    pub(super) fn read_octet_run<T>(
+        &mut self,
+        count: usize,
+        map: impl Fn(u8) -> T,
+    ) -> Result<Vec<T>, CdrError> {
+        self.check_available(count)?;
+        let start = self.position;
+        self.position += count;
+        Ok(self.data[start..start + count].iter().map(|&b| map(b)).collect())
+    }
+
     pub fn deserialize_byte_sequence(&mut self) -> Result<Vec<u8>, CdrError> {
         let length = self.deserialize_u32()? as usize;
-        self.check_available(length)?;
-        let result = self.data[self.position..self.position + length].to_vec();
-        self.position += length;
-        Ok(result)
+        self.read_prim_run(length)
     }
 
     pub fn deserialize_u16_sequence(&mut self) -> Result<Vec<u16>, CdrError> {
         let length = self.deserialize_u32()? as usize;
-        self.align(2);
-        let mut result = Vec::with_capacity(self.checked_capacity(length, 2)?);
-        for _ in 0..length {
-            self.check_available(2)?;
-            let bytes: [u8; 2] = self.data[self.position..self.position + 2]
-                .try_into()
-                .map_err(|_| CdrError::SliceConversionError)?;
-            let value = from_bytes_u16(bytes, self.endianness);
-            result.push(value);
-            self.position += 2;
-        }
-        Ok(result)
+        self.read_prim_run(length)
     }
 
     pub fn deserialize_u32_sequence(&mut self) -> Result<Vec<u32>, CdrError> {
         let length = self.deserialize_u32()? as usize;
-        self.align(4);
-        let mut result = Vec::with_capacity(self.checked_capacity(length, 4)?);
-        for _ in 0..length {
-            self.check_available(4)?;
-            let bytes: [u8; 4] = self.data[self.position..self.position + 4]
-                .try_into()
-                .map_err(|_| CdrError::SliceConversionError)?;
-            let value = from_bytes_u32(bytes, self.endianness);
-            result.push(value);
-            self.position += 4;
-        }
-        Ok(result)
+        self.read_prim_run(length)
     }
 
     pub fn deserialize_u64_sequence(&mut self) -> Result<Vec<u64>, CdrError> {
         let length = self.deserialize_u32()? as usize;
-        self.align(8);
-        let mut result = Vec::with_capacity(self.checked_capacity(length, 8)?);
-        for _ in 0..length {
-            self.check_available(8)?;
-            let bytes: [u8; 8] = self.data[self.position..self.position + 8]
-                .try_into()
-                .map_err(|_| CdrError::SliceConversionError)?;
-            let value = from_bytes_u64(bytes, self.endianness);
-            result.push(value);
-            self.position += 8;
-        }
-        Ok(result)
+        self.read_prim_run(length)
     }
 
     pub fn deserialize_i8_sequence(&mut self) -> Result<Vec<i8>, CdrError> {
         let length = self.deserialize_u32()? as usize;
-        self.check_available(length)?;
-        let mut result = Vec::with_capacity(length);
-        for _ in 0..length {
-            result.push(self.data[self.position] as i8);
-            self.position += 1;
-        }
-        Ok(result)
+        self.read_prim_run(length)
     }
 
     pub fn deserialize_i16_sequence(&mut self) -> Result<Vec<i16>, CdrError> {
         let length = self.deserialize_u32()? as usize;
-        self.align(2);
-        let mut result = Vec::with_capacity(self.checked_capacity(length, 2)?);
-        for _ in 0..length {
-            self.check_available(2)?;
-            let bytes: [u8; 2] = self.data[self.position..self.position + 2]
-                .try_into()
-                .map_err(|_| CdrError::SliceConversionError)?;
-            let value = from_bytes_i16(bytes, self.endianness);
-            result.push(value);
-            self.position += 2;
-        }
-        Ok(result)
+        self.read_prim_run(length)
     }
 
     pub fn deserialize_i32_sequence(&mut self) -> Result<Vec<i32>, CdrError> {
         let length = self.deserialize_u32()? as usize;
-        self.align(4);
-        let mut result = Vec::with_capacity(self.checked_capacity(length, 4)?);
-        for _ in 0..length {
-            self.check_available(4)?;
-            let bytes: [u8; 4] = self.data[self.position..self.position + 4]
-                .try_into()
-                .map_err(|_| CdrError::SliceConversionError)?;
-            let value = from_bytes_i32(bytes, self.endianness);
-            result.push(value);
-            self.position += 4;
-        }
-        Ok(result)
+        self.read_prim_run(length)
     }
 
     pub fn deserialize_i64_sequence(&mut self) -> Result<Vec<i64>, CdrError> {
         let length = self.deserialize_u32()? as usize;
-        self.align(8);
-        let mut result = Vec::with_capacity(self.checked_capacity(length, 8)?);
-        for _ in 0..length {
-            self.check_available(8)?;
-            let bytes: [u8; 8] = self.data[self.position..self.position + 8]
-                .try_into()
-                .map_err(|_| CdrError::SliceConversionError)?;
-            let value = from_bytes_i64(bytes, self.endianness);
-            result.push(value);
-            self.position += 8;
-        }
-        Ok(result)
+        self.read_prim_run(length)
     }
 
     pub fn deserialize_f32_sequence(&mut self) -> Result<Vec<f32>, CdrError> {
         let length = self.deserialize_u32()? as usize;
-        self.align(4);
-        let mut result = Vec::with_capacity(self.checked_capacity(length, 4)?);
-        for _ in 0..length {
-            self.check_available(4)?;
-            let bytes: [u8; 4] = self.data[self.position..self.position + 4]
-                .try_into()
-                .map_err(|_| CdrError::SliceConversionError)?;
-            let value = from_bytes_f32(bytes, self.endianness);
-            result.push(value);
-            self.position += 4;
-        }
-        Ok(result)
+        self.read_prim_run(length)
     }
 
     pub fn deserialize_f64_sequence(&mut self) -> Result<Vec<f64>, CdrError> {
         let length = self.deserialize_u32()? as usize;
-        self.align(8);
-        let mut result = Vec::with_capacity(self.checked_capacity(length, 8)?);
-        for _ in 0..length {
-            self.check_available(8)?;
-            let bytes: [u8; 8] = self.data[self.position..self.position + 8]
-                .try_into()
-                .map_err(|_| CdrError::SliceConversionError)?;
-            let value = from_bytes_f64(bytes, self.endianness);
-            result.push(value);
-            self.position += 8;
-        }
-        Ok(result)
+        self.read_prim_run(length)
     }
 
     pub fn deserialize_bool_sequence(&mut self) -> Result<Vec<bool>, CdrError> {
         let length = self.deserialize_u32()? as usize;
-        self.check_available(length)?;
-        let mut result = Vec::with_capacity(length);
-        for _ in 0..length {
-            result.push(self.data[self.position] != 0);
-            self.position += 1;
-        }
-        Ok(result)
+        self.read_octet_run(length, |b| b != 0)
     }
 
     pub fn deserialize_char_sequence(&mut self) -> Result<Vec<char>, CdrError> {
         let length = self.deserialize_u32()? as usize;
-        self.check_available(length)?;
-        let mut result = Vec::with_capacity(length);
-        for _ in 0..length {
-            result.push(self.data[self.position] as char);
-            self.position += 1;
-        }
-        Ok(result)
+        self.read_octet_run(length, |b| b as char)
     }
 
     pub fn deserialize_string_sequence(&mut self) -> Result<Vec<String>, CdrError> {

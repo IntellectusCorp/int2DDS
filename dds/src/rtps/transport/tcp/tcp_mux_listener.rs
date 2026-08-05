@@ -6,6 +6,7 @@
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use log::{debug, error, info, warn};
 use tokio::net::{TcpListener, TcpStream};
@@ -19,6 +20,7 @@ use crate::rtps::transport::tcp::tls::{accept_tls_async, TlsConfig};
 use crate::rtps::{
     common::guid::GuidPrefix,
     transport::{
+        error::TransportErrorCode,
         plugin::IncomingMessage,
         tcp::connection_registry::{apply_socket_tuning, ConnectionRegistry, TcpSocketTuning},
     },
@@ -46,6 +48,8 @@ impl TcpMuxListener {
         user_data_tx: flume::Sender<IncomingMessage>,
         tls_config: Option<Arc<TlsConfig>>,
         tuning: TcpSocketTuning,
+        tls_handshake_timeout: Duration,
+        peer_handshake_timeout: Duration,
         cancel: CancellationToken,
     ) -> io::Result<Self> {
         let std_listener = bind_listener(port)?;
@@ -65,6 +69,8 @@ impl TcpMuxListener {
             std_listener,
             shared.clone(),
             tls_config,
+            tls_handshake_timeout,
+            peer_handshake_timeout,
             cancel.clone(),
         )));
 
@@ -134,6 +140,8 @@ async fn accept_loop_task(
     std_listener: std::net::TcpListener,
     shared: Arc<ConnectionRegistry>,
     tls_config: Option<Arc<TlsConfig>>,
+    tls_handshake_timeout: Duration,
+    peer_handshake_timeout: Duration,
     cancel: CancellationToken,
 ) {
     let listener = match TcpListener::from_std(std_listener) {
@@ -157,7 +165,13 @@ async fn accept_loop_task(
                         let tls = tls_config.clone();
                         let parent_cancel = cancel.clone();
                         tokio::spawn(handshake_and_register_task(
-                            tcp, addr, shared, tls, parent_cancel,
+                            tcp,
+                            addr,
+                            shared,
+                            tls,
+                            tls_handshake_timeout,
+                            peer_handshake_timeout,
+                            parent_cancel,
                         ));
                     }
                     Err(e) => {
@@ -173,9 +187,6 @@ async fn accept_loop_task(
     }
 }
 
-/// Short-lived per-accept task: completes the optional TLS handshake,
-/// registers the connection in `ConnectionRegistry`, then spawns the reader/writer task pair.
-///
 /// Registration happens **before** spawning the tasks — this guarantees
 /// the reader task finds its `ConnectionEntry` in `ConnectionRegistry.connections` when
 /// the first inbound frame arrives.
@@ -184,18 +195,31 @@ async fn handshake_and_register_task(
     addr: SocketAddr,
     shared: Arc<ConnectionRegistry>,
     tls_config: Option<Arc<TlsConfig>>,
+    tls_handshake_timeout: Duration,
+    peer_handshake_timeout: Duration,
     parent_cancel: CancellationToken,
 ) {
     // Optional TLS — wrap or pass through plain.
     let stream = match &tls_config {
         Some(cfg) => match cfg.build_server_config() {
-            Ok(server_cfg) => match accept_tls_async(tcp, server_cfg).await {
-                Ok(s) => s,
-                Err(e) => {
-                    warn!("TLS handshake failed from {:?}: {:?}", addr, e);
-                    return;
+            Ok(server_cfg) => {
+                match tokio::time::timeout(tls_handshake_timeout, accept_tls_async(tcp, server_cfg))
+                    .await
+                {
+                    Ok(Ok(s)) => s,
+                    Ok(Err(e)) => {
+                        warn!("TLS handshake failed from {:?}: {:?}", addr, e);
+                        return;
+                    }
+                    Err(_) => {
+                        warn!(
+                            "TLS handshake from {:?} did not complete within {:?} — closing",
+                            addr, tls_handshake_timeout
+                        );
+                        return;
+                    }
                 }
-            },
+            }
             Err(e) => {
                 warn!("TLS server config error: {:?}", e);
                 return;
@@ -213,7 +237,23 @@ async fn handshake_and_register_task(
     let (tx, rx) = mpsc::channel::<Vec<u8>>(inbox_capacity());
     let conn_cancel = parent_cancel.child_token();
     let conn_id = shared.register_inbound_connection(addr, conn_cancel.clone());
-    spawn_tasks(read_half, conn_id, shared.clone(), conn_cancel, tx, rx, write_half);
+    spawn_tasks(read_half, conn_id, shared.clone(), conn_cancel.clone(), tx, rx, write_half);
+
+    if tokio::time::timeout(peer_handshake_timeout, conn_cancel.cancelled()).await.is_err()
+        && !shared.inbound_handshake_complete(conn_id)
+    {
+        // This branch will be entered when the connection operation fails
+        // with an error(disable to recover), not timeout.
+        warn!(
+            "TcpMuxListener [{}]: conn {} from {:?} did not finish the handshake \
+             within {:?} — closing",
+            TransportErrorCode::TcpHandshakeHelloFailed,
+            conn_id,
+            addr,
+            peer_handshake_timeout
+        );
+        conn_cancel.cancel();
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -221,8 +261,9 @@ async fn handshake_and_register_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rtps::transport::port_manager::PortManager;
     use crate::rtps::transport::tcp::connection_registry::ConnectionState;
-    use crate::rtps::transport::tcp::framing::write_framed_message;
+    use crate::rtps::transport::tcp::framing::{read_framed_message, write_framed_message};
     use crate::rtps::transport::tcp::protocol::{
         encode_locator, ControlMsg, ERR_CODE_MISSING_LOCATOR, MSG_ERROR, MSG_PEER_HELLO,
         MSG_PEER_HELLO_ACK,
@@ -253,6 +294,15 @@ mod tests {
 
     /// Helper: standard listener whose cancel token the caller keeps a handle on.
     fn make_listener_with_cancel(cancel: CancellationToken) -> TcpMuxListener {
+        make_listener_with(Duration::from_secs(5), cancel)
+    }
+
+    /// Helper: listener with an explicit handshake deadline, for the tests that
+    /// need it to fire (or to stay clear) within the test's own budget.
+    fn make_listener_with(
+        peer_handshake_timeout: Duration,
+        cancel: CancellationToken,
+    ) -> TcpMuxListener {
         let (d_tx, _d_rx, u_tx, _u_rx) = make_channels();
         TcpMuxListener::bind_and_spawn(
             0,
@@ -263,6 +313,8 @@ mod tests {
             u_tx,
             None,
             TcpSocketTuning::default(),
+            Duration::from_secs(5),
+            peer_handshake_timeout,
             cancel,
         )
         .expect("bind_and_spawn")
@@ -431,6 +483,173 @@ mod tests {
         assert_eq!(code, ERR_CODE_MISSING_LOCATOR);
 
         listener.shutdown().await;
+    }
+
+    // ── inbound handshake deadline ───────────────────────────────────────────
+
+    /// Deadline short enough that a test can observe it firing, but long enough
+    /// that a real handshake completes first.
+    const TEST_DEADLINE: Duration = Duration::from_millis(700);
+
+    fn make_deadline_listener() -> TcpMuxListener {
+        make_listener_with(TEST_DEADLINE, CancellationToken::new())
+    }
+
+    /// A peer that opens a socket and sends nothing is invisible to keepalive —
+    /// its kernel answers probes — so only the handshake deadline releases it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn silent_connection_is_closed_after_handshake_deadline() {
+        let listener = make_deadline_listener();
+        let port = listener.port();
+        let shared = listener.shared().clone();
+
+        let client = tokio::spawn(async move {
+            let _stream = TcpStream::connect(("127.0.0.1", port)).await.expect("client connect");
+            // Outlive the observation window so only the deadline can end this.
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+
+        // Registered first, then reaped — proves the deadline did the work.
+        let up =
+            wait_until(Instant::now() + Duration::from_secs(2), || shared.connection_count() == 1)
+                .await;
+        assert!(up, "connection was never registered");
+
+        let gone =
+            wait_until(Instant::now() + Duration::from_secs(3), || shared.connection_count() == 0)
+                .await;
+        assert!(gone, "silent connection outlived the handshake deadline");
+
+        listener.shutdown().await;
+        client.abort();
+    }
+
+    /// A length header with no payload behind it parks the reader mid-frame.
+    /// The deadline has to cut through a read already in progress.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn partial_frame_is_closed_after_handshake_deadline() {
+        let listener = make_deadline_listener();
+        let port = listener.port();
+        let shared = listener.shared().clone();
+
+        let client = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).await.expect("client connect");
+            // Announce a large frame, then never send its body.
+            stream.write_all(&(1024u32 * 1024).to_be_bytes()).await.expect("write length");
+            // Outlive the observation window so only the deadline can end this.
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+
+        let up =
+            wait_until(Instant::now() + Duration::from_secs(2), || shared.connection_count() == 1)
+                .await;
+        assert!(up, "connection was never registered");
+
+        let gone =
+            wait_until(Instant::now() + Duration::from_secs(3), || shared.connection_count() == 0)
+                .await;
+        assert!(gone, "half-sent frame outlived the handshake deadline");
+
+        listener.shutdown().await;
+        client.abort();
+    }
+
+    /// PEER_HELLO alone is not a finished handshake: a control connection has to
+    /// be followed by the peer's data connection. Without it the peer holds a
+    /// control connection it never uses.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_hello_without_a_data_connection_is_closed_after_deadline() {
+        let listener = make_deadline_listener();
+        let port = listener.port();
+        let shared = listener.shared().clone();
+
+        let client = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).await.expect("client connect");
+            let hello = ControlMsg::PeerHello {
+                locator: encode_locator(Ipv4Addr::new(127, 0, 0, 1), 40100),
+            };
+            write_framed_message(&mut stream, &hello.to_bytes()).await.expect("write PEER_HELLO");
+            let _ = read_framed_message(&mut stream).await; // PEER_HELLO_ACK
+                                                            // Outlive the observation window so only the deadline can end this.
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+
+        let reached_control = wait_until(Instant::now() + Duration::from_secs(2), || {
+            shared.connections.iter().any(|e| e.state == ConnectionState::Control)
+        })
+        .await;
+        assert!(reached_control, "PEER_HELLO did not advance the connection to Control");
+
+        let gone =
+            wait_until(Instant::now() + Duration::from_secs(3), || shared.connection_count() == 0)
+                .await;
+        assert!(gone, "control connection with no data connection outlived the deadline");
+
+        listener.shutdown().await;
+        client.abort();
+    }
+
+    /// The regression that matters: a peer that completes all three steps must
+    /// keep both connections well past the deadline. A control connection stops
+    /// at `Control` for good, so a naive "must reach Active" rule would cut a
+    /// healthy peer here.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn completed_handshake_survives_the_deadline() {
+        let listener = make_deadline_listener();
+        let port = listener.port();
+        let shared = listener.shared().clone();
+
+        // domain 0 / participant 0 — matches the listener built by the helper.
+        let logical_port = PortManager::get_discovery_traffic_unicast_port(0, 0);
+
+        let (done_tx, done_rx) = oneshot::channel::<()>();
+        let client = tokio::spawn(async move {
+            // 1. Control connection: PEER_HELLO.
+            let mut control =
+                TcpStream::connect(("127.0.0.1", port)).await.expect("control connect");
+            let hello = ControlMsg::PeerHello {
+                locator: encode_locator(Ipv4Addr::new(127, 0, 0, 1), 40200),
+            };
+            write_framed_message(&mut control, &hello.to_bytes()).await.expect("write PEER_HELLO");
+            read_framed_message(&mut control).await.expect("PEER_HELLO_ACK");
+
+            // 2. PORT_RESERVE on the control connection → cookie.
+            let reserve = ControlMsg::PortReserve { logical_port };
+            write_framed_message(&mut control, &reserve.to_bytes())
+                .await
+                .expect("write PORT_RESERVE");
+            let ack = read_framed_message(&mut control).await.expect("PORT_RESERVE_ACK");
+            let cookie = match ControlMsg::from_bytes(&ack).expect("parse ack") {
+                ControlMsg::PortReserveAck { cookie } => cookie,
+                other => panic!("expected PORT_RESERVE_ACK, got {}", other.type_name()),
+            };
+
+            // 3. Data connection: PORT_BIND with that cookie.
+            let mut data = TcpStream::connect(("127.0.0.1", port)).await.expect("data connect");
+            let bind = ControlMsg::PortBind { cookie };
+            write_framed_message(&mut data, &bind.to_bytes()).await.expect("write PORT_BIND");
+            read_framed_message(&mut data).await.expect("PORT_BIND_ACK");
+
+            let _ = done_rx.await;
+            drop((control, data));
+        });
+
+        let established =
+            wait_until(Instant::now() + Duration::from_secs(2), || shared.connection_count() == 2)
+                .await;
+        assert!(established, "the three-step handshake did not establish both connections");
+
+        // Outlast the deadline by a wide margin, then confirm nothing was reaped.
+        tokio::time::sleep(TEST_DEADLINE * 3).await;
+        assert_eq!(
+            shared.connection_count(),
+            2,
+            "the deadline closed connections belonging to a completed handshake"
+        );
+
+        let _ = done_tx.send(());
+        listener.shutdown().await;
+        let _ = client.await;
     }
 
     // ── connection cleanup on RST / FIN ──────────────────────────────────────

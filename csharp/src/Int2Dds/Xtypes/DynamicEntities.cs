@@ -100,19 +100,16 @@ namespace Int2Dds.Xtypes
         /// Publishes a pre-serialized CDR sample.
         /// </summary>
         /// <param name="data">The CDR-serialized sample bytes (including the encapsulation header).</param>
-        /// <param name="key">The CDR-serialized key bytes, or <c>null</c> for a keyless write.</param>
-        public unsafe void WriteSerialized(byte[] data, byte[]? key = null)
+        public unsafe void WriteSerialized(byte[] data)
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
             if (data == null) throw new ArgumentNullException(nameof(data));
 
             fixed (byte* pData = data)
-            fixed (byte* pKey = key)
             {
                 ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_write_serialized(
                     _handle,
-                    pData, (UIntPtr)data.Length,
-                    pKey, key != null ? (UIntPtr)key.Length : UIntPtr.Zero));
+                    pData, (UIntPtr)data.Length));
             }
         }
 

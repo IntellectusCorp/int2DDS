@@ -177,9 +177,7 @@ int main(int argc, char* argv[]) {
     /* Loop until a subscriber actually matches; the finite timeout keeps Ctrl-C responsive */
     struct Int2DdsPublicationMatchedStatus matched = {0};
     do {
-        struct Int2DdsConditionSeq *triggered = NULL;
-        ret = int2dds_waitset_wait_ex(waitset, 1000, &triggered);
-        int2dds_condition_seq_delete(triggered);
+        ret = int2dds_waitset_wait_ex(waitset, 1000, NULL);
         if (ret != INT2DDS_RET_OK && ret != INT2DDS_RET_TIMEOUT) {
             fprintf(stderr, "WaitSet wait failed: %d\n", ret);
             goto cleanup;
@@ -210,15 +208,16 @@ int main(int argc, char* argv[]) {
         hw.index = i;
         snprintf(hw.message, sizeof(hw.message), "[C]HelloWorld_d%d", domain_id);
 
-        /* Serialize to CDR bytes */
-        size_t serialized_len = HelloWorld_serialize_cdr(&hw, buf, sizeof(buf), false);
+        /* Serialize to CDR bytes — the XCDR version follows the writer's
+           effective DataRepresentation QoS (library default when unset) */
+        size_t serialized_len = HelloWorld_serialize_for(writer, &hw, buf, sizeof(buf));
         if (serialized_len == 0) {
             fprintf(stderr, "Serialization failed\n");
             continue;
         }
 
-        /* Write serialized bytes (no key for HelloWorld) */
-        ret = int2dds_datawriter_write_serialized(writer, buf, serialized_len, NULL, 0);
+        /* Write serialized bytes */
+        ret = int2dds_datawriter_write_serialized(writer, buf, serialized_len);
         if (ret != INT2DDS_RET_OK) {
             fprintf(stderr, "Failed to write: %d\n", ret);
         } else {

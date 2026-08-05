@@ -291,6 +291,7 @@ ffi.cdef("""
     );
 
     /* Effective QoS query */
+    int32_t int2dds_datawriter_data_representation(const Int2DdsDataWriter *writer);
     Int2DdsRet int2dds_datawriter_get_qos(
         const Int2DdsDataWriter *writer,
         Int2DdsDataWriterQos **qos_out
@@ -497,9 +498,7 @@ ffi.cdef("""
     Int2DdsRet int2dds_datawriter_write_serialized(
         const Int2DdsDataWriter *writer,
         const uint8_t *data,
-        size_t data_len,
-        const uint8_t *key,
-        size_t key_len
+        size_t data_len
     );
     /* Instance Management */
     Int2DdsRet int2dds_datawriter_register_instance(
@@ -598,9 +597,7 @@ ffi.cdef("""
     Int2DdsRet int2dds_datawriter_commit_serialized_write(
         const Int2DdsDataWriter *writer,
         Int2DdsSerializedWriteLoan *loan,
-        size_t actual_size,
-        const uint8_t *key,
-        size_t key_len
+        size_t actual_size
     );
     Int2DdsRet int2dds_datawriter_abort_serialized_write(Int2DdsSerializedWriteLoan *loan);
 
