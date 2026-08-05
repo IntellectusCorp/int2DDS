@@ -4158,6 +4158,23 @@ pub(crate) mod tests {
         factory.delete_participant(participant).unwrap();
     }
 
+    /// Listener mask for the counting listeners below. Deliberately not `StatusMask::default()`,
+    /// which is `ALL`.
+    ///
+    /// DDS 1.4 2.2.4.1: a plain communication status is consumed by the listener that handles it,
+    /// and its StatusChangedFlag is reset when that listener returns. A reader whose mask enables
+    /// SUBSCRIPTION_MATCHED therefore never leaves the status latched for a StatusCondition, so
+    /// these tests -- which use the listener only to count `on_data_available` but wait on the
+    /// reader's own condition for the discovery handshake -- would block in
+    /// `WaitSet::wait(Duration::infinite())` forever. LIVELINESS_CHANGED is the same story for
+    /// `test_take_next_instance_surfaces_no_writers_after_writer_deleted`.
+    ///
+    /// The mask is what separates the two mechanisms: the listener takes data notifications, the
+    /// WaitSet takes everything else. Note that `handle_data_available_status` invokes the listener
+    /// without consulting the mask, so DATA_AVAILABLE is named here for intent rather than because
+    /// omitting it would silence the counter.
+    const DATA_ONLY_LISTENER_MASK: StatusMask = StatusMask::DATA_AVAILABLE;
+
     struct SubListener {
         counter_sender: SyncSender<()>,
     }
@@ -4235,7 +4252,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -4347,7 +4364,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -4471,7 +4488,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -4592,7 +4609,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -4714,7 +4731,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -4820,7 +4837,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -4981,7 +4998,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -5109,7 +5126,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -5259,7 +5276,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -5340,7 +5357,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -5458,7 +5475,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -5591,7 +5608,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -5735,7 +5752,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -5852,7 +5869,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -6002,7 +6019,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -6127,7 +6144,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -6251,7 +6268,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -6387,7 +6404,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -6538,7 +6555,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -6655,7 +6672,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
