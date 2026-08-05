@@ -5,7 +5,9 @@ import com.intellectus.int2dds.internal.NativeCleaner;
 import com.intellectus.int2dds.internal.QosMarshal;
 import com.intellectus.int2dds.internal.ReturnCodes;
 import com.intellectus.int2dds.internal.ffi.FfiAccess;
+import com.intellectus.int2dds.qos.DataWriterQos;
 import com.intellectus.int2dds.qos.PublisherQos;
+import com.intellectus.int2dds.types.IDdsType;
 import java.util.Objects;
 
 /**
@@ -16,9 +18,6 @@ import java.util.Objects;
  * the C# reference binding's shape, where {@code Publisher}'s constructor
  * (csharp/src/Int2Dds/Core/Publisher.cs:26) is internal to the assembly
  * rather than public; this one is package-private for the same reason.
- *
- * <p>Holds nothing beyond what {@link NativeEntity} gives it in this
- * branch — {@code createDataWriter} arrives once {@code DataWriter} exists.
  */
 public final class Publisher extends NativeEntity {
 
@@ -48,6 +47,16 @@ public final class Publisher extends NativeEntity {
      */
     static Publisher createForTest(DomainParticipant participant, NativeCleaner.Deleter deleter) {
         return new Publisher(participant, deleter);
+    }
+
+    /** Creates a datawriter for {@code topic} with the core's default QoS. */
+    public <T extends IDdsType> DataWriter<T> createDataWriter(Topic<T> topic) {
+        return new DataWriter<T>(this, topic, null);
+    }
+
+    /** Creates a datawriter for {@code topic} with an explicit QoS. */
+    public <T extends IDdsType> DataWriter<T> createDataWriter(Topic<T> topic, DataWriterQos qos) {
+        return new DataWriter<T>(this, topic, Objects.requireNonNull(qos, "qos"));
     }
 
     /**

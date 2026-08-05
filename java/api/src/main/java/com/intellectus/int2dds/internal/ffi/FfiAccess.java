@@ -190,7 +190,7 @@ public final class FfiAccess {
         Ffi.int2dds_datareader_qos_destroy(handle);
     }
 
-    // --- Topic / Publisher ---
+    // --- Topic / Publisher / DataWriter ---
 
     /**
      * Creates a topic. Returns the C ABI status code and, only on success,
@@ -236,6 +236,63 @@ public final class FfiAccess {
     /** Releases a publisher. Returns the C ABI status code. */
     public static int deletePublisher(long publisher) {
         return Ffi.int2dds_delete_publisher(publisher);
+    }
+
+    /**
+     * Creates a datawriter. Returns the C ABI status code and, only on
+     * success, writes the new handle to {@code handleOut[0]}; on failure
+     * {@code handleOut} is left untouched — the same shape as {@link
+     * #createTopic} and {@link #createPublisher}. {@code qos} is {@code 0L}
+     * for the core's default DataWriter QoS. {@code listener} is {@code 0L}
+     * and {@code mask} is {@code 0} in this branch — listeners are a later
+     * branch.
+     */
+    public static int createDataWriter(long publisher, long topic, long qos, long listener,
+            int mask, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_create_datawriter(
+                publisher, topic, qos, listener, mask, directBufferAddress(slot));
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Releases a datawriter. Returns the C ABI status code. */
+    public static int deleteDataWriter(long writer) {
+        return Ffi.int2dds_delete_datawriter(writer);
+    }
+
+    /**
+     * Writes a pre-serialized CDR sample. {@code key}/{@code keyLen} are
+     * {@code 0L} for an unkeyed write: keys for keyed topics are derived by
+     * the core from field descriptors registered at topic creation, which
+     * this branch does not do, so every write here is unkeyed regardless of
+     * the topic's own type.
+     */
+    public static int datawriterWriteSerialized(long writer, long data, long dataLen,
+            long key, long keyLen) {
+        return Ffi.int2dds_datawriter_write_serialized(writer, data, dataLen, key, keyLen);
+    }
+
+    /**
+     * Reads a datawriter's current QoS into a freshly allocated native
+     * handle. Returns the C ABI status code and, only on success, writes the
+     * new QoS handle to {@code handleOut[0]}; on failure {@code handleOut} is
+     * left untouched — the same shape as {@link #createParticipant}. Unlike
+     * {@link #createParticipantQos} and its siblings, this does not fold a
+     * failure into a bare {@code 0L}: {@code writer} names a real, possibly
+     * already-invalid entity, so the real code is worth preserving for
+     * {@link com.intellectus.int2dds.internal.ReturnCodes#check} to map,
+     * rather than collapsing every failure into one generic exception.
+     */
+    public static int getWriterQos(long writer, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_datawriter_get_qos(writer, directBufferAddress(slot));
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
     }
 
     // --- Topic QoS setters ---
