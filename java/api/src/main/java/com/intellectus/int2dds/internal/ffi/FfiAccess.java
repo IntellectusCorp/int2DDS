@@ -450,4 +450,42 @@ public final class FfiAccess {
     public static int subscriberQosSetPartition(long qos, byte[][] names, long count) {
         return Ffi.int2dds_subscriber_qos_set_partition(qos, names, count);
     }
+
+    // --- Type info / dynamic sample (CDR conformance) ---
+
+    /** Creates a type-info builder, or 0 on failure. */
+    public static long typeInfoCreate(byte[] typeName, int extensibility) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_type_info_create(typeName, extensibility, directBufferAddress(slot));
+        return rc == 0 ? slot.getLong(0) : 0L;
+    }
+
+    /** Appends a field. Returns the C ABI status code. */
+    public static int typeInfoAddField(long typeInfo, byte[] fieldName, int fieldType, int flags) {
+        return Ffi.int2dds_type_info_add_field(typeInfo, fieldName, fieldType, flags);
+    }
+
+    /** Builds a type object from a completed builder, or 0 on failure. */
+    public static long typeInfoToTypeObject(long typeInfo) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_type_info_to_type_object(typeInfo, directBufferAddress(slot));
+        return rc == 0 ? slot.getLong(0) : 0L;
+    }
+
+    /** Releases a type-info builder. */
+    public static void typeInfoDestroy(long typeInfo) {
+        Ffi.int2dds_type_info_destroy(typeInfo);
+    }
+
+    /** Decodes one i32 field out of a serialized sample. */
+    public static int dynamicSampleGetI32(long bytes, long len, long typeObj,
+            byte[] fieldName, long out) {
+        return Ffi.int2dds_dynamic_sample_get_i32(bytes, len, typeObj, fieldName, out);
+    }
+
+    /** Decodes one f64 field out of a serialized sample. */
+    public static int dynamicSampleGetF64(long bytes, long len, long typeObj,
+            byte[] fieldName, long out) {
+        return Ffi.int2dds_dynamic_sample_get_f64(bytes, len, typeObj, fieldName, out);
+    }
 }
