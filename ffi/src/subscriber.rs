@@ -1259,7 +1259,7 @@ pub unsafe extern "C" fn int2dds_datareader_read_serialized_batch(
 /// `handle` is a 16-byte instance handle (e.g. from `int2dds_datareader_lookup_instance`
 /// or a prior sample's info). A nil handle returns `INT2DDS_RET_BAD_PARAMETER`; an
 /// unknown handle returns no samples. The mask arguments are bitmasks of the
-/// SampleState/ViewState/InstanceState kinds (use 0xFFFF for "any").
+/// SampleState/ViewState/InstanceState kinds; a mask of 0 selects "any".
 ///
 /// # Safety
 /// - `reader` must be a valid datareader
@@ -1315,6 +1315,31 @@ pub unsafe extern "C" fn int2dds_datareader_read_instance_serialized_batch(
     )
 }
 
+/// A mask of 0 selects ANY, mirroring the `extensibility = -1` default sentinel.
+fn state_kinds_from_masks(
+    sample_state_mask: u32,
+    view_state_mask: u32,
+    instance_state_mask: u32,
+) -> ([SampleStateKind; 1], [ViewStateKind; 1], [InstanceStateKind; 1]) {
+    (
+        [if sample_state_mask == 0 {
+            SampleStateKind::ANY_SAMPLE_STATE
+        } else {
+            SampleStateKind::from_bits_truncate(sample_state_mask)
+        }],
+        [if view_state_mask == 0 {
+            ViewStateKind::ANY_VIEW_STATE
+        } else {
+            ViewStateKind::from_bits_truncate(view_state_mask)
+        }],
+        [if instance_state_mask == 0 {
+            InstanceStateKind::ANY_INSTANCE_STATE
+        } else {
+            InstanceStateKind::from_bits_truncate(instance_state_mask)
+        }],
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 unsafe fn read_or_take_instance_serialized_batch(
     reader: *const Int2DdsDataReader,
@@ -1332,9 +1357,8 @@ unsafe fn read_or_take_instance_serialized_batch(
 
     let reader_ref = &*reader;
     let instance_handle = InstanceHandle::new(*handle);
-    let ss = [SampleStateKind::from_bits_truncate(sample_state_mask)];
-    let vs = [ViewStateKind::from_bits_truncate(view_state_mask)];
-    let is = [InstanceStateKind::from_bits_truncate(instance_state_mask)];
+    let (ss, vs, is) =
+        state_kinds_from_masks(sample_state_mask, view_state_mask, instance_state_mask);
 
     let result = if take {
         reader_ref.inner.take_instance_serialized(max_samples, instance_handle, &ss, &vs, &is)
@@ -1447,7 +1471,8 @@ pub unsafe extern "C" fn int2dds_sample_seq_delete(seq: *mut Int2DdsSampleSeq) -
 // Read/Take with state condition filter (Feature 7)
 // ============================================================================
 
-/// Read a single serialized sample with state condition filter
+/// Read a single serialized sample with state condition filter.
+/// A state mask of 0 selects "any".
 ///
 /// # Safety
 /// - Same as `int2dds_datareader_read_serialized_w_info`, plus state masks
@@ -1468,13 +1493,10 @@ pub unsafe extern "C" fn int2dds_datareader_read_serialized_w_states(
     check_null!(info_out);
 
     let reader_ref = &*reader;
+    let (ss, vs, is) =
+        state_kinds_from_masks(sample_state_mask, view_state_mask, instance_state_mask);
 
-    let outcome = match reader_ref.inner.read_serialized_bounded(
-        &[SampleStateKind::from_bits_truncate(sample_state_mask)],
-        &[ViewStateKind::from_bits_truncate(view_state_mask)],
-        &[InstanceStateKind::from_bits_truncate(instance_state_mask)],
-        buffer_capacity,
-    ) {
+    let outcome = match reader_ref.inner.read_serialized_bounded(&ss, &vs, &is, buffer_capacity) {
         Ok(outcome) => outcome,
         Err(int2dds::dcps::core::error::DdsError::NoData) => {
             *actual_size_out = 0;
@@ -1490,7 +1512,8 @@ pub unsafe extern "C" fn int2dds_datareader_read_serialized_w_states(
     ret
 }
 
-/// Take a single serialized sample with state condition filter
+/// Take a single serialized sample with state condition filter.
+/// A state mask of 0 selects "any".
 ///
 /// # Safety
 /// - Same as `int2dds_datareader_take_serialized_w_info`, plus state masks
@@ -1511,13 +1534,10 @@ pub unsafe extern "C" fn int2dds_datareader_take_serialized_w_states(
     check_null!(info_out);
 
     let reader_ref = &*reader;
+    let (ss, vs, is) =
+        state_kinds_from_masks(sample_state_mask, view_state_mask, instance_state_mask);
 
-    let outcome = match reader_ref.inner.take_serialized_bounded(
-        &[SampleStateKind::from_bits_truncate(sample_state_mask)],
-        &[ViewStateKind::from_bits_truncate(view_state_mask)],
-        &[InstanceStateKind::from_bits_truncate(instance_state_mask)],
-        buffer_capacity,
-    ) {
+    let outcome = match reader_ref.inner.take_serialized_bounded(&ss, &vs, &is, buffer_capacity) {
         Ok(outcome) => outcome,
         Err(int2dds::dcps::core::error::DdsError::NoData) => {
             *actual_size_out = 0;
@@ -1533,7 +1553,7 @@ pub unsafe extern "C" fn int2dds_datareader_take_serialized_w_states(
     ret
 }
 
-/// Take batch with state condition filter
+/// Take batch with state condition filter. A state mask of 0 selects "any".
 ///
 /// # Safety
 /// - Same as `int2dds_datareader_take_serialized_batch`, plus state masks
@@ -1550,13 +1570,10 @@ pub unsafe extern "C" fn int2dds_datareader_take_serialized_batch_w_states(
     check_null!(seq_out);
 
     let reader_ref = &*reader;
+    let (ss, vs, is) =
+        state_kinds_from_masks(sample_state_mask, view_state_mask, instance_state_mask);
 
-    let samples = match reader_ref.inner.take_serialized(
-        max_samples,
-        &[SampleStateKind::from_bits_truncate(sample_state_mask)],
-        &[ViewStateKind::from_bits_truncate(view_state_mask)],
-        &[InstanceStateKind::from_bits_truncate(instance_state_mask)],
-    ) {
+    let samples = match reader_ref.inner.take_serialized(max_samples, &ss, &vs, &is) {
         Ok(r) => r,
         Err(int2dds::dcps::core::error::DdsError::NoData) => {
             *seq_out = Box::into_raw(Box::new(Int2DdsSampleSeq { samples: Vec::new() }));
@@ -1574,7 +1591,7 @@ pub unsafe extern "C" fn int2dds_datareader_take_serialized_batch_w_states(
     INT2DDS_RET_OK
 }
 
-/// Read batch with state condition filter
+/// Read batch with state condition filter. A state mask of 0 selects "any".
 ///
 /// # Safety
 /// - Same as `int2dds_datareader_read_serialized_batch`, plus state masks
@@ -1591,13 +1608,10 @@ pub unsafe extern "C" fn int2dds_datareader_read_serialized_batch_w_states(
     check_null!(seq_out);
 
     let reader_ref = &*reader;
+    let (ss, vs, is) =
+        state_kinds_from_masks(sample_state_mask, view_state_mask, instance_state_mask);
 
-    let samples = match reader_ref.inner.read_serialized(
-        max_samples,
-        &[SampleStateKind::from_bits_truncate(sample_state_mask)],
-        &[ViewStateKind::from_bits_truncate(view_state_mask)],
-        &[InstanceStateKind::from_bits_truncate(instance_state_mask)],
-    ) {
+    let samples = match reader_ref.inner.read_serialized(max_samples, &ss, &vs, &is) {
         Ok(r) => r,
         Err(int2dds::dcps::core::error::DdsError::NoData) => {
             *seq_out = Box::into_raw(Box::new(Int2DdsSampleSeq { samples: Vec::new() }));
