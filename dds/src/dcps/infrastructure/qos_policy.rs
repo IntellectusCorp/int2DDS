@@ -2470,13 +2470,15 @@ impl QosPolicy for ReaderReliabilityExtensionQosPolicy {
 
 /// Extension for int2DDS-specific user-data multicast reception on a DataReader.
 ///
+/// The group address is not selectable: it is fixed per domain, so this policy
+/// only decides whether the reader joins it.
+///
 /// # Default
-/// - `address: None` - multicast reception disabled; user data is received on unicast only.
+/// - `multicast_enabled: false` - multicast reception disabled; user data is received on unicast only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReaderMulticastExtensionQosPolicy {
-    /// Multicast group address the reader receives user data on.
-    /// `None` keeps multicast reception disabled.
-    pub address: Option<String>,
+    /// Whether the reader receives user data over the domain multicast group.
+    pub multicast_enabled: bool,
 }
 
 impl Default for ReaderMulticastExtensionQosPolicy {
@@ -2486,7 +2488,7 @@ impl Default for ReaderMulticastExtensionQosPolicy {
 }
 
 impl ConstDefault for ReaderMulticastExtensionQosPolicy {
-    const DEFAULT: Self = Self { address: None };
+    const DEFAULT: Self = Self { multicast_enabled: false };
 }
 
 impl QosPolicy for ReaderMulticastExtensionQosPolicy {

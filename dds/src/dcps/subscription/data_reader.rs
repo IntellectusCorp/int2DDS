@@ -510,7 +510,7 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
             let mut dcps_bridge = participant.get_dcps_bridge()?;
             let rtps_reader = match dcps_bridge.as_mut() {
                 Some(dcps_bridge) => {
-                    if reader_qos.reader_multicast_extension.address.is_some() {
+                    if reader_qos.reader_multicast_extension.multicast_enabled {
                         dcps_bridge.ensure_user_multicast_traffic().map_err(|e| {
                             DdsError::Error(format!(
                                 "Failed to start multicast reception for this reader: {}",
