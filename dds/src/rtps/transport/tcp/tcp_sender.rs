@@ -629,9 +629,12 @@ impl TcpSender {
                     health.on_miss();
                 }
                 self.stats.send_deadline.record("send deadline", addr, logical_port);
-                return Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "send deadline expired before the write lock was free",
+                return Err(transport_io_error(
+                    TransportErrorCode::TcpSendDeadlineExpired,
+                    format!(
+                        "peer {:?} (port={}) still writing the previous frame",
+                        addr, logical_port
+                    ),
                 ));
             }
         };
@@ -641,9 +644,12 @@ impl TcpSender {
         if let WriteState::Connecting(buf) = &mut *guard {
             if buf.len() >= CONNECT_BUFFER_DEPTH {
                 self.stats.connect_buffer_full.record("connect buffer full", addr, logical_port);
-                return Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "connect-window buffer full",
+                return Err(transport_io_error(
+                    TransportErrorCode::TcpConnectBufferFull,
+                    format!(
+                        "peer {:?} (port={}) buffered {} frames while connecting",
+                        addr, logical_port, CONNECT_BUFFER_DEPTH
+                    ),
                 ));
             }
             buf.push_back(data.to_vec());
