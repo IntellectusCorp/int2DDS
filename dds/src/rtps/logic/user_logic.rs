@@ -32,8 +32,8 @@ use crate::rtps::entities::writer::reader_locator::ReaderLocator;
 use crate::rtps::entities::writer::reader_proxy::ReaderProxy;
 use crate::rtps::entities::writer::{StatefulWriter, StatelessWriter, Writer};
 use crate::rtps::logic::common::{
-    impl_participant_accessor, impl_unicast_thread_handler, ParticipantAccessor,
-    UnicastThreadHandler,
+    impl_multicast_thread_handler, impl_participant_accessor, impl_unicast_thread_handler,
+    MulticastThreadHandler, ParticipantAccessor, UnicastThreadHandler,
 };
 use crate::rtps::logic::message_processor::unicast_message_processor::UnicastMessageProcessor;
 use crate::rtps::messages::header::Header;
@@ -47,6 +47,7 @@ use crate::rtps::messages::submessages::heartbeat::Heartbeat;
 use crate::rtps::messages::submessages::heartbeat_frag::HeartbeatFrag;
 use crate::rtps::messages::submessages::nack_frag::NackFrag;
 use crate::rtps::task::sending_handler::{MessageType, SendingHandler};
+use crate::rtps::task::user_traffic::user_multicast_listening_task::UserMulticastListeningTask;
 use crate::rtps::task::user_traffic::user_unicast_listening_task::UserUnicastListeningTask;
 use crate::rtps::transport::plugin::{MessageSource, SendTarget, TransportPlugin};
 use crate::rtps::{
@@ -68,6 +69,8 @@ pub(crate) struct UserLogic {
     fragment_buffers: Arc<DashMap<(Guid, SequenceNumber), FragmentBuffer>>,
     unicast_listening_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     unicast_listening_waker: Arc<OnceLock<Arc<Waker>>>,
+    multicast_listening_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+    multicast_listening_waker: Arc<OnceLock<Arc<Waker>>>,
 }
 
 // Initialization
@@ -79,11 +82,19 @@ impl UserLogic {
             fragment_buffers: Arc::new(DashMap::new()),
             unicast_listening_handle: Arc::new(Mutex::new(None)),
             unicast_listening_waker: Arc::new(OnceLock::new()),
+            multicast_listening_handle: Arc::new(Mutex::new(None)),
+            multicast_listening_waker: Arc::new(OnceLock::new()),
         }
     }
 
     pub(crate) fn wake_unicast_listening_thread(&self) {
         if let Some(waker) = self.unicast_listening_waker.get() {
+            let _ = waker.wake();
+        }
+    }
+
+    pub(crate) fn wake_multicast_listening_thread(&self) {
+        if let Some(waker) = self.multicast_listening_waker.get() {
             let _ = waker.wake();
         }
     }
@@ -125,6 +136,51 @@ impl UserLogic {
             if let Ok(mut handle_guard) = self.unicast_listening_handle.lock() {
                 *handle_guard = Some(unicast_handle);
             }
+        }
+
+        Ok(())
+    }
+
+    /// Started on demand by the first DataReader that enables multicast
+    /// reception, so a participant without such a reader never spawns it.
+    pub(crate) fn start_user_multicast_traffic(
+        &self,
+        user_multicast_source: Option<MessageSource>,
+    ) -> RtpsResult<()> {
+        let Some(multicast_source) = user_multicast_source else {
+            warn!("Transport has no user data multicast source; reception stays unicast only");
+            return Ok(());
+        };
+
+        let participant = self.get_upgraded_participant()?;
+
+        let mut user_multicast_listening_task =
+            UserMulticastListeningTask::new(participant.clone());
+        user_multicast_listening_task.set_shutdown_waker(self.multicast_listening_waker.clone());
+        let participant_guid = participant.guid();
+
+        let multicast_handle = thread::Builder::new()
+            .name("user_traffic_multicast_listening".to_string())
+            .spawn(move || {
+                {
+                    use crate::rtps::task::thread_monitor::ThreadMonitor;
+                    ThreadMonitor::register_current_thread_name_with_guid_prefix(
+                        "user_traffic_multicast_listening",
+                        participant_guid.prefix(),
+                    );
+                }
+
+                let _ = user_multicast_listening_task.multicast_listening(multicast_source);
+                {
+                    use crate::rtps::task::thread_monitor::ThreadMonitor;
+                    ThreadMonitor::remove_map_guard();
+                }
+                debug!("user multicast listening thread finished");
+            })
+            .expect("Failed to create user multicast listening thread");
+
+        if let Ok(mut handle_guard) = self.multicast_listening_handle.lock() {
+            *handle_guard = Some(multicast_handle);
         }
 
         Ok(())
@@ -1545,6 +1601,7 @@ impl UserLogic {
 
 impl_participant_accessor!(UserLogic);
 impl_unicast_thread_handler!(UserLogic);
+impl_multicast_thread_handler!(UserLogic);
 
 impl UnicastMessageProcessor for UserLogic {
     fn handle_data_message(

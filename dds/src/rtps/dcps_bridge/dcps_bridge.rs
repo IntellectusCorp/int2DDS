@@ -42,7 +42,7 @@ use crate::{
             writer::{StatefulWriter, StatelessWriter, Writer},
         },
         logic::{
-            common::{JoinAllThread as _, UnicastThreadHandler as _},
+            common::{JoinAllThread as _, MulticastThreadHandler as _, UnicastThreadHandler as _},
             sedp_logic::SedpLogic,
             spdp_logic::SpdpLogic,
             user_logic::UserLogic,
@@ -223,6 +223,34 @@ impl DcpsBridge {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn ensure_user_multicast_traffic(&self) -> RtpsResult<()> {
+        let Some(user_logic) = self.user_logic.as_ref() else {
+            return Err(RtpsError::new(RtpsErrorCode::NotInitialized, "user_logic is not set"));
+        };
+
+        // A single listener and thread serve every multicast reader of this
+        // participant, so only the reader that arrives first creates them.
+        // Callers hold the DcpsBridge lock, which keeps this check exclusive.
+        let listening_handle = user_logic.get_multicast_listening_handle()?;
+        let already_listening = listening_handle
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?
+            .is_some();
+        if already_listening {
+            return Ok(());
+        }
+
+        let transport = self.socket.transport();
+        transport.ensure_user_multicast_listener().map_err(|e| {
+            RtpsError::new(
+                RtpsErrorCode::Io,
+                format!("Failed to create the user data multicast listener: {e}"),
+            )
+        })?;
+
+        user_logic.start_user_multicast_traffic(transport.take_user_data_multicast_source())
     }
 
     pub(crate) fn next_entity_guid(&self, entity_kind: EntityKind) -> Guid {
@@ -593,6 +621,9 @@ impl DcpsBridge {
         if let Some(user_logic) = self.user_logic.as_ref() {
             user_logic.wake_unicast_listening_thread();
             user_logic.join_unicast_listening_thread()?;
+
+            user_logic.wake_multicast_listening_thread();
+            user_logic.join_multicast_listening_thread()?;
         }
 
         // Shutdown participant liveliness monitor
