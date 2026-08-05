@@ -1,5 +1,6 @@
 mod cdr_input;
 pub mod deserializer;
+mod prim_bulk;
 pub mod serializer;
 pub mod xcdr1;
 pub mod xcdr2;

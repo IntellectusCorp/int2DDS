@@ -528,7 +528,7 @@ INT2DDS_MEMBER_EXTERNAL         = 1 << 3
 
 The FFI uses **CDR serialization** with raw bytes:
 - C applications send/receive raw CDR-serialized byte arrays
-- `int2dds_datawriter_write_serialized()` sends CDR bytes with optional key bytes
+- `int2dds_datawriter_write_serialized()` sends CDR bytes (the instance key is derived from the sample)
 - `int2dds_datareader_take_serialized()` / `int2dds_datareader_read_serialized()` receive CDR bytes into caller-provided buffers
 - `int2dds_datareader_take_serialized_w_info()` / `int2dds_datareader_read_serialized_w_info()` additionally return `Int2DdsSampleInfo`
 - `int2dds_datareader_take_serialized_batch()` takes multiple samples at once

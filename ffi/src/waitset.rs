@@ -48,7 +48,8 @@ pub unsafe extern "C" fn int2dds_waitset_new(waitset_out: *mut *mut Int2DdsWaitS
 /// # Safety
 /// - `waitset` must be a valid waitset
 /// - `timeout_ms` is the timeout in milliseconds, or -1 for infinite
-/// - `conditions_out` must be a valid pointer to a null pointer
+/// - `conditions_out` must be a valid pointer to a null pointer, or null if the
+///   caller does not need the triggered conditions
 /// - The returned condition sequence must be freed with `int2dds_condition_seq_delete`
 ///
 /// Returns:
@@ -62,7 +63,6 @@ pub unsafe extern "C" fn int2dds_waitset_wait_ex(
     conditions_out: *mut *mut Int2DdsConditionSeq,
 ) -> Int2DdsRet {
     check_null!(waitset);
-    check_null!(conditions_out);
 
     let waitset_ref = &*waitset;
 
@@ -77,8 +77,10 @@ pub unsafe extern "C" fn int2dds_waitset_wait_ex(
 
     match waitset_ref.inner.wait(duration) {
         Ok(conditions) => {
-            let seq = Box::new(Int2DdsConditionSeq { conditions });
-            *conditions_out = Box::into_raw(seq);
+            if !conditions_out.is_null() {
+                let seq = Box::new(Int2DdsConditionSeq { conditions });
+                *conditions_out = Box::into_raw(seq);
+            }
             INT2DDS_RET_OK
         }
         Err(e) => dds_error_to_code(&e),
@@ -90,7 +92,8 @@ pub unsafe extern "C" fn int2dds_waitset_wait_ex(
 /// # Safety
 /// - `waitset` must be a valid waitset
 /// - `timeout_ns` is the timeout in nanoseconds, or -1 for infinite
-/// - `conditions_out` must be a valid pointer to a null pointer
+/// - `conditions_out` must be a valid pointer to a null pointer, or null if the
+///   caller does not need the triggered conditions
 /// - The returned condition sequence must be freed with `int2dds_condition_seq_delete`
 ///
 /// Returns:
@@ -104,7 +107,6 @@ pub unsafe extern "C" fn int2dds_waitset_wait_ex_ns(
     conditions_out: *mut *mut Int2DdsConditionSeq,
 ) -> Int2DdsRet {
     check_null!(waitset);
-    check_null!(conditions_out);
 
     let waitset_ref = &*waitset;
 
@@ -119,8 +121,10 @@ pub unsafe extern "C" fn int2dds_waitset_wait_ex_ns(
 
     match waitset_ref.inner.wait(duration) {
         Ok(conditions) => {
-            let seq = Box::new(Int2DdsConditionSeq { conditions });
-            *conditions_out = Box::into_raw(seq);
+            if !conditions_out.is_null() {
+                let seq = Box::new(Int2DdsConditionSeq { conditions });
+                *conditions_out = Box::into_raw(seq);
+            }
             INT2DDS_RET_OK
         }
         Err(e) => dds_error_to_code(&e),
