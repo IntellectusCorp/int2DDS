@@ -89,6 +89,9 @@ pub struct WaitSet {
     condvar: Arc<Condvar>,
     waiting_count: Arc<AtomicUsize>,
     notify_lock: Arc<Mutex<NotifyState>>,
+    // Wake-up callback planted into every attached condition. Captures only
+    // per-WaitSet state, so one instance is shared by all attaches.
+    notify: Arc<dyn Fn() + Send + Sync>,
     instance_id: usize,
 }
 
@@ -112,11 +115,16 @@ impl WaitSet {
         let instance_id = WAITSET_COUNTER.fetch_add(1, Ordering::Relaxed);
         debug!("[WaitSet-{}] Creating new WaitSet instance", instance_id);
 
+        let condvar = Arc::new(Condvar::new());
+        let notify_lock = Arc::new(Mutex::new(NotifyState::default()));
+        let notify = Self::make_notify(condvar.clone(), notify_lock.clone(), instance_id);
+
         Self {
             conditions: Arc::new(Mutex::new(Vec::new())),
-            condvar: Arc::new(Condvar::new()),
+            condvar,
             waiting_count: Arc::new(AtomicUsize::new(0)),
-            notify_lock: Arc::new(Mutex::new(NotifyState::default())),
+            notify_lock,
+            notify,
             instance_id,
         }
     }
@@ -176,11 +184,7 @@ impl WaitSet {
         let should_notify =
             waiting_threads > 0 && new_condition.get_trigger_value().unwrap_or(false);
 
-        let notify_fn = self.get_notify();
-
-        new_condition.set_waitset_callback(Some(Arc::new(move || {
-            notify_fn();
-        })));
+        new_condition.set_waitset_callback(Some(self.notify.clone()));
         conditions.push(new_condition);
         let condition_count = conditions.len();
         debug!(
@@ -197,7 +201,7 @@ impl WaitSet {
             // Must go through the same path as a status notification. Poking the condvar directly
             // leaves the generation unchanged, which a waiter cannot tell apart from a spurious
             // wake-up, so it re-parks without ever looking at the newly attached condition.
-            (self.get_notify())();
+            (self.notify)();
         }
 
         Ok(())
@@ -427,11 +431,11 @@ impl WaitSet {
         Ok(triggered)
     }
 
-    pub(crate) fn get_notify(&self) -> Arc<dyn Fn() + Send + Sync> {
-        let condvar = self.condvar.clone();
-        let notify_lock = self.notify_lock.clone();
-        let instance_id = self.instance_id;
-
+    fn make_notify(
+        condvar: Arc<Condvar>,
+        notify_lock: Arc<Mutex<NotifyState>>,
+        instance_id: usize,
+    ) -> Arc<dyn Fn() + Send + Sync> {
         Arc::new(move || {
             // Runs on the RTPS receive thread, which is already holding the reader's
             // `matched_writers` and `status_callback` locks and the condition's
