@@ -287,8 +287,8 @@ cargo run --example hello_world_pub
 ### INT2DDS_DATA_FRAG_SIZE
 
 Sets the RTPS DATA_FRAG fragment size, in bytes, used by DataWriters whose QoS
-does not specify one. An explicit `data_frag` setting in code or in a JSON QoS
-profile always wins over this fallback.
+does not specify one. A `data_frag.max_size` of `1` or greater, set in code or in
+a QoS profile, always wins over this fallback.
 
 - Valid range: `1` - `65000`
 - Values outside the range, or values that do not parse as an integer, are
@@ -297,9 +297,14 @@ profile always wins over this fallback.
 
 #### Resolution order
 
-1. DataWriter QoS `data_frag.max_size` (code) / JSON profile entry
+1. DataWriter QoS `data_frag.max_size` (code) / QoS profile entry, when `>= 1`
 2. `INT2DDS_DATA_FRAG_SIZE` env var
 3. Default `65000`
+
+A `max_size` of `0` — the default — means "unspecified". Negative values are
+treated the same way, so they do not override the env var. `int2dds_datawriter_qos_get_data_frag()`
+and the Python/C# `data_frag` accessors return the value as set, not the resolved
+size, so they report `0` for a QoS that never set it.
 
 #### Configuration
 

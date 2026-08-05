@@ -2399,8 +2399,23 @@ impl DataFragQosPolicy {
         } else if self.max_size > 0 {
             self.max_size
         } else {
-            crate::common::env::get_data_frag_size_override().unwrap_or(Self::DEFAULT_SIZE)
+            Self::env_default_size().unwrap_or(Self::DEFAULT_SIZE)
         }
+    }
+
+    /// `INT2DDS_DATA_FRAG_SIZE`, rejected with a warning when outside `1..=MAX`.
+    /// Out-of-range env values are ignored rather than clamped, unlike an explicit QoS.
+    fn env_default_size() -> Option<i32> {
+        let size = crate::common::env::get_data_frag_size_override()?;
+        if (1..=Self::MAX).contains(&size) {
+            return Some(size);
+        }
+        log::warn!(
+            "INT2DDS_DATA_FRAG_SIZE={} is outside 1..={}, ignoring env override",
+            size,
+            Self::MAX
+        );
+        None
     }
 }
 
