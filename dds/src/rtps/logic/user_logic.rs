@@ -1982,11 +1982,14 @@ impl UnicastMessageProcessor for UserLogic {
             .find(|rp| rp.remote_reader_guid() == remote_reader_guid)
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
 
-        // Preemptive ACKNACK (empty bitmap with seqbase 0 or 1) is an explicit
-        // reset signal and bypasses the count/debounce check. Some foreign RTPS
-        // stacks use base 1 for this preemptive form.
+        // Base 1 with an empty bitmap is ambiguous: preemptive for some stacks, but also
+        // what a reader sends for an empty writer. Accept once, or HB/ACKNACK loops forever.
         let is_preemptive = acknack.reader_sn_state.num_bits() == 0
-            && acknack.reader_sn_state.bitmap_base().to_i64() <= 1;
+            && match acknack.reader_sn_state.bitmap_base().to_i64() {
+                0 => true,
+                1 => reader_proxy.last_acknack_count().is_none(),
+                _ => false,
+            };
         let now = Instant::now();
 
         if !should_accept_count(
@@ -1999,6 +2002,11 @@ impl UnicastMessageProcessor for UserLogic {
         ) {
             return Ok(());
         }
+
+        // Record before branching: the preemptive path returns early, and an unset
+        // count would make every later ACKNACK look like the reader's first.
+        reader_proxy.set_last_acknack_count(acknack.count);
+        reader_proxy.set_last_acknack_at(now);
 
         if is_preemptive {
             drop(reader_proxies);
@@ -2018,9 +2026,6 @@ impl UnicastMessageProcessor for UserLogic {
             "[UserLogic] [AckNack] ACK received up to seq_num={}",
             SequenceNumber::from_i64(acknack.reader_sn_state.bitmap_base().to_i64() - 1)
         );
-
-        reader_proxy.set_last_acknack_count(acknack.count);
-        reader_proxy.set_last_acknack_at(now);
 
         // NACK
         if !missing_seq_numbers.is_empty() {
