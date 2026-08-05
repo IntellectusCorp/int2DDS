@@ -204,6 +204,12 @@ impl MessageReceiver {
         }
     }
 
+    /// Drops the timestamp the receiver is holding, for an INFO_TS that sets the
+    /// InvalidateFlag and therefore carries no timestamp field of its own.
+    pub(crate) fn invalidate_timestamp(&mut self) {
+        self.have_timestamp = false;
+    }
+
     pub(crate) fn init(&mut self, buffer: &Bytes) -> RtpsResult<Arc<RtpsMessage<'static>>> {
         if buffer.len() < RTPS_HEADER_LENGTH as usize {
             return Err(RtpsError::new(
@@ -884,5 +890,43 @@ mod tests {
         big_endian.extend_from_slice(&INFO_DST[4..]);
         let ids = init_ids_within(datagram(&[&big_endian, &INFO_DST]));
         assert_eq!(ids, Some(vec![0x0E, 0x0E]));
+    }
+
+    /// PAD is one of the two submessages for which `octetsToNextHeader == 0` means an empty
+    /// body rather than "extends to the end of the message", so the next submessage header
+    /// follows it immediately.
+    #[test]
+    fn zero_length_pad_does_not_swallow_the_rest() {
+        // PAD, E=1, octetsToNextHeader = 0
+        let ids = init_ids_within(datagram(&[&[0x01, 0x01, 0x00, 0x00], &INFO_DST]));
+        assert_eq!(ids, Some(vec![0x01, 0x0E]));
+    }
+
+    /// INFO_TS is the other one: with the InvalidateFlag set it carries no timestamp field,
+    /// so a declared length of zero is legal and it is not the last submessage. Reading eight
+    /// bytes of whatever follows as a timestamp both invents a timestamp and loses a
+    /// submessage.
+    #[test]
+    fn info_ts_with_invalidate_flag_does_not_swallow_the_rest() {
+        // INFO_TS, E=1 with the InvalidateFlag set, octetsToNextHeader = 0
+        let ids = init_ids_within(datagram(&[&[0x09, 0x03, 0x00, 0x00], &INFO_DST]));
+        assert_eq!(ids, Some(vec![0x0E]), "an invalidated INFO_TS carries no body of its own");
+    }
+
+    /// An invalidated INFO_TS must also clear any timestamp a previous one established,
+    /// rather than leaving the receiver holding a stale one.
+    #[test]
+    fn info_ts_with_invalidate_flag_clears_the_source_timestamp() {
+        let addr: SocketAddr = "127.0.0.1:7400".parse().unwrap();
+        let mut receiver = MessageReceiver::new(GUIDPREFIX_UNKNOWN, &addr);
+
+        // INFO_TS carrying a timestamp, then INFO_TS with the InvalidateFlag set.
+        let timestamped = [0x09, 0x01, 0x08, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let invalidated = [0x09, 0x03, 0x00, 0x00];
+        let bytes = Bytes::from(datagram(&[&timestamped, &invalidated]));
+
+        receiver.init(&bytes).expect("the datagram is well formed");
+
+        assert_eq!(receiver.get_source_timestamp(), None);
     }
 }
