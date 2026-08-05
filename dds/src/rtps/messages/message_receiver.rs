@@ -929,4 +929,64 @@ mod tests {
 
         assert_eq!(receiver.get_source_timestamp(), None);
     }
+
+    /// Parsing must terminate for any bytes at all, not just for the malformed shapes that
+    /// happen to be known today. The generator splices a valid RTPS header in front of every
+    /// case, because `init` rejects anything else before it ever reaches the submessage loop,
+    /// and mixes plausible submessage headers in with the noise so that the length arithmetic
+    /// is actually exercised. The whole sweep runs on one worker so a single timeout covers it.
+    #[test]
+    fn parsing_terminates_on_arbitrary_input() {
+        use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
+
+        const ITERATIONS: usize = 20_000;
+        let (tx, rx) = sync_channel::<usize>(1);
+
+        std::thread::Builder::new()
+            .name("rtps-init-fuzz".into())
+            .spawn(move || {
+                let mut rng = StdRng::seed_from_u64(0xC0FFEE);
+                let addr: SocketAddr = "127.0.0.1:7400".parse().unwrap();
+
+                for _ in 0..ITERATIONS {
+                    let mut bytes = HDR.to_vec();
+                    for _ in 0..rng.random_range(0..6usize) {
+                        match rng.random_range(0..3u8) {
+                            // A known-good submessage, so valid prefixes get exercised too.
+                            0 => bytes.extend_from_slice(&INFO_DST),
+                            // A plausible header with a random declared length and no body.
+                            1 => {
+                                let length: u16 = rng.random();
+                                bytes.extend_from_slice(&[
+                                    rng.random_range(0..0x18u8),
+                                    rng.random_range(0..4u8),
+                                    length as u8,
+                                    (length >> 8) as u8,
+                                ]);
+                            }
+                            // Noise of a random length, which also covers 1-3 byte tails.
+                            _ => {
+                                let mut noise = vec![0u8; rng.random_range(1..40usize)];
+                                rng.fill_bytes(&mut noise);
+                                bytes.extend_from_slice(&noise);
+                            }
+                        }
+                    }
+                    let mut receiver = MessageReceiver::new(GUIDPREFIX_UNKNOWN, &addr);
+                    let _ = receiver.init(&Bytes::from(bytes));
+                }
+                let _ = tx.send(ITERATIONS);
+            })
+            .expect("failed to spawn fuzz worker thread");
+
+        match rx.recv_timeout(Duration::from_secs(30)) {
+            Ok(done) => assert_eq!(done, ITERATIONS),
+            Err(RecvTimeoutError::Timeout) => {
+                panic!("parsing failed to terminate on a generated datagram (seed 0xC0FFEE)")
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                panic!("parsing panicked on a generated datagram (seed 0xC0FFEE)")
+            }
+        }
+    }
 }
