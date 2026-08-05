@@ -39,6 +39,13 @@ tasks.withType<Test>().configureEach {
     }
     val built = rootProject.file("../target/release/$builtName")
     environment("INT2DDS_JAVA_LIB", fromEnv ?: built.absolutePath)
+
+    // Entity tests create real participants. Force multicast egress through
+    // loopback so a test run cannot discover — or be discovered by — anything
+    // else on the subnet, and pick one domain id per JVM well away from the
+    // default 0 and from the low numbers people choose by hand.
+    environment("INT2DDS_FORCE_LOOPBACK_MULTICAST", "true")
+    systemProperty("int2dds.test.domain", (100..199).random().toString())
 }
 
 tasks.jar {

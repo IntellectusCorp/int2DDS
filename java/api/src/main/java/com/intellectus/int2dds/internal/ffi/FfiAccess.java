@@ -63,6 +63,49 @@ public final class FfiAccess {
         Ffi.int2dds_dynamic_value_destroy(value);
     }
 
+    // --- DomainParticipantFactory / DomainParticipant ---
+
+    /**
+     * The process-wide participant factory handle, or 0 on failure. No status
+     * a caller could act on differently accompanies a failure here — the
+     * factory singleton either exists or something is catastrophically wrong
+     * with the native library — so, unlike {@link #createParticipant}, this
+     * does not report a status code.
+     */
+    public static long participantFactoryGetInstance() {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_domain_participant_factory_get_instance(directBufferAddress(slot));
+        return rc == 0 ? slot.getLong(0) : 0L;
+    }
+
+    /**
+     * Creates a participant. Returns the C ABI status code and, only on
+     * success, writes the new handle to {@code handleOut[0]}; on failure
+     * {@code handleOut} is left untouched.
+     *
+     * <p>Returning the status alongside the handle, rather than folding a
+     * failure into a bare 0 handle the way the QoS-handle creators above do,
+     * is deliberate: {@link com.intellectus.int2dds.core.DomainParticipant}
+     * needs the real code to raise the exception it maps to through {@link
+     * com.intellectus.int2dds.internal.ReturnCodes#check}, and a 0 handle
+     * alone cannot carry that. Every create bridge added for Topic, Publisher
+     * and DataWriter follows this same {@code (rc, long[] handleOut)} shape
+     * for that reason.
+     */
+    public static int createParticipant(long factory, int domainId, long qos, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_create_participant(factory, domainId, qos, directBufferAddress(slot));
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Releases a participant. Returns the C ABI status code. */
+    public static int deleteParticipant(long participant) {
+        return Ffi.int2dds_delete_participant(participant);
+    }
+
     /** Creates a standalone DomainParticipant QoS handle, or 0 on failure. */
     public static long createParticipantQos() {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
