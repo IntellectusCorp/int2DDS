@@ -35,8 +35,31 @@ impl Submessage<'static> {
     ) -> RtpsResult<Option<Self>> {
         let map_speedy_err = |p: Error| RtpsError::new(RtpsErrorCode::Io, p.to_string());
 
-        let submessage_header =
-            SubmessageHeader::read_from_buffer(all_submessages_bytes).map_err(map_speedy_err)?;
+        // Read the four header octets by hand rather than deriving them, because
+        // octetsToNextHeader is encoded in the endianness announced by the EndiannessFlag
+        // (bit 0 of the flags octet) of this very header. The write path already honours
+        // that flag; a derived read would always assume little-endian and mis-frame every
+        // big-endian submessage.
+        if all_submessages_bytes.len() < 4 {
+            return Err(RtpsError::new(
+                RtpsErrorCode::InvalidSubmessageHeader,
+                format!(
+                    "{} byte(s) remaining, a submessage header needs 4",
+                    all_submessages_bytes.len()
+                ),
+            ));
+        }
+        let flags = all_submessages_bytes[1];
+        let length_bytes = [all_submessages_bytes[2], all_submessages_bytes[3]];
+        let submessage_header = SubmessageHeader::new(
+            SubmessageId::new(all_submessages_bytes[0]),
+            flags,
+            if flags & 0x01 != 0 {
+                u16::from_le_bytes(length_bytes)
+            } else {
+                u16::from_be_bytes(length_bytes)
+            },
+        );
         // log::debug!(
         //     "submessage_header: {:?} size: {}",
         //     submessage_header,
