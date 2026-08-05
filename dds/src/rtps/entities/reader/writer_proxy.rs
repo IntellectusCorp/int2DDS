@@ -429,20 +429,27 @@ impl WriterProxy {
             }),
         });
 
-        // Merge this submessage's fragment numbers into the accumulated set
-        if let Some(info) = &mut change.fragment_info {
-            // A HEARTBEAT_FRAG may have seeded this entry with a smaller
-            // last-fragment number than the sample's true total; keep the max.
-            info.total_fragments = info.total_fragments.max(total_fragments);
-            for fragment in received {
-                info.received_fragments.insert(fragment);
-            }
+        // Merge this submessage's fragment numbers into the accumulated set.
+        // An entry seeded by HEARTBEAT or GAP carries no fragment_info -- install one
+        // rather than dropping the update, or every fragment of that sample goes
+        // untracked and it can be neither completed nor repaired.
+        let info = change.fragment_info.get_or_insert_with(|| FragmentInfo {
+            total_fragments,
+            received_fragments: std::collections::HashSet::new(),
+            is_complete: false,
+        });
 
-            // Update completion status
-            info.is_complete = info.received_fragments.len() == info.total_fragments as usize;
-            if info.is_complete {
-                change.status = ChangeFromWriterStatusKind::Received;
-            }
+        // A HEARTBEAT_FRAG may have seeded this entry with a smaller
+        // last-fragment number than the sample's true total; keep the max.
+        info.total_fragments = info.total_fragments.max(total_fragments);
+        for fragment in received {
+            info.received_fragments.insert(fragment);
+        }
+
+        // Update completion status
+        info.is_complete = info.received_fragments.len() == info.total_fragments as usize;
+        if info.is_complete {
+            change.status = ChangeFromWriterStatusKind::Received;
         }
     }
 
@@ -572,5 +579,28 @@ mod tests {
             Vec::<SequenceNumber>::new(),
             "a complete sample must no longer be listed as missing",
         );
+    }
+
+    // Under loss a HEARTBEAT announcing a sequence number routinely arrives before
+    // that sample's first surviving DATA_FRAG. The heartbeat seeds the entry with
+    // `fragment_info: None`; fragments arriving afterwards must still be tracked,
+    // or the sample can never be completed nor its missing fragments computed.
+    #[test]
+    fn test_mark_frag_received_populates_heartbeat_seeded_entry() {
+        let mut proxy = empty_writer_proxy();
+        let sn = SequenceNumber::new(0, 1);
+
+        proxy.update_changes_for_heartbeat_range(sn, sn);
+
+        proxy.mark_frag_received(sn, 4, 1..3); // fragments 1, 2 arrive
+
+        assert!(proxy.still_missing_fragments(sn), "fragment state must be tracked, not dropped");
+        assert_eq!(
+            proxy.calculate_missing_fragments(sn, sn),
+            Some(FragmentNumberSet::from_vec(3, vec![3, 4])),
+        );
+
+        proxy.mark_frag_received(sn, 4, 3..5); // fragments 3, 4 complete it
+        assert!(proxy.all_fragments_received(sn));
     }
 }
