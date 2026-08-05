@@ -313,18 +313,11 @@ pub fn set_multicast_ttl(ttl: u8) {
 }
 
 /// Read the DATA_FRAG fragment size fallback from `INT2DDS_DATA_FRAG_SIZE`.
-/// Returns `None` when unset, unparseable, or outside `1..=65000`, so explicit QoS always wins.
+/// Returns `None` when unset, empty, or not an integer; the range is the QoS policy's to check.
 pub fn get_data_frag_size_override() -> Option<i32> {
     let raw = std::env::var("INT2DDS_DATA_FRAG_SIZE").ok().filter(|s| !s.is_empty())?;
     match raw.parse::<i32>() {
-        Ok(size) if (1..=65000).contains(&size) => Some(size),
-        Ok(size) => {
-            log::warn!(
-                "INT2DDS_DATA_FRAG_SIZE value {} is outside 1..=65000. Ignoring env override.",
-                size
-            );
-            None
-        }
+        Ok(size) => Some(size),
         Err(e) => {
             log::warn!(
                 "Invalid INT2DDS_DATA_FRAG_SIZE value '{}': {}. Ignoring env override.",
