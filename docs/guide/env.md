@@ -16,6 +16,7 @@ This document describes the environment variables available in int2dds.
 | `INT2DDS_FORCE_LOOPBACK_MULTICAST`   | Force multicast egress via 127.0.0.1       | false                   |
 | `INT2DDS_UDP_SOCKET_BUFFER`          | UDP socket buffer size (bytes)             | OS default              |
 | `INT2DDS_SHM_BUFFER_SIZE`            | Shared-memory ring buffer size (bytes)     | 1048576 (1MB)           |
+| `INT2DDS_DATA_FRAG_SIZE`             | DATA_FRAG fragment size (bytes)            | 65000                   |
 | `INT2DDS_MULTICAST_TTL`              | IPv4 multicast TTL fallback (0-255)        | 1                       |
 | `INT2DDS_EXTENDED_DISCOVERY`         | Enable extended discovery                  | false                   |
 | `INT2DDS_INITIAL_PEERS`              | Initial peer list                          | none                    |
@@ -282,6 +283,43 @@ export INT2DDS_SHM_BUFFER_SIZE=2097152
 cargo run --example hello_world_pub
 ```
 
+
+### INT2DDS_DATA_FRAG_SIZE
+
+Sets the RTPS DATA_FRAG fragment size, in bytes, used by DataWriters whose QoS
+does not specify one. An explicit `data_frag` setting in code or in a JSON QoS
+profile always wins over this fallback.
+
+- Valid range: `1` - `65000`
+- Values outside the range, or values that do not parse as an integer, are
+  logged at warn level and ignored — the built-in default `65000` is used.
+  The value is **not** clamped.
+
+#### Resolution order
+
+1. DataWriter QoS `data_frag.max_size` (code) / JSON profile entry
+2. `INT2DDS_DATA_FRAG_SIZE` env var
+3. Default `65000`
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_DATA_FRAG_SIZE = "8000"
+
+cargo run --example hello_world_pub
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_DATA_FRAG_SIZE=8000
+
+cargo run --example hello_world_pub
+```
+
+The Rust core consumes the env var inside `DataFragQosPolicy::effective_max_size`
+when the RTPS writer is created, so the value must be set **before** the
+DataWriter is created.
 
 ### INT2DDS_MULTICAST_TTL
 
@@ -613,4 +651,5 @@ cargo run --example hello_world_pub
 - [dds/src/common/log.rs](../../dds/src/common/log.rs) - Logging configuration
 - [dds/src/rtps/transport/mod.rs](../../dds/src/rtps/transport/mod.rs) - Transport type definition
 - [dds/src/rtps/transport/transport_config.rs](../../dds/src/rtps/transport/transport_config.rs) - Multicast TTL resolution
+- [dds/src/dcps/infrastructure/qos_policy.rs](../../dds/src/dcps/infrastructure/qos_policy.rs) - DATA_FRAG fragment size resolution
 - [dds/src/rtps/transport/udp/udp_sender.rs](../../dds/src/rtps/transport/udp/udp_sender.rs) - UDP transport settings
