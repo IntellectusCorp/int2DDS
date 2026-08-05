@@ -415,7 +415,12 @@ impl WriterProxy {
     ) {
         let change = self.changes_from_writer.entry(seq_num).or_insert_with(|| ChangeFromWriter {
             sequence_number: seq_num,
-            status: ChangeFromWriterStatusKind::Received,
+            // RTPS 2.5 - 8.4.12.2
+            // A change counts as received only once every fragment is in. Recording
+            // it as Received on the first fragment hides it from
+            // `missing_changes_for_heartbeat`, so it is never NACKed and the writer
+            // acks and frees it while fragments are still outstanding.
+            status: ChangeFromWriterStatusKind::Missing,
             is_relevant: true,
             fragment_info: Some(FragmentInfo {
                 total_fragments,
@@ -435,6 +440,9 @@ impl WriterProxy {
 
             // Update completion status
             info.is_complete = info.received_fragments.len() == info.total_fragments as usize;
+            if info.is_complete {
+                change.status = ChangeFromWriterStatusKind::Received;
+            }
         }
     }
 
@@ -535,5 +543,34 @@ mod tests {
 
         proxy.mark_frag_received(sn, 4, 3..5); // fragments 3, 4
         assert!(proxy.all_fragments_received(sn));
+    }
+
+    // A sample missing fragments must stay NACK-able. Reporting it as Received
+    // drops it from the ACKNACK missing set, so the writer acks it and frees it
+    // from its history while fragments are still outstanding -- after which no
+    // repair is possible and a RELIABLE reader loses the sample silently.
+    #[test]
+    fn test_partial_fragment_sample_is_not_reported_received() {
+        let mut proxy = empty_writer_proxy();
+        let sn = SequenceNumber::new(0, 1);
+
+        proxy.mark_frag_received(sn, 4, 1..2); // only fragment 1 of 4
+
+        assert!(proxy.still_missing_fragments(sn));
+        assert!(!proxy.all_fragments_received(sn));
+        assert_eq!(
+            proxy.missing_changes_for_heartbeat(sn, sn),
+            vec![sn],
+            "a partially received sample must appear in the ACKNACK missing list",
+        );
+
+        proxy.mark_frag_received(sn, 4, 2..5); // fragments 2, 3, 4 complete it
+
+        assert!(proxy.all_fragments_received(sn));
+        assert_eq!(
+            proxy.missing_changes_for_heartbeat(sn, sn),
+            Vec::<SequenceNumber>::new(),
+            "a complete sample must no longer be listed as missing",
+        );
     }
 }
