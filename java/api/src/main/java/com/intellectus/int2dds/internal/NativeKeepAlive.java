@@ -1,4 +1,4 @@
-package com.intellectus.int2dds.core;
+package com.intellectus.int2dds.internal;
 
 /**
  * The Java 8 stand-in for {@link java.lang.ref.Reference#reachabilityFence},
@@ -8,27 +8,44 @@ package com.intellectus.int2dds.core;
  * overrides it on a 9+ runtime with the real intrinsic — see that class's
  * Javadoc — so this fallback's behavior below only matters on 8 itself.
  *
- * <p>{@link NativeEntity#handle()} returns a bare {@code long}, disconnected
- * from the entity that produced it. Once a caller holds that value, nothing
- * about it keeps the entity — or the underlying native object it names —
- * reachable: if nothing else in the calling code still references the
- * entity, the JIT is free to treat it as unreachable from that point on,
- * including for the duration of a native call still using the raw handle.
- * {@link com.intellectus.int2dds.internal.NativeCleaner}'s reaper can then
- * observe the entity as phantom-reachable and race that in-flight call to
- * delete the very object the call is using — the same class of hazard that
- * makes the reaper safe to begin with (see that class's doc), now applied to
- * a handle a native call is actively using rather than one sitting idle in a
- * field.
+ * <p>Lives in {@code internal} rather than {@code internal.ffi} or {@code
+ * core} because both of those packages need to call it:
+ * {@code com.intellectus.int2dds.core}'s {@code Topic}/{@code Publisher}/
+ * {@code DataWriter} constructors fence a parent's entity handle, and {@code
+ * com.intellectus.int2dds.internal.ffi.FfiAccess} fences a direct {@link
+ * java.nio.ByteBuffer} handed to a native call by address — the identical
+ * hazard, just for a different kind of Java object holding the thing native
+ * code is using. Neither package can see the other's package-private
+ * members, so a single shared implementation has to live somewhere both can
+ * reach; {@code public} here is what makes that possible, not an invitation
+ * for use outside this module — {@code internal} is exactly the package
+ * this codebase already uses to mark "reachable from more than one of our
+ * own packages, not part of the public API" (see {@link NativeCleaner},
+ * {@link NativeHandle}, {@link QosMarshal}, {@link ReturnCodes} in this same
+ * package, all public for the same reason).
+ *
+ * <p>{@code NativeEntity#handle()} (in {@code core}) returns a bare {@code
+ * long}, disconnected from the entity that produced it. Once a caller holds
+ * that value, nothing about it keeps the entity — or the underlying native
+ * object it names — reachable: if nothing else in the calling code still
+ * references the entity, the JIT is free to treat it as unreachable from
+ * that point on, including for the duration of a native call still using
+ * the raw handle. {@link NativeCleaner}'s reaper can then observe the
+ * entity as phantom-reachable and race that in-flight call to delete the
+ * very object the call is using — the same class of hazard that makes the
+ * reaper safe to begin with (see that class's doc), now applied to a handle
+ * a native call is actively using rather than one sitting idle in a field.
+ * {@code FfiAccess.directBufferAddress} has the same shape for a direct
+ * buffer: once its address has been read out as a bare {@code long},
+ * nothing keeps the buffer object itself reachable, and a buffer that
+ * becomes otherwise unreachable while a native call is still using that
+ * address can have its backing memory freed by its own JDK-managed {@code
+ * Cleaner} out from under that call.
  *
  * <p>{@link #keepAlive} closes that window: it forces the object to be
  * considered reachable up to the point it is called, with no other
  * <em>required</em> effect on the program — exactly what {@code
- * Reference.reachabilityFence} does on 9+. {@code Topic}/{@code
- * Publisher}/{@code DataWriter} constructors are exactly the call sites that
- * need it: each reads its parent's handle via {@link NativeEntity#handle()}
- * and then makes a native create call with that bare value, with nothing
- * else necessarily keeping the parent reachable for the call's duration.
+ * Reference.reachabilityFence} does on 9+.
  *
  * <h2>Why a plain static store works as a fence — and why it must not stop there</h2>
  *
@@ -99,9 +116,16 @@ package com.intellectus.int2dds.core;
  * src/main/java9}'s override (wired into {@code api/build.gradle.kts}
  * alongside the {@code java22} source set that already established the
  * pattern) is that formally specified guarantee, for whichever consumer of
- * the packaged artifact is in a position to load it.
+ * the packaged artifact is in a position to load it. Its own class file
+ * must live at {@code src/main/java9/com/intellectus/int2dds/internal/
+ * NativeKeepAlive.java} — the exact same package as this class — since a
+ * multi-release jar's {@code META-INF/versions/9} entry only shadows the
+ * base class it has an identical fully-qualified name to; a path or package
+ * mismatch between the two would silently stop the override from ever
+ * being loaded, with every 9+ consumer falling back to this class instead
+ * with nothing to signal that happened.
  */
-final class NativeKeepAlive {
+public final class NativeKeepAlive {
 
     /**
      * Volatile so the store-then-clear pair in {@link #keepAlive} cannot be
@@ -115,18 +139,19 @@ final class NativeKeepAlive {
 
     /**
      * Keeps {@code obj} reachable up to this call. Place immediately after a
-     * native call that consumed a raw handle read from {@code obj} via
-     * {@link NativeEntity#handle()} — directly, or via a value derived
-     * through it, such as a parent's handle read for a child's create call —
-     * so neither {@code obj} nor the native object its handle names can be
-     * reaped while that call is still in flight.
+     * native call that consumed a raw handle read from {@code obj} —
+     * directly, via a value derived through it such as a parent's handle
+     * read for a child's create call, or via a direct buffer's address read
+     * through {@code FfiAccess.directBufferAddress} — so neither {@code
+     * obj} nor whatever native operation is using the value it produced can
+     * be reaped or freed while that operation is still in flight.
      *
      * <p>Clears the fence again immediately after setting it, so {@code obj}
      * is not left strongly reachable through {@code sink} beyond this call —
      * see this class's doc for why an earlier version that skipped this step
      * was a real, observed defect, not a hypothetical one.
      */
-    static void keepAlive(Object obj) {
+    public static void keepAlive(Object obj) {
         sink = obj;
         sink = null;
     }

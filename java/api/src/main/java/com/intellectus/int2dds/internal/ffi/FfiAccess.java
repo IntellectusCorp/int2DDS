@@ -1,5 +1,6 @@
 package com.intellectus.int2dds.internal.ffi;
 
+import com.intellectus.int2dds.internal.NativeKeepAlive;
 import com.intellectus.int2dds.internal.NativeLoader;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -17,36 +18,6 @@ public final class FfiAccess {
     }
 
     private FfiAccess() {}
-
-    /**
-     * Volatile store-then-clear fence, the same pattern {@code
-     * com.intellectus.int2dds.core.NativeKeepAlive} uses on its own
-     * {@code --release 8} floor — duplicated locally rather than reused
-     * because that class is package-private to {@code core}, invisible from
-     * this package, and this module's baseline predates {@link
-     * java.lang.ref.Reference#reachabilityFence}. Only {@link #keepAlive}
-     * reads it, to clear it again.
-     */
-    private static volatile Object sink;
-
-    /**
-     * Keeps {@code obj} reachable up to this call. Needed after a native
-     * call that was handed a direct {@link ByteBuffer}'s address by {@link
-     * #directBufferAddress} and does not otherwise read from or write to
-     * that buffer object again on every path: once the address has been
-     * read out as a bare {@code long}, nothing about that value keeps the
-     * buffer itself reachable, and a buffer that becomes otherwise
-     * unreachable while the native call is still in flight can have its
-     * backing memory freed by its own JDK-managed {@code Cleaner} out from
-     * under that call — see {@code
-     * com.intellectus.int2dds.core.NativeKeepAlive}'s own doc for the fuller
-     * argument, which this mirrors for a direct buffer instead of an entity
-     * handle.
-     */
-    private static void keepAlive(Object obj) {
-        sink = obj;
-        sink = null;
-    }
 
     /** The library's default type extensibility: 0 Final, 1 Appendable, 2 Mutable. */
     public static int defaultExtensibility() {
@@ -287,8 +258,8 @@ public final class FfiAccess {
         // dead before the native call above actually finishes using the
         // address it was handed, and slot's own JDK-managed Cleaner could
         // free that memory out from under an in-flight native call. See
-        // keepAlive's own doc in this class.
-        keepAlive(slot);
+        // NativeKeepAlive's own doc for the full argument.
+        NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             handleOut[0] = slot.getLong(0);
         }
@@ -329,7 +300,7 @@ public final class FfiAccess {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_datawriter_get_qos(writer, directBufferAddress(slot));
         // See createDataWriter's identical fence just above.
-        keepAlive(slot);
+        NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             handleOut[0] = slot.getLong(0);
         }

@@ -3,6 +3,7 @@ package com.intellectus.int2dds.core;
 import com.intellectus.int2dds.cdr.CdrWriter;
 import com.intellectus.int2dds.exceptions.DdsErrorException;
 import com.intellectus.int2dds.internal.NativeCleaner;
+import com.intellectus.int2dds.internal.NativeKeepAlive;
 import com.intellectus.int2dds.internal.QosMarshal;
 import com.intellectus.int2dds.internal.ReturnCodes;
 import com.intellectus.int2dds.internal.ffi.FfiAccess;

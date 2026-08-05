@@ -95,7 +95,7 @@ class JarLayoutTest {
                     "the manifest must declare Multi-Release: true");
 
             String versionedPath =
-                    "META-INF/versions/9/com/intellectus/int2dds/core/NativeKeepAlive.class";
+                    "META-INF/versions/9/com/intellectus/int2dds/internal/NativeKeepAlive.class";
             JarEntry entry = jar.getJarEntry(versionedPath);
             assertNotNull(entry,
                     versionedPath + " must be present -- the JDK 9+ NativeKeepAlive override");

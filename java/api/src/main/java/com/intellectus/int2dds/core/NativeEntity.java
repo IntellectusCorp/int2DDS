@@ -64,11 +64,11 @@ abstract class NativeEntity implements AutoCloseable {
      *
      * <p>A caller that passes the returned value into a native call must keep
      * this entity reachable for the duration of that call — see {@link
-     * NativeKeepAlive}. Nothing about the returned value itself keeps this
-     * entity, or the native object it names, alive once this method has
-     * returned: if this was the entity's last reference, the reaper can
-     * enqueue and release it while a native call still using the bare {@code
-     * long} is in flight.
+     * com.intellectus.int2dds.internal.NativeKeepAlive}. Nothing about the
+     * returned value itself keeps this entity, or the native object it
+     * names, alive once this method has returned: if this was the entity's
+     * last reference, the reaper can enqueue and release it while a native
+     * call still using the bare {@code long} is in flight.
      */
     final long handle() {
         return handle.value();
