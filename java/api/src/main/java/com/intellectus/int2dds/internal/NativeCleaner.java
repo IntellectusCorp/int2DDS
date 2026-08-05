@@ -165,9 +165,12 @@ public final class NativeCleaner {
         return REAPED.get();
     }
 
-    /** Failed release attempts — refused or otherwise — counted per attempt,
-     *  not per handle: a handle retried five times before succeeding, or
-     *  before being given up on by an explicit close, adds five here. */
+    /** Release attempts that failed for a reason other than refusal: the
+     *  deleter threw, or returned a code that was not
+     *  {@code RET_PRECONDITION_NOT_MET}. A refusal is an expected answer from
+     *  the native layer, not a failure, and is counted by
+     *  {@link #deferredCount()} instead. Counted per attempt, not per handle:
+     *  a handle retried five times adds five here. */
     public static long failedCount() {
         return FAILED.get();
     }
