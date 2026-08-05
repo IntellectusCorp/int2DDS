@@ -209,16 +209,19 @@ impl WriterProxy {
             .is_some_and(|info| info.is_complete)
     }
 
+    /// Missing fragments of the first incomplete change in the range, paired with
+    /// the sequence number they belong to. A NACK_FRAG names one sequence number,
+    /// so the caller must use this one and not the range's endpoint.
     pub(crate) fn calculate_missing_fragments(
         &self,
         first_sn: SequenceNumber,
         last_sn: SequenceNumber,
-    ) -> Option<FragmentNumberSet> {
+    ) -> Option<(SequenceNumber, FragmentNumberSet)> {
         if last_sn < first_sn {
             return None;
         }
 
-        self.changes_from_writer.range(first_sn..=last_sn).find_map(|(_, change)| {
+        self.changes_from_writer.range(first_sn..=last_sn).find_map(|(sn, change)| {
             change.fragment_info.as_ref().and_then(|info| {
                 if info.is_complete {
                     return None;
@@ -237,7 +240,8 @@ impl WriterProxy {
                 }
 
                 if !missing_fragments.is_empty() {
-                    base_fragment.map(|base| FragmentNumberSet::from_vec(base, missing_fragments))
+                    base_fragment
+                        .map(|base| (*sn, FragmentNumberSet::from_vec(base, missing_fragments)))
                 } else {
                     None
                 }
@@ -526,7 +530,7 @@ mod tests {
         assert!(proxy.still_missing_fragments(sn));
         assert_eq!(
             proxy.calculate_missing_fragments(sn, sn),
-            Some(FragmentNumberSet::from_vec(2, vec![2, 4])),
+            Some((sn, FragmentNumberSet::from_vec(2, vec![2, 4]))),
         );
 
         proxy.mark_frag_received(sn, 4, 2..3); // fragment 2
@@ -545,7 +549,7 @@ mod tests {
         assert!(proxy.still_missing_fragments(sn));
         assert_eq!(
             proxy.calculate_missing_fragments(sn, sn),
-            Some(FragmentNumberSet::from_vec(3, vec![3, 4])),
+            Some((sn, FragmentNumberSet::from_vec(3, vec![3, 4]))),
         );
 
         proxy.mark_frag_received(sn, 4, 3..5); // fragments 3, 4
@@ -597,10 +601,28 @@ mod tests {
         assert!(proxy.still_missing_fragments(sn), "fragment state must be tracked, not dropped");
         assert_eq!(
             proxy.calculate_missing_fragments(sn, sn),
-            Some(FragmentNumberSet::from_vec(3, vec![3, 4])),
+            Some((sn, FragmentNumberSet::from_vec(3, vec![3, 4]))),
         );
 
         proxy.mark_frag_received(sn, 4, 3..5); // fragments 3, 4 complete it
         assert!(proxy.all_fragments_received(sn));
+    }
+
+    // The fragment set must identify the sequence number it belongs to. The caller
+    // scans a heartbeat's whole range but addressed its NACK_FRAG to the range's
+    // lastSN, so whenever the incomplete sample was not the newest one the writer
+    // was asked for another sample's fragments -- and the missing ones never came.
+    #[test]
+    fn test_calculate_missing_fragments_identifies_its_sequence_number() {
+        let mut proxy = empty_writer_proxy();
+        let older = SequenceNumber::new(0, 1);
+        let newer = SequenceNumber::new(0, 2);
+
+        proxy.mark_frag_received(older, 4, 1..2); // incomplete
+        proxy.mark_frag_received(newer, 4, 1..5); // complete
+
+        let (sn, set) = proxy.calculate_missing_fragments(older, newer).unwrap();
+        assert_eq!(sn, older, "the set must be attributed to the incomplete sample");
+        assert_eq!(set, FragmentNumberSet::from_vec(2, vec![2, 3, 4]));
     }
 }
