@@ -102,7 +102,18 @@ class NativeCleanerTest {
         AtomicInteger calls = new AtomicInteger();
         closeThenAbandon(calls);
 
-        // Give the reaper every chance to run for the now-unreachable owner.
+        // Positive control: a different resource, abandoned in the same
+        // window, that must be reaped. Without this, "calls stays at 1"
+        // would hold even with a completely dead reaper thread — close()
+        // already released the handle above synchronously, on this thread,
+        // and forget() means the reaper never sees it regardless of whether
+        // the reaper is running at all.
+        List<Long> order = Collections.synchronizedList(new ArrayList<Long>());
+        awaitCleanup(registerAndAbandon(0x9999L, order));
+        assertEquals(1, order.size(), "the reaper is alive: the control resource was reaped");
+
+        // Give the reaper every remaining chance to (incorrectly) re-run the
+        // already-closed handle's deleter.
         for (int i = 0; i < 10; i++) {
             System.gc();
             Thread.sleep(50);
@@ -138,13 +149,19 @@ class NativeCleanerTest {
     // actually encounters them in — but nothing here depends on the GC
     // choosing an order on its own.
 
-    /** A parent whose delete is refused for as long as {@code childAlive} is true. */
-    private static void registerAbandonedParent(AtomicBoolean childAlive, CountDownLatch released) {
+    /** A parent whose delete is refused for as long as {@code childAlive} is
+     *  true, and counts its own successes locally so a caller can verify "no
+     *  double release" without relying on the shared, backoff-driven, global
+     *  {@code releasedCount()} counter — which other tests' background retry
+     *  activity can also touch. */
+    private static void registerAbandonedParent(
+            AtomicBoolean childAlive, AtomicInteger successes, CountDownLatch released) {
         Object owner = new Object();
         NativeCleaner.register(owner, 0xA0L, h -> {
             if (childAlive.get()) {
                 return DdsException.RET_PRECONDITION_NOT_MET;
             }
+            successes.incrementAndGet();
             released.countDown();
             return 0;
         });
@@ -171,7 +188,7 @@ class NativeCleanerTest {
 
         long deferredBefore = NativeCleaner.deferredCount();
         CountDownLatch parentReleased = new CountDownLatch(1);
-        registerAbandonedParent(childAlive, parentReleased);
+        registerAbandonedParent(childAlive, new AtomicInteger(), parentReleased);
         awaitCleanup(parentReleased);
 
         assertEquals(deferredBefore, NativeCleaner.deferredCount(),
@@ -185,11 +202,11 @@ class NativeCleanerTest {
         // tried it and been refused, before the child's owner is dropped at
         // all.
         AtomicBoolean childAlive = new AtomicBoolean(true);
+        AtomicInteger parentSuccesses = new AtomicInteger();
         CountDownLatch parentReleased = new CountDownLatch(1);
         long deferredBefore = NativeCleaner.deferredCount();
-        long releasedBefore = NativeCleaner.releasedCount();
 
-        registerAbandonedParent(childAlive, parentReleased);
+        registerAbandonedParent(childAlive, parentSuccesses, parentReleased);
         awaitCondition(() -> NativeCleaner.deferredCount() > deferredBefore,
                 "the parent was never refused, so this test forced nothing");
         assertEquals(1, parentReleased.getCount(), "must not release while the child is alive");
@@ -209,8 +226,9 @@ class NativeCleanerTest {
         awaitCondition(() -> NativeCleaner.deferredCount() == deferredBefore,
                 "parent never left the deferred list");
         assertEquals(deferredBefore, NativeCleaner.deferredCount(), "no longer stuck");
-        assertEquals(releasedBefore + 2, NativeCleaner.releasedCount(),
-                "parent and child each released exactly once; refusals do not count as releases");
+        assertEquals(1, parentSuccesses.get(),
+                "the parent's deleter must succeed exactly once, however many times it was "
+                        + "refused first");
     }
 
     @Test
@@ -232,31 +250,105 @@ class NativeCleanerTest {
 
     @Test
     void aDeleterReturningNonZeroCountsAsAFailure() {
+        // failedCount() is a global counter a live background thread can also
+        // touch (a deferred entry elsewhere retrying and failing again), so
+        // this checks a lower bound, not exact equality.
         long before = NativeCleaner.failedCount();
-        Object owner = new Object();
-        NativeHandle h = NativeCleaner.register(owner, 0x4444L, x -> 11);
+        AtomicBoolean fail = new AtomicBoolean(true);
+        NativeHandle h = NativeCleaner.register(new Object(), 0x4444L, x -> fail.get() ? 11 : 0);
 
         assertEquals(11, h.close(), "close returns the C ABI code");
-        assertEquals(before + 1, NativeCleaner.failedCount());
+        assertTrue(NativeCleaner.failedCount() >= before + 1);
+
+        // Let it actually close so this handle's owner is not abandoned to
+        // the reaper in a permanently-failing state — every failure is now
+        // deferred and retried forever, so leaving this one to fail forever
+        // would keep contributing to failedCount() in the background for
+        // every later test in this class.
+        fail.set(false);
+        assertEquals(0, h.close());
     }
 
     @Test
     void aDeleterThatThrowsDoesNotKillTheReaperThread() throws InterruptedException {
         // If an exception escapes the reaper loop the thread dies and every
-        // later cleanup silently stops. Register a throwing resource, then a
-        // well-behaved one, and require the second still runs.
-        abandonThrowing();
+        // later cleanup silently stops. abandonThrowing()'s own latch confirms
+        // the throwing deleter actually ran, rather than assuming GC happened
+        // to schedule it before the next assertion — nothing otherwise forces
+        // 0x6666 to be dequeued before 0x5555 is checked.
+        AtomicBoolean stopThrowing = new AtomicBoolean(false);
+        long deferredBefore = NativeCleaner.deferredCount();
+        CountDownLatch threw = abandonThrowing(stopThrowing);
+        awaitCleanup(threw);
 
         List<Long> order = Collections.synchronizedList(new ArrayList<Long>());
         awaitCleanup(registerAndAbandon(0x5555L, order));
         assertEquals(1, order.size(), "the reaper survived the throwing deleter");
+
+        // Let the once-throwing resource actually succeed now (a thrown
+        // deleter is a FAILED outcome, and every failure is deferred and
+        // retried forever) so it does not linger in the background for later
+        // tests' deferredCount() checks to trip over.
+        stopThrowing.set(true);
+        awaitCondition(() -> NativeCleaner.deferredCount() == deferredBefore,
+                "the once-throwing resource never left the deferred list");
     }
 
-    private static void abandonThrowing() {
+    private static CountDownLatch abandonThrowing(AtomicBoolean stopThrowing) {
+        CountDownLatch threw = new CountDownLatch(1);
         Object owner = new Object();
         NativeCleaner.register(owner, 0x6666L, x -> {
+            if (stopThrowing.get()) {
+                return 0;
+            }
+            threw.countDown();
             throw new IllegalStateException("deliberate");
         });
+        return threw;
+    }
+
+    @Test
+    void aConcurrentCloseWaitsForAnInFlightAttemptRatherThanLying() throws InterruptedException {
+        // A failed CAS in release() means either CLOSED (truly done, 0 is
+        // honest) or RELEASING (another attempt is in flight and may yet
+        // revert to OPEN — reporting 0 here would be a lie if it does).
+        // Stall the deleter mid-flight so a second, concurrent close() has to
+        // observe RELEASING specifically, not just race past it.
+        CountDownLatch deleterEntered = new CountDownLatch(1);
+        CountDownLatch releaseDeleter = new CountDownLatch(1);
+        AtomicInteger calls = new AtomicInteger();
+        NativeHandle h = NativeCleaner.register(new Object(), 0xBEEFL, x -> {
+            calls.incrementAndGet();
+            deleterEntered.countDown();
+            try {
+                releaseDeleter.await(2, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return 0;
+        });
+
+        Thread first = new Thread(h::close);
+        first.start();
+        assertTrue(deleterEntered.await(2, TimeUnit.SECONDS), "the first close() never reached the deleter");
+
+        // The handle is now RELEASING and will stay there until
+        // releaseDeleter falls. Start the second close() while that is still
+        // true, then give it a real chance to reach the CAS before releasing
+        // the first.
+        AtomicInteger secondResult = new AtomicInteger(Integer.MIN_VALUE);
+        Thread second = new Thread(() -> secondResult.set(h.close()));
+        second.start();
+        Thread.sleep(50);
+        releaseDeleter.countDown();
+
+        first.join(2000);
+        second.join(2000);
+        assertFalse(first.isAlive(), "first close() did not finish");
+        assertFalse(second.isAlive(), "second close() did not finish");
+        assertEquals(1, calls.get(), "only one of the two concurrent close() calls may reach the deleter");
+        assertEquals(0, secondResult.get(),
+                "the losing close() must report the real, successful outcome, not a premature 0");
     }
 
     @Test
