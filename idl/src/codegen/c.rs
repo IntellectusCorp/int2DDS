@@ -27,6 +27,16 @@ impl Default for COptions {
     }
 }
 
+/// Element kinds whose sequence/array bodies can be moved with one call.
+/// See `CGen::bulk_element` for what qualifies and why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BulkElem {
+    /// Fixed-width primitive whose C memory bytes are its CDR wire bytes, plus that width.
+    Prim(u32),
+    /// `boolean` — one octet on the wire, but the copy needs a 0/1 normalization pass.
+    Bool,
+}
+
 pub fn generate(model: &IdlModel, idl_filename: &str, opts: &COptions) -> String {
     let mut gen = CGen { out: String::new(), opts, model };
     gen.emit_file(idl_filename);
@@ -905,11 +915,10 @@ impl<'a> CGen<'a> {
                     "{}int2dds_cdr_write_seq_header(&w, {}.length);\n",
                     indent, accessor
                 ));
-                if Self::sequence_element_is_raw_byte(element) {
-                    self.raw(&format!(
-                        "{}int2dds_cdr_write_bytes(&w, {}.data, {}.length);\n",
-                        indent, accessor, accessor
-                    ));
+                if let Some(kind) = self.bulk_element(element) {
+                    let data = format!("{}.data", accessor);
+                    let count = format!("{}.length", accessor);
+                    self.emit_bulk_write(kind, &data, &count, indent);
                 } else {
                     self.raw(&format!(
                         "{}for (uint32_t _i = 0; _i < {}.length; _i++) {{\n",
@@ -925,10 +934,18 @@ impl<'a> CGen<'a> {
                 }
             }
             ResolvedType::Array { element, size } => {
-                self.raw(&format!("{}for (uint32_t _i = 0; _i < {}; _i++) {{\n", indent, size));
-                let elem_accessor = format!("{}[_i]", accessor);
-                self.emit_write_field_indented(element, &elem_accessor, &format!("{}    ", indent));
-                self.raw(&format!("{}}}\n", indent));
+                if let Some(kind) = self.bulk_element(element) {
+                    self.emit_bulk_write(kind, accessor, &size.to_string(), indent);
+                } else {
+                    self.raw(&format!("{}for (uint32_t _i = 0; _i < {}; _i++) {{\n", indent, size));
+                    let elem_accessor = format!("{}[_i]", accessor);
+                    self.emit_write_field_indented(
+                        element,
+                        &elem_accessor,
+                        &format!("{}    ", indent),
+                    );
+                    self.raw(&format!("{}}}\n", indent));
+                }
             }
             ResolvedType::Map { key, value, .. } => {
                 let needs_dh = Self::sequence_element_needs_dheader(key)
@@ -1192,7 +1209,9 @@ impl<'a> CGen<'a> {
                     indent, accessor
                 ));
 
-                let raw_bytes = Self::sequence_element_is_raw_byte(element);
+                let bulk = self.bulk_element(element);
+                let data = format!("{}.data", accessor);
+                let count = format!("{}.length", accessor);
 
                 // Pointer mode + unbounded: auto-allocate the data array
                 if self.opts.string_mode == StringMode::Pointer && bound.is_none() {
@@ -1203,11 +1222,8 @@ impl<'a> CGen<'a> {
                         indent, accessor, elem_c, accessor, elem_c
                     ));
                     self.raw(&format!("{}    if ({}.data) {{\n", indent, accessor));
-                    if raw_bytes {
-                        self.raw(&format!(
-                            "{}        int2dds_cdr_read_bytes(&r, {}.data, {}.length);\n",
-                            indent, accessor, accessor
-                        ));
+                    if let Some(kind) = bulk {
+                        self.emit_bulk_read(kind, &data, &count, &format!("{}        ", indent));
                     } else {
                         self.raw(&format!(
                             "{}        for (uint32_t _i = 0; _i < {}.length; _i++) {{\n",
@@ -1223,12 +1239,9 @@ impl<'a> CGen<'a> {
                     }
                     self.raw(&format!("{}    }}\n", indent));
                     self.raw(&format!("{}}}\n", indent));
-                } else if raw_bytes {
+                } else if let Some(kind) = bulk {
                     // Bounded or FixedArray mode: data is inline array or pre-allocated
-                    self.raw(&format!(
-                        "{}int2dds_cdr_read_bytes(&r, {}.data, {}.length);\n",
-                        indent, accessor, accessor
-                    ));
+                    self.emit_bulk_read(kind, &data, &count, indent);
                 } else {
                     self.raw(&format!(
                         "{}for (uint32_t _i = 0; _i < {}.length; _i++) {{\n",
@@ -1244,10 +1257,18 @@ impl<'a> CGen<'a> {
                 }
             }
             ResolvedType::Array { element, size } => {
-                self.raw(&format!("{}for (uint32_t _i = 0; _i < {}; _i++) {{\n", indent, size));
-                let elem_accessor = format!("{}[_i]", accessor);
-                self.emit_read_field_indented(element, &elem_accessor, &format!("{}    ", indent));
-                self.raw(&format!("{}}}\n", indent));
+                if let Some(kind) = self.bulk_element(element) {
+                    self.emit_bulk_read(kind, accessor, &size.to_string(), indent);
+                } else {
+                    self.raw(&format!("{}for (uint32_t _i = 0; _i < {}; _i++) {{\n", indent, size));
+                    let elem_accessor = format!("{}[_i]", accessor);
+                    self.emit_read_field_indented(
+                        element,
+                        &elem_accessor,
+                        &format!("{}    ", indent),
+                    );
+                    self.raw(&format!("{}}}\n", indent));
+                }
             }
             ResolvedType::Map { key, value, .. } => {
                 let needs_dh = Self::sequence_element_needs_dheader(key)
@@ -1324,14 +1345,69 @@ impl<'a> CGen<'a> {
 
     // ---- Type Info (DDS-XTypes discovery) ----
 
-    /// Whether a sequence's elements form a contiguous byte run on the wire.
+    /// How a sequence or array of `element` can be moved in one call, if at all.
     ///
-    /// `octet` and `uint8` have alignment 1, so CDR lays them out with no inter-element
-    /// padding and no byte-order transform. That makes a bulk memcpy byte-identical to a
-    /// per-element loop, which matters for large payloads: the loop costs a bounds check
-    /// per byte and blocks vectorization.
-    fn sequence_element_is_raw_byte(element: &ResolvedType) -> bool {
-        matches!(element, ResolvedType::U8 | ResolvedType::UInt8)
+    /// CDR lays same-width primitives out back to back — no inter-element padding, and no
+    /// per-element transform beyond byte order — so for these element types one aligned
+    /// bulk copy is byte-identical to the per-element loop. That matters for large
+    /// payloads: the loop costs a bounds check per element and its loop-carried error flag
+    /// blocks vectorization.
+    ///
+    /// Deliberately excluded:
+    /// - `enum`, because the generated C type is a real `typedef enum` whose size is
+    ///   implementation-defined, while the wire (and the Rust side) use int32.
+    /// - `struct`, `string`, `wstring`, `map` and nested sequences/arrays, because C
+    ///   in-memory layout does not match CDR layout for aggregates and variable-length
+    ///   elements. Nested arrays fall through to the loop, which then recurses per
+    ///   dimension and reaches this fast path on the innermost one.
+    fn bulk_element(&self, element: &ResolvedType) -> Option<BulkElem> {
+        match element {
+            ResolvedType::Bool => Some(BulkElem::Bool),
+            ResolvedType::U8 | ResolvedType::UInt8 | ResolvedType::I8 | ResolvedType::Char => {
+                Some(BulkElem::Prim(1))
+            }
+            ResolvedType::I16 | ResolvedType::U16 | ResolvedType::WChar => Some(BulkElem::Prim(2)),
+            ResolvedType::I32 | ResolvedType::U32 | ResolvedType::F32 => Some(BulkElem::Prim(4)),
+            ResolvedType::I64 | ResolvedType::U64 | ResolvedType::F64 => Some(BulkElem::Prim(8)),
+            ResolvedType::Bitmask(name) => {
+                // emit_bitmask() declares a plain uintN_t typedef of exactly the wire width.
+                let bits = self.find_bitmask(name).map(|b| b.bit_bound).unwrap_or(32);
+                Some(BulkElem::Prim(match bits {
+                    0..=8 => 1,
+                    9..=16 => 2,
+                    17..=32 => 4,
+                    _ => 8,
+                }))
+            }
+            _ => None,
+        }
+    }
+
+    /// Emit the single call that writes a whole bulk-eligible element run.
+    ///
+    /// `boolean` needs no special case here: a valid C `bool` already holds 0 or 1, which is
+    /// exactly what `int2dds_cdr_write_bool` would emit for it. Only the read side has to
+    /// normalize, because there the octet comes off the wire.
+    fn emit_bulk_write(&mut self, kind: BulkElem, data: &str, count: &str, indent: &str) {
+        let size = match kind {
+            BulkElem::Prim(size) => size,
+            BulkElem::Bool => 1,
+        };
+        self.raw(&format!(
+            "{}int2dds_cdr_write_prim_array(&w, {}, {}, {});\n",
+            indent, data, count, size
+        ));
+    }
+
+    /// Emit the single call that reads a whole bulk-eligible element run.
+    fn emit_bulk_read(&mut self, kind: BulkElem, data: &str, count: &str, indent: &str) {
+        let call = match kind {
+            BulkElem::Prim(size) => {
+                format!("int2dds_cdr_read_prim_array(&r, {}, {}, {})", data, count, size)
+            }
+            BulkElem::Bool => format!("int2dds_cdr_read_bool_array(&r, {}, {})", data, count),
+        };
+        self.raw(&format!("{}{};\n", indent, call));
     }
 
     /// Check if a sequence needs an outer DHEADER in XCDR2.

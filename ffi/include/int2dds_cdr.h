@@ -143,6 +143,13 @@ INT2DDS_CDR_DEF bool int2dds_cdr_write_string(Int2DdsCdrWriter *w, const char *s
 INT2DDS_CDR_DEF bool int2dds_cdr_write_seq_header(Int2DdsCdrWriter *w, uint32_t count);
 INT2DDS_CDR_DEF bool int2dds_cdr_write_bytes(Int2DdsCdrWriter *w, const uint8_t *data, size_t len);
 
+/* Bulk primitive array/sequence body. `elem_size` must be 1, 2, 4 or 8 and must equal
+ * sizeof(*data). Aligns once, then copies the whole run — byte-identical to writing the
+ * elements one at a time, because CDR lays out same-width primitives with no inter-element
+ * padding. A zero count writes nothing at all (not even alignment padding), matching a
+ * per-element loop that never executes. */
+INT2DDS_CDR_DEF bool int2dds_cdr_write_prim_array(Int2DdsCdrWriter *w, const void *data, size_t count, size_t elem_size);
+
 /* XCDR2 DHEADER */
 INT2DDS_CDR_DEF bool int2dds_cdr_write_dheader_begin(Int2DdsCdrWriter *w, size_t *token_out);
 INT2DDS_CDR_DEF bool int2dds_cdr_write_dheader_finalize(Int2DdsCdrWriter *w, size_t token);
@@ -190,6 +197,15 @@ INT2DDS_CDR_DEF bool int2dds_cdr_read_string(Int2DdsCdrReader *r, const char **s
 INT2DDS_CDR_DEF bool int2dds_cdr_read_string_copy(Int2DdsCdrReader *r, char *buf, size_t buf_capacity, size_t *actual_len_out);
 INT2DDS_CDR_DEF bool int2dds_cdr_read_seq_header(Int2DdsCdrReader *r, uint32_t *count_out);
 INT2DDS_CDR_DEF bool int2dds_cdr_read_bytes(Int2DdsCdrReader *r, uint8_t *out, size_t len);
+
+/* Bulk counterpart of int2dds_cdr_write_prim_array. */
+INT2DDS_CDR_DEF bool int2dds_cdr_read_prim_array(Int2DdsCdrReader *r, void *out, size_t count, size_t elem_size);
+
+/* Bulk boolean read. Not a plain copy: the wire may carry any octet, and storing anything
+ * other than 0 or 1 in a C `bool` is undefined, so each octet is normalized the way
+ * int2dds_cdr_read_bool() does. Booleans are written with int2dds_cdr_write_prim_array()
+ * instead — a valid `bool` already holds 0 or 1, so there is nothing to normalize. */
+INT2DDS_CDR_DEF bool int2dds_cdr_read_bool_array(Int2DdsCdrReader *r, bool *out, size_t count);
 
 /* XCDR2 DHEADER */
 INT2DDS_CDR_DEF bool int2dds_cdr_read_dheader(Int2DdsCdrReader *r, uint32_t *object_size_out, size_t *start_pos_out);
@@ -301,6 +317,39 @@ static inline uint64_t _int2dds_get_u64(const uint8_t *src, bool le) {
                 | ((uint64_t)src[2] << 40) | ((uint64_t)src[3] << 32)
                 | ((uint64_t)src[4] << 24) | ((uint64_t)src[5] << 16)
                 | ((uint64_t)src[6] << 8) | (uint64_t)src[7];
+}
+
+/* ---- Bulk primitive copy helpers -------------------------------------- */
+
+/* Host byte order, resolved at compile time where the toolchain exposes it and by a
+ * folded runtime probe otherwise. Used to decide whether a primitive run can go out
+ * as a straight memcpy or has to be swapped element by element. */
+#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__)
+  #define INT2DDS_CDR_HOST_LE (__BYTE_ORDER__ != __ORDER_BIG_ENDIAN__)
+#elif defined(_MSC_VER)
+  #define INT2DDS_CDR_HOST_LE 1  /* every MSVC target is little-endian */
+#else
+static inline bool _int2dds_cdr_host_le_probe(void) {
+    const uint16_t one = 1;
+    return *(const uint8_t *)&one != 0;
+}
+  #define INT2DDS_CDR_HOST_LE _int2dds_cdr_host_le_probe()
+#endif
+
+/* CDR encodes boolean as a single octet, and the bulk bool paths stride by 1.
+ * Every ABI int2DDS targets has sizeof(bool) == 1; fail the build rather than
+ * mis-stride if that ever stops holding. */
+typedef char _int2dds_cdr_bool_is_one_byte[(sizeof(bool) == 1) ? 1 : -1];
+
+/* Reverse each element while copying. Only reached when the stream byte order differs
+ * from the host, which cannot happen on the common LE-host/LE-wire path. */
+static inline void _int2dds_cdr_swap_copy(uint8_t *dst, const uint8_t *src,
+                                          size_t count, size_t elem_size) {
+    for (size_t i = 0; i < count; i++) {
+        const uint8_t *s = src + i * elem_size;
+        uint8_t       *d = dst + (i + 1) * elem_size;
+        for (size_t b = 0; b < elem_size; b++) *(--d) = *s++;
+    }
 }
 
 /* ---- Writer Init ------------------------------------------------------ */
@@ -495,6 +544,29 @@ INT2DDS_CDR_DEF bool int2dds_cdr_write_bytes(Int2DdsCdrWriter *w, const uint8_t 
     w->pos += len;
     return true;
 }
+
+INT2DDS_CDR_DEF bool int2dds_cdr_write_prim_array(Int2DdsCdrWriter *w, const void *data,
+                                                  size_t count, size_t elem_size) {
+    if (!_int2dds_cdr_w_ok(w)) return false;
+    /* No element means nothing to align to: a per-element loop would emit no padding. */
+    if (count == 0) return true;
+    if (count > (size_t)-1 / elem_size) {
+        w->error = INT2DDS_CDR_ERR_OVERFLOW;
+        return false;
+    }
+    if (elem_size > 1 && !int2dds_cdr_write_align(w, elem_size)) return false;
+
+    size_t n = count * elem_size;
+    if (!_int2dds_cdr_w_ensure(w, n)) return false;
+    if (elem_size == 1 || w->little_endian == INT2DDS_CDR_HOST_LE) {
+        memcpy(w->buf + w->pos, data, n);
+    } else {
+        _int2dds_cdr_swap_copy(w->buf + w->pos, (const uint8_t *)data, count, elem_size);
+    }
+    w->pos += n;
+    return true;
+}
+
 
 /* ---- XCDR2 DHEADER Write ---------------------------------------------- */
 
@@ -832,6 +904,40 @@ INT2DDS_CDR_DEF bool int2dds_cdr_read_bytes(Int2DdsCdrReader *r, uint8_t *out, s
     if (!_int2dds_cdr_r_ensure(r, len)) return false;
     if (len > 0) memcpy(out, r->buf + r->pos, len);
     r->pos += len;
+    return true;
+}
+
+INT2DDS_CDR_DEF bool int2dds_cdr_read_prim_array(Int2DdsCdrReader *r, void *out,
+                                                 size_t count, size_t elem_size) {
+    if (!_int2dds_cdr_r_ok(r)) return false;
+    if (count == 0) return true;
+    if (count > (size_t)-1 / elem_size) {
+        r->error = INT2DDS_CDR_ERR_UNDERFLOW;
+        return false;
+    }
+    if (elem_size > 1 && !int2dds_cdr_read_align(r, elem_size)) return false;
+
+    size_t n = count * elem_size;
+    if (!_int2dds_cdr_r_ensure(r, n)) return false;
+    if (elem_size == 1 || r->little_endian == INT2DDS_CDR_HOST_LE) {
+        memcpy(out, r->buf + r->pos, n);
+    } else {
+        _int2dds_cdr_swap_copy((uint8_t *)out, r->buf + r->pos, count, elem_size);
+    }
+    r->pos += n;
+    return true;
+}
+
+INT2DDS_CDR_DEF bool int2dds_cdr_read_bool_array(Int2DdsCdrReader *r, bool *out, size_t count) {
+    if (!_int2dds_cdr_r_ok(r)) return false;
+    if (count == 0) return true;
+    if (!_int2dds_cdr_r_ensure(r, count)) return false;
+
+    /* Same normalization as int2dds_cdr_read_bool(): any nonzero octet reads as true. */
+    uint8_t *dst = (uint8_t *)out;
+    memcpy(dst, r->buf + r->pos, count);
+    for (size_t i = 0; i < count; i++) dst[i] = dst[i] != 0 ? 1 : 0;
+    r->pos += count;
     return true;
 }
 
