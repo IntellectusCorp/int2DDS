@@ -2,6 +2,7 @@ package com.intellectus.int2dds.core;
 
 import com.intellectus.int2dds.cdr.Extensibility;
 import com.intellectus.int2dds.exceptions.DdsErrorException;
+import com.intellectus.int2dds.internal.NativeCleaner;
 import com.intellectus.int2dds.internal.QosMarshal;
 import com.intellectus.int2dds.internal.ReturnCodes;
 import com.intellectus.int2dds.internal.ffi.FfiAccess;
@@ -46,6 +47,32 @@ public final class Topic<T extends IDdsType> extends NativeEntity {
         this.name = name;
         this.typeName = prototype.typeName();
         this.extensibility = prototype.extensibility();
+    }
+
+    private Topic(DomainParticipant participant, String name, T prototype,
+            NativeCleaner.Deleter deleter) {
+        super(Objects.requireNonNull(participant, "participant"),
+                create(participant, Objects.requireNonNull(name, "name"),
+                        Objects.requireNonNull(prototype, "prototype"), null),
+                deleter);
+        this.name = name;
+        this.typeName = prototype.typeName();
+        this.extensibility = prototype.extensibility();
+    }
+
+    /**
+     * Package-private construction seam, the same pattern as {@link
+     * DomainParticipant#createForTest}: the same default-QoS creation path
+     * as the public factory, but with an explicit deleter in place of the
+     * fixed {@code FfiAccess::deleteTopic}, for tests that need to observe
+     * exactly how many times the deleter is actually invoked. A
+     * test-supplied deleter should still delegate to the real delete — this
+     * seam changes who gets to count the calls, not what actually happens
+     * to the underlying native topic.
+     */
+    static <T extends IDdsType> Topic<T> createForTest(DomainParticipant participant,
+            String name, T prototype, NativeCleaner.Deleter deleter) {
+        return new Topic<T>(participant, name, prototype, deleter);
     }
 
     /** The topic name this instance was created with. */

@@ -1,6 +1,7 @@
 package com.intellectus.int2dds.core;
 
 import com.intellectus.int2dds.exceptions.DdsErrorException;
+import com.intellectus.int2dds.internal.NativeCleaner;
 import com.intellectus.int2dds.internal.QosMarshal;
 import com.intellectus.int2dds.internal.ReturnCodes;
 import com.intellectus.int2dds.internal.ffi.FfiAccess;
@@ -29,6 +30,24 @@ public final class Publisher extends NativeEntity {
     Publisher(DomainParticipant participant, PublisherQos qos) {
         super(Objects.requireNonNull(participant, "participant"), create(participant, qos),
                 FfiAccess::deletePublisher);
+    }
+
+    private Publisher(DomainParticipant participant, NativeCleaner.Deleter deleter) {
+        super(Objects.requireNonNull(participant, "participant"), create(participant, null),
+                deleter);
+    }
+
+    /**
+     * Package-private construction seam, the same pattern as {@link
+     * DomainParticipant#createForTest} and {@link Topic#createForTest}: the
+     * same default-QoS creation path as the public factory, but with an
+     * explicit deleter in place of the fixed {@code FfiAccess::deletePublisher},
+     * for tests that need to observe exactly how many times the deleter is
+     * actually invoked. A test-supplied deleter should still delegate to the
+     * real delete.
+     */
+    static Publisher createForTest(DomainParticipant participant, NativeCleaner.Deleter deleter) {
+        return new Publisher(participant, deleter);
     }
 
     /**

@@ -47,20 +47,30 @@ class EntityTreeTest {
         // detect a wrong order, unlike what an earlier version of this test
         // assumed.
         //
-        // What a plain isClosed() cannot rule out is a *double* release of
-        // the participant's own handle, so that one delete is additionally
-        // counted through a test-local AtomicInteger -- the same
-        // createForTest seam DomainParticipantTest.closingTwiceIsHarmless
-        // uses -- rather than the shared NativeCleaner.releasedCount(),
-        // which a background retry thread working on some other test's
-        // entities can also move (NativeCleaner's own class doc).
+        // What isClosed() alone cannot rule out is a *double* release of any
+        // of the three handles, so each delete is additionally counted
+        // through its own test-local AtomicInteger -- the createForTest seam
+        // DomainParticipantTest.closingTwiceIsHarmless already uses for
+        // DomainParticipant, mirrored here for Topic and Publisher -- rather
+        // than the shared NativeCleaner.releasedCount(), which a background
+        // retry thread working on some other test's entities can also move
+        // (NativeCleaner's own class doc).
         AtomicInteger participantDeletes = new AtomicInteger();
+        AtomicInteger topicDeletes = new AtomicInteger();
+        AtomicInteger publisherDeletes = new AtomicInteger();
         DomainParticipant p = DomainParticipant.createForTest(testDomain(), handle -> {
             participantDeletes.incrementAndGet();
             return FfiAccess.deleteParticipant(handle);
         });
-        Topic<ConformanceRecord> t = p.createTopic("tree_cascade", new ConformanceRecord());
-        Publisher pub = p.createPublisher();
+        Topic<ConformanceRecord> t = Topic.createForTest(
+                p, "tree_cascade", new ConformanceRecord(), handle -> {
+                    topicDeletes.incrementAndGet();
+                    return FfiAccess.deleteTopic(handle);
+                });
+        Publisher pub = Publisher.createForTest(p, handle -> {
+            publisherDeletes.incrementAndGet();
+            return FfiAccess.deletePublisher(handle);
+        });
         assertNotEquals(0L, t.handle());
         assertNotEquals(0L, pub.handle());
 
@@ -69,6 +79,9 @@ class EntityTreeTest {
         assertTrue(t.isClosed(), "the topic was closed by the cascade");
         assertTrue(pub.isClosed(), "the publisher was closed by the cascade");
         assertTrue(p.isClosed(), "the participant itself was closed last");
+        assertEquals(1, topicDeletes.get(), "the topic's own handle is released exactly once");
+        assertEquals(1, publisherDeletes.get(),
+                "the publisher's own handle is released exactly once");
         assertEquals(1, participantDeletes.get(),
                 "the participant's own handle is released exactly once");
     }
@@ -107,6 +120,16 @@ class EntityTreeTest {
      * still ends up released, however many refusals it takes to get there.
      * This drives that guarantee through real entities and the real
      * refuse/defer/retry loop, not a fake standing in for it.
+     *
+     * <p>An earlier version of this test needed a decoy create afterward to
+     * unstick a false negative: {@code NativeKeepAlive}'s fence used to keep
+     * whatever it last fenced strongly reachable indefinitely, and
+     * {@code buildAndAbandonTree}'s last constructor call left the abandoned
+     * participant as that last-fenced object, so it was never actually
+     * eligible for collection at all. Fixed at the source in {@code
+     * NativeKeepAlive} itself (store, then immediately clear, the sink) —
+     * see that class's doc — so this test needs no workaround of its own
+     * anymore.
      */
     @Test
     void anAbandonedTreeIsEventuallyFullyReleased() throws InterruptedException {
@@ -114,7 +137,6 @@ class EntityTreeTest {
         long deferredBefore = NativeCleaner.deferredCount();
 
         buildAndAbandonTree();
-        flushNativeKeepAliveSink();
 
         awaitReaped(reapedBefore, 3);
         // awaitReaped only demands that reapedCount reach its target; a
@@ -139,42 +161,6 @@ class EntityTreeTest {
         assertNotEquals(0L, t.handle());
         assertNotEquals(0L, pub.handle());
         // all three go out of scope here with no close()
-    }
-
-    /**
-     * Without this, the test above hangs until its own timeout: {@link
-     * NativeKeepAlive}'s fence is one static field that holds whatever was
-     * last handed to {@code keepAlive} until something else overwrites it
-     * (see that class's doc on why a plain, non-volatile static write is
-     * enough to work as a fence at all). {@code Topic}/{@code Publisher}'s
-     * create path is the only thing that calls it, and {@code
-     * buildAndAbandonTree} above ends with exactly such a call —
-     * {@code createPublisher()}'s {@code keepAlive(participant)} — so once
-     * that method returns, the sink is still holding a strong, static
-     * reference to the abandoned participant. Confirmed directly: without
-     * this flush, the topic and publisher release as expected but the
-     * participant sits at zero attempts (not refused, not failed — simply
-     * never enqueued) for as long as the process keeps running, because
-     * nothing else ever calls {@code keepAlive} again to displace it. In a
-     * real application this is harmless and transient — the next {@code
-     * Topic}/{@code Publisher}/{@code DataWriter} created anywhere flushes
-     * it — but a test that abandons a tree and then does nothing else never
-     * supplies that later call on its own, so this does, on a throwaway
-     * participant that is explicitly closed regardless of what happens to
-     * the abandoned tree.
-     *
-     * <p>This is not a defer/retry bug: {@link NativeCleaner}'s reaper drains
-     * the whole real tree on the order of 200ms once the participant is
-     * actually eligible for collection, verified by instrumenting this exact
-     * scenario before adding this method.
-     */
-    private static void flushNativeKeepAliveSink() {
-        DomainParticipant decoy = new DomainParticipant(testDomain());
-        try {
-            decoy.createPublisher();
-        } finally {
-            decoy.close();
-        }
     }
 
     /**

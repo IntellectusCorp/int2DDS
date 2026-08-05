@@ -24,6 +24,21 @@ tasks.named<JavaCompile>("compileJava22Java") {
     options.release.set(22)
 }
 
+// Source set for the JDK 9+ override of NativeKeepAlive, which delegates
+// straight to java.lang.ref.Reference.reachabilityFence -- unavailable
+// before 9, which is exactly why the --release-8 src/main/java fallback
+// exists at all. Same shape as java22 above; release 9 rather than 22 means
+// this one is compilable by this build's own JDK 17 toolchain today, so
+// unlike java22 it is populated immediately, not left NO-SOURCE.
+val java9 by sourceSets.creating {
+    java.srcDir("src/main/java9")
+    compileClasspath += sourceSets.main.get().output
+}
+
+tasks.named<JavaCompile>("compileJava9Java") {
+    options.release.set(9)
+}
+
 dependencies {
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
 }
@@ -76,6 +91,9 @@ tasks.withType<Test>().configureEach {
 
 tasks.jar {
     archiveBaseName.set("int2dds-api")
+    into("META-INF/versions/9") {
+        from(java9.output)
+    }
     into("META-INF/versions/22") {
         from(java22.output)
     }
