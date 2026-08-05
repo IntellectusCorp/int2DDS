@@ -78,7 +78,12 @@ impl Submessage<'static> {
         let submessage_len = submessage_header.submessage_length() as usize;
 
         let actual_body = if submessage_len == 0 {
-            all_submessages_bytes.len().saturating_sub(4) // Everything except the header
+            match submessage_header.submessage_id() {
+                // PAD and INFO_TS are the exceptions: for them a declared length of zero
+                // means an empty body, and the next submessage header follows immediately.
+                SubmessageId::PAD | SubmessageId::INFO_TS => 0,
+                _ => all_submessages_bytes.len().saturating_sub(4), // Everything except the header
+            }
         } else {
             submessage_len
         };
@@ -171,16 +176,24 @@ impl Submessage<'static> {
                 Some(SubmessageBody::InfoSource(submessage_body))
             }
             SubmessageId::INFO_TS => {
-                let submessage_body = InfoTimestamp::read_from_buffer_with_ctx(
-                    submessage_header.endianness_flag().ok_or_else(|| {
-                        RtpsError::new(RtpsErrorCode::UnsupportedSubmessageType, None)
-                    })?,
-                    &submessage_body_bytes,
-                )
-                .map_err(map_speedy_err)?;
-                // Change in state of Receiver
-                message_receiver.from_timestamp(&submessage_header, &submessage_body);
-                Some(SubmessageBody::InfoTimestamp(submessage_body))
+                // With the InvalidateFlag set there is no timestamp field to read: the
+                // submessage only tells the receiver to stop using the one it holds.
+                if submessage_header.invalidate_flag() == Some(true) {
+                    // Change in state of Receiver
+                    message_receiver.invalidate_timestamp();
+                    None
+                } else {
+                    let submessage_body = InfoTimestamp::read_from_buffer_with_ctx(
+                        submessage_header.endianness_flag().ok_or_else(|| {
+                            RtpsError::new(RtpsErrorCode::UnsupportedSubmessageType, None)
+                        })?,
+                        &submessage_body_bytes,
+                    )
+                    .map_err(map_speedy_err)?;
+                    // Change in state of Receiver
+                    message_receiver.from_timestamp(&submessage_header, &submessage_body);
+                    Some(SubmessageBody::InfoTimestamp(submessage_body))
+                }
             }
             SubmessageId::NACK_FRAG => {
                 let submessage_body =
