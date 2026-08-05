@@ -49,6 +49,7 @@
 //! ```
 
 use log::{debug, info};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Instant;
@@ -85,7 +86,9 @@ struct NotifyState {
 }
 
 pub struct WaitSet {
-    conditions: Arc<Mutex<Vec<Arc<dyn Condition + Send + Sync>>>>,
+    // Attached conditions keyed by Condition::identity(), so attach and detach
+    // need no scan over the attached set.
+    conditions: Arc<Mutex<HashMap<usize, Arc<dyn Condition + Send + Sync>>>>,
     condvar: Arc<Condvar>,
     waiting_count: Arc<AtomicUsize>,
     notify_lock: Arc<Mutex<NotifyState>>,
@@ -120,7 +123,7 @@ impl WaitSet {
         let notify = Self::make_notify(condvar.clone(), notify_lock.clone(), instance_id);
 
         Self {
-            conditions: Arc::new(Mutex::new(Vec::new())),
+            conditions: Arc::new(Mutex::new(HashMap::new())),
             condvar,
             waiting_count: Arc::new(AtomicUsize::new(0)),
             notify_lock,
@@ -170,11 +173,9 @@ impl WaitSet {
             .lock()
             .map_err(|e| DdsError::Error(format!("Failed to lock conditions: {}", e)))?;
 
-        // Check for duplicate condition handles by object identity. Debug output is not an
-        // identity: distinct conditions in the same state render identically, and comparing
-        // the rendered strings costs two allocations per element on every attach.
-        let new_identity = new_condition.identity();
-        if conditions.iter().any(|existing| existing.identity() == new_identity) {
+        // Duplicate condition handles are detected by object identity, which is also the map key.
+        let new_identity = new_condition.identity() as usize;
+        if conditions.contains_key(&new_identity) {
             debug!("[WaitSet-{}] Condition already attached, skipping", self.instance_id);
             return Ok(());
         }
@@ -185,7 +186,7 @@ impl WaitSet {
             waiting_threads > 0 && new_condition.get_trigger_value().unwrap_or(false);
 
         new_condition.set_waitset_callback(Some(self.notify.clone()));
-        conditions.push(new_condition);
+        conditions.insert(new_identity, new_condition);
         let condition_count = conditions.len();
         debug!(
             "[WaitSet-{}] Condition attached successfully. Total conditions: {}",
@@ -217,18 +218,12 @@ impl WaitSet {
             .lock()
             .map_err(|e| DdsError::Error(format!("Failed to lock conditions: {}", e)))?;
 
-        // Remove only the condition that was asked for. Matching on Debug output would remove
-        // whichever attached condition happens to render the same, which for conditions in the
-        // same state is the first one in the list rather than the requested one.
-        let remove_identity = remove_condition.identity();
-        let pos = conditions.iter().position(|c| c.identity() == remove_identity);
-
-        if let Some(pos) = pos {
-            conditions[pos].set_waitset_callback(None);
-            conditions.remove(pos);
-            Ok(())
-        } else {
-            Err(DdsError::PreconditionNotMet)
+        match conditions.remove(&(remove_condition.identity() as usize)) {
+            Some(attached) => {
+                attached.set_waitset_callback(None);
+                Ok(())
+            }
+            None => Err(DdsError::PreconditionNotMet),
         }
     }
 
@@ -385,7 +380,7 @@ impl WaitSet {
             .lock()
             .map_err(|e| DdsError::Error(format!("Failed to lock conditions: {}", e)))?;
 
-        Ok(conditions.clone())
+        Ok(conditions.values().cloned().collect())
     }
 
     /// Function to check and return triggered conditions
@@ -400,7 +395,7 @@ impl WaitSet {
         }
 
         let mut triggered = Vec::new();
-        for (idx, condition) in conditions.iter().enumerate() {
+        for (idx, condition) in conditions.values().enumerate() {
             match condition.get_trigger_value() {
                 Ok(true) => {
                     debug!("[WaitSet-{}] Condition #{} TRIGGERED", self.instance_id, idx + 1);
