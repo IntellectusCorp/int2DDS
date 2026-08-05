@@ -102,26 +102,44 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
      * <p>Allocates nothing and copies nothing: {@code sample.serializeCdr}
      * writes straight into a pooled direct buffer, and only that buffer's
      * native address and length cross into the C ABI. The key arguments are
-     * {@code 0L} — a null key, as in the C# binding: keys for keyed topics
-     * are derived by the core from field descriptors registered at topic
-     * creation, and this branch creates unkeyed topics only.
+     * {@code 0L} because the core ignores them regardless of whether the
+     * topic is keyed: {@code int2dds_datawriter_write_serialized}'s {@code
+     * key}/{@code key_len} parameters (ffi/src/publisher.rs) are retained
+     * only for ABI compatibility — the core derives the instance key and
+     * KeyHash canonically from {@code data}, the full serialized sample
+     * this method already builds, the same way for a keyed topic as an
+     * unkeyed one. An earlier version of this doc, and of the commit that
+     * introduced it, said the opposite — that {@code 0L} was correct only
+     * because this branch creates unkeyed topics; that reasoning was wrong,
+     * though the {@code 0L} it justified was already correct for the actual
+     * reason above. See the task report for the correction.
+     *
+     * @throws NullPointerException if {@code sample} is null
      */
     public void write(T sample) {
+        Objects.requireNonNull(sample, "sample");
+        // Read before the try block, not inside it: a closed writer should
+        // fail here, before this method does the (wasted) work of borrowing
+        // a pooled CdrWriter and serializing into it.
+        long h = handle();
         try (CdrWriter w = CdrWriter.acquire(topic.extensibility(), LITTLE_ENDIAN_HOST, xcdr2)) {
             sample.serializeCdr(w);
-            int rc =
-                    FfiAccess.datawriterWriteSerialized(handle(), w.address(), w.length(), 0L, 0L);
-            // handle() above reads this writer's own handle; nothing else in
-            // this method touches `this` again before the try-with-resources
-            // closes `w`, so without this fence the reaper could treat this
-            // writer as phantom-reachable and race the native call above,
-            // freeing the very writer that call is using -- the same hazard
-            // NativeKeepAlive's own doc describes for a parent's handle read
-            // in a constructor, here applied to a handle an instance method
-            // reads off itself. That is exactly the canonical shape
+            int rc = FfiAccess.datawriterWriteSerialized(h, w.address(), w.length(), 0L, 0L);
+            // `h = handle()` above this try block reads this writer's own
+            // handle; nothing else in this method touches `this` again
+            // before the try-with-resources closes `w`, so without this
+            // fence the reaper could treat this writer as phantom-reachable
+            // and race the native call above, freeing the very writer that
+            // call is using -- the same hazard NativeKeepAlive's own doc
+            // describes for a parent's handle read in a constructor, here
+            // applied to a handle an instance method reads off itself. That
+            // is exactly the canonical shape
             // java.lang.ref.Reference#reachabilityFence's own javadoc
             // illustrates (a receiver fenced inside its own instance
-            // method), not a new hazard this class introduces.
+            // method), not a new hazard this class introduces. A fence
+            // makes every use of `this` strictly before it non-eliminable,
+            // so placing it here still covers the earlier `handle()` read
+            // too, not just this method's tail end.
             NativeKeepAlive.keepAlive(this);
             ReturnCodes.check(rc);
         }

@@ -18,6 +18,36 @@ public final class FfiAccess {
 
     private FfiAccess() {}
 
+    /**
+     * Volatile store-then-clear fence, the same pattern {@code
+     * com.intellectus.int2dds.core.NativeKeepAlive} uses on its own
+     * {@code --release 8} floor — duplicated locally rather than reused
+     * because that class is package-private to {@code core}, invisible from
+     * this package, and this module's baseline predates {@link
+     * java.lang.ref.Reference#reachabilityFence}. Only {@link #keepAlive}
+     * reads it, to clear it again.
+     */
+    private static volatile Object sink;
+
+    /**
+     * Keeps {@code obj} reachable up to this call. Needed after a native
+     * call that was handed a direct {@link ByteBuffer}'s address by {@link
+     * #directBufferAddress} and does not otherwise read from or write to
+     * that buffer object again on every path: once the address has been
+     * read out as a bare {@code long}, nothing about that value keeps the
+     * buffer itself reachable, and a buffer that becomes otherwise
+     * unreachable while the native call is still in flight can have its
+     * backing memory freed by its own JDK-managed {@code Cleaner} out from
+     * under that call — see {@code
+     * com.intellectus.int2dds.core.NativeKeepAlive}'s own doc for the fuller
+     * argument, which this mirrors for a direct buffer instead of an entity
+     * handle.
+     */
+    private static void keepAlive(Object obj) {
+        sink = obj;
+        sink = null;
+    }
+
     /** The library's default type extensibility: 0 Final, 1 Appendable, 2 Mutable. */
     public static int defaultExtensibility() {
         return Ffi.int2dds_default_extensibility();
@@ -252,6 +282,13 @@ public final class FfiAccess {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_create_datawriter(
                 publisher, topic, qos, listener, mask, directBufferAddress(slot));
+        // slot is read below only on the rc == 0 path; on rc != 0 nothing
+        // else touches it, so without this fence the JIT could treat it as
+        // dead before the native call above actually finishes using the
+        // address it was handed, and slot's own JDK-managed Cleaner could
+        // free that memory out from under an in-flight native call. See
+        // keepAlive's own doc in this class.
+        keepAlive(slot);
         if (rc == 0) {
             handleOut[0] = slot.getLong(0);
         }
@@ -265,10 +302,12 @@ public final class FfiAccess {
 
     /**
      * Writes a pre-serialized CDR sample. {@code key}/{@code keyLen} are
-     * {@code 0L} for an unkeyed write: keys for keyed topics are derived by
-     * the core from field descriptors registered at topic creation, which
-     * this branch does not do, so every write here is unkeyed regardless of
-     * the topic's own type.
+     * always {@code 0L} here because the core ignores this pair regardless
+     * of whether the topic is keyed: {@code
+     * int2dds_datawriter_write_serialized}'s own doc comment
+     * (ffi/src/publisher.rs) says they are retained only for ABI
+     * compatibility, and the instance key and KeyHash are instead derived
+     * canonically from {@code data}, the full serialized sample.
      */
     public static int datawriterWriteSerialized(long writer, long data, long dataLen,
             long key, long keyLen) {
@@ -289,6 +328,8 @@ public final class FfiAccess {
     public static int getWriterQos(long writer, long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_datawriter_get_qos(writer, directBufferAddress(slot));
+        // See createDataWriter's identical fence just above.
+        keepAlive(slot);
         if (rc == 0) {
             handleOut[0] = slot.getLong(0);
         }

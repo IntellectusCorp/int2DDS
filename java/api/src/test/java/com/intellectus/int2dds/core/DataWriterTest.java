@@ -3,12 +3,13 @@ package com.intellectus.int2dds.core;
 import static com.intellectus.int2dds.core.DomainParticipantTest.testDomain;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
+import com.intellectus.int2dds.cdr.CdrReader;
+import com.intellectus.int2dds.cdr.CdrWriter;
 import com.intellectus.int2dds.internal.NativeCleaner;
 import com.intellectus.int2dds.internal.ffi.FfiAccess;
 import com.intellectus.int2dds.qos.DataWriterQos;
@@ -31,8 +32,32 @@ class DataWriterTest {
         return r;
     }
 
+    /**
+     * The brief's original oracle here was {@code assertEquals(failedBefore,
+     * NativeCleaner.failedCount())} -- dead, per the dispatch prompt's
+     * correction: {@code failedCount()} is the reaper's delete-*attempt*
+     * counter (NativeCleaner's own Javadoc), and nothing in this test ever
+     * abandons a handle for the reaper to touch, so that assertion could not
+     * have failed regardless of what {@code write()} did.
+     *
+     * <p>My own first replacement, {@code assertFalse(w.isClosed())}, was
+     * flagged in review as the same shape of dead oracle: {@code write()}
+     * never closes the writer on any path, so that assertion could not have
+     * failed either. {@code deferredCount()} returning to its pre-test
+     * baseline is the actual replacement -- the same oracle {@link
+     * #anAbandonedWriterTreeIsReapedCleanly} and {@code
+     * EntityTreeTest.anAbandonedTreeIsEventuallyFullyReleased} use for "the
+     * reaper is not left holding anything." {@code p.close()} in the
+     * {@code finally} block is synchronous, not reaper-driven -- it calls
+     * each handle's deleter directly and throws on a genuine failure
+     * ({@code NativeEntity.close()} -&gt; {@code ReturnCodes.check}) -- so a
+     * clean four-handle cascade should leave {@code deferredCount()}
+     * completely unmoved, unlike {@code isClosed()}, which this specific
+     * method can never fail to satisfy.
+     */
     @Test
     void aWriterIsCreatedAndPublishesWithoutError() {
+        long deferredBefore = NativeCleaner.deferredCount();
         DomainParticipant p = new DomainParticipant(testDomain());
         try {
             Topic<ConformanceRecord> t = p.createTopic("writer_basic", new ConformanceRecord());
@@ -45,16 +70,82 @@ class DataWriterTest {
             for (int i = 0; i < 10; i++) {
                 w.write(sample(i));
             }
-            // The brief's original oracle here was `assertEquals(failedBefore,
-            // NativeCleaner.failedCount())` -- dead: failedCount() is the
-            // *reaper's* delete-attempt counter (NativeCleaner's own
-            // Javadoc), and nothing in this test ever abandons a handle for
-            // the reaper to touch, so that assertion could not have failed
-            // regardless of what write() actually did. A write() that threw
-            // would already have failed this test via the uncaught
-            // exception; the real postcondition worth stating explicitly is
-            // that the writer is still open after ten successful writes.
-            assertFalse(w.isClosed());
+        } finally {
+            p.close();
+        }
+        assertEquals(deferredBefore, NativeCleaner.deferredCount());
+    }
+
+    /**
+     * The "cheap intermediate" between "write() didn't throw" and Task 7's
+     * real end-to-end proof: none of this class's other tests can catch a
+     * wrong {@code xcdr2} flag, a wrong extensibility, a wrong endianness, or
+     * a pooled-buffer regression, since all of them only assert on {@code
+     * write()}'s absence of an exception. This drives the exact sequence
+     * {@code write()} itself performs -- {@code
+     * CdrWriter.acquire(topic.extensibility(), littleEndian, xcdr2)} then
+     * {@code sample.serializeCdr(writer)} -- independently, with the values
+     * a default-QoS writer on this topic actually resolves to ({@code
+     * littleEndian=true}, since {@code ByteOrder.nativeOrder()} is {@code
+     * LITTLE_ENDIAN} on every platform this suite runs on; {@code
+     * xcdr2=false}, confirmed at runtime for this task's report as the
+     * core's own default), and inspects the resulting bytes directly rather
+     * than trusting a return code that was never involved.
+     */
+    @Test
+    void writeEncodesTheExactBytesHandedToNative() {
+        DomainParticipant p = new DomainParticipant(testDomain());
+        try {
+            Topic<ConformanceRecord> t =
+                    p.createTopic("writer_encoding", new ConformanceRecord());
+
+            ConformanceRecord sent = sample(7);
+            byte[] bytes;
+            try (CdrWriter w = CdrWriter.acquire(t.extensibility(), true, false)) {
+                sent.serializeCdr(w);
+                bytes = w.toBytes();
+            }
+
+            // Encapsulation header: 2-byte big-endian encapsulation id, then
+            // 2 reserved bytes. XCDR1 + (FINAL or APPENDABLE) + a
+            // little-endian payload is ENCAP_CDR_LE (0x0001) --
+            // CdrWriter.writeEncapsulationHeader's own mapping for exactly
+            // the (extensibility, littleEndian, xcdr2) combination write()
+            // itself would use here. A wrong xcdr2 flag would instead
+            // produce 0x0006/0x0007 (ENCAP_CDR2_*); a wrong endianness would
+            // produce 0x0000; a MUTABLE-extensibility mixup would produce
+            // 0x0003 (ENCAP_PL_CDR_LE).
+            assertTrue(bytes.length > 4, "expected at least the 4-byte encapsulation header");
+            assertEquals((byte) 0x00, bytes[0]);
+            assertEquals((byte) 0x01, bytes[1]);
+            assertEquals((byte) 0x00, bytes[2]);
+            assertEquals((byte) 0x00, bytes[3]);
+
+            // The encoded fields: decode independently of write() and
+            // compare against the sample that was encoded. A stale,
+            // wrongly-reused pooled buffer or a wrong field encoding would
+            // make this decode wrong, or throw outright.
+            ConformanceRecord received = new ConformanceRecord();
+            received.deserializeCdr(CdrReader.of(bytes));
+            assertEquals(sent.id, received.id);
+            assertEquals(sent.value, received.value, 0.0);
+            assertEquals(sent.label, received.label);
+        } finally {
+            p.close();
+        }
+    }
+
+    @Test
+    void writingANullSampleIsRejectedWithAClearException() {
+        DomainParticipant p = new DomainParticipant(testDomain());
+        try {
+            Topic<ConformanceRecord> t =
+                    p.createTopic("writer_null_sample", new ConformanceRecord());
+            Publisher pub = p.createPublisher();
+            DataWriter<ConformanceRecord> w = pub.createDataWriter(t);
+            NullPointerException e =
+                    assertThrows(NullPointerException.class, () -> w.write(null));
+            assertEquals("sample", e.getMessage());
         } finally {
             p.close();
         }
