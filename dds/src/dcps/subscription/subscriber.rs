@@ -32,7 +32,8 @@ use crate::{
     core::error::{DdsError, DdsResult},
     dcps::topic::type_support::TypeSupport,
     domain::{
-        domain_participant::DomainParticipant, domain_participant_factory::DomainParticipantFactory,
+        domain_participant::{DomainParticipant, ParticipantRef},
+        domain_participant_factory::DomainParticipantFactory,
     },
     infrastructure::{
         domain_entity::DomainEntity,
@@ -1063,6 +1064,42 @@ impl Subscriber {
             }
         }
         Ok(())
+    }
+
+    /// Upgraded parent handle without the deep clone [`Self::get_participant`] performs.
+    ///
+    /// Same failure modes and messages -- `AlreadyDeleted` when this subscriber is deleted, `Error`
+    /// when the parent `Weak` has expired -- but two atomic read-modify-writes instead of ~52.
+    /// `get_participant` clones a struct of 25 `Arc` fields to call one method on it, and at 400
+    /// readers under one participant every one of them hammers the same 25 refcounts.
+    ///
+    /// Only for internal call sites that need `get_listener`, `set_communication_status` or the
+    /// QoS accessors. The value behind the returned handle has `self_ref: None`, so it must not
+    /// reach `create_*`/`delete_*`; use [`Self::get_participant`] for those.
+    pub(crate) fn participant_arc(&self) -> DdsResult<ParticipantRef> {
+        self.is_deleted()?;
+        self.participant
+            .as_ref()
+            .and_then(|weak_ref| weak_ref.upgrade())
+            .map(ParticipantRef::new)
+            .ok_or_else(|| {
+                DdsError::Error("Participant reference is invalid or expired".to_string())
+            })
+    }
+
+    /// PRESENTATION coherent_access without cloning the whole subscriber to read one bool.
+    /// Read twice per received sample by the reader history's coherent-access probes.
+    pub(crate) fn presentation_coherent_access(&self) -> DdsResult<bool> {
+        self.is_deleted()?;
+        Ok(self.qos.load().presentation.coherent_access)
+    }
+
+    /// PRESENTATION ordered_access at topic scope, same reasoning. Read on every `read`/`take`.
+    pub(crate) fn presentation_topic_ordered(&self) -> DdsResult<bool> {
+        self.is_deleted()?;
+        let qos = self.qos.load();
+        Ok(qos.presentation.ordered_access
+            && qos.presentation.access_scope == PresentationQosAccessScopeKind::Topic)
     }
 
     pub fn get_participant(&self) -> DdsResult<DomainParticipant> {
