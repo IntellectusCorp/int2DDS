@@ -41,6 +41,7 @@ pub fn init_from_env() {
     // - INT2DDS_UDP_SOCKET_BUFFER: Set UDP socket buffer size (bytes) - Default: OS default
     // - INT2DDS_SHM_BUFFER_SIZE: Set shared memory buffer size (bytes) - Default: 1048576 (1MB)
     // - INT2DDS_DATA_FRAG_SIZE: Set DATA_FRAG fragment size (1-65000) when the writer QoS specifies none - Default: 65000
+    // - INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT: Set the default for the disable_piggyback_heartbeat writer QoS (true, false) - Default: false
 
     // - INT2DDS_INITIAL_PEERS: Set initial peers for SPDP unicast discovery (comma-separated, e.g., "192.168.1.10:7400,192.168.1.11:7400") - Default: none
 
@@ -334,6 +335,40 @@ pub fn get_data_frag_size_override() -> Option<i32> {
 pub fn set_data_frag_size(size: i32) {
     log::info!("Environment variable set: INT2DDS_DATA_FRAG_SIZE = {}", size);
     unsafe { std::env::set_var("INT2DDS_DATA_FRAG_SIZE", size.to_string()) };
+}
+
+// Read the disable_piggyback_heartbeat QoS default from
+// `INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT`.
+// Returns `None` when unset, empty, or not a recognized boolean.
+pub fn get_disable_piggyback_heartbeat_default() -> Option<bool> {
+    let raw = std::env::var("INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT")
+        .ok()
+        .filter(|s| !s.is_empty())?;
+
+    if raw.eq_ignore_ascii_case("true") || raw == "1" {
+        Some(true)
+    } else if raw.eq_ignore_ascii_case("false") || raw == "0" {
+        Some(false)
+    } else {
+        log::warn!(
+            "Invalid INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT value '{}'. Ignoring env default.",
+            raw
+        );
+        None
+    }
+}
+
+// Set the disable_piggyback_heartbeat QoS default via
+// `INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT`.
+// Must be called before the DataWriter QoS is constructed in order to take effect.
+pub fn set_disable_piggyback_heartbeat_default(is_disabled: bool) {
+    log::info!(
+        "Environment variable set: INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT = {}",
+        is_disabled
+    );
+    unsafe {
+        std::env::set_var("INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT", is_disabled.to_string())
+    };
 }
 
 // Read the public IPv4 advertised in SPDP from `INT2DDS_EXTERNAL_ADDRESS`.

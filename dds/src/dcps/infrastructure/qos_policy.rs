@@ -2311,6 +2311,7 @@ impl QosPolicy for TypeConsistencyEnforcementQosPolicy {
 ///
 /// # Default
 /// - `disable_piggyback_heartbeat: false` - Piggybacked heartbeats are enabled by default.
+///   The default is overridable via the `INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT` env var.
 /// - `heartbeat_period: 2 seconds` - Period for sending periodic heartbeat messages.
 /// - `initial_heartbeat_delay: 10ms` - Delay before sending initial heartbeat after reader discovery.
 /// - `push_mode: true` - (Unsupported) Writer pushes data to readers.
@@ -2348,7 +2349,13 @@ pub struct WriterReliabilityExtensionQosPolicy {
 
 impl Default for WriterReliabilityExtensionQosPolicy {
     fn default() -> Self {
-        Self::DEFAULT
+        let mut qos = Self::DEFAULT;
+
+        if let Some(is_disabled) = crate::common::env::get_disable_piggyback_heartbeat_default() {
+            qos.disable_piggyback_heartbeat = is_disabled;
+        }
+
+        qos
     }
 }
 
@@ -2523,6 +2530,35 @@ mod data_frag_tests {
             unsafe { std::env::set_var(ENV_KEY, raw) };
             assert_eq!(effective(0), raw.parse::<i32>().unwrap(), "boundary accepted");
         }
+
+        unsafe { std::env::remove_var(ENV_KEY) };
+    }
+}
+
+#[cfg(test)]
+mod writer_reliability_extension_tests {
+    use super::*;
+
+    const ENV_KEY: &str = "INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT";
+
+    // Env is process-global and tests run in parallel: keep every
+    // INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT assertion inside this single test.
+    #[test]
+    fn disable_piggyback_heartbeat_default_resolves_through_env() {
+        unsafe { std::env::remove_var(ENV_KEY) };
+        assert!(!WriterReliabilityExtensionQosPolicy::default().disable_piggyback_heartbeat);
+
+        crate::common::env::set_disable_piggyback_heartbeat_default(true);
+        assert!(WriterReliabilityExtensionQosPolicy::default().disable_piggyback_heartbeat);
+
+        unsafe { std::env::set_var(ENV_KEY, "false") };
+        assert!(!WriterReliabilityExtensionQosPolicy::default().disable_piggyback_heartbeat);
+
+        unsafe { std::env::set_var(ENV_KEY, "yes") };
+        assert!(
+            !WriterReliabilityExtensionQosPolicy::default().disable_piggyback_heartbeat,
+            "unrecognized env is ignored"
+        );
 
         unsafe { std::env::remove_var(ENV_KEY) };
     }
