@@ -127,25 +127,42 @@ abstract class NativeEntity implements AutoCloseable {
     /**
      * Closes every live child, then this entity.
      *
-     * <p>Children are closed in the reverse of the order they were added, not
-     * insertion order. The native layer can refuse a delete for reasons that
-     * cross the Java ownership tree, not just direct parent/child
-     * containment — deleting a Topic is refused while any DataWriter still
-     * uses it, even though a DataWriter's Java parent is the Publisher, not
-     * the Topic. The natural create order is Topic, then Publisher, then
-     * (inside the Publisher) its DataWriter, so closing in reverse closes the
-     * Publisher — which cascades to its own DataWriter first — before the
-     * Topic, satisfying both constraints.
+     * <p>The native layer can refuse a delete for reasons that cross the Java
+     * ownership tree, not just direct parent/child containment — deleting a
+     * Topic is refused while any DataWriter still uses it, even though a
+     * DataWriter's Java parent is the Publisher, not the Topic. Closing
+     * children in the reverse of the order they were added, not insertion
+     * order, resolves that for the natural create order — Topic, then
+     * Publisher, then (inside the Publisher) its DataWriter — since reverse
+     * order then closes the Publisher (which cascades to its own DataWriter
+     * first) before the Topic. But nothing enforces that creation order: a
+     * caller is just as entitled to create the Publisher first, and a single
+     * reverse-order pass over that legal order tries the Topic first
+     * instead, where it is refused.
      *
-     * <p>Each child is closed in its own {@code try}. One child failing does
-     * not stop the rest: every live child gets a chance, failures are
-     * collected, and the first is rethrown with the others attached via
+     * <p>So the child pass is retried, the same way {@link
+     * NativeCleaner#sweepDeferred} arbitrates deferred handles: repeat a full
+     * reverse-of-addition pass over whichever children are still open, for as
+     * long as a pass closes at least one of them — closing the Publisher can
+     * be exactly what unblocks the Topic it was blocking, on the very next
+     * pass. Once a full pass closes none of the remaining children, nothing
+     * changed to unblock them, further retries cannot help, and this gives
+     * up. Terminates because a pass either closes at least one child for good
+     * or closes none — there is no third outcome a live child can produce —
+     * so the still-open set shrinks by at least one every productive pass and
+     * reaches empty, or a wholly unproductive pass, in finitely many passes.
+     *
+     * <p>Each child is closed in its own {@code try} within a pass. One child
+     * failing does not stop the rest of that pass: every still-open child
+     * gets a chance, failures are collected, and — from the last,
+     * unproductive pass — the first is rethrown with the others attached via
      * {@link Throwable#addSuppressed}. A child is removed from this entity's
      * registry only once it has actually, successfully closed, so a child
-     * that fails or throws stays reachable from here for a later retry. If
-     * any child failed, this entity's own handle is left completely
-     * untouched — still open, still retryable — rather than spent on a
-     * native delete that a live child would just get refused again anyway.
+     * that fails or throws stays reachable from here for a later retry, of
+     * this call or a later one. If any child is still open once retries
+     * stop, this entity's own handle is left completely untouched — still
+     * open, still retryable — rather than spent on a native delete that a
+     * live child would just get refused again anyway.
      *
      * <p>Nothing calls
      * {@code int2dds_participant_delete_contained_entities}: it would free
@@ -174,21 +191,34 @@ abstract class NativeEntity implements AutoCloseable {
             sinceSweep = 0;
         }
 
+        List<NativeEntity> pending = live;
         RuntimeException firstFailure = null;
-        for (int i = live.size() - 1; i >= 0; i--) {
-            NativeEntity child = live.get(i);
-            try {
-                child.close();
-                synchronized (childLock) {
-                    removeChildLocked(child);
-                }
-            } catch (RuntimeException e) {
-                if (firstFailure == null) {
-                    firstFailure = e;
-                } else {
-                    firstFailure.addSuppressed(e);
+        while (!pending.isEmpty()) {
+            List<NativeEntity> stillPending = new ArrayList<NativeEntity>(pending.size());
+            firstFailure = null;
+            for (int i = pending.size() - 1; i >= 0; i--) {
+                NativeEntity child = pending.get(i);
+                try {
+                    child.close();
+                    synchronized (childLock) {
+                        removeChildLocked(child);
+                    }
+                } catch (RuntimeException e) {
+                    if (firstFailure == null) {
+                        firstFailure = e;
+                    } else {
+                        firstFailure.addSuppressed(e);
+                    }
+                    stillPending.add(child);
                 }
             }
+            if (stillPending.size() == pending.size()) {
+                // No progress this pass: every child still open before it
+                // started is still open after it. Retrying again would just
+                // repeat the same refusals, so this is where retries stop.
+                break;
+            }
+            pending = stillPending;
         }
         if (firstFailure != null) {
             throw firstFailure;

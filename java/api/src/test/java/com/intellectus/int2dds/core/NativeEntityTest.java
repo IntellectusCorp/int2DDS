@@ -82,6 +82,43 @@ class NativeEntityTest {
     }
 
     @Test
+    void closingSucceedsRegardlessOfWhichLegalOrderTheChildrenWereCreatedIn() {
+        // The test above only works because it creates the topic before the
+        // publisher: reverse-of-insertion then closes the publisher (and
+        // transitively its writer) before the topic, which is what the core
+        // requires. Nothing enforces that creation order -- a caller is just
+        // as entitled to build the publisher first and decide what topic its
+        // writer will use second -- and a single reverse-of-insertion pass
+        // over *that* legal order tries the topic first instead. This fake
+        // deleter reproduces the real int2dds_delete_topic's refusal for
+        // exactly that case (contains_topic walks publishers for a writer on
+        // the topic being deleted): it refuses with PRECONDITION_NOT_MET for
+        // as long as "publisher" has not yet closed, and only succeeds once
+        // it has. A single-pass close() rethrows that refusal even though
+        // "publisher" closes cleanly in the very same pass; a correct close()
+        // retries the pass instead of giving up after one.
+        AtomicBoolean publisherClosed = new AtomicBoolean(false);
+        List<String> order = new ArrayList<String>();
+        FakeEntity parent = new FakeEntity(null, 0x700L, recording(order, "parent"));
+        new FakeEntity(parent, 0x701L, h -> {
+            publisherClosed.set(true);
+            order.add("publisher");
+            return 0;
+        });
+        new FakeEntity(parent, 0x702L, h -> {
+            if (!publisherClosed.get()) {
+                return DdsException.RET_PRECONDITION_NOT_MET;
+            }
+            order.add("topic");
+            return 0;
+        });
+
+        parent.close();
+
+        assertEquals(Arrays.asList("publisher", "topic", "parent"), order);
+    }
+
+    @Test
     void oneFailingChildDoesNotStrandItsSiblingsOrSkipThem() {
         List<String> attempted = new ArrayList<String>();
         AtomicBoolean childBShouldFail = new AtomicBoolean(true);
@@ -100,7 +137,15 @@ class NativeEntityTest {
         // Every child was attempted -- childB failing did not abort the
         // loop -- and the parent's own delete was never reached, since a
         // live child (childB, still registered) would just be refused.
-        assertEquals(Arrays.asList("childC", "childB", "childA"), attempted);
+        // childB appears twice: childA and childC succeeding is progress,
+        // so close() retries the pass over whatever is still open (just
+        // childB) once more before giving up -- it cannot know in advance
+        // that nothing actually changed for childB this time, only that
+        // something changed for the pass as a whole. See
+        // closingSucceedsRegardlessOfWhichLegalOrderTheChildrenWereCreatedIn
+        // above for the case where that second attempt is exactly what
+        // lets a real tree finish closing.
+        assertEquals(Arrays.asList("childC", "childB", "childA", "childB"), attempted);
 
         // Let childB actually succeed now and retry, so nothing here is left
         // for the reaper to retry forever in the background.

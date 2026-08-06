@@ -85,6 +85,63 @@ class EntityTreeTest {
                 "the participant's own handle is released exactly once");
     }
 
+    /**
+     * The test above only exercises the one creation order a single
+     * reverse-of-insertion pass already handles: topic, then publisher --
+     * reverse order then closes the publisher (and transitively its writer)
+     * before the topic, satisfying {@code contains_topic}. Nothing enforces
+     * that order; a caller is just as entitled to build the publisher first,
+     * e.g. because it decides what topic to write to only afterward. This
+     * test uses that order instead, and adds a DataWriter on the topic --
+     * without one, {@code contains_topic} has nothing to find regardless of
+     * order, so delete order would never matter and this would not actually
+     * exercise the refusal. The participant's own children are then
+     * {@code [publisher, topic]}, so a single reverse-of-insertion pass tries
+     * the topic first, the core refuses it while the writer -- reachable only
+     * through the publisher -- is still alive, and an unfixed {@code close()}
+     * rethrows that refusal even though the publisher (and its writer) closes
+     * cleanly in the very same pass.
+     *
+     * <p>Unlike {@code closingAParticipantClosesItsChildrenFirst} above, this
+     * uses {@link #countOnSuccess} for every handle, not a raw incrementing
+     * lambda: that test's topic and publisher are never actually refused, so
+     * counting attempts and counting successes agree there. Here the topic's
+     * first attempt is refused by design -- the point of the test -- so only
+     * counting successes still says "released exactly once."
+     */
+    @Test
+    void closingAParticipantClosesItsChildrenFirstRegardlessOfCreationOrder() {
+        AtomicInteger participantDeletes = new AtomicInteger();
+        AtomicInteger publisherDeletes = new AtomicInteger();
+        AtomicInteger topicDeletes = new AtomicInteger();
+        AtomicInteger writerDeletes = new AtomicInteger();
+        DomainParticipant p = DomainParticipant.createForTest(
+                testDomain(), countOnSuccess(participantDeletes, FfiAccess::deleteParticipant));
+        Publisher pub = Publisher.createForTest(
+                p, countOnSuccess(publisherDeletes, FfiAccess::deletePublisher));
+        Topic<ConformanceRecord> t = Topic.createForTest(p, "tree_cascade_reverse_order",
+                new ConformanceRecord(), countOnSuccess(topicDeletes, FfiAccess::deleteTopic));
+        DataWriter<ConformanceRecord> w = DataWriter.createForTest(
+                pub, t, countOnSuccess(writerDeletes, FfiAccess::deleteDataWriter));
+        assertNotEquals(0L, pub.handle());
+        assertNotEquals(0L, t.handle());
+        assertNotEquals(0L, w.handle());
+
+        p.close();
+
+        assertTrue(w.isClosed(), "the writer was closed by the cascade");
+        assertTrue(pub.isClosed(), "the publisher was closed by the cascade");
+        assertTrue(t.isClosed(),
+                "the topic was closed by the cascade, once the writer blocking it was gone");
+        assertTrue(p.isClosed(), "the participant itself was closed last");
+        assertEquals(1, writerDeletes.get(), "the writer's own handle is released exactly once");
+        assertEquals(1, publisherDeletes.get(),
+                "the publisher's own handle is released exactly once");
+        assertEquals(1, topicDeletes.get(), "the topic's own handle is released exactly once");
+        assertEquals(1, participantDeletes.get(),
+                "the participant's own handle is released exactly once");
+    }
+
     @Test
     void closingAChildThenTheParentIsFine() {
         // As above: a wrong-order or otherwise-failed delete throws here
