@@ -19,18 +19,19 @@ import java.lang.ref.Reference;
  * lives in {@code internal} because two packages need to call it, not
  * because it is meant for use outside this module. See the base version's
  * Javadoc for why the hazard this guards against is real, why Tasks 5+'s
- * entity constructors need it, and why the two `FfiAccess` bridges that
- * hand a direct buffer's address to native code need the identical fence;
+ * entity constructors need it, and why every {@code FfiAccess} bridge that
+ * hands a direct buffer's address to native code needs the identical fence;
  * this override changes only how the fence is implemented, not when or why
  * callers reach for it.
  *
- * <p>Unlike the base version's single static store — which, of necessity,
- * keeps {@code obj} strongly reachable for as long as it remains the most
- * recent argument any caller anywhere passed in, since nothing else ever
- * overwrites it — the intrinsic has no such retention: once this call
- * returns, {@code obj} is not kept reachable on its account at all. It is a
- * directive to the compiler about a program-order fact ("keep {@code obj}
- * reachable up to here"), not a store of any kind.
+ * <p>Unlike the base version's store-then-clear pair — which retains {@code
+ * obj} strongly reachable only for the brief window between the two writes,
+ * not indefinitely; see the base version's own Javadoc for the earlier,
+ * single-store design that did retain indefinitely, and why it was
+ * retracted — the intrinsic has no retention window at all: once this call
+ * returns, {@code obj} was never kept reachable on its account in the first
+ * place. It is a directive to the compiler about a program-order fact
+ * ("keep {@code obj} reachable up to here"), not a store of any kind.
  */
 public final class NativeKeepAlive {
 
