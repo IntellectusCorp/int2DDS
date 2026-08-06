@@ -1,5 +1,5 @@
 use crate::serialize::cdr::prim_bulk::{read_prim_vec, NativeBytes};
-use crate::serialize::cdr::{CdrDeserializer, CdrError, Xcdr2Deserializer};
+use crate::serialize::cdr::{try_vec_prealloc, CdrDeserializer, CdrError, Xcdr2Deserializer};
 
 impl<'a> CdrDeserializer<'a> {
     /// Read a whole run of same-width primitives in one copy.
@@ -117,7 +117,7 @@ impl<'a> CdrDeserializer<'a> {
     /// Deserialize string sequence with length prefix
     pub fn deserialize_string_sequence(&mut self) -> Result<Vec<String>, CdrError> {
         let length = self.deserialize_u32()? as usize;
-        let mut result = Vec::with_capacity(self.checked_capacity(length, 4)?);
+        let mut result = try_vec_prealloc(self.checked_capacity(length, 4)?)?;
         for _ in 0..length {
             result.push(self.deserialize_string()?);
         }
@@ -130,7 +130,8 @@ impl<'a> CdrDeserializer<'a> {
         F: FnMut(&mut Self) -> Result<T, CdrError>,
     {
         let length = self.deserialize_u32()? as usize;
-        let mut result = Vec::new();
+        let length = self.checked_capacity(length, 1)?;
+        let mut result = try_vec_prealloc(length)?;
         for _ in 0..length {
             result.push(deserialize_fn(self)?);
         }
@@ -250,7 +251,7 @@ impl<'a> Xcdr2Deserializer<'a> {
 
     pub fn deserialize_string_sequence(&mut self) -> Result<Vec<String>, CdrError> {
         let length = self.deserialize_u32()? as usize;
-        let mut result = Vec::with_capacity(self.checked_capacity(length, 4)?);
+        let mut result = try_vec_prealloc(self.checked_capacity(length, 4)?)?;
         for _ in 0..length {
             result.push(self.deserialize_string()?);
         }
@@ -262,7 +263,8 @@ impl<'a> Xcdr2Deserializer<'a> {
         F: FnMut(&mut Self) -> Result<T, CdrError>,
     {
         let length = self.deserialize_u32()? as usize;
-        let mut result = Vec::with_capacity(self.checked_capacity(length, 1)?);
+        let length = self.checked_capacity(length, 1)?;
+        let mut result = try_vec_prealloc(length)?;
         for _ in 0..length {
             result.push(deserialize_fn(self)?);
         }
@@ -326,6 +328,66 @@ mod robustness_tests {
     fn generic_sequence_with_huge_length_errs_without_oom() {
         let mut d = CdrDeserializer::new_without_header(&HUGE_LEN, true);
         let r: Result<Vec<u32>, _> = d.deserialize_sequence(|de| de.deserialize_u32());
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn char_collections_reject_huge_length() {
+        assert!(CdrDeserializer::new_without_header(&HUGE_LEN, true)
+            .deserialize_char_array()
+            .is_err());
+        assert!(Xcdr2Deserializer::new_without_header(&HUGE_LEN, true)
+            .deserialize_char_array()
+            .is_err());
+    }
+
+    #[test]
+    fn wstrings_reject_huge_length() {
+        assert!(CdrDeserializer::new_without_header(&HUGE_LEN, true)
+            .deserialize_wstring16()
+            .is_err());
+        assert!(Xcdr2Deserializer::new_without_header(&HUGE_LEN, true)
+            .deserialize_wstring16()
+            .is_err());
+    }
+
+    #[test]
+    fn maps_reject_huge_length() {
+        use crate::serialize::cdr::{CdrDeserialize, XcdrDeserialize};
+        use std::collections::{BTreeMap, HashMap};
+
+        let r: Result<HashMap<u32, u32>, _> = CdrDeserialize::deserialize_cdr(
+            &mut CdrDeserializer::new_without_header(&HUGE_LEN, true),
+        );
+        assert!(r.is_err());
+        let r: Result<BTreeMap<u32, u32>, _> = CdrDeserialize::deserialize_cdr(
+            &mut CdrDeserializer::new_without_header(&HUGE_LEN, true),
+        );
+        assert!(r.is_err());
+        let r: Result<HashMap<u32, u32>, _> = XcdrDeserialize::deserialize_xcdr(
+            &mut Xcdr2Deserializer::new_without_header(&HUGE_LEN, true),
+        );
+        assert!(r.is_err());
+        let r: Result<BTreeMap<u32, u32>, _> = XcdrDeserialize::deserialize_xcdr(
+            &mut Xcdr2Deserializer::new_without_header(&HUGE_LEN, true),
+        );
+        assert!(r.is_err());
+    }
+
+    // A short wire element for a large in-memory element type: the capped prealloc
+    // keeps the reserve bounded while element reads consume the input and fail.
+    #[test]
+    fn generic_sequence_with_large_elem_type_errs_without_huge_reserve() {
+        let mut wire = 1000u32.to_le_bytes().to_vec();
+        wire.extend_from_slice(&[0u8; 1000]);
+        let mut d = Xcdr2Deserializer::new_without_header(&wire, true);
+        let r: Result<Vec<[u64; 512]>, _> = d.deserialize_sequence(|de| {
+            let mut a = [0u64; 512];
+            for slot in a.iter_mut() {
+                *slot = de.deserialize_u64()?;
+            }
+            Ok(a)
+        });
         assert!(r.is_err());
     }
 }

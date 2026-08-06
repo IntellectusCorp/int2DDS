@@ -186,6 +186,23 @@ pub type XcdrResult<T> = SerializationResult<T>;
 pub type XcdrSerializer = Xcdr2Serializer;
 pub type XcdrDeserializer<'a> = Xcdr2Deserializer<'a>;
 
+/// Cap on the bytes a wire-declared element count may reserve up front. A count
+/// is validated against remaining input via `checked_capacity`, but one wire byte
+/// per element can still authorize `size_of::<T>()` heap bytes per element; the
+/// cap bounds that amplification. Larger collections grow past it normally.
+pub(crate) const MAX_PREALLOC_BYTES: usize = 64 * 1024;
+
+pub(crate) fn bounded_prealloc_count<T>(count: usize) -> usize {
+    count.min(MAX_PREALLOC_BYTES / std::mem::size_of::<T>().max(1))
+}
+
+pub(crate) fn try_vec_prealloc<T>(count: usize) -> Result<Vec<T>, SerializationError> {
+    let mut vec = Vec::new();
+    vec.try_reserve(bounded_prealloc_count::<T>(count))
+        .map_err(|_| SerializationError::AllocationFailure)?;
+    Ok(vec)
+}
+
 /// Trait for types that can be serialized using CDR
 pub trait CdrSerialize {
     /// Whether this type is a CDR primitive. Unused by classic CDR encoding
@@ -352,8 +369,8 @@ impl<T: XcdrSerialize> XcdrSerialize for Vec<T> {
 impl<T: XcdrDeserialize> XcdrDeserialize for Vec<T> {
     fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
         let length = deserializer.deserialize_u32()? as usize;
-        let capacity = deserializer.checked_capacity(length, 1)?;
-        let mut result = Vec::with_capacity(capacity);
+        let length = deserializer.checked_capacity(length, 1)?;
+        let mut result = try_vec_prealloc::<T>(length)?;
         for _ in 0..length {
             result.push(T::deserialize_xcdr(deserializer)?);
         }
@@ -433,9 +450,12 @@ where
     fn deserialize_cdr(deserializer: &mut CdrDeserializer) -> CdrResult<Self> {
         // Read map length
         let len = deserializer.deserialize_u32()? as usize;
+        let len = deserializer.checked_capacity(len, 2)?;
 
         // Read key-value pairs
         let mut map = HashMap::new();
+        map.try_reserve(bounded_prealloc_count::<(K, V)>(len))
+            .map_err(|_| SerializationError::AllocationFailure)?;
         for _ in 0..len {
             let key = K::deserialize_cdr(deserializer)?;
             let value = V::deserialize_cdr(deserializer)?;
@@ -479,26 +499,20 @@ where
     V: XcdrDeserialize,
 {
     fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
-        if K::IS_PRIMITIVE && V::IS_PRIMITIVE {
-            let len = deserializer.deserialize_u32()? as usize;
-            let mut map = HashMap::new();
-            for _ in 0..len {
-                let key = K::deserialize_xcdr(deserializer)?;
-                let value = V::deserialize_xcdr(deserializer)?;
-                map.insert(key, value);
-            }
-            Ok(map)
-        } else {
+        if !(K::IS_PRIMITIVE && V::IS_PRIMITIVE) {
             let _dheader = deserializer.read_dheader()?;
-            let len = deserializer.deserialize_u32()? as usize;
-            let mut map = HashMap::new();
-            for _ in 0..len {
-                let key = K::deserialize_xcdr(deserializer)?;
-                let value = V::deserialize_xcdr(deserializer)?;
-                map.insert(key, value);
-            }
-            Ok(map)
         }
+        let len = deserializer.deserialize_u32()? as usize;
+        let len = deserializer.checked_capacity(len, 2)?;
+        let mut map = HashMap::new();
+        map.try_reserve(bounded_prealloc_count::<(K, V)>(len))
+            .map_err(|_| SerializationError::AllocationFailure)?;
+        for _ in 0..len {
+            let key = K::deserialize_xcdr(deserializer)?;
+            let value = V::deserialize_xcdr(deserializer)?;
+            map.insert(key, value);
+        }
+        Ok(map)
     }
 }
 
@@ -528,6 +542,7 @@ where
     fn deserialize_cdr(deserializer: &mut CdrDeserializer) -> CdrResult<Self> {
         // Read map length
         let len = deserializer.deserialize_u32()? as usize;
+        let len = deserializer.checked_capacity(len, 2)?;
 
         // Read key-value pairs
         let mut map = BTreeMap::new();
@@ -574,26 +589,18 @@ where
     V: XcdrDeserialize,
 {
     fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
-        if K::IS_PRIMITIVE && V::IS_PRIMITIVE {
-            let len = deserializer.deserialize_u32()? as usize;
-            let mut map = BTreeMap::new();
-            for _ in 0..len {
-                let key = K::deserialize_xcdr(deserializer)?;
-                let value = V::deserialize_xcdr(deserializer)?;
-                map.insert(key, value);
-            }
-            Ok(map)
-        } else {
+        if !(K::IS_PRIMITIVE && V::IS_PRIMITIVE) {
             let _dheader = deserializer.read_dheader()?;
-            let len = deserializer.deserialize_u32()? as usize;
-            let mut map = BTreeMap::new();
-            for _ in 0..len {
-                let key = K::deserialize_xcdr(deserializer)?;
-                let value = V::deserialize_xcdr(deserializer)?;
-                map.insert(key, value);
-            }
-            Ok(map)
         }
+        let len = deserializer.deserialize_u32()? as usize;
+        let len = deserializer.checked_capacity(len, 2)?;
+        let mut map = BTreeMap::new();
+        for _ in 0..len {
+            let key = K::deserialize_xcdr(deserializer)?;
+            let value = V::deserialize_xcdr(deserializer)?;
+            map.insert(key, value);
+        }
+        Ok(map)
     }
 }
 
@@ -739,5 +746,27 @@ mod member_header_tests {
         let (h, consumed) = read(4, 0xDEAD).unwrap();
         assert_eq!(h.member_length, 0xDEAD);
         assert_eq!(consumed, 8);
+    }
+}
+
+#[cfg(test)]
+mod prealloc_tests {
+    use super::*;
+
+    #[test]
+    fn initial_reserve_is_capped_by_bytes_not_count() {
+        assert_eq!(bounded_prealloc_count::<[u8; 4096]>(1_000_000), 16);
+        assert_eq!(bounded_prealloc_count::<u64>(1_000_000), MAX_PREALLOC_BYTES / 8);
+        assert_eq!(bounded_prealloc_count::<u8>(1024), 1024);
+    }
+
+    #[test]
+    fn try_vec_prealloc_reserves_at_most_the_cap() {
+        let v = try_vec_prealloc::<[u8; 4096]>(1_000_000).unwrap();
+        // 16 requested; the allocator may round up, but nowhere near the 4 GiB
+        // that length * size_of would have reserved.
+        assert!(v.capacity() <= 32);
+        let v = try_vec_prealloc::<u8>(100).unwrap();
+        assert!(v.capacity() >= 100);
     }
 }

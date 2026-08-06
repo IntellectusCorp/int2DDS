@@ -1,4 +1,4 @@
-use crate::serialize::cdr::{CdrDeserializer, CdrError, Xcdr2Deserializer};
+use crate::serialize::cdr::{try_vec_prealloc, CdrDeserializer, CdrError, Xcdr2Deserializer};
 
 // Fixed-size arrays carry no length prefix, so each of these is the sequence body read
 // with the element count supplied by the caller. The bulk machinery is shared with
@@ -67,7 +67,7 @@ impl<'a> CdrDeserializer<'a> {
 
     /// Deserialize fixed-size string array (no length prefix)
     pub fn deserialize_string_array(&mut self, size: usize) -> Result<Vec<String>, CdrError> {
-        let mut result = Vec::with_capacity(self.checked_capacity(size, 4)?);
+        let mut result = try_vec_prealloc(self.checked_capacity(size, 4)?)?;
         for _ in 0..size {
             result.push(self.deserialize_string()?);
         }
@@ -126,7 +126,7 @@ impl<'a> Xcdr2Deserializer<'a> {
     }
 
     pub fn deserialize_string_array(&mut self, size: usize) -> Result<Vec<String>, CdrError> {
-        let mut result = Vec::with_capacity(self.checked_capacity(size, 4)?);
+        let mut result = try_vec_prealloc(self.checked_capacity(size, 4)?)?;
         for _ in 0..size {
             result.push(self.deserialize_string()?);
         }
