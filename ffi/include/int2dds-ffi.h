@@ -2556,8 +2556,9 @@ Int2DdsRet int2dds_datawriter_qos_set_ownership_strength(struct Int2DdsDataWrite
 
 /**
  * Set the DataFrag QoS (per-writer RTPS DATA_FRAG fragment size, in bytes) for
- * DataWriter. Values `> 65000` are clamped and `<= 0` falls back to the 65000
- * default at write time.
+ * DataWriter. Resolved when the writer is created: values `> 65000` are clamped
+ * to 65000, and `<= 0` means unspecified, falling back to the
+ * `INT2DDS_DATA_FRAG_SIZE` environment variable and then to 65000.
  *
  * # Safety
  * - `qos` must be a valid QoS handle
@@ -2666,6 +2667,8 @@ Int2DdsRet int2dds_datawriter_qos_get_ownership_strength(const struct Int2DdsDat
 
 /**
  * Get the DataFrag QoS (fragment size, in bytes) from a DataWriter QoS handle.
+ * Returns the value as set, not the resolved size: `0` means unspecified, so the
+ * writer will use `INT2DDS_DATA_FRAG_SIZE` if set and 65000 otherwise.
  */
 Int2DdsRet int2dds_datawriter_qos_get_data_frag(const struct Int2DdsDataWriterQos *qos,
                                                 int32_t *value_out);

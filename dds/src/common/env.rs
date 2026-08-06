@@ -40,6 +40,7 @@ pub fn init_from_env() {
     // - INT2DDS_FORCE_LOOPBACK_MULTICAST: Force multicast egress through the loopback interface (127.0.0.1) for local-only testing (true, false) - Default: false
     // - INT2DDS_UDP_SOCKET_BUFFER: Set UDP socket buffer size (bytes) - Default: OS default
     // - INT2DDS_SHM_BUFFER_SIZE: Set shared memory buffer size (bytes) - Default: 1048576 (1MB)
+    // - INT2DDS_DATA_FRAG_SIZE: Set DATA_FRAG fragment size (1-65000) when the writer QoS specifies none - Default: 65000
 
     // - INT2DDS_INITIAL_PEERS: Set initial peers for SPDP unicast discovery (comma-separated, e.g., "192.168.1.10:7400,192.168.1.11:7400") - Default: none
 
@@ -309,6 +310,30 @@ pub fn get_multicast_ttl_override() -> Option<u8> {
 pub fn set_multicast_ttl(ttl: u8) {
     log::info!("Environment variable set: INT2DDS_MULTICAST_TTL = {}", ttl);
     unsafe { std::env::set_var("INT2DDS_MULTICAST_TTL", ttl.to_string()) };
+}
+
+/// Read the DATA_FRAG fragment size fallback from `INT2DDS_DATA_FRAG_SIZE`.
+/// Returns `None` when unset, empty, or not an integer; the range is the QoS policy's to check.
+pub fn get_data_frag_size_override() -> Option<i32> {
+    let raw = std::env::var("INT2DDS_DATA_FRAG_SIZE").ok().filter(|s| !s.is_empty())?;
+    match raw.parse::<i32>() {
+        Ok(size) => Some(size),
+        Err(e) => {
+            log::warn!(
+                "Invalid INT2DDS_DATA_FRAG_SIZE value '{}': {}. Ignoring env override.",
+                raw,
+                e
+            );
+            None
+        }
+    }
+}
+
+/// Set the DATA_FRAG fragment size fallback via `INT2DDS_DATA_FRAG_SIZE`.
+/// Must be called before the DataWriter is created in order to take effect.
+pub fn set_data_frag_size(size: i32) {
+    log::info!("Environment variable set: INT2DDS_DATA_FRAG_SIZE = {}", size);
+    unsafe { std::env::set_var("INT2DDS_DATA_FRAG_SIZE", size.to_string()) };
 }
 
 // Read the public IPv4 advertised in SPDP from `INT2DDS_EXTERNAL_ADDRESS`.

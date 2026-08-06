@@ -1963,6 +1963,7 @@ impl UnicastMessageProcessor for UserLogic {
     fn handle_acknack_message(
         &mut self,
         rtps_header: &Header,
+        submessage_header: &SubmessageHeader,
         acknack: &AckNack,
     ) -> RtpsResult<()> {
         let remote_reader_guid = Guid::new(rtps_header.guid_prefix(), acknack.reader_id);
@@ -1982,10 +1983,12 @@ impl UnicastMessageProcessor for UserLogic {
             .find(|rp| rp.remote_reader_guid() == remote_reader_guid)
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
 
-        // Preemptive ACKNACK (empty bitmap with seqbase 0 or 1) is an explicit
-        // reset signal and bypasses the count/debounce check. Some foreign RTPS
-        // stacks use base 1 for this preemptive form.
+        // Preemptive ACKNACK (empty bitmap with seqbase 0 or 1) is an explicit reset signal
+        // and bypasses the count/debounce check. Some foreign RTPS stacks use base 1 for this
+        // preemptive form, which our own reader also uses for a plain "nothing missing" ack --
+        // the FinalFlag is what tells the two apart, and only a plain ack carries it.
         let is_preemptive = acknack.reader_sn_state.num_bits() == 0
+            && !submessage_header.final_flag().unwrap_or(false)
             && acknack.reader_sn_state.bitmap_base().to_i64() <= 1;
         let now = Instant::now();
 
