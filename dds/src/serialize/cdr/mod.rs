@@ -1,5 +1,5 @@
 mod cdr_input;
-pub mod deserializer;
+mod deserializer;
 mod prim_bulk;
 pub mod serializer;
 pub mod xcdr1;

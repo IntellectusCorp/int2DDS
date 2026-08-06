@@ -44,11 +44,8 @@ pub use core::{
     align_buffer,
     align_buffer_with_header_offset,
     align_position_with_header_offset,
-    deserialize_array_common,
     // Data payload deserialization
     deserialize_data_payload,
-    deserialize_optional_common,
-    deserialize_sequence_common,
     // Endianness utilities
     from_bytes_f32,
     from_bytes_f64,
@@ -62,10 +59,6 @@ pub use core::{
     read_u32,
     read_u64,
     read_u8,
-    // Sequence processing utilities
-    serialize_array_common,
-    serialize_optional_common,
-    serialize_sequence_common,
     to_bytes_f32,
     to_bytes_f64,
     to_bytes_i16,

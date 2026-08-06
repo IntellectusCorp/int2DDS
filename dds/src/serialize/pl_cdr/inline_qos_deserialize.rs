@@ -24,13 +24,6 @@ impl InlineQosParser {
         }
     }
 
-    pub fn parse_inline_qos_to_parameter_list(
-        &self,
-        parameter_list: ParameterList,
-    ) -> ParameterList {
-        parameter_list
-    }
-
     /// Parse raw bytes into ParameterList, returns bytes consumed
     fn parse_raw_bytes_internal_with_size(
         &self,
