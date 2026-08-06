@@ -15,7 +15,12 @@ import com.intellectus.int2dds.types.IDdsType;
  * C# and Rust {@code HelloWorldPub} examples use, so all three can
  * interoperate on the wire.
  *
- * <p>APPENDABLE, so the struct is wrapped in a DHEADER.
+ * <p>APPENDABLE. That wraps the struct in a DHEADER only under XCDR2, not
+ * under the XCDR1 this type actually ships under: {@link HelloWorldPub}
+ * never sets an XCDR2 {@code DataRepresentation} on its writer's QoS, so
+ * {@code DataWriter.resolveXcdr2} resolves to XCDR1, where {@link
+ * CdrWriter#dheaderBegin()} returns {@code -1} and writes nothing -- no
+ * DHEADER goes on the wire for this type.
  */
 public final class HelloWorld implements IDdsType {
 

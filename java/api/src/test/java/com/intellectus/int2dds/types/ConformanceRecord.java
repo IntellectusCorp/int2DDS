@@ -13,7 +13,14 @@ import com.intellectus.int2dds.cdr.Extensibility;
  * {@code CdrConformanceTest} — the whole point of that test is that the two
  * agree.
  *
- * <p>APPENDABLE, so the struct is wrapped in a DHEADER.
+ * <p>APPENDABLE. That wraps the struct in a DHEADER only under XCDR2 -- how
+ * {@code CdrConformanceTest} always serializes this type -- not under XCDR1,
+ * where {@link CdrWriter#dheaderBegin()} returns {@code -1} and writes
+ * nothing. XCDR1 is what the real write path actually resolves to by
+ * default ({@code DataWriter.resolveXcdr2}, unless a writer's QoS
+ * explicitly sets an XCDR2 {@code DataRepresentation}), so a plain {@code
+ * publisher.createDataWriter(topic)} publishing this type emits no DHEADER
+ * at all.
  */
 public final class ConformanceRecord implements IDdsType {
 
