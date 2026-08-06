@@ -8,7 +8,6 @@ import com.intellectus.int2dds.internal.ffi.Ffi;
 import java.io.DataInputStream;
 import java.io.File;
 import java.io.InputStream;
-import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 import java.util.jar.Manifest;
 import org.junit.jupiter.api.Test;
