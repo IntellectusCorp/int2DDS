@@ -62,7 +62,12 @@ impl PlCdrSerializer {
                 return Err(format!("Buffer size exceeded limit at parameter {}", index));
             }
 
+            // The PID is committed before the payload can fail, so rewind to the last
+            // parameter boundary. Without this the next PID lands in the failed
+            // parameter's length field and every later field shifts by 2 bytes.
+            let boundary = buffer.len();
             if let Err(e) = self.serialize_parameter(&mut buffer, parameter) {
+                buffer.truncate(boundary);
                 warn!(
                     "Failed to serialize parameter {} (ID: 0x{:04X}): {}",
                     index, parameter.id as u16, e
@@ -123,14 +128,6 @@ impl PlCdrSerializer {
         // Serialize parameter value payload
         let param_data = self.serialize_parameter_value(&parameter.value)?;
 
-        if param_data.len() > u16::MAX as usize {
-            return Err(format!(
-                "Parameter 0x{:04X} exceeds maximum allowed length: {} bytes",
-                parameter.id as u16,
-                param_data.len()
-            ));
-        }
-
         // Align to 4-byte boundary between parameters (RTPS 2.5, Section 9.6.2.2.2):
         // parameterLength MUST include the trailing padding (i.e. be a multiple of 4). A strict
         // remote parser advances by parameterLength, so an unpadded length on a
@@ -138,8 +135,18 @@ impl PlCdrSerializer {
         let padding =
             (PARAMETER_ALIGNMENT - (param_data.len() % PARAMETER_ALIGNMENT)) % PARAMETER_ALIGNMENT;
 
+        let padded_len = param_data.len() + padding;
+        if padded_len > u16::MAX as usize {
+            return Err(format!(
+                "Parameter 0x{:04X} exceeds maximum allowed length: {} bytes ({} padded)",
+                parameter.id as u16,
+                param_data.len(),
+                padded_len
+            ));
+        }
+
         // Parameter length field (padded length per RTPS)
-        self.write_u16(buffer, (param_data.len() + padding) as u16);
+        self.write_u16(buffer, padded_len as u16);
 
         // Parameter data bytes
         buffer.extend_from_slice(&param_data);
@@ -1077,5 +1084,102 @@ impl super::ParsedBuiltinTopicData {
                 SerializedData::default()
             }
         }
+    }
+}
+
+// A parameter that fails to serialize must leave the stream byte-identical to one
+// that never contained it.
+#[cfg(test)]
+mod parameter_failure_tests {
+    use super::*;
+    use crate::rtps::builtin::data::content_filtered_topic::ContentFilterInfo;
+    use crate::serialize::pl_cdr::PlCdrParser;
+
+    // ContentFilter has no serializer arm, so it reaches the failure path without
+    // allocating a 64 KiB payload. Adding one would silently neuter the three tests
+    // below; move them onto another unhandled variant if that happens.
+    fn unsupported<'a>() -> PlCdrParameter<'a> {
+        PlCdrParameter {
+            id: ParameterId::PidContentFilterInfo,
+            value: ParameterValue::ContentFilter(ContentFilterInfo {
+                filter_result: Vec::new(),
+                filter_signatures: Vec::new(),
+            }),
+        }
+    }
+
+    fn domain_id<'a>(id: u32) -> PlCdrParameter<'a> {
+        PlCdrParameter { id: ParameterId::PidDomainId, value: ParameterValue::DomainId(id) }
+    }
+
+    fn topic_name<'a>(name: &str) -> PlCdrParameter<'a> {
+        PlCdrParameter {
+            id: ParameterId::PidTopicName,
+            value: ParameterValue::TopicName(name.to_string()),
+        }
+    }
+
+    fn user_data(data: &[u8]) -> PlCdrParameter<'_> {
+        PlCdrParameter { id: ParameterId::PidUserData, value: ParameterValue::UserData(data) }
+    }
+
+    fn serialize(parameters: &[PlCdrParameter]) -> Vec<u8> {
+        PlCdrSerializer::new(true).serialize_parameters(parameters).unwrap()
+    }
+
+    // The parser consumes a bare parameter list, so skip the encapsulation header.
+    fn parameter_ids(bytes: &[u8]) -> Vec<u16> {
+        PlCdrParser::new(false)
+            .parse(&bytes[4..])
+            .unwrap()
+            .iter()
+            .map(|parameter| parameter.id as u16)
+            .collect()
+    }
+
+    #[test]
+    fn failed_parameter_leaves_no_bytes_behind() {
+        assert_eq!(
+            serialize(&[domain_id(7), unsupported(), topic_name("Square")]),
+            serialize(&[domain_id(7), topic_name("Square")])
+        );
+    }
+
+    #[test]
+    fn failed_trailing_parameter_keeps_the_sentinel() {
+        assert_eq!(serialize(&[domain_id(7), unsupported()]), serialize(&[domain_id(7)]));
+    }
+
+    #[test]
+    fn stream_with_a_failed_parameter_still_parses() {
+        let bytes = serialize(&[domain_id(7), unsupported(), topic_name("Square")]);
+        assert_eq!(
+            parameter_ids(&bytes),
+            vec![
+                ParameterId::PidDomainId as u16,
+                ParameterId::PidTopicName as u16,
+                ParameterId::PidSentinel as u16,
+            ]
+        );
+    }
+
+    #[test]
+    fn padded_length_at_the_u16_boundary_is_rejected() {
+        // 65531 payload bytes plus the 4-byte length prefix is 65535, which pads to
+        // 65536 and would truncate to a length field of 0.
+        let data = vec![0xAA; 65531];
+        assert_eq!(serialize(&[domain_id(7), user_data(&data)]), serialize(&[domain_id(7)]));
+    }
+
+    #[test]
+    fn largest_representable_parameter_is_accepted() {
+        let data = vec![0xAA; 65528];
+        let bytes = serialize(&[user_data(&data)]);
+
+        assert_eq!(u16::from_le_bytes([bytes[6], bytes[7]]), 65532);
+        assert_eq!(
+            parameter_ids(&bytes),
+            vec![ParameterId::PidUserData as u16, ParameterId::PidSentinel as u16]
+        );
     }
 }
