@@ -1,4 +1,4 @@
-use crate::serialize::cdr::{CdrDeserializer, CdrError, Xcdr2Deserializer};
+use crate::serialize::cdr::{try_vec_prealloc, CdrDeserializer, CdrError, Xcdr2Deserializer};
 use log::debug;
 
 use crate::serialize::{read_u16, read_u32, read_u8};
@@ -52,7 +52,7 @@ impl<'a> CdrDeserializer<'a> {
 
         self.check_available(length)?;
 
-        let mut chars = Vec::with_capacity(length);
+        let mut chars = try_vec_prealloc(length)?;
         for _ in 0..length {
             let byte_val = self.read_u8()?;
             chars.push(byte_val as char);
@@ -67,7 +67,7 @@ impl<'a> CdrDeserializer<'a> {
         let length = self.read_u32()? as usize;
 
         self.align(2);
-        let mut utf16_chars = Vec::with_capacity(self.checked_capacity(length, 2)?);
+        let mut utf16_chars = try_vec_prealloc(self.checked_capacity(length, 2)?)?;
 
         for _ in 0..length {
             utf16_chars.push(self.read_u16()?);
@@ -157,7 +157,7 @@ impl<'a> Xcdr2Deserializer<'a> {
     pub fn deserialize_char_array(&mut self) -> Result<Vec<char>, CdrError> {
         let length = self.read_u32()? as usize;
         self.check_available(length)?;
-        let mut chars = Vec::with_capacity(length);
+        let mut chars = try_vec_prealloc(length)?;
         for _ in 0..length {
             let byte_val = self.read_u8()?;
             chars.push(byte_val as char);
@@ -169,7 +169,7 @@ impl<'a> Xcdr2Deserializer<'a> {
     pub fn deserialize_wstring16(&mut self) -> Result<String, CdrError> {
         let length = self.read_u32()? as usize;
         self.align(2);
-        let mut utf16_chars = Vec::with_capacity(self.checked_capacity(length, 2)?);
+        let mut utf16_chars = try_vec_prealloc(self.checked_capacity(length, 2)?)?;
         for _ in 0..length {
             utf16_chars.push(self.read_u16()?);
         }

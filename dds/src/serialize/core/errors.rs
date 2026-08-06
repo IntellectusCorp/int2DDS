@@ -19,6 +19,7 @@ pub enum SerializationError {
     // Slice conversion error
     SliceConversionError,
     InvalidMemberId(u32),
+    AllocationFailure,
 }
 
 impl std::fmt::Display for SerializationError {
@@ -53,6 +54,9 @@ impl std::fmt::Display for SerializationError {
             }
             SerializationError::InvalidMemberId(id) => {
                 write!(f, "EMHEADER member_id exceeds 28 bits: {:#x}", id)
+            }
+            SerializationError::AllocationFailure => {
+                write!(f, "Memory allocation failed")
             }
         }
     }
