@@ -107,6 +107,16 @@ class CdrWriter:
                 "types use PL_CDR (PID member headers), not EMHEADER."
             )
 
+    def _check_token(self, token: int, header_bytes: int) -> None:
+        """Reject a finalize token that does not name a header this writer reserved.
+
+        struct.pack_into() accepts a negative offset and silently patches
+        relative to the end of the buffer, so an unchecked token corrupts the
+        stream without raising.
+        """
+        if token < 0 or len(self._buf) - token < header_bytes:
+            raise ValueError(f"Invalid finalize token: {token}")
+
     def _align(self, alignment: int) -> None:
         """Align the write position to the given boundary."""
         if alignment <= 1:
@@ -274,6 +284,7 @@ class CdrWriter:
 
     def write_dheader_finalize(self, token: int) -> None:
         """Finalize a DHEADER block by backpatching the size."""
+        self._check_token(token, 4)
         object_size = len(self._buf) - token - 4
         fmt = "<I" if self._le else ">I"
         struct.pack_into(fmt, self._buf, token, object_size)
@@ -335,6 +346,7 @@ class CdrWriter:
 
     def write_emheader_finalize(self, token: int) -> None:
         """Finalize an EMHEADER block by backpatching the length."""
+        self._check_token(token, 4)
         data_length = len(self._buf) - token - 4
         fmt = "<I" if self._le else ">I"
         struct.pack_into(fmt, self._buf, token, data_length)
@@ -383,6 +395,7 @@ class CdrWriter:
         fmt16 = "<H" if self._le else ">H"
         fmt32 = "<I" if self._le else ">I"
         short_reserved = member_id <= MAX_SHORT_MEMBER_ID
+        self._check_token(header_pos, 4 if short_reserved else 12)
         content_start = header_pos + (4 if short_reserved else 12)
         content_len = len(self._buf) - content_start
         if short_reserved and content_len <= MAX_SHORT_LENGTH:

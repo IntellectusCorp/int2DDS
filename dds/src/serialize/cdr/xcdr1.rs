@@ -246,7 +246,9 @@ impl<'a> CdrDeserializer<'a> {
 
     #[inline]
     pub(super) fn check_available(&self, size: usize) -> Result<(), CdrError> {
-        if self.position + size > self.input.len() {
+        // Subtraction form: `position + size` can wrap and pass an additive check.
+        let len = self.input.len();
+        if self.position > len || size > len - self.position {
             Err(CdrError::InsufficientData)
         } else {
             Ok(())

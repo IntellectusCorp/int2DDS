@@ -136,18 +136,45 @@ namespace Int2Dds.Cdr
 
         // ---- Buffer Management ----------------------------------------------
 
+        // Array.MaxLength, which is not available on the older target frameworks.
+        private const int MaxBufferLength = 0x7FFFFFC7;
+
         private void EnsureCapacity(int additionalBytes)
         {
-            int required = _pos + additionalBytes;
-            if (required <= _buffer.Length) return;
+            if (additionalBytes < 0)
+                throw new ArgumentOutOfRangeException(nameof(additionalBytes), "Negative length.");
+            // Subtraction form: `_pos + additionalBytes` can overflow to a negative
+            // value and pass an additive check, and doubling can overflow the growth loop.
+            if (additionalBytes <= _buffer.Length - _pos) return;
+            if (additionalBytes > MaxBufferLength - _pos)
+                throw new CdrOverflowException("Buffer would exceed the maximum array length.");
 
+            int required = _pos + additionalBytes;
             int newCapacity = _buffer.Length;
             while (newCapacity < required)
+            {
+                if (newCapacity > MaxBufferLength / 2)
+                {
+                    newCapacity = required;
+                    break;
+                }
                 newCapacity *= 2;
+            }
 
             var newBuffer = new byte[newCapacity];
             Buffer.BlockCopy(_buffer, 0, newBuffer, 0, _pos);
             _buffer = newBuffer;
+        }
+
+        /// <summary>
+        /// Reject a finalize token that does not name a header this writer reserved.
+        /// An unchecked token back-patches at the wrong offset and derives a negative
+        /// length, which is then written as a huge unsigned value.
+        /// </summary>
+        private void CheckToken(int token, int headerBytes)
+        {
+            if (token < 0 || _pos - token < headerBytes)
+                throw new ArgumentOutOfRangeException(nameof(token), $"Invalid finalize token: {token}");
         }
 
         // ---- Primitive Writes -----------------------------------------------
@@ -342,6 +369,7 @@ namespace Int2Dds.Cdr
         public void DheaderFinalize(int token)
         {
             if (!_xcdr2) return; // XCDR1: no DHEADER
+            CheckToken(token, 4);
             uint objectSize = (uint)(_pos - token - 4);
             if (_littleEndian)
                 BinaryPrimitives.WriteUInt32LittleEndian(_buffer.AsSpan(token), objectSize);
@@ -388,6 +416,7 @@ namespace Int2Dds.Cdr
         /// <param name="token">The token returned by <see cref="EmheaderBegin"/>.</param>
         public void EmheaderFinalize(int token)
         {
+            CheckToken(token, 4);
             uint dataLength = (uint)(_pos - token - 4);
             if (_littleEndian)
                 BinaryPrimitives.WriteUInt32LittleEndian(_buffer.AsSpan(token), dataLength);
@@ -428,6 +457,7 @@ namespace Int2Dds.Cdr
         {
             ushort flags = mustUnderstand ? MuFlag : (ushort)0;
             bool shortReserved = memberId <= MaxShortMemberId;
+            CheckToken(headerPos, shortReserved ? 4 : 12);
             int contentStart = headerPos + (shortReserved ? 4 : 12);
             int contentLen = _pos - contentStart;
             if (shortReserved && contentLen <= MaxShortLength)

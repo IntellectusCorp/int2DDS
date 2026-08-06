@@ -126,6 +126,10 @@ class CdrReader:
 
     def _ensure(self, n: int) -> None:
         """Ensure at least n bytes are available."""
+        # A negative n passes the comparison below and lets skip()/read_bytes()
+        # walk the position backwards, so reject it up front.
+        if n < 0:
+            raise CdrUnderflowError(f"Negative length: {n}")
         if self._pos + n > len(self._buf):
             raise CdrUnderflowError(
                 f"Need {n} bytes but only {len(self._buf) - self._pos} remaining"
