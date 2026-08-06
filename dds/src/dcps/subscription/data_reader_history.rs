@@ -94,6 +94,9 @@ pub(crate) struct DataReaderHistoryCache<Foo> {
     time_based_filter: TimeBasedFilter,
     // Receive-side ContentFilteredTopic hook (type-erased so the trait impl can call it).
     content_filter: Option<Arc<dyn Fn(&CacheChange) -> bool + Send + Sync>>,
+    // Sticky: set once a finite-lifespan sample is stored, so read-time purge
+    // can skip scanning caches that can never hold an expirable sample.
+    seen_finite_lifespan: bool,
 }
 
 // DESTINATION_ORDER comparison key: reception or source timestamp, then sequence number.
@@ -121,6 +124,10 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
 
     // Insert into the change's instance bucket in DESTINATION_ORDER.
     fn insert_change_sorted(&mut self, change: Arc<CacheChange>) {
+        if change.lifespan_duration().is_some_and(|d| !d.is_infinite()) {
+            self.seen_finite_lifespan = true;
+        }
+
         let kind = self.destination_order_kind;
         if let Ok(mut map) = self.instance_map.lock() {
             let bucket = map.entry(change.instance_handle()).or_default();
@@ -222,19 +229,30 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
 
     // Reader override: enforce Lifespan at read time using the live reference mode.
     fn purge_expired_on_read(&mut self) -> DdsResult<()> {
+        // No finite-lifespan sample was ever stored, so nothing can expire.
+        if !self.seen_finite_lifespan {
+            return Ok(());
+        }
+
         let now = RtpsTime::now();
         let reference = self.reader_lifespan_reference();
+
         let mut to_remove = Vec::new();
-        for change in self.get_changes().iter() {
-            let Some(lifespan) = change.lifespan_duration() else { continue };
-            if lifespan.is_infinite() {
-                continue;
-            }
-            let Some(expiry) = sample_expiry(change, lifespan, reference) else { continue };
-            if now >= expiry {
-                to_remove.push(change.clone());
+        if let Ok(map) = self.instance_map.lock() {
+            for bucket in map.values() {
+                for change in bucket.iter() {
+                    let Some(lifespan) = change.lifespan_duration() else { continue };
+                    if lifespan.is_infinite() {
+                        continue;
+                    }
+                    let Some(expiry) = sample_expiry(change, lifespan, reference) else { continue };
+                    if now >= expiry {
+                        to_remove.push(change.clone());
+                    }
+                }
             }
         }
+
         for change in to_remove {
             // Best-effort, matching the generic purge: a read must not fail on a purge hiccup.
             let _ = self.remove_change(change);
@@ -380,7 +398,7 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
 
         let removed_change = self.ensure_capacity(immutable_change.instance_handle())?;
 
-        self.insert_change_sorted(immutable_change.clone());
+        self.insert_change_sorted(immutable_change);
 
         Ok((removed_change, false))
     }
@@ -639,7 +657,16 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
             status_callback: Arc::new(Mutex::new(None)),
             time_based_filter: TimeBasedFilter::new(),
             content_filter: None,
+            seen_finite_lifespan: false,
         }
+    }
+
+    // True when any instance bucket holds a sample, without snapshotting the cache.
+    pub(crate) fn has_changes(&self) -> bool {
+        self.instance_map
+            .lock()
+            .map(|m| m.values().any(|bucket| !bucket.is_empty()))
+            .unwrap_or(false)
     }
 
     // TOPIC ordered_access: merge the per-instance buckets (each already DESTINATION_ORDER

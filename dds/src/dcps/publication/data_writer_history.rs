@@ -604,8 +604,9 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
 
     // Removes and returns the oldest change from all instances.
     fn remove_oldest_change_of_all(&mut self) -> DdsResult<Arc<CacheChange>> {
-        // The oldest change is always at index 0.
-        let oldest_change = self.get_changes().first().cloned();
+        // The oldest change is always at index 0. Read it directly instead of
+        // snapshotting the whole change list.
+        let oldest_change = self.changes.first().cloned();
         match oldest_change {
             Some(change) => {
                 self.remove_change(change.clone())?;
@@ -690,7 +691,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
     fn get_upgraded_rtps_writer(&self) -> DdsResult<Arc<dyn Writer + Send + Sync>> {
         self.rtps_writer
             .as_ref()
-            .ok_or(DdsError::Error("Failed to upgrade rtps writer weak".to_string()))?
+            .ok_or_else(|| DdsError::Error("Failed to upgrade rtps writer weak".to_string()))?
             .upgrade()
             .ok_or_else(|| DdsError::Error("Failed to upgrade rtps writer weak".to_string()))
     }
@@ -749,7 +750,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
         if let Some(rtps_writer) = self
             .rtps_writer
             .as_ref()
-            .ok_or(DdsError::Error("Failed to upgrade rtps writer weak".to_string()))?
+            .ok_or_else(|| DdsError::Error("Failed to upgrade rtps writer weak".to_string()))?
             .upgrade()
         {
             let rtps_writer_cache = rtps_writer.writer_cache();
@@ -790,7 +791,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
         if let Some(rtps_writer) = self
             .rtps_writer
             .as_ref()
-            .ok_or(DdsError::Error("Failed to upgrade rtps writer weak".to_string()))?
+            .ok_or_else(|| DdsError::Error("Failed to upgrade rtps writer weak".to_string()))?
             .upgrade()
         {
             let rtps_writer_cache = rtps_writer.writer_cache();
