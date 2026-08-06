@@ -833,7 +833,7 @@ impl<'a> CsGen<'a> {
         };
 
         // SerializeCdr method
-        self.emit_serialize_cdr(&full_struct);
+        self.emit_serialize_cdr();
         self.line("");
 
         // DeserializeCdr static method
@@ -981,52 +981,23 @@ impl<'a> CsGen<'a> {
 
     // ---- Serialization ----
 
-    fn emit_serialize_cdr(&mut self, s: &ResolvedStruct) {
+    fn emit_serialize_cdr(&mut self) {
         // SerializeCdr() - default uses XCDR1 (spec effective write default)
         self.line("public byte[] SerializeCdr() => SerializeCdr(false);");
         self.line("");
 
-        // SerializeCdr(bool xcdr2) - actual implementation
         self.line("public byte[] SerializeCdr(bool xcdr2)");
         self.line("{");
         self.indent += 1;
         self.line("var w = new CdrWriter(TypeExtensibility, xcdr2: xcdr2);");
-
-        match s.extensibility {
-            ExtensibilityKind::Final => {
-                for m in &s.members {
-                    let accessor = cs_ident(&m.name);
-                    self.emit_write_field(&m.resolved_type, &accessor);
-                }
-            }
-            ExtensibilityKind::Appendable => {
-                self.line("var _dt = w.DheaderBegin();");
-                for m in &s.members {
-                    let accessor = cs_ident(&m.name);
-                    self.emit_write_field(&m.resolved_type, &accessor);
-                }
-                self.line("w.DheaderFinalize(_dt);");
-            }
-            ExtensibilityKind::Mutable => {
-                // XCDR2: DHEADER + EMHEADER per field. XCDR1: PL_CDR headers + sentinel.
-                self.line("if (w.IsXcdr2)");
-                self.line("{");
-                self.indent += 1;
-                self.emit_mutable_ser_xcdr2_cs(&s.members);
-                self.indent -= 1;
-                self.line("}");
-                self.line("else");
-                self.line("{");
-                self.indent += 1;
-                self.emit_mutable_ser_xcdr1_cs(&s.members);
-                self.indent -= 1;
-                self.line("}");
-            }
-        }
-
+        self.line("SerializeCdrInline(w);");
         self.line("return w.ToBytes();");
         self.indent -= 1;
         self.line("}");
+        self.line("");
+
+        // Writer-receiving IDdsType overload so callers can reuse one buffer.
+        self.line("public void SerializeCdr(CdrWriter w) => SerializeCdrInline(w);");
     }
 
     fn emit_write_field(&mut self, ty: &ResolvedType, accessor: &str) {
@@ -1172,68 +1143,15 @@ impl<'a> CsGen<'a> {
     fn emit_deserialize_cdr(&mut self, s: &ResolvedStruct) {
         let class_name = naming::to_pascal_case(&s.name);
 
-        self.line(&format!("public static {} DeserializeCdr(ReadOnlySpan<byte> data)", class_name));
-        self.line("{");
-        self.indent += 1;
-        self.line("var r = new CdrReader(data);");
-        self.line(&format!("var obj = new {}();", class_name));
-
-        match s.extensibility {
-            ExtensibilityKind::Final => {
-                for m in &s.members {
-                    let prop_name = cs_ident(&m.name);
-                    self.emit_read_field(&m.resolved_type, &prop_name, "obj");
-                }
-            }
-            ExtensibilityKind::Appendable => {
-                self.line("var (_dSize, _dStart) = r.ReadDheader();");
-                for m in &s.members {
-                    let prop_name = cs_ident(&m.name);
-                    self.emit_read_field(&m.resolved_type, &prop_name, "obj");
-                }
-                self.line("r.ReadDheaderEnd(_dSize, _dStart);");
-            }
-            ExtensibilityKind::Mutable => {
-                // XCDR2: DHEADER-bounded EMHEADER loop. XCDR1: PL_CDR headers until sentinel.
-                self.line("if (r.IsXcdr2)");
-                self.line("{");
-                self.indent += 1;
-                self.line("var (_dSize, _dStart) = r.ReadDheader();");
-                self.line("int _dEnd = _dStart + (int)_dSize;");
-                self.line("while (r.Position < _dEnd)");
-                self.line("{");
-                self.indent += 1;
-                self.line("var (_mid, _mlen, _mu) = r.ReadEmheader();");
-                self.emit_mutable_deser_dispatch_cs(&s.members);
-                self.indent -= 1;
-                self.line("}");
-                self.line("r.ReadDheaderEnd(_dSize, _dStart);");
-                self.indent -= 1;
-                self.line("}");
-                self.line("else");
-                self.line("{");
-                self.indent += 1;
-                self.line("while (true)");
-                self.line("{");
-                self.indent += 1;
-                self.line("var (_mid, _mlen, _mu, _sentinel) = r.ReadParameterHeader();");
-                self.line("if (_sentinel) break;");
-                self.emit_mutable_deser_dispatch_cs(&s.members);
-                self.indent -= 1;
-                self.line("}");
-                self.indent -= 1;
-                self.line("}");
-            }
-        }
-
-        self.line("return obj;");
-        self.indent -= 1;
-        self.line("}");
-        self.line("");
-
-        // byte[] overload for P/Invoke compatibility (DataReader uses reflection to find this signature)
+        // Span overload copies (the span may be transient); the byte[] overload wraps
+        // the array without copying (DataReader uses reflection to find this signature).
         self.line(&format!(
-            "public static {} DeserializeCdr(byte[] data) => DeserializeCdr(data.AsSpan());",
+            "public static {} DeserializeCdr(ReadOnlySpan<byte> data) => DeserializeCdrInline(new CdrReader(data));",
+            class_name
+        ));
+        self.line("");
+        self.line(&format!(
+            "public static {} DeserializeCdr(byte[] data) => DeserializeCdrInline(new CdrReader(data));",
             class_name
         ));
     }

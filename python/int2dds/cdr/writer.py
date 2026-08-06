@@ -40,6 +40,19 @@ MAX_SHORT_MEMBER_ID = 0x3F00  # member ids above this need the long form
 MAX_SHORT_LENGTH = 0xFFFF  # content lengths above this need the long form
 _MU_FLAG = 0x4000  # must-understand bit in a PL_CDR pid
 
+# Pre-compiled codecs, indexed by little_endian (False=BE, True=LE)
+_ST_U16 = (struct.Struct(">H"), struct.Struct("<H"))
+_ST_I16 = (struct.Struct(">h"), struct.Struct("<h"))
+_ST_U32 = (struct.Struct(">I"), struct.Struct("<I"))
+_ST_I32 = (struct.Struct(">i"), struct.Struct("<i"))
+_ST_U64 = (struct.Struct(">Q"), struct.Struct("<Q"))
+_ST_I64 = (struct.Struct(">q"), struct.Struct("<q"))
+_ST_F32 = (struct.Struct(">f"), struct.Struct("<f"))
+_ST_F64 = (struct.Struct(">d"), struct.Struct("<d"))
+_ST_ENCAP = struct.Struct(">HH")
+
+_ZEROS = tuple(b"\x00" * n for n in range(13))
+
 
 class CdrWriter:
     """
@@ -55,7 +68,21 @@ class CdrWriter:
         >>> data = writer.to_bytes()
     """
 
-    __slots__ = ("_buf", "_le", "_xcdr2", "_header_size", "_extensibility")
+    __slots__ = (
+        "_buf",
+        "_le",
+        "_xcdr2",
+        "_header_size",
+        "_extensibility",
+        "_st_u16",
+        "_st_i16",
+        "_st_u32",
+        "_st_i32",
+        "_st_u64",
+        "_st_i64",
+        "_st_f32",
+        "_st_f64",
+    )
 
     def __init__(
         self,
@@ -76,6 +103,14 @@ class CdrWriter:
         self._xcdr2 = xcdr2
         self._extensibility = extensibility
         self._header_size = 0
+        self._st_u16 = _ST_U16[little_endian]
+        self._st_i16 = _ST_I16[little_endian]
+        self._st_u32 = _ST_U32[little_endian]
+        self._st_i32 = _ST_I32[little_endian]
+        self._st_u64 = _ST_U64[little_endian]
+        self._st_i64 = _ST_I64[little_endian]
+        self._st_f32 = _ST_F32[little_endian]
+        self._st_f64 = _ST_F64[little_endian]
 
         # Write encapsulation header
         self._write_encapsulation()
@@ -96,7 +131,7 @@ class CdrWriter:
             encap_id = _ENCAP_CDR_LE if self._le else _ENCAP_CDR_BE
 
         # Encapsulation header is always big-endian: [encap_id(2), options(2)]
-        self._buf.extend(struct.pack(">HH", encap_id, 0))
+        self._buf.extend(_ST_ENCAP.pack(encap_id, 0))
         self._header_size = 4
 
     def _require_xcdr2(self, what: str) -> None:
@@ -130,7 +165,7 @@ class CdrWriter:
         padding = (actual - (stream_pos % actual)) % actual
 
         if padding > 0:
-            self._buf.extend(b"\x00" * padding)
+            self._buf.extend(_ZEROS[padding])
 
     # -------------------------------------------------------------------------
     # Primitive writes
@@ -146,55 +181,48 @@ class CdrWriter:
 
     def write_i8(self, val: int) -> None:
         """Write a signed 8-bit integer."""
-        self._buf.extend(struct.pack("b", val))
+        self._buf.append(val & 0xFF)
+
+    def _pack(self, codec: struct.Struct, align: int, val) -> None:
+        """Align, grow the buffer, and pack in place (no per-call temporaries)."""
+        self._align(align)
+        buf = self._buf
+        pos = len(buf)
+        buf.extend(_ZEROS[codec.size])
+        codec.pack_into(buf, pos, val)
 
     def write_u16(self, val: int) -> None:
         """Write an unsigned 16-bit integer."""
-        self._align(2)
-        fmt = "<H" if self._le else ">H"
-        self._buf.extend(struct.pack(fmt, val))
+        self._pack(self._st_u16, 2, val)
 
     def write_i16(self, val: int) -> None:
         """Write a signed 16-bit integer."""
-        self._align(2)
-        fmt = "<h" if self._le else ">h"
-        self._buf.extend(struct.pack(fmt, val))
+        self._pack(self._st_i16, 2, val)
 
     def write_u32(self, val: int) -> None:
         """Write an unsigned 32-bit integer."""
-        self._align(4)
-        fmt = "<I" if self._le else ">I"
-        self._buf.extend(struct.pack(fmt, val))
+        self._pack(self._st_u32, 4, val)
 
     def write_i32(self, val: int) -> None:
         """Write a signed 32-bit integer."""
-        self._align(4)
-        fmt = "<i" if self._le else ">i"
-        self._buf.extend(struct.pack(fmt, val))
+        self._pack(self._st_i32, 4, val)
 
     def write_u64(self, val: int) -> None:
         """Write an unsigned 64-bit integer."""
-        self._align(4 if self._xcdr2 else 8)  # XCDR2 caps at 4-byte alignment
-        fmt = "<Q" if self._le else ">Q"
-        self._buf.extend(struct.pack(fmt, val))
+        # XCDR2 caps at 4-byte alignment
+        self._pack(self._st_u64, 4 if self._xcdr2 else 8, val)
 
     def write_i64(self, val: int) -> None:
         """Write a signed 64-bit integer."""
-        self._align(4 if self._xcdr2 else 8)
-        fmt = "<q" if self._le else ">q"
-        self._buf.extend(struct.pack(fmt, val))
+        self._pack(self._st_i64, 4 if self._xcdr2 else 8, val)
 
     def write_f32(self, val: float) -> None:
         """Write a 32-bit float."""
-        self._align(4)
-        fmt = "<f" if self._le else ">f"
-        self._buf.extend(struct.pack(fmt, val))
+        self._pack(self._st_f32, 4, val)
 
     def write_f64(self, val: float) -> None:
         """Write a 64-bit double."""
-        self._align(4 if self._xcdr2 else 8)
-        fmt = "<d" if self._le else ">d"
-        self._buf.extend(struct.pack(fmt, val))
+        self._pack(self._st_f64, 4 if self._xcdr2 else 8, val)
 
     def write_char(self, val: str) -> None:
         """Write a single character (1 byte)."""
@@ -211,9 +239,10 @@ class CdrWriter:
         The string is encoded as UTF-8 with a null terminator.
         Length includes the null terminator.
         """
-        encoded = val.encode("utf-8") + b"\x00"
-        self.write_u32(len(encoded))
+        encoded = val.encode("utf-8")
+        self.write_u32(len(encoded) + 1)
         self._buf.extend(encoded)
+        self._buf.append(0)
 
     def write_wstring(self, val: str) -> None:
         """
@@ -267,8 +296,7 @@ class CdrWriter:
         yield
         # Backpatch the size
         object_size = len(self._buf) - token - 4
-        fmt = "<I" if self._le else ">I"
-        struct.pack_into(fmt, self._buf, token, object_size)
+        self._st_u32.pack_into(self._buf, token, object_size)
 
     def write_dheader_begin(self) -> int:
         """
@@ -286,8 +314,7 @@ class CdrWriter:
         """Finalize a DHEADER block by backpatching the size."""
         self._check_token(token, 4)
         object_size = len(self._buf) - token - 4
-        fmt = "<I" if self._le else ">I"
-        struct.pack_into(fmt, self._buf, token, object_size)
+        self._st_u32.pack_into(self._buf, token, object_size)
 
     # -------------------------------------------------------------------------
     # XCDR2 EMHEADER (Element Member Header for Mutable types)
@@ -348,8 +375,7 @@ class CdrWriter:
         """Finalize an EMHEADER block by backpatching the length."""
         self._check_token(token, 4)
         data_length = len(self._buf) - token - 4
-        fmt = "<I" if self._le else ">I"
-        struct.pack_into(fmt, self._buf, token, data_length)
+        self._st_u32.pack_into(self._buf, token, data_length)
 
     def write_sentinel(self) -> None:
         """Write a sentinel marker (end of mutable struct fields)."""
@@ -381,10 +407,7 @@ class CdrWriter:
             raise ValueError(f"member_id exceeds 28 bits: 0x{member_id:X}")
         self._align(4)
         header_pos = len(self._buf)
-        if member_id <= MAX_SHORT_MEMBER_ID:
-            self._buf.extend(b"\x00\x00\x00\x00")
-        else:
-            self._buf.extend(b"\x00" * 12)
+        self._buf.extend(_ZEROS[4] if member_id <= MAX_SHORT_MEMBER_ID else _ZEROS[12])
         return header_pos
 
     def write_member_v1_finalize(
@@ -392,32 +415,33 @@ class CdrWriter:
     ) -> None:
         """Backpatch a PL_CDR v1 member header, promoting to long form if needed."""
         flags = _MU_FLAG if must_understand else 0
-        fmt16 = "<H" if self._le else ">H"
-        fmt32 = "<I" if self._le else ">I"
+        st16 = self._st_u16
+        st32 = self._st_u32
         short_reserved = member_id <= MAX_SHORT_MEMBER_ID
         self._check_token(header_pos, 4 if short_reserved else 12)
         content_start = header_pos + (4 if short_reserved else 12)
         content_len = len(self._buf) - content_start
         if short_reserved and content_len <= MAX_SHORT_LENGTH:
             pid = flags | (member_id & 0x3FFF)
-            struct.pack_into(fmt16, self._buf, header_pos, pid)
-            struct.pack_into(fmt16, self._buf, header_pos + 2, content_len)
+            st16.pack_into(self._buf, header_pos, pid)
+            st16.pack_into(self._buf, header_pos + 2, content_len)
             return
         if short_reserved:
             # Content too large for the short form: make room for 8 more header bytes.
             self._buf[header_pos + 4 : header_pos + 4] = b"\x00" * 8
         pid_ext = flags | PID_EXTENDED
-        struct.pack_into(fmt16, self._buf, header_pos, pid_ext)
-        struct.pack_into(fmt16, self._buf, header_pos + 2, 8)
-        struct.pack_into(fmt32, self._buf, header_pos + 4, member_id)
-        struct.pack_into(fmt32, self._buf, header_pos + 8, content_len)
+        st16.pack_into(self._buf, header_pos, pid_ext)
+        st16.pack_into(self._buf, header_pos + 2, 8)
+        st32.pack_into(self._buf, header_pos + 4, member_id)
+        st32.pack_into(self._buf, header_pos + 8, content_len)
 
     def end_mutable_struct(self) -> None:
         """Write the PL_CDR sentinel that terminates an XCDR1 mutable struct."""
         self._align(4)
-        fmt16 = "<H" if self._le else ">H"
-        self._buf.extend(struct.pack(fmt16, MEMBER_ID_SENTINEL))
-        self._buf.extend(struct.pack(fmt16, 0))
+        st16 = self._st_u16
+        pos = len(self._buf)
+        self._buf.extend(_ZEROS[4])
+        st16.pack_into(self._buf, pos, MEMBER_ID_SENTINEL)
 
     # -------------------------------------------------------------------------
     # Output
@@ -426,6 +450,14 @@ class CdrWriter:
     def to_bytes(self) -> bytes:
         """Return the serialized data as bytes."""
         return bytes(self._buf)
+
+    def view(self) -> memoryview:
+        """Return a read-only zero-copy view of the serialized data.
+
+        While the view (or anything holding it) is alive the writer must not
+        be written to: the exported buffer blocks the bytearray from resizing.
+        """
+        return memoryview(self._buf).toreadonly()
 
     def __len__(self) -> int:
         """Return the current size of the serialized data."""

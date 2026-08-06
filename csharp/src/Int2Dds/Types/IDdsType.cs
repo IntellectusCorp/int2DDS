@@ -1,4 +1,5 @@
 using System;
+using Int2Dds.Cdr;
 
 namespace Int2Dds.Types
 {
@@ -21,5 +22,11 @@ namespace Int2Dds.Types
     {
         byte[] SerializeCdr();
         byte[] SerializeCdr(bool xcdr2);
+
+        /// <summary>
+        /// Serialize into an existing writer (which already carries the
+        /// encapsulation header) so callers can reuse one buffer across writes.
+        /// </summary>
+        void SerializeCdr(CdrWriter writer);
     }
 }

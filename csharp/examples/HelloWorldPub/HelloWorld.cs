@@ -30,25 +30,15 @@ namespace HelloWorldPub
         public byte[] SerializeCdr(bool xcdr2)
         {
             var w = new CdrWriter(TypeExtensibility, xcdr2: xcdr2);
-            var _dt = w.DheaderBegin();
-            w.WriteU32(Index);
-            w.WriteString(Message);
-            w.DheaderFinalize(_dt);
+            SerializeCdrInline(w);
             return w.ToBytes();
         }
 
-        public static HelloWorld DeserializeCdr(ReadOnlySpan<byte> data)
-        {
-            var r = new CdrReader(data);
-            var obj = new HelloWorld();
-            var (_dSize, _dStart) = r.ReadDheader();
-            obj.Index = r.ReadU32();
-            obj.Message = r.ReadString();
-            r.ReadDheaderEnd(_dSize, _dStart);
-            return obj;
-        }
+        public void SerializeCdr(CdrWriter w) => SerializeCdrInline(w);
 
-        public static HelloWorld DeserializeCdr(byte[] data) => DeserializeCdr(data.AsSpan());
+        public static HelloWorld DeserializeCdr(ReadOnlySpan<byte> data) => DeserializeCdrInline(new CdrReader(data));
+
+        public static HelloWorld DeserializeCdr(byte[] data) => DeserializeCdrInline(new CdrReader(data));
 
         internal static HelloWorld DeserializeCdrInline(CdrReader r)
         {

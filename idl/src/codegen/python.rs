@@ -187,12 +187,12 @@ impl<'a> PyGen<'a> {
         self.line("");
 
         // _serialize_cdr (with encap header)
-        self.line("def _serialize_cdr(self, xcdr2: bool = False) -> bytes:");
+        self.line("def _serialize_cdr(self, xcdr2: bool = False) -> memoryview:");
         self.indent += 1;
-        self.line("\"\"\"Serialize to CDR bytes with encapsulation header.\"\"\"");
+        self.line("\"\"\"Serialize to CDR bytes with encapsulation header (zero-copy view).\"\"\"");
         self.line("w = CdrWriter(extensibility=self._extensibility, xcdr2=xcdr2)");
         self.line("self._serialize_cdr_inline(w)");
-        self.line("return w.to_bytes()");
+        self.line("return w.view()");
         self.indent -= 1;
         self.line("");
 
@@ -357,12 +357,12 @@ impl<'a> PyGen<'a> {
         self.line("");
 
         // _serialize_cdr (with encap header)
-        self.line("def _serialize_cdr(self, xcdr2: bool = False) -> bytes:");
+        self.line("def _serialize_cdr(self, xcdr2: bool = False) -> memoryview:");
         self.indent += 1;
-        self.line("\"\"\"Serialize to CDR bytes with encapsulation header.\"\"\"");
+        self.line("\"\"\"Serialize to CDR bytes with encapsulation header (zero-copy view).\"\"\"");
         self.line("w = CdrWriter(extensibility=self._extensibility, xcdr2=xcdr2)");
         self.line("self._serialize_cdr_inline(w)");
-        self.line("return w.to_bytes()");
+        self.line("return w.view()");
         self.indent -= 1;
         self.line("");
 
@@ -840,9 +840,9 @@ impl<'a> PyGen<'a> {
 
     fn emit_serialize_cdr(&mut self, s: &ResolvedStruct) {
         let members = self.collect_all_members(s);
-        self.line("def _serialize_cdr(self, xcdr2: bool = False) -> bytes:");
+        self.line("def _serialize_cdr(self, xcdr2: bool = False) -> memoryview:");
         self.indent += 1;
-        self.line("\"\"\"Serialize to CDR bytes with encapsulation header.\"\"\"");
+        self.line("\"\"\"Serialize to CDR bytes with encapsulation header (zero-copy view).\"\"\"");
         self.line("w = CdrWriter(extensibility=self._extensibility, xcdr2=xcdr2)");
 
         match s.extensibility {
@@ -916,7 +916,7 @@ impl<'a> PyGen<'a> {
             }
         }
 
-        self.line("return w.to_bytes()");
+        self.line("return w.view()");
         self.indent -= 1;
     }
 
@@ -1538,7 +1538,7 @@ mod tests {
         let model = resolve(defs).unwrap();
         let code = generate(&model, "ShapeType.idl", &PythonOptions::new());
         assert!(
-            code.contains("def _serialize_cdr(self, xcdr2: bool = False) -> bytes:"),
+            code.contains("def _serialize_cdr(self, xcdr2: bool = False) -> memoryview:"),
             "no-arg _serialize_cdr must default to XCDR1 (False): {}",
             code
         );

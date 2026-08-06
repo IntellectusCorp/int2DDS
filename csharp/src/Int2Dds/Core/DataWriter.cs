@@ -1,6 +1,7 @@
 using System;
 using System.Reflection;
 using System.Text;
+using Int2Dds.Cdr;
 using Int2Dds.Conditions;
 using Int2Dds.Exceptions;
 using Int2Dds.Interop;
@@ -21,9 +22,15 @@ namespace Int2Dds.Core
         private static readonly bool s_hasKey =
             typeof(T).GetCustomAttribute<DdsTypeAttribute>()?.HasKey ?? false;
 
+        private static readonly Extensibility s_extensibility = (Extensibility)(
+            typeof(T).GetCustomAttribute<DdsTypeAttribute>()?.Extensibility
+            ?? (int)Extensibility.Appendable);
+
         private readonly IntPtr _handle;
         private readonly Topic<T> _topic;
         private readonly bool _xcdr2;
+        private readonly object _writeLock = new object();
+        private CdrWriter _writer;
         private IntPtr _listenerContextHandle;
         private bool _disposed;
 
@@ -191,16 +198,21 @@ namespace Int2Dds.Core
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
-            var data = sample.SerializeCdr(_xcdr2);
-
-            unsafe
+            lock (_writeLock)
             {
-                fixed (byte* pData = data)
+                var w = _writer ?? (_writer = new CdrWriter(s_extensibility, xcdr2: _xcdr2));
+                w.Reset();
+                sample.SerializeCdr(w);
+
+                unsafe
                 {
-                    ReturnCodeHelper.CheckReturn(
-                        NativeMethods.int2dds_datawriter_write_serialized(
-                            _handle,
-                            pData, (UIntPtr)data.Length));
+                    fixed (byte* pData = w.InternalBuffer)
+                    {
+                        ReturnCodeHelper.CheckReturn(
+                            NativeMethods.int2dds_datawriter_write_serialized(
+                                _handle,
+                                pData, (UIntPtr)w.Length));
+                    }
                 }
             }
         }
@@ -214,22 +226,27 @@ namespace Int2Dds.Core
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
-            var data = sample.SerializeCdr(_xcdr2);
-
             var epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
             var elapsed = timestamp.ToUniversalTime() - epoch;
             var sec = (int)elapsed.TotalSeconds;
             var nanosec = (uint)((elapsed.TotalSeconds - sec) * 1_000_000_000);
 
-            unsafe
+            lock (_writeLock)
             {
-                fixed (byte* pData = data)
+                var w = _writer ?? (_writer = new CdrWriter(s_extensibility, xcdr2: _xcdr2));
+                w.Reset();
+                sample.SerializeCdr(w);
+
+                unsafe
                 {
-                    ReturnCodeHelper.CheckReturn(
-                        NativeMethods.int2dds_datawriter_write_serialized_w_timestamp(
-                            _handle,
-                            pData, (UIntPtr)data.Length,
-                            sec, nanosec));
+                    fixed (byte* pData = w.InternalBuffer)
+                    {
+                        ReturnCodeHelper.CheckReturn(
+                            NativeMethods.int2dds_datawriter_write_serialized_w_timestamp(
+                                _handle,
+                                pData, (UIntPtr)w.Length,
+                                sec, nanosec));
+                    }
                 }
             }
         }

@@ -30,9 +30,14 @@ namespace Int2Dds.Tests.Helpers
         public byte[] SerializeCdr(bool xcdr2)
         {
             var w = new CdrWriter(Extensibility.Final);
+            SerializeCdr(w);
+            return w.ToBytes();
+        }
+
+        public void SerializeCdr(CdrWriter w)
+        {
             w.WriteU32(Index);
             w.WriteString(Message);
-            return w.ToBytes();
         }
 
         public static HelloWorld DeserializeCdr(byte[] data)
