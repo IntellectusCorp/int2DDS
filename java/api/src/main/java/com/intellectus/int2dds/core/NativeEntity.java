@@ -142,12 +142,16 @@ abstract class NativeEntity implements AutoCloseable {
      *
      * <p>So the child pass is retried, the same way {@link
      * NativeCleaner#sweepDeferred} arbitrates deferred handles: repeat a full
-     * reverse-of-addition pass over whichever children are still open, for as
+     * pass over whichever children are still open, for as
      * long as a pass closes at least one of them — closing the Publisher can
      * be exactly what unblocks the Topic it was blocking, on the very next
      * pass. Once a full pass closes none of the remaining children, nothing
      * changed to unblock them, further retries cannot help, and this gives
-     * up. Terminates because a pass either closes at least one child for good
+     * up. Only the first pass runs in reverse-of-addition order; later passes
+     * carry the survivors forward and so alternate direction. That affects
+     * only how many passes are needed, never the outcome: every still-open
+     * child is attempted in every pass, and closing one can only remove a
+     * blocker, never add one. Terminates because a pass either closes at least one child for good
      * or closes none — there is no third outcome a live child can produce —
      * so the still-open set shrinks by at least one every productive pass and
      * reaches empty, or a wholly unproductive pass, in finitely many passes.

@@ -367,6 +367,13 @@ public final class QosMarshal {
         ReturnCodes.check(FfiAccess.writerQosGetDataFrag(h, addr));
         q.setDataFrag(slot.getInt(0));
 
+
+        // One slot address feeds every getter above. The ordinary later
+        // slot.getInt/getLong reads are what keep it reachable in practice,
+        // but that is the same reasoning this class rejected as insufficient
+        // for the FfiAccess bridges: a cold path C2 prunes into an uncommon
+        // trap takes those reads with it. Fence once, after the last call.
+        NativeKeepAlive.keepAlive(slot);
         return q;
     }
 
@@ -427,6 +434,13 @@ public final class QosMarshal {
         q.setLiveliness(new Liveliness(
                 LivelinessKind.fromValue(slot.getInt(0)), Duration.ofNanos(slot.getLong(8))));
 
+
+        // One slot address feeds every getter above. The ordinary later
+        // slot.getInt/getLong reads are what keep it reachable in practice,
+        // but that is the same reasoning this class rejected as insufficient
+        // for the FfiAccess bridges: a cold path C2 prunes into an uncommon
+        // trap takes those reads with it. Fence once, after the last call.
+        NativeKeepAlive.keepAlive(slot);
         return q;
     }
 
@@ -447,14 +461,20 @@ public final class QosMarshal {
      * NativeKeepAlive}'s own doc -- so this fences {@code buf} explicitly
      * immediately afterward, the same fence every {@code FfiAccess} bridge
      * that hands a direct buffer's address to native code uses.
+     *
+     * <p>The status code is held in a local and checked <em>after</em> the
+     * fence, not folded into the call. Checking first would throw past the
+     * fence on failure, leaving the one path with no later use of {@code buf}
+     * unfenced -- which is the path the fence exists for.
      */
     private static void applyUserData(UserData ud, ByteBufferSetter setter) {
         byte[] data = ud.getData();
         ByteBuffer buf = ByteBuffer.allocateDirect(data.length).order(ByteOrder.nativeOrder());
         buf.put(data);
         long addr = FfiAccess.directBufferAddress(buf);
-        ReturnCodes.check(setter.set(addr, data.length));
+        int rc = setter.set(addr, data.length);
         NativeKeepAlive.keepAlive(buf);
+        ReturnCodes.check(rc);
     }
 
     /** Converts a partition's names to UTF-8 and hands them to {@code setter}. */
