@@ -203,6 +203,41 @@ pub(crate) fn try_vec_prealloc<T>(count: usize) -> Result<Vec<T>, SerializationE
     Ok(vec)
 }
 
+/// Build a `[T; N]` element-by-element on the stack (no intermediate heap `Vec`),
+/// dropping the already-initialized elements if `next` fails partway through.
+fn try_array_from_fn<T, E, const N: usize>(
+    mut next: impl FnMut() -> Result<T, E>,
+) -> Result<[T; N], E> {
+    use std::mem::MaybeUninit;
+
+    struct Partial<T, const N: usize> {
+        items: [MaybeUninit<T>; N],
+        init: usize,
+    }
+    impl<T, const N: usize> Drop for Partial<T, N> {
+        fn drop(&mut self) {
+            for item in &mut self.items[..self.init] {
+                // SAFETY: exactly the first `init` slots hold initialized values.
+                unsafe { item.assume_init_drop() };
+            }
+        }
+    }
+
+    let mut partial = Partial::<T, N> {
+        // SAFETY: an array of `MaybeUninit` is valid without initialization.
+        items: unsafe { MaybeUninit::<[MaybeUninit<T>; N]>::uninit().assume_init() },
+        init: 0,
+    };
+    for slot in &mut partial.items {
+        *slot = MaybeUninit::new(next()?);
+        partial.init += 1;
+    }
+    partial.init = 0;
+    // SAFETY: all `N` slots are initialized and the guard above is disarmed, so each
+    // value is read out exactly once. `MaybeUninit<T>` has the same layout as `T`.
+    Ok(unsafe { partial.items.as_ptr().cast::<[T; N]>().read() })
+}
+
 /// Trait for types that can be serialized using CDR
 pub trait CdrSerialize {
     /// Whether this type is a CDR primitive. Unused by classic CDR encoding
@@ -284,14 +319,7 @@ impl<T: CdrSerialize, const N: usize> CdrSerialize for [T; N] {
 
 impl<T: CdrDeserialize, const N: usize> CdrDeserialize for [T; N] {
     fn deserialize_cdr(deserializer: &mut CdrDeserializer) -> CdrResult<Self> {
-        // Collect into Vec and try to convert to array
-        let mut vec = Vec::with_capacity(N);
-        for _ in 0..N {
-            vec.push(T::deserialize_cdr(deserializer)?);
-        }
-        vec.try_into().map_err(|_| {
-            SerializationError::DeserializationError("Failed to convert Vec to array".to_string())
-        })
+        try_array_from_fn(|| T::deserialize_cdr(deserializer))
     }
 }
 
@@ -410,13 +438,7 @@ impl<T: XcdrSerialize, const N: usize> XcdrSerialize for [T; N] {
 
 impl<T: XcdrDeserialize, const N: usize> XcdrDeserialize for [T; N] {
     fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
-        let mut vec = Vec::with_capacity(N);
-        for _ in 0..N {
-            vec.push(T::deserialize_xcdr(deserializer)?);
-        }
-        vec.try_into().map_err(|_| {
-            SerializationError::DeserializationError("Failed to convert Vec to array".to_string())
-        })
+        try_array_from_fn(|| T::deserialize_xcdr(deserializer))
     }
 }
 
@@ -690,5 +712,55 @@ mod prealloc_tests {
         assert!(v.capacity() <= 32);
         let v = try_vec_prealloc::<u8>(100).unwrap();
         assert!(v.capacity() >= 100);
+    }
+}
+
+#[cfg(test)]
+mod try_array_from_fn_tests {
+    use super::try_array_from_fn;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    struct DropCounter(Rc<Cell<usize>>);
+    impl Drop for DropCounter {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+
+    #[test]
+    fn partial_failure_drops_only_initialized_elements() {
+        let drops = Rc::new(Cell::new(0));
+        let mut produced = 0;
+        let result: Result<[DropCounter; 8], ()> = try_array_from_fn(|| {
+            if produced == 5 {
+                return Err(());
+            }
+            produced += 1;
+            Ok(DropCounter(drops.clone()))
+        });
+        assert!(result.is_err());
+        assert_eq!(drops.get(), 5);
+    }
+
+    #[test]
+    fn success_yields_each_element_exactly_once() {
+        let drops = Rc::new(Cell::new(0));
+        let arr: [DropCounter; 4] =
+            try_array_from_fn(|| Ok::<_, ()>(DropCounter(drops.clone()))).unwrap();
+        assert_eq!(drops.get(), 0);
+        drop(arr);
+        assert_eq!(drops.get(), 4);
+    }
+
+    #[test]
+    fn values_arrive_in_call_order() {
+        let mut n = 0u32;
+        let arr: [u32; 5] = try_array_from_fn(|| {
+            n += 1;
+            Ok::<_, ()>(n)
+        })
+        .unwrap();
+        assert_eq!(arr, [1, 2, 3, 4, 5]);
     }
 }
