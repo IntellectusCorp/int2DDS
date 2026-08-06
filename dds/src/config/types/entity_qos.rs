@@ -5,9 +5,10 @@ use crate::{
         DataFragQosPolicy, DataRepresentationQosPolicy, DestinationOrderQosPolicy,
         DurabilityQosPolicy, DurabilityServiceQosPolicy, GroupDataQosPolicy, HistoryQosPolicy,
         LifespanReferenceQosPolicy, LivelinessQosPolicy, OwnershipQosPolicy, PartitionQosPolicy,
-        PresentationQosPolicy, PropertyQosPolicy, ReaderReliabilityExtensionQosPolicy,
-        ReliabilityQosPolicy, TopicDataQosPolicy, TypeConsistencyEnforcementQosPolicy,
-        UserDataQosPolicy, WriterReliabilityExtensionQosPolicy, DEFAULT_MAX_BLOCKING_TIME,
+        PresentationQosPolicy, PropertyQosPolicy, ReaderMulticastExtensionQosPolicy,
+        ReaderReliabilityExtensionQosPolicy, ReliabilityQosPolicy, TopicDataQosPolicy,
+        TypeConsistencyEnforcementQosPolicy, UserDataQosPolicy,
+        WriterReliabilityExtensionQosPolicy, DEFAULT_MAX_BLOCKING_TIME,
     },
     domain,
     infrastructure::qos_policy as internal_qos_policy,
@@ -260,6 +261,8 @@ pub(crate) struct DataReaderQos {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reader_reliability_extension: Option<ReaderReliabilityExtensionQosPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reader_multicast_extension: Option<ReaderMulticastExtensionQosPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) data_representation: Option<DataRepresentationQosPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) type_consistency_enforcement: Option<TypeConsistencyEnforcementQosPolicy>,
@@ -286,6 +289,10 @@ impl MergeQos for DataReaderQos {
                 .reader_reliability_extension
                 .clone()
                 .or(base.reader_reliability_extension.clone()),
+            reader_multicast_extension: self
+                .reader_multicast_extension
+                .clone()
+                .or(base.reader_multicast_extension.clone()),
             data_representation: self
                 .data_representation
                 .clone()
@@ -380,6 +387,10 @@ impl From<DataReaderQos> for subscription::qos::DataReaderQos {
             qos.reader_reliability_extension = reader_reliability_extension.into();
         }
 
+        if let Some(reader_multicast_extension) = external.reader_multicast_extension {
+            qos.reader_multicast_extension = reader_multicast_extension.into();
+        }
+
         if let Some(data_representation) = external.data_representation {
             qos.data_representation = data_representation.into();
         }
@@ -410,6 +421,7 @@ impl From<subscription::qos::DataReaderQos> for DataReaderQos {
             reader_data_lifecycle: Some(internal.reader_data_lifecycle),
             lifespan_reference: Some(internal.lifespan_reference.into()),
             reader_reliability_extension: Some(internal.reader_reliability_extension.into()),
+            reader_multicast_extension: Some(internal.reader_multicast_extension.into()),
             data_representation: Some(internal.data_representation.into()),
             type_consistency_enforcement: Some(internal.type_consistency_enforcement.into()),
         }
