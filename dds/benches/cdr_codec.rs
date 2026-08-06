@@ -1,8 +1,17 @@
 use std::hint::black_box;
+use std::sync::Arc;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use int2dds::bytes::Bytes;
-use int2dds::serialize::cdr::CdrDeserializer;
+use int2dds::serialize::cdr::{CdrDeserializer, CdrSerialize, CdrSerializer};
+use int2dds::serialize::BufferManager;
+use int2dds::topic::type_support::SerializationFormat;
+use int2dds::xtypes::{
+    serialize_dynamic_data, CompleteStructMember, CompleteStructType, CompleteTypeObject,
+    DynamicData, DynamicType, DynamicValue, MemberFlag, PlainCollectionHeader, TryConstructKind,
+    TypeFlag, TypeIdentifier,
+};
+use int2dds::DdsType;
 
 const N_FIELDS: usize = 2048;
 
@@ -74,5 +83,51 @@ fn chained_bulk_sequence(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, chained_primitive_reads, chained_bulk_sequence);
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds")]
+struct TypedU32Seq {
+    seq: Vec<u32>,
+}
+
+// Tracks the gap between the DynamicData path and the derive codec on the same
+// data shape (#384).
+fn dynamic_vs_typed_u32_seq(c: &mut Criterion) {
+    let n = 4096u32;
+    let ext = int2dds::xtypes::ExtensibilityKind::Final;
+    let mut st = CompleteStructType::new(TypeFlag::new(ext, false, false), "BenchSeq".into(), None);
+    st.add_member(CompleteStructMember::new(
+        0,
+        MemberFlag::new(TryConstructKind::Discard, false, false, false, false, false),
+        TypeIdentifier::PlainSequenceLarge {
+            header: PlainCollectionHeader::default(),
+            bound: 0,
+            element_identifier: Box::new(TypeIdentifier::Uint32),
+        },
+        "seq".to_string(),
+    ));
+    let dt = Arc::new(
+        DynamicType::from_type_object(CompleteTypeObject::Struct(st), TypeIdentifier::None)
+            .unwrap(),
+    );
+    let mut data = DynamicData::new(dt);
+    data.set_value("seq", DynamicValue::Sequence((0..n).map(DynamicValue::Uint32).collect()))
+        .unwrap();
+    let typed = TypedU32Seq { seq: (0..n).collect() };
+
+    let mut group = c.benchmark_group("dynamic_vs_typed_u32_seq_serialize");
+    group.bench_function("dynamic", |b| {
+        b.iter(|| serialize_dynamic_data(black_box(&data), &SerializationFormat::Cdr).unwrap())
+    });
+    group.bench_function("typed", |b| {
+        b.iter(|| {
+            let mut ser = CdrSerializer::new(true);
+            ser.write_encapsulation_header().unwrap();
+            black_box(&typed).serialize_cdr(&mut ser).unwrap();
+            ser.into_bytes()
+        })
+    });
+    group.finish();
+}
+
+criterion_group!(benches, chained_primitive_reads, chained_bulk_sequence, dynamic_vs_typed_u32_seq);
 criterion_main!(benches);

@@ -11,8 +11,9 @@ use crate::dcps::core::error::{DdsError, DdsResult};
 use crate::dcps::topic::type_support::SerializationFormat;
 use crate::rtps::common::types::SerializedData;
 use crate::serialize::cdr::{
-    CdrDeserializer, CdrError, CdrSerializer, ExtensibilityKind, PlCdrMemberHeader,
-    PrimitiveSerialize, StringSerialize, Xcdr2Deserializer, Xcdr2Serializer,
+    try_vec_prealloc, ArraySerialize, CdrDeserializer, CdrError, CdrSerializer, ExtensibilityKind,
+    PlCdrMemberHeader, PrimitiveSerialize, SequenceSerialize, StringSerialize, Xcdr2Deserializer,
+    Xcdr2Serializer,
 };
 use crate::serialize::{BufferManager, DeserializerReader};
 
@@ -444,6 +445,9 @@ where
                 DynamicTypeKind::Sequence { element_type, .. } => element_type.as_ref(),
                 _ => return Err(DdsError::Error("type mismatch: expected Sequence".to_string())),
             };
+            if let Some(result) = try_serialize_prim_run(serializer, items, element_type, true) {
+                return result.map_err(cdr_error);
+            }
             serializer.serialize_u32(items.len() as u32).map_err(cdr_error)?;
             for item in items {
                 serialize_value_cdr(serializer, item, element_type, serialize_nested_struct)?;
@@ -455,6 +459,9 @@ where
                 DynamicTypeKind::Array { element_type, .. } => element_type.as_ref(),
                 _ => return Err(DdsError::Error("type mismatch: expected Array".to_string())),
             };
+            if let Some(result) = try_serialize_prim_run(serializer, items, element_type, false) {
+                return result.map_err(cdr_error);
+            }
             for item in items {
                 serialize_value_cdr(serializer, item, element_type, serialize_nested_struct)?;
             }
@@ -503,6 +510,136 @@ fn map_element_types(
     }
 }
 
+/// Bulk-serialize a run of primitive elements with one alignment and one copy,
+/// via the same typed sequence/array methods the derive codec uses. Returns
+/// None — caller falls back to the per-element loop — when the element kind has
+/// no contiguous native form (Boolean/Char8/Char16/Float128) or an item's
+/// variant does not match the declared element kind.
+fn try_serialize_prim_run<S>(
+    serializer: &mut S,
+    items: &[DynamicValue],
+    element_type: &DynamicTypeKind,
+    with_length: bool,
+) -> Option<Result<(), CdrError>>
+where
+    S: SequenceSerialize + ArraySerialize,
+{
+    let DynamicTypeKind::Primitive(kind) = resolved_kind(element_type) else {
+        return None;
+    };
+    macro_rules! run {
+        ($variant:ident, $ty:ty, $seq:ident, $arr:ident) => {{
+            let vals: Option<Vec<$ty>> = items
+                .iter()
+                .map(|item| match item {
+                    DynamicValue::$variant(v) => Some(*v),
+                    _ => None,
+                })
+                .collect();
+            vals.map(
+                |vals| {
+                    if with_length {
+                        serializer.$seq(&vals)
+                    } else {
+                        serializer.$arr(&vals)
+                    }
+                },
+            )
+        }};
+    }
+    match kind {
+        PrimitiveKind::Byte => run!(Byte, u8, serialize_byte_sequence, serialize_byte_array),
+        PrimitiveKind::Uint8 => run!(Uint8, u8, serialize_byte_sequence, serialize_byte_array),
+        PrimitiveKind::Uint16 => run!(Uint16, u16, serialize_u16_sequence, serialize_u16_array),
+        PrimitiveKind::Uint32 => run!(Uint32, u32, serialize_u32_sequence, serialize_u32_array),
+        PrimitiveKind::Uint64 => run!(Uint64, u64, serialize_u64_sequence, serialize_u64_array),
+        PrimitiveKind::Int8 => run!(Int8, i8, serialize_i8_sequence, serialize_i8_array),
+        PrimitiveKind::Int16 => run!(Int16, i16, serialize_i16_sequence, serialize_i16_array),
+        PrimitiveKind::Int32 => run!(Int32, i32, serialize_i32_sequence, serialize_i32_array),
+        PrimitiveKind::Int64 => run!(Int64, i64, serialize_i64_sequence, serialize_i64_array),
+        PrimitiveKind::Float32 => run!(Float32, f32, serialize_f32_sequence, serialize_f32_array),
+        PrimitiveKind::Float64 => run!(Float64, f64, serialize_f64_sequence, serialize_f64_array),
+        _ => None,
+    }
+}
+
+/// Bulk-deserialize a primitive sequence (`array_len: None`, reads its own
+/// length) or array (`Some(n)`, type-derived count) through the validated typed
+/// read path, then wrap the values. Returns None for element kinds without a
+/// contiguous native form.
+fn try_deserialize_prim_run_cdr(
+    deserializer: &mut CdrDeserializer,
+    element_type: &DynamicTypeKind,
+    array_len: Option<usize>,
+) -> Option<DdsResult<Vec<DynamicValue>>> {
+    let DynamicTypeKind::Primitive(kind) = resolved_kind(element_type) else {
+        return None;
+    };
+    macro_rules! run {
+        ($variant:ident, $seq:ident, $arr:ident) => {{
+            let read = match array_len {
+                None => deserializer.$seq(),
+                Some(n) => deserializer.$arr(n),
+            };
+            Some(
+                read.map_err(cdr_error)
+                    .map(|vals| vals.into_iter().map(DynamicValue::$variant).collect()),
+            )
+        }};
+    }
+    match kind {
+        PrimitiveKind::Byte => run!(Byte, deserialize_byte_sequence, deserialize_byte_array),
+        PrimitiveKind::Uint8 => run!(Uint8, deserialize_byte_sequence, deserialize_byte_array),
+        PrimitiveKind::Uint16 => run!(Uint16, deserialize_u16_sequence, deserialize_u16_array),
+        PrimitiveKind::Uint32 => run!(Uint32, deserialize_u32_sequence, deserialize_u32_array),
+        PrimitiveKind::Uint64 => run!(Uint64, deserialize_u64_sequence, deserialize_u64_array),
+        PrimitiveKind::Int8 => run!(Int8, deserialize_i8_sequence, deserialize_i8_array),
+        PrimitiveKind::Int16 => run!(Int16, deserialize_i16_sequence, deserialize_i16_array),
+        PrimitiveKind::Int32 => run!(Int32, deserialize_i32_sequence, deserialize_i32_array),
+        PrimitiveKind::Int64 => run!(Int64, deserialize_i64_sequence, deserialize_i64_array),
+        PrimitiveKind::Float32 => run!(Float32, deserialize_f32_sequence, deserialize_f32_array),
+        PrimitiveKind::Float64 => run!(Float64, deserialize_f64_sequence, deserialize_f64_array),
+        _ => None,
+    }
+}
+
+/// XCDR2 counterpart of [`try_deserialize_prim_run_cdr`].
+fn try_deserialize_prim_run_xcdr2(
+    deserializer: &mut Xcdr2Deserializer,
+    element_type: &DynamicTypeKind,
+    array_len: Option<usize>,
+) -> Option<DdsResult<Vec<DynamicValue>>> {
+    let DynamicTypeKind::Primitive(kind) = resolved_kind(element_type) else {
+        return None;
+    };
+    macro_rules! run {
+        ($variant:ident, $seq:ident, $arr:ident) => {{
+            let read = match array_len {
+                None => deserializer.$seq(),
+                Some(n) => deserializer.$arr(n),
+            };
+            Some(
+                read.map_err(cdr_error)
+                    .map(|vals| vals.into_iter().map(DynamicValue::$variant).collect()),
+            )
+        }};
+    }
+    match kind {
+        PrimitiveKind::Byte => run!(Byte, deserialize_byte_sequence, deserialize_byte_array),
+        PrimitiveKind::Uint8 => run!(Uint8, deserialize_byte_sequence, deserialize_byte_array),
+        PrimitiveKind::Uint16 => run!(Uint16, deserialize_u16_sequence, deserialize_u16_array),
+        PrimitiveKind::Uint32 => run!(Uint32, deserialize_u32_sequence, deserialize_u32_array),
+        PrimitiveKind::Uint64 => run!(Uint64, deserialize_u64_sequence, deserialize_u64_array),
+        PrimitiveKind::Int8 => run!(Int8, deserialize_i8_sequence, deserialize_i8_array),
+        PrimitiveKind::Int16 => run!(Int16, deserialize_i16_sequence, deserialize_i16_array),
+        PrimitiveKind::Int32 => run!(Int32, deserialize_i32_sequence, deserialize_i32_array),
+        PrimitiveKind::Int64 => run!(Int64, deserialize_i64_sequence, deserialize_i64_array),
+        PrimitiveKind::Float32 => run!(Float32, deserialize_f32_sequence, deserialize_f32_array),
+        PrimitiveKind::Float64 => run!(Float64, deserialize_f64_sequence, deserialize_f64_array),
+        _ => None,
+    }
+}
+
 fn serialize_value_xcdr2<F>(
     serializer: &mut Xcdr2Serializer,
     value: &DynamicValue,
@@ -518,6 +655,9 @@ where
                 DynamicTypeKind::Sequence { element_type, .. } => element_type.as_ref(),
                 _ => return Err(DdsError::Error("type mismatch: expected Sequence".to_string())),
             };
+            if let Some(result) = try_serialize_prim_run(serializer, items, element_type, true) {
+                return result.map_err(cdr_error);
+            }
             serializer.serialize_u32(items.len() as u32).map_err(cdr_error)?;
             for item in items {
                 serialize_value_xcdr2(serializer, item, element_type, serialize_nested_struct)?;
@@ -529,6 +669,9 @@ where
                 DynamicTypeKind::Array { element_type, .. } => element_type.as_ref(),
                 _ => return Err(DdsError::Error("type mismatch: expected Array".to_string())),
             };
+            if let Some(result) = try_serialize_prim_run(serializer, items, element_type, false) {
+                return result.map_err(cdr_error);
+            }
             for item in items {
                 serialize_value_xcdr2(serializer, item, element_type, serialize_nested_struct)?;
             }
@@ -597,7 +740,6 @@ where
         ExtensibilityKind::Mutable => {
             let size_pos = serializer.begin_struct().map_err(cdr_error)?;
             let branch_id = member.index as u32 + 1;
-            let member_type = member.member_type.clone();
             serializer
                 .write_member_with(0, false, |s| {
                     serialize_value_xcdr2(s, discriminator, disc_type, nested)
@@ -606,7 +748,7 @@ where
                 .map_err(cdr_error)?;
             serializer
                 .write_member_with(branch_id, false, |s| {
-                    serialize_value_xcdr2(s, value, &member_type, nested)
+                    serialize_value_xcdr2(s, value, &member.member_type, nested)
                         .map_err(|e| CdrError::SerializationError(e.to_string()))
                 })
                 .map_err(cdr_error)?;
@@ -665,16 +807,25 @@ fn deserialize_value_cdr(
 ) -> DdsResult<DynamicValue> {
     match type_kind {
         DynamicTypeKind::Sequence { element_type, .. } => {
+            if let Some(items) = try_deserialize_prim_run_cdr(deserializer, element_type, None) {
+                return items.map(DynamicValue::Sequence);
+            }
             let len = deserializer.deserialize_u32().map_err(cdr_error)? as usize;
-            let mut items = Vec::new();
+            let len = deserializer.checked_capacity(len, 1).map_err(cdr_error)?;
+            let mut items = try_vec_prealloc(len).map_err(cdr_error)?;
             for _ in 0..len {
                 items.push(deserialize_value_cdr(deserializer, element_type)?);
             }
             Ok(DynamicValue::Sequence(items))
         }
         DynamicTypeKind::Array { element_type, dimensions } => {
-            let total_size = checked_array_len(dimensions)?;
-            let mut items = Vec::new();
+            let total_size = checked_array_len(dimensions)? as usize;
+            if let Some(items) =
+                try_deserialize_prim_run_cdr(deserializer, element_type, Some(total_size))
+            {
+                return items.map(DynamicValue::Array);
+            }
+            let mut items = try_vec_prealloc(total_size).map_err(cdr_error)?;
             for _ in 0..total_size {
                 items.push(deserialize_value_cdr(deserializer, element_type)?);
             }
@@ -682,7 +833,8 @@ fn deserialize_value_cdr(
         }
         DynamicTypeKind::Map { key_type, value_type, .. } => {
             let len = deserializer.deserialize_u32().map_err(cdr_error)? as usize;
-            let mut entries = Vec::new();
+            let len = deserializer.checked_capacity(len, 2).map_err(cdr_error)?;
+            let mut entries = try_vec_prealloc(len).map_err(cdr_error)?;
             for _ in 0..len {
                 let key = deserialize_value_cdr(deserializer, key_type)?;
                 let value = deserialize_value_cdr(deserializer, value_type)?;
@@ -721,16 +873,25 @@ fn deserialize_value_xcdr2(
 ) -> DdsResult<DynamicValue> {
     match type_kind {
         DynamicTypeKind::Sequence { element_type, .. } => {
+            if let Some(items) = try_deserialize_prim_run_xcdr2(deserializer, element_type, None) {
+                return items.map(DynamicValue::Sequence);
+            }
             let len = deserializer.deserialize_u32().map_err(cdr_error)? as usize;
-            let mut items = Vec::new();
+            let len = deserializer.checked_capacity(len, 1).map_err(cdr_error)?;
+            let mut items = try_vec_prealloc(len).map_err(cdr_error)?;
             for _ in 0..len {
                 items.push(deserialize_value_xcdr2(deserializer, element_type)?);
             }
             Ok(DynamicValue::Sequence(items))
         }
         DynamicTypeKind::Array { element_type, dimensions } => {
-            let total_size = checked_array_len(dimensions)?;
-            let mut items = Vec::new();
+            let total_size = checked_array_len(dimensions)? as usize;
+            if let Some(items) =
+                try_deserialize_prim_run_xcdr2(deserializer, element_type, Some(total_size))
+            {
+                return items.map(DynamicValue::Array);
+            }
+            let mut items = try_vec_prealloc(total_size).map_err(cdr_error)?;
             for _ in 0..total_size {
                 items.push(deserialize_value_xcdr2(deserializer, element_type)?);
             }
@@ -741,7 +902,8 @@ fn deserialize_value_xcdr2(
                 let _ = deserializer.read_dheader().map_err(cdr_error)?;
             }
             let len = deserializer.deserialize_u32().map_err(cdr_error)? as usize;
-            let mut entries = Vec::new();
+            let len = deserializer.checked_capacity(len, 2).map_err(cdr_error)?;
+            let mut entries = try_vec_prealloc(len).map_err(cdr_error)?;
             for _ in 0..len {
                 let key = deserialize_value_xcdr2(deserializer, key_type)?;
                 let value = deserialize_value_xcdr2(deserializer, value_type)?;
@@ -1012,10 +1174,9 @@ fn serialize_struct_cdr(serializer: &mut CdrSerializer, data: &DynamicData) -> D
             if let Some(value) = member_value_or_default(data, member) {
                 let member_id = member.member_id;
                 let must_understand = member.is_must_understand;
-                let member_type = member.member_type.clone();
                 serializer
                     .write_member_with_v1(member_id, must_understand, |s| {
-                        serialize_value_cdr(s, &value, &member_type, &mut nested)
+                        serialize_value_cdr(s, &value, &member.member_type, &mut nested)
                             .map_err(|e| CdrError::SerializationError(e.to_string()))
                     })
                     .map_err(cdr_error)?;
@@ -1382,10 +1543,9 @@ fn serialize_struct_xcdr(serializer: &mut Xcdr2Serializer, data: &DynamicData) -
                 if let Some(value) = member_value_or_default(data, member) {
                     let member_id = member.member_id;
                     let must_understand = member.is_must_understand;
-                    let member_type = member.member_type.clone();
                     serializer
                         .write_member_with(member_id, must_understand, |s| {
-                            serialize_value_xcdr2(s, &value, &member_type, &mut nested)
+                            serialize_value_xcdr2(s, &value, &member.member_type, &mut nested)
                                 .map_err(|e| CdrError::SerializationError(e.to_string()))
                         })
                         .map_err(cdr_error)?;
@@ -1769,6 +1929,103 @@ mod tests {
 
         run(SerializationFormat::Cdr);
         run(xcdr_format(ExtensibilityKind::Final));
+    }
+
+    // The bulk primitive-run paths must stay byte-identical to the derive codec.
+    #[test]
+    fn test_primitive_runs_match_derive_codec_bytes() {
+        use crate::dcps::topic::type_support::DdsType;
+        use crate::serialize::cdr::{CdrSerialize, XcdrSerialize};
+
+        #[derive(DdsType)]
+        #[dds_type(crate_path = "int2dds", extensibility = "Final")]
+        struct PrimRuns {
+            counts: Vec<u32>,
+            samples: Vec<f64>,
+            flags: [u16; 3],
+        }
+
+        let mut outer =
+            CompleteStructType::new(tf(ExtensibilityKind::Final), "PrimRuns".into(), None);
+        outer.add_member(CompleteStructMember::new(
+            0,
+            member_flag(false, false, false),
+            TypeIdentifier::PlainSequenceLarge {
+                header: PlainCollectionHeader::default(),
+                bound: 0,
+                element_identifier: Box::new(TypeIdentifier::Uint32),
+            },
+            "counts".to_string(),
+        ));
+        outer.add_member(CompleteStructMember::new(
+            1,
+            member_flag(false, false, false),
+            TypeIdentifier::PlainSequenceLarge {
+                header: PlainCollectionHeader::default(),
+                bound: 0,
+                element_identifier: Box::new(TypeIdentifier::Float64),
+            },
+            "samples".to_string(),
+        ));
+        outer.add_member(CompleteStructMember::new(
+            2,
+            member_flag(false, false, false),
+            TypeIdentifier::PlainArrayLarge {
+                header: PlainCollectionHeader::default(),
+                array_bound_seq: vec![3],
+                element_identifier: Box::new(TypeIdentifier::Uint16),
+            },
+            "flags".to_string(),
+        ));
+        let dt = build_with_registry(CompleteTypeObject::Struct(outer), &TypeRegistry::new());
+
+        let mut data = DynamicData::new(dt.clone());
+        data.set_value(
+            "counts",
+            DynamicValue::Sequence(vec![
+                DynamicValue::Uint32(1),
+                DynamicValue::Uint32(2),
+                DynamicValue::Uint32(3),
+            ]),
+        )
+        .unwrap();
+        data.set_value(
+            "samples",
+            DynamicValue::Sequence(vec![DynamicValue::Float64(1.5), DynamicValue::Float64(-2.25)]),
+        )
+        .unwrap();
+        data.set_value(
+            "flags",
+            DynamicValue::Array(vec![
+                DynamicValue::Uint16(7),
+                DynamicValue::Uint16(8),
+                DynamicValue::Uint16(9),
+            ]),
+        )
+        .unwrap();
+
+        let typed = PrimRuns { counts: vec![1, 2, 3], samples: vec![1.5, -2.25], flags: [7, 8, 9] };
+
+        let dynamic_bytes = serialize_dynamic_data(&data, &SerializationFormat::Cdr).unwrap();
+        let mut ser = CdrSerializer::new(true);
+        ser.write_encapsulation_header().unwrap();
+        typed.serialize_cdr(&mut ser).unwrap();
+        assert_eq!(&dynamic_bytes[..], ser.into_bytes().as_slice());
+        let back = deserialize_dynamic_data(&dynamic_bytes, &dt).unwrap();
+        assert_eq!(back.get_value("counts"), data.get_value("counts"));
+        assert_eq!(back.get_value("samples"), data.get_value("samples"));
+        assert_eq!(back.get_value("flags"), data.get_value("flags"));
+
+        let dynamic_bytes =
+            serialize_dynamic_data(&data, &xcdr_format(ExtensibilityKind::Final)).unwrap();
+        let mut ser = Xcdr2Serializer::with_capacity(true, ExtensibilityKind::Final, 256);
+        ser.write_encapsulation_header().unwrap();
+        typed.serialize_xcdr(&mut ser).unwrap();
+        assert_eq!(&dynamic_bytes[..], ser.into_bytes().as_slice());
+        let back = deserialize_dynamic_data(&dynamic_bytes, &dt).unwrap();
+        assert_eq!(back.get_value("counts"), data.get_value("counts"));
+        assert_eq!(back.get_value("samples"), data.get_value("samples"));
+        assert_eq!(back.get_value("flags"), data.get_value("flags"));
     }
 
     fn map_member(
