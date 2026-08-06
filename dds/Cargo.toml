@@ -117,3 +117,7 @@ harness = false   # Set to false to disable the default benchmark functionality 
 [[bench]]
 name = "besteffort"
 harness = false
+
+[[bench]]
+name = "cdr_codec"
+harness = false
