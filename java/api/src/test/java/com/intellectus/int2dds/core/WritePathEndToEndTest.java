@@ -258,13 +258,30 @@ class WritePathEndToEndTest {
             if (typeInfo != 0L) {
                 FfiAccess.typeInfoDestroy(typeInfo);
             }
+            // Release every remaining handle before asserting on any of
+            // them. assertEquals throws immediately on a mismatch -- if that
+            // threw here before deleteSubscriber/p.close() ran, both would be
+            // skipped, leaking the subscriber (a raw handle with no Java
+            // wrapper, so nothing would ever retry it) and abandoning the
+            // participant with that subscriber still attached, which the
+            // reaper could then never delete either -- not a self-contained
+            // failure, since every later test in the module that compares
+            // NativeCleaner.deferredCount() against a baseline
+            // (EntityTreeTest.anAbandonedTreeIsEventuallyFullyReleased,
+            // DataWriterTest.anAbandonedWriterTreeIsReapedCleanly, and
+            // others) would then see a baseline permanently one higher than
+            // it should be. Capturing both codes first and asserting only
+            // once every release has been attempted keeps one bad code from
+            // ever skipping another entity's release.
+            int readerRc = reader != 0L ? FfiAccess.deleteDataReader(reader) : 0;
+            int subscriberRc = subscriber != 0L ? FfiAccess.deleteSubscriber(subscriber) : 0;
+            p.close();
             if (reader != 0L) {
-                assertEquals(0, FfiAccess.deleteDataReader(reader), "deleteDataReader must succeed");
+                assertEquals(0, readerRc, "deleteDataReader must succeed");
             }
             if (subscriber != 0L) {
-                assertEquals(0, FfiAccess.deleteSubscriber(subscriber), "deleteSubscriber must succeed");
+                assertEquals(0, subscriberRc, "deleteSubscriber must succeed");
             }
-            p.close();
         }
     }
 
@@ -305,13 +322,21 @@ class WritePathEndToEndTest {
             assertEquals(DdsException.RET_NO_DATA, rc,
                     "an empty reader must report NO_DATA specifically, not merely a nonzero code");
         } finally {
+            // Same ordering as aSampleSurvivesTheWholeStack's teardown, and
+            // for the same reason: release every handle before asserting on
+            // any of them, so an assertEquals failure here cannot skip
+            // deleteSubscriber or p.close() and abandon the participant for
+            // the rest of the module's deferredCount() baselines to trip
+            // over.
+            int readerRc = reader != 0L ? FfiAccess.deleteDataReader(reader) : 0;
+            int subscriberRc = subscriber != 0L ? FfiAccess.deleteSubscriber(subscriber) : 0;
+            p.close();
             if (reader != 0L) {
-                assertEquals(0, FfiAccess.deleteDataReader(reader), "deleteDataReader must succeed");
+                assertEquals(0, readerRc, "deleteDataReader must succeed");
             }
             if (subscriber != 0L) {
-                assertEquals(0, FfiAccess.deleteSubscriber(subscriber), "deleteSubscriber must succeed");
+                assertEquals(0, subscriberRc, "deleteSubscriber must succeed");
             }
-            p.close();
         }
     }
 }
