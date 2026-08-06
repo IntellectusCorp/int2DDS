@@ -336,7 +336,7 @@ impl<'a> Xcdr2Deserializer<'a> {
 
     /// Validate a wire-declared count against remaining bytes before allocating.
     #[inline]
-    pub(super) fn checked_capacity(
+    pub(crate) fn checked_capacity(
         &self,
         count: usize,
         min_elem_size: usize,
