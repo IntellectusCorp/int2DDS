@@ -152,21 +152,6 @@ impl PlCdrParser {
         }
     }
 
-    #[allow(dead_code)]
-    #[inline(always)]
-    fn read_u16(&self, data: &[u8]) -> u16 {
-        if data.len() < 2 {
-            debug!("Insufficient data for u16, got {} bytes", data.len());
-            return 0;
-        }
-
-        let bytes = [data[0], data[1]];
-        match self.endianness {
-            Endianness::LittleEndian => u16::from_le_bytes(bytes),
-            Endianness::BigEndian => u16::from_be_bytes(bytes),
-        }
-    }
-
     #[inline(always)]
     fn read_u32(&self, data: &[u8]) -> u32 {
         if data.len() < 4 {

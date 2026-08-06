@@ -3,7 +3,6 @@ mod alignment;
 mod bounded_types;
 #[cfg(test)]
 mod cdr_wire_format_tests;
-mod collections;
 mod endianness;
 mod errors;
 mod primitive;
@@ -13,7 +12,6 @@ pub mod xcdr;
 // Re-export everything from submodules
 pub use alignment::*;
 pub use bounded_types::*;
-pub use collections::*;
 pub use endianness::*;
 pub use errors::*;
 pub use primitive::*;
