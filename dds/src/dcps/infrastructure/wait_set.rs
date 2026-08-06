@@ -49,6 +49,7 @@
 //! ```
 
 use log::{debug, info};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Instant;
@@ -85,10 +86,15 @@ struct NotifyState {
 }
 
 pub struct WaitSet {
-    conditions: Arc<Mutex<Vec<Arc<dyn Condition + Send + Sync>>>>,
+    // Attached conditions keyed by Condition::identity(), so attach and detach
+    // need no scan over the attached set.
+    conditions: Arc<Mutex<HashMap<usize, Arc<dyn Condition + Send + Sync>>>>,
     condvar: Arc<Condvar>,
     waiting_count: Arc<AtomicUsize>,
     notify_lock: Arc<Mutex<NotifyState>>,
+    // Wake-up callback planted into every attached condition. Captures only
+    // per-WaitSet state, so one instance is shared by all attaches.
+    notify: Arc<dyn Fn() + Send + Sync>,
     instance_id: usize,
 }
 
@@ -112,11 +118,16 @@ impl WaitSet {
         let instance_id = WAITSET_COUNTER.fetch_add(1, Ordering::Relaxed);
         debug!("[WaitSet-{}] Creating new WaitSet instance", instance_id);
 
+        let condvar = Arc::new(Condvar::new());
+        let notify_lock = Arc::new(Mutex::new(NotifyState::default()));
+        let notify = Self::make_notify(condvar.clone(), notify_lock.clone(), instance_id);
+
         Self {
-            conditions: Arc::new(Mutex::new(Vec::new())),
-            condvar: Arc::new(Condvar::new()),
+            conditions: Arc::new(Mutex::new(HashMap::new())),
+            condvar,
             waiting_count: Arc::new(AtomicUsize::new(0)),
-            notify_lock: Arc::new(Mutex::new(NotifyState::default())),
+            notify_lock,
+            notify,
             instance_id,
         }
     }
@@ -162,11 +173,9 @@ impl WaitSet {
             .lock()
             .map_err(|e| DdsError::Error(format!("Failed to lock conditions: {}", e)))?;
 
-        // Check for duplicate condition handles by object identity. Debug output is not an
-        // identity: distinct conditions in the same state render identically, and comparing
-        // the rendered strings costs two allocations per element on every attach.
-        let new_identity = new_condition.identity();
-        if conditions.iter().any(|existing| existing.identity() == new_identity) {
+        // Duplicate condition handles are detected by object identity, which is also the map key.
+        let new_identity = new_condition.identity() as usize;
+        if conditions.contains_key(&new_identity) {
             debug!("[WaitSet-{}] Condition already attached, skipping", self.instance_id);
             return Ok(());
         }
@@ -176,12 +185,8 @@ impl WaitSet {
         let should_notify =
             waiting_threads > 0 && new_condition.get_trigger_value().unwrap_or(false);
 
-        let notify_fn = self.get_notify();
-
-        new_condition.set_waitset_callback(Some(Arc::new(move || {
-            notify_fn();
-        })));
-        conditions.push(new_condition);
+        new_condition.set_waitset_callback(Some(self.notify.clone()));
+        conditions.insert(new_identity, new_condition);
         let condition_count = conditions.len();
         debug!(
             "[WaitSet-{}] Condition attached successfully. Total conditions: {}",
@@ -197,7 +202,7 @@ impl WaitSet {
             // Must go through the same path as a status notification. Poking the condvar directly
             // leaves the generation unchanged, which a waiter cannot tell apart from a spurious
             // wake-up, so it re-parks without ever looking at the newly attached condition.
-            (self.get_notify())();
+            (self.notify)();
         }
 
         Ok(())
@@ -213,18 +218,12 @@ impl WaitSet {
             .lock()
             .map_err(|e| DdsError::Error(format!("Failed to lock conditions: {}", e)))?;
 
-        // Remove only the condition that was asked for. Matching on Debug output would remove
-        // whichever attached condition happens to render the same, which for conditions in the
-        // same state is the first one in the list rather than the requested one.
-        let remove_identity = remove_condition.identity();
-        let pos = conditions.iter().position(|c| c.identity() == remove_identity);
-
-        if let Some(pos) = pos {
-            conditions[pos].set_waitset_callback(None);
-            conditions.remove(pos);
-            Ok(())
-        } else {
-            Err(DdsError::PreconditionNotMet)
+        match conditions.remove(&(remove_condition.identity() as usize)) {
+            Some(attached) => {
+                attached.set_waitset_callback(None);
+                Ok(())
+            }
+            None => Err(DdsError::PreconditionNotMet),
         }
     }
 
@@ -381,7 +380,7 @@ impl WaitSet {
             .lock()
             .map_err(|e| DdsError::Error(format!("Failed to lock conditions: {}", e)))?;
 
-        Ok(conditions.clone())
+        Ok(conditions.values().cloned().collect())
     }
 
     /// Function to check and return triggered conditions
@@ -396,7 +395,7 @@ impl WaitSet {
         }
 
         let mut triggered = Vec::new();
-        for (idx, condition) in conditions.iter().enumerate() {
+        for (idx, condition) in conditions.values().enumerate() {
             match condition.get_trigger_value() {
                 Ok(true) => {
                     debug!("[WaitSet-{}] Condition #{} TRIGGERED", self.instance_id, idx + 1);
@@ -427,11 +426,11 @@ impl WaitSet {
         Ok(triggered)
     }
 
-    pub(crate) fn get_notify(&self) -> Arc<dyn Fn() + Send + Sync> {
-        let condvar = self.condvar.clone();
-        let notify_lock = self.notify_lock.clone();
-        let instance_id = self.instance_id;
-
+    fn make_notify(
+        condvar: Arc<Condvar>,
+        notify_lock: Arc<Mutex<NotifyState>>,
+        instance_id: usize,
+    ) -> Arc<dyn Fn() + Send + Sync> {
         Arc::new(move || {
             // Runs on the RTPS receive thread, which is already holding the reader's
             // `matched_writers` and `status_callback` locks and the condition's
