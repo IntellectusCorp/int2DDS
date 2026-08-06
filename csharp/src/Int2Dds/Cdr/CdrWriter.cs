@@ -311,20 +311,17 @@ namespace Int2Dds.Cdr
         }
 
         /// <summary>
-        /// Write a CDR wstring (wide string): uint32 length (number of UTF-16 code units including null)
-        /// + UTF-16 code units (each 2 bytes) + null terminator (2 bytes of zero).
+        /// Write a CDR wstring (wide string): uint32 length (number of UTF-16 code units,
+        /// no terminator) + UTF-16 code units (each 2 bytes). Matches the Rust core format.
         /// </summary>
         public void WriteWString(string s)
         {
             if (s == null) s = string.Empty;
-            char[] chars = s.ToCharArray();
-            uint cdrLen = (uint)(chars.Length + 1); // number of UTF-16 code units including null
-            WriteU32(cdrLen);
-            for (int i = 0; i < chars.Length; i++)
+            WriteU32((uint)s.Length);
+            for (int i = 0; i < s.Length; i++)
             {
-                WriteU16((ushort)chars[i]);
+                WriteU16(s[i]);
             }
-            WriteU16(0); // null terminator
         }
 
         /// <summary>Write a sequence header (uint32 element count).</summary>
