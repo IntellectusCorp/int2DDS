@@ -228,7 +228,7 @@ impl<'a> CdrDeserializer<'a> {
             return Err(CdrError::InsufficientData);
         }
 
-        let header = CdrInput::Chained { chunks, skip: 0 }.read_array::<4>(0);
+        let header = CdrInput::chained(chunks, 0).read_array::<4>(0);
         let encap_id = u16::from_be_bytes([header[0], header[1]]);
 
         let endianness = match encap_id {
@@ -237,7 +237,7 @@ impl<'a> CdrDeserializer<'a> {
             _ => return Err(CdrError::InvalidEncapsulation(encap_id)),
         };
 
-        Ok(Self { endianness, input: CdrInput::Chained { chunks, skip: 4 }, position: 0 })
+        Ok(Self { endianness, input: CdrInput::chained(chunks, 4), position: 0 })
     }
 
     pub(super) fn align(&mut self, alignment: usize) {
