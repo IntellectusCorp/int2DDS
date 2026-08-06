@@ -36,6 +36,7 @@ namespace Int2Dds.Cdr
         private int _headerSize;
         private readonly bool _littleEndian;
         private readonly bool _xcdr2;
+        private readonly Extensibility _extensibility;
 
         /// <summary>
         /// Creates a new CDR writer that automatically writes the 4-byte encapsulation header.
@@ -47,6 +48,7 @@ namespace Int2Dds.Cdr
         {
             _littleEndian = littleEndian;
             _xcdr2 = xcdr2;
+            _extensibility = extensibility;
             _buffer = new byte[DefaultCapacity];
             _pos = 0;
             _headerSize = 0;
@@ -54,20 +56,18 @@ namespace Int2Dds.Cdr
             WriteEncapsulationHeader(extensibility);
         }
 
-        /// <summary>
-        /// Internal constructor for key writers (no encapsulation header).
-        /// </summary>
-        internal CdrWriter(bool littleEndian, bool xcdr2, int headerSize)
-        {
-            _littleEndian = littleEndian;
-            _xcdr2 = xcdr2;
-            _buffer = new byte[DefaultCapacity];
-            _pos = 0;
-            _headerSize = headerSize;
-        }
-
         /// <summary>Current number of bytes written.</summary>
         public int Length => _pos;
+
+        /// <summary>
+        /// Reset the writer for reuse: discards the content and rewrites the
+        /// encapsulation header. The internal buffer is kept.
+        /// </summary>
+        public void Reset()
+        {
+            _pos = 0;
+            WriteEncapsulationHeader(_extensibility);
+        }
 
         /// <summary>Whether this writer uses XCDR2 encoding.</summary>
         public bool IsXcdr2 => _xcdr2;
@@ -318,10 +318,13 @@ namespace Int2Dds.Cdr
         {
             if (s == null) s = string.Empty;
             WriteU32((uint)s.Length);
-            for (int i = 0; i < s.Length; i++)
-            {
-                WriteU16(s[i]);
-            }
+            if (s.Length == 0) return;
+            Align(2);
+            int byteLen = s.Length * 2;
+            EnsureCapacity(byteLen);
+            var enc = _littleEndian ? Encoding.Unicode : Encoding.BigEndianUnicode;
+            enc.GetBytes(s, 0, s.Length, _buffer, _pos);
+            _pos += byteLen;
         }
 
         /// <summary>Write a sequence header (uint32 element count).</summary>
@@ -513,5 +516,11 @@ namespace Int2Dds.Cdr
             Buffer.BlockCopy(_buffer, 0, result, 0, _pos);
             return result;
         }
+
+        /// <summary>
+        /// The backing buffer for zero-copy interop; only [0, Length) is valid,
+        /// and any write invalidates it.
+        /// </summary>
+        internal byte[] InternalBuffer => _buffer;
     }
 }

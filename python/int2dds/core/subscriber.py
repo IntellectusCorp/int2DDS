@@ -355,8 +355,8 @@ class DataReader(Generic[T]):
 
             handle = bytes(ffi.buffer(info.instance_handle, 16))
             if info.valid_data:
-                data_bytes = ffi.buffer(self._buffer, actual_size[0])[:]
-                data = self._topic.type_class._deserialize_cdr(data_bytes)
+                data = self._topic.type_class._deserialize_cdr(
+                    ffi.buffer(self._buffer, actual_size[0]))
                 return Sample(data=data, valid_data=True, instance_handle=handle,
                               instance_state=info.instance_state)
             return Sample(data=None, valid_data=False, instance_handle=handle,
@@ -502,7 +502,7 @@ class DataReader(Generic[T]):
                     samples.append(Sample(data=None, valid_data=False, instance_handle=handle,
                                           instance_state=info.instance_state))
                     continue
-                # Copy the serialized bytes, growing the shared buffer if needed.
+                # Read the serialized bytes, growing the shared buffer if needed.
                 while True:
                     ret = lib.int2dds_sample_seq_get_data(
                         seq, i, self._buffer, self._buffer_size, actual_size
@@ -513,8 +513,8 @@ class DataReader(Generic[T]):
                         self._grow_buffer(actual_size[0])
                         continue
                     check_ret(ret)
-                data_bytes = ffi.buffer(self._buffer, actual_size[0])[:]
-                data = self._topic.type_class._deserialize_cdr(data_bytes)
+                data = self._topic.type_class._deserialize_cdr(
+                    ffi.buffer(self._buffer, actual_size[0]))
                 samples.append(Sample(data=data, valid_data=True, instance_handle=handle,
                                       instance_state=info.instance_state))
             return samples
@@ -591,8 +591,8 @@ class DataReader(Generic[T]):
                         self._grow_buffer(actual_size[0])
                         continue
                     check_ret(ret)
-                data_bytes = ffi.buffer(self._buffer, actual_size[0])[:]
-                data = self._topic.type_class._deserialize_cdr(data_bytes)
+                data = self._topic.type_class._deserialize_cdr(
+                    ffi.buffer(self._buffer, actual_size[0]))
                 samples.append(Sample(data=data, valid_data=True, instance_handle=handle,
                                       instance_state=info.instance_state))
             return samples
@@ -642,8 +642,8 @@ class DataReader(Generic[T]):
                         self._grow_buffer(actual_size[0])
                         continue
                     check_ret(ret)
-                data_bytes = ffi.buffer(self._buffer, actual_size[0])[:]
-                data = self._topic.type_class._deserialize_cdr(data_bytes)
+                data = self._topic.type_class._deserialize_cdr(
+                    ffi.buffer(self._buffer, actual_size[0]))
                 samples.append(Sample(data=data, valid_data=True, instance_handle=handle,
                                       instance_state=info.instance_state))
             return samples

@@ -47,12 +47,12 @@ class DdsType(Protocol):
     _extensibility: ClassVar[Extensibility]
     _has_key: ClassVar[bool]
 
-    def _serialize_cdr(self) -> bytes:
+    def _serialize_cdr(self) -> bytes | memoryview:
         """Serialize this instance to CDR bytes with encapsulation header."""
         ...
 
     @classmethod
-    def _deserialize_cdr(cls: type[T], data: bytes) -> T:
+    def _deserialize_cdr(cls: type[T], data: bytes | bytearray | memoryview) -> T:
         """Deserialize from CDR bytes."""
         ...
 

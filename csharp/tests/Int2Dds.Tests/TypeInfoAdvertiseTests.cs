@@ -34,6 +34,12 @@ namespace Int2Dds.Tests
         public byte[] SerializeCdr(bool xcdr2)
         {
             var w = new CdrWriter(Extensibility.Appendable, true, xcdr2);
+            SerializeCdr(w);
+            return w.ToBytes();
+        }
+
+        public void SerializeCdr(CdrWriter w)
+        {
             int token = w.DheaderBegin();
             w.WriteString(Color);
             w.WriteI32(X);
@@ -42,7 +48,6 @@ namespace Int2Dds.Tests
             foreach (var b in Payload)
                 w.WriteU8(b);
             w.DheaderFinalize(token);
-            return w.ToBytes();
         }
     }
 

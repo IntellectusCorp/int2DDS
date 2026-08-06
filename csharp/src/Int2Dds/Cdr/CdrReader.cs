@@ -34,9 +34,17 @@ namespace Int2Dds.Cdr
 
         /// <summary>
         /// Create a reader from a byte array, parsing the 4-byte encapsulation header.
+        /// The array is used directly (no copy); it must not be mutated while reading.
         /// </summary>
-        public CdrReader(byte[] data) : this((ReadOnlySpan<byte>)data)
+        public CdrReader(byte[] data)
         {
+            if (data == null || data.Length < 4)
+                throw new CdrUnderflowException("Data too short for encapsulation header.");
+
+            _data = data;
+            ParseEncapsulation(data, out _littleEndian, out _xcdr2);
+            _headerSize = 4;
+            _pos = 4; // skip encapsulation header
         }
 
         /// <summary>
@@ -49,35 +57,38 @@ namespace Int2Dds.Cdr
                 throw new CdrUnderflowException("Data too short for encapsulation header.");
 
             _data = data.ToArray();
+            ParseEncapsulation(_data, out _littleEndian, out _xcdr2);
+            _headerSize = 4;
+            _pos = 4; // skip encapsulation header
+        }
 
+        private static void ParseEncapsulation(byte[] data, out bool littleEndian, out bool xcdr2)
+        {
             // Encapsulation header is always big-endian
-            ushort encapId = (ushort)((_data[0] << 8) | _data[1]);
+            ushort encapId = (ushort)((data[0] << 8) | data[1]);
 
             switch (encapId)
             {
                 case EncapCdrLe:
-                    _littleEndian = true; _xcdr2 = false; break;
+                    littleEndian = true; xcdr2 = false; break;
                 case EncapCdrBe:
-                    _littleEndian = false; _xcdr2 = false; break;
+                    littleEndian = false; xcdr2 = false; break;
                 case EncapPlCdrLe:
-                    _littleEndian = true; _xcdr2 = false; break;
+                    littleEndian = true; xcdr2 = false; break;
                 case EncapPlCdrBe:
-                    _littleEndian = false; _xcdr2 = false; break;
+                    littleEndian = false; xcdr2 = false; break;
                 case EncapCdr2Le:
                 case EncapDcdr2Le:
                 case EncapPlCdr2Le:
-                    _littleEndian = true; _xcdr2 = true; break;
+                    littleEndian = true; xcdr2 = true; break;
                 case EncapCdr2Be:
                 case EncapDcdr2Be:
                 case EncapPlCdr2Be:
-                    _littleEndian = false; _xcdr2 = true; break;
+                    littleEndian = false; xcdr2 = true; break;
                 default:
                     throw new CdrInvalidEncapsulationException(
                         $"Unrecognized encapsulation ID: 0x{encapId:X4}");
             }
-
-            _headerSize = 4;
-            _pos = 4; // skip encapsulation header
         }
 
         /// <summary>
@@ -283,19 +294,19 @@ namespace Int2Dds.Cdr
             if (cdrLen == 0)
                 return string.Empty;
 
-            // Each unit is 2 wire bytes. Without this the array below is sized
+            // Each unit is 2 wire bytes. Without this the decode below is sized
             // straight from the wire, so 4 bytes of input can demand gigabytes.
             if (cdrLen > (uint)(Remaining / 2))
                 throw new CdrUnderflowException(
                     $"WString length {cdrLen} exceeds {Remaining} remaining bytes.");
 
-            int strLen = (int)cdrLen;
-            var chars = new char[strLen];
-            for (int i = 0; i < strLen; i++)
-            {
-                chars[i] = (char)ReadU16();
-            }
-            return new string(chars);
+            Align(2);
+            int byteLen = (int)cdrLen * 2;
+            EnsureRemaining(byteLen);
+            var enc = _littleEndian ? Encoding.Unicode : Encoding.BigEndianUnicode;
+            string result = enc.GetString(_data, _pos, byteLen);
+            _pos += byteLen;
+            return result;
         }
 
         /// <summary>Read a sequence header (uint32 element count).</summary>
