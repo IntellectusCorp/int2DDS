@@ -33,7 +33,12 @@ class DataWriterTest {
     }
 
     /**
-     * The brief's original oracle here was {@code assertEquals(failedBefore,
+     * A smoke test: create a writer and publish through it, and let JUnit's
+     * own uncaught-exception handling be the oracle for "without error." Two
+     * earlier attempts at a positive assertion here were both dead, and the
+     * second one is worth spelling out since it looked real.
+     *
+     * <p>The brief's original oracle was {@code assertEquals(failedBefore,
      * NativeCleaner.failedCount())} -- dead, per the dispatch prompt's
      * correction: {@code failedCount()} is the reaper's delete-*attempt*
      * counter (NativeCleaner's own Javadoc), and nothing in this test ever
@@ -43,21 +48,26 @@ class DataWriterTest {
      * <p>My own first replacement, {@code assertFalse(w.isClosed())}, was
      * flagged in review as the same shape of dead oracle: {@code write()}
      * never closes the writer on any path, so that assertion could not have
-     * failed either. {@code deferredCount()} returning to its pre-test
-     * baseline is the actual replacement -- the same oracle {@link
-     * #anAbandonedWriterTreeIsReapedCleanly} and {@code
+     * failed either. My second replacement compared {@code
+     * NativeCleaner.deferredCount()} before and after -- the same oracle
+     * {@link #anAbandonedWriterTreeIsReapedCleanly} and {@code
      * EntityTreeTest.anAbandonedTreeIsEventuallyFullyReleased} use for "the
-     * reaper is not left holding anything." {@code p.close()} in the
-     * {@code finally} block is synchronous, not reaper-driven -- it calls
-     * each handle's deleter directly and throws on a genuine failure
-     * ({@code NativeEntity.close()} -&gt; {@code ReturnCodes.check}) -- so a
-     * clean four-handle cascade should leave {@code deferredCount()}
-     * completely unmoved, unlike {@code isClosed()}, which this specific
-     * method can never fail to satisfy.
+     * reaper is not left holding anything" -- but that is dead here too, for
+     * a different reason: {@code DEFERRED} moves only inside the reaper
+     * (NativeCleaner's {@code attempt()}/{@code sweepDeferred()}), and {@code
+     * p.close()} in the {@code finally} block below is synchronous, calling
+     * each handle's deleter directly and throwing out of {@code
+     * NativeEntity.close()} -&gt; {@code ReturnCodes.check} on a genuine
+     * refusal rather than ever touching {@code DEFERRED}. So either {@code
+     * p.close()} throws -- and the test already fails on that exception,
+     * never reaching a {@code deferredCount()} assertion -- or it returns
+     * normally, in which case {@code deferredCount()} is provably unmoved.
+     * That assertion could not fail either way, so it is gone; {@code
+     * assertNotEquals(0L, w.handle())} and the topic-identity check below,
+     * plus the implicit "did not throw," are this method's real oracles.
      */
     @Test
     void aWriterIsCreatedAndPublishesWithoutError() {
-        long deferredBefore = NativeCleaner.deferredCount();
         DomainParticipant p = new DomainParticipant(testDomain());
         try {
             Topic<ConformanceRecord> t = p.createTopic("writer_basic", new ConformanceRecord());
@@ -73,7 +83,6 @@ class DataWriterTest {
         } finally {
             p.close();
         }
-        assertEquals(deferredBefore, NativeCleaner.deferredCount());
     }
 
     /**
