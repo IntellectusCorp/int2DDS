@@ -112,7 +112,19 @@ import org.openjdk.jmh.infra.Blackhole;
  * between them — it does not cancel out of either arm's own absolute
  * number, which is why level 1's absolute throughput is not directly
  * comparable to level 2's (a further reason the two levels are reported
- * separately rather than combined).
+ * separately rather than combined). <b>Concretely: level 1's score is
+ * encode-plus-read-back, and level 2 never performs a read-back at all
+ * (the native write call is what consumes the encoded bytes instead — see
+ * below) — so {@code (1/L2score − 1/L1score)} is not the write's own added
+ * cost, it is the write's added cost <em>minus</em> the read-back tax L1
+ * paid and L2 didn't.</b> That subtraction is small enough to ignore at
+ * small payloads, where the read-back tax is a few hundred nanoseconds at
+ * most against a multi-microsecond write; it is not small at large
+ * payloads, where the read-back tax is itself a bulk copy of the whole
+ * payload and can be a substantial fraction of level 1's own score. Treat
+ * any decomposition built this way as a bound, not an exact split, at
+ * large payload sizes specifically — see the task report for the measured
+ * size of this specific error at 64&nbsp;KB.
  *
  * <p>The encode-and-write arms need no such device: {@code
  * datawriterWriteSerialized} is a native (JNI) call, and unlike {@code
@@ -281,6 +293,20 @@ public class WritePathBenchmark {
      * plus the {@code directBufferAddress} JNI call, exactly the cost {@code
      * CdrWriter}'s own class doc says pooling exists to avoid paying per
      * sample.
+     *
+     * <p><b>That is one allocation only at the smallest payload size.</b>
+     * {@code CdrWriter}'s constructor always calls {@code take(
+     * DEFAULT_CAPACITY)} — 256 bytes — regardless of what the caller will
+     * eventually write; {@code ensure()} then grows (a second {@code
+     * allocate()}, sized to the actual requirement, plus a copy of the bytes
+     * already written) the moment the running length would exceed whatever
+     * is currently held. At 64&nbsp;B the initial 256-byte buffer is never
+     * exceeded, so this method allocates once. At 1024&nbsp;B and 65536&nbsp;B
+     * it allocates twice per invocation, not once — the mechanism above
+     * ("every acquire() falls through to allocate()") is accurate but does
+     * not by itself say how many times. See the task report for measured
+     * per-call allocation costs at each size and what this means for the
+     * S1 multipliers at those two sizes specifically.
      *
      * <p>This is deterministic, not probabilistic: {@code ArrayDeque} and
      * {@code ThreadLocal} have no hidden cross-talk, and JMH forks a fresh

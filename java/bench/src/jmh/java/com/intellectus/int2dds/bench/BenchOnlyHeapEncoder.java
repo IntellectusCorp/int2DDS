@@ -23,10 +23,20 @@ import java.nio.ByteBuffer;
  *
  * <p>Deliberately not {@code CdrWriter}-shaped: no {@code acquire()}/{@code
  * close()}, no thread-local pool. A single instance is created once per
- * benchmark trial and reused across invocations via {@link #reset()},
- * mirroring how {@code CdrWriter}'s pooled buffer is reused across {@code
- * acquire()} calls — so neither V1 arm's number is inflated by allocation
- * neither design actually requires.
+ * benchmark trial and reused across invocations via {@link #reset()} — a
+ * one-field write, not comparable to what {@code CdrWriter.acquire()} does
+ * every call ({@code new CdrWriter(...)}, a {@code ThreadLocal.get()} and
+ * {@code ArrayDeque.poll()} to check the pool out, then a second {@code
+ * ThreadLocal.get()} and {@code ArrayDeque.push()} on {@code close()} to
+ * check it back in). <b>This class's own per-invocation cost is therefore
+ * optimistic, not neutral</b>: {@code reset()} skips a real, if small,
+ * per-call lifecycle {@code CdrWriter} pays and a production {@code
+ * byte[]}-backed writer, pooled the same way for the same reasons, would
+ * presumably also need to pay. An earlier version of this doc claimed the
+ * opposite — that neither V1 arm's number was inflated by allocation
+ * neither design required — which is wrong about this specific asymmetry;
+ * see {@code WritePathBenchmark}'s own Javadoc and the task report for the
+ * size of the effect and which V1 numbers it bears on.
  *
  * <p>Package-private: nothing outside {@code WritePathBenchmark} — the only
  * thing V1 is about — has any business constructing one of these.
