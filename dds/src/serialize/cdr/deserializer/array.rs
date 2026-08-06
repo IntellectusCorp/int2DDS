@@ -3,133 +3,61 @@ use crate::serialize::cdr::{try_vec_prealloc, CdrDeserializer, CdrError, Xcdr2De
 // Fixed-size arrays carry no length prefix, so each of these is the sequence body read
 // with the element count supplied by the caller. The bulk machinery is shared with
 // deserializer/sequence.rs — see `read_prim_run` there.
+//
+// The method bodies are identical for both deserializers; the macros below emit them
+// once for each so the two cannot drift apart.
 
-impl<'a> CdrDeserializer<'a> {
-    /// Deserialize fixed-size byte array (no length prefix)
-    pub fn deserialize_byte_array(&mut self, size: usize) -> Result<Vec<u8>, CdrError> {
-        self.read_prim_run(size)
-    }
-
-    /// Deserialize fixed-size u16 array (no length prefix)
-    pub fn deserialize_u16_array(&mut self, size: usize) -> Result<Vec<u16>, CdrError> {
-        self.read_prim_run(size)
-    }
-
-    /// Deserialize fixed-size u32 array (no length prefix)
-    pub fn deserialize_u32_array(&mut self, size: usize) -> Result<Vec<u32>, CdrError> {
-        self.read_prim_run(size)
-    }
-
-    /// Deserialize fixed-size u64 array (no length prefix)
-    pub fn deserialize_u64_array(&mut self, size: usize) -> Result<Vec<u64>, CdrError> {
-        self.read_prim_run(size)
-    }
-
-    /// Deserialize fixed-size i8 array (no length prefix)
-    pub fn deserialize_i8_array(&mut self, size: usize) -> Result<Vec<i8>, CdrError> {
-        self.read_prim_run(size)
-    }
-
-    /// Deserialize fixed-size i16 array (no length prefix)
-    pub fn deserialize_i16_array(&mut self, size: usize) -> Result<Vec<i16>, CdrError> {
-        self.read_prim_run(size)
-    }
-
-    /// Deserialize fixed-size i32 array (no length prefix)
-    pub fn deserialize_i32_array(&mut self, size: usize) -> Result<Vec<i32>, CdrError> {
-        self.read_prim_run(size)
-    }
-
-    /// Deserialize fixed-size i64 array (no length prefix)
-    pub fn deserialize_i64_array(&mut self, size: usize) -> Result<Vec<i64>, CdrError> {
-        self.read_prim_run(size)
-    }
-
-    /// Deserialize fixed-size f32 array (no length prefix)
-    pub fn deserialize_f32_array(&mut self, size: usize) -> Result<Vec<f32>, CdrError> {
-        self.read_prim_run(size)
-    }
-
-    /// Deserialize fixed-size f64 array (no length prefix)
-    pub fn deserialize_f64_array(&mut self, size: usize) -> Result<Vec<f64>, CdrError> {
-        self.read_prim_run(size)
-    }
-
-    /// Deserialize fixed-size bool array (no length prefix)
-    pub fn deserialize_bool_array(&mut self, size: usize) -> Result<Vec<bool>, CdrError> {
-        self.read_octet_run(size, |b| b != 0)
-    }
-
-    /// Deserialize fixed-size char array (no length prefix)
-    pub fn deserialize_char_array_fixed(&mut self, size: usize) -> Result<Vec<char>, CdrError> {
-        self.read_octet_run(size, |b| b as char)
-    }
-
-    /// Deserialize fixed-size string array (no length prefix)
-    pub fn deserialize_string_array(&mut self, size: usize) -> Result<Vec<String>, CdrError> {
-        let mut result = try_vec_prealloc(self.checked_capacity(size, 4)?)?;
-        for _ in 0..size {
-            result.push(self.deserialize_string()?);
+macro_rules! prim_array_reads {
+    ($($name:ident => $ty:ty),+ $(,)?) => {$(
+        #[doc = concat!("Deserialize fixed-size `", stringify!($ty), "` array (no length prefix)")]
+        pub fn $name(&mut self, size: usize) -> Result<Vec<$ty>, CdrError> {
+            self.read_prim_run(size)
         }
-        Ok(result)
-    }
+    )+};
 }
 
-// Xcdr2Deserializer uses the same array deserialization logic
-impl<'a> Xcdr2Deserializer<'a> {
-    pub fn deserialize_byte_array(&mut self, size: usize) -> Result<Vec<u8>, CdrError> {
-        self.read_prim_run(size)
-    }
+macro_rules! impl_shared_array_reads {
+    ($($de:ident),+ $(,)?) => {$(
+        impl<'a> $de<'a> {
+            prim_array_reads! {
+                deserialize_byte_array => u8,
+                deserialize_u16_array => u16,
+                deserialize_u32_array => u32,
+                deserialize_u64_array => u64,
+                deserialize_i8_array => i8,
+                deserialize_i16_array => i16,
+                deserialize_i32_array => i32,
+                deserialize_i64_array => i64,
+                deserialize_f32_array => f32,
+                deserialize_f64_array => f64,
+            }
 
-    pub fn deserialize_u16_array(&mut self, size: usize) -> Result<Vec<u16>, CdrError> {
-        self.read_prim_run(size)
-    }
+            /// Deserialize fixed-size bool array (no length prefix)
+            pub fn deserialize_bool_array(&mut self, size: usize) -> Result<Vec<bool>, CdrError> {
+                self.read_octet_run(size, |b| b != 0)
+            }
 
-    pub fn deserialize_u32_array(&mut self, size: usize) -> Result<Vec<u32>, CdrError> {
-        self.read_prim_run(size)
-    }
+            /// Deserialize fixed-size char array (no length prefix)
+            pub fn deserialize_char_array_fixed(
+                &mut self,
+                size: usize,
+            ) -> Result<Vec<char>, CdrError> {
+                self.read_octet_run(size, |b| b as char)
+            }
 
-    pub fn deserialize_u64_array(&mut self, size: usize) -> Result<Vec<u64>, CdrError> {
-        self.read_prim_run(size)
-    }
-
-    pub fn deserialize_i8_array(&mut self, size: usize) -> Result<Vec<i8>, CdrError> {
-        self.read_prim_run(size)
-    }
-
-    pub fn deserialize_i16_array(&mut self, size: usize) -> Result<Vec<i16>, CdrError> {
-        self.read_prim_run(size)
-    }
-
-    pub fn deserialize_i32_array(&mut self, size: usize) -> Result<Vec<i32>, CdrError> {
-        self.read_prim_run(size)
-    }
-
-    pub fn deserialize_i64_array(&mut self, size: usize) -> Result<Vec<i64>, CdrError> {
-        self.read_prim_run(size)
-    }
-
-    pub fn deserialize_f32_array(&mut self, size: usize) -> Result<Vec<f32>, CdrError> {
-        self.read_prim_run(size)
-    }
-
-    pub fn deserialize_f64_array(&mut self, size: usize) -> Result<Vec<f64>, CdrError> {
-        self.read_prim_run(size)
-    }
-
-    pub fn deserialize_bool_array(&mut self, size: usize) -> Result<Vec<bool>, CdrError> {
-        self.read_octet_run(size, |b| b != 0)
-    }
-
-    pub fn deserialize_char_array_fixed(&mut self, size: usize) -> Result<Vec<char>, CdrError> {
-        self.read_octet_run(size, |b| b as char)
-    }
-
-    pub fn deserialize_string_array(&mut self, size: usize) -> Result<Vec<String>, CdrError> {
-        let mut result = try_vec_prealloc(self.checked_capacity(size, 4)?)?;
-        for _ in 0..size {
-            result.push(self.deserialize_string()?);
+            /// Deserialize fixed-size string array (no length prefix)
+            pub fn deserialize_string_array(
+                &mut self,
+                size: usize,
+            ) -> Result<Vec<String>, CdrError> {
+                let mut result = try_vec_prealloc(self.checked_capacity(size, 4)?)?;
+                for _ in 0..size {
+                    result.push(self.deserialize_string()?);
+                }
+                Ok(result)
+            }
         }
-        Ok(result)
-    }
+    )+};
 }
+
+impl_shared_array_reads!(CdrDeserializer, Xcdr2Deserializer);

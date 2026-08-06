@@ -40,119 +40,6 @@ impl<'a> CdrDeserializer<'a> {
         self.position += count;
         Ok(bytes.into_iter().map(map).collect())
     }
-
-    /// Deserialize byte sequence with length prefix
-    pub fn deserialize_byte_sequence(&mut self) -> Result<Vec<u8>, CdrError> {
-        let length = self.deserialize_u32()? as usize;
-        self.read_prim_run(length)
-    }
-
-    /// Deserialize u16 sequence with length prefix
-    pub fn deserialize_u16_sequence(&mut self) -> Result<Vec<u16>, CdrError> {
-        let length = self.deserialize_u32()? as usize;
-        self.read_prim_run(length)
-    }
-
-    /// Deserialize u32 sequence with length prefix
-    pub fn deserialize_u32_sequence(&mut self) -> Result<Vec<u32>, CdrError> {
-        let length = self.deserialize_u32()? as usize;
-        self.read_prim_run(length)
-    }
-
-    /// Deserialize u64 sequence with length prefix
-    pub fn deserialize_u64_sequence(&mut self) -> Result<Vec<u64>, CdrError> {
-        let length = self.deserialize_u32()? as usize;
-        self.read_prim_run(length)
-    }
-
-    /// Deserialize i8 sequence with length prefix
-    pub fn deserialize_i8_sequence(&mut self) -> Result<Vec<i8>, CdrError> {
-        let length = self.deserialize_u32()? as usize;
-        self.read_prim_run(length)
-    }
-
-    /// Deserialize i16 sequence with length prefix
-    pub fn deserialize_i16_sequence(&mut self) -> Result<Vec<i16>, CdrError> {
-        let length = self.deserialize_u32()? as usize;
-        self.read_prim_run(length)
-    }
-
-    /// Deserialize i32 sequence with length prefix
-    pub fn deserialize_i32_sequence(&mut self) -> Result<Vec<i32>, CdrError> {
-        let length = self.deserialize_u32()? as usize;
-        self.read_prim_run(length)
-    }
-
-    /// Deserialize i64 sequence with length prefix
-    pub fn deserialize_i64_sequence(&mut self) -> Result<Vec<i64>, CdrError> {
-        let length = self.deserialize_u32()? as usize;
-        self.read_prim_run(length)
-    }
-
-    /// Deserialize f32 sequence with length prefix
-    pub fn deserialize_f32_sequence(&mut self) -> Result<Vec<f32>, CdrError> {
-        let length = self.deserialize_u32()? as usize;
-        self.read_prim_run(length)
-    }
-
-    /// Deserialize f64 sequence with length prefix
-    pub fn deserialize_f64_sequence(&mut self) -> Result<Vec<f64>, CdrError> {
-        let length = self.deserialize_u32()? as usize;
-        self.read_prim_run(length)
-    }
-
-    /// Deserialize bool sequence with length prefix.
-    /// The wire may carry any octet; anything nonzero is `true`.
-    pub fn deserialize_bool_sequence(&mut self) -> Result<Vec<bool>, CdrError> {
-        let length = self.deserialize_u32()? as usize;
-        self.read_octet_run(length, |b| b != 0)
-    }
-
-    /// Deserialize char sequence with length prefix
-    pub fn deserialize_char_sequence(&mut self) -> Result<Vec<char>, CdrError> {
-        let length = self.deserialize_u32()? as usize;
-        self.read_octet_run(length, |b| b as char)
-    }
-
-    /// Deserialize string sequence with length prefix
-    pub fn deserialize_string_sequence(&mut self) -> Result<Vec<String>, CdrError> {
-        let length = self.deserialize_u32()? as usize;
-        let mut result = try_vec_prealloc(self.checked_capacity(length, 4)?)?;
-        for _ in 0..length {
-            result.push(self.deserialize_string()?);
-        }
-        Ok(result)
-    }
-
-    /// Deserialize sequence of values with length prefix
-    pub fn deserialize_sequence<T, F>(&mut self, mut deserialize_fn: F) -> Result<Vec<T>, CdrError>
-    where
-        F: FnMut(&mut Self) -> Result<T, CdrError>,
-    {
-        let length = self.deserialize_u32()? as usize;
-        let length = self.checked_capacity(length, 1)?;
-        let mut result = try_vec_prealloc(length)?;
-        for _ in 0..length {
-            result.push(deserialize_fn(self)?);
-        }
-        Ok(result)
-    }
-
-    /// Deserialize optional value
-    pub fn deserialize_optional<T, F>(
-        &mut self,
-        mut deserialize_fn: F,
-    ) -> Result<Option<T>, CdrError>
-    where
-        F: FnMut(&mut Self) -> Result<T, CdrError>,
-    {
-        let has_value = self.deserialize_bool()?;
-        if has_value {
-            Ok(Some(deserialize_fn(self)?))
-        } else {
-            Ok(None)
-        }
-    }
 }
 
 // Xcdr2Deserializer uses the same sequence deserialization logic
@@ -188,104 +75,97 @@ impl<'a> Xcdr2Deserializer<'a> {
         self.position += count;
         Ok(self.data[start..start + count].iter().map(|&b| map(b)).collect())
     }
-
-    pub fn deserialize_byte_sequence(&mut self) -> Result<Vec<u8>, CdrError> {
-        let length = self.deserialize_u32()? as usize;
-        self.read_prim_run(length)
-    }
-
-    pub fn deserialize_u16_sequence(&mut self) -> Result<Vec<u16>, CdrError> {
-        let length = self.deserialize_u32()? as usize;
-        self.read_prim_run(length)
-    }
-
-    pub fn deserialize_u32_sequence(&mut self) -> Result<Vec<u32>, CdrError> {
-        let length = self.deserialize_u32()? as usize;
-        self.read_prim_run(length)
-    }
-
-    pub fn deserialize_u64_sequence(&mut self) -> Result<Vec<u64>, CdrError> {
-        let length = self.deserialize_u32()? as usize;
-        self.read_prim_run(length)
-    }
-
-    pub fn deserialize_i8_sequence(&mut self) -> Result<Vec<i8>, CdrError> {
-        let length = self.deserialize_u32()? as usize;
-        self.read_prim_run(length)
-    }
-
-    pub fn deserialize_i16_sequence(&mut self) -> Result<Vec<i16>, CdrError> {
-        let length = self.deserialize_u32()? as usize;
-        self.read_prim_run(length)
-    }
-
-    pub fn deserialize_i32_sequence(&mut self) -> Result<Vec<i32>, CdrError> {
-        let length = self.deserialize_u32()? as usize;
-        self.read_prim_run(length)
-    }
-
-    pub fn deserialize_i64_sequence(&mut self) -> Result<Vec<i64>, CdrError> {
-        let length = self.deserialize_u32()? as usize;
-        self.read_prim_run(length)
-    }
-
-    pub fn deserialize_f32_sequence(&mut self) -> Result<Vec<f32>, CdrError> {
-        let length = self.deserialize_u32()? as usize;
-        self.read_prim_run(length)
-    }
-
-    pub fn deserialize_f64_sequence(&mut self) -> Result<Vec<f64>, CdrError> {
-        let length = self.deserialize_u32()? as usize;
-        self.read_prim_run(length)
-    }
-
-    pub fn deserialize_bool_sequence(&mut self) -> Result<Vec<bool>, CdrError> {
-        let length = self.deserialize_u32()? as usize;
-        self.read_octet_run(length, |b| b != 0)
-    }
-
-    pub fn deserialize_char_sequence(&mut self) -> Result<Vec<char>, CdrError> {
-        let length = self.deserialize_u32()? as usize;
-        self.read_octet_run(length, |b| b as char)
-    }
-
-    pub fn deserialize_string_sequence(&mut self) -> Result<Vec<String>, CdrError> {
-        let length = self.deserialize_u32()? as usize;
-        let mut result = try_vec_prealloc(self.checked_capacity(length, 4)?)?;
-        for _ in 0..length {
-            result.push(self.deserialize_string()?);
-        }
-        Ok(result)
-    }
-
-    pub fn deserialize_sequence<T, F>(&mut self, mut deserialize_fn: F) -> Result<Vec<T>, CdrError>
-    where
-        F: FnMut(&mut Self) -> Result<T, CdrError>,
-    {
-        let length = self.deserialize_u32()? as usize;
-        let length = self.checked_capacity(length, 1)?;
-        let mut result = try_vec_prealloc(length)?;
-        for _ in 0..length {
-            result.push(deserialize_fn(self)?);
-        }
-        Ok(result)
-    }
-
-    pub fn deserialize_optional<T, F>(
-        &mut self,
-        mut deserialize_fn: F,
-    ) -> Result<Option<T>, CdrError>
-    where
-        F: FnMut(&mut Self) -> Result<T, CdrError>,
-    {
-        let has_value = self.deserialize_bool()?;
-        if has_value {
-            Ok(Some(deserialize_fn(self)?))
-        } else {
-            Ok(None)
-        }
-    }
 }
+
+// The public sequence methods are identical for both deserializers; the macros below
+// emit them once for each so the two cannot drift apart.
+
+macro_rules! prim_sequence_reads {
+    ($($name:ident => $ty:ty),+ $(,)?) => {$(
+        #[doc = concat!("Deserialize `", stringify!($ty), "` sequence with length prefix")]
+        pub fn $name(&mut self) -> Result<Vec<$ty>, CdrError> {
+            let length = self.deserialize_u32()? as usize;
+            self.read_prim_run(length)
+        }
+    )+};
+}
+
+macro_rules! impl_shared_sequence_reads {
+    ($($de:ident),+ $(,)?) => {$(
+        impl<'a> $de<'a> {
+            prim_sequence_reads! {
+                deserialize_byte_sequence => u8,
+                deserialize_u16_sequence => u16,
+                deserialize_u32_sequence => u32,
+                deserialize_u64_sequence => u64,
+                deserialize_i8_sequence => i8,
+                deserialize_i16_sequence => i16,
+                deserialize_i32_sequence => i32,
+                deserialize_i64_sequence => i64,
+                deserialize_f32_sequence => f32,
+                deserialize_f64_sequence => f64,
+            }
+
+            /// Deserialize bool sequence with length prefix.
+            /// The wire may carry any octet; anything nonzero is `true`.
+            pub fn deserialize_bool_sequence(&mut self) -> Result<Vec<bool>, CdrError> {
+                let length = self.deserialize_u32()? as usize;
+                self.read_octet_run(length, |b| b != 0)
+            }
+
+            /// Deserialize char sequence with length prefix
+            pub fn deserialize_char_sequence(&mut self) -> Result<Vec<char>, CdrError> {
+                let length = self.deserialize_u32()? as usize;
+                self.read_octet_run(length, |b| b as char)
+            }
+
+            /// Deserialize string sequence with length prefix
+            pub fn deserialize_string_sequence(&mut self) -> Result<Vec<String>, CdrError> {
+                let length = self.deserialize_u32()? as usize;
+                let mut result = try_vec_prealloc(self.checked_capacity(length, 4)?)?;
+                for _ in 0..length {
+                    result.push(self.deserialize_string()?);
+                }
+                Ok(result)
+            }
+
+            /// Deserialize sequence of values with length prefix
+            pub fn deserialize_sequence<T, F>(
+                &mut self,
+                mut deserialize_fn: F,
+            ) -> Result<Vec<T>, CdrError>
+            where
+                F: FnMut(&mut Self) -> Result<T, CdrError>,
+            {
+                let length = self.deserialize_u32()? as usize;
+                let length = self.checked_capacity(length, 1)?;
+                let mut result = try_vec_prealloc(length)?;
+                for _ in 0..length {
+                    result.push(deserialize_fn(self)?);
+                }
+                Ok(result)
+            }
+
+            /// Deserialize optional value
+            pub fn deserialize_optional<T, F>(
+                &mut self,
+                mut deserialize_fn: F,
+            ) -> Result<Option<T>, CdrError>
+            where
+                F: FnMut(&mut Self) -> Result<T, CdrError>,
+            {
+                let has_value = self.deserialize_bool()?;
+                if has_value {
+                    Ok(Some(deserialize_fn(self)?))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    )+};
+}
+
+impl_shared_sequence_reads!(CdrDeserializer, Xcdr2Deserializer);
 
 #[cfg(test)]
 mod robustness_tests {
