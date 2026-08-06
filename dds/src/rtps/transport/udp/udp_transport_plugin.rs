@@ -1,11 +1,13 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
+use socket2::Socket as Socket2;
+use std::collections::HashSet;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Mutex;
 
-use crate::rtps::common::locator::{Locator, MULTICAST_IP};
+use crate::rtps::common::locator::Locator;
 use crate::rtps::transport::plugin::{MessageSource, SendTarget, TransportPlugin};
 use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
@@ -30,6 +32,9 @@ pub(crate) struct UdpTransportPlugin {
     discovery_unicast_listener: Mutex<Option<UdpListener>>,
     user_multicast_listener: Mutex<Option<UdpListener>>,
     user_unicast_listener: Mutex<Option<UdpListener>>,
+
+    user_multicast_group_handle: Mutex<Option<Socket2>>,
+    joined_user_multicast_groups: Mutex<HashSet<Ipv4Addr>>,
 }
 
 impl UdpTransportPlugin {
@@ -102,6 +107,8 @@ impl UdpTransportPlugin {
             discovery_unicast_listener: Mutex::new(discovery_uc),
             user_multicast_listener: Mutex::new(None),
             user_unicast_listener: Mutex::new(user_uc),
+            user_multicast_group_handle: Mutex::new(None),
+            joined_user_multicast_groups: Mutex::new(HashSet::new()),
         })
     }
 
@@ -170,9 +177,9 @@ impl TransportPlugin for UdpTransportPlugin {
         self.udp_locators(port)
     }
 
-    fn advertised_default_multicast_locators(&self) -> Vec<Locator> {
+    fn advertised_default_multicast_locators(&self, groups: Vec<Ipv4Addr>) -> Vec<Locator> {
         let port = PortManager::get_user_traffic_multicast_port(self.domain_id) as u32;
-        vec![Locator::from_ip_v4_addr_and_port(&MULTICAST_IP, port)]
+        groups.iter().map(|group| Locator::from_ip_v4_addr_and_port(group, port)).collect()
     }
 
     fn take_discovery_multicast_source(&self) -> Option<MessageSource> {
@@ -195,19 +202,40 @@ impl TransportPlugin for UdpTransportPlugin {
         Some(MessageSource::MioPoll { listener })
     }
 
-    fn ensure_user_multicast_listener(&self) -> io::Result<()> {
-        let mut guard = self.user_multicast_listener.lock().expect("lock poisoned");
-        if guard.is_none() {
+    fn ensure_user_multicast_listener(&self, group: Ipv4Addr) -> io::Result<()> {
+        let mut handle_guard = self.user_multicast_group_handle.lock().expect("lock poisoned");
+        if handle_guard.is_none() {
             let user_mc_port = PortManager::get_user_traffic_multicast_port(self.domain_id);
-            *guard = Some(UdpListener::new_user_multicast(
-                user_mc_port,
-                &self.working_ips,
-                self.multicast_if_ip,
-            )?);
+            let mut listener = UdpListener::new_user_multicast(user_mc_port, &self.working_ips)?;
+            *handle_guard = listener.take_multicast_group_handle();
+            *self.user_multicast_listener.lock().expect("lock poisoned") = Some(listener);
             log::info!(
                 "[UdpTransportPlugin] user data multicast listener bound on port {user_mc_port}"
             );
         }
+
+        let mut joined = self.joined_user_multicast_groups.lock().expect("lock poisoned");
+        if !joined.insert(group) {
+            return Ok(());
+        }
+
+        let handle = handle_guard
+            .as_ref()
+            .ok_or_else(|| io::Error::other("user data multicast listener has no group handle"))?;
+        // A group nobody can receive on is worse than a refused DataReader, so a
+        // failed join on the sending interface is fatal here.
+        if let Err(e) = UdpListener::join_multicast_group(
+            handle,
+            &group,
+            &self.working_ips,
+            Some(self.multicast_if_ip),
+            true,
+        ) {
+            joined.remove(&group);
+            return Err(e);
+        }
+
+        log::info!("[UdpTransportPlugin] joined user data multicast group {group}");
         Ok(())
     }
 

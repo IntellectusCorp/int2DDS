@@ -115,7 +115,7 @@ impl SubscriptionBuiltinTopicData {
             type_consistency_enforcement: datareader_qos.type_consistency_enforcement,
             type_information: None,
             reader_reliability_extension: datareader_qos.reader_reliability_extension,
-            reader_multicast_extension: datareader_qos.reader_multicast_extension,
+            reader_multicast_extension: datareader_qos.reader_multicast_extension.clone(),
         }
     }
 

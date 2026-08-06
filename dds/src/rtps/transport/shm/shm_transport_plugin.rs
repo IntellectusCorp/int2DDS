@@ -39,7 +39,6 @@ pub(crate) struct ShmTransportPlugin {
     discovery_unicast_listener: Mutex<Option<UdpListener>>,
 
     // User-traffic listeners (UDP fallback + SHM ring buffer)
-    user_multicast_listener: Mutex<Option<UdpListener>>,
     user_unicast_listener: Mutex<Option<UdpListener>>,
     shm_listener: Mutex<Option<ShmListener>>,
 }
@@ -57,13 +56,10 @@ impl ShmTransportPlugin {
         let udp_sender = UdpSender::new(bind_ip, multicast_if_ip, udp_config)?;
         let shm_sender = ShmSender::new(domain_id)?;
 
-        // Create UDP multicast listeners (shared ports, no per-pid collision).
+        // Discovery multicast uses a shared port, so there is no per-pid collision.
         let discovery_mc_port = PortManager::get_discovery_traffic_multicast_port(domain_id);
-        let user_mc_port = PortManager::get_user_traffic_multicast_port(domain_id);
         let discovery_mc =
             UdpListener::new_discovery_multicast(discovery_mc_port, &working_ips, egress_if).ok();
-        let user_mc = egress_if
-            .and_then(|ip| UdpListener::new_user_multicast(user_mc_port, &working_ips, ip).ok());
 
         // Unicast listeners — both must bind at the same participant_id
         // (matches develop's Socket contract). If either fails, close any
@@ -113,7 +109,6 @@ impl ShmTransportPlugin {
             working_ips,
             discovery_multicast_listener: Mutex::new(discovery_mc),
             discovery_unicast_listener: Mutex::new(discovery_uc),
-            user_multicast_listener: Mutex::new(user_mc),
             user_unicast_listener: Mutex::new(user_uc),
             shm_listener: Mutex::new(shm_listener),
         })
@@ -219,9 +214,16 @@ impl TransportPlugin for ShmTransportPlugin {
         locators
     }
 
-    fn advertised_default_multicast_locators(&self) -> Vec<Locator> {
-        // SHM has no multicast.
+    fn advertised_default_multicast_locators(&self, _groups: Vec<Ipv4Addr>) -> Vec<Locator> {
+        // The UDP fallback carries user data over unicast only.
         Vec::new()
+    }
+
+    fn ensure_user_multicast_listener(&self, _group: Ipv4Addr) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "SHM cannot receive user data over multicast",
+        ))
     }
 
     fn take_discovery_multicast_source(&self) -> Option<MessageSource> {
@@ -258,7 +260,6 @@ impl TransportPlugin for ShmTransportPlugin {
         for guard_arc in [
             &self.discovery_multicast_listener,
             &self.discovery_unicast_listener,
-            &self.user_multicast_listener,
             &self.user_unicast_listener,
         ] {
             if let Ok(mut guard) = guard_arc.lock() {

@@ -242,9 +242,16 @@ impl TransportPlugin for HybridTransportPlugin {
         self.tcp_plugin.advertised_default_unicast_locators()
     }
 
-    fn advertised_default_multicast_locators(&self) -> Vec<Locator> {
-        // user data rides TCP.
-        self.tcp_plugin.advertised_default_multicast_locators()
+    fn advertised_default_multicast_locators(&self, _groups: Vec<Ipv4Addr>) -> Vec<Locator> {
+        // User data rides TCP; the UDP side carries multicast SPDP only.
+        Vec::new()
+    }
+
+    fn ensure_user_multicast_listener(&self, _group: Ipv4Addr) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "user data rides TCP, which cannot receive multicast",
+        ))
     }
 
     fn take_discovery_multicast_source(&self) -> Option<MessageSource> {

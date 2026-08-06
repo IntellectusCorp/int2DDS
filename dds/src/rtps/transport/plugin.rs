@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
-use std::io;
 use std::net::SocketAddr;
+use std::{io, net::Ipv4Addr};
 
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::locator::Locator;
@@ -108,7 +108,7 @@ pub(crate) trait TransportPlugin: Send + Sync {
     /// participants. Populated into the SPDP announcement.
     fn advertised_default_unicast_locators(&self) -> Vec<Locator>;
 
-    fn advertised_default_multicast_locators(&self) -> Vec<Locator>;
+    fn advertised_default_multicast_locators(&self, groups: Vec<Ipv4Addr>) -> Vec<Locator>;
 
     /// Take ownership of the discovery multicast message source.
     ///
@@ -140,14 +140,14 @@ pub(crate) trait TransportPlugin: Send + Sync {
         None
     }
 
-    /// Create the user data multicast listener and join the group.
+    /// Create the user data multicast listener if needed and join `group`.
     ///
-    /// Called when a DataReader asks for multicast reception. Only the first
-    /// call creates anything; later ones leave the existing listener alone.
-    /// Transports without multicast do nothing.
-    fn ensure_user_multicast_listener(&self) -> io::Result<()> {
-        Ok(())
-    }
+    /// Called once per DataReader that asks for multicast reception. Only the
+    /// first call creates a listener; every call joins the group it was given
+    /// unless that group is already joined. A transport that cannot carry user
+    /// data over multicast rejects here, so the DataReader fails to be created
+    /// instead of silently falling back to unicast.
+    fn ensure_user_multicast_listener(&self, group: Ipv4Addr) -> io::Result<()>;
 
     /// Get the local port number used by this transport's sender.
     fn port(&self) -> u16;

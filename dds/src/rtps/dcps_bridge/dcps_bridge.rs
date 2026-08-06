@@ -4,6 +4,7 @@
 //! managing participant lifecycles, entity creation, and message routing between
 //! the two layers.
 
+use std::net::Ipv4Addr;
 use std::sync::{Arc, RwLock, Weak};
 
 use log::debug;
@@ -225,14 +226,19 @@ impl DcpsBridge {
         Ok(())
     }
 
-    pub(crate) fn ensure_user_multicast_traffic(&self) -> RtpsResult<()> {
+    pub(crate) fn ensure_user_multicast_traffic(&self, group: Ipv4Addr) -> RtpsResult<()> {
         let Some(user_logic) = self.user_logic.as_ref() else {
             return Err(RtpsError::new(RtpsErrorCode::NotInitialized, "user_logic is not set"));
         };
 
-        // A single listener and thread serve every multicast reader of this
-        // participant, so only the reader that arrives first creates them.
-        // Callers hold the DcpsBridge lock, which keeps this check exclusive.
+        let transport = self.socket.transport();
+        transport.ensure_user_multicast_listener(group).map_err(|e| {
+            RtpsError::new(
+                RtpsErrorCode::Io,
+                format!("Failed to enable user data multicast reception: {e}"),
+            )
+        })?;
+
         let listening_handle = user_logic.get_multicast_listening_handle()?;
         let already_listening = listening_handle
             .lock()
@@ -242,14 +248,6 @@ impl DcpsBridge {
             return Ok(());
         }
 
-        let transport = self.socket.transport();
-        transport.ensure_user_multicast_listener().map_err(|e| {
-            RtpsError::new(
-                RtpsErrorCode::Io,
-                format!("Failed to create the user data multicast listener: {e}"),
-            )
-        })?;
-
         user_logic.start_user_multicast_traffic(transport.take_user_data_multicast_source())
     }
 
@@ -258,12 +256,11 @@ impl DcpsBridge {
         Guid::new(self.guid_prefix, next_entity_id)
     }
 
-    fn default_endpoint_info(&self) -> RtpsResult<(Vec<Locator>, Vec<Locator>)> {
+    /// Multicast is excluded here: a group is chosen per DataReader through QoS,
+    /// and no endpoint advertises one by default.
+    fn default_unicast_locators(&self) -> RtpsResult<Vec<Locator>> {
         let local_participant_data = self.participant.local_participant_proxy_data();
-        Ok((
-            local_participant_data.default_unicast_locator_list().clone(),
-            self.socket.transport().advertised_default_multicast_locators(),
-        ))
+        Ok(local_participant_data.default_unicast_locator_list().clone())
     }
 
     #[allow(clippy::type_complexity)]
@@ -282,7 +279,7 @@ impl DcpsBridge {
             return Err(RtpsError::new(RtpsErrorCode::InvalidEntityKind, "Invalid entity kind"));
         };
 
-        let (unicast_locator_list, multicast_locator_list) = self.default_endpoint_info()?;
+        let unicast_locator_list = self.default_unicast_locators()?;
 
         for locator in &unicast_locator_list {
             publication_builtin_topic_data.add_unicast_locator(locator.clone());
@@ -294,8 +291,8 @@ impl DcpsBridge {
         {
             Arc::new(StatefulWriter::new(
                 datawriter_guid,
-                unicast_locator_list,
-                multicast_locator_list,
+                unicast_locator_list.clone(),
+                Vec::new(),
                 ReliabilityQosPolicyKind::Reliable,
                 topic_kind,
                 datawriter_guid.entity_id(),
@@ -307,8 +304,8 @@ impl DcpsBridge {
         } else {
             Arc::new(StatelessWriter::new(
                 datawriter_guid,
-                unicast_locator_list,
-                multicast_locator_list,
+                unicast_locator_list.clone(),
+                Vec::new(),
                 ReliabilityQosPolicyKind::BestEffort,
                 topic_kind,
                 datawriter_guid.entity_id(),
@@ -416,21 +413,24 @@ impl DcpsBridge {
             return Err(RtpsError::new(RtpsErrorCode::InvalidEntityKind, "Invalid entity kind"));
         };
 
-        let (unicast_locator_list, multicast_locator_list) = self.default_endpoint_info()?;
+        let unicast_locator_list = self.default_unicast_locators()?;
 
-        // Clone locator lists before using them in Reader constructors
-        let unicast_locator_list_clone = unicast_locator_list.clone();
-        let multicast_locator_list_clone = multicast_locator_list.clone();
-
-        for locator in &unicast_locator_list_clone {
+        for locator in &unicast_locator_list {
             subscription_builtin_topic_data.add_unicast_locator(locator.clone());
         }
 
-        if subscription_builtin_topic_data.reader_multicast_extension().multicast_enabled {
-            for locator in &multicast_locator_list_clone {
-                subscription_builtin_topic_data.add_multicast_locator(locator.clone());
-            }
-        }
+        let multicast_locator_list =
+            match subscription_builtin_topic_data.reader_multicast_extension().group_ipv4() {
+                Some(group) => {
+                    let locators =
+                        self.socket.transport().advertised_default_multicast_locators(vec![group]);
+                    for locator in &locators {
+                        subscription_builtin_topic_data.add_multicast_locator(locator.clone());
+                    }
+                    locators
+                }
+                None => Vec::new(),
+            };
 
         let reader: Arc<dyn Reader + Send + Sync> = if subscription_builtin_topic_data.is_reliable()
         {
@@ -438,8 +438,8 @@ impl DcpsBridge {
                 datareader_guid,
                 topic_kind,
                 ReliabilityQosPolicyKind::Reliable,
-                unicast_locator_list_clone,
-                multicast_locator_list_clone,
+                unicast_locator_list.clone(),
+                multicast_locator_list.clone(),
                 datareader_guid.entity_id(),
                 false,
                 change_callback,
@@ -452,8 +452,8 @@ impl DcpsBridge {
                 datareader_guid,
                 topic_kind,
                 ReliabilityQosPolicyKind::BestEffort,
-                unicast_locator_list_clone,
-                multicast_locator_list_clone,
+                unicast_locator_list.clone(),
+                multicast_locator_list.clone(),
                 datareader_guid.entity_id(),
                 false,
                 change_callback,
@@ -803,7 +803,7 @@ impl DcpsBridge {
 #[cfg(test)]
 mod tests {
     use log::debug;
-    use std::{sync::Mutex, thread, time::Duration as StdDuration};
+    use std::{net::Ipv4Addr, sync::Mutex, thread, time::Duration as StdDuration};
 
     use super::*;
     use crate::{
@@ -814,13 +814,12 @@ mod tests {
         },
         publication::qos::{DataWriterQos, PublisherQos},
         rtps::{
-            common::{entity_kind::EntityKind, locator::MULTICAST_IP, sequence::SequenceNumber},
+            common::{entity_kind::EntityKind, sequence::SequenceNumber},
             entities::{
                 history::history_cache::HistoryCache,
                 reader::WriterProxy,
                 writer::{reader_locator::ReaderLocator, reader_proxy::ReaderProxy},
             },
-            logic::common::MulticastThreadHandler as _,
             transport::port_manager::PortManager,
         },
         subscription::qos::{DataReaderQos, SubscriberQos},
@@ -1516,14 +1515,16 @@ mod tests {
     fn create_reader_and_take_subscription_data(
         bridge: &mut DcpsBridge,
         topic_name: &str,
-        multicast_enabled: bool,
+        group_address: Option<&str>,
     ) -> SubscriptionBuiltinTopicData {
         let reader_qos = DataReaderQos {
             reliability: ReliabilityQosPolicy {
                 kind: ReliabilityQosPolicyKind::Reliable,
                 max_blocking_time: Duration { sec: 0, nanosec: 100_000_000 },
             },
-            reader_multicast_extension: ReaderMulticastExtensionQosPolicy { multicast_enabled },
+            reader_multicast_extension: ReaderMulticastExtensionQosPolicy {
+                group_address: group_address.map(str::to_string),
+            },
             ..Default::default()
         };
 
@@ -1555,9 +1556,9 @@ mod tests {
     }
 
     /// The group address is what tells a remote writer that multicast delivery is
-    /// possible, so it must appear in SEDP only for a reader that opted in.
+    /// possible, so SEDP must carry exactly the address the reader asked for.
     #[test]
-    fn test_reader_advertises_group_locator_only_when_multicast_enabled() {
+    fn test_reader_advertises_the_group_address_from_its_qos() {
         let domain_id = unique_domain_id();
         let dcps_bridge =
             Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default()).unwrap()));
@@ -1566,20 +1567,23 @@ mod tests {
         guard.init().unwrap();
 
         let expected_group = Locator::from_ip_v4_addr_and_port(
-            &MULTICAST_IP,
+            &Ipv4Addr::new(239, 255, 12, 7),
             PortManager::get_user_traffic_multicast_port(domain_id as u32) as u32,
         );
 
-        let opted_in =
-            create_reader_and_take_subscription_data(&mut guard, "multicast_on_topic", true);
+        let opted_in = create_reader_and_take_subscription_data(
+            &mut guard,
+            "multicast_on_topic",
+            Some("239.255.12.7"),
+        );
         assert_eq!(
             opted_in.multicast_locator_list(),
             vec![expected_group],
-            "An opted-in reader should advertise the domain user traffic multicast group"
+            "A reader must advertise the group its QoS selected, at the domain port"
         );
 
         let opted_out =
-            create_reader_and_take_subscription_data(&mut guard, "multicast_off_topic", false);
+            create_reader_and_take_subscription_data(&mut guard, "multicast_off_topic", None);
         assert!(
             opted_out.multicast_locator_list().is_empty(),
             "A reader that did not opt in must not advertise any multicast locator"
@@ -1589,6 +1593,33 @@ mod tests {
             !opted_in.unicast_locator_list().is_empty()
                 && !opted_out.unicast_locator_list().is_empty(),
             "Unicast advertisement must stay untouched in both cases"
+        );
+
+        let _ = guard.disable();
+    }
+
+    #[test]
+    fn test_every_reader_joins_its_group_on_the_shared_listener() {
+        let domain_id = unique_domain_id();
+        let dcps_bridge =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default()).unwrap()));
+
+        let mut guard = dcps_bridge.lock().unwrap();
+        guard.init().unwrap();
+
+        guard.ensure_user_multicast_traffic(Ipv4Addr::new(239, 255, 12, 7)).unwrap();
+        guard
+            .ensure_user_multicast_traffic(Ipv4Addr::new(239, 255, 12, 8))
+            .expect("a group requested once the listener exists must still be joined");
+        guard
+            .ensure_user_multicast_traffic(Ipv4Addr::new(239, 255, 12, 7))
+            .expect("an already joined group must not be joined twice");
+
+        // A unicast address cannot be joined. Reaching that failure proves the
+        // join runs on every call instead of being skipped once the thread is up.
+        assert!(
+            guard.ensure_user_multicast_traffic(Ipv4Addr::new(10, 0, 0, 1)).is_err(),
+            "the join path must still be reached after the listening thread started"
         );
 
         let _ = guard.disable();

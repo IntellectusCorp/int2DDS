@@ -24,6 +24,7 @@ pub(crate) struct UdpListener {
     port: u16,
     socket: Option<mio::net::UdpSocket>,
     recv_arena: RecvArena,
+    multicast_group_handle: Option<Socket2>,
 }
 
 impl Drop for UdpListener {
@@ -62,7 +63,12 @@ impl UdpListener {
             mio::net::UdpSocket::from_std(std_socket)
         };
 
-        Ok(Self { socket: Some(socket), port, recv_arena: new_recv_arena() })
+        Ok(Self {
+            socket: Some(socket),
+            port,
+            recv_arena: new_recv_arena(),
+            multicast_group_handle: None,
+        })
     }
 
     pub(crate) fn port(&self) -> u16 {
@@ -94,20 +100,64 @@ impl UdpListener {
         working_ips: &[String],
         send_interface_ip: Option<Ipv4Addr>,
     ) -> std::io::Result<Self> {
-        Self::new_multicast(port, working_ips, send_interface_ip, false)
+        Self::new_multicast(port, working_ips, send_interface_ip, false, Some(&MULTICAST_IP))
     }
 
     /// Multicast listener for user data.
     ///
-    /// Created only when a DataReader asks for multicast reception, so failing
-    /// to join on the sending interface fails construction instead of handing
-    /// back a listener that receives nothing.
-    pub(crate) fn new_user_multicast(
-        port: u16,
+    /// The groups are chosen per DataReader, so the socket is bound without any
+    /// membership and every group is joined afterwards through
+    /// [`Self::join_multicast_group`] on the retained handle.
+    pub(crate) fn new_user_multicast(port: u16, working_ips: &[String]) -> std::io::Result<Self> {
+        Self::new_multicast(port, working_ips, None, false, None)
+    }
+
+    /// Joining on the interface multicast is sent from matters for the
+    /// self-transmission case: sending and receiving on different interfaces
+    /// looks like a successful send that nobody ever receives. The remaining
+    /// working interfaces are joined individually so reception does not depend
+    /// on the OS default route being usable.
+    pub(crate) fn join_multicast_group(
+        socket: &Socket2,
+        group: &Ipv4Addr,
         working_ips: &[String],
-        send_interface_ip: Ipv4Addr,
-    ) -> std::io::Result<Self> {
-        Self::new_multicast(port, working_ips, Some(send_interface_ip), true)
+        send_interface_ip: Option<Ipv4Addr>,
+        send_interface_required: bool,
+    ) -> std::io::Result<()> {
+        if let Some(addr) = send_interface_ip {
+            if let Err(e) = socket.join_multicast_v4(group, &addr) {
+                if send_interface_required {
+                    return Err(e);
+                }
+                error!("Fail - join_multicast_v4 on sending interface : {:?} {:?}", e, addr);
+            }
+        }
+
+        for ip in working_ips {
+            match ip.parse::<std::net::Ipv4Addr>() {
+                Ok(addr) => {
+                    // Joining twice on one interface fails; it is already done above.
+                    if Some(addr) == send_interface_ip {
+                        continue;
+                    }
+                    socket.join_multicast_v4(group, &addr).unwrap_or_else(|e| {
+                        error!("Fail - join_multicast_v4 : {:?} {:?}", e, addr);
+                    });
+                }
+                Err(e) => {
+                    log::warn!("Skipping non-IPv4 address: {} ({})", ip, e);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Hand over the duplicate handle on the same kernel socket. Registration
+    /// needs `&mut` on the mio socket, which the poll thread takes ownership of,
+    /// so group membership has to be changed through this separate handle.
+    pub(crate) fn take_multicast_group_handle(&mut self) -> Option<Socket2> {
+        self.multicast_group_handle.take()
     }
 
     fn new_multicast(
@@ -115,6 +165,7 @@ impl UdpListener {
         working_ips: &[String],
         send_interface_ip: Option<Ipv4Addr>,
         send_interface_required: bool,
+        group: Option<&Ipv4Addr>,
     ) -> std::io::Result<Self> {
         let socket = Socket2::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
         socket.set_reuse_address(true)?;
@@ -129,36 +180,14 @@ impl UdpListener {
             let _ = socket.set_recv_buffer_size(new_size);
         }
 
-        // The interface multicast is sent from must be joined considering the self-transmission
-        // and reception case. Sending and receiving on different interfaces
-        // looks like a successful send that nobody ever receives.
-        // However, this policy is not mandatory for multicast discovery.
-        if let Some(addr) = send_interface_ip {
-            if let Err(e) = socket.join_multicast_v4(&MULTICAST_IP, &addr) {
-                if send_interface_required {
-                    return Err(e);
-                }
-                error!("Fail - join_multicast_v4 on sending interface : {:?} {:?}", e, addr);
-            }
-        }
-
-        // Join multicast group on each working interface individually,
-        // so multicast works regardless of OS default route availability.
-        for ip in working_ips {
-            match ip.parse::<std::net::Ipv4Addr>() {
-                Ok(addr) => {
-                    // Joining twice on one interface fails; it is already done above.
-                    if Some(addr) == send_interface_ip {
-                        continue;
-                    }
-                    socket.join_multicast_v4(&MULTICAST_IP, &addr).unwrap_or_else(|e| {
-                        error!("Fail - join_multicast_v4 : {:?} {:?}", e, addr);
-                    });
-                }
-                Err(e) => {
-                    log::warn!("Skipping non-IPv4 address: {} ({})", ip, e);
-                }
-            }
+        if let Some(group) = group {
+            Self::join_multicast_group(
+                &socket,
+                group,
+                working_ips,
+                send_interface_ip,
+                send_interface_required,
+            )?;
         }
 
         let addr: SocketAddr = format!("0.0.0.0:{}", port).parse().unwrap();
@@ -166,7 +195,8 @@ impl UdpListener {
         socket.bind(&sock_addr)?;
         socket.set_nonblocking(true)?;
 
-        let socket = mio::net::UdpSocket::from_std(socket.into());
+        let multicast_group_handle = socket.try_clone()?;
+        let udp_socket = mio::net::UdpSocket::from_std(socket.into());
 
         // //1. std socket bind
         // let std_socket = StdUdpSocket::bind(format!("0.0.0.0:{}", port))?;
@@ -236,7 +266,12 @@ impl UdpListener {
         //     });
         // }
 
-        Ok(Self { socket: Some(socket), port, recv_arena: new_recv_arena() })
+        Ok(Self {
+            socket: Some(udp_socket),
+            port,
+            recv_arena: new_recv_arena(),
+            multicast_group_handle: Some(multicast_group_handle),
+        })
     }
 
     pub(crate) fn socket(&mut self) -> &mut mio::net::UdpSocket {

@@ -51,6 +51,8 @@
 //! | [`GroupDataQosPolicy`] | Arbitrary data attached to Publisher/Subscriber | Publisher, Subscriber |
 //! | [`DurabilityServiceQosPolicy`] | Transient/Persistent service config | DataWriter, Topic |
 
+use std::net::Ipv4Addr;
+
 use const_default::ConstDefault;
 use serde::{Deserialize, Serialize};
 use speedy::{Readable, Writable};
@@ -2470,16 +2472,31 @@ impl QosPolicy for ReaderReliabilityExtensionQosPolicy {
 
 /// Extension for int2DDS-specific user-data multicast reception on a DataReader.
 ///
-/// The group address is not selectable: it is fixed per domain, so this policy
-/// only decides whether the reader joins it.
+/// The group is selected per reader. The port is not: it is derived from the
+/// domain, so a single listening socket serves every group of a participant.
 ///
 /// # Default
-/// - `multicast_enabled: false` - multicast reception disabled; user data is received on unicast only.
-#[derive(DdsType, Copy, Eq)]
+/// - `group_address: None` - multicast reception disabled; user data is received on unicast only.
+#[derive(DdsType, Eq)]
 #[dds_type(crate_path = "crate", no_default)]
 pub struct ReaderMulticastExtensionQosPolicy {
-    /// Whether the reader receives user data over the domain multicast group.
-    pub multicast_enabled: bool,
+    pub group_address: Option<String>,
+}
+
+impl ReaderMulticastExtensionQosPolicy {
+    pub(crate) fn group_ipv4(&self) -> Option<Ipv4Addr> {
+        self.group_address.as_deref()?.parse::<Ipv4Addr>().ok()
+    }
+
+    pub(crate) fn is_consistent(&self) -> DdsResult<()> {
+        if self.group_address.is_none() {
+            return Ok(());
+        }
+        match self.group_ipv4() {
+            Some(ip) if ip.is_multicast() => Ok(()),
+            _ => Err(DdsError::InconsistentPolicy),
+        }
+    }
 }
 
 impl Default for ReaderMulticastExtensionQosPolicy {
@@ -2489,7 +2506,7 @@ impl Default for ReaderMulticastExtensionQosPolicy {
 }
 
 impl ConstDefault for ReaderMulticastExtensionQosPolicy {
-    const DEFAULT: Self = Self { multicast_enabled: false };
+    const DEFAULT: Self = Self { group_address: None };
 }
 
 impl QosPolicy for ReaderMulticastExtensionQosPolicy {
@@ -2517,6 +2534,42 @@ mod data_frag_tests {
     #[test]
     fn data_frag_valid_value_passes_through() {
         assert_eq!(DataFragQosPolicy { max_size: 1344 }.effective_max_size(), 1344);
+    }
+}
+
+#[cfg(test)]
+mod reader_multicast_extension_tests {
+    use super::*;
+
+    fn policy(group_address: Option<&str>) -> ReaderMulticastExtensionQosPolicy {
+        ReaderMulticastExtensionQosPolicy { group_address: group_address.map(str::to_string) }
+    }
+
+    #[test]
+    fn absent_group_address_is_consistent() {
+        assert!(policy(None).is_consistent().is_ok());
+    }
+
+    #[test]
+    fn multicast_group_address_is_consistent() {
+        assert!(policy(Some("239.255.12.7")).is_consistent().is_ok());
+        assert_eq!(policy(Some("239.255.12.7")).group_ipv4(), Some(Ipv4Addr::new(239, 255, 12, 7)));
+    }
+
+    #[test]
+    fn unicast_group_address_is_rejected() {
+        assert_eq!(policy(Some("10.0.0.1")).is_consistent(), Err(DdsError::InconsistentPolicy));
+    }
+
+    #[test]
+    fn malformed_group_address_is_rejected() {
+        for bad in ["", "239.255.12", "999.1.1.1", "not an address"] {
+            assert_eq!(
+                policy(Some(bad)).is_consistent(),
+                Err(DdsError::InconsistentPolicy),
+                "{bad} should be rejected"
+            );
+        }
     }
 }
 
