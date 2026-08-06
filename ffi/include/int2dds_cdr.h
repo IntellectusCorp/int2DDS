@@ -541,7 +541,14 @@ INT2DDS_CDR_DEF bool int2dds_cdr_write_f64(Int2DdsCdrWriter *w, double val) {
 /* ---- String / Sequence / Bytes Write ---------------------------------- */
 
 INT2DDS_CDR_DEF bool int2dds_cdr_write_string(Int2DdsCdrWriter *w, const char *str) {
+    if (!_int2dds_cdr_w_ok(w)) return false;
     size_t slen = str ? strlen(str) : 0;
+    /* The wire length is a uint32 that includes the terminator; a longer string
+     * would truncate in the narrowing cast (and slen + 1 could wrap). */
+    if (slen >= UINT32_MAX) {
+        w->error = INT2DDS_CDR_ERR_OVERFLOW;
+        return false;
+    }
     uint32_t cdr_len = (uint32_t)(slen + 1); /* includes null terminator */
     if (!int2dds_cdr_write_u32(w, cdr_len)) return false;
     if (!_int2dds_cdr_w_ensure(w, slen + 1)) return false;

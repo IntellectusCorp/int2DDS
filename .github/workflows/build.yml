@@ -73,6 +73,29 @@ jobs:
           CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
         run: cargo build --target armv7-unknown-linux-gnueabihf
 
+  cdr-c-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install 32-bit toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib
+
+      - name: Build and run with ASan/UBSan (64-bit)
+        run: |
+          cmake -S ffi/tests/c -B build-asan -DINT2DDS_CDR_TEST_SANITIZE=ON
+          cmake --build build-asan
+          ctest --test-dir build-asan --output-on-failure
+
+      - name: Build and run 32-bit
+        run: |
+          cmake -S ffi/tests/c -B build-m32 -DCMAKE_C_FLAGS=-m32
+          cmake --build build-m32
+          ctest --test-dir build-m32 --output-on-failure
+
   cross-platform-build:
     runs-on: ubuntu-latest
     needs: [build, build-arm32]

@@ -15,7 +15,7 @@ else()
     target_compile_options(test_cdr_bounds PRIVATE -Wall -Wextra)
 endif()
 
-# Off by default; the CI job that turns this on is tracked in #381.
+# Off by default; the cdr-c-tests CI job turns this on (#379).
 option(INT2DDS_CDR_TEST_SANITIZE "Build the C CDR tests with ASan/UBSan" OFF)
 if(INT2DDS_CDR_TEST_SANITIZE AND NOT MSVC)
     target_compile_options(test_cdr_bounds PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer -g)
