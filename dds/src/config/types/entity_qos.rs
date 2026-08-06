@@ -918,4 +918,13 @@ mod property_qos_config_tests {
         let internal2: subscription::qos::DataReaderQos = external.into();
         assert_eq!(internal2.lifespan_reference.kind, internal.lifespan_reference.kind);
     }
+
+    #[test]
+    fn datawriter_qos_data_frag_without_max_size_stays_unset() {
+        // A data_frag block with no max_size must not read back as an explicit
+        // size, or the INT2DDS_DATA_FRAG_SIZE fallback would be suppressed.
+        let parsed: DataWriterQos = serde_json::from_str(r#"{"data_frag": {}}"#).expect("parse");
+        let internal: publication::qos::DataWriterQos = parsed.into();
+        assert_eq!(internal.data_frag.max_size, internal_qos_policy::DataFragQosPolicy::UNSET);
+    }
 }

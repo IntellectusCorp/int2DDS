@@ -40,8 +40,8 @@ pub(crate) trait UnicastMessageProcessor: ParticipantAccessor {
                 TypedSubmessage::Heartbeat(header, heartbeat) => {
                     self.handle_heartbeat_message(&rtps_header, header, heartbeat)?;
                 }
-                TypedSubmessage::AckNack(_header, acknack) => {
-                    self.handle_acknack_message(&rtps_header, acknack)?;
+                TypedSubmessage::AckNack(header, acknack) => {
+                    self.handle_acknack_message(&rtps_header, header, acknack)?;
                 }
                 TypedSubmessage::DataFrag(_header, data_frag) => {
                     self.handle_datafrag_message(&rtps_header, data_frag, &message_receiver)?;
@@ -76,8 +76,12 @@ pub(crate) trait UnicastMessageProcessor: ParticipantAccessor {
         heartbeat: &Heartbeat,
     ) -> RtpsResult<()>;
 
-    fn handle_acknack_message(&mut self, rtps_header: &Header, acknack: &AckNack)
-        -> RtpsResult<()>;
+    fn handle_acknack_message(
+        &mut self,
+        rtps_header: &Header,
+        submessage_header: &SubmessageHeader,
+        acknack: &AckNack,
+    ) -> RtpsResult<()>;
 
     fn handle_preemptive_acknack_message(
         &mut self,

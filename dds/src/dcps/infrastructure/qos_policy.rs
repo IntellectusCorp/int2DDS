@@ -2370,19 +2370,23 @@ impl QosPolicy for WriterReliabilityExtensionQosPolicy {
 }
 
 /// int2DDS extension: per-writer RTPS DATA_FRAG fragment size. Writer-local,
-/// not propagated over the wire. Default `max_size: 65000`.
+/// not propagated over the wire. Unset falls back to env, then `DEFAULT_SIZE`.
 #[derive(DdsType, Copy, Eq)]
 #[dds_type(crate_path = "crate", no_default)]
 pub struct DataFragQosPolicy {
     /// Max serialized payload bytes per DATA_FRAG fragment. Range 1..=65000.
+    /// `UNSET` means unspecified; resolve through `effective_max_size()`.
     pub max_size: i32,
 }
 
 impl DataFragQosPolicy {
     pub const MAX: i32 = 65000;
     pub const DEFAULT_SIZE: i32 = 65000;
+    /// Sentinel meaning "no size specified".
+    pub const UNSET: i32 = 0;
 
-    /// Validated size: clamp `> MAX` to MAX, fall back `<= 0` to DEFAULT_SIZE.
+    /// Validated size: clamp `> MAX` to MAX, fall back `<= 0` to the
+    /// `INT2DDS_DATA_FRAG_SIZE` env override, then to DEFAULT_SIZE.
     pub fn effective_max_size(&self) -> i32 {
         if self.max_size > Self::MAX {
             log::warn!(
@@ -2395,8 +2399,23 @@ impl DataFragQosPolicy {
         } else if self.max_size > 0 {
             self.max_size
         } else {
-            Self::DEFAULT_SIZE
+            Self::env_default_size().unwrap_or(Self::DEFAULT_SIZE)
         }
+    }
+
+    /// `INT2DDS_DATA_FRAG_SIZE`, rejected with a warning when outside `1..=MAX`.
+    /// Out-of-range env values are ignored rather than clamped, unlike an explicit QoS.
+    fn env_default_size() -> Option<i32> {
+        let size = crate::common::env::get_data_frag_size_override()?;
+        if (1..=Self::MAX).contains(&size) {
+            return Some(size);
+        }
+        log::warn!(
+            "INT2DDS_DATA_FRAG_SIZE={} is outside 1..={}, ignoring env override",
+            size,
+            Self::MAX
+        );
+        None
     }
 }
 
@@ -2407,7 +2426,7 @@ impl Default for DataFragQosPolicy {
 }
 
 impl ConstDefault for DataFragQosPolicy {
-    const DEFAULT: Self = Self { max_size: 65000 };
+    const DEFAULT: Self = Self { max_size: Self::UNSET };
 }
 
 impl QosPolicy for DataFragQosPolicy {
@@ -2463,21 +2482,49 @@ impl QosPolicy for ReaderReliabilityExtensionQosPolicy {
 mod data_frag_tests {
     use super::*;
 
-    #[test]
-    fn data_frag_clamps_above_max() {
-        let p = DataFragQosPolicy { max_size: 70000 };
-        assert_eq!(p.effective_max_size(), 65000);
+    const ENV_KEY: &str = "INT2DDS_DATA_FRAG_SIZE";
+
+    fn effective(max_size: i32) -> i32 {
+        DataFragQosPolicy { max_size }.effective_max_size()
     }
 
     #[test]
-    fn data_frag_nonpositive_falls_back_to_default() {
-        assert_eq!(DataFragQosPolicy { max_size: 0 }.effective_max_size(), 65000);
-        assert_eq!(DataFragQosPolicy { max_size: -5 }.effective_max_size(), 65000);
+    fn data_frag_explicit_size_ignores_env() {
+        assert_eq!(effective(1344), 1344);
+        assert_eq!(effective(70000), 65000, "above MAX clamps");
     }
 
     #[test]
-    fn data_frag_valid_value_passes_through() {
-        assert_eq!(DataFragQosPolicy { max_size: 1344 }.effective_max_size(), 1344);
+    fn data_frag_default_is_unset() {
+        assert_eq!(DataFragQosPolicy::DEFAULT.max_size, DataFragQosPolicy::UNSET);
+        assert_eq!(DataFragQosPolicy::default().max_size, DataFragQosPolicy::UNSET);
+    }
+
+    // Env is process-global and tests run in parallel: keep every
+    // INT2DDS_DATA_FRAG_SIZE assertion inside this single test.
+    #[test]
+    fn data_frag_unset_resolves_through_env() {
+        unsafe { std::env::remove_var(ENV_KEY) };
+        assert_eq!(effective(0), 65000, "no env -> DEFAULT_SIZE");
+        assert_eq!(effective(-5), 65000, "negative, no env -> DEFAULT_SIZE");
+
+        crate::common::env::set_data_frag_size(8000);
+        assert_eq!(effective(0), 8000, "env applies");
+        assert_eq!(effective(1344), 1344, "explicit qos wins over env");
+
+        for (raw, why) in
+            [("abc", "non-numeric"), ("0", "zero"), ("70000", "above MAX"), ("", "empty")]
+        {
+            unsafe { std::env::set_var(ENV_KEY, raw) };
+            assert_eq!(effective(0), 65000, "{} env is ignored, not clamped", why);
+        }
+
+        for raw in ["1", "65000"] {
+            unsafe { std::env::set_var(ENV_KEY, raw) };
+            assert_eq!(effective(0), raw.parse::<i32>().unwrap(), "boundary accepted");
+        }
+
+        unsafe { std::env::remove_var(ENV_KEY) };
     }
 }
 
