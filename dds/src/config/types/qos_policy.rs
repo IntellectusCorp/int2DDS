@@ -707,7 +707,7 @@ pub(crate) struct DataFragQosPolicy {
 
 impl Default for DataFragQosPolicy {
     fn default() -> Self {
-        Self { max_size: 65000 }
+        Self { max_size: qos_policy::DataFragQosPolicy::UNSET }
     }
 }
 
