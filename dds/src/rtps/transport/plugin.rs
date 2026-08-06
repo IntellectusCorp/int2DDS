@@ -108,6 +108,8 @@ pub(crate) trait TransportPlugin: Send + Sync {
     /// participants. Populated into the SPDP announcement.
     fn advertised_default_unicast_locators(&self) -> Vec<Locator>;
 
+    fn advertised_default_multicast_locators(&self) -> Vec<Locator>;
+
     /// Take ownership of the discovery multicast message source.
     ///
     /// Returns `None` if the transport does not support multicast (e.g., TCP).

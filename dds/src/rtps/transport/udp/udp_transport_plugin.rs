@@ -5,7 +5,7 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Mutex;
 
-use crate::rtps::common::locator::Locator;
+use crate::rtps::common::locator::{Locator, MULTICAST_IP};
 use crate::rtps::transport::plugin::{MessageSource, SendTarget, TransportPlugin};
 use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
@@ -168,6 +168,11 @@ impl TransportPlugin for UdpTransportPlugin {
         let port =
             PortManager::get_user_traffic_unicast_port(self.domain_id, self.participant_id) as u32;
         self.udp_locators(port)
+    }
+
+    fn advertised_default_multicast_locators(&self) -> Vec<Locator> {
+        let port = PortManager::get_user_traffic_multicast_port(self.domain_id) as u32;
+        vec![Locator::from_ip_v4_addr_and_port(&MULTICAST_IP, port)]
     }
 
     fn take_discovery_multicast_source(&self) -> Option<MessageSource> {

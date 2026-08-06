@@ -339,6 +339,11 @@ impl TransportPlugin for TcpTransportPlugin {
         self.advertised_tcp_locators(logical_port)
     }
 
+    fn advertised_default_multicast_locators(&self) -> Vec<Locator> {
+        // TCP has no multicast — discovery uses unicast fan-out via SPDP.
+        Vec::new()
+    }
+
     fn take_discovery_multicast_source(&self) -> Option<MessageSource> {
         // TCP has no multicast — discovery uses unicast fan-out via SPDP.
         None

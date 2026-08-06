@@ -242,6 +242,11 @@ impl TransportPlugin for HybridTransportPlugin {
         self.tcp_plugin.advertised_default_unicast_locators()
     }
 
+    fn advertised_default_multicast_locators(&self) -> Vec<Locator> {
+        // user data rides TCP.
+        self.tcp_plugin.advertised_default_multicast_locators()
+    }
+
     fn take_discovery_multicast_source(&self) -> Option<MessageSource> {
         let listener = self.discovery_multicast_listener.lock().expect("lock poisoned").take()?;
         Some(MessageSource::MioPoll { listener })

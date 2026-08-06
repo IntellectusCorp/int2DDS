@@ -4,6 +4,7 @@
 //! discovered DataReader information in the DDS discovery protocol.
 
 use super::builtin_topic_key::BuiltinTopicKey;
+use crate::infrastructure::qos_policy::ReaderMulticastExtensionQosPolicy;
 use crate::serialize::DeserializerReader;
 use crate::{
     infrastructure::qos_policy::{
@@ -75,6 +76,8 @@ pub struct SubscriptionBuiltinTopicData {
     type_information: Option<TypeInformation>,
     #[dds(non_serialized)]
     reader_reliability_extension: ReaderReliabilityExtensionQosPolicy,
+    #[dds(non_serialized)]
+    reader_multicast_extension: ReaderMulticastExtensionQosPolicy,
 }
 
 impl SubscriptionBuiltinTopicData {
@@ -112,6 +115,7 @@ impl SubscriptionBuiltinTopicData {
             type_consistency_enforcement: datareader_qos.type_consistency_enforcement,
             type_information: None,
             reader_reliability_extension: datareader_qos.reader_reliability_extension,
+            reader_multicast_extension: datareader_qos.reader_multicast_extension,
         }
     }
 
@@ -308,6 +312,10 @@ impl SubscriptionBuiltinTopicData {
 
     pub fn reader_reliability_extension(&self) -> &ReaderReliabilityExtensionQosPolicy {
         &self.reader_reliability_extension
+    }
+
+    pub fn reader_multicast_extension(&self) -> &ReaderMulticastExtensionQosPolicy {
+        &self.reader_multicast_extension
     }
 
     pub fn convert_u8_to_i32_array(data: [u8; 12]) -> [i32; 3] {

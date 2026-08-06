@@ -1048,9 +1048,7 @@ impl SedpLogic {
         subscription_builtin_topic_data: &mut SubscriptionBuiltinTopicData,
         participant_guard: &Participant,
     ) {
-        if subscription_builtin_topic_data.unicast_locator_list().is_empty()
-        // || subscription_builtin_topic_data.multicast_locator_list().is_empty()
-        {
+        if subscription_builtin_topic_data.unicast_locator_list().is_empty() {
             let remote_participant_data = participant_guard.find_remote_participant_proxy_data(
                 subscription_builtin_topic_data.endpoint_guid().prefix(),
             );

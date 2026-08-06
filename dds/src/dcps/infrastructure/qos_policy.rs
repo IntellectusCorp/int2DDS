@@ -2475,7 +2475,8 @@ impl QosPolicy for ReaderReliabilityExtensionQosPolicy {
 ///
 /// # Default
 /// - `multicast_enabled: false` - multicast reception disabled; user data is received on unicast only.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(DdsType, Copy, Eq)]
+#[dds_type(crate_path = "crate", no_default)]
 pub struct ReaderMulticastExtensionQosPolicy {
     /// Whether the reader receives user data over the domain multicast group.
     pub multicast_enabled: bool,

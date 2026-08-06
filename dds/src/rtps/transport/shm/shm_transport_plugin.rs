@@ -219,6 +219,11 @@ impl TransportPlugin for ShmTransportPlugin {
         locators
     }
 
+    fn advertised_default_multicast_locators(&self) -> Vec<Locator> {
+        // SHM has no multicast.
+        Vec::new()
+    }
+
     fn take_discovery_multicast_source(&self) -> Option<MessageSource> {
         let listener = self.discovery_multicast_listener.lock().expect("lock poisoned").take()?;
         Some(MessageSource::MioPoll { listener })
