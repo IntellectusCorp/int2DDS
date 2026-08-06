@@ -442,8 +442,11 @@ public final class QosMarshal {
 
     /**
      * Copies {@code ud}'s bytes into a direct buffer and hands its address to
-     * {@code setter}. The buffer stays reachable for the duration of the call,
-     * so it cannot be collected out from under the native side.
+     * {@code setter}. Nothing about the raw address itself keeps the buffer
+     * reachable for the setter call's duration -- see {@link
+     * NativeKeepAlive}'s own doc -- so this fences {@code buf} explicitly
+     * immediately afterward, the same fence every {@code FfiAccess} bridge
+     * that hands a direct buffer's address to native code uses.
      */
     private static void applyUserData(UserData ud, ByteBufferSetter setter) {
         byte[] data = ud.getData();
@@ -451,6 +454,7 @@ public final class QosMarshal {
         buf.put(data);
         long addr = FfiAccess.directBufferAddress(buf);
         ReturnCodes.check(setter.set(addr, data.length));
+        NativeKeepAlive.keepAlive(buf);
     }
 
     /** Converts a partition's names to UTF-8 and hands them to {@code setter}. */

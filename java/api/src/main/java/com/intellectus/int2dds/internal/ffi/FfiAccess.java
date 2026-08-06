@@ -76,6 +76,15 @@ public final class FfiAccess {
     public static long participantFactoryGetInstance() {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_domain_participant_factory_get_instance(directBufferAddress(slot));
+        // slot is read below only on the rc == 0 path; on rc != 0 nothing
+        // else touches it, so without this fence the JIT could treat it as
+        // dead before the native call above actually finishes using the
+        // address it was handed, and slot's own JDK-managed Cleaner could
+        // free that memory out from under an in-flight native call. See
+        // NativeKeepAlive's own doc for the full argument; every other
+        // directBufferAddress(slot) call site in this file needs the same
+        // fence for the same reason.
+        NativeKeepAlive.keepAlive(slot);
         return rc == 0 ? slot.getLong(0) : 0L;
     }
 
@@ -96,6 +105,9 @@ public final class FfiAccess {
     public static int createParticipant(long factory, int domainId, long qos, long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_create_participant(factory, domainId, qos, directBufferAddress(slot));
+        // Same hazard as participantFactoryGetInstance's fence above -- see
+        // NativeKeepAlive's own doc for the full argument.
+        NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             handleOut[0] = slot.getLong(0);
         }
@@ -123,6 +135,9 @@ public final class FfiAccess {
     public static long createParticipantQos() {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_participant_qos_create_default(directBufferAddress(slot));
+        // Same hazard as participantFactoryGetInstance's fence above -- see
+        // NativeKeepAlive's own doc for the full argument.
+        NativeKeepAlive.keepAlive(slot);
         return rc != 0 ? 0L : slot.getLong(0);
     }
 
@@ -135,6 +150,9 @@ public final class FfiAccess {
     public static long createPublisherQos() {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_publisher_qos_create_default(directBufferAddress(slot));
+        // Same hazard as participantFactoryGetInstance's fence above -- see
+        // NativeKeepAlive's own doc for the full argument.
+        NativeKeepAlive.keepAlive(slot);
         return rc != 0 ? 0L : slot.getLong(0);
     }
 
@@ -147,6 +165,9 @@ public final class FfiAccess {
     public static long createSubscriberQos() {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_subscriber_qos_create_default(directBufferAddress(slot));
+        // Same hazard as participantFactoryGetInstance's fence above -- see
+        // NativeKeepAlive's own doc for the full argument.
+        NativeKeepAlive.keepAlive(slot);
         return rc != 0 ? 0L : slot.getLong(0);
     }
 
@@ -159,6 +180,9 @@ public final class FfiAccess {
     public static long createTopicQos() {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_topic_qos_create_default(directBufferAddress(slot));
+        // Same hazard as participantFactoryGetInstance's fence above -- see
+        // NativeKeepAlive's own doc for the full argument.
+        NativeKeepAlive.keepAlive(slot);
         return rc != 0 ? 0L : slot.getLong(0);
     }
 
@@ -171,6 +195,9 @@ public final class FfiAccess {
     public static long createDataWriterQos() {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_datawriter_qos_create_default(directBufferAddress(slot));
+        // Same hazard as participantFactoryGetInstance's fence above -- see
+        // NativeKeepAlive's own doc for the full argument.
+        NativeKeepAlive.keepAlive(slot);
         return rc != 0 ? 0L : slot.getLong(0);
     }
 
@@ -183,6 +210,9 @@ public final class FfiAccess {
     public static long createDataReaderQos() {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_datareader_qos_create_default(directBufferAddress(slot));
+        // Same hazard as participantFactoryGetInstance's fence above -- see
+        // NativeKeepAlive's own doc for the full argument.
+        NativeKeepAlive.keepAlive(slot);
         return rc != 0 ? 0L : slot.getLong(0);
     }
 
@@ -208,6 +238,9 @@ public final class FfiAccess {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_create_topic(
                 participant, topicName, typeName, extensibility, qos, directBufferAddress(slot));
+        // Same hazard as participantFactoryGetInstance's fence above -- see
+        // NativeKeepAlive's own doc for the full argument.
+        NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             handleOut[0] = slot.getLong(0);
         }
@@ -228,6 +261,9 @@ public final class FfiAccess {
     public static int createPublisher(long participant, long qos, long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_create_publisher(participant, qos, directBufferAddress(slot));
+        // Same hazard as participantFactoryGetInstance's fence above -- see
+        // NativeKeepAlive's own doc for the full argument.
+        NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             handleOut[0] = slot.getLong(0);
         }
@@ -629,6 +665,9 @@ public final class FfiAccess {
     public static long typeInfoCreate(byte[] typeName, int extensibility) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_type_info_create(typeName, extensibility, directBufferAddress(slot));
+        // Same hazard as participantFactoryGetInstance's fence above -- see
+        // NativeKeepAlive's own doc for the full argument.
+        NativeKeepAlive.keepAlive(slot);
         return rc == 0 ? slot.getLong(0) : 0L;
     }
 
@@ -641,6 +680,9 @@ public final class FfiAccess {
     public static long typeInfoToTypeObject(long typeInfo) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_type_info_to_type_object(typeInfo, directBufferAddress(slot));
+        // Same hazard as participantFactoryGetInstance's fence above -- see
+        // NativeKeepAlive's own doc for the full argument.
+        NativeKeepAlive.keepAlive(slot);
         return rc == 0 ? slot.getLong(0) : 0L;
     }
 
