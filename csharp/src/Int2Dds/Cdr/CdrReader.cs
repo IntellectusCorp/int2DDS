@@ -274,13 +274,12 @@ namespace Int2Dds.Cdr
         }
 
         /// <summary>
-        /// Read a CDR wstring (wide string): uint32 length (number of UTF-16 code units including null)
-        /// + UTF-16 code units (each 2 bytes) + null terminator.
-        /// Returns the decoded string (without null terminator).
+        /// Read a CDR wstring (wide string): uint32 length (number of UTF-16 code units,
+        /// no terminator) + UTF-16 code units (each 2 bytes). Matches the Rust core format.
         /// </summary>
         public string ReadWString()
         {
-            uint cdrLen = ReadU32(); // number of UTF-16 code units including null
+            uint cdrLen = ReadU32(); // number of UTF-16 code units, no terminator
             if (cdrLen == 0)
                 return string.Empty;
 
@@ -290,13 +289,12 @@ namespace Int2Dds.Cdr
                 throw new CdrUnderflowException(
                     $"WString length {cdrLen} exceeds {Remaining} remaining bytes.");
 
-            int strLen = (int)(cdrLen - 1); // exclude null terminator
+            int strLen = (int)cdrLen;
             var chars = new char[strLen];
             for (int i = 0; i < strLen; i++)
             {
                 chars[i] = (char)ReadU16();
             }
-            ReadU16(); // consume null terminator
             return new string(chars);
         }
 

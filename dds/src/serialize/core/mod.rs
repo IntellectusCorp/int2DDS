@@ -1,6 +1,8 @@
 // Core serialization modules
 mod alignment;
 mod bounded_types;
+#[cfg(test)]
+mod cdr_wire_format_tests;
 mod collections;
 mod endianness;
 mod errors;
