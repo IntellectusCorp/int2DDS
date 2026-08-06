@@ -2421,6 +2421,7 @@ impl UnicastMessageProcessor for SedpLogic {
     fn handle_acknack_message(
         &mut self,
         rtps_header: &Header,
+        _submessage_header: &SubmessageHeader,
         acknack: &AckNack,
     ) -> RtpsResult<()> {
         if acknack.writer_id == EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER {
