@@ -1721,7 +1721,13 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     }
 
     pub fn has_cached_data(&self) -> DdsResult<bool> {
-        Ok(!self.get_available_changes()?.is_empty())
+        let cache = self.get_datareader_cache()?;
+        let mut guard = cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
+        // Expired samples must not count as available data.
+        guard.purge_expired_on_read()?;
+
+        Ok(guard.has_changes())
     }
 
     pub(crate) fn get_change(
@@ -2997,9 +3003,11 @@ impl<Foo: DdsType> DataReader<Foo> {
                 sample_rank: 0,
                 generation_rank: 0,
                 absolute_generation_rank: 0,
-                source_timestamp: (*change.source_timestamp().as_ref().ok_or(DdsError::Error(
-                    "CacheChange's source timestamp is not properly initialized".to_string(),
-                ))?)
+                source_timestamp: (*change.source_timestamp().as_ref().ok_or_else(|| {
+                    DdsError::Error(
+                        "CacheChange's source timestamp is not properly initialized".to_string(),
+                    )
+                })?)
                 .into(),
                 instance_handle: change.instance_handle(),
                 publication_handle: InstanceHandle::from_guid(&change.writer_guid()),
