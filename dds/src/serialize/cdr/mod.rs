@@ -420,189 +420,111 @@ impl<T: XcdrDeserialize, const N: usize> XcdrDeserialize for [T; N] {
     }
 }
 
-// HashMap and BTreeMap support
+// HashMap and BTreeMap support: one macro emits all four codec impls per map type.
+// Only the key bounds and the prealloc strategy differ (BTreeMap has no capacity
+// concept, so it skips the reserve).
 use std::collections::{BTreeMap, HashMap};
 use std::hash::Hash;
 
-impl<K, V> CdrSerialize for HashMap<K, V>
-where
-    K: CdrSerialize + Eq + Hash,
-    V: CdrSerialize,
-{
-    fn serialize_cdr(&self, serializer: &mut CdrSerializer) -> CdrResult<()> {
-        // Write map length
-        serializer.serialize_u32(self.len() as u32)?;
-
-        // Write key-value pairs
-        for (key, value) in self {
-            key.serialize_cdr(serializer)?;
-            value.serialize_cdr(serializer)?;
-        }
-        Ok(())
-    }
+fn hashmap_with_prealloc<K: Eq + Hash, V>(len: usize) -> Result<HashMap<K, V>, SerializationError> {
+    let mut map = HashMap::new();
+    map.try_reserve(bounded_prealloc_count::<(K, V)>(len))
+        .map_err(|_| SerializationError::AllocationFailure)?;
+    Ok(map)
 }
 
-impl<K, V> CdrDeserialize for HashMap<K, V>
-where
-    K: CdrDeserialize + Eq + Hash,
-    V: CdrDeserialize,
-{
-    fn deserialize_cdr(deserializer: &mut CdrDeserializer) -> CdrResult<Self> {
-        // Read map length
-        let len = deserializer.deserialize_u32()? as usize;
-        let len = deserializer.checked_capacity(len, 2)?;
-
-        // Read key-value pairs
-        let mut map = HashMap::new();
-        map.try_reserve(bounded_prealloc_count::<(K, V)>(len))
-            .map_err(|_| SerializationError::AllocationFailure)?;
-        for _ in 0..len {
-            let key = K::deserialize_cdr(deserializer)?;
-            let value = V::deserialize_cdr(deserializer)?;
-            map.insert(key, value);
-        }
-        Ok(map)
-    }
+fn btreemap_without_prealloc<K: Ord, V>(_len: usize) -> Result<BTreeMap<K, V>, SerializationError> {
+    Ok(BTreeMap::new())
 }
 
-impl<K, V> XcdrSerialize for HashMap<K, V>
-where
-    K: XcdrSerialize + Eq + Hash,
-    V: XcdrSerialize,
-{
-    fn serialize_xcdr(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()> {
-        if K::IS_PRIMITIVE && V::IS_PRIMITIVE {
-            serializer.serialize_u32(self.len() as u32)?;
-            for (key, value) in self {
-                key.serialize_xcdr(serializer)?;
-                value.serialize_xcdr(serializer)?;
+macro_rules! impl_map_serialization {
+    ($map:ident, [$($bound:tt)+], $new:ident) => {
+        impl<K, V> CdrSerialize for $map<K, V>
+        where
+            K: CdrSerialize + $($bound)+,
+            V: CdrSerialize,
+        {
+            fn serialize_cdr(&self, serializer: &mut CdrSerializer) -> CdrResult<()> {
+                serializer.serialize_u32(self.len() as u32)?;
+                for (key, value) in self {
+                    key.serialize_cdr(serializer)?;
+                    value.serialize_cdr(serializer)?;
+                }
+                Ok(())
             }
-            Ok(())
-        } else {
-            let dh = serializer.reserve_dheader();
-            let start = serializer.position();
-            serializer.serialize_u32(self.len() as u32)?;
-            for (key, value) in self {
-                key.serialize_xcdr(serializer)?;
-                value.serialize_xcdr(serializer)?;
+        }
+
+        impl<K, V> CdrDeserialize for $map<K, V>
+        where
+            K: CdrDeserialize + $($bound)+,
+            V: CdrDeserialize,
+        {
+            fn deserialize_cdr(deserializer: &mut CdrDeserializer) -> CdrResult<Self> {
+                let len = deserializer.deserialize_u32()? as usize;
+                let len = deserializer.checked_capacity(len, 2)?;
+                let mut map = $new::<K, V>(len)?;
+                for _ in 0..len {
+                    let key = K::deserialize_cdr(deserializer)?;
+                    let value = V::deserialize_cdr(deserializer)?;
+                    map.insert(key, value);
+                }
+                Ok(map)
             }
-            let size = (serializer.position() - start) as u32;
-            serializer.write_dheader_at(dh, size);
-            Ok(())
         }
-    }
-}
 
-impl<K, V> XcdrDeserialize for HashMap<K, V>
-where
-    K: XcdrDeserialize + Eq + Hash,
-    V: XcdrDeserialize,
-{
-    fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
-        if !(K::IS_PRIMITIVE && V::IS_PRIMITIVE) {
-            let _dheader = deserializer.read_dheader()?;
-        }
-        let len = deserializer.deserialize_u32()? as usize;
-        let len = deserializer.checked_capacity(len, 2)?;
-        let mut map = HashMap::new();
-        map.try_reserve(bounded_prealloc_count::<(K, V)>(len))
-            .map_err(|_| SerializationError::AllocationFailure)?;
-        for _ in 0..len {
-            let key = K::deserialize_xcdr(deserializer)?;
-            let value = V::deserialize_xcdr(deserializer)?;
-            map.insert(key, value);
-        }
-        Ok(map)
-    }
-}
-
-impl<K, V> CdrSerialize for BTreeMap<K, V>
-where
-    K: CdrSerialize + Ord,
-    V: CdrSerialize,
-{
-    fn serialize_cdr(&self, serializer: &mut CdrSerializer) -> CdrResult<()> {
-        // Write map length
-        serializer.serialize_u32(self.len() as u32)?;
-
-        // Write key-value pairs
-        for (key, value) in self {
-            key.serialize_cdr(serializer)?;
-            value.serialize_cdr(serializer)?;
-        }
-        Ok(())
-    }
-}
-
-impl<K, V> CdrDeserialize for BTreeMap<K, V>
-where
-    K: CdrDeserialize + Ord,
-    V: CdrDeserialize,
-{
-    fn deserialize_cdr(deserializer: &mut CdrDeserializer) -> CdrResult<Self> {
-        // Read map length
-        let len = deserializer.deserialize_u32()? as usize;
-        let len = deserializer.checked_capacity(len, 2)?;
-
-        // Read key-value pairs
-        let mut map = BTreeMap::new();
-        for _ in 0..len {
-            let key = K::deserialize_cdr(deserializer)?;
-            let value = V::deserialize_cdr(deserializer)?;
-            map.insert(key, value);
-        }
-        Ok(map)
-    }
-}
-
-impl<K, V> XcdrSerialize for BTreeMap<K, V>
-where
-    K: XcdrSerialize + Ord,
-    V: XcdrSerialize,
-{
-    fn serialize_xcdr(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()> {
-        if K::IS_PRIMITIVE && V::IS_PRIMITIVE {
-            serializer.serialize_u32(self.len() as u32)?;
-            for (key, value) in self {
-                key.serialize_xcdr(serializer)?;
-                value.serialize_xcdr(serializer)?;
+        impl<K, V> XcdrSerialize for $map<K, V>
+        where
+            K: XcdrSerialize + $($bound)+,
+            V: XcdrSerialize,
+        {
+            fn serialize_xcdr(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()> {
+                if K::IS_PRIMITIVE && V::IS_PRIMITIVE {
+                    serializer.serialize_u32(self.len() as u32)?;
+                    for (key, value) in self {
+                        key.serialize_xcdr(serializer)?;
+                        value.serialize_xcdr(serializer)?;
+                    }
+                    Ok(())
+                } else {
+                    let dh = serializer.reserve_dheader();
+                    let start = serializer.position();
+                    serializer.serialize_u32(self.len() as u32)?;
+                    for (key, value) in self {
+                        key.serialize_xcdr(serializer)?;
+                        value.serialize_xcdr(serializer)?;
+                    }
+                    let size = (serializer.position() - start) as u32;
+                    serializer.write_dheader_at(dh, size);
+                    Ok(())
+                }
             }
-            Ok(())
-        } else {
-            let dh = serializer.reserve_dheader();
-            let start = serializer.position();
-            serializer.serialize_u32(self.len() as u32)?;
-            for (key, value) in self {
-                key.serialize_xcdr(serializer)?;
-                value.serialize_xcdr(serializer)?;
-            }
-            let size = (serializer.position() - start) as u32;
-            serializer.write_dheader_at(dh, size);
-            Ok(())
         }
-    }
+
+        impl<K, V> XcdrDeserialize for $map<K, V>
+        where
+            K: XcdrDeserialize + $($bound)+,
+            V: XcdrDeserialize,
+        {
+            fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
+                if !(K::IS_PRIMITIVE && V::IS_PRIMITIVE) {
+                    let _dheader = deserializer.read_dheader()?;
+                }
+                let len = deserializer.deserialize_u32()? as usize;
+                let len = deserializer.checked_capacity(len, 2)?;
+                let mut map = $new::<K, V>(len)?;
+                for _ in 0..len {
+                    let key = K::deserialize_xcdr(deserializer)?;
+                    let value = V::deserialize_xcdr(deserializer)?;
+                    map.insert(key, value);
+                }
+                Ok(map)
+            }
+        }
+    };
 }
 
-impl<K, V> XcdrDeserialize for BTreeMap<K, V>
-where
-    K: XcdrDeserialize + Ord,
-    V: XcdrDeserialize,
-{
-    fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
-        if !(K::IS_PRIMITIVE && V::IS_PRIMITIVE) {
-            let _dheader = deserializer.read_dheader()?;
-        }
-        let len = deserializer.deserialize_u32()? as usize;
-        let len = deserializer.checked_capacity(len, 2)?;
-        let mut map = BTreeMap::new();
-        for _ in 0..len {
-            let key = K::deserialize_xcdr(deserializer)?;
-            let value = V::deserialize_xcdr(deserializer)?;
-            map.insert(key, value);
-        }
-        Ok(map)
-    }
-}
+impl_map_serialization!(HashMap, [Eq + Hash], hashmap_with_prealloc);
+impl_map_serialization!(BTreeMap, [Ord], btreemap_without_prealloc);
 
 // Box<T> support for @external
 impl<T: CdrSerialize> CdrSerialize for Box<T> {

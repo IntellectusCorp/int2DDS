@@ -3,79 +3,78 @@ use log::debug;
 
 use crate::serialize::{read_u16, read_u32, read_u8};
 
+// Everything except `deserialize_string` (whose input access differs between the plain
+// slice and the fragment chain) is identical for both deserializers; the macro emits the
+// shared methods once for each so the two cannot drift apart.
+
+macro_rules! impl_shared_char_reads {
+    ($($de:ident),+ $(,)?) => {$(
+        impl<'a> $de<'a> {
+            /// Internal helper to read u8
+            fn read_u8(&mut self) -> Result<u8, CdrError> {
+                read_u8(self).map_err(|_| CdrError::InsufficientData)
+            }
+
+            /// Internal helper to read u16
+            fn read_u16(&mut self) -> Result<u16, CdrError> {
+                read_u16(self).map_err(|_| CdrError::InsufficientData)
+            }
+
+            /// Internal helper to read u32
+            fn read_u32(&mut self) -> Result<u32, CdrError> {
+                read_u32(self).map_err(|_| CdrError::InsufficientData)
+            }
+
+            /// Deserialize 8-bit character (ISO Latin-1)
+            pub fn deserialize_char(&mut self) -> Result<char, CdrError> {
+                let byte_val = self.read_u8()?;
+                Ok(byte_val as char)
+            }
+
+            /// Deserialize wide character (UTF-16)
+            pub fn deserialize_wchar16(&mut self) -> Result<char, CdrError> {
+                let code_unit = self.read_u16()?;
+                if (0xD800..=0xDFFF).contains(&code_unit) {
+                    return Err(CdrError::InvalidWideCharacter);
+                }
+                char::from_u32(code_unit as u32).ok_or(CdrError::InvalidWideCharacter)
+            }
+
+            /// Deserialize wide character (UTF-32)
+            pub fn deserialize_wchar32(&mut self) -> Result<char, CdrError> {
+                let code_point = self.read_u32()?;
+                char::from_u32(code_point).ok_or(CdrError::InvalidWideCharacter)
+            }
+
+            /// Deserialize character array (8-bit Latin-1)
+            pub fn deserialize_char_array(&mut self) -> Result<Vec<char>, CdrError> {
+                let length = self.read_u32()? as usize;
+                self.check_available(length)?;
+                let mut chars = try_vec_prealloc(length)?;
+                for _ in 0..length {
+                    let byte_val = self.read_u8()?;
+                    chars.push(byte_val as char);
+                }
+                Ok(chars)
+            }
+
+            /// Deserialize wide character string (UTF-16)
+            pub fn deserialize_wstring16(&mut self) -> Result<String, CdrError> {
+                let length = self.read_u32()? as usize;
+                self.align(2);
+                let mut utf16_chars = try_vec_prealloc(self.checked_capacity(length, 2)?)?;
+                for _ in 0..length {
+                    utf16_chars.push(self.read_u16()?);
+                }
+                String::from_utf16(&utf16_chars).map_err(|_| CdrError::InvalidWideCharacter)
+            }
+        }
+    )+};
+}
+
+impl_shared_char_reads!(CdrDeserializer, Xcdr2Deserializer);
+
 impl<'a> CdrDeserializer<'a> {
-    /// Internal helper to read u8
-    fn read_u8(&mut self) -> Result<u8, CdrError> {
-        read_u8(self).map_err(|_| CdrError::InsufficientData)
-    }
-
-    /// Internal helper to read u16
-    fn read_u16(&mut self) -> Result<u16, CdrError> {
-        read_u16(self).map_err(|_| CdrError::InsufficientData)
-    }
-
-    /// Internal helper to read u32
-    fn read_u32(&mut self) -> Result<u32, CdrError> {
-        read_u32(self).map_err(|_| CdrError::InsufficientData)
-    }
-
-    /// Deserialize 8-bit character (ISO Latin-1)
-    pub fn deserialize_char(&mut self) -> Result<char, CdrError> {
-        let byte_val = self.read_u8()?;
-
-        // Convert Latin-1 to char (safe conversion)
-        Ok(byte_val as char)
-    }
-
-    /// Deserialize wide character (UTF-16)
-    pub fn deserialize_wchar16(&mut self) -> Result<char, CdrError> {
-        let code_unit = self.read_u16()?;
-
-        // Check for UTF-16 surrogate pair (simple implementation)
-        if (0xD800..=0xDFFF).contains(&code_unit) {
-            return Err(CdrError::InvalidWideCharacter);
-        }
-
-        char::from_u32(code_unit as u32).ok_or(CdrError::InvalidWideCharacter)
-    }
-
-    /// Deserialize wide character (UTF-32)
-    pub fn deserialize_wchar32(&mut self) -> Result<char, CdrError> {
-        let code_point = self.read_u32()?;
-
-        char::from_u32(code_point).ok_or(CdrError::InvalidWideCharacter)
-    }
-
-    /// Deserialize character array (8-bit Latin-1)
-    pub fn deserialize_char_array(&mut self) -> Result<Vec<char>, CdrError> {
-        let length = self.read_u32()? as usize;
-
-        self.check_available(length)?;
-
-        let mut chars = try_vec_prealloc(length)?;
-        for _ in 0..length {
-            let byte_val = self.read_u8()?;
-            chars.push(byte_val as char);
-        }
-
-        // debug!("CDR deserialize_char_array: {} chars", length);
-        Ok(chars)
-    }
-
-    /// Deserialize wide character string (UTF-16)
-    pub fn deserialize_wstring16(&mut self) -> Result<String, CdrError> {
-        let length = self.read_u32()? as usize;
-
-        self.align(2);
-        let mut utf16_chars = try_vec_prealloc(self.checked_capacity(length, 2)?)?;
-
-        for _ in 0..length {
-            utf16_chars.push(self.read_u16()?);
-        }
-
-        String::from_utf16(&utf16_chars).map_err(|_| CdrError::InvalidWideCharacter)
-    }
-
     /// Deserialize string
     pub fn deserialize_string(&mut self) -> Result<String, CdrError> {
         let length = self.deserialize_u32()? as usize;
@@ -112,70 +111,7 @@ impl<'a> CdrDeserializer<'a> {
     }
 }
 
-// Xcdr2Deserializer uses the same string deserialization logic
 impl<'a> Xcdr2Deserializer<'a> {
-    /// Internal helper to read u8
-    fn read_u8(&mut self) -> Result<u8, CdrError> {
-        use crate::serialize::read_u8;
-        read_u8(self).map_err(|_| CdrError::InsufficientData)
-    }
-
-    /// Internal helper to read u16
-    fn read_u16(&mut self) -> Result<u16, CdrError> {
-        use crate::serialize::read_u16;
-        read_u16(self).map_err(|_| CdrError::InsufficientData)
-    }
-
-    /// Internal helper to read u32
-    fn read_u32(&mut self) -> Result<u32, CdrError> {
-        use crate::serialize::read_u32;
-        read_u32(self).map_err(|_| CdrError::InsufficientData)
-    }
-
-    /// Deserialize 8-bit character (ISO Latin-1)
-    pub fn deserialize_char(&mut self) -> Result<char, CdrError> {
-        let byte_val = self.read_u8()?;
-        Ok(byte_val as char)
-    }
-
-    /// Deserialize wide character (UTF-16)
-    pub fn deserialize_wchar16(&mut self) -> Result<char, CdrError> {
-        let code_unit = self.read_u16()?;
-        if (0xD800..=0xDFFF).contains(&code_unit) {
-            return Err(CdrError::InvalidWideCharacter);
-        }
-        char::from_u32(code_unit as u32).ok_or(CdrError::InvalidWideCharacter)
-    }
-
-    /// Deserialize wide character (UTF-32)
-    pub fn deserialize_wchar32(&mut self) -> Result<char, CdrError> {
-        let code_point = self.read_u32()?;
-        char::from_u32(code_point).ok_or(CdrError::InvalidWideCharacter)
-    }
-
-    /// Deserialize character array (8-bit Latin-1)
-    pub fn deserialize_char_array(&mut self) -> Result<Vec<char>, CdrError> {
-        let length = self.read_u32()? as usize;
-        self.check_available(length)?;
-        let mut chars = try_vec_prealloc(length)?;
-        for _ in 0..length {
-            let byte_val = self.read_u8()?;
-            chars.push(byte_val as char);
-        }
-        Ok(chars)
-    }
-
-    /// Deserialize wide character string (UTF-16)
-    pub fn deserialize_wstring16(&mut self) -> Result<String, CdrError> {
-        let length = self.read_u32()? as usize;
-        self.align(2);
-        let mut utf16_chars = try_vec_prealloc(self.checked_capacity(length, 2)?)?;
-        for _ in 0..length {
-            utf16_chars.push(self.read_u16()?);
-        }
-        String::from_utf16(&utf16_chars).map_err(|_| CdrError::InvalidWideCharacter)
-    }
-
     /// Deserialize string
     pub fn deserialize_string(&mut self) -> Result<String, CdrError> {
         let length = self.deserialize_u32()? as usize;
