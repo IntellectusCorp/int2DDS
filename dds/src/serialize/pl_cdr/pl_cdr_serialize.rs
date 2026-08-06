@@ -122,38 +122,46 @@ impl PlCdrSerializer {
         buffer: &mut Vec<u8>,
         parameter: &PlCdrParameter,
     ) -> Result<(), String> {
+        // The payload's internal `buffer.len() % 4` alignment math assumes every
+        // parameter starts 4-aligned: the header is 4 bytes and each parameter
+        // consumes 4 + a padded multiple of 4.
+        debug_assert!(buffer.len().is_multiple_of(4));
+
         // Parameter ID encoding
         self.write_u16(buffer, parameter.id as u16);
 
-        // Serialize parameter value payload
-        let param_data = self.serialize_parameter_value(&parameter.value)?;
+        // Length placeholder, backpatched once the payload is written in place.
+        let len_pos = buffer.len();
+        self.write_u16(buffer, 0);
+        let value_start = buffer.len();
+
+        self.serialize_parameter_value(buffer, &parameter.value)?;
 
         // Align to 4-byte boundary between parameters (RTPS 2.5, Section 9.6.2.2.2):
         // parameterLength MUST include the trailing padding (i.e. be a multiple of 4). A strict
         // remote parser advances by parameterLength, so an unpadded length on a
         // variable-size parameter (USER_DATA/TOPIC_DATA/etc.) misaligns and corrupts later params.
+        let value_len = buffer.len() - value_start;
         let padding =
-            (PARAMETER_ALIGNMENT - (param_data.len() % PARAMETER_ALIGNMENT)) % PARAMETER_ALIGNMENT;
+            (PARAMETER_ALIGNMENT - (value_len % PARAMETER_ALIGNMENT)) % PARAMETER_ALIGNMENT;
 
-        let padded_len = param_data.len() + padding;
+        let padded_len = value_len + padding;
         if padded_len > u16::MAX as usize {
             return Err(format!(
                 "Parameter 0x{:04X} exceeds maximum allowed length: {} bytes ({} padded)",
-                parameter.id as u16,
-                param_data.len(),
-                padded_len
+                parameter.id as u16, value_len, padded_len
             ));
         }
-
-        // Parameter length field (padded length per RTPS)
-        self.write_u16(buffer, padded_len as u16);
-
-        // Parameter data bytes
-        buffer.extend_from_slice(&param_data);
 
         if padding > 0 {
             buffer.extend(std::iter::repeat_n(0u8, padding));
         }
+
+        let len_bytes = match self.endianness {
+            Endianness::LittleEndian => (padded_len as u16).to_le_bytes(),
+            Endianness::BigEndian => (padded_len as u16).to_be_bytes(),
+        };
+        buffer[len_pos..len_pos + 2].copy_from_slice(&len_bytes);
 
         Ok(())
     }
@@ -165,10 +173,12 @@ impl PlCdrSerializer {
         Ok(())
     }
 
-    /// Serialize parameter value
-    fn serialize_parameter_value(&self, value: &ParameterValue) -> Result<Vec<u8>, String> {
-        let mut buffer: Vec<u8> = Vec::with_capacity(256);
-
+    /// Serialize parameter value directly into the final buffer
+    fn serialize_parameter_value(
+        &self,
+        buffer: &mut Vec<u8>,
+        value: &ParameterValue,
+    ) -> Result<(), String> {
         match value {
             ParameterValue::ProtocolVersion(v) => {
                 buffer.push(v.major);
@@ -184,15 +194,15 @@ impl PlCdrSerializer {
                 buffer.push(0); // padding byte 2
             }
             ParameterValue::DomainId(d) => {
-                self.write_u32(&mut buffer, *d);
+                self.write_u32(buffer, *d);
             }
             ParameterValue::Locator(l) => {
-                self.write_i32(&mut buffer, l.kind());
-                self.write_u32(&mut buffer, l.port());
+                self.write_i32(buffer, l.kind());
+                self.write_u32(buffer, l.port());
                 buffer.extend_from_slice(&l.address);
             }
             ParameterValue::ParticipantLeaseDuration(d) => {
-                self.write_duration(&mut buffer, d);
+                self.write_duration(buffer, d);
             }
             ParameterValue::ParticipantGuid(guid) => {
                 buffer.extend_from_slice(&guid.to_bytes());
@@ -201,20 +211,20 @@ impl PlCdrSerializer {
                 buffer.extend_from_slice(&guid.to_bytes());
             }
             ParameterValue::BuiltinEndpointSet(bes) => {
-                self.write_u32(&mut buffer, *bes);
+                self.write_u32(buffer, *bes);
             }
             ParameterValue::EntityName(name)
             | ParameterValue::TopicName(name)
             | ParameterValue::TypeName(name) => {
-                self.write_string(&mut buffer, name);
+                self.write_string(buffer, name);
             }
             ParameterValue::Reliability(rel) => {
                 let kind_u32 = match rel.kind {
                     ReliabilityQosPolicyKind::BestEffort => 1,
                     ReliabilityQosPolicyKind::Reliable => 2,
                 };
-                self.write_u32(&mut buffer, kind_u32);
-                self.write_duration(&mut buffer, &rel.max_blocking_time.into());
+                self.write_u32(buffer, kind_u32);
+                self.write_duration(buffer, &rel.max_blocking_time.into());
             }
             ParameterValue::Durability(dur) => {
                 let kind_u32 = match dur.kind {
@@ -223,17 +233,17 @@ impl PlCdrSerializer {
                     DurabilityQosPolicyKind::Transient => 2,
                     DurabilityQosPolicyKind::Persistent => 3,
                 };
-                self.write_u32(&mut buffer, kind_u32);
+                self.write_u32(buffer, kind_u32);
             }
             ParameterValue::Ownership(own) => {
                 let kind_u32 = match own.kind {
                     OwnershipQosPolicyKind::Shared => 0,
                     OwnershipQosPolicyKind::Exclusive => 1,
                 };
-                self.write_u32(&mut buffer, kind_u32);
+                self.write_u32(buffer, kind_u32);
             }
             ParameterValue::OwnershipStrength(strength) => {
-                self.write_u32(&mut buffer, *strength);
+                self.write_u32(buffer, *strength);
             }
             ParameterValue::Liveliness(live) => {
                 let kind_u32 = match live.kind {
@@ -241,8 +251,8 @@ impl PlCdrSerializer {
                     LivelinessQosPolicyKind::ManualByParticipant => 1,
                     LivelinessQosPolicyKind::ManualByTopic => 2,
                 };
-                self.write_u32(&mut buffer, kind_u32);
-                self.write_duration(&mut buffer, &live.lease_duration.into());
+                self.write_u32(buffer, kind_u32);
+                self.write_duration(buffer, &live.lease_duration.into());
             }
             ParameterValue::Presentation(pres) => {
                 let access_scope_u32 = match pres.access_scope {
@@ -250,7 +260,7 @@ impl PlCdrSerializer {
                     PresentationQosAccessScopeKind::Topic => 1,
                     PresentationQosAccessScopeKind::Group => 2,
                 };
-                self.write_u32(&mut buffer, access_scope_u32);
+                self.write_u32(buffer, access_scope_u32);
                 buffer.push(if pres.coherent_access { 1 } else { 0 });
                 buffer.push(if pres.ordered_access { 1 } else { 0 });
                 // CDR alignment - efficient padding
@@ -264,38 +274,38 @@ impl PlCdrSerializer {
                     DestinationOrderQosPolicyKind::ByReceptionTimestamp => 0,
                     DestinationOrderQosPolicyKind::BySourceTimestamp => 1,
                 };
-                self.write_u32(&mut buffer, kind_u32);
+                self.write_u32(buffer, kind_u32);
             }
             ParameterValue::HistoryQosPolicy(hist) => {
                 let (kind_u32, depth) = match hist.kind {
                     HistoryQosPolicyKind::KeepLast(depth) => (0, depth),
                     HistoryQosPolicyKind::KeepAll => (1, -1),
                 };
-                self.write_u32(&mut buffer, kind_u32);
-                self.write_i32(&mut buffer, depth);
+                self.write_u32(buffer, kind_u32);
+                self.write_i32(buffer, depth);
             }
             ParameterValue::ResourceLimits(res) => {
-                self.write_i32(&mut buffer, res.max_samples);
-                self.write_i32(&mut buffer, res.max_instances);
-                self.write_i32(&mut buffer, res.max_samples_per_instance);
+                self.write_i32(buffer, res.max_samples);
+                self.write_i32(buffer, res.max_instances);
+                self.write_i32(buffer, res.max_samples_per_instance);
             }
             ParameterValue::TransportPriority(prio) => {
-                self.write_u32(&mut buffer, *prio);
+                self.write_u32(buffer, *prio);
             }
             ParameterValue::Lifespan(lifespan) => {
-                self.write_duration(&mut buffer, lifespan);
+                self.write_duration(buffer, lifespan);
             }
             ParameterValue::Deadline(deadline) => {
-                self.write_duration(&mut buffer, deadline);
+                self.write_duration(buffer, deadline);
             }
             ParameterValue::LatencyBudget(latency_budget) => {
-                self.write_duration(&mut buffer, latency_budget);
+                self.write_duration(buffer, latency_budget);
             }
             ParameterValue::TimeBasedFilter(time_based_filter) => {
-                self.write_duration(&mut buffer, time_based_filter);
+                self.write_duration(buffer, time_based_filter);
             }
             ParameterValue::DurabilityService(dur_svc) => {
-                self.write_duration(&mut buffer, &dur_svc.service_cleanup_delay.into());
+                self.write_duration(buffer, &dur_svc.service_cleanup_delay.into());
 
                 // Write history_kind as u32 and history_depth
                 let (history_kind_value, history_depth) = match dur_svc.history_kind {
@@ -303,33 +313,33 @@ impl PlCdrSerializer {
                     HistoryQosPolicyKind::KeepAll => (1u32, -1i32),
                 };
 
-                self.write_u32(&mut buffer, history_kind_value);
-                self.write_i32(&mut buffer, history_depth);
-                self.write_i32(&mut buffer, dur_svc.max_samples);
-                self.write_i32(&mut buffer, dur_svc.max_instances);
-                self.write_i32(&mut buffer, dur_svc.max_samples_per_instance);
+                self.write_u32(buffer, history_kind_value);
+                self.write_i32(buffer, history_depth);
+                self.write_i32(buffer, dur_svc.max_samples);
+                self.write_i32(buffer, dur_svc.max_instances);
+                self.write_i32(buffer, dur_svc.max_samples_per_instance);
             }
             ParameterValue::UserData(data)
             | ParameterValue::GroupData(data)
             | ParameterValue::TopicData(data) => {
-                self.write_u32(&mut buffer, data.len() as u32);
+                self.write_u32(buffer, data.len() as u32);
                 buffer.extend_from_slice(data);
             }
             ParameterValue::UserDataOwned(data) => {
-                self.write_u32(&mut buffer, data.len() as u32);
+                self.write_u32(buffer, data.len() as u32);
                 buffer.extend_from_slice(data);
             }
             ParameterValue::Partition(partitions) => {
-                self.write_u32(&mut buffer, partitions.len() as u32);
+                self.write_u32(buffer, partitions.len() as u32);
                 for partition in partitions {
-                    self.write_string(&mut buffer, partition);
+                    self.write_string(buffer, partition);
                 }
             }
             ParameterValue::PropertyList(properties) => {
-                self.write_u32(&mut buffer, properties.len() as u32);
+                self.write_u32(buffer, properties.len() as u32);
                 for property in properties {
-                    self.write_string(&mut buffer, &property.name);
-                    self.write_string(&mut buffer, &property.value);
+                    self.write_string(buffer, &property.name);
+                    self.write_string(buffer, &property.value);
                 }
             }
             ParameterValue::ExpectsInlineQos(expects) => {
@@ -344,17 +354,17 @@ impl PlCdrSerializer {
                 buffer.extend_from_slice(key_hash);
             }
             ParameterValue::StatusInfo(status_info) => {
-                self.write_u32(&mut buffer, status_info.flags());
+                self.write_u32(buffer, status_info.flags());
             }
             ParameterValue::MaxSerializedSize(max_size) => {
-                self.write_u32(&mut buffer, *max_size);
+                self.write_u32(buffer, *max_size);
             }
             ParameterValue::DataRepresentation(data_rep) => {
                 // CDR sequence format: length + data
-                self.write_u32(&mut buffer, data_rep.value.len() as u32);
+                self.write_u32(buffer, data_rep.value.len() as u32);
                 for rep_id in &data_rep.value {
                     let id_value = *rep_id as u16;
-                    self.write_u16(&mut buffer, id_value);
+                    self.write_u16(buffer, id_value);
                 }
                 // CDR alignment - pad to 4-byte boundary if needed
                 let padding = (4 - (buffer.len() % 4)) % 4;
@@ -379,7 +389,7 @@ impl PlCdrSerializer {
             }
             ParameterValue::TypeConsistencyEnforcement(tce) => {
                 // TypeConsistencyEnforcementQosPolicy: kind(2) + 5 bools(5) + padding(1)
-                self.write_u16(&mut buffer, tce.kind as u16);
+                self.write_u16(buffer, tce.kind as u16);
                 buffer.push(if tce.ignore_sequence_bounds { 1 } else { 0 });
                 buffer.push(if tce.ignore_string_bounds { 1 } else { 0 });
                 buffer.push(if tce.ignore_member_names { 1 } else { 0 });
@@ -403,25 +413,25 @@ impl PlCdrSerializer {
                 }
             }
             ParameterValue::ContentFilterProperty(cfp) => {
-                self.write_string(&mut buffer, &cfp.content_filtered_topic_name);
-                self.write_string(&mut buffer, &cfp.related_topic_name);
-                self.write_string(&mut buffer, &cfp.filter_class_name);
-                self.write_string(&mut buffer, &cfp.filter_expression);
-                self.write_u32(&mut buffer, cfp.expression_parameters.len() as u32);
+                self.write_string(buffer, &cfp.content_filtered_topic_name);
+                self.write_string(buffer, &cfp.related_topic_name);
+                self.write_string(buffer, &cfp.filter_class_name);
+                self.write_string(buffer, &cfp.filter_expression);
+                self.write_u32(buffer, cfp.expression_parameters.len() as u32);
 
                 for param in &cfp.expression_parameters {
                     // Do not quote expression parameters for interoperability with OpenDDS.
                     // Ref: https://github.com/omg-dds/dds-rtps/issues/37
                     // // let quoted_param = format!("'{}'", param);
-                    // self.write_string(&mut buffer, &quoted_param);
-                    self.write_string(&mut buffer, param);
+                    // self.write_string(buffer, &quoted_param);
+                    self.write_string(buffer, param);
                 }
             }
             ParameterValue::Sentinel => {
                 // PID_SENTINEL has no data, just return empty buffer
             }
             ParameterValue::Count(count) => {
-                self.write_u32(&mut buffer, *count);
+                self.write_u32(buffer, *count);
             }
             ParameterValue::Unknown(data) => {
                 buffer.extend_from_slice(data);
@@ -431,7 +441,7 @@ impl PlCdrSerializer {
             }
         }
 
-        Ok(buffer)
+        Ok(())
     }
 
     /// Serialize duration
@@ -698,34 +708,27 @@ pub fn remove_encapsulation_header(data: &mut Vec<u8>) {
 }
 
 pub fn combine_pl_cdr_parameters(lists: Vec<Vec<u8>>) -> Vec<u8> {
-    // Pre-calculate total capacity to avoid reallocations
-    // First list: -4 (sentinel), Others: -4 (sentinel) -4 (encapsulation header)
-    let total_capacity: usize = lists
-        .iter()
-        .enumerate()
-        .map(|(index, list)| {
-            if index == 0 {
-                list.len().saturating_sub(4) // Remove sentinel only
-            } else {
-                list.len().saturating_sub(8) // Remove sentinel + encapsulation header
+    // Slice off the trailing sentinel everywhere and the 4-byte encapsulation
+    // header on every list after the first, then copy each kept range once —
+    // no drain-shift of the source buffers.
+    fn keep_range(list: &[u8], strip_header: bool) -> &[u8] {
+        let mut end = list.len();
+        if end >= 4 {
+            let tail = &list[end - 4..];
+            if tail == [0x01, 0x00, 0x00, 0x00] || tail == [0x00, 0x01, 0x00, 0x00] {
+                end -= 4;
             }
-        })
-        .sum();
+        }
+        let start = if strip_header && end >= 4 { 4 } else { 0 };
+        &list[start..end]
+    }
+
+    let total_capacity: usize =
+        lists.iter().enumerate().map(|(index, list)| keep_range(list, index != 0).len()).sum();
 
     let mut result = Vec::with_capacity(total_capacity);
-
-    for (index, mut list) in lists.into_iter().enumerate() {
-        if index == 0 {
-            // First list: remove only sentinel (keep encapsulation header)
-            remove_pl_cdr_sentinel(&mut list);
-        } else {
-            // Subsequent lists: remove both encapsulation header and sentinel
-            remove_pl_cdr_sentinel(&mut list);
-            remove_encapsulation_header(&mut list);
-        }
-
-        // Merge
-        result.extend_from_slice(&list);
+    for (index, list) in lists.iter().enumerate() {
+        result.extend_from_slice(keep_range(list, index != 0));
     }
 
     result
@@ -842,7 +845,7 @@ impl super::ParsedBuiltinTopicData {
     pub fn to_serialized_data(&self) -> crate::rtps::common::types::SerializedData {
         use crate::rtps::common::types::SerializedData;
 
-        let mut parameters = Vec::new();
+        let mut parameters = Vec::with_capacity(32);
 
         // GUID-related fields
         if let Some(guid) = &self.endpoint_guid {
@@ -1161,6 +1164,16 @@ mod parameter_failure_tests {
                 ParameterId::PidSentinel as u16,
             ]
         );
+    }
+
+    // Merging two serialized lists must be byte-identical to serializing all the
+    // parameters as one list.
+    #[test]
+    fn merged_lists_match_a_single_combined_list() {
+        let base = serialize(&[domain_id(7)]);
+        let extra = serialize(&[topic_name("Square")]);
+        let merged = merge_serialized_data(base, Some(extra), true);
+        assert_eq!(merged, serialize(&[domain_id(7), topic_name("Square")]));
     }
 
     #[test]
