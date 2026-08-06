@@ -87,7 +87,13 @@ macro_rules! impl_dds_entity_impl {
         {
             fn get_status_changes(&self) -> DdsResult<StatusMask> {
                 self.is_deleted()?;
-                self.get_statuscondition()?.get_status_changes()
+
+                // Read the changed-status mask under the lock without materializing a clone.
+                let status_condition = self
+                    .status_condition
+                    .lock()
+                    .map_err(|e| DdsError::Error(e.to_string()))?;
+                status_condition.get_status_changes()
             }
 
             fn enable(&self) -> DdsResult<()> {
