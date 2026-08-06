@@ -122,7 +122,7 @@ impl MemberHeader {
     ) -> Result<(Self, usize), SerializationError> {
         use crate::serialize::from_bytes_u32;
 
-        if position + 4 > data.len() {
+        if position > data.len() || data.len() - position < 4 {
             return Err(SerializationError::InsufficientData);
         }
 
@@ -136,7 +136,7 @@ impl MemberHeader {
         let member_id = header & 0x0FFF_FFFF;
 
         let read_nextint = |buf: &[u8]| -> Result<u32, SerializationError> {
-            if position + 8 > buf.len() {
+            if position > buf.len() || buf.len() - position < 8 {
                 return Err(SerializationError::InsufficientData);
             }
             let b: [u8; 4] = buf[position + 4..position + 8]
@@ -145,16 +145,24 @@ impl MemberHeader {
             Ok(from_bytes_u32(b, endianness))
         };
 
-        // LC=5/6/7: NEXTINT overlaps with payload's first 4 bytes (DDS-XTypes 7.4.3.4.2)
+        // LC=5/6/7: NEXTINT overlaps with payload's first 4 bytes (DDS-XTypes 7.4.3.4.2).
+        // Checked arithmetic: an unchecked wrap turns a huge NEXTINT into a *small*
+        // member_length, which suppresses the skip and misparses every later member.
+        let scaled_length = |scale: u32| -> Result<u32, SerializationError> {
+            read_nextint(data)?
+                .checked_mul(scale)
+                .and_then(|n| n.checked_add(4))
+                .ok_or(SerializationError::InvalidMemberHeader)
+        };
         let (member_length, bytes_consumed) = match lc {
             0 => (1u32, 4usize),
             1 => (2u32, 4usize),
             2 => (4u32, 4usize),
             3 => (8u32, 4usize),
             4 => (read_nextint(data)?, 8usize),
-            5 => (4u32 + read_nextint(data)?, 4usize),
-            6 => (4u32 + 4 * read_nextint(data)?, 4usize),
-            7 => (4u32 + 8 * read_nextint(data)?, 4usize),
+            5 => (scaled_length(1)?, 4usize),
+            6 => (scaled_length(4)?, 4usize),
+            7 => (scaled_length(8)?, 4usize),
             _ => return Err(SerializationError::InvalidMemberHeader),
         };
 
@@ -681,5 +689,55 @@ impl XcdrDeserialize for WChar {
     fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
         let c = deserializer.deserialize_wchar16()?;
         Ok(WChar::from(c))
+    }
+}
+
+#[cfg(test)]
+mod member_header_tests {
+    use super::*;
+    use speedy::Endianness;
+
+    fn wire(lc: u32, member_id: u32, nextint: u32) -> Vec<u8> {
+        let header = (lc << 28) | (member_id & 0x0FFF_FFFF);
+        let mut v = header.to_le_bytes().to_vec();
+        v.extend_from_slice(&nextint.to_le_bytes());
+        v
+    }
+
+    fn read(lc: u32, nextint: u32) -> Result<(MemberHeader, usize), SerializationError> {
+        MemberHeader::read(&wire(lc, 1, nextint), 0, Endianness::LittleEndian)
+    }
+
+    #[test]
+    fn lc5_length_overflow_is_rejected() {
+        assert!(matches!(read(5, u32::MAX), Err(SerializationError::InvalidMemberHeader)));
+    }
+
+    #[test]
+    fn lc6_length_overflow_is_rejected() {
+        assert!(matches!(read(6, 0x4000_0000), Err(SerializationError::InvalidMemberHeader)));
+    }
+
+    #[test]
+    fn lc7_length_overflow_is_rejected() {
+        assert!(matches!(read(7, 0x2000_0000), Err(SerializationError::InvalidMemberHeader)));
+    }
+
+    #[test]
+    fn lc5_6_7_lengths_are_unchanged_for_valid_nextint() {
+        assert_eq!(read(5, 5).unwrap().0.member_length, 9);
+        assert_eq!(read(6, 3).unwrap().0.member_length, 16);
+        assert_eq!(read(7, 2).unwrap().0.member_length, 20);
+    }
+
+    #[test]
+    fn lc0_to_4_are_unchanged() {
+        assert_eq!(read(0, 0).unwrap().0.member_length, 1);
+        assert_eq!(read(1, 0).unwrap().0.member_length, 2);
+        assert_eq!(read(2, 0).unwrap().0.member_length, 4);
+        assert_eq!(read(3, 0).unwrap().0.member_length, 8);
+        let (h, consumed) = read(4, 0xDEAD).unwrap();
+        assert_eq!(h.member_length, 0xDEAD);
+        assert_eq!(consumed, 8);
     }
 }

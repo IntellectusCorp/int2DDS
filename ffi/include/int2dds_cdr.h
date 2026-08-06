@@ -54,7 +54,8 @@ typedef enum Int2DdsCdrError {
     INT2DDS_CDR_ERR_OVERFLOW   = 1,       /**< Writer: buffer capacity exceeded   */
     INT2DDS_CDR_ERR_UNDERFLOW  = 2,       /**< Reader: not enough data remaining  */
     INT2DDS_CDR_ERR_INVALID_ENCAP = 5,    /**< Unrecognized encapsulation ID      */
-    INT2DDS_CDR_ERR_INVALID_MEMBER_ID = 6 /**< EMHEADER member_id exceeds 28 bits */
+    INT2DDS_CDR_ERR_INVALID_MEMBER_ID = 6,/**< EMHEADER member_id exceeds 28 bits */
+    INT2DDS_CDR_ERR_INVALID_ARGUMENT = 7  /**< Bad element size or finalize token */
 } Int2DdsCdrError;
 
 /* ========================================================================
@@ -238,9 +239,11 @@ static inline bool _int2dds_cdr_r_ok(Int2DdsCdrReader *r) {
     return r->error == INT2DDS_CDR_OK;
 }
 
+/* Subtraction form: `pos + n` can wrap and pass an additive check, which is
+ * reachable from a wire uint32 length wherever size_t is 32 bits. */
 static inline bool _int2dds_cdr_w_ensure(Int2DdsCdrWriter *w, size_t n) {
     if (!_int2dds_cdr_w_ok(w)) return false;
-    if (w->pos + n > w->capacity) {
+    if (w->pos > w->capacity || n > w->capacity - w->pos) {
         w->error = INT2DDS_CDR_ERR_OVERFLOW;
         return false;
     }
@@ -249,11 +252,26 @@ static inline bool _int2dds_cdr_w_ensure(Int2DdsCdrWriter *w, size_t n) {
 
 static inline bool _int2dds_cdr_r_ensure(Int2DdsCdrReader *r, size_t n) {
     if (!_int2dds_cdr_r_ok(r)) return false;
-    if (r->pos + n > r->len) {
+    if (r->pos > r->len || n > r->len - r->pos) {
         r->error = INT2DDS_CDR_ERR_UNDERFLOW;
         return false;
     }
     return true;
+}
+
+/* Bulk APIs divide by elem_size to bound `count`, so 0 has to be rejected up
+ * front. Only these four widths are supported. */
+static inline bool _int2dds_cdr_elem_size_ok(size_t elem_size) {
+    return elem_size == 1 || elem_size == 2 || elem_size == 4 || elem_size == 8;
+}
+
+/* A finalize() patches header_bytes in place at `token` and derives a length from
+ * `pos - token`. Both are unsafe unless the token names a header this writer
+ * actually reserved, so the patch region stays inside [0, pos) and thus [0, capacity). */
+static inline bool _int2dds_cdr_token_ok(const Int2DdsCdrWriter *w, size_t token, size_t header_bytes) {
+    if (w->pos > w->capacity) return false;
+    if (token > w->pos) return false;
+    return w->pos - token >= header_bytes;
 }
 
 /* ---- Endian byte-swap helpers (strict-aliasing safe via memcpy) -------- */
@@ -548,6 +566,10 @@ INT2DDS_CDR_DEF bool int2dds_cdr_write_bytes(Int2DdsCdrWriter *w, const uint8_t 
 INT2DDS_CDR_DEF bool int2dds_cdr_write_prim_array(Int2DdsCdrWriter *w, const void *data,
                                                   size_t count, size_t elem_size) {
     if (!_int2dds_cdr_w_ok(w)) return false;
+    if (!_int2dds_cdr_elem_size_ok(elem_size)) {
+        w->error = INT2DDS_CDR_ERR_INVALID_ARGUMENT;
+        return false;
+    }
     /* No element means nothing to align to: a per-element loop would emit no padding. */
     if (count == 0) return true;
     if (count > (size_t)-1 / elem_size) {
@@ -579,6 +601,10 @@ INT2DDS_CDR_DEF bool int2dds_cdr_write_dheader_begin(Int2DdsCdrWriter *w, size_t
 
 INT2DDS_CDR_DEF bool int2dds_cdr_write_dheader_finalize(Int2DdsCdrWriter *w, size_t token) {
     if (!_int2dds_cdr_w_ok(w)) return false;
+    if (!_int2dds_cdr_token_ok(w, token, 4)) {
+        w->error = INT2DDS_CDR_ERR_INVALID_ARGUMENT;
+        return false;
+    }
     uint32_t object_size = (uint32_t)(w->pos - token - 4);
     _int2dds_put_u32(w->buf + token, object_size, w->little_endian);
     return true;
@@ -625,6 +651,10 @@ INT2DDS_CDR_DEF bool int2dds_cdr_write_emheader_begin(Int2DdsCdrWriter *w, uint3
 
 INT2DDS_CDR_DEF bool int2dds_cdr_write_emheader_finalize(Int2DdsCdrWriter *w, size_t token) {
     if (!_int2dds_cdr_w_ok(w)) return false;
+    if (!_int2dds_cdr_token_ok(w, token, 4)) {
+        w->error = INT2DDS_CDR_ERR_INVALID_ARGUMENT;
+        return false;
+    }
     uint32_t data_length = (uint32_t)(w->pos - token - 4);
     _int2dds_put_u32(w->buf + token, data_length, w->little_endian);
     return true;
@@ -651,7 +681,12 @@ INT2DDS_CDR_DEF bool int2dds_cdr_write_pid_finalize(Int2DdsCdrWriter *w, uint32_
     if (!_int2dds_cdr_w_ok(w)) return false;
     uint16_t flags = must_understand ? 0x4000 : 0;
     bool short_hdr = member_id <= INT2DDS_CDR_PID_MAX_SHORT_ID;
-    size_t content_len = w->pos - token - (short_hdr ? 4 : 12);
+    size_t header_bytes = short_hdr ? 4u : 12u;
+    if (!_int2dds_cdr_token_ok(w, token, header_bytes)) {
+        w->error = INT2DDS_CDR_ERR_INVALID_ARGUMENT;
+        return false;
+    }
+    size_t content_len = w->pos - token - header_bytes;
 
     if (short_hdr && content_len <= 0xFFFF) {
         _int2dds_put_u16(w->buf + token, (uint16_t)(flags | (member_id & 0x3FFFu)), w->little_endian);
@@ -910,6 +945,10 @@ INT2DDS_CDR_DEF bool int2dds_cdr_read_bytes(Int2DdsCdrReader *r, uint8_t *out, s
 INT2DDS_CDR_DEF bool int2dds_cdr_read_prim_array(Int2DdsCdrReader *r, void *out,
                                                  size_t count, size_t elem_size) {
     if (!_int2dds_cdr_r_ok(r)) return false;
+    if (!_int2dds_cdr_elem_size_ok(elem_size)) {
+        r->error = INT2DDS_CDR_ERR_INVALID_ARGUMENT;
+        return false;
+    }
     if (count == 0) return true;
     if (count > (size_t)-1 / elem_size) {
         r->error = INT2DDS_CDR_ERR_UNDERFLOW;

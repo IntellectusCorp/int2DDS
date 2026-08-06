@@ -127,7 +127,9 @@ namespace Int2Dds.Cdr
 
         private void EnsureRemaining(int count)
         {
-            if (_pos + count > _data.Length)
+            // Subtraction form: `_pos + count` can overflow to a negative value and
+            // pass an additive check. A negative count passes it unconditionally.
+            if (count < 0 || _pos > _data.Length || count > _data.Length - _pos)
                 throw new CdrUnderflowException(
                     $"Need {count} bytes but only {Remaining} remaining.");
         }
@@ -259,6 +261,8 @@ namespace Int2Dds.Cdr
             if (cdrLen == 0)
                 return string.Empty;
 
+            if (cdrLen > int.MaxValue)
+                throw new CdrUnderflowException($"String length {cdrLen} exceeds the addressable range.");
             EnsureRemaining((int)cdrLen);
             // cdrLen includes the null terminator; string length is cdrLen - 1
             int strLen = (int)(cdrLen - 1);
@@ -279,6 +283,12 @@ namespace Int2Dds.Cdr
             uint cdrLen = ReadU32(); // number of UTF-16 code units including null
             if (cdrLen == 0)
                 return string.Empty;
+
+            // Each unit is 2 wire bytes. Without this the array below is sized
+            // straight from the wire, so 4 bytes of input can demand gigabytes.
+            if (cdrLen > (uint)(Remaining / 2))
+                throw new CdrUnderflowException(
+                    $"WString length {cdrLen} exceeds {Remaining} remaining bytes.");
 
             int strLen = (int)(cdrLen - 1); // exclude null terminator
             var chars = new char[strLen];
@@ -336,10 +346,11 @@ namespace Int2Dds.Cdr
         public void ReadDheaderEnd(uint objectSize, int startPos)
         {
             if (!_xcdr2) return; // XCDR1: no DHEADER
-            int expectedEnd = startPos + (int)objectSize;
-            if (expectedEnd > _data.Length)
+            // `startPos + (int)objectSize` can overflow to a negative value, which
+            // passes the bounds check below and rewinds the position.
+            if (startPos < 0 || startPos > _data.Length || objectSize > (uint)(_data.Length - startPos))
                 throw new CdrUnderflowException("DHEADER end exceeds buffer.");
-            _pos = expectedEnd;
+            _pos = startPos + (int)objectSize;
         }
 
         // ---- XCDR2 EMHEADER -------------------------------------------------

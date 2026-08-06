@@ -1169,9 +1169,14 @@ impl<'a> CGen<'a> {
                     ));
                 }
                 StringMode::Pointer => {
-                    // Zero-copy read, then allocate and copy
-                    self.raw(&format!("{}{{ const char* _str; size_t _len;\n", indent));
-                    self.raw(&format!("{}int2dds_cdr_read_string(&r, &_str, &_len);\n", indent));
+                    // Zero-copy read, then allocate and copy. The reset makes the
+                    // failure postcondition explicit instead of relying on
+                    // read_string() to have zeroed the outputs.
+                    self.raw(&format!("{}{{ const char* _str = NULL; size_t _len = 0;\n", indent));
+                    self.raw(&format!(
+                        "{}if (!int2dds_cdr_read_string(&r, &_str, &_len)) {{ _str = NULL; _len = 0; }}\n",
+                        indent
+                    ));
                     self.raw(&format!("{}{} = (char*)malloc(_len + 1);\n", indent, accessor));
                     self.raw(&format!("{}if ({}) {{\n", indent, accessor));
                     self.raw(&format!(

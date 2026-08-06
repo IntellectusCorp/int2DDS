@@ -325,7 +325,9 @@ impl<'a> Xcdr2Deserializer<'a> {
     /// Check if enough data is available
     #[inline]
     pub(super) fn check_available(&self, size: usize) -> Result<(), CdrError> {
-        if self.position + size > self.data.len() {
+        // Subtraction form: `position + size` can wrap and pass an additive check.
+        let len = self.data.len();
+        if self.position > len || size > len - self.position {
             Err(CdrError::InsufficientData)
         } else {
             Ok(())

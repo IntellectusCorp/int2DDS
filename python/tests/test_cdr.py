@@ -174,3 +174,80 @@ class TestCdrSequence:
 
         r = CdrReader(data)
         assert r.read_seq_header() == 0
+
+
+class TestCdrBoundsArithmetic:
+    """Bounds-check hardening (issue #378)."""
+
+    def _reader(self):
+        w = CdrWriter()
+        w.write_u32(0x11111111)
+        w.write_u32(0x22222222)
+        r = CdrReader(w.to_bytes())
+        r.read_u32()
+        return r
+
+    def test_skip_rejects_negative(self):
+        r = self._reader()
+        pos = r.position
+        with pytest.raises(Exception):
+            r.skip(-4)
+        assert r.position == pos
+
+    def test_read_bytes_rejects_negative(self):
+        r = self._reader()
+        pos = r.position
+        with pytest.raises(Exception):
+            r.read_bytes(-4)
+        assert r.position == pos
+
+    def test_skip_and_read_bytes_still_work(self):
+        r = self._reader()
+        pos = r.position
+        r.skip(2)
+        assert r.position == pos + 2
+        assert len(r.read_bytes(2)) == 2
+
+    def test_dheader_finalize_rejects_negative_token(self):
+        w = CdrWriter(xcdr2=True)
+        w.write_u32(0xAAAAAAAA)
+        before = w.to_bytes()
+        with pytest.raises(ValueError):
+            w.write_dheader_finalize(-4)
+        assert w.to_bytes() == before
+
+    def test_dheader_finalize_rejects_token_past_end(self):
+        w = CdrWriter(xcdr2=True)
+        w.write_u32(0xAAAAAAAA)
+        with pytest.raises(ValueError):
+            w.write_dheader_finalize(len(w.to_bytes()) + 8)
+
+    def test_emheader_finalize_rejects_bad_token(self):
+        w = CdrWriter(xcdr2=True)
+        w.write_u32(0xAAAAAAAA)
+        with pytest.raises(ValueError):
+            w.write_emheader_finalize(-4)
+
+    def test_member_v1_finalize_rejects_bad_token(self):
+        w = CdrWriter()
+        w.write_u32(0xAAAAAAAA)
+        with pytest.raises(ValueError):
+            w.write_member_v1_finalize(-4, 5)
+
+    def test_dheader_roundtrip_still_works(self):
+        w = CdrWriter(xcdr2=True)
+        token = w.write_dheader_begin()
+        w.write_u32(0xDEADBEEF)
+        w.write_dheader_finalize(token)
+        r = CdrReader(w.to_bytes())
+        size, start = r.read_dheader()
+        assert size == 4
+        assert r.read_u32() == 0xDEADBEEF
+        r.read_dheader_end(size, start)
+
+    def test_member_v1_roundtrip_still_works(self):
+        w = CdrWriter()
+        token = w.write_member_v1_begin(5)
+        w.write_u32(0xCAFEBABE)
+        w.write_member_v1_finalize(token, 5)
+        assert len(w.to_bytes()) > 4
