@@ -1,5 +1,6 @@
 use bytes::Bytes;
 
+use crate::common::profile;
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::entities::entity::Entity;
 use crate::rtps::entities::participant::Participant;
@@ -17,20 +18,12 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, OnceLock, Weak,
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 static USER_PROCESS_PROFILE_COUNT: AtomicU64 = AtomicU64::new(0);
 static USER_PROCESS_PROFILE_PARSE_US: AtomicU64 = AtomicU64::new(0);
 static USER_PROCESS_PROFILE_HANDLE_US: AtomicU64 = AtomicU64::new(0);
 static USER_PROCESS_PROFILE_TOTAL_US: AtomicU64 = AtomicU64::new(0);
-
-fn user_process_profile_enabled() -> bool {
-    std::env::var_os("RMW_INT2DDS_PROFILE").is_some()
-}
-
-fn elapsed_us(start: Instant, end: Instant) -> u64 {
-    end.duration_since(start).as_micros() as u64
-}
 
 fn record_user_process_profile(parse_us: u64, handle_us: u64, total_us: u64) {
     let n = USER_PROCESS_PROFILE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
@@ -243,12 +236,12 @@ impl UserUnicastListeningTask {
     }
 
     fn process_rtps_message(&mut self, bytes: Bytes, from_addr: SocketAddr) {
-        let profile = user_process_profile_enabled();
-        let total_t0 = Instant::now();
+        let profile = profile::enabled();
+        let total_t0 = profile::now_if(profile);
         let mut message_receiver = MessageReceiver::new(self.guid_prefix, &from_addr);
-        let parse_t0 = Instant::now();
+        let parse_t0 = profile::now_if(profile);
         let rtps_message = message_receiver.init(&bytes);
-        let parse_us = if profile { elapsed_us(parse_t0, Instant::now()) } else { 0 };
+        let parse_us = profile::elapsed_us(parse_t0);
         if rtps_message.is_err() {
             error!("Failed to parse RTPS message from {:?}", from_addr);
             return;
@@ -256,15 +249,15 @@ impl UserUnicastListeningTask {
         let mut user_logic =
             self.user_logic.as_ref().as_ref().expect("UserLogic is not initialized").clone();
 
-        let handle_t0 = Instant::now();
+        let handle_t0 = profile::now_if(profile);
         if let Err(e) = user_logic.handle_rtps_message(message_receiver) {
             debug!("Failed to handle user RTPS message from {:?}: {:?}", from_addr, e);
         }
         if profile {
             record_user_process_profile(
                 parse_us,
-                elapsed_us(handle_t0, Instant::now()),
-                elapsed_us(total_t0, Instant::now()),
+                profile::elapsed_us(handle_t0),
+                profile::elapsed_us(total_t0),
             );
         }
     }

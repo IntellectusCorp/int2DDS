@@ -37,7 +37,6 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, RwLock, Weak,
     },
-    time::Instant,
 };
 
 use super::{
@@ -48,6 +47,7 @@ use super::{
     sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind},
     subscriber::Subscriber,
 };
+use crate::common::profile;
 use crate::{
     common::{
         builtin::topic::{
@@ -123,14 +123,6 @@ static SERIALIZED_TAKE_LOOP_PROFILE_SAMPLE_INFO_US: AtomicU64 = AtomicU64::new(0
 static SERIALIZED_TAKE_LOOP_PROFILE_REMOVE_US: AtomicU64 = AtomicU64::new(0);
 static SERIALIZED_TAKE_LOOP_PROFILE_PUSH_US: AtomicU64 = AtomicU64::new(0);
 static SERIALIZED_TAKE_LOOP_PROFILE_TOTAL_US: AtomicU64 = AtomicU64::new(0);
-
-fn serialized_take_profile_enabled() -> bool {
-    std::env::var_os("RMW_INT2DDS_PROFILE").is_some()
-}
-
-fn elapsed_us(start: Instant, end: Instant) -> u64 {
-    end.duration_since(start).as_micros() as u64
-}
 
 fn record_serialized_take_profile(
     precheck_us: u64,
@@ -2899,9 +2891,9 @@ impl<Foo: DdsType> DataReader<Foo> {
         max_bytes: Option<usize>,
         instance_handle: Option<InstanceHandle>,
     ) -> DdsResult<(Vec<(Bytes, SampleInfo)>, Option<usize>)> {
-        let profile = serialized_take_profile_enabled();
-        let total_t0 = Instant::now();
-        let precheck_t0 = Instant::now();
+        let profile = profile::enabled();
+        let total_t0 = profile::now_if(profile);
+        let precheck_t0 = profile::now_if(profile);
         self.is_enabled()?;
 
         if max_samples == 0 {
@@ -2918,25 +2910,24 @@ impl<Foo: DdsType> DataReader<Foo> {
         }
 
         self.set_read_communication_status(false)?;
-        let precheck_us = if profile { elapsed_us(precheck_t0, Instant::now()) } else { 0 };
+        let precheck_us = profile::elapsed_us(precheck_t0);
         let mut result: Vec<(Bytes, SampleInfo)> = Vec::new();
         let mut remaining = if max_samples == -1 { i32::MAX } else { max_samples };
 
-        let get_changes_t0 = Instant::now();
+        let get_changes_t0 = profile::now_if(profile);
         let changes = self.get_available_changes()?;
-        let get_changes_us = if profile { elapsed_us(get_changes_t0, Instant::now()) } else { 0 };
+        let get_changes_us = profile::elapsed_us(get_changes_t0);
 
         let sort_us = 0u64;
 
         // ContentFilteredTopic is applied on the receive path, so the cache is already filtered.
         let filter_setup_us = 0u64;
 
-        let instance_info_t0 = Instant::now();
+        let instance_info_t0 = profile::now_if(profile);
         let instance_infos = self.get_instance_infos()?;
-        let instance_info_us =
-            if profile { elapsed_us(instance_info_t0, Instant::now()) } else { 0 };
+        let instance_info_us = profile::elapsed_us(instance_info_t0);
 
-        let loop_t0 = Instant::now();
+        let loop_t0 = profile::now_if(profile);
         let mut loop_sample_state_us = 0;
         let mut loop_info_us = 0;
         let mut loop_match_us = 0;
@@ -2958,13 +2949,11 @@ impl<Foo: DdsType> DataReader<Foo> {
                 }
             }
 
-            let sample_state_t0 = Instant::now();
+            let sample_state_t0 = profile::now_if(profile);
             let sample_state =
                 self.get_sample_state(&change.writer_guid(), &change.sequence_number())?;
-            if profile {
-                loop_sample_state_us += elapsed_us(sample_state_t0, Instant::now());
-            }
-            let info_t0 = Instant::now();
+            loop_sample_state_us += profile::elapsed_us(sample_state_t0);
+            let info_t0 = profile::now_if(profile);
             let info = match instance_infos.get(&change.instance_handle()) {
                 Some(info) => info,
                 None => &InstanceInfo {
@@ -2976,20 +2965,16 @@ impl<Foo: DdsType> DataReader<Foo> {
                     pending_notification: false,
                 },
             };
-            if profile {
-                loop_info_us += elapsed_us(info_t0, Instant::now());
-            }
+            loop_info_us += profile::elapsed_us(info_t0);
 
-            let match_t0 = Instant::now();
+            let match_t0 = profile::now_if(profile);
             if !sample_states.matches(sample_state)
                 || !view_states.matches(info.view_state)
                 || !instance_states.matches(info.instance_state)
             {
                 continue;
             }
-            if profile {
-                loop_match_us += elapsed_us(match_t0, Instant::now());
-            }
+            loop_match_us += profile::elapsed_us(match_t0);
 
             let has_valid_data = match change.kind() {
                 ChangeKind::Alive | ChangeKind::AliveFiltered => true,
@@ -2998,11 +2983,9 @@ impl<Foo: DdsType> DataReader<Foo> {
                 | ChangeKind::NotAliveDisposedUnregistered => false,
             };
 
-            let data_bytes_t0 = Instant::now();
+            let data_bytes_t0 = profile::now_if(profile);
             let serialized_data = change.data_bytes();
-            if profile {
-                loop_data_bytes_us += elapsed_us(data_bytes_t0, Instant::now());
-            }
+            loop_data_bytes_us += profile::elapsed_us(data_bytes_t0);
 
             if let Some(cap) = max_bytes {
                 if has_valid_data && serialized_data.len() > cap {
@@ -3010,7 +2993,7 @@ impl<Foo: DdsType> DataReader<Foo> {
                 }
             }
 
-            let sample_info_t0 = Instant::now();
+            let sample_info_t0 = profile::now_if(profile);
             let sample_info = SampleInfo {
                 sample_state,
                 view_state: info.view_state,
@@ -3030,28 +3013,22 @@ impl<Foo: DdsType> DataReader<Foo> {
                 publication_handle: InstanceHandle::from_guid(&change.writer_guid()),
                 valid_data: has_valid_data,
             };
-            if profile {
-                loop_sample_info_us += elapsed_us(sample_info_t0, Instant::now());
-            }
+            loop_sample_info_us += profile::elapsed_us(sample_info_t0);
 
-            let remove_t0 = Instant::now();
+            let remove_t0 = profile::now_if(profile);
             if take {
                 self.remove_change(change.clone())?;
             } else {
                 self.mark_sample_as_read(&change.writer_guid(), change.sequence_number())?;
             }
-            if profile {
-                loop_remove_us += elapsed_us(remove_t0, Instant::now());
-            }
+            loop_remove_us += profile::elapsed_us(remove_t0);
 
-            let push_t0 = Instant::now();
+            let push_t0 = profile::now_if(profile);
             result.push((serialized_data, sample_info));
             remaining -= 1;
-            if profile {
-                loop_push_us += elapsed_us(push_t0, Instant::now());
-            }
+            loop_push_us += profile::elapsed_us(push_t0);
         }
-        let loop_us = if profile { elapsed_us(loop_t0, Instant::now()) } else { 0 };
+        let loop_us = profile::elapsed_us(loop_t0);
         if profile {
             record_serialized_take_loop_profile(
                 loop_sample_state_us,
@@ -3065,7 +3042,7 @@ impl<Foo: DdsType> DataReader<Foo> {
             );
         }
 
-        let cleanup_t0 = Instant::now();
+        let cleanup_t0 = profile::now_if(profile);
         for sample_info in self.drain_pending_notifications(
             &instance_infos,
             sample_states,
@@ -3082,7 +3059,7 @@ impl<Foo: DdsType> DataReader<Foo> {
         }
 
         self.reevaluate_all_conditions()?;
-        let cleanup_us = if profile { elapsed_us(cleanup_t0, Instant::now()) } else { 0 };
+        let cleanup_us = profile::elapsed_us(cleanup_t0);
 
         if result.is_empty() {
             Err(DdsError::NoData)
@@ -3096,7 +3073,7 @@ impl<Foo: DdsType> DataReader<Foo> {
                     instance_info_us,
                     loop_us,
                     cleanup_us,
-                    elapsed_us(total_t0, Instant::now()),
+                    profile::elapsed_us(total_t0),
                 );
             }
             Ok((result, None))
