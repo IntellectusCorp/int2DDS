@@ -37,6 +37,106 @@ use crate::rtps::{
 };
 use crate::serialize::pl_cdr::InlineQosParameters;
 
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+
+    use super::*;
+    use crate::rtps::common::entity_kind::EntityKind;
+    use crate::rtps::messages::message_receiver::{MessageReceiver, TypedSubmessage};
+
+    const LOCAL_PREFIX: GuidPrefix = [1; 12];
+    const DST_PREFIX: GuidPrefix = [2; 12];
+
+    fn reply(reader: u8, writer: u8, missing: Vec<i64>) -> AckNackRequest {
+        AckNackRequest {
+            reader_entity_id: EntityId::new(
+                [0, 0, reader],
+                EntityKind::USER_DEFINED_READER_WITH_KEY,
+            ),
+            writer_entity_id: EntityId::new(
+                [0, 0, writer],
+                EntityKind::USER_DEFINED_WRITER_WITH_KEY,
+            ),
+            missing_changes: missing.into_iter().map(SequenceNumber::from_i64).collect(),
+            acknack_count: 1,
+            bitmap_base: SequenceNumber::from_i64(1),
+            is_preemptive: false,
+        }
+    }
+
+    // Several replies must survive one message intact: a peer reads them back as
+    // separate ACKNACKs, each still addressed to its own reader/writer pair.
+    #[test]
+    fn batched_acknacks_round_trip_as_separate_submessages() {
+        let local = Guid::new(LOCAL_PREFIX, EntityId::PARTICIPANT);
+        let dst_prefix = DST_PREFIX;
+        let replies = vec![
+            reply(0x10, 0xA0, vec![1, 2]),
+            reply(0x11, 0xA1, vec![]),
+            reply(0x12, 0xA2, vec![7]),
+        ];
+
+        let buffer = MessageCreator::create_acknack_msg_multi(local, dst_prefix, &replies).unwrap();
+
+        let addr = "127.0.0.1:7400".parse().unwrap();
+        let mut receiver = MessageReceiver::new(dst_prefix, &addr);
+        receiver.init(&Bytes::copy_from_slice(&buffer)).unwrap();
+
+        let parsed: Vec<_> = receiver
+            .parse_submessages()
+            .into_iter()
+            .filter_map(|submessage| match submessage {
+                TypedSubmessage::AckNack(_, acknack) => Some(acknack.reader_id),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(parsed, replies.iter().map(|reply| reply.reader_entity_id).collect::<Vec<_>>(),);
+        assert!(receiver.is_dst_me(dst_prefix), "INFO_DST must address the writer's participant");
+    }
+
+    // A single reply is the ordinary case and must not gain anything from the batched
+    // builder - one ACKNACK in, one ACKNACK out.
+    #[test]
+    fn a_lone_acknack_still_produces_one_submessage() {
+        let local = Guid::new(LOCAL_PREFIX, EntityId::PARTICIPANT);
+        let dst_prefix = DST_PREFIX;
+
+        let buffer = MessageCreator::create_acknack_msg_multi(
+            local,
+            dst_prefix,
+            &[reply(0x10, 0xA0, vec![1])],
+        )
+        .unwrap();
+
+        let addr = "127.0.0.1:7400".parse().unwrap();
+        let mut receiver = MessageReceiver::new(dst_prefix, &addr);
+        receiver.init(&Bytes::copy_from_slice(&buffer)).unwrap();
+
+        let count = receiver
+            .parse_submessages()
+            .iter()
+            .filter(|submessage| matches!(submessage, TypedSubmessage::AckNack(..)))
+            .count();
+
+        assert_eq!(count, 1);
+    }
+}
+
+/// One reader's reply to one remote writer, worked out but not yet on the wire.
+///
+/// Holding the reply as data rather than a finished datagram is what lets several of
+/// them share one message - see [`MessageCreator::create_acknack_msg_multi`].
+pub(crate) struct AckNackRequest {
+    pub(crate) reader_entity_id: EntityId,
+    pub(crate) writer_entity_id: EntityId,
+    pub(crate) missing_changes: Vec<SequenceNumber>,
+    pub(crate) acknack_count: u32,
+    pub(crate) bitmap_base: SequenceNumber,
+    pub(crate) is_preemptive: bool,
+}
+
 pub(crate) struct MessageCreator {}
 
 impl MessageCreator {
@@ -134,6 +234,38 @@ impl MessageCreator {
             bitmap_base,
             is_preemptive,
         )?);
+
+        match rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian) {
+            Ok(buffer) => Ok(Arc::new(buffer)),
+            Err(e) => Err(Box::new(e)),
+        }
+    }
+
+    /// One RTPS message carrying several ACKNACKs to the **same** remote participant.
+    ///
+    /// INFO_DST addresses a participant, so every writer behind one GuidPrefix can share
+    /// a single header + INFO_DST and differ only in its ACKNACK submessage. This is the
+    /// return path of [`MessageCreator::create_data_msg_multi`]: a batched DATA message
+    /// delivers one heartbeat per reader behind this participant, and without this the
+    /// replies would go back one datagram at a time.
+    pub(crate) fn create_acknack_msg_multi(
+        local_participant_guid: Guid,
+        dst_prefix: GuidPrefix,
+        acknacks: &[AckNackRequest],
+    ) -> Result<Arc<Vec<u8>>, Box<dyn std::error::Error>> {
+        let mut rtps_message = RtpsMessage::new(Header::new(local_participant_guid.prefix()));
+        rtps_message.add_submessage(SubmessageCreator::create_info_dst_submessage(dst_prefix));
+
+        for acknack in acknacks {
+            rtps_message.add_submessage(SubmessageCreator::create_acknack_submessage(
+                acknack.reader_entity_id,
+                acknack.writer_entity_id,
+                acknack.missing_changes.clone(),
+                acknack.acknack_count,
+                acknack.bitmap_base,
+                acknack.is_preemptive,
+            )?);
+        }
 
         match rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian) {
             Ok(buffer) => Ok(Arc::new(buffer)),

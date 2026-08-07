@@ -7,7 +7,7 @@ use crate::rtps::common::rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult}
 use crate::rtps::entities::participant::Participant;
 use crate::rtps::logic::sedp_logic::SedpLogic;
 use crate::rtps::logic::spdp_logic::SpdpLogic;
-use crate::rtps::logic::user_logic::UserLogic;
+use crate::rtps::logic::user_logic::{PendingAckNack, UserLogic};
 use crate::rtps::task::sending_handler::MessageType;
 use crate::rtps::transport::socket::MAX_EVENTS;
 
@@ -197,11 +197,12 @@ impl SendingTask {
             }
 
             MessageType::UserAcknack(reader_id, remote_writer_guid, final_flag, is_preemptive) => {
-                if is_preemptive {
-                    user_logic.send_preemptive_acknack(reader_id, remote_writer_guid)?;
-                } else {
-                    user_logic.send_acknack(reader_id, remote_writer_guid, final_flag)?;
-                }
+                user_logic.send_acknacks(&[PendingAckNack {
+                    reader_id,
+                    remote_writer_guid,
+                    final_flag,
+                    is_preemptive,
+                }])?;
                 Ok(())
             }
 
@@ -215,6 +216,34 @@ impl SendingTask {
                 Ok(())
             }
         }
+    }
+
+    /// Hand a whole drain's worth of ACKNACKs to `UserLogic` at once so it can put the
+    /// ones addressed to the same participant into a single message.
+    fn send_acknack_batch(&self, messages: Vec<MessageType>) -> RtpsResult<()> {
+        let user_logic = self.user_logic.as_ref().as_ref().ok_or_else(|| {
+            RtpsError::new(RtpsErrorCode::DataNotSet, "UserLogic is not initialized")
+        })?;
+
+        let pending: Vec<PendingAckNack> = messages
+            .into_iter()
+            .filter_map(|message| match message {
+                MessageType::UserAcknack(
+                    reader_id,
+                    remote_writer_guid,
+                    final_flag,
+                    is_preemptive,
+                ) => Some(PendingAckNack {
+                    reader_id,
+                    remote_writer_guid,
+                    final_flag,
+                    is_preemptive,
+                }),
+                _ => None,
+            })
+            .collect();
+
+        user_logic.send_acknacks(&pending)
     }
 
     pub(crate) fn event_loop(&mut self, queue: Arc<Mutex<Vec<MessageType>>>) -> RtpsResult<()> {
@@ -246,8 +275,20 @@ impl SendingTask {
             // `is_terminated()` check above stays reachable on every pass.
             let messages: Vec<MessageType> = std::mem::take(&mut *lock_message_queue(&queue));
 
-            for message in messages {
+            // Replies that came due in this window are sent together: they are
+            // grouped by the participant they address and leave one datagram per
+            // participant instead of one per writer. Every other message type is
+            // handled in the order it arrived.
+            let (acknacks, others): (Vec<MessageType>, Vec<MessageType>) = messages
+                .into_iter()
+                .partition(|message| matches!(message, MessageType::UserAcknack(..)));
+
+            for message in others {
                 let _ = self.create_worker_task(message);
+            }
+
+            if !acknacks.is_empty() {
+                let _ = self.send_acknack_batch(acknacks);
             }
         }
     }
