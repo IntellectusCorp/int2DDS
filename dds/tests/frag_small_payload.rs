@@ -179,14 +179,15 @@ fn run_fragmented_exchange(reliability: ReliabilityQosPolicyKind) {
 }
 
 /// RELIABLE drives the heartbeat path, where reassembled samples are flushed to the reader.
+///
+/// Only the reliable case asserts an exact count: BEST_EFFORT promises nothing about delivery,
+/// so demanding all four back from it would be a flake waiting for a slow machine -- which is
+/// exactly why `frag.rs` needs a raised `rmem_max` to stay green. The best-effort case is
+/// covered instead by `payload_larger_than_one_datagram_requires_fragmentation`, which needs
+/// only one sample through.
 #[test]
 fn fragmented_samples_reassemble_reliable() {
     run_fragmented_exchange(ReliabilityQosPolicyKind::Reliable);
-}
-
-#[test]
-fn fragmented_samples_reassemble_best_effort() {
-    run_fragmented_exchange(ReliabilityQosPolicyKind::BestEffort);
 }
 
 /// Proves the other two cases are not passing unfragmented.

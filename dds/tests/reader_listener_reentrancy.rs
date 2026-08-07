@@ -9,7 +9,7 @@
 //!
 //! Each case runs the whole DDS session on a worker thread and bounds it with a channel, so a
 //! regression fails in seconds instead of wedging the test binary. That bound is not optional:
-//! `cargo test` has no per-test timeout, and the nextest timeout is 300s x 4 retries.
+//! `cargo test` has no per-test timeout at all, and nextest's is 300s per attempt.
 //! The failure path uses `process::exit` rather than `panic!` on purpose -- unwinding runs
 //! `Drop`, which calls `delete_contained_entities()`, which blocks on the very thread that is
 //! already stuck.

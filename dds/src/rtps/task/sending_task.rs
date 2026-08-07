@@ -15,11 +15,14 @@ use crate::rtps::transport::socket::MAX_EVENTS;
 ///
 /// Both the producer and the consumer went through `Mutex::lock`/`try_lock` directly and had
 /// no way back from a poisoned queue. `try_lock` in particular cannot tell `WouldBlock` from
-/// `Poisoned`, and poisoning is permanent, so the consumer's retry loop spun at full speed
-/// forever -- and did so *holding* the lock, because the `Err(PoisonError<MutexGuard>)`
-/// scrutinee of the `if let` stays alive through the else branch in edition 2021. The producer
-/// fared no better: its recovery path fetched the handler for the same participant GUID, which
-/// is the very handler it was called on, and re-locked a mutex the thread already held.
+/// `Poisoned`, and poisoning is permanent, so the consumer's retry loop had no exit and spun at
+/// full speed forever. (It also held the lock inside the else branch, since the
+/// `Err(PoisonError<MutexGuard>)` scrutinee lives to the end of the `if let` -- but `continue`
+/// is a scope exit, so it was re-taken and released each iteration rather than held.) The
+/// producer fared worse: its recovery path fetched the handler for the same participant GUID,
+/// which is the very handler it was called on, and re-locked a mutex the thread already held --
+/// `PoisonError` owns the guard, so the error arm never released it. That one deadlocked
+/// immediately, and the guard it leaked is what starved the consumer.
 ///
 /// Recovering is safe here. The queue is a plain `Vec` of owned messages, so a producer that
 /// unwound mid-push leaves it structurally sound and a partially-pushed message is safe to
