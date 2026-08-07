@@ -163,9 +163,18 @@ impl<'a> DataFrag<'a> {
         // }
 
         // 9.4.5.3.3 - should always use the octetsToInlineQos to skip any submessage headers it does not expect or understand
-        cursor.set_position(
-            4 + octets_to_inline_qos as u64, // extraFlags + octetsToInlineQos
-        );
+        let inline_qos_start = 4 + octets_to_inline_qos as usize; // extraFlags + octetsToInlineQos
+        if inline_qos_start > buffer.len() {
+            return Err(RtpsError::new(
+                RtpsErrorCode::InvalidSubmessageBody,
+                format!(
+                    "octetsToInlineQos {} points past the end of a {}-byte submessage",
+                    octets_to_inline_qos,
+                    buffer.len()
+                ),
+            ));
+        }
+        cursor.set_position(inline_qos_start as u64);
 
         let inline_qos = if inline_qos_flag {
             Some(
@@ -177,6 +186,16 @@ impl<'a> DataFrag<'a> {
         };
 
         let start_pos = cursor.position() as usize;
+        if start_pos > buffer.len() {
+            return Err(RtpsError::new(
+                RtpsErrorCode::InvalidSubmessageBody,
+                format!(
+                    "inline QoS ran past the end of a {}-byte submessage, to {}",
+                    buffer.len(),
+                    start_pos
+                ),
+            ));
+        }
         let serialized_data_bytes = buffer.slice(start_pos..);
 
         // 8.3.7.3.3 Validity
@@ -517,5 +536,35 @@ mod tests {
         let mut buffer = three_fragment_buffer();
         // fragment 1 allows at most fragment_size (2) bytes
         assert!(!buffer.copy_fragment_data(1, Bytes::from_static(&[1, 2, 3])));
+    }
+
+    /// `octetsToInlineQos` says where the payload begins, and it is unvalidated wire data.
+    /// Seeking to it and slicing from there lets a sender point past the end of the
+    /// submessage, which takes the listener thread down with a panic rather than rejecting
+    /// one bad datagram.
+    #[test]
+    fn payload_offset_beyond_the_submessage_is_rejected() {
+        let mut body: Vec<u8> = Vec::new();
+        body.extend_from_slice(&0u16.to_le_bytes()); // extraFlags
+        body.extend_from_slice(&0xFFFFu16.to_le_bytes()); // octetsToInlineQos, far past the end
+        body.extend_from_slice(&[0x00, 0x00, 0x01, 0x04]); // readerId
+        body.extend_from_slice(&[0x00, 0x00, 0x02, 0x03]); // writerId
+        body.extend_from_slice(&0i32.to_le_bytes()); // writerSN.high
+        body.extend_from_slice(&1u32.to_le_bytes()); // writerSN.low
+        body.extend_from_slice(&1u32.to_le_bytes()); // fragmentStartingNum
+        body.extend_from_slice(&1u16.to_le_bytes()); // fragmentsInSubmessage
+        body.extend_from_slice(&1u16.to_le_bytes()); // fragmentSize
+        body.extend_from_slice(&2u32.to_le_bytes()); // sampleSize
+        body.extend_from_slice(&[0xAA; 4]); // payload
+
+        // E=1 so the body above is read little-endian; Q=0 so no inline QoS follows.
+        let header = SubmessageHeader::new(SubmessageId::DATA_FRAG, 0x01, body.len() as u16);
+
+        let result = DataFrag::deserialize(&Bytes::from(body), &header);
+
+        assert!(
+            result.is_err(),
+            "a payload offset past the end of the submessage must be rejected"
+        );
     }
 }
