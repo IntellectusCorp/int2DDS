@@ -133,9 +133,10 @@ impl DropCounter {
     }
 }
 
-/// Why frames failed to reach the wire. Nothing upstream can act on a send
-/// failure — RTPS recovers via NACK — so these exist to make a load test
-/// answerable: which peer, which cause, how many.
+/// Why frames failed to reach the wire. A frame refused before the handoff is
+/// reported to the caller as well; a write that failed afterwards can only be
+/// counted here. Either way the count is what makes a load test answerable:
+/// which peer, which cause, how many.
 #[derive(Default)]
 pub(crate) struct SendStats {
     /// Could not take the write lock within the deadline — the previous frame
@@ -351,17 +352,17 @@ impl TcpSender {
         self: &Arc<Self>,
         addr: SocketAddr,
         logical_port: u16,
-    ) -> Option<SendHandle> {
+    ) -> io::Result<Option<SendHandle>> {
         // Control connections are established on demand by data connects; they
         // are never a direct send destination.
         if logical_port == CONTROL_LOGICAL_PORT {
-            return None;
+            return Ok(None);
         }
 
         // Never connect to our own listener (SPDP self-loop): drop without
         // creating an entry or spawning a connect.
         if self.is_self_connection(&addr) {
-            return None;
+            return Ok(None);
         }
 
         let key = (addr, logical_port);
@@ -373,15 +374,18 @@ impl TcpSender {
             self.evict_connection(addr, logical_port);
         }
 
-        if self.backoff_remaining(addr).is_some() {
+        if let Some(remaining) = self.backoff_remaining(addr) {
             self.stats.backoff.record("reconnect backoff", addr, logical_port);
-            return None;
+            return Err(transport_io_error(
+                TransportErrorCode::TcpReconnectBackoff,
+                format!("peer {:?} is in reconnect backoff for another {:?}", addr, remaining),
+            ));
         }
 
         // Create-or-get atomically so concurrent sends to a new peer start
         // exactly one background connect and all buffer into the same state.
         match self.connections.entry(key) {
-            Entry::Occupied(o) => o.get().send_handle(),
+            Entry::Occupied(o) => Ok(o.get().send_handle()),
             Entry::Vacant(v) => {
                 let write_state = init_connection_state();
                 let conn_cancel = self.peer_token(addr).child_token();
@@ -412,7 +416,7 @@ impl TcpSender {
                     write_state,
                     conn_cancel,
                 ));
-                handle
+                Ok(handle)
             }
         }
     }
@@ -571,9 +575,9 @@ impl TcpSender {
         };
         let handle = match live {
             Some(h) => h,
-            None => match self.ensure_connecting_entry(addr, logical_port) {
+            None => match self.ensure_connecting_entry(addr, logical_port)? {
                 Some(h) => h,
-                // Peer in reconnect backoff → drop this frame.
+                // Not a send target at all — nothing was meant to reach the wire.
                 None => return Ok(()),
             },
         };
@@ -583,6 +587,12 @@ impl TcpSender {
 
     /// Hand one frame to the connection, never blocking the caller for longer
     /// than the deadline.
+    ///
+    /// `Ok` means the frame was accepted: either buffered for the connect
+    /// window, or staged under the write lock and handed to a task that runs the
+    /// write to completion. `Err` means it was refused before any of that, so a
+    /// caller whose bookkeeping depends on the frame having left — a piggyback
+    /// heartbeat, for one — can tell the two apart.
     fn write_frame(
         &self,
         addr: SocketAddr,
@@ -601,7 +611,7 @@ impl TcpSender {
 
         // The lock is the only bounded wait. An expiry is clean by construction:
         // not a byte has left, so the stream stays well-formed and the frame is
-        // simply dropped.
+        // refused rather than half-written.
         let guard = self.runtime_handle.block_on(async {
             match deadline {
                 Some(d) => tokio::time::timeout(d, write_state.clone().lock_owned()).await.ok(),
@@ -612,25 +622,37 @@ impl TcpSender {
             Some(g) => g,
             None => {
                 // The miss counter only feeds congestion isolation, so it is
-                // left alone where that does not apply. The drop itself is
-                // always recorded — at `0` dropping *is* the configured mode,
+                // left alone where that does not apply. The refusal itself is
+                // always recorded — at `0` refusing *is* the configured mode,
                 // which is exactly when the counter matters most.
                 if self.congestion_isolation {
                     health.on_miss();
                 }
                 self.stats.send_deadline.record("send deadline", addr, logical_port);
-                return Ok(());
+                return Err(transport_io_error(
+                    TransportErrorCode::TcpSendDeadlineExpired,
+                    format!(
+                        "peer {:?} (port={}) still writing the previous frame",
+                        addr, logical_port
+                    ),
+                ));
             }
         };
 
         // Still connecting: buffer in order until the handshake completes. This
         // is the only path that needs an owned copy per frame.
         if let WriteState::Connecting(buf) = &mut *guard {
-            if buf.len() < CONNECT_BUFFER_DEPTH {
-                buf.push_back(data.to_vec());
-            } else {
+            if buf.len() >= CONNECT_BUFFER_DEPTH {
                 self.stats.connect_buffer_full.record("connect buffer full", addr, logical_port);
+                return Err(transport_io_error(
+                    TransportErrorCode::TcpConnectBufferFull,
+                    format!(
+                        "peer {:?} (port={}) buffered {} frames while connecting",
+                        addr, logical_port, CONNECT_BUFFER_DEPTH
+                    ),
+                ));
             }
+            buf.push_back(data.to_vec());
             return Ok(());
         }
 
@@ -1411,7 +1433,10 @@ mod tests {
         let peer: SocketAddr = "192.0.2.20:7400".parse().unwrap();
 
         assert!(
-            sender.ensure_connecting_entry(peer, CONTROL_LOGICAL_PORT).is_none(),
+            sender
+                .ensure_connecting_entry(peer, CONTROL_LOGICAL_PORT)
+                .expect("the control port is not a send target, not a send failure")
+                .is_none(),
             "control-port send must not create a connecting entry"
         );
         assert_eq!(sender.connections.len(), 0, "control-port send must not cache a connection");
@@ -1494,8 +1519,46 @@ mod tests {
         sender.shutdown().await;
     }
 
+    /// The connect window absorbs a burst, not an unbounded backlog. Once the
+    /// buffer is at depth the frame is refused, and the refusal reaches the
+    /// caller — buffering is a promise to deliver, so a frame that never made it
+    /// into the buffer must not read as one that did.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connect_buffer_full_refuses_the_frame() {
+        const PAST_DEPTH: usize = 8;
+
+        let (sender, _rx) = make_sender(0, [0xAE; 12], 7012);
+        // RFC 5737 TEST-NET-1 — the connect never completes, so the entry stays
+        // in its connect window for the whole test.
+        let unreachable: SocketAddr = "192.0.2.2:7400".parse().unwrap();
+
+        let s = Arc::clone(&sender);
+        let (buffered, refused) = tokio::task::spawn_blocking(move || {
+            let mut buffered = 0usize;
+            let mut refused = 0usize;
+            for _ in 0..CONNECT_BUFFER_DEPTH + PAST_DEPTH {
+                match s.send_to(unreachable, 7400, b"RTPS\x00\x00\x00\x00") {
+                    Ok(()) => buffered += 1,
+                    Err(e) => {
+                        assert_eq!(e.kind(), io::ErrorKind::WouldBlock);
+                        refused += 1;
+                    }
+                }
+            }
+            (buffered, refused)
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(buffered, CONNECT_BUFFER_DEPTH, "the connect window must buffer its full depth");
+        assert_eq!(refused, PAST_DEPTH, "every frame past the depth must be refused");
+        assert_eq!(sender.stats.connect_buffer_full.count(), PAST_DEPTH as u64);
+
+        sender.shutdown().await;
+    }
+
     /// A write whose write-state lock is already held times out *acquiring the
-    /// lock* and drops the frame, without ever touching the stream. Repeated
+    /// lock* and refuses the frame, without ever touching the stream. Repeated
     /// expiries congest the connection. (Recovery is covered by
     /// `conn_health_congests_at_threshold_and_recovers_with_hysteresis`.)
     #[tokio::test(flavor = "multi_thread")]
@@ -1515,8 +1578,10 @@ mod tests {
             let handle = test_handle(&write_state, &health, &CancellationToken::new());
             tokio::task::spawn_blocking(move || {
                 for _ in 0..CONGESTION_MISS_THRESHOLD {
-                    // Frame dropped on timeout; the call still returns Ok.
-                    s.write_frame(addr, 7400, &handle, b"x").unwrap();
+                    let err = s
+                        .write_frame(addr, 7400, &handle, b"x")
+                        .expect_err("a frame refused at the lock must be reported to the caller");
+                    assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
                 }
             })
             .await
@@ -1587,7 +1652,8 @@ mod tests {
             let handle = test_handle(&write_state, &health, &CancellationToken::new());
             tokio::task::spawn_blocking(move || {
                 for _ in 0..SENDS {
-                    s.write_frame(addr, 7400, &handle, b"x").unwrap();
+                    s.write_frame(addr, 7400, &handle, b"x")
+                        .expect_err("a held lock must refuse the frame");
                 }
             })
             .await
@@ -1675,7 +1741,9 @@ mod tests {
             let payload = vec![0xEE; FRAME];
             let deadline = Instant::now() + Duration::from_secs(20);
             while Instant::now() < deadline && !c.is_cancelled() {
-                s.write_frame(peer_addr, 7400, &handle, &payload).unwrap();
+                // Refusals at the lock are expected while the wire is stalled;
+                // what is under test is the write task's own failure.
+                let _ = s.write_frame(peer_addr, 7400, &handle, &payload);
                 std::thread::sleep(Duration::from_millis(50));
             }
         })
@@ -1745,7 +1813,7 @@ mod tests {
         tokio::task::spawn_blocking(move || {
             let payload = vec![0xEE; FRAME];
             for _ in 0..64 {
-                s.write_frame(peer_addr, 7400, &handle, &payload).unwrap();
+                let _ = s.write_frame(peer_addr, 7400, &handle, &payload);
             }
             // The lock is held by the stalled write; anything else times out.
             assert!(ws.try_lock().is_err(), "expected a write to be stuck holding the lock");
@@ -1817,7 +1885,7 @@ mod tests {
             let mut worst = Duration::ZERO;
             for _ in 0..FRAMES {
                 let t = Instant::now();
-                s.write_frame(peer_addr, 7400, &handle, &payload).unwrap();
+                let _ = s.write_frame(peer_addr, 7400, &handle, &payload);
                 worst = worst.max(t.elapsed());
             }
             worst
@@ -2241,6 +2309,14 @@ mod tests {
             "a failed connect must arm the backoff, or the next send retries immediately",
         );
 
+        // A send inside the backoff window never reaches the wire, and the
+        // caller has to be able to tell — a reliable writer settles its
+        // heartbeat bookkeeping on this answer.
+        let err = blocking_send_discovery(&sender, refused, b"RTPS\x11\x11\x11\x11")
+            .await
+            .expect_err("a send deferred by backoff must be reported to the caller");
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+
         sender.shutdown().await;
     }
 
@@ -2337,7 +2413,7 @@ mod tests {
                 if cancel.is_cancelled() {
                     return true;
                 }
-                s.write_frame(peer_addr, 7400, &handle, b"RTPS\x00\x00\x00\x00").unwrap();
+                let _ = s.write_frame(peer_addr, 7400, &handle, b"RTPS\x00\x00\x00\x00");
                 std::thread::sleep(Duration::from_millis(20));
             }
             cancel.is_cancelled()
