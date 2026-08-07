@@ -37,7 +37,7 @@ use crate::rtps::logic::common::{
 };
 use crate::rtps::logic::message_processor::unicast_message_processor::UnicastMessageProcessor;
 use crate::rtps::messages::header::Header;
-use crate::rtps::messages::message_creator::MessageCreator;
+use crate::rtps::messages::message_creator::{AckNackRequest, MessageCreator};
 use crate::rtps::messages::submessage_header::SubmessageHeader;
 use crate::rtps::messages::submessages::ack_nack::AckNack;
 use crate::rtps::messages::submessages::data::Data;
@@ -1228,62 +1228,88 @@ impl UserLogic {
     }
 }
 
+/// A reply the sending task has been asked to make, before it is worked out.
+///
+/// A heartbeat schedules one of these on a `heartbeat_response_delay` timer rather than
+/// replying inline, so the ones that come due together can leave together.
+#[derive(Clone, Copy)]
+pub(crate) struct PendingAckNack {
+    pub(crate) reader_id: EntityId,
+    pub(crate) remote_writer_guid: Guid,
+    pub(crate) final_flag: bool,
+    pub(crate) is_preemptive: bool,
+}
+
 // Reader ACKNACK Sending (Local Reader -> Remote Writer)
 impl UserLogic {
-    pub(crate) fn send_acknack(
-        &self,
-        reader_id: EntityId,
-        remote_writer_guid: Guid,
-        final_flag: bool,
-    ) -> RtpsResult<()> {
+    /// Send the queued ACKNACKs, one message per remote participant.
+    ///
+    /// The sending task drains its whole queue at once, so replies that came due in the
+    /// same window arrive here together. INFO_DST names a participant, so all the
+    /// replies addressed to one participant leave in a single datagram - the return path
+    /// of the batched DATA message that triggered them.
+    pub(crate) fn send_acknacks(&self, pending: &[PendingAckNack]) -> RtpsResult<()> {
+        // (destination prefix, locators) -> replies sharing one message
+        let mut groups: Vec<((GuidPrefix, Vec<Locator>), Vec<AckNackRequest>)> = Vec::new();
+
+        for reply in pending {
+            match self.prepare_acknack(reply) {
+                // Preparing a reply bumps the proxy's acknack count, so a prepared reply
+                // has to go out - it is grouped, never dropped.
+                Ok(Some((request, locators))) => {
+                    let key = (reply.remote_writer_guid.prefix(), locators);
+                    match groups.iter_mut().find(|(existing, _)| *existing == key) {
+                        Some((_, requests)) => requests.push(request),
+                        None => groups.push((key, vec![request])),
+                    }
+                }
+                Ok(None) => {}
+                // One writer going away must not silence the replies owed to the others.
+                Err(e) => {
+                    debug!("[AckNack] Skipping reply to {}: {:?}", reply.remote_writer_guid, e)
+                }
+            }
+        }
+
+        if groups.is_empty() {
+            return Ok(());
+        }
+
         let participant = self.get_upgraded_participant()?;
 
-        let reader = participant
-            .find_reader_from_entity_id(reader_id)
-            .ok_or_else(|| RtpsError::new(RtpsErrorCode::RtpsEntityNotFound, None))?;
-        let stateful_reader = reader
-            .as_any()
-            .downcast_ref::<StatefulReader>()
-            .ok_or_else(|| RtpsError::new(RtpsErrorCode::DowncastError, "Not a StatefulReader"))?;
-        let writer_proxies = stateful_reader.writer_proxies();
-        let mut writer_proxies_guard = writer_proxies.lock().map_err(|e| {
-            RtpsError::new(
-                RtpsErrorCode::LockError,
-                format!("Failed to acquire writer_proxies lock: {}", e),
-            )
-        })?;
-        let writer_proxy = writer_proxies_guard
-            .iter_mut()
-            .find(|wp| wp.remote_writer_guid() == remote_writer_guid)
-            .ok_or_else(|| {
-                RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, "WriterProxy not found")
+        for ((dst_prefix, locators), requests) in groups {
+            let buffer =
+                MessageCreator::create_acknack_msg_multi(participant.guid(), dst_prefix, &requests)
+                    .map_err(|e| {
+                        RtpsError::new(
+                            RtpsErrorCode::SerializationError,
+                            format!("Failed to create ACKNACK message: {}", e),
+                        )
+                    })?;
+
+            self.send_rtps_message_to_locators(locators.iter(), &buffer).map_err(|e| {
+                RtpsError::new(
+                    RtpsErrorCode::SerializationError,
+                    format!("Failed to send ACKNACK message: {}", e),
+                )
             })?;
-
-        let bitmap_base = writer_proxy.calculate_bitmap_base();
-        let last_sn = writer_proxy.changes_from_writer_max();
-        let missing_changes = writer_proxy.missing_changes_for_heartbeat(bitmap_base, last_sn);
-
-        self.send_acknack_to_writer_proxy_inner(
-            writer_proxy,
-            stateful_reader,
-            missing_changes,
-            bitmap_base,
-            final_flag,
-            false,
-        )?;
+        }
 
         Ok(())
     }
 
-    pub(crate) fn send_preemptive_acknack(
+    /// Work out the reply owed to one writer, or `None` if none is owed.
+    ///
+    /// Kept apart from the send so several replies can share a datagram. It bumps the
+    /// proxy's acknack count, so whatever it returns must reach the wire.
+    fn prepare_acknack(
         &self,
-        reader_id: EntityId,
-        remote_writer_guid: Guid,
-    ) -> RtpsResult<()> {
+        reply: &PendingAckNack,
+    ) -> RtpsResult<Option<(AckNackRequest, Vec<Locator>)>> {
         let participant = self.get_upgraded_participant()?;
 
         let reader = participant
-            .find_reader_from_entity_id(reader_id)
+            .find_reader_from_entity_id(reply.reader_id)
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::RtpsEntityNotFound, None))?;
         let stateful_reader = reader
             .as_any()
@@ -1298,23 +1324,42 @@ impl UserLogic {
         })?;
         let writer_proxy = writer_proxies_guard
             .iter_mut()
-            .find(|wp| wp.remote_writer_guid() == remote_writer_guid)
+            .find(|wp| wp.remote_writer_guid() == reply.remote_writer_guid)
             .ok_or_else(|| {
                 RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, "WriterProxy not found")
             })?;
 
-        if writer_proxy.expected_sn() == SequenceNumber::UNKNOWN {
-            self.send_acknack_to_writer_proxy_inner(
-                writer_proxy,
-                stateful_reader,
-                vec![],
-                SequenceNumber::from_i64(0),
-                false,
-                true,
-            )?;
+        let (missing_changes, bitmap_base) = if reply.is_preemptive {
+            // A preemptive ACKNACK only asks a writer that has told this reader nothing
+            // yet to start talking; once it has, there is nothing to send.
+            if writer_proxy.expected_sn() != SequenceNumber::UNKNOWN {
+                return Ok(None);
+            }
+            (Vec::new(), SequenceNumber::from_i64(0))
+        } else {
+            let bitmap_base = writer_proxy.calculate_bitmap_base();
+            let last_sn = writer_proxy.changes_from_writer_max();
+            (writer_proxy.missing_changes_for_heartbeat(bitmap_base, last_sn), bitmap_base)
+        };
+
+        if missing_changes.is_empty() && reply.final_flag && !reply.is_preemptive {
+            debug!("Skip ACKNACK because no missing changes, final flag set, not preemptive");
+            return Ok(None);
         }
 
-        Ok(())
+        writer_proxy.increase_acknack_count();
+
+        Ok(Some((
+            AckNackRequest {
+                reader_entity_id: stateful_reader.guid().entity_id(),
+                writer_entity_id: writer_proxy.remote_writer_guid().entity_id(),
+                missing_changes,
+                acknack_count: writer_proxy.acknack_count(),
+                bitmap_base,
+                is_preemptive: reply.is_preemptive,
+            },
+            writer_proxy.unicast_locator_list().to_vec(),
+        )))
     }
 
     fn send_acknack_to_writer_proxy_inner(
