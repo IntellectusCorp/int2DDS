@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::ops::Add;
 use std::time::{Duration, Instant};
 
+use crate::common::builtin::topic::subscription_builtin_topic_data::SubscriptionBuiltinTopicData;
 use crate::common::instance_handle::InstanceHandle;
 use crate::rtps::common::count_filter::should_accept_count;
 use crate::rtps::common::entity_id::EntityId;
@@ -37,7 +38,8 @@ use crate::rtps::logic::common::{
 };
 use crate::rtps::logic::message_processor::unicast_message_processor::UnicastMessageProcessor;
 use crate::rtps::logic::multicast_eligibility::{
-    group_targets_by_multicast, sample_allows_multicast, MulticastSendType,
+    group_can_carry_change, group_start_sequence_number, group_targets_by_multicast,
+    sample_allows_multicast, MulticastSendType,
 };
 use crate::rtps::messages::header::Header;
 use crate::rtps::messages::message_creator::MessageCreator;
@@ -423,6 +425,129 @@ impl UserLogic {
     ) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
 
+        struct GroupCandidate {
+            reader_guid: Guid,
+            subscription: SubscriptionBuiltinTopicData,
+            has_content_filter: bool,
+            // Where this Reader stands, using the same start the single-reader path derives.
+            start_sn: SequenceNumber,
+        }
+
+        let candidates: Vec<GroupCandidate> = {
+            let reader_proxies_lock = writer.reader_proxies();
+            let reader_proxies = reader_proxies_lock.lock().map_err(|_| {
+                RtpsError::new(
+                    RtpsErrorCode::LockError,
+                    "[Data] Failed to acquire reader proxies lock",
+                )
+            })?;
+            reader_proxies
+                .iter()
+                .map(|rp| GroupCandidate {
+                    reader_guid: rp.remote_reader_guid(),
+                    subscription: rp.subscription_builtin_topic_data().clone(),
+                    // TODO: content filtering is not implemented.
+                    has_content_filter: rp.generate_content_filter_info().is_some(),
+                    start_sn: std::cmp::max(rp.highest_sent_change_sn(), rp.last_irrelevant_sn()),
+                })
+                .collect()
+        };
+
+        let grouping = group_targets_by_multicast(
+            candidates.iter().enumerate().map(|(index, candidate)| {
+                (index, &candidate.subscription, candidate.has_content_filter)
+            }),
+            |group| self.transport.can_handle(group),
+        );
+
+        let mut send_buffer = participant
+            .wire_buffer_pool()
+            .lock()
+            .map_err(|_| {
+                RtpsError::new(RtpsErrorCode::LockError, "Failed to lock wire buffer pool")
+            })?
+            .acquire();
+
+        // Readers whose DATA reached the wire.
+        let mut readers_with_sent_data: Vec<Guid> = Vec::new();
+
+        // Readers reachable on a group locator: one datagram serves the whole group.
+        for group in &grouping.multicast_groups {
+            let member_guids: Vec<Guid> =
+                group.reader_list.iter().map(|&index| candidates[index].reader_guid).collect();
+            let group_start = group_start_sequence_number(
+                group.reader_list.iter().map(|&index| candidates[index].start_sn),
+            );
+
+            readers_with_sent_data.extend(self.send_unsent_changes_to_reader_proxy_group(
+                writer,
+                history_cache,
+                &group.locator,
+                &member_guids,
+                group_start,
+                &mut send_buffer,
+            )?);
+        }
+
+        // Readers with no usable group: one send per unicast locator.
+        for &index in &grouping.unicast_only_reader_list {
+            let reader_guid = candidates[index].reader_guid;
+            if self.send_unsent_changes_to_reader_proxy(
+                writer,
+                history_cache,
+                &participant,
+                reader_guid,
+                None,
+                &mut send_buffer,
+            )? {
+                readers_with_sent_data.push(reader_guid);
+            }
+        }
+
+        participant
+            .wire_buffer_pool()
+            .lock()
+            .map_err(|_| {
+                RtpsError::new(RtpsErrorCode::LockError, "Failed to lock wire buffer pool")
+            })?
+            .release(send_buffer);
+
+        if !readers_with_sent_data.is_empty() {
+            let reader_proxies_lock = writer.reader_proxies();
+            let mut reader_proxies = reader_proxies_lock.lock().map_err(|_| {
+                RtpsError::new(
+                    RtpsErrorCode::LockError,
+                    "[Data] Failed to acquire reader proxies lock",
+                )
+            })?;
+
+            for reader_proxy in reader_proxies.iter_mut() {
+                if !reader_proxy.is_first_hb_sent()
+                    && readers_with_sent_data.contains(&reader_proxy.remote_reader_guid())
+                {
+                    reader_proxy.set_first_hb_sent();
+                }
+            }
+        }
+
+        // Periodic heartbeat timer resuming when new changes are sent
+        if !writer.heartbeat_timer_running() {
+            writer.register_periodic_heartbeat_timer();
+        }
+
+        Ok(())
+    }
+
+    /// Send one ReaderProxy's unsent changes, stopping after `upper_bound` when given.
+    fn send_unsent_changes_to_reader_proxy(
+        &self,
+        writer: &StatefulWriter,
+        history_cache: &WriterHistoryCache,
+        participant: &Participant,
+        reader_guid: Guid,
+        upper_bound: Option<SequenceNumber>,
+        send_buffer: &mut Vec<u8>,
+    ) -> RtpsResult<bool> {
         enum UnsentChangeType {
             Gap(SequenceNumber, SequenceNumber),
             Data(SequenceNumber),
@@ -443,29 +568,7 @@ impl UserLogic {
         let first_sn = history_cache.get_seq_num_min();
         let last_sn = history_cache.get_seq_num_max();
 
-        let reader_guids: Vec<Guid> = {
-            let reader_proxies_lock = writer.reader_proxies();
-            let reader_proxies = reader_proxies_lock.lock().map_err(|_| {
-                RtpsError::new(
-                    RtpsErrorCode::LockError,
-                    "[Data] Failed to acquire reader proxies lock",
-                )
-            })?;
-            reader_proxies.iter().map(|rp| rp.remote_reader_guid()).collect()
-        };
-
-        let mut send_buffer = participant
-            .wire_buffer_pool()
-            .lock()
-            .map_err(|_| {
-                RtpsError::new(RtpsErrorCode::LockError, "Failed to lock wire buffer pool")
-            })?
-            .acquire();
-
-        // Readers whose DATA reached the wire.
-        let mut readers_with_sent_data: Vec<Guid> = Vec::new();
-
-        for reader_guid in reader_guids {
+        {
             let plan = {
                 let reader_proxies_lock = writer.reader_proxies();
                 let mut reader_proxies = reader_proxies_lock.lock().map_err(|_| {
@@ -478,7 +581,7 @@ impl UserLogic {
                 let Some(reader_proxy) =
                     reader_proxies.iter_mut().find(|rp| rp.remote_reader_guid() == reader_guid)
                 else {
-                    continue;
+                    return Ok(false);
                 };
 
                 let reliable = reader_proxy.is_reliable();
@@ -488,6 +591,10 @@ impl UserLogic {
                 loop {
                     let a_change_seq_num = reader_proxy.next_unsent_change(history_cache);
                     if a_change_seq_num == SequenceNumber::UNKNOWN {
+                        break;
+                    }
+
+                    if upper_bound.is_some_and(|bound| a_change_seq_num > bound) {
                         break;
                     }
 
@@ -539,7 +646,7 @@ impl UserLogic {
             };
 
             if plan.unsent_change_types.is_empty() {
-                continue;
+                return Ok(false);
             }
 
             // Serialize and send each message outside reader_proxies.
@@ -624,15 +731,12 @@ impl UserLogic {
                                     fragment_data,
                                     heartbeat_info,
                                     timestamp,
-                                    &mut send_buffer,
+                                    send_buffer,
                                 )
                                 .is_ok()
                                 {
                                     if self
-                                        .send_rtps_message_to_locators(
-                                            locators.iter(),
-                                            &send_buffer,
-                                        )
+                                        .send_rtps_message_to_locators(locators.iter(), send_buffer)
                                         .is_ok()
                                     {
                                         data_sent = true;
@@ -657,12 +761,12 @@ impl UserLogic {
                                 heartbeat_info,
                                 true, // Use inline QoS (default)
                                 content_filter.clone(),
-                                &mut send_buffer,
+                                send_buffer,
                             )
                             .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
 
                             if self
-                                .send_rtps_message_to_locators(locators.iter(), &send_buffer)
+                                .send_rtps_message_to_locators(locators.iter(), send_buffer)
                                 .is_ok()
                             {
                                 data_sent = true;
@@ -675,20 +779,125 @@ impl UserLogic {
                 }
             }
 
-            if data_sent && piggyback {
-                readers_with_sent_data.push(reader_guid);
+            Ok(data_sent && piggyback)
+        }
+    }
+
+    /// Serve one multicast group: a single datagram per eligible sample, and unicast for
+    /// everything the group cannot carry.
+    fn send_unsent_changes_to_reader_proxy_group(
+        &self,
+        writer: &StatefulWriter,
+        history_cache: &WriterHistoryCache,
+        group_locator: &Locator,
+        member_guids: &[Guid],
+        group_start: SequenceNumber,
+        send_buffer: &mut Vec<u8>,
+    ) -> RtpsResult<Vec<Guid>> {
+        let participant = self.get_upgraded_participant()?;
+        let mut readers_with_sent_data: Vec<Guid> = Vec::new();
+
+        // A member that joined behind the group is filled over unicast first, so the group
+        // send can start from a single sequence number.
+        for &member_guid in member_guids {
+            if self.send_unsent_changes_to_reader_proxy(
+                writer,
+                history_cache,
+                &participant,
+                member_guid,
+                Some(group_start),
+                send_buffer,
+            )? {
+                readers_with_sent_data.push(member_guid);
             }
         }
 
-        participant
-            .wire_buffer_pool()
-            .lock()
-            .map_err(|_| {
-                RtpsError::new(RtpsErrorCode::LockError, "Failed to lock wire buffer pool")
-            })?
-            .release(send_buffer);
+        let mut group_sent_sn = group_start;
+        while let Some(change) = history_cache.next_change_after(group_sent_sn) {
+            let change_sn = change.sequence_number();
 
-        if !readers_with_sent_data.is_empty() {
+            if !group_can_carry_change(&change, group_sent_sn) {
+                // Per-Reader state decides here: the hole below the change needs a GAP, and a
+                // coherent set may turn the change itself into one. The single-Reader path
+                // already owns both rules, so it is handed the change instead of the group.
+                self.advance_group_highest_sent_change_sn(writer, member_guids, group_sent_sn)?;
+
+                for &member_guid in member_guids {
+                    if self.send_unsent_changes_to_reader_proxy(
+                        writer,
+                        history_cache,
+                        &participant,
+                        member_guid,
+                        Some(change_sn),
+                        send_buffer,
+                    )? {
+                        readers_with_sent_data.push(member_guid);
+                    }
+                }
+
+                group_sent_sn = change_sn;
+                continue;
+            }
+
+            match MessageCreator::create_data_msg_multicast(
+                &change,
+                writer.endpoint_id(),
+                true, // Use inline QoS (default)
+                send_buffer,
+            ) {
+                Ok(()) => {
+                    if let Err(e) = self.send_rtps_message_to_locators(
+                        std::slice::from_ref(group_locator),
+                        send_buffer,
+                    ) {
+                        warn!("[Data] Failed to send multicast DATA message: {:?}", e);
+                    }
+                }
+                Err(e) => warn!("[Data] Failed to create multicast DATA message: {}", e),
+            }
+
+            group_sent_sn = change_sn;
+        }
+
+        self.advance_group_highest_sent_change_sn(writer, member_guids, group_sent_sn)?;
+
+        if group_sent_sn > group_start {
+            self.send_group_heartbeats(writer, history_cache, member_guids)?;
+        }
+
+        Ok(readers_with_sent_data)
+    }
+
+    fn advance_group_highest_sent_change_sn(
+        &self,
+        writer: &StatefulWriter,
+        member_guids: &[Guid],
+        sent_sn: SequenceNumber,
+    ) -> RtpsResult<()> {
+        let reader_proxies_lock = writer.reader_proxies();
+        let mut reader_proxies = reader_proxies_lock.lock().map_err(|_| {
+            RtpsError::new(RtpsErrorCode::LockError, "[Data] Failed to acquire reader proxies lock")
+        })?;
+
+        for reader_proxy in
+            reader_proxies.iter_mut().filter(|rp| member_guids.contains(&rp.remote_reader_guid()))
+        {
+            if reader_proxy.highest_sent_change_sn() < sent_sn {
+                reader_proxy.set_highest_sent_change_sn(sent_sn);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn send_group_heartbeats(
+        &self,
+        writer: &StatefulWriter,
+        history_cache: &WriterHistoryCache,
+        member_guids: &[Guid],
+    ) -> RtpsResult<()> {
+        // Built under the lock but sent outside it, so no send runs while reader_proxies is held.
+        let heartbeats: Vec<(Vec<Locator>, Arc<Vec<u8>>)> = {
             let reader_proxies_lock = writer.reader_proxies();
             let mut reader_proxies = reader_proxies_lock.lock().map_err(|_| {
                 RtpsError::new(
@@ -697,18 +906,45 @@ impl UserLogic {
                 )
             })?;
 
-            for reader_proxy in reader_proxies.iter_mut() {
-                if !reader_proxy.is_first_hb_sent()
-                    && readers_with_sent_data.contains(&reader_proxy.remote_reader_guid())
-                {
+            let highest_sn = history_cache.highest_sn();
+            let first_sn = history_cache.get_seq_num_min().unwrap_or(highest_sn + 1);
+            let last_sn = history_cache.get_seq_num_max().unwrap_or(highest_sn);
+
+            let mut heartbeats = Vec::new();
+            for reader_proxy in reader_proxies
+                .iter_mut()
+                .filter(|rp| rp.is_reliable() && member_guids.contains(&rp.remote_reader_guid()))
+            {
+                let Ok(buffer) = MessageCreator::create_heartbeat_message(
+                    writer.guid().prefix(),
+                    reader_proxy.remote_reader_guid().prefix(),
+                    writer.heartbeat_count(),
+                    reader_proxy.remote_group_entity_id(),
+                    writer.endpoint_id(),
+                    first_sn,
+                    last_sn,
+                    false,
+                    false,
+                ) else {
+                    warn!("[Data] Failed to build HEARTBEAT for a multicast group member");
+                    continue;
+                };
+
+                writer.increase_heartbeat_count();
+                if !reader_proxy.is_first_hb_sent() {
                     reader_proxy.set_first_hb_sent();
                 }
-            }
-        }
 
-        // Periodic heartbeat timer resuming when new changes are sent
-        if !writer.heartbeat_timer_running() {
-            writer.register_periodic_heartbeat_timer();
+                heartbeats.push((reader_proxy.unicast_locator_list().to_vec(), buffer));
+            }
+
+            heartbeats
+        };
+
+        for (locators, buffer) in heartbeats {
+            if let Err(e) = self.send_rtps_message_to_locators(locators.iter(), &buffer) {
+                warn!("[Data] Failed to send HEARTBEAT to a multicast group member: {:?}", e);
+            }
         }
 
         Ok(())

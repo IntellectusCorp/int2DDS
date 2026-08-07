@@ -4,7 +4,10 @@ use log::{debug, trace};
 
 use crate::{
     common::builtin::topic::subscription_builtin_topic_data::SubscriptionBuiltinTopicData,
-    rtps::{common::locator::Locator, entities::history::cache_change::CacheChange},
+    rtps::{
+        common::{locator::Locator, sequence::SequenceNumber},
+        entities::history::cache_change::CacheChange,
+    },
 };
 
 /// Whether a matched remote Reader can be served over multicast.
@@ -109,6 +112,30 @@ where
     MulticastGrouping { multicast_groups: groups, unicast_only_reader_list: unicast_only }
 }
 
+pub(crate) fn group_start_sequence_number(
+    member_starts: impl IntoIterator<Item = SequenceNumber>,
+) -> SequenceNumber {
+    member_starts.into_iter().max().unwrap_or(SequenceNumber::UNKNOWN)
+}
+
+/// Whether one datagram can serve the whole group for this change.
+pub(crate) fn group_can_carry_change(change: &CacheChange, group_sent_sn: SequenceNumber) -> bool {
+    // A hole means changes in between were skipped without the group recording them as sent.
+    let follows_a_hole =
+        group_sent_sn != SequenceNumber::UNKNOWN && change.sequence_number() > group_sent_sn + 1;
+
+    if follows_a_hole {
+        trace!(
+            "[Multicast] SN {} not eligible: sits above a hole left by SN {}",
+            change.sequence_number(),
+            group_sent_sn + 1
+        );
+        return false;
+    }
+
+    sample_allows_multicast(change, MulticastSendType::FirstSample)
+}
+
 pub(crate) enum MulticastSendType {
     FirstSample,
     ReSendSample,
@@ -189,14 +216,22 @@ mod tests {
     }
 
     fn plain_change() -> CacheChange {
+        change_with_sn(1)
+    }
+
+    fn change_with_sn(sn: i64) -> CacheChange {
         CacheChange::new(
             ChangeKind::Alive,
             writer_guid(),
             InstanceHandle::default(),
-            SequenceNumber::from_i64(1),
+            SequenceNumber::from_i64(sn),
             vec![0; 16],
             None,
         )
+    }
+
+    fn sn(value: i64) -> SequenceNumber {
+        SequenceNumber::from_i64(value)
     }
 
     #[test]
@@ -390,5 +425,54 @@ mod tests {
 
         assert!(sample_allows_multicast(&change, MulticastSendType::FirstSample));
         assert!(!sample_allows_multicast(&change, MulticastSendType::ReSendSample));
+    }
+
+    #[test]
+    fn group_with_no_member_starts_from_unknown() {
+        assert_eq!(group_start_sequence_number([]), SequenceNumber::UNKNOWN);
+    }
+
+    #[test]
+    fn group_starts_from_the_furthest_served_member() {
+        assert_eq!(group_start_sequence_number([sn(3), sn(7), sn(5)]), sn(7));
+    }
+
+    #[test]
+    fn a_member_that_was_never_served_does_not_pull_the_group_start_down() {
+        assert_eq!(group_start_sequence_number([SequenceNumber::UNKNOWN, sn(4)]), sn(4));
+    }
+
+    #[test]
+    fn group_carries_the_change_right_above_where_it_stands() {
+        assert!(group_can_carry_change(&change_with_sn(5), sn(4)));
+    }
+
+    #[test]
+    fn group_refuses_a_change_that_sits_above_a_hole() {
+        assert!(!group_can_carry_change(&change_with_sn(7), sn(4)));
+    }
+
+    #[test]
+    fn a_group_that_never_sent_reads_no_hole_below_its_first_change() {
+        assert!(group_can_carry_change(&change_with_sn(9), SequenceNumber::UNKNOWN));
+    }
+
+    #[test]
+    fn group_refuses_a_fragmented_change_it_stands_right_below() {
+        let mut change = change_with_sn(5);
+        change.apply_fragmentation(4);
+
+        assert!(!group_can_carry_change(&change, sn(4)));
+    }
+
+    #[test]
+    fn group_refuses_a_coherent_set_member_it_stands_right_below() {
+        let mut change = change_with_sn(5);
+        change.set_presentation_info(PresentationInfo {
+            coherent_set: Some(SequenceNumber::from_i64(5)),
+            ..Default::default()
+        });
+
+        assert!(!group_can_carry_change(&change, sn(4)));
     }
 }
