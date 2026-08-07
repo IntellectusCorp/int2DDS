@@ -282,6 +282,118 @@ impl MessageCreator {
         Ok(())
     }
 
+    pub(crate) fn create_data_msg_multicast(
+        cache_change: &CacheChange,
+        writer_entity_id: EntityId,
+        use_inline_qos: bool,
+        send_buffer: &mut Vec<u8>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        debug!("Creating RTPS message from cache change: {}", cache_change);
+
+        let mut rtps_message = RtpsMessage::new(Header::new(cache_change.writer_guid().prefix()));
+
+        // No INFO_DST: a group datagram has no single destination Participant, and every
+        // receiver in the group would drop a message addressed to someone else.
+        let timestamp = Utc::now();
+        rtps_message.add_submessage(SubmessageCreator::create_info_ts_submessage(timestamp));
+
+        let mut data_header_flag = SubmessageHeaderFlag::new();
+        data_header_flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::DATA);
+        match cache_change.kind() {
+            ChangeKind::Alive | ChangeKind::AliveFiltered => {
+                // Payload-less Alive changes (coherent set end markers) carry no DataFlag.
+                if !cache_change.data_value().is_empty() {
+                    data_header_flag.add_flag(SubmessageFlagType::DataFlag, SubmessageId::DATA);
+                }
+            }
+            ChangeKind::NotAliveDisposed
+            | ChangeKind::NotAliveUnregistered
+            | ChangeKind::NotAliveDisposedUnregistered => {
+                if !cache_change.data_value().is_empty() {
+                    data_header_flag.add_flag(SubmessageFlagType::KeyFlag, SubmessageId::DATA);
+                }
+            }
+        }
+
+        let mut data =
+            Data::new(EntityId::UNKNOWN, writer_entity_id, cache_change.sequence_number());
+
+        // Add inline QoS parameters if enabled
+        if use_inline_qos {
+            let mut param_list = ParameterList::default();
+            if !cache_change.instance_handle().is_nil() {
+                param_list.add_parameter(Self::create_key_hash_parameter(
+                    cache_change.instance_handle().value(),
+                ));
+            }
+
+            let mut flags = 0;
+            match cache_change.kind() {
+                ChangeKind::Alive => {}
+                ChangeKind::AliveFiltered => {}
+                ChangeKind::NotAliveDisposed => {
+                    flags |= StatusInfo::DISPOSED;
+                    let status_info_bytes = flags.to_be_bytes();
+                    param_list
+                        .add_parameter(Self::create_status_info_parameter(&status_info_bytes));
+                }
+                ChangeKind::NotAliveUnregistered => {
+                    flags |= StatusInfo::UNREGISTERED;
+                    let status_info_bytes = flags.to_be_bytes();
+                    param_list
+                        .add_parameter(Self::create_status_info_parameter(&status_info_bytes));
+                }
+                ChangeKind::NotAliveDisposedUnregistered => {
+                    flags |= StatusInfo::DISPOSED;
+                    flags |= StatusInfo::UNREGISTERED;
+                    let status_info_bytes = flags.to_be_bytes();
+                    param_list
+                        .add_parameter(Self::create_status_info_parameter(&status_info_bytes));
+                }
+            }
+
+            // No ContentFilterInfo: one datagram is shared by readers whose filters differ,
+            // so a filtered sample is sent unicast instead.
+
+            // Attach per-sample coherent/group presentation metadata.
+            let inline = cache_change.presentation_info();
+            if let Some(sn) = inline.coherent_set {
+                param_list.set_coherent_set(sn);
+            }
+            if let Some(sn) = inline.group_seq_num {
+                param_list.set_group_seq_num(sn);
+            }
+            if let Some(sn) = inline.group_coherent_set {
+                param_list.set_group_coherent_set(sn);
+            }
+
+            if !param_list.parameters().is_empty() {
+                data_header_flag.add_flag(SubmessageFlagType::InlineQosFlag, SubmessageId::DATA);
+                data.set_inline_qos_list(param_list);
+            }
+        }
+
+        data.add_serialized_data(SubmessagePayload::Borrowed(cache_change.data_value()));
+        let data_submessage = Submessage {
+            header: SubmessageHeader::new(
+                SubmessageId::DATA,
+                data_header_flag.flag,
+                data.octets_to_next_header(),
+            ),
+            body: SubmessageBody::Data(data),
+        };
+
+        rtps_message.add_submessage(data_submessage);
+
+        // No HEARTBEAT: a single group heartbeat would draw an ACKNACK from every reader at once.
+
+        // Serialize directly into the reusable Vec via its `Write` impl.
+        // Avoids the `bytes_needed` pre-pass and the zero-fill from `resize(_, 0)`.
+        send_buffer.clear();
+        rtps_message.write_to_stream_with_ctx(Endianness::LittleEndian, &mut *send_buffer)?;
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn create_data_frag_msg(
         cache_change: &CacheChange,
