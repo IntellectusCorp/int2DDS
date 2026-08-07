@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
-use crate::common::profile;
 use crate::rtps::{
     common::locator::MULTICAST_IP,
     transport::{port_manager::PortManager, UdpConfig},
@@ -11,33 +10,7 @@ use socket2::{Domain, Protocol, SockAddr, Socket as Socket2, Type};
 use std::env;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Mutex,
-};
-
-static UDP_PROFILE_COUNT: AtomicU64 = AtomicU64::new(0);
-static UDP_PROFILE_LOCK_US: AtomicU64 = AtomicU64::new(0);
-static UDP_PROFILE_SENDTO_US: AtomicU64 = AtomicU64::new(0);
-static UDP_PROFILE_TOTAL_US: AtomicU64 = AtomicU64::new(0);
-
-fn record_udp_send_profile(lock_us: u64, sendto_us: u64, total_us: u64) {
-    let n = UDP_PROFILE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    UDP_PROFILE_LOCK_US.fetch_add(lock_us, Ordering::Relaxed);
-    UDP_PROFILE_SENDTO_US.fetch_add(sendto_us, Ordering::Relaxed);
-    UDP_PROFILE_TOTAL_US.fetch_add(total_us, Ordering::Relaxed);
-
-    if n % 4096 == 0 {
-        let divisor = n as f64;
-        eprintln!(
-            "INT2DDS_UDP_PROFILE count={} total_avg_us={:.3} lock_avg_us={:.3} sendto_avg_us={:.3}",
-            n,
-            UDP_PROFILE_TOTAL_US.load(Ordering::Relaxed) as f64 / divisor,
-            UDP_PROFILE_LOCK_US.load(Ordering::Relaxed) as f64 / divisor,
-            UDP_PROFILE_SENDTO_US.load(Ordering::Relaxed) as f64 / divisor,
-        );
-    }
-}
+use std::sync::Mutex;
 
 #[derive(Debug)]
 pub(crate) struct UdpSender {
@@ -98,24 +71,12 @@ impl UdpSender {
     }
 
     pub(crate) fn send(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
-        let profile = profile::enabled();
-        let total_t0 = profile::now_if(profile);
-        let lock_t0 = profile::now_if(profile);
         let guard = self.socket.lock().map_err(|_| io::Error::other("Mutex poisoned"))?;
-        let lock_us = profile::elapsed_us(lock_t0);
         let socket = guard
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "Socket is closed"))?;
         let sock_addr = SockAddr::from(*addr);
-        let sendto_t0 = profile::now_if(profile);
         let result = socket.send_to(data, &sock_addr);
-        if profile {
-            record_udp_send_profile(
-                lock_us,
-                profile::elapsed_us(sendto_t0),
-                profile::elapsed_us(total_t0),
-            );
-        }
         debug!("UDP send to {:?}: {:?}", addr, result);
         result
     }

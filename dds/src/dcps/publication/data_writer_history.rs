@@ -12,16 +12,12 @@
 
 use std::{
     collections::HashMap,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc, Mutex, Weak,
-    },
+    sync::{Arc, Mutex, Weak},
     thread,
 };
 
 use ::log::debug;
 
-use crate::common::profile;
 use crate::{
     common::instance_handle::InstanceHandle,
     core::{
@@ -49,49 +45,6 @@ use crate::{
     },
     utils::timer::timer_id::TimerId,
 };
-
-static WRITER_HISTORY_PROFILE_COUNT: AtomicU64 = AtomicU64::new(0);
-static WRITER_HISTORY_PROFILE_LIFESPAN_US: AtomicU64 = AtomicU64::new(0);
-static WRITER_HISTORY_PROFILE_ENSURE_US: AtomicU64 = AtomicU64::new(0);
-static WRITER_HISTORY_PROFILE_RELEASE_US: AtomicU64 = AtomicU64::new(0);
-static WRITER_HISTORY_PROFILE_PUSH_US: AtomicU64 = AtomicU64::new(0);
-static WRITER_HISTORY_PROFILE_INSTANCE_US: AtomicU64 = AtomicU64::new(0);
-static WRITER_HISTORY_PROFILE_RTPS_US: AtomicU64 = AtomicU64::new(0);
-static WRITER_HISTORY_PROFILE_TOTAL_US: AtomicU64 = AtomicU64::new(0);
-
-fn record_writer_history_profile(
-    lifespan_us: u64,
-    ensure_us: u64,
-    release_us: u64,
-    push_us: u64,
-    instance_us: u64,
-    rtps_us: u64,
-    total_us: u64,
-) {
-    let n = WRITER_HISTORY_PROFILE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    WRITER_HISTORY_PROFILE_LIFESPAN_US.fetch_add(lifespan_us, Ordering::Relaxed);
-    WRITER_HISTORY_PROFILE_ENSURE_US.fetch_add(ensure_us, Ordering::Relaxed);
-    WRITER_HISTORY_PROFILE_RELEASE_US.fetch_add(release_us, Ordering::Relaxed);
-    WRITER_HISTORY_PROFILE_PUSH_US.fetch_add(push_us, Ordering::Relaxed);
-    WRITER_HISTORY_PROFILE_INSTANCE_US.fetch_add(instance_us, Ordering::Relaxed);
-    WRITER_HISTORY_PROFILE_RTPS_US.fetch_add(rtps_us, Ordering::Relaxed);
-    WRITER_HISTORY_PROFILE_TOTAL_US.fetch_add(total_us, Ordering::Relaxed);
-
-    if n % 300 == 0 {
-        let divisor = n as f64;
-        eprintln!(
-            "INT2DDS_WRITER_HISTORY_PROFILE count={} total_avg_us={:.3} lifespan_avg_us={:.3} ensure_avg_us={:.3} release_avg_us={:.3} push_avg_us={:.3} instance_avg_us={:.3} rtps_avg_us={:.3}",
-            n,
-            WRITER_HISTORY_PROFILE_TOTAL_US.load(Ordering::Relaxed) as f64 / divisor,
-            WRITER_HISTORY_PROFILE_LIFESPAN_US.load(Ordering::Relaxed) as f64 / divisor,
-            WRITER_HISTORY_PROFILE_ENSURE_US.load(Ordering::Relaxed) as f64 / divisor,
-            WRITER_HISTORY_PROFILE_RELEASE_US.load(Ordering::Relaxed) as f64 / divisor,
-            WRITER_HISTORY_PROFILE_PUSH_US.load(Ordering::Relaxed) as f64 / divisor,
-            WRITER_HISTORY_PROFILE_INSTANCE_US.load(Ordering::Relaxed) as f64 / divisor,
-            WRITER_HISTORY_PROFILE_RTPS_US.load(Ordering::Relaxed) as f64 / divisor,
-        );
-    }
-}
 
 #[derive(Debug)]
 pub(crate) struct DataWriterHistoryCache<Foo> {
@@ -196,11 +149,6 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
             return Ok((None, false));
         }
 
-        // Deliberately below the `purge_sent_changes` early return above: that QoS
-        // combination pays nothing today and must keep paying nothing.
-        let profile = profile::enabled();
-        let total_t0 = profile::now_if(profile);
-        let lifespan_t0 = profile::now_if(profile);
         // Set lifespan timer if lifespan qos is configured
         let lifespan_duration = self.data_writer.upgrade().and_then(|data_writer| {
             data_writer.get_qos_arc().ok().and_then(|qos| {
@@ -231,51 +179,28 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
             }
         }
         // end lifespan
-        let lifespan_us = profile::elapsed_us(lifespan_t0);
 
-        let ensure_t0 = profile::now_if(profile);
         let removed = self.ensure_capacity(a_change.instance_handle())?;
-        let ensure_us = profile::elapsed_us(ensure_t0);
 
         // Release evicted change back to pool for buffer reuse.
         // Consume the Arc by value so Arc::try_unwrap succeeds (refcount == 1).
-        let release_t0 = profile::now_if(profile);
         if let Some(evicted) = removed {
             self.pool.try_release(evicted);
         }
-        let release_us = profile::elapsed_us(release_t0);
 
-        let push_t0 = profile::now_if(profile);
         if lifespan_duration.is_some() {
             self.insert_change_sorted(a_change.clone());
         } else {
             self.changes.push(a_change.clone());
         }
-        let push_us = profile::elapsed_us(push_t0);
 
-        let instance_t0 = profile::now_if(profile);
         if self.has_key {
             self.add_change_to_instance_map(a_change.clone())?;
         }
-        let instance_us = profile::elapsed_us(instance_t0);
 
-        let rtps_t0 = profile::now_if(profile);
         self.add_change_to_rtps_writer_cache(a_change)?;
-        let rtps_us = profile::elapsed_us(rtps_t0);
 
         debug!("add_change_with_cleanup completed");
-
-        if profile {
-            record_writer_history_profile(
-                lifespan_us,
-                ensure_us,
-                release_us,
-                push_us,
-                instance_us,
-                rtps_us,
-                profile::elapsed_us(total_t0),
-            );
-        }
 
         // Writer-side callers never use the removed value
         // unlike DataReaderHistoryCache, which needs it to sync the RTPS history
