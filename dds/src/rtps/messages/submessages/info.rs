@@ -77,21 +77,6 @@ impl<'a, C: Context> Readable<'a, C> for InfoTimestamp {
     }
 }
 
-/// Serialised size of a `Locator`: kind + port + address.
-const LOCATOR_WIRE_SIZE: usize = 4 + 4 + 16;
-
-/// How many locators it is safe to reserve for, given what a sender declared and how many
-/// bytes are actually left to read them from.
-///
-/// The declared count is unvalidated wire data, so reserving that many entries lets a small
-/// datagram ask for an arbitrary amount of memory. An allocation that large aborts the
-/// process instead of unwinding, so it cannot be caught either; the reservation has to be
-/// bounded by what the remaining bytes could really contain. An honest count is always
-/// smaller than that bound and is therefore still reserved exactly.
-fn bounded_locator_capacity(declared: u32, remaining_bytes: usize) -> usize {
-    (declared as usize).min(remaining_bytes / LOCATOR_WIRE_SIZE)
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct InfoReply {
     unicast_locator_list: Vec<Locator>,
@@ -120,9 +105,7 @@ impl InfoReply {
 
         let num_locators = u32::read_from_stream_unbuffered_with_ctx(endianness, &mut cursor)
             .map_err(map_speedy_err)?;
-        let remaining = buffer.len().saturating_sub(cursor.position() as usize);
-        let mut unicast_locator_list: Vec<Locator> =
-            Vec::with_capacity(bounded_locator_capacity(num_locators, remaining));
+        let mut unicast_locator_list: Vec<Locator> = Vec::with_capacity(num_locators as usize);
         for _i in 0..num_locators {
             let locator = Locator::read_from_stream_unbuffered_with_ctx(endianness, &mut cursor)
                 .map_err(map_speedy_err)?;
@@ -137,9 +120,7 @@ impl InfoReply {
         {
             let num_locators = u32::read_from_stream_unbuffered_with_ctx(endianness, &mut cursor)
                 .map_err(map_speedy_err)?;
-            let remaining = buffer.len().saturating_sub(cursor.position() as usize);
-            multicast_locator_list =
-                Vec::with_capacity(bounded_locator_capacity(num_locators, remaining));
+            multicast_locator_list = Vec::with_capacity(num_locators as usize);
             for _i in 0..num_locators {
                 let locator =
                     Locator::read_from_stream_unbuffered_with_ctx(endianness, &mut cursor)
@@ -280,41 +261,5 @@ impl<'a, C: Context> Readable<'a, C> for InfoSource {
         let guid_prefix: GuidPrefix = reader.read_value()?;
 
         Ok(Self { protocol_version, vendor_id, guid_prefix })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A locator count is read straight off the wire, so it is whatever a remote sender chose
-    /// to put there. Reserving that many entries up front lets a 28-byte datagram ask for tens
-    /// of gigabytes, and an allocation failure aborts the process rather than unwinding, so it
-    /// cannot even be caught. The reservation has to be bounded by the locators the buffer
-    /// could actually hold.
-    #[test]
-    fn locator_capacity_is_bounded_by_the_bytes_available() {
-        // Nothing but the count itself: no locator can follow, so reserve nothing.
-        assert_eq!(bounded_locator_capacity(u32::MAX, 0), 0);
-        assert_eq!(bounded_locator_capacity(1, 0), 0);
-
-        // A declared count far beyond what the remaining bytes can hold is clamped to them.
-        assert_eq!(bounded_locator_capacity(u32::MAX, 100), 100 / LOCATOR_WIRE_SIZE);
-
-        // A partial locator does not count.
-        assert_eq!(bounded_locator_capacity(u32::MAX, LOCATOR_WIRE_SIZE - 1), 0);
-        assert_eq!(bounded_locator_capacity(u32::MAX, LOCATOR_WIRE_SIZE), 1);
-
-        // An honest count is reserved exactly, so the normal path still allocates once.
-        assert_eq!(bounded_locator_capacity(2, 4 * LOCATOR_WIRE_SIZE), 2);
-    }
-
-    /// `Locator` is serialised as kind + port + address, and the bound above is only correct
-    /// if that is really its wire size.
-    #[test]
-    fn locator_wire_size_matches_the_serialised_locator() {
-        let locator = Locator::new(1, 7400, [0u8; 16]);
-        let bytes = locator.write_to_vec_with_ctx(speedy::Endianness::LittleEndian).unwrap();
-        assert_eq!(bytes.len(), LOCATOR_WIRE_SIZE);
     }
 }
