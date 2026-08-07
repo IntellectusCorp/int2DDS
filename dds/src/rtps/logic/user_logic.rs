@@ -1809,16 +1809,19 @@ impl UnicastMessageProcessor for UserLogic {
                 }
             } else {
                 // Case when fragments are not completely received yet - apply suppression delay
+                // A NACK_FRAG names exactly one sequence number, and the incomplete
+                // sample is not necessarily the heartbeat's lastSN. Repair the sample the
+                // fragments actually belong to; addressing the request to lastSN asked the
+                // writer for a different sample's fragments, so the missing ones never came.
                 let missing_fragments =
                     writer_proxy.calculate_missing_fragments(heartbeat.first_sn, heartbeat.last_sn);
 
-                if missing_fragments.is_some() {
+                if let Some((target_sn, target_fragments)) = missing_fragments {
                     let writer_proxies_clone = writer_proxies.clone();
                     let stateful_reader_guid = stateful_reader.guid();
                     let participant = participant.clone();
                     let transport_clone = self.transport.clone();
                     let last_sn = heartbeat.last_sn;
-                    let missing_fragments_clone = missing_fragments.clone();
                     let remote_writer_guid = writer_proxy.remote_writer_guid();
 
                     writer_proxy.increase_nackfrag_count();
@@ -1826,7 +1829,7 @@ impl UnicastMessageProcessor for UserLogic {
                     let timer_id = TimerId::NackFrag {
                         reader_entity_id: stateful_reader.guid().entity_id(),
                         remote_writer_guid,
-                        sequence_number: last_sn,
+                        sequence_number: target_sn,
                     };
                     if let Ok(locked_timer_handler) =
                         TimerHandler::get_instance(participant.guid().prefix()).lock()
@@ -1850,7 +1853,7 @@ impl UnicastMessageProcessor for UserLogic {
                                     .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
                                 {
                                     let still_missing =
-                                        current_writer_proxy.still_missing_fragments(last_sn);
+                                        current_writer_proxy.still_missing_fragments(target_sn);
 
                                     if still_missing {
                                         // Create and send NACK_FRAG message
@@ -1869,8 +1872,8 @@ impl UnicastMessageProcessor for UserLogic {
                                                 current_writer_proxy
                                                     .remote_writer_guid()
                                                     .entity_id(),
-                                                last_sn,
-                                                missing_fragments_clone.as_ref().unwrap().clone(),
+                                                target_sn,
+                                                target_fragments.clone(),
                                                 current_writer_proxy.nackfrag_count(),
                                                 acknack_info,
                                             ) {
@@ -1984,7 +1987,9 @@ impl UnicastMessageProcessor for UserLogic {
                 continue;
             }
 
-            let Some(missing_fragments) = writer_proxy
+            // The range is a single sequence number here, so the returned key is
+            // necessarily `heartbeat_frag.writer_sn`.
+            let Some((_, missing_fragments)) = writer_proxy
                 .calculate_missing_fragments(heartbeat_frag.writer_sn, heartbeat_frag.writer_sn)
             else {
                 continue;
@@ -2020,6 +2025,7 @@ impl UnicastMessageProcessor for UserLogic {
     fn handle_acknack_message(
         &mut self,
         rtps_header: &Header,
+        submessage_header: &SubmessageHeader,
         acknack: &AckNack,
     ) -> RtpsResult<()> {
         let remote_reader_guid = Guid::new(rtps_header.guid_prefix(), acknack.reader_id);
@@ -2039,10 +2045,12 @@ impl UnicastMessageProcessor for UserLogic {
             .find(|rp| rp.remote_reader_guid() == remote_reader_guid)
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
 
-        // Preemptive ACKNACK (empty bitmap with seqbase 0 or 1) is an explicit
-        // reset signal and bypasses the count/debounce check. Some foreign RTPS
-        // stacks use base 1 for this preemptive form.
+        // Preemptive ACKNACK (empty bitmap with seqbase 0 or 1) is an explicit reset signal
+        // and bypasses the count/debounce check. Some foreign RTPS stacks use base 1 for this
+        // preemptive form, which our own reader also uses for a plain "nothing missing" ack --
+        // the FinalFlag is what tells the two apart, and only a plain ack carries it.
         let is_preemptive = acknack.reader_sn_state.num_bits() == 0
+            && !submessage_header.final_flag().unwrap_or(false)
             && acknack.reader_sn_state.bitmap_base().to_i64() <= 1;
         let now = Instant::now();
 

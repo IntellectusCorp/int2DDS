@@ -148,8 +148,9 @@ pub fn u16_to_parameter_id(value: u16) -> ParameterId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parameter {
     parameter_id: ParameterId,
-    // Multiple of 4
-    length: i16,
+    // Multiple of 4. Unsigned, as on the wire: a signed field would make every length from
+    // 0x8000 up negative.
+    length: u16,
     // [u8, length]
     value: SmallVec<[u8; 16]>,
 }
@@ -160,12 +161,12 @@ impl Parameter {
         V: Into<SmallVec<[u8; 16]>>,
     {
         let value = value.into();
-        Self { parameter_id, length: value.len() as i16, value }
+        Self { parameter_id, length: value.len() as u16, value }
     }
     pub fn parameter_id(&self) -> ParameterId {
         self.parameter_id
     }
-    pub fn length(&self) -> i16 {
+    pub fn length(&self) -> u16 {
         self.length
     }
     pub fn value(&self) -> &[u8] {
@@ -177,7 +178,10 @@ impl<'a, C: Context> Readable<'a, C> for Parameter {
     #[allow(clippy::needless_maybe_sized)]
     fn read_from<T: ?Sized + Reader<'a, C>>(reader: &mut T) -> Result<Self, C::Error> {
         let parameter_id = reader.read_u16()?;
-        let length = reader.read_u16()? as i16;
+        // The wire field is an unsigned short. Reading it as signed turns any length from
+        // 0x8000 up into a negative number, which then sizes the buffer below as usize::MAX
+        // instead of reporting that the parameter overruns what is left to read.
+        let length = reader.read_u16()?;
         let mut value: Vec<u8> = vec![0u8; length as usize];
         reader.read_bytes(&mut value)?;
         let value = SmallVec::from_vec(value);
@@ -400,4 +404,45 @@ pub enum ParameterValue<'a> {
 pub struct PlCdrParameter<'a> {
     pub id: ParameterId,
     pub value: ParameterValue<'a>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use speedy::Endianness;
+
+    /// The length octets are unvalidated wire data. Reading them as a signed value turns
+    /// anything from 0x8000 up into a negative number, and sizing the value buffer from it
+    /// then asks for a preposterous allocation instead of reporting a short buffer.
+    #[test]
+    fn a_length_with_the_high_bit_set_is_rejected_not_allocated() {
+        for declared_length in [0x8000u16, 0xF000, 0xFFFF] {
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(&0x0005u16.to_le_bytes()); // PID_TOPIC_NAME
+            bytes.extend_from_slice(&declared_length.to_le_bytes());
+            bytes.extend_from_slice(&[0xAA; 8]); // far fewer bytes than declared
+
+            let result = Parameter::read_from_buffer_with_ctx(Endianness::LittleEndian, &bytes);
+
+            assert!(
+                result.is_err(),
+                "a parameter declaring {declared_length} bytes with 8 available must be rejected"
+            );
+        }
+    }
+
+    /// An ordinary parameter must still round-trip, so the fix cannot be a blanket rejection.
+    #[test]
+    fn an_ordinary_parameter_still_reads() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x0005u16.to_le_bytes()); // PID_TOPIC_NAME
+        bytes.extend_from_slice(&8u16.to_le_bytes());
+        bytes.extend_from_slice(&[0xAA; 8]);
+
+        let parameter =
+            Parameter::read_from_buffer_with_ctx(Endianness::LittleEndian, &bytes).unwrap();
+
+        assert_eq!(parameter.length(), 8);
+        assert_eq!(parameter.value(), &[0xAA; 8]);
+    }
 }

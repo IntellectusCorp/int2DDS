@@ -53,6 +53,10 @@ pub enum TransportErrorCode {
     /// recent connect attempts keep failing). A deferral, not a hard failure —
     /// the triggering connect failure is reported separately.
     TcpReconnectBackoff = 730,
+    /// The previous frame still held the write lock when the send deadline
+    /// expired. Not a byte left the socket, so the frame is refused whole
+    /// rather than half-written.
+    TcpSendDeadlineExpired = 731,
 
     // ── 740: TCP framing ────────────────────────────────────────────────
     /// Frame magic bytes were not "INT2".
@@ -73,6 +77,9 @@ pub enum TransportErrorCode {
     // ── 760: TCP internal channel ───────────────────────────────────────
     /// Internal channel (discovery or user-data) is full; message dropped.
     TcpChannelFull = 760,
+    /// The per-connection buffer holding frames until the handshake completes
+    /// hit its bound; the frame was dropped.
+    TcpConnectBufferFull = 761,
 
     // ── 770: TCP listener / accept ─────────────────────────────────────
     /// Incoming TCP accept() failed (fd exhaustion, permission, etc.).
@@ -112,7 +119,7 @@ impl TransportErrorCode {
             | Self::TcpHandshakeReserveFailed
             | Self::TcpHandshakeBindFailed => io::ErrorKind::InvalidData,
 
-            Self::TcpReconnectBackoff => io::ErrorKind::WouldBlock,
+            Self::TcpReconnectBackoff | Self::TcpSendDeadlineExpired => io::ErrorKind::WouldBlock,
 
             Self::TcpFrameInvalidMagic | Self::TcpFrameTooLarge | Self::TcpFrameInvalidLength => {
                 io::ErrorKind::InvalidData
@@ -122,7 +129,7 @@ impl TransportErrorCode {
             | Self::TcpControlInvalidPort
             | Self::TcpControlInvalidCookie => io::ErrorKind::InvalidData,
 
-            Self::TcpChannelFull => io::ErrorKind::WouldBlock,
+            Self::TcpChannelFull | Self::TcpConnectBufferFull => io::ErrorKind::WouldBlock,
 
             Self::TcpAcceptFailed => io::ErrorKind::ConnectionAborted,
             Self::TcpReadError => io::ErrorKind::ConnectionReset,
@@ -147,6 +154,7 @@ impl TransportErrorCode {
             Self::TcpHandshakeBindFailed => "TCP PORT_BIND handshake failed",
 
             Self::TcpReconnectBackoff => "peer in reconnect backoff",
+            Self::TcpSendDeadlineExpired => "TCP send deadline expired before the write lock",
 
             Self::TcpFrameInvalidMagic => "TCP frame invalid magic",
             Self::TcpFrameTooLarge => "TCP frame too large",
@@ -157,6 +165,7 @@ impl TransportErrorCode {
             Self::TcpControlInvalidCookie => "TCP PORT_BIND invalid cookie",
 
             Self::TcpChannelFull => "TCP internal channel full",
+            Self::TcpConnectBufferFull => "TCP connect-window buffer full",
 
             Self::TcpAcceptFailed => "TCP accept failed",
             Self::TcpReadError => "TCP read error on accepted connection",

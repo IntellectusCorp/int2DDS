@@ -662,14 +662,7 @@ pub(crate) struct WriterReliabilityExtensionQosPolicy {
 
 impl Default for WriterReliabilityExtensionQosPolicy {
     fn default() -> Self {
-        Self {
-            disable_piggyback_heartbeat: false,
-            heartbeat_period: Duration { sec: 2, nanosec: 0 },
-            initial_heartbeat_delay: Duration { sec: 0, nanosec: 10_000_000 },
-            push_mode: true,
-            nack_suppression_duration: Duration { sec: 0, nanosec: 0 },
-            nack_response_delay: Duration { sec: 0, nanosec: 10_000_000 },
-        }
+        qos_policy::WriterReliabilityExtensionQosPolicy::default().into()
     }
 }
 
@@ -707,7 +700,7 @@ pub(crate) struct DataFragQosPolicy {
 
 impl Default for DataFragQosPolicy {
     fn default() -> Self {
-        Self { max_size: 65000 }
+        Self { max_size: qos_policy::DataFragQosPolicy::UNSET }
     }
 }
 

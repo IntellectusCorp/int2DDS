@@ -3,7 +3,7 @@
 
 use bytes::Bytes;
 use core::net::{Ipv4Addr, SocketAddr};
-use log::{debug, error};
+use log::{debug, error, warn};
 use network_interface::{Addr, NetworkInterface, NetworkInterfaceConfig};
 use socket2::{Domain, Protocol, SockAddr, Socket as Socket2, Type};
 use std::env;
@@ -39,17 +39,38 @@ impl UdpListener {
         env::var("INT2DDS_UDP_SOCKET_BUFFER").ok().and_then(|val| val.parse().ok())
     }
 
+    // Applies the configured receive buffer, or doubles the OS default when unset.
+    //
+    // Linux silently caps SO_RCVBUF at net.core.rmem_max, and getsockopt reports back
+    // twice the granted size. Losing one DATA_FRAG loses the whole fragmented sample,
+    // so a buffer that is smaller than asked for must not pass unnoticed: a deployment
+    // otherwise believes it has headroom it does not have.
+    fn apply_recv_buffer_size(socket: &Socket2) {
+        let Some(requested) = Self::get_socket_buffer_size() else {
+            if let Ok(current) = socket.recv_buffer_size() {
+                let _ = socket.set_recv_buffer_size(current.saturating_mul(2));
+            }
+            return;
+        };
+
+        let _ = socket.set_recv_buffer_size(requested);
+        if let Ok(granted) = socket.recv_buffer_size() {
+            if granted < requested {
+                warn!(
+                    "UDP recv buffer capped by OS: requested {} bytes, granted {}. \
+                     Large samples may be dropped; raise net.core.rmem_max.",
+                    requested, granted
+                );
+            }
+        }
+    }
+
     pub(crate) fn new(port: u16) -> std::io::Result<Self> {
         let socket = {
             let saddr: SocketAddr = SocketAddr::new("0.0.0.0".parse().unwrap(), port);
 
             let socket2 = Socket2::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-            if let Some(size) = Self::get_socket_buffer_size() {
-                let _ = socket2.set_recv_buffer_size(size);
-            } else if let Ok(current) = socket2.recv_buffer_size() {
-                let new_size = current.saturating_mul(2);
-                let _ = socket2.set_recv_buffer_size(new_size);
-            }
+            Self::apply_recv_buffer_size(&socket2);
 
             // println!("[socket2] new_listener recv_buffer_size: {:?}", socket2.recv_buffer_size());
 
@@ -173,12 +194,7 @@ impl UdpListener {
         #[cfg(unix)]
         socket.set_reuse_port(true)?;
 
-        if let Some(size) = Self::get_socket_buffer_size() {
-            let _ = socket.set_recv_buffer_size(size);
-        } else if let Ok(current) = socket.recv_buffer_size() {
-            let new_size = current.saturating_mul(2);
-            let _ = socket.set_recv_buffer_size(new_size);
-        }
+        Self::apply_recv_buffer_size(&socket);
 
         if let Some(group) = group {
             Self::join_multicast_group(
