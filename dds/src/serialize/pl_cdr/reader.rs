@@ -3,11 +3,6 @@ use speedy::Endianness;
 use super::constants::PARAMETER_ALIGNMENT;
 
 /// Streaming reader for PL-CDR encoded parameter sequences.
-///
-/// The reader makes no progress guarantee of its own: a read that fails leaves the position
-/// untouched, `read_bytes(0)` advances by nothing, and aligning an already aligned position
-/// is a no-op. A loop driving this reader over untrusted bytes therefore has to stop on an
-/// error, or consume at least one byte before it continues, or it will never end.
 pub(crate) struct PlCdrReader<'a> {
     data: &'a [u8],
     position: usize,

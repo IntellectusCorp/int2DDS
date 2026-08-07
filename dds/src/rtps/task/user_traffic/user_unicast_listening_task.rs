@@ -13,42 +13,8 @@ use crate::rtps::transport::tokens::ListenerToken;
 use log::{debug, error, info, warn};
 use mio::{Events, Interest, Poll, Waker};
 use std::net::SocketAddr;
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc, OnceLock, Weak,
-};
-use std::time::{Duration, Instant};
-
-static USER_PROCESS_PROFILE_COUNT: AtomicU64 = AtomicU64::new(0);
-static USER_PROCESS_PROFILE_PARSE_US: AtomicU64 = AtomicU64::new(0);
-static USER_PROCESS_PROFILE_HANDLE_US: AtomicU64 = AtomicU64::new(0);
-static USER_PROCESS_PROFILE_TOTAL_US: AtomicU64 = AtomicU64::new(0);
-
-fn user_process_profile_enabled() -> bool {
-    std::env::var_os("RMW_INT2DDS_PROFILE").is_some()
-}
-
-fn elapsed_us(start: Instant, end: Instant) -> u64 {
-    end.duration_since(start).as_micros() as u64
-}
-
-fn record_user_process_profile(parse_us: u64, handle_us: u64, total_us: u64) {
-    let n = USER_PROCESS_PROFILE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    USER_PROCESS_PROFILE_PARSE_US.fetch_add(parse_us, Ordering::Relaxed);
-    USER_PROCESS_PROFILE_HANDLE_US.fetch_add(handle_us, Ordering::Relaxed);
-    USER_PROCESS_PROFILE_TOTAL_US.fetch_add(total_us, Ordering::Relaxed);
-
-    if n % 4096 == 0 {
-        let divisor = n as f64;
-        eprintln!(
-            "INT2DDS_USER_PROCESS_PROFILE count={} total_avg_us={:.3} parse_avg_us={:.3} handle_avg_us={:.3}",
-            n,
-            USER_PROCESS_PROFILE_TOTAL_US.load(Ordering::Relaxed) as f64 / divisor,
-            USER_PROCESS_PROFILE_PARSE_US.load(Ordering::Relaxed) as f64 / divisor,
-            USER_PROCESS_PROFILE_HANDLE_US.load(Ordering::Relaxed) as f64 / divisor,
-        );
-    }
-}
+use std::sync::{Arc, OnceLock, Weak};
+use std::time::Duration;
 
 pub(crate) struct UserUnicastListeningTask {
     guid_prefix: GuidPrefix,
@@ -243,12 +209,8 @@ impl UserUnicastListeningTask {
     }
 
     fn process_rtps_message(&mut self, bytes: Bytes, from_addr: SocketAddr) {
-        let profile = user_process_profile_enabled();
-        let total_t0 = Instant::now();
         let mut message_receiver = MessageReceiver::new(self.guid_prefix, &from_addr);
-        let parse_t0 = Instant::now();
         let rtps_message = message_receiver.init(&bytes);
-        let parse_us = if profile { elapsed_us(parse_t0, Instant::now()) } else { 0 };
         if rtps_message.is_err() {
             error!("Failed to parse RTPS message from {:?}", from_addr);
             return;
@@ -256,16 +218,8 @@ impl UserUnicastListeningTask {
         let mut user_logic =
             self.user_logic.as_ref().as_ref().expect("UserLogic is not initialized").clone();
 
-        let handle_t0 = Instant::now();
         if let Err(e) = user_logic.handle_rtps_message(message_receiver) {
             debug!("Failed to handle user RTPS message from {:?}: {:?}", from_addr, e);
-        }
-        if profile {
-            record_user_process_profile(
-                parse_us,
-                elapsed_us(handle_t0, Instant::now()),
-                elapsed_us(total_t0, Instant::now()),
-            );
         }
     }
 }

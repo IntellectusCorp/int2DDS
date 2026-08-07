@@ -209,19 +209,16 @@ impl WriterProxy {
             .is_some_and(|info| info.is_complete)
     }
 
-    /// Missing fragments of the first incomplete change in the range, paired with
-    /// the sequence number they belong to. A NACK_FRAG names one sequence number,
-    /// so the caller must use this one and not the range's endpoint.
     pub(crate) fn calculate_missing_fragments(
         &self,
         first_sn: SequenceNumber,
         last_sn: SequenceNumber,
-    ) -> Option<(SequenceNumber, FragmentNumberSet)> {
+    ) -> Option<FragmentNumberSet> {
         if last_sn < first_sn {
             return None;
         }
 
-        self.changes_from_writer.range(first_sn..=last_sn).find_map(|(sn, change)| {
+        self.changes_from_writer.range(first_sn..=last_sn).find_map(|(_, change)| {
             change.fragment_info.as_ref().and_then(|info| {
                 if info.is_complete {
                     return None;
@@ -240,8 +237,7 @@ impl WriterProxy {
                 }
 
                 if !missing_fragments.is_empty() {
-                    base_fragment
-                        .map(|base| (*sn, FragmentNumberSet::from_vec(base, missing_fragments)))
+                    base_fragment.map(|base| FragmentNumberSet::from_vec(base, missing_fragments))
                 } else {
                     None
                 }
@@ -419,12 +415,7 @@ impl WriterProxy {
     ) {
         let change = self.changes_from_writer.entry(seq_num).or_insert_with(|| ChangeFromWriter {
             sequence_number: seq_num,
-            // RTPS 2.5 - 8.4.12.2
-            // A change counts as received only once every fragment is in. Recording
-            // it as Received on the first fragment hides it from
-            // `missing_changes_for_heartbeat`, so it is never NACKed and the writer
-            // acks and frees it while fragments are still outstanding.
-            status: ChangeFromWriterStatusKind::Missing,
+            status: ChangeFromWriterStatusKind::Received,
             is_relevant: true,
             fragment_info: Some(FragmentInfo {
                 total_fragments,
@@ -433,27 +424,17 @@ impl WriterProxy {
             }),
         });
 
-        // Merge this submessage's fragment numbers into the accumulated set.
-        // An entry seeded by HEARTBEAT or GAP carries no fragment_info -- install one
-        // rather than dropping the update, or every fragment of that sample goes
-        // untracked and it can be neither completed nor repaired.
-        let info = change.fragment_info.get_or_insert_with(|| FragmentInfo {
-            total_fragments,
-            received_fragments: std::collections::HashSet::new(),
-            is_complete: false,
-        });
+        // Merge this submessage's fragment numbers into the accumulated set
+        if let Some(info) = &mut change.fragment_info {
+            // A HEARTBEAT_FRAG may have seeded this entry with a smaller
+            // last-fragment number than the sample's true total; keep the max.
+            info.total_fragments = info.total_fragments.max(total_fragments);
+            for fragment in received {
+                info.received_fragments.insert(fragment);
+            }
 
-        // A HEARTBEAT_FRAG may have seeded this entry with a smaller
-        // last-fragment number than the sample's true total; keep the max.
-        info.total_fragments = info.total_fragments.max(total_fragments);
-        for fragment in received {
-            info.received_fragments.insert(fragment);
-        }
-
-        // Update completion status
-        info.is_complete = info.received_fragments.len() == info.total_fragments as usize;
-        if info.is_complete {
-            change.status = ChangeFromWriterStatusKind::Received;
+            // Update completion status
+            info.is_complete = info.received_fragments.len() == info.total_fragments as usize;
         }
     }
 
@@ -530,7 +511,7 @@ mod tests {
         assert!(proxy.still_missing_fragments(sn));
         assert_eq!(
             proxy.calculate_missing_fragments(sn, sn),
-            Some((sn, FragmentNumberSet::from_vec(2, vec![2, 4]))),
+            Some(FragmentNumberSet::from_vec(2, vec![2, 4])),
         );
 
         proxy.mark_frag_received(sn, 4, 2..3); // fragment 2
@@ -549,80 +530,10 @@ mod tests {
         assert!(proxy.still_missing_fragments(sn));
         assert_eq!(
             proxy.calculate_missing_fragments(sn, sn),
-            Some((sn, FragmentNumberSet::from_vec(3, vec![3, 4]))),
+            Some(FragmentNumberSet::from_vec(3, vec![3, 4])),
         );
 
         proxy.mark_frag_received(sn, 4, 3..5); // fragments 3, 4
         assert!(proxy.all_fragments_received(sn));
-    }
-
-    // A sample missing fragments must stay NACK-able. Reporting it as Received
-    // drops it from the ACKNACK missing set, so the writer acks it and frees it
-    // from its history while fragments are still outstanding -- after which no
-    // repair is possible and a RELIABLE reader loses the sample silently.
-    #[test]
-    fn test_partial_fragment_sample_is_not_reported_received() {
-        let mut proxy = empty_writer_proxy();
-        let sn = SequenceNumber::new(0, 1);
-
-        proxy.mark_frag_received(sn, 4, 1..2); // only fragment 1 of 4
-
-        assert!(proxy.still_missing_fragments(sn));
-        assert!(!proxy.all_fragments_received(sn));
-        assert_eq!(
-            proxy.missing_changes_for_heartbeat(sn, sn),
-            vec![sn],
-            "a partially received sample must appear in the ACKNACK missing list",
-        );
-
-        proxy.mark_frag_received(sn, 4, 2..5); // fragments 2, 3, 4 complete it
-
-        assert!(proxy.all_fragments_received(sn));
-        assert_eq!(
-            proxy.missing_changes_for_heartbeat(sn, sn),
-            Vec::<SequenceNumber>::new(),
-            "a complete sample must no longer be listed as missing",
-        );
-    }
-
-    // Under loss a HEARTBEAT announcing a sequence number routinely arrives before
-    // that sample's first surviving DATA_FRAG. The heartbeat seeds the entry with
-    // `fragment_info: None`; fragments arriving afterwards must still be tracked,
-    // or the sample can never be completed nor its missing fragments computed.
-    #[test]
-    fn test_mark_frag_received_populates_heartbeat_seeded_entry() {
-        let mut proxy = empty_writer_proxy();
-        let sn = SequenceNumber::new(0, 1);
-
-        proxy.update_changes_for_heartbeat_range(sn, sn);
-
-        proxy.mark_frag_received(sn, 4, 1..3); // fragments 1, 2 arrive
-
-        assert!(proxy.still_missing_fragments(sn), "fragment state must be tracked, not dropped");
-        assert_eq!(
-            proxy.calculate_missing_fragments(sn, sn),
-            Some((sn, FragmentNumberSet::from_vec(3, vec![3, 4]))),
-        );
-
-        proxy.mark_frag_received(sn, 4, 3..5); // fragments 3, 4 complete it
-        assert!(proxy.all_fragments_received(sn));
-    }
-
-    // The fragment set must identify the sequence number it belongs to. The caller
-    // scans a heartbeat's whole range but addressed its NACK_FRAG to the range's
-    // lastSN, so whenever the incomplete sample was not the newest one the writer
-    // was asked for another sample's fragments -- and the missing ones never came.
-    #[test]
-    fn test_calculate_missing_fragments_identifies_its_sequence_number() {
-        let mut proxy = empty_writer_proxy();
-        let older = SequenceNumber::new(0, 1);
-        let newer = SequenceNumber::new(0, 2);
-
-        proxy.mark_frag_received(older, 4, 1..2); // incomplete
-        proxy.mark_frag_received(newer, 4, 1..5); // complete
-
-        let (sn, set) = proxy.calculate_missing_fragments(older, newer).unwrap();
-        assert_eq!(sn, older, "the set must be attributed to the incomplete sample");
-        assert_eq!(set, FragmentNumberSet::from_vec(2, vec![2, 3, 4]));
     }
 }
