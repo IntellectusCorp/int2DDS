@@ -1,11 +1,4 @@
-use std::collections::BTreeMap;
-use std::ops::Bound;
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc, Weak,
-};
-use std::time::Instant;
-
+use crate::common::profile;
 use crate::rtps::common::rtps_error_code::{RtpsError, RtpsErrorCode};
 use crate::{
     common::instance_handle::InstanceHandle,
@@ -19,20 +12,18 @@ use crate::{
         task::sending_handler::{MessageType, SendingHandler},
     },
 };
+use std::collections::BTreeMap;
+use std::ops::Bound;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Weak,
+};
 
 static RTPS_WRITER_HISTORY_PROFILE_COUNT: AtomicU64 = AtomicU64::new(0);
 static RTPS_WRITER_HISTORY_PROFILE_INSERT_US: AtomicU64 = AtomicU64::new(0);
 static RTPS_WRITER_HISTORY_PROFILE_HIGHEST_SN_US: AtomicU64 = AtomicU64::new(0);
 static RTPS_WRITER_HISTORY_PROFILE_SEND_UNSENT_US: AtomicU64 = AtomicU64::new(0);
 static RTPS_WRITER_HISTORY_PROFILE_TOTAL_US: AtomicU64 = AtomicU64::new(0);
-
-fn rtps_writer_history_profile_enabled() -> bool {
-    std::env::var_os("RMW_INT2DDS_PROFILE").is_some()
-}
-
-fn elapsed_us(start: Instant, end: Instant) -> u64 {
-    end.duration_since(start).as_micros() as u64
-}
 
 fn record_rtps_writer_history_profile(
     insert_us: u64,
@@ -133,8 +124,8 @@ impl WriterHistoryCache {
         a_change: Arc<CacheChange>,
         writer: &(dyn Writer + Send + Sync),
     ) -> RtpsResult<()> {
-        let profile = rtps_writer_history_profile_enabled();
-        let total_t0 = Instant::now();
+        let profile = profile::enabled();
+        let total_t0 = profile::now_if(profile);
         if self.is_builtin() {
             return Err(RtpsError::new(
                 RtpsErrorCode::InvalidEntityKind,
@@ -143,31 +134,31 @@ impl WriterHistoryCache {
         }
 
         let sn = a_change.sequence_number();
-        let insert_t0 = Instant::now();
+        let insert_t0 = profile::now_if(profile);
         self.changes.insert(sn, a_change.clone());
-        let insert_us = if profile { elapsed_us(insert_t0, Instant::now()) } else { 0 };
+        let insert_us = profile::elapsed_us(insert_t0);
 
-        let highest_t0 = Instant::now();
+        let highest_t0 = profile::now_if(profile);
         if sn > self.highest_sn {
             self.highest_sn = sn;
         }
-        let highest_us = if profile { elapsed_us(highest_t0, Instant::now()) } else { 0 };
+        let highest_us = profile::elapsed_us(highest_t0);
 
-        let send_t0 = Instant::now();
+        let send_t0 = profile::now_if(profile);
         if let Some(participant) = self.participant.upgrade() {
             let (_, _, user_logic_arc) = participant.get_logics();
             if let Some(user_logic) = user_logic_arc.as_ref() {
                 user_logic.send_unsent_changes(writer, self)?
             }
         }
-        let send_us = if profile { elapsed_us(send_t0, Instant::now()) } else { 0 };
+        let send_us = profile::elapsed_us(send_t0);
 
         if profile {
             record_rtps_writer_history_profile(
                 insert_us,
                 highest_us,
                 send_us,
-                elapsed_us(total_t0, Instant::now()),
+                profile::elapsed_us(total_t0),
             );
         }
 
