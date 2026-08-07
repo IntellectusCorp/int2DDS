@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
+use crate::utils::notify::{callback_handle, notify_user};
 use std::{
     cmp::max,
     collections::{BTreeMap, BTreeSet},
@@ -439,15 +440,10 @@ impl WriterProxy {
     }
 
     pub(crate) fn on_sample_lost(&self) {
-        match self.status_callback.lock() {
-            Ok(callback) => {
-                if let Some(callback) = callback.as_ref() {
-                    callback(StatusKind::SAMPLE_LOST, None);
-                }
-            }
-            Err(e) => {
-                log::error!("Failed to lock callback: {:?}", e);
-            }
+        // Lift the callback out before calling it: the listener it reaches may
+        // re-enter this entity, and an unwind through the call would poison the slot.
+        if let Some(callback) = callback_handle(&self.status_callback) {
+            notify_user("writer_proxy", || callback(StatusKind::SAMPLE_LOST, None));
         }
     }
 }

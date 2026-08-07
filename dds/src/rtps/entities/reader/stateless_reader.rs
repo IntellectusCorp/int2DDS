@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
+use crate::utils::notify::{callback_handle, notify_user};
 use log::{debug, error};
 
 use crate::{
@@ -275,15 +276,10 @@ impl Entity for StatelessReader {
     }
 
     fn update_status(&self, status: StatusKind, info: Option<Arc<dyn StatusInfo>>) {
-        match self.status_callback.lock() {
-            Ok(callback) => {
-                if let Some(callback) = callback.as_ref() {
-                    callback(status, info.clone());
-                }
-            }
-            Err(e) => {
-                log::error!("Failed to lock callback: {:?}", e);
-            }
+        // Lift the callback out before calling it: the listener it reaches may
+        // re-enter this entity, and an unwind through the call would poison the slot.
+        if let Some(callback) = callback_handle(&self.status_callback) {
+            notify_user("stateless_reader", || callback(status, info.clone()));
         }
     }
 
@@ -291,25 +287,11 @@ impl Entity for StatelessReader {
         &self,
         f: Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>,
     ) {
-        match self.status_callback.lock() {
-            Ok(mut callback) => {
-                callback.replace(f);
-            }
-            Err(e) => {
-                log::error!("Failed to lock callback: {:?}", e);
-            }
-        }
+        self.status_callback.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).replace(f);
     }
 
     fn set_update_change(&self, f: Arc<dyn Fn(Arc<CacheChange>) + Send + Sync>) {
-        match self.change_callback.lock() {
-            Ok(mut callback) => {
-                callback.replace(f);
-            }
-            Err(e) => {
-                log::error!("Failed to lock callback: {:?}", e);
-            }
-        }
+        self.change_callback.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).replace(f);
     }
 
     fn get_update_status_callback(
@@ -395,27 +377,13 @@ impl Reader for StatelessReader {
     fn on_change(&self, change: Arc<CacheChange>) {
         log::debug!("change: {}", change);
 
-        match self.status_callback.lock() {
-            Ok(callback) => {
-                if let Some(callback) = callback.as_ref() {
-                    callback(StatusKind::DATA_AVAILABLE, None);
-                }
-            }
-            Err(e) => {
-                log::error!("Failed to lock callback: {:?}", e);
-            }
-        };
+        if let Some(callback) = callback_handle(&self.status_callback) {
+            notify_user("stateless_reader", || callback(StatusKind::DATA_AVAILABLE, None));
+        }
 
-        match self.change_callback.lock() {
-            Ok(callback) => {
-                if let Some(callback) = callback.as_ref() {
-                    callback(change);
-                }
-            }
-            Err(e) => {
-                log::error!("Failed to lock callback: {:?}", e);
-            }
-        };
+        if let Some(callback) = callback_handle(&self.change_callback) {
+            notify_user("stateless_reader", || callback(change));
+        }
 
         log::debug!("StatelessReader on_change completed.");
     }
