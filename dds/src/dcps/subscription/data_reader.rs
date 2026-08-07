@@ -1139,12 +1139,63 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
             qos.resource_limits.max_instances
         };
 
+        // LENGTH_UNLIMITED is -1, and `-1 as usize` is `usize::MAX`, which silently disables
+        // every cap derived from this. `DataReaderHistoryCache` normalises all three limits the
+        // same way when it sizes the cache.
+        let resource_max_samples = if qos.resource_limits.max_samples == -1 {
+            i32::MAX
+        } else {
+            qos.resource_limits.max_samples
+        };
+
         let max_samples = i32::min(
-            qos.resource_limits.max_samples,
+            resource_max_samples,
             max_instances.saturating_mul(samples_limit), // Prevent overflow
         );
 
         Ok(max_samples as usize)
+    }
+
+    /// Drops read-state for samples the cache no longer holds.
+    ///
+    /// `read_samples` exists so a second `read()` can report `READ_SAMPLE_STATE`. Its only
+    /// bound was `get_max_samples`, which resolved to `usize::MAX` under the default
+    /// `LENGTH_UNLIMITED` limits, so the map grew for the reader's lifetime.
+    ///
+    /// The bound has to come from the cache rather than a count. `get_sample_state` answers
+    /// `READ` both for a sample recorded here and for a sample that is no longer cached, so
+    /// entries below the cache's low-water mark cannot change any answer -- dropping them is
+    /// unobservable. Dropping an entry whose sample is *still* cached is not: it would report
+    /// `NOT_READ` again and hand the sample out a second time.
+    ///
+    /// `changes` is the snapshot the caller already holds, so this needs no extra cache lock,
+    /// and being a pre-removal snapshot only makes the mark conservative.
+    fn prune_read_samples_to_cache(&self, changes: &[Arc<CacheChange>]) {
+        let mut low_water: HashMap<Guid, SequenceNumber> = HashMap::new();
+        for change in changes {
+            low_water
+                .entry(change.writer_guid())
+                .and_modify(|lowest| {
+                    if change.sequence_number() < *lowest {
+                        *lowest = change.sequence_number();
+                    }
+                })
+                .or_insert_with(|| change.sequence_number());
+        }
+
+        let Ok(mut read_samples) = self.read_samples.lock() else { return };
+        read_samples.retain(|writer_guid, seen| {
+            match low_water.get(writer_guid) {
+                // Every sample this writer had has left the cache, so nothing recorded for it
+                // is reachable any more. Dropping the entry also bounds the outer map, which
+                // otherwise kept one entry per writer GUID ever matched.
+                None => false,
+                Some(lowest) => {
+                    *seen = seen.split_off(lowest);
+                    !seen.is_empty()
+                }
+            }
+        });
     }
 
     fn cleanup_old_read_samples(
@@ -3064,6 +3115,7 @@ impl<Foo: DdsType> DataReader<Foo> {
             self.mark_instance_as_viewed(sample_info.instance_handle);
         }
 
+        self.prune_read_samples_to_cache(&changes);
         self.reevaluate_all_conditions()?;
         let cleanup_us = if profile { elapsed_us(cleanup_t0, Instant::now()) } else { 0 };
 
@@ -3283,6 +3335,7 @@ impl<Foo: DdsType> DataReader<Foo> {
             self.mark_instance_as_viewed(sample.sample_info().instance_handle);
         }
 
+        self.prune_read_samples_to_cache(&changes);
         self.reevaluate_all_conditions()?;
 
         if result_samples.is_empty() {
@@ -4309,6 +4362,182 @@ pub(crate) mod tests {
         assert_eq!(samples[1].sample_info().sample_rank, 0);
         assert_eq!(samples[0].data().unwrap().index, data1.index);
         assert_eq!(samples[1].data().unwrap().index, data2.index);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    /// `LENGTH_UNLIMITED` is -1, and casting it to `usize` yields `usize::MAX`, which makes
+    /// every `len() > max_samples` test unsatisfiable. The cache does normalise it
+    /// (`DataReaderHistoryCache` applies `cap()` to all three limits); this second copy of the
+    /// computation did not.
+    ///
+    /// Hermetic on purpose: no writer, no networking, no timing.
+    #[test]
+    fn unlimited_resource_limits_do_not_become_a_usize_max_cap() {
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "read_samples_cap",
+                "HelloWorldType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let data_reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &topic,
+                DataReaderQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let cap = data_reader.get_max_samples().unwrap();
+        assert_ne!(
+            cap,
+            usize::MAX,
+            "LENGTH_UNLIMITED max_samples became usize::MAX, so the read-sample cap can never fire"
+        );
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    /// `read()` records every sample it hands out in `read_samples` so a later `read()` can
+    /// report `READ_SAMPLE_STATE`. Nothing ever pruned that map, so it grew for the reader's
+    /// lifetime -- roughly 20 bytes per distinct sample read, unbounded.
+    ///
+    /// The bound must come from the cache, not from a count. `get_sample_state` answers
+    /// `READ` both for a sample recorded in `read_samples` and for a sample that is no longer
+    /// cached, so entries below the cache's low-water mark cannot change any answer and are
+    /// free to drop. Evicting an entry whose sample is *still cached* would flip it back to
+    /// `NOT_READ` and re-deliver it, which is why the last assertion here matters more than
+    /// the size one.
+    #[test]
+    fn read_samples_stays_bounded_without_redelivering() {
+        const SAMPLES: usize = 60;
+
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "read_samples_growth",
+                "HelloWorldType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        // KeepLast(1) on both ends: the cache holds one sample at a time, so a correctly
+        // bounded `read_samples` cannot accumulate either.
+        let history = HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepLast(1), strict: false };
+        let reliability = ReliabilityQosPolicy {
+            kind: ReliabilityQosPolicyKind::Reliable,
+            max_blocking_time: Duration::from_seconds(1),
+        };
+
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic,
+                DataWriterQos {
+                    history: history.clone(),
+                    reliability: reliability.clone(),
+                    ..Default::default()
+                },
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let data_reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &topic,
+                DataReaderQos { history, reliability, ..Default::default() },
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let condition = writer.get_statuscondition().unwrap().clone();
+        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
+        let wait_set = WaitSet::new();
+        wait_set.attach_condition(condition).unwrap();
+        wait_set.wait(Duration::infinite()).unwrap();
+
+        for index in 0..SAMPLES as u32 {
+            writer
+                .write(&HelloWorld { index, message: "growth".to_string() }, InstanceHandle::NIL)
+                .unwrap();
+            // `read` is the non-consuming path, and the only one that records read state.
+            let _ = data_reader.read(
+                1,
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            );
+        }
+
+        let recorded: usize =
+            data_reader.read_samples.lock().unwrap().values().map(|set| set.len()).sum();
+
+        // The cache holds one sample; a handful of slack covers samples still in flight.
+        assert!(
+            recorded <= 8,
+            "read_samples holds {recorded} sequence numbers for a depth-1 cache, so it is \
+             growing with every sample read rather than with what the cache retains"
+        );
+
+        // The guard that must hold before and after any bounding change: whatever is still
+        // cached and already read stays READ. A cap that evicts a live entry re-delivers it.
+        let cached = data_reader.read(
+            1,
+            &[SampleStateKind::ANY_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::ANY_INSTANCE_STATE],
+        );
+        if cached.is_ok() {
+            assert!(
+                data_reader
+                    .read(
+                        1,
+                        &[SampleStateKind::NOT_READ_SAMPLE_STATE],
+                        &[ViewStateKind::ANY_VIEW_STATE],
+                        &[InstanceStateKind::ANY_INSTANCE_STATE],
+                    )
+                    .is_err(),
+                "a cached sample that was just read came back as NOT_READ, so bounding \
+                 read_samples re-delivers already-read samples"
+            );
+        }
 
         participant.delete_contained_entities().unwrap();
         factory.delete_participant(participant).unwrap();
