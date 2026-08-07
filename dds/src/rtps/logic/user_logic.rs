@@ -1456,8 +1456,9 @@ impl UserLogic {
             match self.transport.send(buffer, &SendTarget::UserData(locator)) {
                 Ok(_) => is_sent = true,
                 Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
-                    let kind = e.to_string();
-                    warn!("[UserLogic] {} locator found but no {} sender available", kind, kind);
+                    // `io::Error` is `Display`, so the macro formats it lazily; binding a
+                    // `String` first allocated even at a level that emits nothing.
+                    warn!("[UserLogic] {} locator found but no {} sender available", e, e);
                     continue;
                 }
                 Err(e) => {
@@ -1919,10 +1920,9 @@ impl UnicastMessageProcessor for UserLogic {
                                                             if e.kind()
                                                                 == std::io::ErrorKind::Unsupported =>
                                                         {
-                                                            let kind = e.to_string();
                                                             warn!(
                                                                 "[UserLogic] {} locator found but no {} sender available",
-                                                                kind, kind
+                                                                e, e
                                                             );
                                                         }
                                                         Err(e) => {
