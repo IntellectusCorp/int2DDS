@@ -34,10 +34,9 @@ use std::{
     fmt::Debug,
     marker::PhantomData,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
         Arc, Mutex, RwLock, Weak,
     },
-    time::Instant,
 };
 
 use super::{
@@ -103,107 +102,6 @@ use crate::{
 pub enum BoundedSerialized {
     Fit(Bytes, SampleInfo),
     TooSmall { required: usize },
-}
-
-static SERIALIZED_TAKE_PROFILE_COUNT: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_PROFILE_PRECHECK_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_PROFILE_GET_CHANGES_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_PROFILE_SORT_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_PROFILE_FILTER_SETUP_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_PROFILE_INSTANCE_INFO_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_PROFILE_LOOP_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_PROFILE_CLEANUP_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_PROFILE_TOTAL_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_LOOP_PROFILE_COUNT: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_LOOP_PROFILE_SAMPLE_STATE_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_LOOP_PROFILE_INFO_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_LOOP_PROFILE_MATCH_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_LOOP_PROFILE_DATA_BYTES_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_LOOP_PROFILE_SAMPLE_INFO_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_LOOP_PROFILE_REMOVE_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_LOOP_PROFILE_PUSH_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_LOOP_PROFILE_TOTAL_US: AtomicU64 = AtomicU64::new(0);
-
-fn serialized_take_profile_enabled() -> bool {
-    std::env::var_os("RMW_INT2DDS_PROFILE").is_some()
-}
-
-fn elapsed_us(start: Instant, end: Instant) -> u64 {
-    end.duration_since(start).as_micros() as u64
-}
-
-fn record_serialized_take_profile(
-    precheck_us: u64,
-    get_changes_us: u64,
-    sort_us: u64,
-    filter_setup_us: u64,
-    instance_info_us: u64,
-    loop_us: u64,
-    cleanup_us: u64,
-    total_us: u64,
-) {
-    let n = SERIALIZED_TAKE_PROFILE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    SERIALIZED_TAKE_PROFILE_PRECHECK_US.fetch_add(precheck_us, Ordering::Relaxed);
-    SERIALIZED_TAKE_PROFILE_GET_CHANGES_US.fetch_add(get_changes_us, Ordering::Relaxed);
-    SERIALIZED_TAKE_PROFILE_SORT_US.fetch_add(sort_us, Ordering::Relaxed);
-    SERIALIZED_TAKE_PROFILE_FILTER_SETUP_US.fetch_add(filter_setup_us, Ordering::Relaxed);
-    SERIALIZED_TAKE_PROFILE_INSTANCE_INFO_US.fetch_add(instance_info_us, Ordering::Relaxed);
-    SERIALIZED_TAKE_PROFILE_LOOP_US.fetch_add(loop_us, Ordering::Relaxed);
-    SERIALIZED_TAKE_PROFILE_CLEANUP_US.fetch_add(cleanup_us, Ordering::Relaxed);
-    SERIALIZED_TAKE_PROFILE_TOTAL_US.fetch_add(total_us, Ordering::Relaxed);
-
-    if n % 300 == 0 {
-        let divisor = n as f64;
-        eprintln!(
-            "INT2DDS_SERIALIZED_TAKE_PROFILE count={} total_avg_us={:.3} precheck_avg_us={:.3} get_changes_avg_us={:.3} sort_avg_us={:.3} filter_setup_avg_us={:.3} instance_info_avg_us={:.3} loop_avg_us={:.3} cleanup_avg_us={:.3}",
-            n,
-            SERIALIZED_TAKE_PROFILE_TOTAL_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_TAKE_PROFILE_PRECHECK_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_TAKE_PROFILE_GET_CHANGES_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_TAKE_PROFILE_SORT_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_TAKE_PROFILE_FILTER_SETUP_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_TAKE_PROFILE_INSTANCE_INFO_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_TAKE_PROFILE_LOOP_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_TAKE_PROFILE_CLEANUP_US.load(Ordering::Relaxed) as f64 / divisor,
-        );
-    }
-}
-
-fn record_serialized_take_loop_profile(
-    sample_state_us: u64,
-    info_us: u64,
-    match_us: u64,
-    data_bytes_us: u64,
-    sample_info_us: u64,
-    remove_us: u64,
-    push_us: u64,
-    total_us: u64,
-) {
-    let n = SERIALIZED_TAKE_LOOP_PROFILE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    SERIALIZED_TAKE_LOOP_PROFILE_SAMPLE_STATE_US.fetch_add(sample_state_us, Ordering::Relaxed);
-    SERIALIZED_TAKE_LOOP_PROFILE_INFO_US.fetch_add(info_us, Ordering::Relaxed);
-    SERIALIZED_TAKE_LOOP_PROFILE_MATCH_US.fetch_add(match_us, Ordering::Relaxed);
-    SERIALIZED_TAKE_LOOP_PROFILE_DATA_BYTES_US.fetch_add(data_bytes_us, Ordering::Relaxed);
-    SERIALIZED_TAKE_LOOP_PROFILE_SAMPLE_INFO_US.fetch_add(sample_info_us, Ordering::Relaxed);
-    SERIALIZED_TAKE_LOOP_PROFILE_REMOVE_US.fetch_add(remove_us, Ordering::Relaxed);
-    SERIALIZED_TAKE_LOOP_PROFILE_PUSH_US.fetch_add(push_us, Ordering::Relaxed);
-    SERIALIZED_TAKE_LOOP_PROFILE_TOTAL_US.fetch_add(total_us, Ordering::Relaxed);
-
-    if n % 300 == 0 {
-        let divisor = n as f64;
-        eprintln!(
-            "INT2DDS_SERIALIZED_TAKE_LOOP_PROFILE count={} total_avg_us={:.3} sample_state_avg_us={:.3} info_avg_us={:.3} match_avg_us={:.3} data_bytes_avg_us={:.3} sample_info_avg_us={:.3} remove_avg_us={:.3} push_avg_us={:.3}",
-            n,
-            SERIALIZED_TAKE_LOOP_PROFILE_TOTAL_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_TAKE_LOOP_PROFILE_SAMPLE_STATE_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_TAKE_LOOP_PROFILE_INFO_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_TAKE_LOOP_PROFILE_MATCH_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_TAKE_LOOP_PROFILE_DATA_BYTES_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_TAKE_LOOP_PROFILE_SAMPLE_INFO_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_TAKE_LOOP_PROFILE_REMOVE_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_TAKE_LOOP_PROFILE_PUSH_US.load(Ordering::Relaxed) as f64 / divisor,
-        );
-    }
 }
 
 // Pub/Sub must contain multiple types of DataWriter/Reader<Foo>,
@@ -1675,15 +1573,32 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         // 1. DataReader StatusCondition
         self.set_communication_status(&StatusKind::DATA_AVAILABLE, trigger_value)?;
 
-        // 2. Subscriber StatusCondition
+        // 2. Subscriber and 3. DomainParticipant StatusConditions.
+        //
+        // `Entity::set_communication_status` reaches the condition through `get_statuscondition`,
+        // which takes a mutex and clones a 4-`Arc` `StatusCondition` just to run one atomic bit
+        // update. The subscriber and the participant each take two status kinds, so calling it
+        // once per kind pays that lock-and-clone twice for the very same condition. Hoisting one
+        // clone per entity turns five lock+clone pairs per sample into three -- and every reader
+        // under the participant does this on every sample it delivers.
+        //
+        // The two kinds stay two separate calls on purpose. `add_communication_status` fires the
+        // WaitSet callback only when `enabled_statuses` contains *every* bit of its argument
+        // (`StatusMask::contains` is all-of), so folding the kinds into one mask would silently
+        // stop waking a condition that enabled only one of them.
         let subscriber = self.subscriber_arc()?;
-        subscriber.set_communication_status(&StatusKind::DATA_ON_READERS, trigger_value)?;
-        subscriber.set_communication_status(&StatusKind::DATA_AVAILABLE, trigger_value)?;
+        let subscriber_condition = subscriber.get_statuscondition()?;
+        subscriber_condition
+            .set_communication_status(&StatusKind::DATA_ON_READERS, trigger_value)?;
+        subscriber_condition
+            .set_communication_status(&StatusKind::DATA_AVAILABLE, trigger_value)?;
 
-        // 3. DomainParticipant StatusCondition
         let participant = subscriber.participant_arc()?;
-        participant.set_communication_status(&StatusKind::DATA_ON_READERS, trigger_value)?;
-        participant.set_communication_status(&StatusKind::DATA_AVAILABLE, trigger_value)?;
+        let participant_condition = participant.get_statuscondition()?;
+        participant_condition
+            .set_communication_status(&StatusKind::DATA_ON_READERS, trigger_value)?;
+        participant_condition
+            .set_communication_status(&StatusKind::DATA_AVAILABLE, trigger_value)?;
 
         Ok(())
     }
@@ -2896,9 +2811,6 @@ impl<Foo: DdsType> DataReader<Foo> {
         max_bytes: Option<usize>,
         instance_handle: Option<InstanceHandle>,
     ) -> DdsResult<(Vec<(Bytes, SampleInfo)>, Option<usize>)> {
-        let profile = serialized_take_profile_enabled();
-        let total_t0 = Instant::now();
-        let precheck_t0 = Instant::now();
         self.is_enabled()?;
 
         if max_samples == 0 {
@@ -2915,32 +2827,14 @@ impl<Foo: DdsType> DataReader<Foo> {
         }
 
         self.set_read_communication_status(false)?;
-        let precheck_us = if profile { elapsed_us(precheck_t0, Instant::now()) } else { 0 };
         let mut result: Vec<(Bytes, SampleInfo)> = Vec::new();
         let mut remaining = if max_samples == -1 { i32::MAX } else { max_samples };
 
-        let get_changes_t0 = Instant::now();
         let changes = self.get_available_changes()?;
-        let get_changes_us = if profile { elapsed_us(get_changes_t0, Instant::now()) } else { 0 };
-
-        let sort_us = 0u64;
 
         // ContentFilteredTopic is applied on the receive path, so the cache is already filtered.
-        let filter_setup_us = 0u64;
-
-        let instance_info_t0 = Instant::now();
         let instance_infos = self.get_instance_infos()?;
-        let instance_info_us =
-            if profile { elapsed_us(instance_info_t0, Instant::now()) } else { 0 };
 
-        let loop_t0 = Instant::now();
-        let mut loop_sample_state_us = 0;
-        let mut loop_info_us = 0;
-        let mut loop_match_us = 0;
-        let mut loop_data_bytes_us = 0;
-        let mut loop_sample_info_us = 0;
-        let mut loop_remove_us = 0;
-        let mut loop_push_us = 0;
         for change in changes.iter() {
             if remaining <= 0 {
                 break;
@@ -2955,13 +2849,8 @@ impl<Foo: DdsType> DataReader<Foo> {
                 }
             }
 
-            let sample_state_t0 = Instant::now();
             let sample_state =
                 self.get_sample_state(&change.writer_guid(), &change.sequence_number())?;
-            if profile {
-                loop_sample_state_us += elapsed_us(sample_state_t0, Instant::now());
-            }
-            let info_t0 = Instant::now();
             let info = match instance_infos.get(&change.instance_handle()) {
                 Some(info) => info,
                 None => &InstanceInfo {
@@ -2973,19 +2862,12 @@ impl<Foo: DdsType> DataReader<Foo> {
                     pending_notification: false,
                 },
             };
-            if profile {
-                loop_info_us += elapsed_us(info_t0, Instant::now());
-            }
 
-            let match_t0 = Instant::now();
             if !sample_states.matches(sample_state)
                 || !view_states.matches(info.view_state)
                 || !instance_states.matches(info.instance_state)
             {
                 continue;
-            }
-            if profile {
-                loop_match_us += elapsed_us(match_t0, Instant::now());
             }
 
             let has_valid_data = match change.kind() {
@@ -2995,11 +2877,7 @@ impl<Foo: DdsType> DataReader<Foo> {
                 | ChangeKind::NotAliveDisposedUnregistered => false,
             };
 
-            let data_bytes_t0 = Instant::now();
             let serialized_data = change.data_bytes();
-            if profile {
-                loop_data_bytes_us += elapsed_us(data_bytes_t0, Instant::now());
-            }
 
             if let Some(cap) = max_bytes {
                 if has_valid_data && serialized_data.len() > cap {
@@ -3007,7 +2885,6 @@ impl<Foo: DdsType> DataReader<Foo> {
                 }
             }
 
-            let sample_info_t0 = Instant::now();
             let sample_info = SampleInfo {
                 sample_state,
                 view_state: info.view_state,
@@ -3027,42 +2904,17 @@ impl<Foo: DdsType> DataReader<Foo> {
                 publication_handle: InstanceHandle::from_guid(&change.writer_guid()),
                 valid_data: has_valid_data,
             };
-            if profile {
-                loop_sample_info_us += elapsed_us(sample_info_t0, Instant::now());
-            }
 
-            let remove_t0 = Instant::now();
             if take {
                 self.remove_change(change.clone())?;
             } else {
                 self.mark_sample_as_read(&change.writer_guid(), change.sequence_number())?;
             }
-            if profile {
-                loop_remove_us += elapsed_us(remove_t0, Instant::now());
-            }
 
-            let push_t0 = Instant::now();
             result.push((serialized_data, sample_info));
             remaining -= 1;
-            if profile {
-                loop_push_us += elapsed_us(push_t0, Instant::now());
-            }
-        }
-        let loop_us = if profile { elapsed_us(loop_t0, Instant::now()) } else { 0 };
-        if profile {
-            record_serialized_take_loop_profile(
-                loop_sample_state_us,
-                loop_info_us,
-                loop_match_us,
-                loop_data_bytes_us,
-                loop_sample_info_us,
-                loop_remove_us,
-                loop_push_us,
-                loop_us,
-            );
         }
 
-        let cleanup_t0 = Instant::now();
         for sample_info in self.drain_pending_notifications(
             &instance_infos,
             sample_states,
@@ -3080,23 +2932,10 @@ impl<Foo: DdsType> DataReader<Foo> {
 
         self.prune_read_samples_to_cache(&changes);
         self.reevaluate_all_conditions()?;
-        let cleanup_us = if profile { elapsed_us(cleanup_t0, Instant::now()) } else { 0 };
 
         if result.is_empty() {
             Err(DdsError::NoData)
         } else {
-            if profile {
-                record_serialized_take_profile(
-                    precheck_us,
-                    get_changes_us,
-                    sort_us,
-                    filter_setup_us,
-                    instance_info_us,
-                    loop_us,
-                    cleanup_us,
-                    elapsed_us(total_t0, Instant::now()),
-                );
-            }
             Ok((result, None))
         }
     }
@@ -4121,6 +3960,98 @@ pub(crate) mod tests {
     pub struct TestData {
         #[dds(key)]
         id: u32,
+    }
+
+    /// `set_read_communication_status` fans one arrival out to three entity levels with two
+    /// status kinds, and every reader under a participant writes the participant's shared
+    /// condition on every sample. Pin the exact bits at every level so a refactor of how the
+    /// condition is reached cannot quietly drop or merge one of the five updates -- merging the
+    /// two kinds into a single mask op looks equivalent but is not, because the WaitSet trigger
+    /// test is all-of (`StatusMask::contains`), not any-of.
+    #[test]
+    fn read_communication_status_sets_and_clears_every_level() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<TestData>(
+                "ReadCommStatusTopic",
+                "TestData",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let reader = subscriber
+            .create_datareader::<TestData>(
+                &topic,
+                DataReaderQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        reader.set_read_communication_status(true).unwrap();
+
+        assert!(
+            reader.get_status_changes().unwrap().contains(StatusMask::DATA_AVAILABLE),
+            "reader must report DATA_AVAILABLE"
+        );
+        let subscriber_changes = subscriber.get_status_changes().unwrap();
+        assert!(
+            subscriber_changes.contains(StatusMask::DATA_ON_READERS),
+            "subscriber must report DATA_ON_READERS"
+        );
+        assert!(
+            subscriber_changes.contains(StatusMask::DATA_AVAILABLE),
+            "subscriber must report DATA_AVAILABLE"
+        );
+        let participant_changes = participant.get_status_changes().unwrap();
+        assert!(
+            participant_changes.contains(StatusMask::DATA_ON_READERS),
+            "participant must report DATA_ON_READERS"
+        );
+        assert!(
+            participant_changes.contains(StatusMask::DATA_AVAILABLE),
+            "participant must report DATA_AVAILABLE"
+        );
+
+        reader.set_read_communication_status(false).unwrap();
+
+        assert!(
+            !reader.get_status_changes().unwrap().contains(StatusMask::DATA_AVAILABLE),
+            "reader must clear DATA_AVAILABLE"
+        );
+        let subscriber_changes = subscriber.get_status_changes().unwrap();
+        assert!(
+            !subscriber_changes.contains(StatusMask::DATA_ON_READERS),
+            "subscriber must clear DATA_ON_READERS"
+        );
+        assert!(
+            !subscriber_changes.contains(StatusMask::DATA_AVAILABLE),
+            "subscriber must clear DATA_AVAILABLE"
+        );
+        let participant_changes = participant.get_status_changes().unwrap();
+        assert!(
+            !participant_changes.contains(StatusMask::DATA_ON_READERS),
+            "participant must clear DATA_ON_READERS"
+        );
+        assert!(
+            !participant_changes.contains(StatusMask::DATA_AVAILABLE),
+            "participant must clear DATA_AVAILABLE"
+        );
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[derive(DdsType)]
