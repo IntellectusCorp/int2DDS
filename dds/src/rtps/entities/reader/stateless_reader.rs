@@ -22,7 +22,7 @@ use crate::{
     rtps::{
         common::{
             entity_id::EntityId,
-            guid::{Guid, GuidPrefix},
+            guid::Guid,
             locator::Locator,
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
             time::RtpsDuration,
@@ -500,52 +500,5 @@ impl Reader for StatelessReader {
 
         debug!("Removed writer proxy with guid {} from matched writers", writer_guid);
         Ok(true)
-    }
-
-    fn remove_all_matched_writers_with_prefix_and_update_status(
-        &self,
-        prefix: GuidPrefix,
-    ) -> RtpsResult<usize> {
-        let mut remote_writer_info = self
-            .matched_writers
-            .lock()
-            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
-
-        debug!(
-            "Before unmatching with writer, this reader had {:?} matched writer",
-            remote_writer_info.len()
-        );
-        for info in remote_writer_info.iter() {
-            if info.remote_writer_guid().prefix() == prefix {
-                self.update_subscription_matched_status(
-                    -1,
-                    InstanceHandle::from_guid(&info.remote_writer_guid()),
-                );
-            }
-        }
-        let removed_guids: Vec<Guid> = remote_writer_info
-            .iter()
-            .filter(|info| info.remote_writer_guid().prefix() == prefix)
-            .map(|info| info.remote_writer_guid())
-            .collect();
-        let len_before = remote_writer_info.len();
-        remote_writer_info.retain(|info| info.remote_writer_guid().prefix() != prefix);
-        let removed = len_before - remote_writer_info.len();
-        let len_after = remote_writer_info.len();
-        drop(remote_writer_info);
-
-        // Connectivity change: drop any open coherent sets from the removed writers.
-        if let Ok(mut cache) = self.reader_cache.lock() {
-            for writer_guid in &removed_guids {
-                cache.discard_coherent_pending(*writer_guid);
-            }
-        }
-
-        debug!(
-            "Removed all unmatched remote writers from participant: {}",
-            Guid::guid_prefix_to_string(&prefix)
-        );
-        debug!("Current number of matched writer: {:?}", len_after);
-        Ok(removed)
     }
 }
