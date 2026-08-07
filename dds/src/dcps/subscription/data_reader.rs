@@ -1131,6 +1131,15 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     /// `changes` is the snapshot the caller already holds, so this needs no extra cache lock,
     /// and being a pre-removal snapshot only makes the mark conservative.
     fn prune_read_samples_to_cache(&self, changes: &[Arc<CacheChange>]) {
+        let Ok(mut read_samples) = self.read_samples.lock() else { return };
+
+        // Only `read()` records anything here, so a reader that only ever `take()`s -- the
+        // common case -- has nothing to prune. Bailing before the map is built keeps this off
+        // that path entirely rather than hashing a Guid per cached change for an empty result.
+        if read_samples.is_empty() {
+            return;
+        }
+
         let mut low_water: HashMap<Guid, SequenceNumber> = HashMap::new();
         for change in changes {
             low_water
@@ -1143,7 +1152,6 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                 .or_insert_with(|| change.sequence_number());
         }
 
-        let Ok(mut read_samples) = self.read_samples.lock() else { return };
         read_samples.retain(|writer_guid, seen| {
             match low_water.get(writer_guid) {
                 // Every sample this writer had has left the cache, so nothing recorded for it
