@@ -1413,6 +1413,20 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         Ok(())
     }
 
+    /// DCPS cache length for the `[history-strict]` diagnostics.
+    ///
+    /// Shaped like [`StatefulWriter::rtps_cache_len`] so both can be passed straight into a
+    /// `debug!` argument list. That laziness is the point: this takes a lock and allocates a
+    /// `String`, and `log` is built with `release_max_level_error`, so in release the macro
+    /// that consumes it cannot emit at all. Bound to a `let` outside the macro, the work ran on
+    /// every reliable write to feed a line that could never print.
+    fn dcps_cache_len(&self) -> String {
+        match self.datawriter_cache.try_lock() {
+            Ok(cache) => cache.changes_len().to_string(),
+            Err(_) => "busy".to_string(),
+        }
+    }
+
     /// Pool-based add_change skeleton: acquire from pool → reset → fill buffer → add to history.
     /// Avoids per-write heap allocation by reusing CacheChange and its internal buffer.
     /// `fill` writes the payload into the reused buffer (already cleared by reset).
@@ -1455,14 +1469,10 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         if let Some(stateful_writer) = rtps_writer.as_any().downcast_ref::<StatefulWriter>() {
             debug!("[history-strict] trigger=send-complete seq={}", seq_num.to_i64());
             stateful_writer.process_acked_changes();
-            let dcps_len = match self.datawriter_cache.try_lock() {
-                Ok(cache) => cache.changes_len().to_string(),
-                Err(_) => "busy".to_string(),
-            };
             debug!(
                 "[history-strict] after send-complete rtps_len={} dcps_len={}",
                 stateful_writer.rtps_cache_len(),
-                dcps_len
+                self.dcps_cache_len()
             );
         }
 
