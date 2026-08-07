@@ -407,7 +407,7 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
         let data_reader = self
             .data_reader
             .upgrade()
-            .ok_or(DdsError::Error("DataReader has been dropped".to_string()))?;
+            .ok_or_else(|| DdsError::Error("DataReader has been dropped".to_string()))?;
 
         let instance_handle = data_reader.fallback_instance_handle(change)?;
         change.set_instance_handle(instance_handle);
@@ -737,7 +737,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
         let data_reader = self
             .data_reader
             .upgrade()
-            .ok_or(DdsError::Error("DataReader has been dropped".to_string()))?;
+            .ok_or_else(|| DdsError::Error("DataReader has been dropped".to_string()))?;
 
         let change_kind = cache_change.kind();
         let mut state_changed = false;
@@ -856,7 +856,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
         let data_reader = self
             .data_reader
             .upgrade()
-            .ok_or(DdsError::Error("DataReader has been dropped".to_string()))?;
+            .ok_or_else(|| DdsError::Error("DataReader has been dropped".to_string()))?;
         let state_changed = data_reader.update_instance_state(
             instance_handle,
             InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE,

@@ -42,7 +42,8 @@ use crate::{
     },
     dcps::topic::type_support::{DdsType, TypeSupport},
     domain::{
-        domain_participant::DomainParticipant, domain_participant_factory::DomainParticipantFactory,
+        domain_participant::{DomainParticipant, ParticipantRef},
+        domain_participant_factory::DomainParticipantFactory,
     },
     infrastructure::{
         domain_entity::DomainEntity,
@@ -1093,6 +1094,32 @@ impl Publisher {
 
         // Case when participant is None or reference has expired
         Err(DdsError::Error("Participant reference is invalid or expired".to_string()))
+    }
+
+    /// Upgraded parent handle without the deep clone [`Self::get_participant`] performs.
+    ///
+    /// Same failure modes and messages -- `AlreadyDeleted` when this publisher is deleted,
+    /// `Error` when the parent `Weak` has expired -- but two atomic read-modify-writes instead
+    /// of ~52. `get_participant` clones a struct of 25 `Arc` fields to call one method on it,
+    /// and `write()` does that on every sample.
+    ///
+    /// Returns [`ParticipantRef`], not a bare `Arc`: `get_participant` force-sets `self_ref` on
+    /// the value it hands back, so that value performs the factory orphan handoff when it is
+    /// the last reference standing. `ParticipantRef` reproduces it for two plain atomic loads.
+    ///
+    /// Only for internal call sites that need `get_current_time`, `get_listener`,
+    /// `set_communication_status` or the QoS accessors. The value behind the returned handle
+    /// has `self_ref: None`, so it must not reach `create_*`/`delete_*`; use
+    /// [`Self::get_participant`] for those.
+    pub(crate) fn participant_arc(&self) -> DdsResult<ParticipantRef> {
+        self.is_deleted()?;
+        self.participant
+            .as_ref()
+            .and_then(|weak_ref| weak_ref.upgrade())
+            .map(ParticipantRef::new)
+            .ok_or_else(|| {
+                DdsError::Error("Participant reference is invalid or expired".to_string())
+            })
     }
 
     pub(crate) fn has_active_entities(&self) -> DdsResult<bool> {
