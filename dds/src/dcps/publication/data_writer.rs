@@ -460,6 +460,22 @@ impl<Foo: 'static + Clone> UpdateStatus for DataWriter<Foo> {
 
 // DataWriter abstract class
 impl<Foo: 'static + Clone> DataWriter<Foo> {
+    /// Upgraded parent handle without the deep clone [`DataWriterBase::get_publisher`] performs.
+    ///
+    /// Same failure modes and messages -- `AlreadyDeleted` when this writer is deleted, `Error`
+    /// when the parent `Weak` has expired -- but two atomic read-modify-writes instead of ~26.
+    /// Needs no drop guard, unlike the participant equivalent: the value inside the `Arc` has
+    /// `self_ref: None`, so `Drop for Publisher` early-returns either way.
+    ///
+    /// Only for internal call sites that never read `Publisher::self_ref`.
+    pub(crate) fn publisher_arc(&self) -> DdsResult<Arc<Publisher>> {
+        self.is_deleted()?;
+        self.publisher
+            .as_ref()
+            .and_then(|weak_ref| weak_ref.upgrade())
+            .ok_or_else(|| DdsError::Error("Publisher reference is invalid or expired".to_string()))
+    }
+
     // DataWriter should be specialized for each data type.
     // Trait defining methods that should be defined in auto-generated class for <Foo>
     #[allow(clippy::too_many_arguments)]
@@ -667,7 +683,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             This operation can block and return TIMEOUT under the same conditions as the write operation (2.2.2.4.2.11).
             Additionally, this operation can return OUT_OF_RESOURCES error under the same conditions as the write operation.
         */
-        let timestamp = self.get_publisher()?.get_participant()?.get_current_time().unwrap();
+        let timestamp = self.publisher_arc()?.participant_arc()?.get_current_time().unwrap();
         self.dispose_w_timestamp(data, handle, timestamp)
     }
 
@@ -768,7 +784,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         //     if register_instance() != handle
         //
         // self.rtps_writer(handle, data related).history_cache.add_change(cache) // Rtps v2.5 Overview
-        let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
+        let timestamp = self.publisher_arc()?.participant_arc()?.get_current_time()?;
         self.write_w_timestamp(data, handle, timestamp)
     }
 
@@ -793,7 +809,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         on_identity_assigned: impl FnOnce(&mut Foo, Guid, SequenceNumber),
     ) -> DdsResult<(Guid, SequenceNumber)> {
         self.is_enabled()?;
-        let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
+        let timestamp = self.publisher_arc()?.participant_arc()?.get_current_time()?;
         Self::validate_timestamp(&timestamp)?;
 
         let format = {
@@ -904,7 +920,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         serialized_data: &[u8],
         serialized_key: Option<&[u8]>,
     ) -> DdsResult<()> {
-        let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
+        let timestamp = self.publisher_arc()?.participant_arc()?.get_current_time()?;
         self.write_serialized_w_timestamp(serialized_data, serialized_key, timestamp)
     }
 
@@ -965,7 +981,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             return Err(DdsError::BadParameter);
         }
 
-        let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
+        let timestamp = self.publisher_arc()?.participant_arc()?.get_current_time()?;
         self.is_enabled()?;
         Self::validate_timestamp(&timestamp)?;
 
@@ -1048,7 +1064,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
 
     /// Register an instance from a full serialized sample.
     pub fn register_instance_serialized(&self, sample: &[u8]) -> DdsResult<InstanceHandle> {
-        let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
+        let timestamp = self.publisher_arc()?.participant_arc()?.get_current_time()?;
         self.register_instance_serialized_w_timestamp(sample, timestamp)
     }
 
@@ -1071,7 +1087,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
 
     /// Dispose an instance from a full serialized sample.
     pub fn dispose_serialized(&self, sample: &[u8], handle: InstanceHandle) -> DdsResult<()> {
-        let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
+        let timestamp = self.publisher_arc()?.participant_arc()?.get_current_time()?;
         self.dispose_serialized_w_timestamp(sample, handle, timestamp)
     }
 
@@ -1101,7 +1117,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         sample: &[u8],
         handle: InstanceHandle,
     ) -> DdsResult<()> {
-        let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
+        let timestamp = self.publisher_arc()?.participant_arc()?.get_current_time()?;
         self.unregister_instance_serialized_w_timestamp(sample, handle, timestamp)
     }
 
@@ -1128,7 +1144,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
     /// Dispose an instance identified only by its handle; the serialized key is
     /// looked up from the writer's instance registry.
     pub fn dispose_serialized_by_handle(&self, handle: InstanceHandle) -> DdsResult<()> {
-        let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
+        let timestamp = self.publisher_arc()?.participant_arc()?.get_current_time()?;
         self.is_enabled()?;
         Self::validate_timestamp(&timestamp)?;
 
@@ -1145,7 +1161,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         &self,
         handle: InstanceHandle,
     ) -> DdsResult<()> {
-        let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
+        let timestamp = self.publisher_arc()?.participant_arc()?.get_current_time()?;
         self.is_enabled()?;
         Self::validate_timestamp(&timestamp)?;
 
@@ -1583,10 +1599,10 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         // 1. DataWriter StatusCondition
         self.get_statuscondition()?.set_communication_status(status_kind, trigger_value)?;
         // 2. Publisher StatusCondition
-        let publisher = self.get_publisher()?;
+        let publisher = self.publisher_arc()?;
         publisher.set_communication_status(status_kind, trigger_value)?;
         // 3. DomainParticipant StatusCondition
-        publisher.get_participant()?.set_communication_status(status_kind, trigger_value)?;
+        publisher.participant_arc()?.set_communication_status(status_kind, trigger_value)?;
 
         Ok(())
     }
@@ -1615,12 +1631,12 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 listener.on_offered_deadline_missed(self, &status);
                 listener_called = true;
             }
-            let publisher = self.get_publisher()?;
+            let publisher = self.publisher_arc()?;
             if let Some(listener) = publisher.get_listener()? {
                 listener.on_offered_deadline_missed(self, &status);
                 listener_called = true;
             }
-            let participant = publisher.get_participant()?;
+            let participant = publisher.participant_arc()?;
             if let Some(listener) = participant.get_listener()? {
                 listener.on_offered_deadline_missed(self, &status);
                 listener_called = true;
@@ -1662,12 +1678,12 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 listener.on_offered_incompatible_qos(self, &status);
                 listener_called = true;
             }
-            let publisher = self.get_publisher()?;
+            let publisher = self.publisher_arc()?;
             if let Some(listener) = publisher.get_listener()? {
                 listener.on_offered_incompatible_qos(self, &status);
                 listener_called = true;
             }
-            let participant = publisher.get_participant()?;
+            let participant = publisher.participant_arc()?;
             if let Some(listener) = participant.get_listener()? {
                 listener.on_offered_incompatible_qos(self, &status);
                 listener_called = true;
@@ -1722,12 +1738,12 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 listener.on_liveliness_lost(self, &status);
                 listener_called = true;
             }
-            let publisher = self.get_publisher()?;
+            let publisher = self.publisher_arc()?;
             if let Some(listener) = publisher.get_listener()? {
                 listener.on_liveliness_lost(self, &status);
                 listener_called = true;
             }
-            let participant = publisher.get_participant()?;
+            let participant = publisher.participant_arc()?;
             if let Some(listener) = participant.get_listener()? {
                 listener.on_liveliness_lost(self, &status);
                 listener_called = true;
@@ -1773,12 +1789,12 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 listener.on_publication_matched(self, &status);
                 listener_called = true;
             }
-            let publisher = self.get_publisher()?;
+            let publisher = self.publisher_arc()?;
             if let Some(listener) = publisher.get_listener()? {
                 listener.on_publication_matched(self, &status);
                 listener_called = true;
             }
-            let participant = publisher.get_participant()?;
+            let participant = publisher.participant_arc()?;
             if let Some(listener) = participant.get_listener()? {
                 listener.on_publication_matched(self, &status);
                 listener_called = true;
@@ -2132,7 +2148,7 @@ where
         // # Errors
         // - `TIMEOUT`: timeout can occur under the same conditions as write operations.
         // - `OUT_OF_RESOURCES`: can occur when resources are insufficient.
-        let timestamp = self.get_publisher()?.get_participant()?.get_current_time().unwrap();
+        let timestamp = self.publisher_arc()?.participant_arc()?.get_current_time().unwrap();
         self.register_instance_w_timestamp(instance, timestamp)
     }
 
@@ -2242,7 +2258,7 @@ impl<Foo: 'static + Clone> DataWriterBase for DataWriter<Foo> {
         match self.get_qos_arc()?.liveliness.kind {
             LivelinessQosPolicyKind::Automatic => Ok(()),
             LivelinessQosPolicyKind::ManualByParticipant => {
-                self.get_publisher()?.get_participant()?.assert_liveliness()
+                self.publisher_arc()?.participant_arc()?.assert_liveliness()
             }
             LivelinessQosPolicyKind::ManualByTopic => {
                 let rtps_writer = self.get_rtps_writer()?;
@@ -2509,7 +2525,7 @@ impl<Foo: 'static + Clone> DataWriterInternal for DataWriter<Foo> {
         }
 
         // A payload-less Data carrying no coherent set id marks the end of the coherent set.
-        let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
+        let timestamp = self.publisher_arc()?.participant_arc()?.get_current_time()?;
         let rtps_writer = self.get_rtps_writer()?;
         let mut change = {
             let mut cache =
@@ -2549,6 +2565,77 @@ mod tests {
     pub struct TestData {
         #[dds(key)]
         id: u32,
+    }
+
+    /// The write path reaches the participant through the writer's internal accessors, so
+    /// those accessors own the factory orphan handoff that `Publisher::get_participant`
+    /// performs today.
+    ///
+    /// `get_participant` force-sets `self_ref` on the value it returns, so when that value is
+    /// the last strong reference its `Drop` hands the participant to
+    /// `DomainParticipantFactory::orphaned_participants` instead of destroying it. An accessor
+    /// returning a bare `Arc<DomainParticipant>` drops an interior value whose `self_ref` is
+    /// `None`; `Drop` then early-returns as "never fully initialized", no handoff runs, and the
+    /// participant is torn down along with its RTPS threads.
+    ///
+    /// `test_participant_drop_without_delete` cannot catch that: it holds two clones before
+    /// dropping, so `strong_count` is 3 and `Drop` early-returns on the clone check. This test
+    /// drives the count to exactly 1 through the writer's own accessor chain.
+    #[test]
+    fn writer_participant_accessor_orphans_the_last_reference() {
+        let domain_id = crate::test_utils::unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic = participant
+            .create_topic::<TestData>(
+                "OrphanHandoffTopic",
+                "TestData",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer = publisher
+            .create_datawriter::<TestData>(
+                &topic,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        // The handle the write path uses. Taking it before dropping the user's handle is what
+        // makes the accessor's value the last strong reference a moment later.
+        let internal = writer.publisher_arc().unwrap().participant_arc().unwrap();
+
+        drop(participant);
+        assert!(
+            factory.lookup_participant(domain_id).unwrap().is_some(),
+            "participant must stay alive while the write path still holds it"
+        );
+
+        // Releasing the last reference must orphan the participant, not destroy it.
+        drop(internal);
+        assert!(
+            factory.lookup_participant(domain_id).unwrap().is_some(),
+            "participant was destroyed instead of orphaned when the write path released the \
+             last reference; the internal accessor dropped the orphan handoff"
+        );
+
+        drop(writer);
+        drop(publisher);
+        drop(topic);
     }
 
     #[test]
