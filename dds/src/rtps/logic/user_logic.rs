@@ -155,190 +155,204 @@ impl UserLogic {
     ) -> RtpsResult<()> {
         let writer = self.find_stateful_writer(writer_entity_id)?;
         let stateful_writer = writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
+        let participant = self.get_upgraded_participant()?;
+
+        enum RequestedChangeType {
+            Gap(SequenceNumber),
+            Data(Arc<CacheChange>),
+        }
+
+        // Pre-collect and store the information required for wire-level transmission
+        // to minimize the duration of `writer_cache` and `reader_proxies`.
+        struct SendPlan {
+            locators: Vec<Locator>,
+            group_id: EntityId,
+            reliable: bool,
+            requested_change_types: Vec<RequestedChangeType>,
+        }
 
         // LOCK ORDER: acquires `writer_cache` first, then `reader_proxies`.
-        let writer_cache = stateful_writer.writer_cache();
-        let cache_guard = writer_cache.lock().map_err(|e| {
-            RtpsError::new(
-                RtpsErrorCode::LockError,
-                format!("Failed to acquire writer cache lock: {}", e),
-            )
-        })?;
-
-        let reader_proxies = stateful_writer.reader_proxies();
-        let mut reader_proxies_guard = reader_proxies.lock().map_err(|e| {
-            RtpsError::new(
-                RtpsErrorCode::LockError,
-                format!("Failed to acquire reader_proxies lock: {}", e),
-            )
-        })?;
-
-        let reader_proxy = reader_proxies_guard
-            .iter_mut()
-            .find(|rp| rp.remote_reader_guid() == remote_reader_guid)
-            .ok_or_else(|| {
-                RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, "ReaderProxy not found")
+        let plan = {
+            let writer_cache = stateful_writer.writer_cache();
+            let cache_guard = writer_cache.lock().map_err(|e| {
+                RtpsError::new(
+                    RtpsErrorCode::LockError,
+                    format!("Failed to acquire writer cache lock: {}", e),
+                )
             })?;
 
-        // If requested change is not in HistoryCache or did not pass DDS FILTER, send GAP message
-        let mut gap_list: Vec<SequenceNumber> = Vec::new();
+            let reader_proxies = stateful_writer.reader_proxies();
+            let mut reader_proxies_guard = reader_proxies.lock().map_err(|e| {
+                RtpsError::new(
+                    RtpsErrorCode::LockError,
+                    format!("Failed to acquire reader_proxies lock: {}", e),
+                )
+            })?;
 
-        // Send RequestedChanges that ReaderProxy requested via Nack
-        for requested_change_sn in reader_proxy.requested_changes().iter() {
-            // For volatile readers, sequence numbers <= last_irrelevant_sn should be responded with GAP
-            if *requested_change_sn <= reader_proxy.last_irrelevant_sn() {
-                gap_list.push(*requested_change_sn);
-                continue;
+            let reader_proxy = reader_proxies_guard
+                .iter_mut()
+                .find(|rp| rp.remote_reader_guid() == remote_reader_guid)
+                .ok_or_else(|| {
+                    RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, "ReaderProxy not found")
+                })?;
+
+            let mut requested_change_types: Vec<RequestedChangeType> = Vec::new();
+
+            // Answer the changes the ReaderProxy requested via NACK
+            for requested_change_sn in reader_proxy.requested_changes().iter() {
+                // For volatile readers, sequence numbers <= last_irrelevant_sn should be responded with GAP
+                if *requested_change_sn <= reader_proxy.last_irrelevant_sn() {
+                    requested_change_types.push(RequestedChangeType::Gap(*requested_change_sn));
+                    continue;
+                }
+
+                if let Some(a_change) = cache_guard.get_change(*requested_change_sn) {
+                    // ACK may have been received in the meantime, so check first
+                    if reader_proxy.max_acked_sn() >= *requested_change_sn {
+                        continue;
+                    }
+
+                    if reader_proxy.is_change_in_gapped_coherent_set(&a_change) {
+                        requested_change_types.push(RequestedChangeType::Gap(*requested_change_sn));
+                        continue;
+                    }
+
+                    // TODO: Filter message according to Reader Proxy's request (time based filter, content filtered topic, etc)
+                    requested_change_types.push(RequestedChangeType::Data(a_change));
+                } else {
+                    requested_change_types.push(RequestedChangeType::Gap(*requested_change_sn));
+
+                    debug!(
+                        "[UserLogic] [AckNack] CacheChange not found for sequence number: {}",
+                        requested_change_sn
+                    );
+                }
             }
 
-            if let Some(a_change) = cache_guard.get_change(*requested_change_sn) {
-                // ACK may have been received in the meantime, so check first
-                if reader_proxy.max_acked_sn() >= *requested_change_sn {
+            reader_proxy.empty_requested_changes();
+
+            SendPlan {
+                locators: reader_proxy.unicast_locator_list().to_vec(),
+                group_id: reader_proxy.remote_group_entity_id(),
+                reliable: reader_proxy.is_reliable(),
+                requested_change_types,
+            }
+        };
+
+        if plan.requested_change_types.is_empty() {
+            return Ok(());
+        }
+
+        // Serialize and send outside both locks, reusing one buffer.
+        let SendPlan { locators, group_id, reliable, requested_change_types } = plan;
+        let piggyback = reliable && !stateful_writer.disable_piggyback_heartbeat();
+
+        let mut send_buffer = participant
+            .wire_buffer_pool()
+            .lock()
+            .map_err(|_| {
+                RtpsError::new(RtpsErrorCode::LockError, "Failed to lock wire buffer pool")
+            })?
+            .acquire();
+        let mut gap_list: Vec<SequenceNumber> = Vec::new();
+
+        for change_type in requested_change_types {
+            let a_change = match change_type {
+                RequestedChangeType::Gap(sn) => {
+                    gap_list.push(sn);
                     continue;
                 }
+                RequestedChangeType::Data(a_change) => a_change,
+            };
 
-                // Change in a coherent set whose first sequence number was GAPped: answer with GAP.
-                if reader_proxy.is_change_in_gapped_coherent_set(&a_change) {
-                    gap_list.push(*requested_change_sn);
-                    continue;
-                }
-
-                // TODO: Filter message according to Reader Proxy's request (time based filter, content filtered topic, etc)
-                // Send DATA message or GAP message depending on filter result
+            if a_change.is_fragmented() {
+                let requested_change_sn = a_change.sequence_number();
+                debug!("[UserLogic] [RequestedChanges] Fragmented change: {}", requested_change_sn);
 
                 // In case of fragment, fragment state is checked via last seq number, so
                 // use current seq number in previous heartbeat to get ack from reader for retransmitted message
-                // In case of data retransmission, decide whether to send heartbeat
-                let heartbeat_info = if reader_proxy.is_reliable()
-                    && !stateful_writer.disable_piggyback_heartbeat()
-                {
-                    Some((
+                let heartbeat_info = piggyback.then(|| {
+                    (
                         stateful_writer.heartbeat_count(),
-                        *requested_change_sn,
-                        *requested_change_sn,
+                        requested_change_sn,
+                        requested_change_sn,
                         false, // final_flag
                         false, // liveliness_flag = false for retransmission
-                    ))
-                } else {
-                    None
-                };
+                    )
+                });
+                let timestamp = Utc::now();
 
-                if a_change.is_fragmented() {
-                    debug!(
-                        "[UserLogic] [RequestedChanges] Fragmented change: {}",
-                        a_change.sequence_number()
-                    );
+                for fragment_num in 1..=a_change.total_fragments() {
+                    let Some(fragment_data) = a_change.get_fragment_data(fragment_num) else {
+                        continue;
+                    };
 
-                    let participant = self.get_upgraded_participant()?;
-                    let timestamp = Utc::now();
-
-                    // Reuse a single send buffer across every fragment of this change.
-                    let mut send_buffer = participant
-                        .wire_buffer_pool()
-                        .lock()
-                        .map_err(|_| {
-                            RtpsError::new(
-                                RtpsErrorCode::LockError,
-                                "Failed to lock wire buffer pool",
-                            )
-                        })?
-                        .acquire();
-
-                    for fragment_num in 1..=a_change.total_fragments() {
-                        if let Some(fragment_data) = a_change.get_fragment_data(fragment_num) {
-                            let result = MessageCreator::create_data_frag_msg(
-                                &a_change,
-                                reader_proxy.remote_reader_guid(),
-                                reader_proxy.remote_group_entity_id(),
-                                writer.endpoint_id(),
-                                fragment_num,
-                                1,
-                                a_change.fragment_size() as u16,
-                                a_change.data_value().len() as u32,
-                                fragment_data,
-                                heartbeat_info,
-                                timestamp,
-                                &mut send_buffer,
-                            );
-
-                            if result.is_ok() {
-                                if let Err(e) = self.send_rtps_message_to_locators(
-                                    reader_proxy.unicast_locator_list(),
-                                    &send_buffer,
-                                ) {
-                                    warn!("Failed to send DATA_FRAG for requested change: {:?}", e);
-                                }
-                            }
-                        }
-                    }
-
-                    participant
-                        .wire_buffer_pool()
-                        .lock()
-                        .map_err(|_| {
-                            RtpsError::new(
-                                RtpsErrorCode::LockError,
-                                "Failed to lock wire buffer pool",
-                            )
-                        })?
-                        .release(send_buffer);
-                } else {
-                    // No fragment case - send regular DATA message
-                    let participant = self.get_upgraded_participant()?;
-                    let mut send_buffer = participant
-                        .wire_buffer_pool()
-                        .lock()
-                        .map_err(|_| {
-                            RtpsError::new(
-                                RtpsErrorCode::LockError,
-                                "Failed to lock wire buffer pool",
-                            )
-                        })?
-                        .acquire();
-                    let result = MessageCreator::create_data_msg(
+                    if MessageCreator::create_data_frag_msg(
                         &a_change,
-                        reader_proxy.remote_reader_guid(),
-                        reader_proxy.remote_group_entity_id(),
+                        remote_reader_guid,
+                        group_id,
                         writer.endpoint_id(),
-                        None, // No heartbeat
-                        true, // Use inline QoS (default)
-                        None, // No content filter for retransmission (TODO: consider adding filter)
+                        fragment_num,
+                        1,
+                        a_change.fragment_size() as u16,
+                        a_change.data_value().len() as u32,
+                        fragment_data,
+                        heartbeat_info,
+                        timestamp,
                         &mut send_buffer,
-                    );
-
-                    if result.is_ok() {
-                        if let Err(e) = self.send_rtps_message_to_locators(
-                            reader_proxy.unicast_locator_list(),
-                            &send_buffer,
-                        ) {
-                            warn!("Failed to send DATA for requested change: {:?}", e);
+                    )
+                    .is_ok()
+                    {
+                        if let Err(e) =
+                            self.send_rtps_message_to_locators(locators.iter(), &send_buffer)
+                        {
+                            warn!("Failed to send DATA_FRAG for requested change: {:?}", e);
                         }
                     }
-                    participant
-                        .wire_buffer_pool()
-                        .lock()
-                        .map_err(|_| {
-                            RtpsError::new(
-                                RtpsErrorCode::LockError,
-                                "Failed to lock wire buffer pool",
-                            )
-                        })?
-                        .release(send_buffer);
                 }
-            } else {
-                gap_list.push(*requested_change_sn);
-
-                debug!(
-                    "[UserLogic] [AckNack] CacheChange not found for sequence number: {}",
-                    requested_change_sn
-                );
+            } else if MessageCreator::create_data_msg(
+                &a_change,
+                remote_reader_guid,
+                group_id,
+                writer.endpoint_id(),
+                None, // No heartbeat
+                true, // Use inline QoS (default)
+                None, // No content filter for retransmission (TODO: consider adding filter)
+                &mut send_buffer,
+            )
+            .is_ok()
+            {
+                if let Err(e) = self.send_rtps_message_to_locators(locators.iter(), &send_buffer) {
+                    warn!("Failed to send DATA for requested change: {:?}", e);
+                }
             }
         }
 
-        self.send_gap_for_vec(writer.guid(), reader_proxy, writer.endpoint_id(), &mut gap_list)?;
+        participant
+            .wire_buffer_pool()
+            .lock()
+            .map_err(|_| {
+                RtpsError::new(RtpsErrorCode::LockError, "Failed to lock wire buffer pool")
+            })?
+            .release(send_buffer);
 
-        // Clear after sending all requested changes to prevent duplicate transmission. Can safely clear since Lock has been acquired.
-        reader_proxy.empty_requested_changes();
+        if !gap_list.is_empty() {
+            let buffer_list = MessageCreator::create_multiple_gap_msgs(
+                writer.guid(),
+                remote_reader_guid,
+                group_id,
+                writer.endpoint_id(),
+                &mut gap_list,
+            )
+            .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
+
+            for buf in buffer_list {
+                if let Err(e) = self.send_rtps_message_to_locators(locators.iter(), buf.as_slice())
+                {
+                    warn!("Failed to send GAP: {:?}", e);
+                }
+            }
+        }
 
         Ok(())
     }
@@ -348,195 +362,290 @@ impl UserLogic {
         writer: &StatefulWriter,
         history_cache: &WriterHistoryCache,
     ) -> RtpsResult<()> {
-        let reader_proxies_lock = writer.reader_proxies();
-        let mut reader_proxies = reader_proxies_lock.lock().map_err(|_| {
-            RtpsError::new(RtpsErrorCode::LockError, "[Data] Failed to acquire reader proxies lock")
-        })?;
-
         let participant = self.get_upgraded_participant()?;
 
-        // Send unsent CacheChanges to matched readers
-        for reader_proxy in reader_proxies.iter_mut() {
-            loop {
-                let a_change_seq_num = reader_proxy.next_unsent_change(history_cache);
+        enum UnsentChangeType {
+            Gap(SequenceNumber, SequenceNumber),
+            Data(SequenceNumber),
+        }
 
-                // Send cache changes that have not been sent to this reader until none remain
-                if a_change_seq_num == SequenceNumber::UNKNOWN {
-                    break;
-                }
+        // Pre-collect and store the information required for wire-level transmission
+        // to minimize the duration of `reader_proxies`.
+        struct SendPlan {
+            locators: Vec<Locator>,
+            group_id: EntityId,
+            reliable: bool,
+            piggyback: bool,
+            content_filter:
+                Option<crate::rtps::builtin::data::content_filtered_topic::ContentFilterInfo>,
+            unsent_change_types: Vec<UnsentChangeType>,
+        }
 
-                // RTPS 2.5 - 8.4.9.1.4 This may happen when a CacheChanges is removed from the Writer cache
-                // GAP only sent on reliable communication for efficiency
-                if reader_proxy.highest_sent_change_sn() != SequenceNumber::UNKNOWN
-                    && a_change_seq_num > reader_proxy.highest_sent_change_sn() + 1
-                    && reader_proxy.is_reliable()
-                {
-                    self.send_gap_for_range(
-                        participant.guid(),
-                        reader_proxy,
-                        writer.endpoint_id(),
-                        reader_proxy.highest_sent_change_sn() + 1,
-                        SequenceNumber::from_i64(a_change_seq_num.to_i64() - 1),
-                    )?;
-                }
+        let first_sn = history_cache.get_seq_num_min();
+        let last_sn = history_cache.get_seq_num_max();
 
-                // TODO: Filter message according to Reader Proxy's request (time based filter, content filtered topic, etc)
+        let reader_guids: Vec<Guid> = {
+            let reader_proxies_lock = writer.reader_proxies();
+            let reader_proxies = reader_proxies_lock.lock().map_err(|_| {
+                RtpsError::new(
+                    RtpsErrorCode::LockError,
+                    "[Data] Failed to acquire reader proxies lock",
+                )
+            })?;
+            reader_proxies.iter().map(|rp| rp.remote_reader_guid()).collect()
+        };
 
-                // Send DATA message or GAP message depending on filter result
-                if let Some(a_change) = history_cache.get_change(a_change_seq_num) {
-                    // A change in a coherent set whose first sequence number was GAPped can never
-                    // complete on this reader; answer with GAP so no DATA references a gapped set start.
-                    if reader_proxy.is_change_in_gapped_coherent_set(&a_change) {
-                        if reader_proxy.is_reliable() {
-                            self.send_gap_for_range(
-                                participant.guid(),
-                                reader_proxy,
-                                writer.endpoint_id(),
-                                a_change_seq_num,
-                                a_change_seq_num,
-                            )?;
-                        }
+        let mut send_buffer = participant
+            .wire_buffer_pool()
+            .lock()
+            .map_err(|_| {
+                RtpsError::new(RtpsErrorCode::LockError, "Failed to lock wire buffer pool")
+            })?
+            .acquire();
 
-                        reader_proxy.extend_last_irrelevant_sn(a_change_seq_num);
-                        reader_proxy.set_highest_sent_change_sn(a_change_seq_num);
-                        continue;
+        // Readers whose DATA reached the wire.
+        let mut readers_with_sent_data: Vec<Guid> = Vec::new();
+
+        for reader_guid in reader_guids {
+            let plan = {
+                let reader_proxies_lock = writer.reader_proxies();
+                let mut reader_proxies = reader_proxies_lock.lock().map_err(|_| {
+                    RtpsError::new(
+                        RtpsErrorCode::LockError,
+                        "[Data] Failed to acquire reader proxies lock",
+                    )
+                })?;
+
+                let Some(reader_proxy) =
+                    reader_proxies.iter_mut().find(|rp| rp.remote_reader_guid() == reader_guid)
+                else {
+                    continue;
+                };
+
+                let reliable = reader_proxy.is_reliable();
+                let piggyback = !writer.disable_piggyback_heartbeat();
+                let mut unsent_change_types: Vec<UnsentChangeType> = Vec::new();
+
+                loop {
+                    let a_change_seq_num = reader_proxy.next_unsent_change(history_cache);
+                    if a_change_seq_num == SequenceNumber::UNKNOWN {
+                        break;
                     }
 
-                    let first_sn = history_cache.get_seq_num_min().ok_or_else(|| {
-                        RtpsError::new(
-                            RtpsErrorCode::DataNotSet,
-                            "Writer cache should not be empty while sending DATA",
-                        )
-                    })?;
-                    let last_sn = history_cache.get_seq_num_max().ok_or_else(|| {
-                        RtpsError::new(
-                            RtpsErrorCode::DataNotSet,
-                            "Writer cache should not be empty while sending DATA",
-                        )
-                    })?;
+                    // RTPS 2.5 - 8.4.9.1.4 GAP the hole below the next change (reliable only).
+                    if reader_proxy.highest_sent_change_sn() != SequenceNumber::UNKNOWN
+                        && a_change_seq_num > reader_proxy.highest_sent_change_sn() + 1
+                        && reliable
+                    {
+                        unsent_change_types.push(UnsentChangeType::Gap(
+                            reader_proxy.highest_sent_change_sn() + 1,
+                            SequenceNumber::from_i64(a_change_seq_num.to_i64() - 1),
+                        ));
+                    }
 
-                    if a_change.is_fragmented() {
-                        let timestamp = Utc::now();
-
-                        // Reuse a single send buffer across every fragment of this change.
-                        let mut send_buffer = participant
-                            .wire_buffer_pool()
-                            .lock()
-                            .map_err(|_| {
-                                RtpsError::new(
-                                    RtpsErrorCode::LockError,
-                                    "Failed to lock wire buffer pool",
-                                )
-                            })?
-                            .acquire();
-
-                        for fragment_num in 1..=a_change.total_fragments() {
-                            let mut heartbeat_info = None;
-
-                            if reader_proxy.is_reliable() && !writer.disable_piggyback_heartbeat() {
-                                heartbeat_info = Some((
-                                    writer.heartbeat_count(),
-                                    first_sn,
-                                    last_sn,
-                                    false,
-                                    false,
+                    if let Some(a_change) = history_cache.get_change(a_change_seq_num) {
+                        // A change in a coherent set whose first sequence number was GAPped can never
+                        // complete on this reader; answer with GAP so no DATA references a gapped set start.
+                        if reader_proxy.is_change_in_gapped_coherent_set(&a_change) {
+                            if reliable {
+                                unsent_change_types.push(UnsentChangeType::Gap(
+                                    a_change_seq_num,
+                                    a_change_seq_num,
                                 ));
                             }
+                            reader_proxy.extend_last_irrelevant_sn(a_change_seq_num);
+                            reader_proxy.set_highest_sent_change_sn(a_change_seq_num);
+                            continue;
+                        }
 
-                            if self.send_data_frag_to_reader_proxy(
-                                &a_change,
-                                reader_proxy,
-                                writer.endpoint_id(),
-                                fragment_num,
-                                heartbeat_info,
-                                timestamp,
-                                &mut send_buffer,
-                            ) {
-                                if !writer.disable_piggyback_heartbeat() {
-                                    writer.increase_heartbeat_count();
-                                    if !reader_proxy.is_first_hb_sent() {
-                                        reader_proxy.set_first_hb_sent();
+                        unsent_change_types.push(UnsentChangeType::Data(a_change_seq_num));
+                    } else {
+                        warn!(
+                            "[Data] Failed to find change in history cache for seq_num: {}",
+                            a_change_seq_num
+                        );
+                    }
+
+                    reader_proxy.set_highest_sent_change_sn(a_change_seq_num);
+                }
+
+                SendPlan {
+                    locators: reader_proxy.unicast_locator_list().to_vec(),
+                    group_id: reader_proxy.remote_group_entity_id(),
+                    reliable,
+                    piggyback,
+                    content_filter: reader_proxy.generate_content_filter_info(),
+                    unsent_change_types,
+                }
+            };
+
+            if plan.unsent_change_types.is_empty() {
+                continue;
+            }
+
+            // Serialize and send each message outside reader_proxies.
+            let SendPlan {
+                locators,
+                group_id,
+                reliable,
+                piggyback,
+                content_filter,
+                unsent_change_types,
+            } = plan;
+            let mut data_sent = false;
+            for change_type in unsent_change_types {
+                match change_type {
+                    UnsentChangeType::Gap(start, end) => {
+                        match MessageCreator::create_gap_msg_consecutive(
+                            participant.guid(),
+                            reader_guid,
+                            reader_guid.entity_id(),
+                            writer.endpoint_id(),
+                            start,
+                            end,
+                        ) {
+                            Ok(buffer) => {
+                                if let Err(e) =
+                                    self.send_rtps_message_to_locators(locators.iter(), &buffer[..])
+                                {
+                                    warn!("[Data] Failed to send GAP: {:?}", e);
+                                }
+                            }
+                            Err(e) => warn!("[Data] Failed to build GAP: {:?}", e),
+                        }
+                    }
+                    UnsentChangeType::Data(a_change_seq_num) => {
+                        let Some(a_change) = history_cache.get_change(a_change_seq_num) else {
+                            warn!(
+                                "[Data] Failed to find change in history cache for seq_num: {}",
+                                a_change_seq_num
+                            );
+                            continue;
+                        };
+
+                        let (first_sn, last_sn) = match (first_sn, last_sn) {
+                            (Some(first), Some(last)) => (first, last),
+                            _ => {
+                                return Err(RtpsError::new(
+                                    RtpsErrorCode::DataNotSet,
+                                    "Writer cache should not be empty while sending DATA",
+                                ))
+                            }
+                        };
+
+                        if a_change.is_fragmented() {
+                            let timestamp = Utc::now();
+                            for fragment_num in 1..=a_change.total_fragments() {
+                                let Some(fragment_data) = a_change.get_fragment_data(fragment_num)
+                                else {
+                                    continue;
+                                };
+
+                                let heartbeat_info = if reliable && piggyback {
+                                    Some((
+                                        writer.heartbeat_count(),
+                                        first_sn,
+                                        last_sn,
+                                        false,
+                                        false,
+                                    ))
+                                } else {
+                                    None
+                                };
+
+                                if MessageCreator::create_data_frag_msg(
+                                    &a_change,
+                                    reader_guid,
+                                    group_id,
+                                    writer.endpoint_id(),
+                                    fragment_num,
+                                    1,
+                                    a_change.fragment_size() as u16,
+                                    a_change.data_value().len() as u32,
+                                    fragment_data,
+                                    heartbeat_info,
+                                    timestamp,
+                                    &mut send_buffer,
+                                )
+                                .is_ok()
+                                {
+                                    if self
+                                        .send_rtps_message_to_locators(
+                                            locators.iter(),
+                                            &send_buffer,
+                                        )
+                                        .is_ok()
+                                    {
+                                        data_sent = true;
+                                        if piggyback {
+                                            writer.increase_heartbeat_count();
+                                        }
                                     }
                                 }
                             }
-                        }
+                        } else {
+                            let heartbeat_info = if reliable && piggyback {
+                                Some((writer.heartbeat_count(), first_sn, last_sn, false, false))
+                            } else {
+                                None
+                            };
 
-                        participant
-                            .wire_buffer_pool()
-                            .lock()
-                            .map_err(|_| {
-                                RtpsError::new(
-                                    RtpsErrorCode::LockError,
-                                    "Failed to lock wire buffer pool",
-                                )
-                            })?
-                            .release(send_buffer);
-                    } else {
-                        // TODO: Fill in inlineQos if ReaderProxy.expects_inline_qos() == true
-                        let mut heartbeat_info = None;
+                            MessageCreator::create_data_msg(
+                                &a_change,
+                                reader_guid,
+                                group_id,
+                                writer.endpoint_id(),
+                                heartbeat_info,
+                                true, // Use inline QoS (default)
+                                content_filter.clone(),
+                                &mut send_buffer,
+                            )
+                            .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
 
-                        if reader_proxy.is_reliable() && !writer.disable_piggyback_heartbeat() {
-                            heartbeat_info =
-                                Some((writer.heartbeat_count(), first_sn, last_sn, false, false));
-                        }
-
-                        let mut send_buffer = participant
-                            .wire_buffer_pool()
-                            .lock()
-                            .map_err(|_| {
-                                RtpsError::new(
-                                    RtpsErrorCode::LockError,
-                                    "Failed to lock wire buffer pool",
-                                )
-                            })?
-                            .acquire();
-                        MessageCreator::create_data_msg(
-                            &a_change,
-                            reader_proxy.remote_reader_guid(),
-                            reader_proxy.remote_group_entity_id(),
-                            writer.endpoint_id(),
-                            heartbeat_info,
-                            true, // Use inline QoS (default)
-                            reader_proxy.generate_content_filter_info(),
-                            &mut send_buffer,
-                        )
-                        .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
-
-                        let send_result = self.send_rtps_message_to_locators(
-                            reader_proxy.unicast_locator_list(),
-                            &send_buffer,
-                        );
-                        participant
-                            .wire_buffer_pool()
-                            .lock()
-                            .map_err(|_| {
-                                RtpsError::new(
-                                    RtpsErrorCode::LockError,
-                                    "Failed to lock wire buffer pool",
-                                )
-                            })?
-                            .release(send_buffer);
-                        if send_result.is_ok() {
-                            if !writer.disable_piggyback_heartbeat() {
-                                writer.increase_heartbeat_count();
-                                if !reader_proxy.is_first_hb_sent() {
-                                    reader_proxy.set_first_hb_sent();
+                            if self
+                                .send_rtps_message_to_locators(locators.iter(), &send_buffer)
+                                .is_ok()
+                            {
+                                data_sent = true;
+                                if piggyback {
+                                    writer.increase_heartbeat_count();
                                 }
                             }
                         }
                     }
-                } else {
-                    warn!(
-                        "[Data] Failed to find change in history cache for seq_num: {}",
-                        a_change_seq_num
-                    );
                 }
+            }
 
-                reader_proxy.set_highest_sent_change_sn(a_change_seq_num);
+            if data_sent && piggyback {
+                readers_with_sent_data.push(reader_guid);
             }
         }
 
-        drop(reader_proxies);
+        participant
+            .wire_buffer_pool()
+            .lock()
+            .map_err(|_| {
+                RtpsError::new(RtpsErrorCode::LockError, "Failed to lock wire buffer pool")
+            })?
+            .release(send_buffer);
+
+        if !readers_with_sent_data.is_empty() {
+            let reader_proxies_lock = writer.reader_proxies();
+            let mut reader_proxies = reader_proxies_lock.lock().map_err(|_| {
+                RtpsError::new(
+                    RtpsErrorCode::LockError,
+                    "[Data] Failed to acquire reader proxies lock",
+                )
+            })?;
+
+            for reader_proxy in reader_proxies.iter_mut() {
+                if !reader_proxy.is_first_hb_sent()
+                    && readers_with_sent_data.contains(&reader_proxy.remote_reader_guid())
+                {
+                    reader_proxy.set_first_hb_sent();
+                }
+            }
+        }
 
         // Periodic heartbeat timer resuming when new changes are sent
         if !writer.heartbeat_timer_running() {
@@ -938,37 +1047,6 @@ impl UserLogic {
                     min_sn,
                     last_irrelevant,
                 )?;
-            }
-        }
-
-        Ok(())
-    }
-
-    fn send_gap_for_vec(
-        &self,
-        local_guid: Guid,
-        reader_proxy: &ReaderProxy,
-        writer_entity_id: EntityId,
-        gap_list: &mut Vec<SequenceNumber>,
-    ) -> RtpsResult<()> {
-        if gap_list.is_empty() {
-            return Ok(());
-        }
-
-        let buffer_list = MessageCreator::create_multiple_gap_msgs(
-            local_guid,
-            reader_proxy.remote_reader_guid(),
-            reader_proxy.remote_group_entity_id(),
-            writer_entity_id,
-            gap_list,
-        )
-        .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
-
-        for buf in buffer_list {
-            if let Err(e) = self
-                .send_rtps_message_to_locators(reader_proxy.unicast_locator_list(), buf.as_slice())
-            {
-                warn!("Failed to send GAP: {:?}", e);
             }
         }
 
