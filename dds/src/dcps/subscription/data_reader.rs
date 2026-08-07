@@ -1661,15 +1661,32 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         // 1. DataReader StatusCondition
         self.set_communication_status(&StatusKind::DATA_AVAILABLE, trigger_value)?;
 
-        // 2. Subscriber StatusCondition
+        // 2. Subscriber and 3. DomainParticipant StatusConditions.
+        //
+        // `Entity::set_communication_status` reaches the condition through `get_statuscondition`,
+        // which takes a mutex and clones a 4-`Arc` `StatusCondition` just to run one atomic bit
+        // update. The subscriber and the participant each take two status kinds, so calling it
+        // once per kind pays that lock-and-clone twice for the very same condition. Hoisting one
+        // clone per entity turns five lock+clone pairs per sample into three -- and every reader
+        // under the participant does this on every sample it delivers.
+        //
+        // The two kinds stay two separate calls on purpose. `add_communication_status` fires the
+        // WaitSet callback only when `enabled_statuses` contains *every* bit of its argument
+        // (`StatusMask::contains` is all-of), so folding the kinds into one mask would silently
+        // stop waking a condition that enabled only one of them.
         let subscriber = self.subscriber_arc()?;
-        subscriber.set_communication_status(&StatusKind::DATA_ON_READERS, trigger_value)?;
-        subscriber.set_communication_status(&StatusKind::DATA_AVAILABLE, trigger_value)?;
+        let subscriber_condition = subscriber.get_statuscondition()?;
+        subscriber_condition
+            .set_communication_status(&StatusKind::DATA_ON_READERS, trigger_value)?;
+        subscriber_condition
+            .set_communication_status(&StatusKind::DATA_AVAILABLE, trigger_value)?;
 
-        // 3. DomainParticipant StatusCondition
         let participant = subscriber.participant_arc()?;
-        participant.set_communication_status(&StatusKind::DATA_ON_READERS, trigger_value)?;
-        participant.set_communication_status(&StatusKind::DATA_AVAILABLE, trigger_value)?;
+        let participant_condition = participant.get_statuscondition()?;
+        participant_condition
+            .set_communication_status(&StatusKind::DATA_ON_READERS, trigger_value)?;
+        participant_condition
+            .set_communication_status(&StatusKind::DATA_AVAILABLE, trigger_value)?;
 
         Ok(())
     }
@@ -4105,6 +4122,98 @@ pub(crate) mod tests {
     pub struct TestData {
         #[dds(key)]
         id: u32,
+    }
+
+    /// `set_read_communication_status` fans one arrival out to three entity levels with two
+    /// status kinds, and every reader under a participant writes the participant's shared
+    /// condition on every sample. Pin the exact bits at every level so a refactor of how the
+    /// condition is reached cannot quietly drop or merge one of the five updates -- merging the
+    /// two kinds into a single mask op looks equivalent but is not, because the WaitSet trigger
+    /// test is all-of (`StatusMask::contains`), not any-of.
+    #[test]
+    fn read_communication_status_sets_and_clears_every_level() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<TestData>(
+                "ReadCommStatusTopic",
+                "TestData",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let reader = subscriber
+            .create_datareader::<TestData>(
+                &topic,
+                DataReaderQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        reader.set_read_communication_status(true).unwrap();
+
+        assert!(
+            reader.get_status_changes().unwrap().contains(StatusMask::DATA_AVAILABLE),
+            "reader must report DATA_AVAILABLE"
+        );
+        let subscriber_changes = subscriber.get_status_changes().unwrap();
+        assert!(
+            subscriber_changes.contains(StatusMask::DATA_ON_READERS),
+            "subscriber must report DATA_ON_READERS"
+        );
+        assert!(
+            subscriber_changes.contains(StatusMask::DATA_AVAILABLE),
+            "subscriber must report DATA_AVAILABLE"
+        );
+        let participant_changes = participant.get_status_changes().unwrap();
+        assert!(
+            participant_changes.contains(StatusMask::DATA_ON_READERS),
+            "participant must report DATA_ON_READERS"
+        );
+        assert!(
+            participant_changes.contains(StatusMask::DATA_AVAILABLE),
+            "participant must report DATA_AVAILABLE"
+        );
+
+        reader.set_read_communication_status(false).unwrap();
+
+        assert!(
+            !reader.get_status_changes().unwrap().contains(StatusMask::DATA_AVAILABLE),
+            "reader must clear DATA_AVAILABLE"
+        );
+        let subscriber_changes = subscriber.get_status_changes().unwrap();
+        assert!(
+            !subscriber_changes.contains(StatusMask::DATA_ON_READERS),
+            "subscriber must clear DATA_ON_READERS"
+        );
+        assert!(
+            !subscriber_changes.contains(StatusMask::DATA_AVAILABLE),
+            "subscriber must clear DATA_AVAILABLE"
+        );
+        let participant_changes = participant.get_status_changes().unwrap();
+        assert!(
+            !participant_changes.contains(StatusMask::DATA_ON_READERS),
+            "participant must clear DATA_ON_READERS"
+        );
+        assert!(
+            !participant_changes.contains(StatusMask::DATA_AVAILABLE),
+            "participant must clear DATA_AVAILABLE"
+        );
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[derive(DdsType)]
