@@ -34,6 +34,52 @@ pub(crate) fn evaluate_reader_multicast(
     ReaderMulticastVerdict::Eligible { group_locators }
 }
 
+pub(crate) struct MulticastGroup<K> {
+    pub(crate) locator: Locator,
+    pub(crate) reader_list: Vec<K>,
+}
+
+pub(crate) struct MulticastGrouping<K> {
+    pub(crate) multicast_groups: Vec<MulticastGroup<K>>,
+    pub(crate) unicast_only_reader_list: Vec<K>,
+}
+
+/// Split send targets into multicast groups and unicast-only targets.
+pub(crate) fn group_targets_by_multicast<'a, K, I>(
+    targets: I,
+    is_reachable: impl Fn(&Locator) -> bool,
+) -> MulticastGrouping<K>
+where
+    I: IntoIterator<Item = (K, &'a SubscriptionBuiltinTopicData, bool)>,
+{
+    let mut groups: Vec<MulticastGroup<K>> = Vec::new();
+    let mut unicast_only: Vec<K> = Vec::new();
+
+    for (target, subscription, has_content_filter) in targets {
+        // A Reader advertising several groups is served by its first reachable one: one copy
+        // reaches it either way, and one key per Reader keeps the groups from splitting.
+        let group_locator =
+            match evaluate_reader_multicast(subscription, has_content_filter, &is_reachable) {
+                ReaderMulticastVerdict::Eligible { group_locators } => {
+                    group_locators.into_iter().next()
+                }
+                ReaderMulticastVerdict::Ineligible => None,
+            };
+
+        let Some(locator) = group_locator else {
+            unicast_only.push(target);
+            continue;
+        };
+
+        match groups.iter_mut().find(|group| group.locator == locator) {
+            Some(group) => group.reader_list.push(target),
+            None => groups.push(MulticastGroup { locator, reader_list: vec![target] }),
+        }
+    }
+
+    MulticastGrouping { multicast_groups: groups, unicast_only_reader_list: unicast_only }
+}
+
 pub(crate) enum MulticastSendType {
     FirstSample,
     ReSendSample,
@@ -175,6 +221,69 @@ mod tests {
             evaluate_reader_multicast(&subscription, false, |_| true),
             ReaderMulticastVerdict::Eligible { group_locators: vec![group] }
         );
+    }
+
+    #[test]
+    fn targets_sharing_a_group_land_in_one_group() {
+        let group = group_locator(1);
+        let subscription = subscription_with_groups(&[group.clone()]);
+
+        let grouping = group_targets_by_multicast(
+            [("a", &subscription, false), ("b", &subscription, false)],
+            |_| true,
+        );
+
+        assert!(grouping.unicast_only_reader_list.is_empty());
+        assert_eq!(grouping.multicast_groups.len(), 1);
+        assert_eq!(grouping.multicast_groups[0].locator, group);
+        assert_eq!(grouping.multicast_groups[0].reader_list, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn targets_of_different_groups_stay_apart() {
+        let first = subscription_with_groups(&[group_locator(1)]);
+        let second = subscription_with_groups(&[group_locator(2)]);
+
+        let grouping =
+            group_targets_by_multicast([("a", &first, false), ("b", &second, false)], |_| true);
+
+        assert_eq!(grouping.multicast_groups.len(), 2);
+        assert_eq!(grouping.multicast_groups[0].locator, group_locator(1));
+        assert_eq!(grouping.multicast_groups[0].reader_list, vec!["a"]);
+        assert_eq!(grouping.multicast_groups[1].locator, group_locator(2));
+        assert_eq!(grouping.multicast_groups[1].reader_list, vec!["b"]);
+    }
+
+    #[test]
+    fn ineligible_target_goes_to_unicast_only() {
+        let with_group = subscription_with_groups(&[group_locator(1)]);
+        let without_group = subscription_with_groups(&[]);
+
+        let grouping = group_targets_by_multicast(
+            [("a", &with_group, false), ("b", &without_group, false), ("c", &with_group, true)],
+            |_| true,
+        );
+
+        assert_eq!(grouping.multicast_groups.len(), 1);
+        assert_eq!(grouping.multicast_groups[0].reader_list, vec!["a"]);
+        assert_eq!(grouping.unicast_only_reader_list, vec!["b", "c"]);
+    }
+
+    #[test]
+    fn target_is_keyed_by_its_first_reachable_group() {
+        let unreachable = group_locator(1);
+        let reachable = group_locator(2);
+        let both = subscription_with_groups(&[unreachable.clone(), reachable.clone()]);
+        let only_second = subscription_with_groups(&[reachable.clone()]);
+
+        let grouping = group_targets_by_multicast(
+            [("a", &both, false), ("b", &only_second, false)],
+            |locator| locator != &unreachable,
+        );
+
+        assert_eq!(grouping.multicast_groups.len(), 1);
+        assert_eq!(grouping.multicast_groups[0].locator, reachable);
+        assert_eq!(grouping.multicast_groups[0].reader_list, vec!["a", "b"]);
     }
 
     #[test]

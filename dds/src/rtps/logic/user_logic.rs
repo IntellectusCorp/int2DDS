@@ -36,6 +36,9 @@ use crate::rtps::logic::common::{
     MulticastThreadHandler, ParticipantAccessor, UnicastThreadHandler,
 };
 use crate::rtps::logic::message_processor::unicast_message_processor::UnicastMessageProcessor;
+use crate::rtps::logic::multicast_eligibility::{
+    group_targets_by_multicast, sample_allows_multicast, MulticastSendType,
+};
 use crate::rtps::messages::header::Header;
 use crate::rtps::messages::message_creator::MessageCreator;
 use crate::rtps::messages::submessage_header::SubmessageHeader;
@@ -711,12 +714,94 @@ impl UserLogic {
         Ok(())
     }
 
+    fn send_change_to_reader_locator(
+        &self,
+        change: &CacheChange,
+        reader_locator: &ReaderLocator,
+        writer_entity_id: EntityId,
+        participant: &Participant,
+    ) -> RtpsResult<()> {
+        // Reuse a single send buffer across every fragment of this change.
+        let mut send_buffer = participant
+            .wire_buffer_pool()
+            .lock()
+            .map_err(|_| {
+                RtpsError::new(RtpsErrorCode::LockError, "Failed to lock wire buffer pool")
+            })?
+            .acquire();
+
+        if change.is_fragmented() {
+            let timestamp = Utc::now();
+
+            // Send each fragment as DATA_FRAG submessage immediately
+            for fragment_num in 1..=change.total_fragments() {
+                if let Some(fragment_data) = change.get_fragment_data(fragment_num) {
+                    let result = MessageCreator::create_data_frag_msg(
+                        change,
+                        Guid::new(reader_locator.guid_prefix(), EntityId::PARTICIPANT),
+                        reader_locator.remote_entity_id(),
+                        writer_entity_id,
+                        fragment_num,
+                        1,
+                        change.fragment_size() as u16,
+                        change.data_value().len() as u32,
+                        fragment_data,
+                        None,
+                        timestamp,
+                        &mut send_buffer,
+                    );
+
+                    if result.is_ok() {
+                        if let Err(e) = self.send_rtps_message_to_locators(
+                            &[reader_locator.locator()],
+                            &send_buffer,
+                        ) {
+                            warn!("Failed to send DATA_FRAG message: {:?}", e);
+                        }
+                    }
+                }
+            }
+        } else {
+            match MessageCreator::create_data_msg(
+                change,
+                Guid::new(reader_locator.guid_prefix(), EntityId::PARTICIPANT),
+                reader_locator.remote_entity_id(),
+                writer_entity_id,
+                None, // No heartbeat
+                true, // Use inline QoS (default)
+                None, // No content filter for stateless writer
+                &mut send_buffer,
+            ) {
+                Ok(()) => {
+                    if let Err(e) = self
+                        .send_rtps_message_to_locators(&[reader_locator.locator()], &send_buffer)
+                    {
+                        warn!("Failed to send DATA message: {:?}", e);
+                        // Continue sending other messages instead of aborting
+                    }
+                }
+                Err(e) => warn!("Failed to create DATA message: {}", e),
+            }
+        }
+
+        participant
+            .wire_buffer_pool()
+            .lock()
+            .map_err(|_| {
+                RtpsError::new(RtpsErrorCode::LockError, "Failed to lock wire buffer pool")
+            })?
+            .release(send_buffer);
+
+        Ok(())
+    }
+
     fn send_unsent_changes_of_stateless_writer(
         &self,
         writer: &StatelessWriter,
         cache: &WriterHistoryCache,
     ) -> RtpsResult<()> {
-        let reader_tasks: Vec<(ReaderLocator, Vec<Arc<CacheChange>>)> = {
+        // Work off a snapshot so no send runs while the reader_locator lock is held.
+        let reader_locators: Vec<ReaderLocator> = {
             let reader_locators = writer.reader_locator();
             let reader_locators_guard = reader_locators.lock().map_err(|e| {
                 RtpsError::new(
@@ -725,153 +810,142 @@ impl UserLogic {
                 )
             })?;
 
-            let mut tasks = Vec::new();
-            for reader_locator in reader_locators_guard.iter() {
-                let mut changes_to_send = Vec::new();
-                let mut current_sn = reader_locator.highest_sent_change_sn();
-
-                // Collect cache changes not yet sent to the Remote Reader (Arc clone occurs)
-                while let Some(change) = cache.next_change_after(current_sn) {
-                    current_sn = change.sequence_number();
-                    changes_to_send.push(change);
-                }
-
-                if !changes_to_send.is_empty() {
-                    tasks.push((reader_locator.clone(), changes_to_send));
-                }
-            }
-            tasks
+            reader_locators_guard.iter().cloned().collect()
         };
 
-        if reader_tasks.is_empty() {
+        if reader_locators.is_empty() {
             return Ok(()); // Nothing to send
         }
 
+        let grouping = group_targets_by_multicast(
+            reader_locators.iter().enumerate().map(|(index, reader_locator)| {
+                (index, reader_locator.subscription_builtin_topic_data(), false)
+            }),
+            |group| self.transport.can_handle(group),
+        );
+
         let participant = self.get_upgraded_participant()?;
+        let writer_entity_id = writer.endpoint_id();
 
-        for (reader_locator, changes) in reader_tasks.iter() {
-            for change in changes.iter() {
-                // Create DATA or DATA_FRAG message
-                if change.is_fragmented() {
-                    let timestamp = Utc::now();
+        let mut highest_sent: Vec<SequenceNumber> =
+            reader_locators.iter().map(|rl| rl.highest_sent_change_sn()).collect();
 
-                    // Reuse a single send buffer across every fragment of this change.
-                    let mut send_buffer = participant
-                        .wire_buffer_pool()
-                        .lock()
-                        .map_err(|_| {
-                            RtpsError::new(
-                                RtpsErrorCode::LockError,
-                                "Failed to lock wire buffer pool",
-                            )
-                        })?
-                        .acquire();
+        // Readers that advertise a group: an eligible sample goes out once per group, and
+        // anything the group cannot carry falls back to unicast.
+        for group in &grouping.multicast_groups {
+            let group_start = group
+                .reader_list
+                .iter()
+                .map(|&index| highest_sent[index])
+                .max()
+                .unwrap_or(SequenceNumber::UNKNOWN);
 
-                    // Send each fragment as DATA_FRAG submessage immediately
-                    for fragment_num in 1..=change.total_fragments() {
-                        if let Some(fragment_data) = change.get_fragment_data(fragment_num) {
-                            let result = MessageCreator::create_data_frag_msg(
-                                change,
-                                Guid::new(reader_locator.guid_prefix(), EntityId::PARTICIPANT),
-                                reader_locator.remote_entity_id(),
-                                writer.endpoint_id(),
-                                fragment_num,
-                                1,
-                                change.fragment_size() as u16,
-                                change.data_value().len() as u32,
-                                fragment_data,
-                                None,
-                                timestamp,
-                                &mut send_buffer,
-                            );
+            // A Reader that joined behind the group is filled over unicast first, so the
+            // group send can start from a single sequence number.
+            for &index in &group.reader_list {
+                while let Some(change) = cache.next_change_after(highest_sent[index]) {
+                    if change.sequence_number() > group_start {
+                        break;
+                    }
 
-                            if result.is_ok() {
-                                // Send fragmented message immediately
-                                if let Err(e) = self.send_rtps_message_to_locators(
-                                    &[reader_locator.locator()],
-                                    &send_buffer,
-                                ) {
-                                    warn!("Failed to send DATA_FRAG message: {:?}", e);
-                                }
-                            }
+                    self.send_change_to_reader_locator(
+                        &change,
+                        &reader_locators[index],
+                        writer_entity_id,
+                        &participant,
+                    )?;
+                    highest_sent[index] = change.sequence_number();
+                }
+            }
+
+            let mut current_sn = group_start;
+            while let Some(change) = cache.next_change_after(current_sn) {
+                current_sn = change.sequence_number();
+
+                if !sample_allows_multicast(&change, MulticastSendType::FirstSample) {
+                    for &index in &group.reader_list {
+                        self.send_change_to_reader_locator(
+                            &change,
+                            &reader_locators[index],
+                            writer_entity_id,
+                            &participant,
+                        )?;
+                    }
+                    continue;
+                }
+
+                let mut send_buffer = participant
+                    .wire_buffer_pool()
+                    .lock()
+                    .map_err(|_| {
+                        RtpsError::new(RtpsErrorCode::LockError, "Failed to lock wire buffer pool")
+                    })?
+                    .acquire();
+
+                match MessageCreator::create_data_msg_multicast(
+                    &change,
+                    writer_entity_id,
+                    true, // Use inline QoS (default)
+                    &mut send_buffer,
+                ) {
+                    Ok(()) => {
+                        if let Err(e) = self.send_rtps_message_to_locators(
+                            std::slice::from_ref(&group.locator),
+                            &send_buffer,
+                        ) {
+                            warn!("Failed to send multicast DATA message: {:?}", e);
                         }
                     }
-
-                    participant
-                        .wire_buffer_pool()
-                        .lock()
-                        .map_err(|_| {
-                            RtpsError::new(
-                                RtpsErrorCode::LockError,
-                                "Failed to lock wire buffer pool",
-                            )
-                        })?
-                        .release(send_buffer);
-                } else {
-                    // Send as regular DATA message
-                    let mut send_buffer = participant
-                        .wire_buffer_pool()
-                        .lock()
-                        .map_err(|_| {
-                            RtpsError::new(
-                                RtpsErrorCode::LockError,
-                                "Failed to lock wire buffer pool",
-                            )
-                        })?
-                        .acquire();
-                    MessageCreator::create_data_msg(
-                        change,
-                        Guid::new(reader_locator.guid_prefix(), EntityId::PARTICIPANT),
-                        reader_locator.remote_entity_id(),
-                        writer.endpoint_id(),
-                        None, // No heartbeat
-                        true, // Use inline QoS (default)
-                        None, // No content filter for stateless writer
-                        &mut send_buffer,
-                    )
-                    .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
-
-                    if let Err(e) = self
-                        .send_rtps_message_to_locators(&[reader_locator.locator()], &send_buffer)
-                    {
-                        warn!("Failed to send DATA message: {:?}", e);
-                        // Continue sending other messages instead of aborting
-                    }
-                    participant
-                        .wire_buffer_pool()
-                        .lock()
-                        .map_err(|_| {
-                            RtpsError::new(
-                                RtpsErrorCode::LockError,
-                                "Failed to lock wire buffer pool",
-                            )
-                        })?
-                        .release(send_buffer);
+                    Err(e) => warn!("Failed to create multicast DATA message: {}", e),
                 }
+
+                participant
+                    .wire_buffer_pool()
+                    .lock()
+                    .map_err(|_| {
+                        RtpsError::new(RtpsErrorCode::LockError, "Failed to lock wire buffer pool")
+                    })?
+                    .release(send_buffer);
+            }
+
+            for &index in &group.reader_list {
+                highest_sent[index] = current_sn;
+            }
+        }
+
+        // Readers with no usable group take one send per unicast locator.
+        for &index in &grouping.unicast_only_reader_list {
+            while let Some(change) = cache.next_change_after(highest_sent[index]) {
+                self.send_change_to_reader_locator(
+                    &change,
+                    &reader_locators[index],
+                    writer_entity_id,
+                    &participant,
+                )?;
+                highest_sent[index] = change.sequence_number();
             }
         }
 
         {
-            let reader_locators = writer.reader_locator();
-            let mut reader_locators_guard = reader_locators.lock().map_err(|e| {
+            let reader_locators_lock = writer.reader_locator();
+            let mut reader_locators_guard = reader_locators_lock.lock().map_err(|e| {
                 RtpsError::new(
                     RtpsErrorCode::LockError,
                     format!("Failed to acquire reader_locators lock for update: {}", e),
                 )
             })?;
 
-            for (task_reader, changes) in reader_tasks.iter() {
-                if let Some(last_change) = changes.last() {
-                    let last_sn = last_change.sequence_number();
+            // The snapshot may be stale, so each entry is looked up by identity rather than
+            // by its position in the snapshot.
+            for (index, sent_reader_locator) in reader_locators.iter().enumerate() {
+                if highest_sent[index] == sent_reader_locator.highest_sent_change_sn() {
+                    continue;
+                }
 
-                    // Find and update matching reader_locator
-                    if let Some(reader_locator) = reader_locators_guard.iter_mut().find(|rl| {
-                        rl.guid_prefix() == task_reader.guid_prefix()
-                            && rl.remote_entity_id() == task_reader.remote_entity_id()
-                            && rl.locator() == task_reader.locator()
-                    }) {
-                        reader_locator.set_highest_sent_change_sn(last_sn);
-                    }
+                if let Some(reader_locator) =
+                    reader_locators_guard.iter_mut().find(|rl| *rl == sent_reader_locator)
+                {
+                    reader_locator.set_highest_sent_change_sn(highest_sent[index]);
                 }
             }
         }
