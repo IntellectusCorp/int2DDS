@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use log::{debug, trace};
+
 use crate::{
     common::builtin::topic::subscription_builtin_topic_data::SubscriptionBuiltinTopicData,
     rtps::{common::locator::Locator, entities::history::cache_change::CacheChange},
@@ -18,18 +20,29 @@ pub(crate) fn evaluate_reader_multicast(
     is_reachable: impl Fn(&Locator) -> bool,
 ) -> ReaderMulticastVerdict {
     if has_content_filter {
+        trace!("[Multicast] Reader {} not eligible: content filter", subscription.endpoint_guid());
         return ReaderMulticastVerdict::Ineligible;
     }
 
-    let group_locators: Vec<Locator> = subscription
-        .multicast_locator_list()
-        .into_iter()
-        .filter(|locator| is_reachable(locator))
-        .collect();
+    let advertised_groups = subscription.multicast_locator_list();
+    let group_locators: Vec<Locator> =
+        advertised_groups.iter().filter(|locator| is_reachable(locator)).cloned().collect();
 
     if group_locators.is_empty() {
+        trace!(
+            "[Multicast] Reader {} not eligible: none of its {} advertised group(s) is reachable",
+            subscription.endpoint_guid(),
+            advertised_groups.len()
+        );
         return ReaderMulticastVerdict::Ineligible;
     }
+
+    trace!(
+        "[Multicast] Reader {} eligible on {} of its {} advertised group(s)",
+        subscription.endpoint_guid(),
+        group_locators.len(),
+        advertised_groups.len()
+    );
 
     ReaderMulticastVerdict::Eligible { group_locators }
 }
@@ -77,6 +90,22 @@ where
         }
     }
 
+    // Silent while nothing is grouped, so a deployment without multicast stays quiet.
+    if !groups.is_empty() {
+        debug!(
+            "[Multicast] {} group(s) formed, {} target(s) stay unicast-only",
+            groups.len(),
+            unicast_only.len()
+        );
+        for group in &groups {
+            debug!(
+                "[Multicast] Group {} serves {} target(s)",
+                group.locator,
+                group.reader_list.len()
+            );
+        }
+    }
+
     MulticastGrouping { multicast_groups: groups, unicast_only_reader_list: unicast_only }
 }
 
@@ -88,14 +117,34 @@ pub(crate) enum MulticastSendType {
 pub(crate) fn sample_allows_multicast(change: &CacheChange, send_type: MulticastSendType) -> bool {
     match send_type {
         MulticastSendType::FirstSample => {
+            if change.is_fragmented() {
+                trace!(
+                    "[Multicast] SN {} not eligible: fragmented into {} piece(s)",
+                    change.sequence_number(),
+                    change.total_fragments()
+                );
+                return false;
+            }
+
             let presentation_info = change.presentation_info();
             let in_coherent_set = presentation_info.coherent_set.is_some()
                 || presentation_info.group_coherent_set.is_some()
                 || change.is_coherent_end_marker();
 
-            !change.is_fragmented() && !in_coherent_set
+            if in_coherent_set {
+                trace!(
+                    "[Multicast] SN {} not eligible: belongs to a coherent set",
+                    change.sequence_number()
+                );
+                return false;
+            }
+
+            true
         }
-        MulticastSendType::ReSendSample => false,
+        MulticastSendType::ReSendSample => {
+            trace!("[Multicast] SN {} not eligible: resend", change.sequence_number());
+            false
+        }
     }
 }
 
