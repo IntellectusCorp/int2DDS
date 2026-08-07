@@ -17,11 +17,11 @@ use std::{
         Arc, Mutex, Weak,
     },
     thread,
-    time::Instant,
 };
 
 use ::log::debug;
 
+use crate::common::profile;
 use crate::{
     common::instance_handle::InstanceHandle,
     core::{
@@ -58,14 +58,6 @@ static WRITER_HISTORY_PROFILE_PUSH_US: AtomicU64 = AtomicU64::new(0);
 static WRITER_HISTORY_PROFILE_INSTANCE_US: AtomicU64 = AtomicU64::new(0);
 static WRITER_HISTORY_PROFILE_RTPS_US: AtomicU64 = AtomicU64::new(0);
 static WRITER_HISTORY_PROFILE_TOTAL_US: AtomicU64 = AtomicU64::new(0);
-
-fn writer_history_profile_enabled() -> bool {
-    std::env::var_os("RMW_INT2DDS_PROFILE").is_some()
-}
-
-fn elapsed_us(start: Instant, end: Instant) -> u64 {
-    end.duration_since(start).as_micros() as u64
-}
 
 fn record_writer_history_profile(
     lifespan_us: u64,
@@ -204,9 +196,11 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
             return Ok((None, false));
         }
 
-        let profile = writer_history_profile_enabled();
-        let total_t0 = Instant::now();
-        let lifespan_t0 = Instant::now();
+        // Deliberately below the `purge_sent_changes` early return above: that QoS
+        // combination pays nothing today and must keep paying nothing.
+        let profile = profile::enabled();
+        let total_t0 = profile::now_if(profile);
+        let lifespan_t0 = profile::now_if(profile);
         // Set lifespan timer if lifespan qos is configured
         let lifespan_duration = self.data_writer.upgrade().and_then(|data_writer| {
             data_writer.get_qos_arc().ok().and_then(|qos| {
@@ -237,37 +231,37 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
             }
         }
         // end lifespan
-        let lifespan_us = if profile { elapsed_us(lifespan_t0, Instant::now()) } else { 0 };
+        let lifespan_us = profile::elapsed_us(lifespan_t0);
 
-        let ensure_t0 = Instant::now();
+        let ensure_t0 = profile::now_if(profile);
         let removed = self.ensure_capacity(a_change.instance_handle())?;
-        let ensure_us = if profile { elapsed_us(ensure_t0, Instant::now()) } else { 0 };
+        let ensure_us = profile::elapsed_us(ensure_t0);
 
         // Release evicted change back to pool for buffer reuse.
         // Consume the Arc by value so Arc::try_unwrap succeeds (refcount == 1).
-        let release_t0 = Instant::now();
+        let release_t0 = profile::now_if(profile);
         if let Some(evicted) = removed {
             self.pool.try_release(evicted);
         }
-        let release_us = if profile { elapsed_us(release_t0, Instant::now()) } else { 0 };
+        let release_us = profile::elapsed_us(release_t0);
 
-        let push_t0 = Instant::now();
+        let push_t0 = profile::now_if(profile);
         if lifespan_duration.is_some() {
             self.insert_change_sorted(a_change.clone());
         } else {
             self.changes.push(a_change.clone());
         }
-        let push_us = if profile { elapsed_us(push_t0, Instant::now()) } else { 0 };
+        let push_us = profile::elapsed_us(push_t0);
 
-        let instance_t0 = Instant::now();
+        let instance_t0 = profile::now_if(profile);
         if self.has_key {
             self.add_change_to_instance_map(a_change.clone())?;
         }
-        let instance_us = if profile { elapsed_us(instance_t0, Instant::now()) } else { 0 };
+        let instance_us = profile::elapsed_us(instance_t0);
 
-        let rtps_t0 = Instant::now();
+        let rtps_t0 = profile::now_if(profile);
         self.add_change_to_rtps_writer_cache(a_change)?;
-        let rtps_us = if profile { elapsed_us(rtps_t0, Instant::now()) } else { 0 };
+        let rtps_us = profile::elapsed_us(rtps_t0);
 
         debug!("add_change_with_cleanup completed");
 
@@ -279,7 +273,7 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
                 push_us,
                 instance_us,
                 rtps_us,
-                elapsed_us(total_t0, Instant::now()),
+                profile::elapsed_us(total_t0),
             );
         }
 
