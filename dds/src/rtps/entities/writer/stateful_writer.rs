@@ -863,48 +863,6 @@ impl Writer for StatefulWriter {
 
         Ok(true)
     }
-
-    fn remove_all_matched_readers_with_prefix_and_update_status(
-        &self,
-        prefix: GuidPrefix,
-    ) -> RtpsResult<usize> {
-        let mut reader_proxies = self
-            .matched_readers
-            .lock()
-            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
-
-        debug!(
-            "Before unmatching with reader, this writer had {:?} matched readers",
-            reader_proxies.len()
-        );
-        for reader_proxy in reader_proxies.iter() {
-            if reader_proxy.remote_reader_guid().prefix() == prefix {
-                self.update_publication_matched_status(
-                    -1,
-                    InstanceHandle::from_guid(&reader_proxy.remote_reader_guid()),
-                );
-            }
-        }
-        let len_before = reader_proxies.len();
-        reader_proxies.retain(|reader_proxy| reader_proxy.remote_reader_guid().prefix() != prefix);
-        let removed = len_before - reader_proxies.len();
-
-        debug!(
-            "Removed all unmatched reader proxies from unmatched participant: {}",
-            Guid::guid_prefix_to_string(&prefix)
-        );
-        debug!("Current number of matched reader: {:?}", reader_proxies.len());
-        drop(reader_proxies);
-
-        // Removed readers can advance the ack floor; recompute once the lock is released.
-        if removed > 0 {
-            debug!("[history-strict] trigger=unmatch-bulk");
-            self.process_acked_changes();
-            debug!("[history-strict] after unmatch-bulk rtps_len={}", self.rtps_cache_len());
-        }
-
-        Ok(removed)
-    }
 }
 
 impl Endpoint for StatefulWriter {
