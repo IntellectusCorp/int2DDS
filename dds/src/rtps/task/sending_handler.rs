@@ -244,9 +244,9 @@ impl SendingHandler {
             *waker_guard = None;
         }
 
-        if let Ok(mut queue) = self.message_queue.lock() {
-            queue.clear();
-        }
+        // Recover rather than skip: on a poisoned queue the old form silently left it full,
+        // so shutdown never actually drained it.
+        lock_message_queue(&self.message_queue).clear();
 
         Ok(())
     }
@@ -265,11 +265,11 @@ impl SendingHandler {
 
     // Remove only entries of this kind; other kinds keep running.
     pub(crate) fn cancel_p2p_messages_by_kind(&self, kind: ParticipantMessageDataKind) {
-        if let Ok(mut queue) = self.message_queue.lock() {
-            queue.retain(|msg| match msg {
-                MessageType::P2pData(_, _, pmd) => pmd.kind() != kind,
-                _ => true,
-            });
-        }
+        // Recover rather than skip: silently not cancelling leaves stale liveliness messages
+        // being emitted for a kind the caller has retired.
+        lock_message_queue(&self.message_queue).retain(|msg| match msg {
+            MessageType::P2pData(_, _, pmd) => pmd.kind() != kind,
+            _ => true,
+        });
     }
 }

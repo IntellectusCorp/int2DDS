@@ -1230,10 +1230,16 @@ impl UserLogic {
         // `std::sync::Mutex` is not reentrant, so notifying under the guard hangs the receive
         // thread with no timeout anywhere in the stack.
         //
-        // Ordering does not depend on the guard: user DATA/HEARTBEAT/GAP for a participant are
-        // all handled by the single `user_traffic_unicast_listening` thread, with UDP and TCP
-        // merged into one channel before it. The guard protects the proxy list against the
-        // discovery, WLP and ACKNACK-timer threads, and all of that work still happens inside it.
+        // Ordering does not depend on the guard. Every RTPS submessage for a participant --
+        // DATA, HEARTBEAT, GAP, DATA_FRAG -- is decoded by the one
+        // `user_traffic_unicast_listening` thread, so no two of them can race here, and the
+        // sequence-number work below (`mark_change_received`, `expected_sn`,
+        // `flush_buffered_changes`) all stays inside the guard.
+        //
+        // What the guard protects the proxy list against is the other threads that reach it:
+        // discovery, the sending task, `liveliness_monitor`, the NACK_FRAG timer, and any user
+        // thread calling `get_matched_publications`. None of them delivers samples, so releasing
+        // before delivery costs no ordering.
         let mut change_to_add: Vec<CacheChange> = Vec::new();
 
         // Update WriterProxy state - mark as Received if data was received
@@ -1751,6 +1757,7 @@ impl UnicastMessageProcessor for UserLogic {
             // Collected under the guard, delivered after it: delivery reaches the user's
             // listener, which may re-lock this mutex via `get_matched_publications`.
             let mut pending_delivery: Vec<CacheChange> = Vec::new();
+            let mut acknack_result: RtpsResult<()> = Ok(());
 
             let writer_proxies = stateful_reader.writer_proxies();
             let mut matched_writers = writer_proxies.lock().map_err(|e| {
@@ -1803,16 +1810,23 @@ impl UnicastMessageProcessor for UserLogic {
                 let delay_duration = heartbeat_response_delay.to_std_duration();
 
                 if delay_duration.is_zero() {
-                    // No delay - send immediately
+                    // No delay - send immediately.
+                    //
+                    // The error is carried, not propagated with `?`. `flush_buffered_changes`
+                    // above already removed those changes from the proxy and advanced
+                    // `expected_sn`, so returning here would drop `pending_delivery` on the
+                    // floor with no way to ever re-request it -- silent loss on a RELIABLE
+                    // reader. A failed ACKNACK only costs one ACKNACK; the next heartbeat
+                    // retries it.
                     let bitmap_base = writer_proxy.expected_sn();
-                    self.send_acknack_to_writer_proxy_inner(
+                    acknack_result = self.send_acknack_to_writer_proxy_inner(
                         writer_proxy,
                         stateful_reader,
                         missing_changes,
                         bitmap_base,
                         final_flag,
                         false,
-                    )?;
+                    );
                 } else {
                     // Schedule delayed ACKNACK via SendingHandler
                     let remote_writer_guid = writer_proxy.remote_writer_guid();
@@ -1967,6 +1981,8 @@ impl UnicastMessageProcessor for UserLogic {
             if !pending_delivery.is_empty() {
                 self.add_change_to_reader_cache_and_notify(reader.as_ref(), pending_delivery)?;
             }
+            // Reported only once the flushed samples are safely in the reader's cache.
+            acknack_result?;
         }
 
         Ok(())
@@ -2518,6 +2534,11 @@ impl UnicastMessageProcessor for UserLogic {
 
         for reader in matched_readers {
             if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
+                // Same rule as the DATA and HEARTBEAT paths: the batch is decided under the
+                // guard and delivered after it, because delivery ends in the user's listener
+                // and that listener may re-lock this mutex.
+                let mut pending_delivery: Vec<CacheChange> = Vec::new();
+
                 let writer_proxies_arc = stateful_reader.writer_proxies();
                 let mut writer_proxies = writer_proxies_arc.lock().map_err(|_| {
                     RtpsError::new(
@@ -2546,17 +2567,17 @@ impl UnicastMessageProcessor for UserLogic {
                 if let Some(last) = irrelevant_changes.last() {
                     if last >= &writer_proxy.expected_sn() {
                         writer_proxy.set_expected_sn(SequenceNumber::from_i64(last.to_i64() + 1));
-
-                        let flushed_changes = writer_proxy.flush_buffered_changes();
-                        self.add_change_to_reader_cache_and_notify(
-                            stateful_reader,
-                            flushed_changes,
-                        )?;
+                        pending_delivery = writer_proxy.flush_buffered_changes();
                     }
                 }
 
                 for seq_num in irrelevant_changes {
                     writer_proxy.irrelevant_change_set(seq_num);
+                }
+
+                drop(writer_proxies);
+                if !pending_delivery.is_empty() {
+                    self.add_change_to_reader_cache_and_notify(stateful_reader, pending_delivery)?;
                 }
             }
         }
