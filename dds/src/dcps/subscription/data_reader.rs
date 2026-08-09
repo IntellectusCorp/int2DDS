@@ -4357,6 +4357,35 @@ pub(crate) mod tests {
         }
         assert!(ever_read, "no sample was ever read, so this test proves nothing");
 
+        // The last write is still in flight when the loop ends: `write` hands the sample to the
+        // send path and returns, while delivery lands on the receive thread afterwards. A sample
+        // that reads NOT_READ because it has only just arrived is not the defect under test, so
+        // asserting before the final sample settles is a race -- one that fast loopback wins and
+        // slower stacks lose. Read until the last written index has been handed out, which
+        // leaves every cached sample genuinely already read.
+        let settle_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut read_last = false;
+        while !read_last && std::time::Instant::now() < settle_deadline {
+            if let Ok(samples) = data_reader.read(
+                1,
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            ) {
+                read_last = samples
+                    .iter()
+                    .any(|sample| matches!(sample.data(), Ok(d) if d.index == SAMPLES as u32 - 1));
+            }
+            if !read_last {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        assert!(
+            read_last,
+            "the last written sample never reached the reader, so the guard below would assert \
+             against a cache that is still filling rather than against redelivery"
+        );
+
         let recorded: usize =
             data_reader.read_samples.lock().unwrap().values().map(|set| set.len()).sum();
 
