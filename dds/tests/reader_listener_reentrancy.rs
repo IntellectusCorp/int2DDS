@@ -105,12 +105,27 @@ impl DataReaderListener for ProbingListener {
 ///
 /// The worker is deliberately not joined: when the receive thread is wedged, teardown blocks
 /// too, so the caller must decide the verdict from the channel alone.
+///
+/// Teardown is driven by the caller rather than by the worker. The worker owns the reader, the
+/// reader owns the listener, and the listener owns the only `Signal` sender -- so a worker that
+/// tore down as soon as `write` returned would race the receive thread for the sample and drop
+/// the sender out from under a caller that had not decided anything yet.
 fn run_probe(probe: Probe, reliability: ReliabilityQosPolicyKind) {
     let (tx, rx) = mpsc::sync_channel::<Signal>(4);
+    // Keeps the channel connected for as long as the worker lives. Without it, a sample that is
+    // never delivered reports as `Disconnected` ("the worker died") instead of the timeout that
+    // actually describes what happened.
+    let keepalive = tx.clone();
+    // Caller -> worker: the verdict is in, tearing down is now safe.
+    let (teardown_tx, teardown_rx) = mpsc::channel::<()>();
+    // Worker -> caller: teardown finished, so the next test in this binary does not start
+    // against a participant that is still shutting down.
+    let (torn_down_tx, torn_down_rx) = mpsc::sync_channel::<()>(1);
 
     std::thread::Builder::new()
         .name(format!("reentrancy-{probe:?}"))
         .spawn(move || {
+            let _keepalive = keepalive;
             let domain_id = next_domain_id();
             let factory = DomainParticipantFactory::get_instance();
             let participant = factory
@@ -175,10 +190,17 @@ fn run_probe(probe: Probe, reliability: ReliabilityQosPolicyKind) {
 
             writer.write(&KeyedDataType::new(1, 42), InstanceHandle::NIL).unwrap();
 
+            // `write` returns once the sample is handed to the send path; the listener runs
+            // later, on the receive thread. Block until the caller has its verdict rather than
+            // racing that delivery. `Err` means the caller already gave up and dropped its
+            // sender, which is just as good a cue to clean up.
+            let _ = teardown_rx.recv_timeout(DEADLINE);
+
             // Teardown is best-effort: it blocks if the receive thread is wedged, which is
             // exactly the case this test exists to catch.
             let _ = participant.delete_contained_entities();
             let _ = factory.delete_participant(participant);
+            let _ = torn_down_tx.try_send(());
         })
         .expect("failed to spawn the DDS worker thread");
 
@@ -210,6 +232,11 @@ fn run_probe(probe: Probe, reliability: ReliabilityQosPolicyKind) {
             std::process::exit(101);
         }
     }
+
+    // Verdict is in, so the worker may drop the reader now. Give teardown a bounded chance to
+    // finish; if it does not, the caller still returns and the harness moves on.
+    let _ = teardown_tx.send(());
+    let _ = torn_down_rx.recv_timeout(DEADLINE);
 }
 
 #[test]
