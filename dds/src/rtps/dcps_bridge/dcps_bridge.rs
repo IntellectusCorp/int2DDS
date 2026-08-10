@@ -1122,6 +1122,9 @@ mod tests {
             "HistoryCache Arc should be dropped after removal"
         );
 
+        // Two instances, one change each: the surviving reader's announcement and the deleted
+        // reader's dispose. The dispose stays because this builtin writer is RELIABLE -- a peer
+        // that missed the datagram can only ask for a sequence number the history still holds.
         assert_eq!(
             dcps_bridge
                 .lock()
@@ -1134,7 +1137,7 @@ mod tests {
                 .unwrap()
                 .get_changes()
                 .len(),
-            1
+            2
         );
     }
 
@@ -1214,6 +1217,9 @@ mod tests {
             "HistoryCache Arc should be dropped after removal"
         );
 
+        // Two instances, one change each: the surviving writer's announcement and the deleted
+        // writer's dispose. The dispose stays because this builtin writer is RELIABLE -- a peer
+        // that missed the datagram can only ask for a sequence number the history still holds.
         assert_eq!(
             dcps_bridge
                 .lock()
@@ -1226,7 +1232,7 @@ mod tests {
                 .unwrap()
                 .get_changes()
                 .len(),
-            1
+            2
         );
     }
 

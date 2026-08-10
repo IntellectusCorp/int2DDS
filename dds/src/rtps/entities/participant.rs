@@ -522,21 +522,25 @@ impl Participant {
 
             if let Some((writer_guid, _)) = writer_info {
                 // Bare dispose: instance is identified by PID_KEY_HASH inline QoS only
-                let a_cache_change = self.sedp_builtin_publications_writer().new_change(
+                let a_cache_change = Arc::new(self.sedp_builtin_publications_writer().new_change(
                     ChangeKind::NotAliveDisposedUnregistered,
                     Vec::new(),
                     InstanceHandle::from_guid(&writer_guid),
                     Some(RtpsTime::now()),
-                );
+                ));
 
-                self.sync_send_sedp_terminate_endpoint(
-                    self.sedp_builtin_publications_writer().guid(),
-                    Arc::new(a_cache_change),
-                )?;
-
-                log::info!("Remote writer with GUID {} terminated", writer_guid);
-
-                // Remove builtin topic data from builtin endpoint
+                // The dispose takes the alive announcement's place in the history, and it does so
+                // before it goes on the wire.
+                //
+                // Keeping it is what makes it repairable. This builtin writer is RELIABLE, and a
+                // peer can only ask for a sequence number that a heartbeat still covers -- so a
+                // dispose that exists nowhere but in one already-sent datagram cannot be
+                // recovered, and a peer that missed it keeps the endpoint matched for good.
+                //
+                // Dropping it also stranded the sequence number it consumed. `new_change` moves
+                // the counter whether or not anything is stored, so deleting every endpoint used
+                // to empty the cache while the counter kept climbing, leaving the writer
+                // advertising `firstSN = lastSN + 1` over a range it could not serve.
                 match self.builtin_endpoints.sedp_builtin_publications_writer.writer_cache().lock()
                 {
                     Ok(mut writer_cache) => {
@@ -551,6 +555,7 @@ impl Participant {
                                 }
                             }
                         }
+                        let _ = writer_cache.add_change_builtin(a_cache_change.clone());
                     }
                     Err(e) => {
                         log::error!(
@@ -559,6 +564,13 @@ impl Participant {
                         );
                     }
                 }
+
+                self.sync_send_sedp_terminate_endpoint(
+                    self.sedp_builtin_publications_writer().guid(),
+                    a_cache_change,
+                )?;
+
+                log::info!("Remote writer with GUID {} terminated", writer_guid);
             }
         }
 
@@ -604,19 +616,16 @@ impl Participant {
 
             if let Some((reader_guid, _)) = reader_info {
                 // Bare dispose: instance is identified by PID_KEY_HASH inline QoS only
-                let a_cache_change = self.sedp_builtin_subscriptions_writer().new_change(
+                let a_cache_change = Arc::new(self.sedp_builtin_subscriptions_writer().new_change(
                     ChangeKind::NotAliveDisposedUnregistered,
                     Vec::new(),
                     InstanceHandle::from_guid(&reader_guid),
                     Some(RtpsTime::now()),
-                );
+                ));
 
-                self.sync_send_sedp_terminate_endpoint(
-                    self.sedp_builtin_subscriptions_writer().guid(),
-                    Arc::new(a_cache_change),
-                )?;
-
-                // Remove builtin topic data from builtin endpoint
+                // Same reasoning as the publications side in `remove_writer`: the dispose has to
+                // stay in the history to be repairable, and to keep the advertised range in step
+                // with the sequence number it consumed.
                 match self.builtin_endpoints.sedp_builtin_subscriptions_writer.writer_cache().lock()
                 {
                     Ok(mut writer_cache) => {
@@ -631,6 +640,7 @@ impl Participant {
                                 }
                             }
                         }
+                        let _ = writer_cache.add_change_builtin(a_cache_change.clone());
                     }
                     Err(e) => {
                         log::error!(
@@ -639,6 +649,11 @@ impl Participant {
                         );
                     }
                 }
+
+                self.sync_send_sedp_terminate_endpoint(
+                    self.sedp_builtin_subscriptions_writer().guid(),
+                    a_cache_change,
+                )?;
             }
         }
 
@@ -1110,5 +1125,108 @@ impl Participant {
             }
             *monitor = None;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::infrastructure::qos_policy::ReliabilityQosPolicyKind;
+    use crate::rtps::common::{entity_kind::EntityKind, types::TopicKind};
+
+    fn participant_with_one_writer() -> (Arc<Participant>, EntityId) {
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let entity_id = EntityId::new([0, 0, 1], EntityKind::USER_DEFINED_WRITER_WITH_KEY);
+
+        let writer = Arc::new(StatefulWriter::new(
+            Guid::new(participant.guid().prefix(), entity_id),
+            Vec::new(),
+            Vec::new(),
+            ReliabilityQosPolicyKind::Reliable,
+            TopicKind::WithKey,
+            entity_id,
+            1024,
+            None,
+            PublicationBuiltinTopicData::default(),
+            Arc::downgrade(&participant),
+        ));
+
+        participant.add_writer("a_topic", writer).expect("the writer must register");
+
+        (participant, entity_id)
+    }
+
+    fn participant_with_one_reader() -> (Arc<Participant>, EntityId) {
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let entity_id = EntityId::new([0, 0, 1], EntityKind::USER_DEFINED_READER_WITH_KEY);
+
+        let reader = Arc::new(StatefulReader::new(
+            Guid::new(participant.guid().prefix(), entity_id),
+            TopicKind::WithKey,
+            ReliabilityQosPolicyKind::Reliable,
+            Vec::new(),
+            Vec::new(),
+            entity_id,
+            false,
+            None,
+            None,
+            SubscriptionBuiltinTopicData::default(),
+            participant.guid(),
+        ));
+
+        participant.add_reader("a_topic", reader);
+
+        (participant, entity_id)
+    }
+
+    /// The subscriptions writer has the same defect as the publications one.
+    #[test]
+    fn deleting_a_reader_leaves_its_dispose_in_the_sedp_history() {
+        let (participant, entity_id) = participant_with_one_reader();
+        let sedp_writer = participant.sedp_builtin_subscriptions_writer();
+
+        participant.remove_reader("a_topic".to_string(), entity_id).expect("removal must succeed");
+
+        let dispose_sn = sedp_writer.last_change_sequence_number();
+        let cache_arc = sedp_writer.writer_cache();
+        let cache = cache_arc.lock().expect("cache lock");
+
+        assert!(
+            cache.get_change(dispose_sn).is_some(),
+            "the dispose took sequence number {dispose_sn} but left no change behind, so nothing \
+             can retransmit it"
+        );
+        assert_eq!(cache.get_seq_num_max(), Some(dispose_sn));
+    }
+
+    /// The SEDP dispose is what tells peers an endpoint is gone, and the builtin writer that
+    /// carries it is RELIABLE. Sending it once and dropping it on the floor leaves no copy to
+    /// retransmit: the heartbeat range never covers that sequence number, so a peer that missed
+    /// the single datagram cannot even ask for it and keeps the endpoint matched forever.
+    ///
+    /// It also strands the sequence number the dispose consumed. Deleting every endpoint then
+    /// leaves the writer advertising `firstSN = lastSN + 1` -- an empty range over a counter that
+    /// kept climbing.
+    #[test]
+    fn deleting_a_writer_leaves_its_dispose_in_the_sedp_history() {
+        let (participant, entity_id) = participant_with_one_writer();
+        let sedp_writer = participant.sedp_builtin_publications_writer();
+
+        participant.remove_writer("a_topic".to_string(), entity_id).expect("removal must succeed");
+
+        let dispose_sn = sedp_writer.last_change_sequence_number();
+        let cache_arc = sedp_writer.writer_cache();
+        let cache = cache_arc.lock().expect("cache lock");
+
+        assert!(
+            cache.get_change(dispose_sn).is_some(),
+            "the dispose took sequence number {dispose_sn} but left no change behind, so nothing \
+             can retransmit it"
+        );
+        assert_eq!(
+            cache.get_seq_num_max(),
+            Some(dispose_sn),
+            "the advertised range has to reach the dispose"
+        );
     }
 }
