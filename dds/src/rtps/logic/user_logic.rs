@@ -269,23 +269,31 @@ impl UserLogic {
                 let requested_change_sn = a_change.sequence_number();
                 debug!("[UserLogic] [RequestedChanges] Fragmented change: {}", requested_change_sn);
 
-                // In case of fragment, fragment state is checked via last seq number, so
-                // use current seq number in previous heartbeat to get ack from reader for retransmitted message
-                let heartbeat_info = piggyback.then(|| {
-                    (
-                        stateful_writer.heartbeat_count(),
-                        requested_change_sn,
-                        requested_change_sn,
-                        false, // final_flag
-                        false, // liveliness_flag = false for retransmission
-                    )
-                });
                 let timestamp = Utc::now();
 
                 for fragment_num in 1..=a_change.total_fragments() {
                     let Some(fragment_data) = a_change.get_fragment_data(fragment_num) else {
                         continue;
                     };
+
+                    // Read the count per fragment, exactly as the initial send does. The reader
+                    // rejects a heartbeat whose count did not advance, and it rejects it *before*
+                    // scheduling the NACK_FRAG timer -- so one count reused for a whole repair
+                    // round is invisible from the second round on, leaving the periodic heartbeat
+                    // as the only thing that can restart repair.
+                    //
+                    // In case of fragment, fragment state is checked via last seq number, so
+                    // use current seq number in previous heartbeat to get ack from reader for
+                    // retransmitted message
+                    let heartbeat_info = piggyback.then(|| {
+                        (
+                            stateful_writer.heartbeat_count(),
+                            requested_change_sn,
+                            requested_change_sn,
+                            false, // final_flag
+                            false, // liveliness_flag = false for retransmission
+                        )
+                    });
 
                     if MessageCreator::create_data_frag_msg(
                         &a_change,
@@ -303,10 +311,15 @@ impl UserLogic {
                     )
                     .is_ok()
                     {
-                        if let Err(e) =
-                            self.send_rtps_message_to_locators(locators.iter(), &send_buffer)
-                        {
-                            warn!("Failed to send DATA_FRAG for requested change: {:?}", e);
+                        match self.send_rtps_message_to_locators(locators.iter(), &send_buffer) {
+                            Ok(_) => {
+                                if piggyback {
+                                    stateful_writer.increase_heartbeat_count();
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Failed to send DATA_FRAG for requested change: {:?}", e)
+                            }
                         }
                     }
                 }
@@ -2476,19 +2489,14 @@ impl UnicastMessageProcessor for UserLogic {
 
         let total_frags = change.total_fragments();
         let requested_fragments = frag_state.extract_numbers();
-        let heartbeat_count = stateful_writer.heartbeat_count();
         let last_sn = history_cache_guard.get_seq_num_max().ok_or_else(|| {
             RtpsError::new(
                 RtpsErrorCode::DataNotSet,
                 "Writer cache should not be empty while sending DATA_FRAG",
             )
         })?;
-        let heartbeat_info =
-            if reader_proxy.is_reliable() && !stateful_writer.disable_piggyback_heartbeat() {
-                Some((heartbeat_count, writer_sn, last_sn, false, false))
-            } else {
-                None
-            };
+        let piggyback =
+            reader_proxy.is_reliable() && !stateful_writer.disable_piggyback_heartbeat();
 
         let timestamp = Utc::now();
         let participant = self.get_upgraded_participant()?;
@@ -2501,7 +2509,13 @@ impl UnicastMessageProcessor for UserLogic {
             .acquire();
         for fragment_num in requested_fragments {
             if fragment_num >= 1 && fragment_num <= total_frags {
-                self.send_data_frag_to_reader_proxy(
+                // Fresh count per fragment. A repair round that reuses one count is dropped by
+                // the reader's duplicate filter from the second round on, before it ever gets to
+                // schedule the NACK_FRAG that would continue the repair.
+                let heartbeat_info = piggyback
+                    .then(|| (stateful_writer.heartbeat_count(), writer_sn, last_sn, false, false));
+
+                if self.send_data_frag_to_reader_proxy(
                     &change,
                     reader_proxy,
                     writer_id,
@@ -2509,7 +2523,10 @@ impl UnicastMessageProcessor for UserLogic {
                     heartbeat_info,
                     timestamp,
                     &mut send_buffer,
-                );
+                ) && piggyback
+                {
+                    stateful_writer.increase_heartbeat_count();
+                }
             }
         }
         participant
