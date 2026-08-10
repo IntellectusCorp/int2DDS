@@ -18,7 +18,7 @@ use crate::rtps::common::types::DomainId;
 use crate::rtps::entities::entity::Entity;
 use crate::rtps::entities::participant::Participant;
 use crate::rtps::logic::wlp_logic::WlpLogic;
-use crate::rtps::task::sending_task::SendingTask;
+use crate::rtps::task::sending_task::{lock_message_queue, SendingTask};
 
 #[derive(Debug, Clone)]
 pub(crate) enum MessageType {
@@ -200,29 +200,12 @@ impl SendingHandler {
 
     // Add message to message queue
     pub(crate) fn push_message_and_wake(&self, message: MessageType) {
-        match self.message_queue.lock() {
-            Ok(mut queue_guard) => {
-                // // Deduplication: skip if SendUnsentChanges for same EntityId already exists
-                // if let MessageType::UserUnsentChanges(entity_id) = &message {
-                //     if queue_guard.iter().any(
-                //         |m| matches!(m, MessageType::UserUnsentChanges(eid) if eid == entity_id),
-                //     ) {
-                //         return; // Already queued, no need to add duplicate
-                //     }
-                // }
-                queue_guard.push(message);
-            }
-            Err(e) => {
-                error!("Failed to acquire message queue lock (poisoned): {}", e);
-                // If the lock is poisoned, try to get a new instance and retry once
-                if let Some(handler) = SendingHandler::get_instance_by_participant_guid(
-                    self.participant.upgrade().expect("Participant already dropped").guid(),
-                ) {
-                    handler.push_message_and_wake(message);
-                    return; // Early return to avoid double wake
-                }
-            }
-        }
+        // The previous recovery path re-fetched the handler for this participant's GUID, which
+        // is this very handler, and pushed into the same poisoned mutex the thread was already
+        // holding -- `PoisonError` owns the guard, so the error arm never released it. That
+        // self-deadlocked the producer at the first retry and, because the guard was then held
+        // forever, wedged the consumer too. Recovering in place keeps both moving.
+        lock_message_queue(&self.message_queue).push(message);
         self.wake_event_loop();
     }
 
@@ -261,9 +244,9 @@ impl SendingHandler {
             *waker_guard = None;
         }
 
-        if let Ok(mut queue) = self.message_queue.lock() {
-            queue.clear();
-        }
+        // Recover rather than skip: on a poisoned queue the old form silently left it full,
+        // so shutdown never actually drained it.
+        lock_message_queue(&self.message_queue).clear();
 
         Ok(())
     }
@@ -282,11 +265,11 @@ impl SendingHandler {
 
     // Remove only entries of this kind; other kinds keep running.
     pub(crate) fn cancel_p2p_messages_by_kind(&self, kind: ParticipantMessageDataKind) {
-        if let Ok(mut queue) = self.message_queue.lock() {
-            queue.retain(|msg| match msg {
-                MessageType::P2pData(_, _, pmd) => pmd.kind() != kind,
-                _ => true,
-            });
-        }
+        // Recover rather than skip: silently not cancelling leaves stale liveliness messages
+        // being emitted for a kind the caller has retired.
+        lock_message_queue(&self.message_queue).retain(|msg| match msg {
+            MessageType::P2pData(_, _, pmd) => pmd.kind() != kind,
+            _ => true,
+        });
     }
 }

@@ -1224,6 +1224,24 @@ impl UserLogic {
         remote_guid: Guid,
         fragment_info: Option<FragmentInfo>,
     ) -> RtpsResult<()> {
+        // The batch is decided under the matched-writer guard, but delivered after it is
+        // released. Delivery ends in the user's `on_data_available`, and a listener calling
+        // `get_matched_publications`/`get_matched_publication_data` re-locks this very mutex --
+        // `std::sync::Mutex` is not reentrant, so notifying under the guard hangs the receive
+        // thread with no timeout anywhere in the stack.
+        //
+        // Ordering does not depend on the guard. Every RTPS submessage for a participant --
+        // DATA, HEARTBEAT, GAP, DATA_FRAG -- is decoded by the one
+        // `user_traffic_unicast_listening` thread, so no two of them can race here, and the
+        // sequence-number work below (`mark_change_received`, `expected_sn`,
+        // `flush_buffered_changes`) all stays inside the guard.
+        //
+        // What the guard protects the proxy list against is the other threads that reach it:
+        // discovery, the sending task, `liveliness_monitor`, the NACK_FRAG timer, and any user
+        // thread calling `get_matched_publications`. None of them delivers samples, so releasing
+        // before delivery costs no ordering.
+        let mut change_to_add: Vec<CacheChange> = Vec::new();
+
         // Update WriterProxy state - mark as Received if data was received
         if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
             if let Ok(mut matched_writers) = stateful_reader.writer_proxies().lock() {
@@ -1264,11 +1282,9 @@ impl UserLogic {
                         flushed_changes.last().map(|c| c.sequence_number())
                     );
 
-                    let mut change_to_add: Vec<CacheChange> =
-                        Vec::with_capacity(1 + flushed_changes.len());
+                    change_to_add.reserve(1 + flushed_changes.len());
                     change_to_add.push(change);
                     change_to_add.extend(flushed_changes);
-                    self.add_change_to_reader_cache_and_notify(reader, change_to_add)?;
                 }
                 // Buffer out-of-order changes
                 else if change.sequence_number() > writer_proxy.expected_sn() {
@@ -1291,11 +1307,17 @@ impl UserLogic {
                 // 8.4.12.1.2 The Best-Effort reader checks that the sequence number associated with the change is strictly greater than
                 // the highest sequence number of all changes received in the past from this RTPS Writer
                 if change.sequence_number() >= remote_writer_info.expected_sn() {
-                    let next_sn = change.sequence_number().add(1);
-                    self.add_change_to_reader_cache_and_notify(reader, vec![change])?;
-                    remote_writer_info.set_expected_sn(next_sn);
+                    // Advancing before delivery keeps the compare-and-set atomic under the
+                    // guard. Delivery cannot report failure -- the notify helper discards
+                    // per-change results and always returns Ok -- so nothing is lost by it.
+                    remote_writer_info.set_expected_sn(change.sequence_number().add(1));
+                    change_to_add.push(change);
                 }
             }
+        }
+
+        if !change_to_add.is_empty() {
+            self.add_change_to_reader_cache_and_notify(reader, change_to_add)?;
         }
 
         Ok(())
@@ -1733,6 +1755,11 @@ impl UnicastMessageProcessor for UserLogic {
                 continue;
             };
 
+            // Collected under the guard, delivered after it: delivery reaches the user's
+            // listener, which may re-lock this mutex via `get_matched_publications`.
+            let mut pending_delivery: Vec<CacheChange> = Vec::new();
+            let mut acknack_result: RtpsResult<()> = Ok(());
+
             let writer_proxies = stateful_reader.writer_proxies();
             let mut matched_writers = writer_proxies.lock().map_err(|e| {
                 RtpsError::new(
@@ -1777,24 +1804,30 @@ impl UnicastMessageProcessor for UserLogic {
                 }
 
                 // Always flush buffer after updating sequence number
-                let change_to_add = writer_proxy.flush_buffered_changes();
-                self.add_change_to_reader_cache_and_notify(reader.as_ref(), change_to_add)?;
+                pending_delivery = writer_proxy.flush_buffered_changes();
 
                 // Apply heartbeat response delay
                 let heartbeat_response_delay = stateful_reader.heartbeat_response_delay();
                 let delay_duration = heartbeat_response_delay.to_std_duration();
 
                 if delay_duration.is_zero() {
-                    // No delay - send immediately
+                    // No delay - send immediately.
+                    //
+                    // The error is carried, not propagated with `?`. `flush_buffered_changes`
+                    // above already removed those changes from the proxy and advanced
+                    // `expected_sn`, so returning here would drop `pending_delivery` on the
+                    // floor with no way to ever re-request it -- silent loss on a RELIABLE
+                    // reader. A failed ACKNACK only costs one ACKNACK; the next heartbeat
+                    // retries it.
                     let bitmap_base = writer_proxy.expected_sn();
-                    self.send_acknack_to_writer_proxy_inner(
+                    acknack_result = self.send_acknack_to_writer_proxy_inner(
                         writer_proxy,
                         stateful_reader,
                         missing_changes,
                         bitmap_base,
                         final_flag,
                         false,
-                    )?;
+                    );
                 } else {
                     // Schedule delayed ACKNACK via SendingHandler
                     let remote_writer_guid = writer_proxy.remote_writer_guid();
@@ -1941,6 +1974,15 @@ impl UnicastMessageProcessor for UserLogic {
                     }
                 }
             }
+
+            // All writer-proxy work for this reader is done; release before notifying so a
+            // listener may call back into the reader's matched-writer APIs.
+            drop(matched_writers);
+            if !pending_delivery.is_empty() {
+                self.add_change_to_reader_cache_and_notify(reader.as_ref(), pending_delivery)?;
+            }
+            // Reported only once the flushed samples are safely in the reader's cache.
+            acknack_result?;
         }
 
         Ok(())
@@ -2496,6 +2538,11 @@ impl UnicastMessageProcessor for UserLogic {
 
         for reader in matched_readers {
             if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
+                // Same rule as the DATA and HEARTBEAT paths: the batch is decided under the
+                // guard and delivered after it, because delivery ends in the user's listener
+                // and that listener may re-lock this mutex.
+                let mut pending_delivery: Vec<CacheChange> = Vec::new();
+
                 let writer_proxies_arc = stateful_reader.writer_proxies();
                 let mut writer_proxies = writer_proxies_arc.lock().map_err(|_| {
                     RtpsError::new(
@@ -2524,17 +2571,17 @@ impl UnicastMessageProcessor for UserLogic {
                 if let Some(last) = irrelevant_changes.last() {
                     if last >= &writer_proxy.expected_sn() {
                         writer_proxy.set_expected_sn(SequenceNumber::from_i64(last.to_i64() + 1));
-
-                        let flushed_changes = writer_proxy.flush_buffered_changes();
-                        self.add_change_to_reader_cache_and_notify(
-                            stateful_reader,
-                            flushed_changes,
-                        )?;
+                        pending_delivery = writer_proxy.flush_buffered_changes();
                     }
                 }
 
                 for seq_num in irrelevant_changes {
                     writer_proxy.irrelevant_change_set(seq_num);
+                }
+
+                drop(writer_proxies);
+                if !pending_delivery.is_empty() {
+                    self.add_change_to_reader_cache_and_notify(stateful_reader, pending_delivery)?;
                 }
             }
         }
