@@ -1537,31 +1537,31 @@ impl UserLogic {
             return;
         }
 
-        // Sort incomplete fragment buffers by created_at and remove oldest ones
+        // Evict the incomplete buffers that have gone longest without receiving a
+        // fragment, so a large sample still making progress is not sacrificed
         let mut incomplete_buffers: Vec<_> = self
             .fragment_buffers
             .iter()
             .filter(|entry| !entry.value().all_fragments_received())
-            .map(|entry| (*entry.key(), entry.value().created_at))
+            .map(|entry| (*entry.key(), entry.value().last_updated))
             .collect();
 
-        // Sort in ascending order by creation time (oldest first)
-        incomplete_buffers.sort_by_key(|(_, created_at)| *created_at);
+        incomplete_buffers.sort_by_key(|(_, last_updated)| *last_updated);
 
         let buffers_to_remove = self.fragment_buffers.len() - max_size;
         let mut removed_count = 0;
 
         for (key, _) in incomplete_buffers.iter().take(buffers_to_remove) {
-            if let Some((_, _removed_buffer)) = self.fragment_buffers.remove(key) {
-                // warn!(
-                //     "Cleaned up incomplete fragment buffer: writer_guid={:?}, seq_num={:?}, \
-                //      received_fragments={}/{}, age={:.2}s",
-                //     key.0,
-                //     key.1,
-                //     removed_buffer.received_fragments.len(),
-                //     removed_buffer.total_fragments,
-                //     removed_buffer.created_at.elapsed().as_secs_f64()
-                // );
+            if let Some((_, removed_buffer)) = self.fragment_buffers.remove(key) {
+                debug!(
+                    "Evicting incomplete fragment buffer: writer={}, seq={}, fragments={}/{}, idle={:.2}s, age={:.2}s",
+                    key.0,
+                    key.1.to_i64(),
+                    removed_buffer.received_count,
+                    removed_buffer.total_fragments,
+                    removed_buffer.last_updated.elapsed().as_secs_f64(),
+                    removed_buffer.created_at.elapsed().as_secs_f64()
+                );
                 removed_count += 1;
             }
         }
@@ -2338,6 +2338,10 @@ impl UnicastMessageProcessor for UserLogic {
         // DashMap is thread-safe, so no explicit lock is needed
         //println!("[DEBUG] FragmentBuffer count: {}, size: {}", self.fragment_buffers.len(), self.fragment_buffers.iter().map(|entry| entry.value().total_size as usize).sum::<usize>());
         if self.fragment_buffers.len() > 30 {
+            debug!(
+                "[UserLogic] Fragment buffer count exceeded threshold ({}), cleaning up old buffers.",
+                self.fragment_buffers.len()
+            );
             self.cleanup_old_fragment_buffers(30);
         }
 

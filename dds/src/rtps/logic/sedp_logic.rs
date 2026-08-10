@@ -907,6 +907,18 @@ impl SedpLogic {
                 writer,
                 subscription_builtin_topic_data.endpoint_guid(),
             )?;
+
+            // Restart the stopped periodic heartbeat so the new reader can recover history
+            if !writer.heartbeat_timer_running()
+                && writer.last_change_sequence_number() > SequenceNumber::new(0, 0)
+            {
+                debug!(
+                    "Restarting periodic heartbeat of writer {} for late-joining reader {}",
+                    writer.guid(),
+                    subscription_builtin_topic_data.endpoint_guid()
+                );
+                writer.register_periodic_heartbeat_timer_after_delay(writer.heartbeat_period())?;
+            }
         }
 
         Ok(())
