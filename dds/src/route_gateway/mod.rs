@@ -40,5 +40,5 @@ pub mod topic_relay;
 
 pub use auto_relay::{AutoRelay, QosResolver, TopicFilter};
 pub use config::{AutoRelayConfig, NodeConfig, RouteGatewayConfig, TopicRelayRule};
-pub use relay::{LinkRole, RelayConfig, RelayGateway};
+pub use relay::{LinkRole, LinkStats, RelayConfig, RelayGateway};
 pub use topic_relay::{TopicRelay, TopicRelayQos};

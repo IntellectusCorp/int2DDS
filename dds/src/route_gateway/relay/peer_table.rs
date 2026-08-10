@@ -2,10 +2,10 @@
 //!
 //! Every relayed datagram is routed by this table alone: a prefix is either a
 //! participant on the gateway's own network, in which case its real addresses
-//! are known, or a participant behind the peer gateway, in which case the only
-//! way to reach it is the link. An entry lives as long as the lease its owner
-//! announced, so a participant that stops announcing is forgotten even when it
-//! never got to say goodbye.
+//! are known, or a participant behind one of the peer gateways, in which case
+//! the only way to reach it is the link it was learned on. An entry lives as
+//! long as the lease its owner announced, so a participant that stops
+//! announcing is forgotten even when it never got to say goodbye.
 
 use std::{
     collections::HashMap,
@@ -13,7 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::{discovery_rewrite::SpdpEndpoints, rtps_scan::GuidPrefix};
+use super::{discovery_rewrite::SpdpEndpoints, link::LinkId, rtps_scan::GuidPrefix};
 
 /// Lease given to an announcement that does not state one.
 pub(crate) const DEFAULT_LEASE: Duration = Duration::from_secs(100);
@@ -26,7 +26,7 @@ const MAX_LEASE: Duration = Duration::from_secs(24 * 60 * 60);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PeerRoute {
     Local(SpdpEndpoints),
-    Remote,
+    Remote(LinkId),
 }
 
 struct Entry {
@@ -50,20 +50,26 @@ impl PeerTable {
         self.insert(prefix, PeerRoute::Local(endpoints), lease, now);
     }
 
-    pub(crate) fn insert_remote(&self, prefix: GuidPrefix, lease: Duration, now: Instant) {
-        self.insert(prefix, PeerRoute::Remote, lease, now);
+    pub(crate) fn insert_remote(
+        &self,
+        prefix: GuidPrefix,
+        link: LinkId,
+        lease: Duration,
+        now: Instant,
+    ) {
+        self.insert(prefix, PeerRoute::Remote(link), lease, now);
     }
 
     pub(crate) fn remove(&self, prefix: &GuidPrefix) {
         self.lock().remove(prefix);
     }
 
-    /// Drops every participant reached through the link. Returns how many were
-    /// dropped so the caller can say so.
-    pub(crate) fn forget_remote(&self) -> usize {
+    /// Drops every participant reached through one link, leaving the other
+    /// links alone. Returns how many were dropped so the caller can say so.
+    pub(crate) fn forget_remote(&self, link: LinkId) -> usize {
         let mut routes = self.lock();
         let before = routes.len();
-        routes.retain(|_, entry| entry.route != PeerRoute::Remote);
+        routes.retain(|_, entry| entry.route != PeerRoute::Remote(link));
         before - routes.len()
     }
 
@@ -83,7 +89,15 @@ impl PeerTable {
     }
 
     pub(crate) fn is_remote(&self, prefix: &GuidPrefix) -> bool {
-        matches!(self.route(prefix), Some(PeerRoute::Remote))
+        matches!(self.route(prefix), Some(PeerRoute::Remote(_)))
+    }
+
+    /// Which link reaches this participant, if any does.
+    pub(crate) fn remote_link(&self, prefix: &GuidPrefix) -> Option<LinkId> {
+        match self.route(prefix) {
+            Some(PeerRoute::Remote(link)) => Some(link),
+            _ => None,
+        }
     }
 
     fn insert(&self, prefix: GuidPrefix, route: PeerRoute, lease: Duration, now: Instant) {
@@ -108,6 +122,8 @@ mod tests {
     const PREFIX: GuidPrefix = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
     const OTHER_PREFIX: GuidPrefix = [12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1];
     const LEASE: Duration = Duration::from_secs(10);
+    const LINK: LinkId = LinkId(0);
+    const OTHER_LINK: LinkId = LinkId(1);
 
     fn endpoints() -> SpdpEndpoints {
         SpdpEndpoints {
@@ -133,7 +149,7 @@ mod tests {
         assert_eq!(table.route(&PREFIX), Some(PeerRoute::Local(endpoints())));
         assert!(table.is_local(&PREFIX));
 
-        table.insert_remote(PREFIX, LEASE, now);
+        table.insert_remote(PREFIX, LINK, LEASE, now);
         assert!(table.is_remote(&PREFIX));
         assert!(!table.is_local(&PREFIX));
     }
@@ -177,8 +193,8 @@ mod tests {
     fn an_absurd_lease_is_clamped_instead_of_overflowing() {
         let table = PeerTable::default();
         let now = Instant::now();
-        table.insert_remote(PREFIX, Duration::MAX, now);
-        table.insert_remote(OTHER_PREFIX, Duration::ZERO, now);
+        table.insert_remote(PREFIX, LINK, Duration::MAX, now);
+        table.insert_remote(OTHER_PREFIX, LINK, Duration::ZERO, now);
 
         assert_eq!(table.purge_expired(now + Duration::from_secs(2)), 1);
         assert!(table.is_remote(&PREFIX));
@@ -186,13 +202,25 @@ mod tests {
     }
 
     #[test]
+    fn losing_one_link_leaves_the_other_links_alone() {
+        let table = PeerTable::default();
+        let now = Instant::now();
+        table.insert_remote(PREFIX, LINK, LEASE, now);
+        table.insert_remote(OTHER_PREFIX, OTHER_LINK, LEASE, now);
+
+        assert_eq!(table.forget_remote(LINK), 1);
+        assert_eq!(table.route(&PREFIX), None);
+        assert_eq!(table.remote_link(&OTHER_PREFIX), Some(OTHER_LINK));
+    }
+
+    #[test]
     fn losing_the_link_forgets_only_the_far_network() {
         let table = PeerTable::default();
         let now = Instant::now();
         table.insert_local(PREFIX, endpoints(), LEASE, now);
-        table.insert_remote(OTHER_PREFIX, LEASE, now);
+        table.insert_remote(OTHER_PREFIX, LINK, LEASE, now);
 
-        assert_eq!(table.forget_remote(), 1);
+        assert_eq!(table.forget_remote(LINK), 1);
         assert!(table.is_local(&PREFIX));
         assert_eq!(table.route(&OTHER_PREFIX), None);
     }

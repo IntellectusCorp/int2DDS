@@ -172,6 +172,92 @@ fn relay_carries_discovery_and_samples_between_two_networks() {
     gateway_b.stop();
 }
 
+/// One gateway serving two peers at once. The writer's network is linked to two
+/// others that are not linked to each other, so a sample reaching both readers
+/// proves the announcements went out on every link and that each reply found
+/// its way back to the link its participant was learned on.
+#[test]
+fn one_gateway_relays_to_two_peers_at_once() {
+    let domain_a = next_domain_id();
+    let domain_b = next_domain_id();
+    let domain_c = next_domain_id();
+    let ports_a = GatewayPorts::for_domain(domain_a);
+    let ports_b = GatewayPorts::for_domain(domain_b);
+    let ports_c = GatewayPorts::for_domain(domain_c);
+    let link_to_b: std::net::SocketAddr = format!("127.0.0.1:{}", ports_a.link).parse().unwrap();
+    let link_to_c: std::net::SocketAddr =
+        format!("127.0.0.1:{}", ports_a.link + 1).parse().unwrap();
+
+    let gateway_a = RelayGateway::start(
+        RelayConfig::new(
+            domain_a as u32,
+            ports_a.metatraffic,
+            ports_a.user_data,
+            LinkRole::Listen(link_to_b),
+        )
+        .with_peer(LinkRole::Listen(link_to_c)),
+    )
+    .expect("gateway A failed to start");
+    let gateway_b = start_gateway(domain_b, &ports_b, LinkRole::Connect(link_to_b));
+    let gateway_c = start_gateway(domain_c, &ports_c, LinkRole::Connect(link_to_c));
+
+    let factory = DomainParticipantFactory::get_instance();
+    let writer_participant = factory
+        .create_participant(domain_a, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+    let writer =
+        create_datawriter(&writer_participant, PublisherQos::default(), reliable_writer_qos());
+
+    let reader_b_participant = factory
+        .create_participant(domain_b, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+    let reader_b =
+        create_datareader(&reader_b_participant, SubscriberQos::default(), reliable_reader_qos());
+    let reader_c_participant = factory
+        .create_participant(domain_c, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+    let reader_c =
+        create_datareader(&reader_c_participant, SubscriberQos::default(), reliable_reader_qos());
+
+    let matched = wait_until(
+        || writer.get_publication_matched_status().map(|s| s.current_count() >= 2).unwrap_or(false),
+        30_000,
+    );
+    assert!(matched, "the writer did not match a reader behind each peer gateway");
+
+    for value in 1..=SAMPLE_COUNT {
+        writer.write(&KeyedDataType::new(1, value * 10), InstanceHandle::NIL).unwrap();
+    }
+
+    let received = wait_until(
+        || {
+            [&reader_b, &reader_c].iter().all(|reader| {
+                reader
+                    .read(
+                        100,
+                        &[SampleStateKind::ANY_SAMPLE_STATE],
+                        &[ViewStateKind::ANY_VIEW_STATE],
+                        &[InstanceStateKind::ALIVE_INSTANCE_STATE],
+                    )
+                    .map(|samples| samples.len() >= SAMPLE_COUNT as usize)
+                    .unwrap_or(false)
+            })
+        },
+        20_000,
+    );
+    assert!(received, "a reader behind one of the two peers did not receive the samples");
+
+    writer_participant.delete_contained_entities().unwrap();
+    factory.delete_participant(writer_participant).unwrap();
+    reader_b_participant.delete_contained_entities().unwrap();
+    factory.delete_participant(reader_b_participant).unwrap();
+    reader_c_participant.delete_contained_entities().unwrap();
+    factory.delete_participant(reader_c_participant).unwrap();
+    gateway_a.stop();
+    gateway_b.stop();
+    gateway_c.stop();
+}
+
 /// One gateway is restarted under a running writer and reader. Neither
 /// participant is touched, so anything that arrives afterwards had to cross a
 /// second link that the surviving gateway accepted on its own.

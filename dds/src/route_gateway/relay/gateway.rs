@@ -1,14 +1,18 @@
 //! The relay itself.
 //!
 //! The gateway is not a participant. It owns three UDP ports on its own network
-//! and one link to the peer gateway, and it moves datagrams between them
-//! without ever interpreting what they carry. The one datagram it does touch is
-//! the SPDP announcement: rewriting the addresses inside it is what makes the
+//! and one link per peer gateway, and it moves datagrams between them without
+//! ever interpreting what they carry. The one datagram it does touch is the
+//! SPDP announcement: rewriting the addresses inside it is what makes the
 //! participants on both networks discover and match each other directly.
+//!
+//! Links never feed each other. A datagram that arrives on one link is either
+//! delivered to this network or dropped, so several peers form a star around
+//! each network and no datagram can circle between gateways.
 
 use std::{
-    io::{self, BufReader},
-    net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket},
+    io,
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -23,16 +27,16 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use crate::rtps::common::locator::MULTICAST_IP;
 
 use super::{
-    config::{LinkRole, RelayConfig, ResolvedConfig},
+    config::{RelayConfig, ResolvedConfig},
     discovery_rewrite::{self, SpdpEndpoints},
-    link::{self, Channel, Frame},
+    link::{self, Channel, Frame, LinkConnection, LinkEndpoint, LinkId},
     peer_table::{PeerRoute, PeerTable, DEFAULT_LEASE},
     rtps_scan::{self, Announcement, ScannedMessage},
+    stats::{LinkCounters, LinkStats},
 };
 
 const RECV_BUFFER_LEN: usize = 64 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
-const DIAL_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const LINK_QUEUE_LEN: usize = 1024;
 
 pub struct RelayGateway {
@@ -48,8 +52,15 @@ struct Shared {
     metatraffic_socket: UdpSocket,
     user_data_socket: UdpSocket,
     multicast_target: SocketAddrV4,
-    link_tx: Sender<Frame>,
-    link_stream: Mutex<Option<TcpStream>>,
+    links: Vec<Link>,
+    counters: LinkCounters,
+}
+
+/// One peer gateway: the queue feeding it and the connection carrying it,
+/// which is absent whenever that peer is unreachable.
+struct Link {
+    tx: Sender<Frame>,
+    connection: Mutex<Option<Arc<dyn LinkConnection>>>,
 }
 
 impl RelayGateway {
@@ -61,7 +72,22 @@ impl RelayGateway {
         let user_data_socket = open_unicast_socket(config.user_data_port)?;
         let multicast_target = SocketAddrV4::new(MULTICAST_IP, config.discovery_multicast_port);
 
-        let (link_tx, link_rx) = bounded(LINK_QUEUE_LEN);
+        // Bound before any thread starts so that a port already in use is
+        // reported to the caller instead of buried in a log line.
+        let endpoints = config
+            .links
+            .iter()
+            .map(link::open_endpoint)
+            .collect::<io::Result<Vec<Box<dyn LinkEndpoint>>>>()?;
+
+        let mut links = Vec::with_capacity(endpoints.len());
+        let mut queues = Vec::with_capacity(endpoints.len());
+        for _ in &endpoints {
+            let (tx, rx) = bounded(LINK_QUEUE_LEN);
+            links.push(Link { tx, connection: Mutex::new(None) });
+            queues.push(rx);
+        }
+
         let shared = Arc::new(Shared {
             config,
             table: PeerTable::default(),
@@ -69,14 +95,10 @@ impl RelayGateway {
             metatraffic_socket,
             user_data_socket,
             multicast_target,
-            link_tx,
-            link_stream: Mutex::new(None),
+            links,
+            counters: LinkCounters::default(),
         });
         let shutdown = Arc::new(AtomicBool::new(false));
-
-        // Bound before any thread starts so that a port already in use is
-        // reported to the caller instead of buried in a log line.
-        let endpoint = LinkEndpoint::open(&shared.config.link)?;
 
         let mut threads = Vec::new();
         threads.push(spawn_receiver(
@@ -101,16 +123,19 @@ impl RelayGateway {
             |shared, datagram| shared.handle_lan(datagram, Channel::UserData),
         ));
 
-        threads.push(spawn_named("relay-link-writer", {
-            let shared = shared.clone();
-            let shutdown = shutdown.clone();
-            move || run_link_writer(shared, link_rx, shutdown)
-        }));
-        threads.push(spawn_named("relay-link-reader", {
-            let shared = shared.clone();
-            let shutdown = shutdown.clone();
-            move || run_link_reader(shared, endpoint, shutdown)
-        }));
+        for (index, (queue, endpoint)) in queues.into_iter().zip(endpoints).enumerate() {
+            let id = LinkId(index);
+            threads.push(spawn_named(&format!("relay-link-writer-{}", index), {
+                let shared = shared.clone();
+                let shutdown = shutdown.clone();
+                move || run_link_writer(shared, id, queue, shutdown)
+            }));
+            threads.push(spawn_named(&format!("relay-link-reader-{}", index), {
+                let shared = shared.clone();
+                let shutdown = shutdown.clone();
+                move || run_link_reader(shared, id, endpoint, shutdown)
+            }));
+        }
         threads.push(spawn_named("relay-reaper", {
             let shared = shared.clone();
             let shutdown = shutdown.clone();
@@ -125,6 +150,11 @@ impl RelayGateway {
         self.shared.config.lan_ip
     }
 
+    /// What has crossed the link so far, split by direction and channel.
+    pub fn link_stats(&self) -> LinkStats {
+        self.shared.counters.read()
+    }
+
     pub fn stop(self) {
         // Dropping performs the shutdown.
     }
@@ -134,10 +164,12 @@ impl Drop for RelayGateway {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
 
-        // The link reader blocks on the stream rather than polling, so it is
-        // woken by tearing the stream down under it.
-        if let Some(stream) = lock(&self.shared.link_stream).take() {
-            let _ = stream.shutdown(std::net::Shutdown::Both);
+        // Each link reader blocks on its connection rather than polling, so it
+        // is woken by tearing that connection down under it.
+        for link in &self.shared.links {
+            if let Some(connection) = lock(&link.connection).take() {
+                connection.close();
+            }
         }
 
         for thread in self.threads.drain(..) {
@@ -163,8 +195,8 @@ impl Shared {
         let Some(destination) = scanned.dest_prefix else {
             return;
         };
-        if self.table.is_remote(&destination) {
-            self.enqueue(channel, datagram);
+        if let Some(link) = self.table.remote_link(&destination) {
+            self.enqueue(link, channel, datagram);
         }
     }
 
@@ -194,17 +226,19 @@ impl Shared {
             self.table.insert_local(scanned.source_prefix, endpoints, lease, Instant::now());
         }
 
-        self.enqueue(Channel::Metatraffic, datagram);
+        self.enqueue_everywhere(Channel::Metatraffic, datagram);
     }
 
-    fn handle_link_frame(&self, frame: Frame) {
+    fn handle_link_frame(&self, link: LinkId, frame: Frame) {
+        self.counters.count_received(frame.channel, frame.payload.len());
+
         let mut datagram = frame.payload;
         let Some(scanned) = rtps_scan::scan(&datagram) else {
             return;
         };
 
         if scanned.announcement == Some(Announcement::Participant) {
-            self.inject_announcement(&mut datagram, &scanned);
+            self.inject_announcement(link, &mut datagram, &scanned);
             return;
         }
 
@@ -234,7 +268,7 @@ impl Shared {
 
     /// A participant on the far network, seen through the link. It is given the
     /// gateway's own addresses so that this network can reach it at all.
-    fn inject_announcement(&self, datagram: &mut [u8], scanned: &ScannedMessage) {
+    fn inject_announcement(&self, link: LinkId, datagram: &mut [u8], scanned: &ScannedMessage) {
         // Whatever the peer gateway says about this network came from here.
         if self.table.is_local(&scanned.source_prefix) {
             return;
@@ -256,7 +290,7 @@ impl Shared {
                 log::warn!("Relay dropped an announcement it could not rewrite");
                 return;
             }
-            self.table.insert_remote(scanned.source_prefix, lease, Instant::now());
+            self.table.insert_remote(scanned.source_prefix, link, lease, Instant::now());
         }
 
         if let Err(e) = self.discovery_socket.send_to(datagram, self.multicast_target) {
@@ -271,113 +305,95 @@ impl Shared {
             && endpoints.metatraffic.port() == self.config.metatraffic_port
     }
 
-    /// Nothing behind the link is reachable while it is down, and the peer
-    /// gateway announces all of it again once the link is back.
-    fn handle_link_lost(&self) {
-        *lock(&self.link_stream) = None;
-        let forgotten = self.table.forget_remote();
+    /// Nothing behind a link is reachable while it is down, and that peer
+    /// gateway announces all of it again once the link is back. The other
+    /// links keep their participants.
+    fn handle_link_lost(&self, link: LinkId) {
+        *lock(&self.links[link.0].connection) = None;
+        let forgotten = self.table.forget_remote(link);
         if forgotten > 0 {
-            log::info!("Relay link lost, {} relayed participant(s) forgotten", forgotten);
+            log::info!(
+                "Relay link {} lost, {} relayed participant(s) forgotten",
+                link.0,
+                forgotten
+            );
         }
     }
 
-    fn enqueue(&self, channel: Channel, datagram: &[u8]) {
+    /// Announcements go to every peer, because which of them holds a matching
+    /// participant is exactly what is not known yet.
+    fn enqueue_everywhere(&self, channel: Channel, datagram: &[u8]) {
+        for index in 0..self.links.len() {
+            self.enqueue(LinkId(index), channel, datagram);
+        }
+    }
+
+    fn enqueue(&self, link: LinkId, channel: Channel, datagram: &[u8]) {
         let frame = Frame { channel, payload: datagram.to_vec() };
-        if self.link_tx.try_send(frame).is_err() {
-            log::warn!("Relay link queue is full, datagram dropped");
+        if self.links[link.0].tx.try_send(frame).is_err() {
+            log::warn!("Relay queue for link {} is full, datagram dropped", link.0);
         }
     }
 
-    fn write_to_link(&self, frame: Frame) {
-        let mut guard = lock(&self.link_stream);
-        let Some(stream) = guard.as_ref() else {
+    fn write_to_link(&self, link: LinkId, frame: Frame) {
+        let mut guard = lock(&self.links[link.0].connection);
+        let Some(connection) = guard.as_ref() else {
             return;
         };
-        if let Err(e) = link::write_frame(&mut &*stream, frame.channel, &frame.payload) {
-            log::warn!("Relay link write failed: {}", e);
-            // The reader is blocked on the same connection and would otherwise
-            // sit there until TCP gives up, so it is torn down here.
-            let _ = stream.shutdown(std::net::Shutdown::Both);
-            *guard = None;
+        match connection.send(frame.channel, &frame.payload) {
+            Ok(()) => self.counters.count_sent(frame.channel, frame.payload.len()),
+            Err(e) => {
+                log::warn!("Relay link write failed: {}", e);
+                // The reader is blocked on the same connection and would
+                // otherwise sit there until the transport gives up, so it is
+                // torn down here.
+                connection.close();
+                *guard = None;
+            }
         }
     }
 }
 
-fn run_link_writer(shared: Arc<Shared>, link_rx: Receiver<Frame>, shutdown: Arc<AtomicBool>) {
+fn run_link_writer(
+    shared: Arc<Shared>,
+    link: LinkId,
+    queue: Receiver<Frame>,
+    shutdown: Arc<AtomicBool>,
+) {
     while !shutdown.load(Ordering::Relaxed) {
-        match link_rx.recv_timeout(POLL_INTERVAL) {
-            Ok(frame) => shared.write_to_link(frame),
+        match queue.recv_timeout(POLL_INTERVAL) {
+            Ok(frame) => shared.write_to_link(link, frame),
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => break,
         }
     }
 }
 
-/// The end of the link this gateway owns. The listener is bound once and kept,
-/// because a peer that goes away has to be able to come back.
-enum LinkEndpoint {
-    Listener(TcpListener),
-    Dialer(SocketAddr),
-}
-
-impl LinkEndpoint {
-    fn open(role: &LinkRole) -> io::Result<Self> {
-        match role {
-            LinkRole::Listen(address) => {
-                let listener = TcpListener::bind(address)?;
-                listener.set_nonblocking(true)?;
-                Ok(LinkEndpoint::Listener(listener))
-            }
-            LinkRole::Connect(address) => Ok(LinkEndpoint::Dialer(*address)),
-        }
-    }
-
-    fn connect(&self, shutdown: &AtomicBool) -> Option<TcpStream> {
-        while !shutdown.load(Ordering::Relaxed) {
-            let attempt = match self {
-                LinkEndpoint::Listener(listener) => listener.accept().map(|(stream, _)| stream),
-                LinkEndpoint::Dialer(address) => TcpStream::connect_timeout(address, POLL_INTERVAL),
-            };
-            match attempt {
-                Ok(stream) => {
-                    let _ = stream.set_nonblocking(false);
-                    let _ = stream.set_nodelay(true);
-                    return Some(stream);
-                }
-                Err(_) => thread::sleep(DIAL_RETRY_INTERVAL),
-            }
-        }
-        None
-    }
-}
-
-fn run_link_reader(shared: Arc<Shared>, endpoint: LinkEndpoint, shutdown: Arc<AtomicBool>) {
+fn run_link_reader(
+    shared: Arc<Shared>,
+    link: LinkId,
+    endpoint: Box<dyn LinkEndpoint>,
+    shutdown: Arc<AtomicBool>,
+) {
     while !shutdown.load(Ordering::Relaxed) {
-        let Some(stream) = endpoint.connect(&shutdown) else {
+        let Some(connection) = endpoint.connect(&shutdown) else {
             break;
         };
-        match stream.try_clone() {
-            Ok(clone) => *lock(&shared.link_stream) = Some(clone),
-            Err(e) => {
-                log::error!("Relay could not share the link stream: {}", e);
-                break;
-            }
-        }
+        *lock(&shared.links[link.0].connection) = Some(connection.clone());
 
-        let mut reader = BufReader::new(stream);
         while !shutdown.load(Ordering::Relaxed) {
-            match link::read_frame(&mut reader) {
-                Ok(frame) => shared.handle_link_frame(frame),
+            match connection.recv() {
+                Ok(frame) => shared.handle_link_frame(link, frame),
                 Err(e) => {
                     if !shutdown.load(Ordering::Relaxed) {
-                        log::warn!("Relay link closed: {}", e);
+                        log::warn!("Relay link {} closed: {}", link.0, e);
                     }
                     break;
                 }
             }
         }
 
-        shared.handle_link_lost();
+        shared.handle_link_lost(link);
     }
 }
 

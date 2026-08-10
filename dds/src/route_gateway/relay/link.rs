@@ -1,15 +1,33 @@
 //! The link between two gateways.
 //!
-//! A datagram loses its own framing the moment it enters a stream, so each one
-//! is length prefixed. The tag that follows the length says which of the two
-//! LAN ports the datagram entered by, which is the same port the peer gateway
-//! must deliver it to on the other side.
+//! The gateway only ever sees frames: a payload plus the channel that says
+//! which of the two LAN ports the datagram entered by, which is the same port
+//! the peer gateway must deliver it to on the other side. How a frame reaches
+//! the peer is the transport's business, so the length prefix below lives with
+//! the TCP transport that needs it — a datagram loses its own boundaries inside
+//! a byte stream, and a transport that preserves boundaries would not carry it.
 
-use std::io::{self, Read, Write};
+use std::{
+    io::{self, BufReader, Read, Write},
+    net::{Shutdown, SocketAddr, TcpListener, TcpStream},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    thread,
+    time::Duration,
+};
 
-/// Wide enough for a fragmented RTPS datagram, narrow enough that a corrupted
-/// length cannot make the relay allocate without bound.
-const MAX_FRAME_LEN: usize = 64 * 1024;
+use super::config::LinkRole;
+
+const RETRY_INTERVAL: Duration = Duration::from_millis(100);
+const DIAL_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// Which of the configured peer gateways a link stands for. Links are numbered
+/// by their place in the configuration, which is stable for the run and needs
+/// no identity handshake with the peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct LinkId(pub(crate) usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Channel {
@@ -40,11 +58,93 @@ pub(crate) struct Frame {
     pub(crate) payload: Vec<u8>,
 }
 
-pub(crate) fn write_frame<W: Write>(
-    writer: &mut W,
-    channel: Channel,
-    payload: &[u8],
-) -> io::Result<()> {
+/// The end of the link this gateway owns. It outlives every connection made
+/// through it, because a peer that goes away has to be able to come back.
+pub(crate) trait LinkEndpoint: Send {
+    /// Blocks until the peer gateway is reachable, retrying until then.
+    /// `None` once shutdown is set.
+    fn connect(&self, shutdown: &AtomicBool) -> Option<Arc<dyn LinkConnection>>;
+}
+
+/// An established link. The reader and the writer thread hold it at the same
+/// time, so every method takes `&self` and closing is safe from either.
+pub(crate) trait LinkConnection: Send + Sync {
+    fn send(&self, channel: Channel, payload: &[u8]) -> io::Result<()>;
+    fn recv(&self) -> io::Result<Frame>;
+    /// Tears the connection down under whichever thread is blocked on it.
+    fn close(&self);
+}
+
+/// Picks the transport that serves the configured role.
+pub(crate) fn open_endpoint(role: &LinkRole) -> io::Result<Box<dyn LinkEndpoint>> {
+    match role {
+        LinkRole::Listen(address) => {
+            let listener = TcpListener::bind(address)?;
+            listener.set_nonblocking(true)?;
+            Ok(Box::new(TcpEndpoint::Listener(listener)))
+        }
+        LinkRole::Connect(address) => Ok(Box::new(TcpEndpoint::Dialer(*address))),
+    }
+}
+
+enum TcpEndpoint {
+    Listener(TcpListener),
+    Dialer(SocketAddr),
+}
+
+impl LinkEndpoint for TcpEndpoint {
+    fn connect(&self, shutdown: &AtomicBool) -> Option<Arc<dyn LinkConnection>> {
+        while !shutdown.load(Ordering::Relaxed) {
+            let attempt = match self {
+                TcpEndpoint::Listener(listener) => listener.accept().map(|(stream, _)| stream),
+                TcpEndpoint::Dialer(address) => TcpStream::connect_timeout(address, DIAL_TIMEOUT),
+            };
+            match attempt.and_then(TcpLink::new) {
+                Ok(link) => return Some(Arc::new(link)),
+                Err(_) => thread::sleep(RETRY_INTERVAL),
+            }
+        }
+        None
+    }
+}
+
+/// Three handles on one connection: reads and writes are independent, and
+/// closing must work while both of them are blocked.
+struct TcpLink {
+    writer: Mutex<TcpStream>,
+    reader: Mutex<BufReader<TcpStream>>,
+    control: TcpStream,
+}
+
+impl TcpLink {
+    fn new(stream: TcpStream) -> io::Result<Self> {
+        stream.set_nonblocking(false)?;
+        let _ = stream.set_nodelay(true);
+        let reader = stream.try_clone()?;
+        let control = stream.try_clone()?;
+        Ok(Self { writer: Mutex::new(stream), reader: Mutex::new(BufReader::new(reader)), control })
+    }
+}
+
+impl LinkConnection for TcpLink {
+    fn send(&self, channel: Channel, payload: &[u8]) -> io::Result<()> {
+        write_frame(&mut *lock(&self.writer), channel, payload)
+    }
+
+    fn recv(&self) -> io::Result<Frame> {
+        read_frame(&mut *lock(&self.reader))
+    }
+
+    fn close(&self) {
+        let _ = self.control.shutdown(Shutdown::Both);
+    }
+}
+
+/// Wide enough for a fragmented RTPS datagram, narrow enough that a corrupted
+/// length cannot make the relay allocate without bound.
+const MAX_FRAME_LEN: usize = 64 * 1024;
+
+fn write_frame<W: Write>(writer: &mut W, channel: Channel, payload: &[u8]) -> io::Result<()> {
     if payload.len() + 1 > MAX_FRAME_LEN {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "frame too large"));
     }
@@ -55,7 +155,7 @@ pub(crate) fn write_frame<W: Write>(
     writer.flush()
 }
 
-pub(crate) fn read_frame<R: Read>(reader: &mut R) -> io::Result<Frame> {
+fn read_frame<R: Read>(reader: &mut R) -> io::Result<Frame> {
     let mut length_bytes = [0u8; 4];
     reader.read_exact(&mut length_bytes)?;
     let length = u32::from_be_bytes(length_bytes) as usize;
@@ -72,6 +172,10 @@ pub(crate) fn read_frame<R: Read>(reader: &mut R) -> io::Result<Frame> {
     reader.read_exact(&mut payload)?;
 
     Ok(Frame { channel, payload })
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]

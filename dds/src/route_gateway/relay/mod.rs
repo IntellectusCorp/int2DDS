@@ -21,6 +21,8 @@ mod gateway;
 mod link;
 mod peer_table;
 mod rtps_scan;
+mod stats;
 
 pub use config::{LinkRole, RelayConfig};
 pub use gateway::RelayGateway;
+pub use stats::LinkStats;

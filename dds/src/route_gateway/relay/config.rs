@@ -7,7 +7,7 @@ use std::{
 
 use crate::rtps::transport::port_manager::PortManager;
 
-/// Which end of the link this gateway is. Exactly one of the pair listens.
+/// Which end of one link this gateway is. Exactly one end of each pair listens.
 #[derive(Debug, Clone)]
 pub enum LinkRole {
     Listen(SocketAddr),
@@ -25,7 +25,10 @@ pub struct RelayConfig {
     pub metatraffic_port: u16,
     /// Port that stands in for every relayed participant's user data locator.
     pub user_data_port: u16,
-    pub link: LinkRole,
+    /// One entry per peer gateway. Each is an independent link: nothing that
+    /// arrives on one is ever passed to another, so the gateways form a star
+    /// around each network rather than a routed mesh.
+    pub links: Vec<LinkRole>,
 }
 
 impl RelayConfig {
@@ -35,11 +38,17 @@ impl RelayConfig {
         user_data_port: u16,
         link: LinkRole,
     ) -> Self {
-        Self { lan_domain_id, lan_ip: None, metatraffic_port, user_data_port, link }
+        Self { lan_domain_id, lan_ip: None, metatraffic_port, user_data_port, links: vec![link] }
     }
 
     pub fn with_lan_ip(mut self, lan_ip: Ipv4Addr) -> Self {
         self.lan_ip = Some(lan_ip);
+        self
+    }
+
+    /// Adds another peer gateway to relay with.
+    pub fn with_peer(mut self, link: LinkRole) -> Self {
+        self.links.push(link);
         self
     }
 
@@ -48,6 +57,13 @@ impl RelayConfig {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "metatraffic and user data ports must differ",
+            ));
+        }
+
+        if self.links.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a relay needs at least one peer gateway",
             ));
         }
 
@@ -64,7 +80,7 @@ impl RelayConfig {
             discovery_multicast_port: PortManager::get_discovery_traffic_multicast_port(
                 self.lan_domain_id,
             ),
-            link: self.link.clone(),
+            links: self.links.clone(),
         })
     }
 }
@@ -76,7 +92,7 @@ pub(crate) struct ResolvedConfig {
     pub(crate) metatraffic_port: u16,
     pub(crate) user_data_port: u16,
     pub(crate) discovery_multicast_port: u16,
-    pub(crate) link: LinkRole,
+    pub(crate) links: Vec<LinkRole>,
 }
 
 /// First routable IPv4 address of the host. The gateway has to advertise an
@@ -115,6 +131,19 @@ mod tests {
         let resolved = config().resolve().expect("resolve failed");
         assert_eq!(resolved.discovery_multicast_port, 7900);
         assert_eq!(resolved.lan_ip, Ipv4Addr::new(10, 1, 2, 3));
+    }
+
+    #[test]
+    fn every_configured_peer_survives_resolution() {
+        let config = config().with_peer(LinkRole::Connect("127.0.0.1:9001".parse().unwrap()));
+        assert_eq!(config.resolve().expect("resolve failed").links.len(), 2);
+    }
+
+    #[test]
+    fn resolve_rejects_a_relay_without_a_peer() {
+        let mut config = config();
+        config.links.clear();
+        assert!(config.resolve().is_err());
     }
 
     #[test]
