@@ -1867,13 +1867,15 @@ impl UnicastMessageProcessor for UserLogic {
                 let missing_fragments =
                     writer_proxy.calculate_missing_fragments(heartbeat.first_sn, heartbeat.last_sn);
 
-                if missing_fragments.is_some() {
+                // `incomplete_sn`, not `heartbeat.last_sn`: the writer resolves the request
+                // against `writer_sn`, and it also keys the suppression timer below.
+                if let Some((incomplete_sn, missing_fragments)) = missing_fragments {
                     let writer_proxies_clone = writer_proxies.clone();
                     let stateful_reader_guid = stateful_reader.guid();
                     let participant = participant.clone();
                     let transport_clone = self.transport.clone();
+                    // Belongs to the piggybacked ACKNACK, not the fragment request.
                     let last_sn = heartbeat.last_sn;
-                    let missing_fragments_clone = missing_fragments.clone();
                     let remote_writer_guid = writer_proxy.remote_writer_guid();
 
                     writer_proxy.increase_nackfrag_count();
@@ -1881,7 +1883,7 @@ impl UnicastMessageProcessor for UserLogic {
                     let timer_id = TimerId::NackFrag {
                         reader_entity_id: stateful_reader.guid().entity_id(),
                         remote_writer_guid,
-                        sequence_number: last_sn,
+                        sequence_number: incomplete_sn,
                     };
                     if let Ok(locked_timer_handler) =
                         TimerHandler::get_instance(participant.guid().prefix()).lock()
@@ -1905,7 +1907,7 @@ impl UnicastMessageProcessor for UserLogic {
                                     .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
                                 {
                                     let still_missing =
-                                        current_writer_proxy.still_missing_fragments(last_sn);
+                                        current_writer_proxy.still_missing_fragments(incomplete_sn);
 
                                     if still_missing {
                                         // Create and send NACK_FRAG message
@@ -1924,8 +1926,8 @@ impl UnicastMessageProcessor for UserLogic {
                                                 current_writer_proxy
                                                     .remote_writer_guid()
                                                     .entity_id(),
-                                                last_sn,
-                                                missing_fragments_clone.as_ref().unwrap().clone(),
+                                                incomplete_sn,
+                                                missing_fragments.clone(),
                                                 current_writer_proxy.nackfrag_count(),
                                                 acknack_info,
                                             ) {
@@ -2047,7 +2049,8 @@ impl UnicastMessageProcessor for UserLogic {
                 continue;
             }
 
-            let Some(missing_fragments) = writer_proxy
+            // Stamp with what the scan returned rather than re-deriving it.
+            let Some((incomplete_sn, missing_fragments)) = writer_proxy
                 .calculate_missing_fragments(heartbeat_frag.writer_sn, heartbeat_frag.writer_sn)
             else {
                 continue;
@@ -2061,7 +2064,7 @@ impl UnicastMessageProcessor for UserLogic {
                 writer_proxy.remote_writer_guid(),
                 stateful_reader.guid().entity_id(),
                 writer_proxy.remote_writer_guid().entity_id(),
-                heartbeat_frag.writer_sn,
+                incomplete_sn,
                 missing_fragments,
                 writer_proxy.nackfrag_count(),
                 None,
