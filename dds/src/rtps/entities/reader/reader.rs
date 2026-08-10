@@ -20,11 +20,7 @@ use crate::{
     },
     infrastructure::history_cache::HistoryCache,
     rtps::{
-        common::{
-            guid::{Guid, GuidPrefix},
-            rtps_error_code::RtpsResult,
-            time::RtpsDuration,
-        },
+        common::{guid::Guid, rtps_error_code::RtpsResult, time::RtpsDuration},
         entities::{
             endpoint::Endpoint,
             entity::Entity,
@@ -63,11 +59,4 @@ pub(crate) trait Reader: Entity + Endpoint + Debug + Any {
     ) -> RtpsResult<PublicationBuiltinTopicData>;
 
     fn remove_matched_writer_and_update_status(&self, writer_guid: Guid) -> RtpsResult<bool>;
-
-    // Remove all matched writers whose GUID prefix equals `prefix` (e.g. on remote
-    // participant termination). Returns the number of writers removed.
-    fn remove_all_matched_writers_with_prefix_and_update_status(
-        &self,
-        prefix: GuidPrefix,
-    ) -> RtpsResult<usize>;
 }

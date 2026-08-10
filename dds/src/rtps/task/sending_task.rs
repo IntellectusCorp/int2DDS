@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use mio::{Events, Poll, Token, Waker};
 
@@ -10,6 +10,33 @@ use crate::rtps::logic::spdp_logic::SpdpLogic;
 use crate::rtps::logic::user_logic::UserLogic;
 use crate::rtps::task::sending_handler::MessageType;
 use crate::rtps::transport::socket::MAX_EVENTS;
+
+/// Locks the send queue, recovering from poisoning instead of failing on it.
+///
+/// Both the producer and the consumer went through `Mutex::lock`/`try_lock` directly and had
+/// no way back from a poisoned queue. `try_lock` in particular cannot tell `WouldBlock` from
+/// `Poisoned`, and poisoning is permanent, so the consumer's retry loop had no exit and spun at
+/// full speed forever. (It also held the lock inside the else branch, since the
+/// `Err(PoisonError<MutexGuard>)` scrutinee lives to the end of the `if let` -- but `continue`
+/// is a scope exit, so it was re-taken and released each iteration rather than held.) The
+/// producer fared worse: its recovery path fetched the handler for the same participant GUID,
+/// which is the very handler it was called on, and re-locked a mutex the thread already held --
+/// `PoisonError` owns the guard, so the error arm never released it. That one deadlocked
+/// immediately, and the guard it leaked is what starved the consumer.
+///
+/// Recovering is safe here. The queue is a plain `Vec` of owned messages, so a producer that
+/// unwound mid-push leaves it structurally sound and a partially-pushed message is safe to
+/// observe. `into_inner` matches the recovery already used in `time_based_filter.rs` and
+/// `tcp_sender.rs`.
+///
+/// The returned guard must be released before dispatching anything: `message_queue` is a leaf
+/// lock, and holding it across `create_worker_task` would invert the order the receive thread
+/// takes, which acquires `reader_proxies` and then wants this queue.
+pub(crate) fn lock_message_queue(
+    queue: &Mutex<Vec<MessageType>>,
+) -> MutexGuard<'_, Vec<MessageType>> {
+    queue.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 pub(crate) struct SendingTask {
     participant: Weak<Participant>,
@@ -213,23 +240,99 @@ impl SendingTask {
                 return Ok(());
             }
 
-            loop {
-                let messages: Vec<MessageType> = if let Ok(mut queue_guard) = queue.try_lock() {
-                    // Take all messages from queue at once to release lock quickly
-                    std::mem::take(&mut *queue_guard)
-                } else {
-                    // thread::sleep(StdDuration::from_nanos(random_range(10..20)));
-                    continue;
-                };
+            // Take everything at once, release, then dispatch. The release is load-bearing:
+            // holding the queue across `create_worker_task` would invert the lock order the
+            // receive thread uses. There is no retry loop any more, so the outer
+            // `is_terminated()` check above stays reachable on every pass.
+            let messages: Vec<MessageType> = std::mem::take(&mut *lock_message_queue(&queue));
 
-                // Process messages after releasing lock (prevent deadlock)
-                if !messages.is_empty() {
-                    for message in messages {
-                        let _ = self.create_worker_task(message);
-                    }
-                }
-                break;
+            for message in messages {
+                let _ = self.create_worker_task(message);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration as StdDuration;
+
+    /// The old consumer used `try_lock` and `continue`d on any error. This is the property that
+    /// made that an infinite loop: poisoning is permanent and indistinguishable from
+    /// contention, so the else branch was taken on every iteration forever.
+    #[test]
+    fn try_lock_cannot_recover_from_poisoning() {
+        let queue: Arc<Mutex<Vec<MessageType>>> = Arc::new(Mutex::new(Vec::new()));
+        poison(&queue);
+
+        for _ in 0..3 {
+            assert!(
+                matches!(queue.try_lock(), Err(std::sync::TryLockError::Poisoned(_))),
+                "try_lock recovered from poisoning, so the old spin loop had an exit after all"
+            );
+        }
+    }
+
+    /// Draining a poisoned queue must return, and must return the queued messages rather than
+    /// dropping them. Bounded on a worker thread because the pre-fix code never returned here.
+    #[test]
+    fn draining_a_poisoned_queue_returns_its_messages() {
+        let queue: Arc<Mutex<Vec<MessageType>>> = Arc::new(Mutex::new(Vec::new()));
+        lock_message_queue(&queue).push(MessageType::P2pHeartbeat(None));
+        poison(&queue);
+        assert!(queue.is_poisoned(), "the queue under test was not actually poisoned");
+
+        let (tx, rx) = mpsc::sync_channel::<usize>(1);
+        let drained = Arc::clone(&queue);
+        std::thread::Builder::new()
+            .name("drain-poisoned-queue".into())
+            .spawn(move || {
+                let messages: Vec<MessageType> = std::mem::take(&mut *lock_message_queue(&drained));
+                let _ = tx.send(messages.len());
+            })
+            .expect("failed to spawn the drain thread");
+
+        let drained_count = rx
+            .recv_timeout(StdDuration::from_secs(5))
+            .expect("draining a poisoned queue never returned");
+        assert_eq!(drained_count, 1, "the queued message was lost on the recovery path");
+        assert!(lock_message_queue(&queue).is_empty(), "the queue was not actually drained");
+    }
+
+    /// The producer must still enqueue after poisoning. Its old recovery path looked the
+    /// handler up by participant GUID, got itself back, and re-locked a mutex it already held.
+    #[test]
+    fn pushing_to_a_poisoned_queue_still_enqueues() {
+        let queue: Arc<Mutex<Vec<MessageType>>> = Arc::new(Mutex::new(Vec::new()));
+        poison(&queue);
+
+        let (tx, rx) = mpsc::sync_channel::<()>(1);
+        let pushed = Arc::clone(&queue);
+        std::thread::Builder::new()
+            .name("push-poisoned-queue".into())
+            .spawn(move || {
+                lock_message_queue(&pushed).push(MessageType::P2pHeartbeat(None));
+                let _ = tx.send(());
+            })
+            .expect("failed to spawn the push thread");
+
+        rx.recv_timeout(StdDuration::from_secs(5))
+            .expect("pushing to a poisoned queue never returned");
+        assert_eq!(lock_message_queue(&queue).len(), 1, "the message never reached the queue");
+    }
+
+    /// Poisons `queue` by unwinding while its guard is held.
+    fn poison(queue: &Arc<Mutex<Vec<MessageType>>>) {
+        let victim = Arc::clone(queue);
+        let _ = std::thread::Builder::new()
+            .name("poisoner".into())
+            .spawn(move || {
+                let _guard = victim.lock().unwrap();
+                panic!("deliberate panic to poison the queue under test");
+            })
+            .expect("failed to spawn the poisoning thread")
+            .join();
     }
 }
