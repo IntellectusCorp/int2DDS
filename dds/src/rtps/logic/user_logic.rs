@@ -276,15 +276,13 @@ impl UserLogic {
                         continue;
                     };
 
-                    // Read the count per fragment, exactly as the initial send does. The reader
-                    // rejects a heartbeat whose count did not advance, and it rejects it *before*
-                    // scheduling the NACK_FRAG timer -- so one count reused for a whole repair
-                    // round is invisible from the second round on, leaving the periodic heartbeat
-                    // as the only thing that can restart repair.
+                    // Fresh count per fragment, as the initial send does: the reader drops a
+                    // heartbeat whose count did not advance, and drops it before scheduling the
+                    // NACK_FRAG timer, so a reused count stalls repair until the periodic
+                    // heartbeat.
                     //
-                    // In case of fragment, fragment state is checked via last seq number, so
-                    // use current seq number in previous heartbeat to get ack from reader for
-                    // retransmitted message
+                    // Fragment state is checked via last seq number, so use the current seq
+                    // number to get an ack for the retransmitted message.
                     let heartbeat_info = piggyback.then(|| {
                         (
                             stateful_writer.heartbeat_count(),
@@ -1770,7 +1768,7 @@ impl UnicastMessageProcessor for UserLogic {
 
             // Collected under the guard, delivered after it: delivery reaches the user's
             // listener, which may re-lock this mutex via `get_matched_publications`.
-            let mut pending_delivery: Vec<CacheChange> = Vec::new();
+            let pending_delivery: Vec<CacheChange>;
             let mut acknack_result: RtpsResult<()> = Ok(());
 
             let writer_proxies = stateful_reader.writer_proxies();
@@ -1806,19 +1804,19 @@ impl UnicastMessageProcessor for UserLogic {
             let missing_changes =
                 writer_proxy.process_heartbeat(heartbeat.first_sn, heartbeat.last_sn);
 
-            // Case when ACKNACK sending is required: no fragments or
-            // all fragments have been received
-            if !writer_proxy.has_fragmented_changes(heartbeat.first_sn, heartbeat.last_sn)
-                || writer_proxy.all_fragments_received(heartbeat.last_sn)
-            {
-                // This is the first HB for reader
-                if writer_proxy.expected_sn() == SequenceNumber::UNKNOWN {
-                    writer_proxy.set_expected_sn(heartbeat.first_sn);
-                }
+            // This is the first HB for reader
+            if writer_proxy.expected_sn() == SequenceNumber::UNKNOWN {
+                writer_proxy.set_expected_sn(heartbeat.first_sn);
+            }
 
-                // Always flush buffer after updating sequence number
-                pending_delivery = writer_proxy.flush_buffered_changes();
+            // Owed on both branches: a whole buffered sample must reach the cache even while
+            // another sample in the range is still short of fragments.
+            pending_delivery = writer_proxy.flush_buffered_changes();
 
+            // Any short change in the range means a NACK_FRAG, which piggybacks its own ACKNACK.
+            // Routing on `last_sn` alone stranded a short earlier sample: it is already marked
+            // `Received`, so the plain ACKNACK omits it too and nothing asks for it again.
+            if !writer_proxy.has_fragmented_changes(heartbeat.first_sn, heartbeat.last_sn) {
                 // Apply heartbeat response delay
                 let heartbeat_response_delay = stateful_reader.heartbeat_response_delay();
                 let delay_duration = heartbeat_response_delay.to_std_duration();
@@ -2509,8 +2507,7 @@ impl UnicastMessageProcessor for UserLogic {
             .acquire();
         for fragment_num in requested_fragments {
             if fragment_num >= 1 && fragment_num <= total_frags {
-                // Fresh count per fragment. A repair round that reuses one count is dropped by
-                // the reader's duplicate filter from the second round on, before it ever gets to
+                // Fresh count per fragment: a reused count is dropped by the reader before it can
                 // schedule the NACK_FRAG that would continue the repair.
                 let heartbeat_info = piggyback
                     .then(|| (stateful_writer.heartbeat_count(), writer_sn, last_sn, false, false));
