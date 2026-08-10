@@ -2453,8 +2453,8 @@ impl UnicastMessageProcessor for SedpLogic {
         writer_proxy.set_last_heartbeat_count(heartbeat.count);
         writer_proxy.set_last_heartbeat_at(now);
 
-        let missing_changes = writer_proxy.process_heartbeat(heartbeat.first_sn, heartbeat.last_sn);
-        let bitmap_base = writer_proxy.expected_sn();
+        let (bitmap_base, missing_changes) =
+            writer_proxy.process_heartbeat(heartbeat.first_sn, heartbeat.last_sn);
 
         // Check Heartbeat's final flag
         let requires_response = !final_flag;
