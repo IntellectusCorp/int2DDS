@@ -60,6 +60,146 @@ use mio::Waker;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread::{self, JoinHandle};
 
+/// Delay before the first NACK_FRAG, so a burst of DATA_FRAG is answered once rather than
+/// per fragment.
+const NACK_FRAG_SUPPRESSION: Duration = Duration::from_millis(5);
+
+/// Delay before re-asking when the request produced nothing.
+///
+/// Only silence gets here: every retransmitted fragment carries a heartbeat that re-arms the
+/// suppression timer, so a healthy repair never waits this long. Its job is to bound the case
+/// where the NACK_FRAG itself, or every fragment answering it, was lost -- which otherwise waits
+/// for the writer's periodic heartbeat (2 s by default).
+const NACK_FRAG_RETRY: Duration = Duration::from_millis(200);
+
+/// How many times a request re-asks before giving the job back to the periodic heartbeat.
+///
+/// Bounded on purpose. A writer that has gone away can leave an incomplete sample behind whose
+/// proxy is still matched; without a budget this would re-ask five times a second forever, which
+/// the one-shot timer it replaces never did.
+const NACK_FRAG_MAX_RETRIES: u32 = 10;
+
+/// Everything a deferred NACK_FRAG needs to build itself, so it can be re-armed without the
+/// caller's stack.
+#[derive(Clone)]
+struct NackFragRequest {
+    writer_proxies: Arc<Mutex<Vec<WriterProxy>>>,
+    transport: Arc<dyn TransportPlugin>,
+    participant: Arc<Participant>,
+    reader_guid: Guid,
+    remote_writer_guid: Guid,
+    /// The change the fragment numbers belong to; also keys the timer.
+    incomplete_sn: SequenceNumber,
+    /// For the piggybacked ACKNACK, which is about sequence numbers rather than fragments.
+    acknack_last_sn: SequenceNumber,
+    acknack_missing_changes: Vec<SequenceNumber>,
+    /// Re-asks left before the periodic heartbeat takes over again.
+    retries_left: u32,
+}
+
+impl NackFragRequest {
+    fn timer_id(&self) -> TimerId {
+        TimerId::NackFrag {
+            reader_entity_id: self.reader_guid.entity_id(),
+            remote_writer_guid: self.remote_writer_guid,
+            sequence_number: self.incomplete_sn,
+        }
+    }
+
+    /// Sends the request. Returns whether fragments are still outstanding, i.e. whether a retry
+    /// is owed.
+    fn fire(&self) -> bool {
+        let Ok(mut proxies) = self.writer_proxies.lock() else {
+            warn!("Failed to acquire writer_proxies lock");
+            return false;
+        };
+        let Some(proxy) =
+            proxies.iter_mut().find(|proxy| proxy.remote_writer_guid() == self.remote_writer_guid)
+        else {
+            return false;
+        };
+
+        // Recomputed rather than carried: fragments may have arrived since this was scheduled,
+        // and a retry that re-requests them would pull the whole sample down again.
+        let Some((_, missing_fragments)) =
+            proxy.calculate_missing_fragments(self.incomplete_sn, self.incomplete_sn)
+        else {
+            return false;
+        };
+
+        proxy.increase_acknack_count();
+        proxy.increase_nackfrag_count();
+        let acknack_info = Some((
+            proxy.acknack_count(),
+            self.acknack_last_sn,
+            self.acknack_missing_changes.clone(),
+        ));
+
+        let Ok(buffer) = MessageCreator::create_nackfrag_msg(
+            self.participant.guid(),
+            proxy.remote_writer_guid(),
+            self.reader_guid.entity_id(),
+            proxy.remote_writer_guid().entity_id(),
+            self.incomplete_sn,
+            missing_fragments,
+            proxy.nackfrag_count(),
+            acknack_info,
+        ) else {
+            return true;
+        };
+
+        // Same SHM > TCP > UDP priority filter as send_rtps_message_to_locators, with can_handle
+        // guarding the local-side reachability.
+        let locs: Vec<&Locator> = proxy.unicast_locator_list().iter().collect();
+        let try_kind = |is_kind: fn(&Locator) -> bool| -> Option<Vec<&Locator>> {
+            let v: Vec<&Locator> = locs
+                .iter()
+                .copied()
+                .filter(|l| is_kind(l) && self.transport.can_handle(l))
+                .collect();
+            (!v.is_empty()).then_some(v)
+        };
+        let chosen: Vec<&Locator> = try_kind(Locator::is_shm)
+            .or_else(|| try_kind(Locator::is_tcp))
+            .or_else(|| try_kind(Locator::is_udp))
+            .unwrap_or(locs);
+
+        for locator in chosen {
+            match self.transport.send(&buffer, &SendTarget::UserData(locator)) {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
+                    warn!("[UserLogic] {} locator found but no {} sender available", e, e);
+                }
+                Err(e) => warn!("[UserLogic] Failed to send NACK_FRAG: {:?}", e),
+            }
+        }
+
+        true
+    }
+}
+
+/// Arms `request` to fire after `delay`, re-arming itself at [`NACK_FRAG_RETRY`] for as long as
+/// fragments stay missing.
+///
+/// A named function rather than a self-referencing closure: the callback cannot clone itself, and
+/// a non-repeating timer is dropped after it triggers, so re-adding the same `TimerId` from
+/// inside the callback lands on the next tick against an empty slot.
+fn schedule_nackfrag(request: NackFragRequest, delay: Duration) {
+    let timer_handler = TimerHandler::get_instance(request.participant.guid().prefix());
+    let Ok(handler) = timer_handler.lock() else {
+        warn!("Failed to acquire timer handler lock for NACK_FRAG");
+        return;
+    };
+    let timer_id = request.timer_id();
+    handler.add_timer(timer_id, delay, false, move || {
+        if request.fire() && request.retries_left > 0 {
+            let mut next = request.clone();
+            next.retries_left -= 1;
+            schedule_nackfrag(next, NACK_FRAG_RETRY);
+        }
+    });
+}
+
 #[allow(dead_code)]
 #[derive(Clone)]
 pub(crate) struct UserLogic {
@@ -1879,112 +2019,28 @@ impl UnicastMessageProcessor for UserLogic {
                     writer_proxy.calculate_missing_fragments(heartbeat.first_sn, heartbeat.last_sn);
 
                 // `incomplete_sn`, not `heartbeat.last_sn`: the writer resolves the request
-                // against `writer_sn`, and it also keys the suppression timer below.
-                if let Some((incomplete_sn, missing_fragments)) = missing_fragments {
-                    let writer_proxies_clone = writer_proxies.clone();
-                    let stateful_reader_guid = stateful_reader.guid();
-                    let participant = participant.clone();
-                    let transport_clone = self.transport.clone();
-                    // Belongs to the piggybacked ACKNACK, not the fragment request.
-                    let last_sn = heartbeat.last_sn;
-                    let remote_writer_guid = writer_proxy.remote_writer_guid();
-
-                    writer_proxy.increase_nackfrag_count();
-
-                    let timer_id = TimerId::NackFrag {
-                        reader_entity_id: stateful_reader.guid().entity_id(),
-                        remote_writer_guid,
-                        sequence_number: incomplete_sn,
+                // against `writer_sn`, and it also keys the suppression timer.
+                if let Some((incomplete_sn, _)) = missing_fragments {
+                    let request = NackFragRequest {
+                        writer_proxies: writer_proxies.clone(),
+                        transport: self.transport.clone(),
+                        participant: participant.clone(),
+                        reader_guid: stateful_reader.guid(),
+                        remote_writer_guid: writer_proxy.remote_writer_guid(),
+                        incomplete_sn,
+                        acknack_last_sn: heartbeat.last_sn,
+                        acknack_missing_changes: missing_changes,
+                        retries_left: NACK_FRAG_MAX_RETRIES,
                     };
-                    if let Ok(locked_timer_handler) =
+
+                    // Re-armed on every accepted heartbeat, so a burst is answered once after it
+                    // settles rather than per fragment.
+                    if let Ok(handler) =
                         TimerHandler::get_instance(participant.guid().prefix()).lock()
                     {
-                        locked_timer_handler.remove_timer(timer_id);
-                        locked_timer_handler.add_timer(
-                            timer_id,
-                            Duration::from_millis(5),
-                            false, // not repeating
-                            move || {
-                                let mut writer_proxies_guard = match writer_proxies_clone.lock() {
-                                    Ok(guard) => guard,
-                                    Err(e) => {
-                                        warn!("Failed to acquire writer_proxies lock: {}", e);
-                                        return;
-                                    }
-                                };
-
-                                if let Some(current_writer_proxy) = writer_proxies_guard
-                                    .iter_mut()
-                                    .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
-                                {
-                                    let still_missing =
-                                        current_writer_proxy.still_missing_fragments(incomplete_sn);
-
-                                    if still_missing {
-                                        // Create and send NACK_FRAG message
-                                        current_writer_proxy.increase_acknack_count();
-
-                                        let acknack_info = Some((
-                                            current_writer_proxy.acknack_count(),
-                                            last_sn,
-                                            missing_changes.clone(),
-                                        ));
-
-                                            if let Ok(buffer) = MessageCreator::create_nackfrag_msg(
-                                                participant.guid(),
-                                                current_writer_proxy.remote_writer_guid(),
-                                                stateful_reader_guid.entity_id(),
-                                                current_writer_proxy
-                                                    .remote_writer_guid()
-                                                    .entity_id(),
-                                                incomplete_sn,
-                                                missing_fragments.clone(),
-                                                current_writer_proxy.nackfrag_count(),
-                                                acknack_info,
-                                            ) {
-                                                // Same SHM > TCP > UDP priority filter as
-                                                // send_rtps_message_to_locators, with can_handle
-                                                // guarding the local-side reachability.
-                                                let locs: Vec<&Locator> =
-                                                    current_writer_proxy.unicast_locator_list().iter().collect();
-                                                let try_kind = |is_kind: fn(&Locator) -> bool| -> Option<Vec<&Locator>> {
-                                                    let v: Vec<&Locator> = locs.iter().copied()
-                                                        .filter(|l| is_kind(l) && transport_clone.can_handle(l))
-                                                        .collect();
-                                                    (!v.is_empty()).then_some(v)
-                                                };
-                                                let chosen: Vec<&Locator> = try_kind(Locator::is_shm)
-                                                    .or_else(|| try_kind(Locator::is_tcp))
-                                                    .or_else(|| try_kind(Locator::is_udp))
-                                                    .unwrap_or(locs);
-                                                for locator in chosen {
-                                                    match transport_clone
-                                                        .send(&buffer, &SendTarget::UserData(locator))
-                                                    {
-                                                        Ok(_) => {}
-                                                        Err(e)
-                                                            if e.kind()
-                                                                == std::io::ErrorKind::Unsupported =>
-                                                        {
-                                                            warn!(
-                                                                "[UserLogic] {} locator found but no {} sender available",
-                                                                e, e
-                                                            );
-                                                        }
-                                                        Err(e) => {
-                                                            warn!(
-                                                                "[UserLogic] Failed to send NACK_FRAG: {:?}",
-                                                                e
-                                                            );
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                },
-                            );
+                        handler.remove_timer(request.timer_id());
                     }
+                    schedule_nackfrag(request, NACK_FRAG_SUPPRESSION);
                 }
             }
 

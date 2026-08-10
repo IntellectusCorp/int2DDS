@@ -620,6 +620,25 @@ mod tests {
         assert!(proxy.still_missing_fragments(nacked_sn), "the nacked sample really is short");
     }
 
+    /// The NACK_FRAG retry re-arms itself for as long as this reports something missing, so a
+    /// completed sample has to report `None` or the timer never stops.
+    #[test]
+    fn a_completed_sample_reports_nothing_missing() {
+        let mut proxy = empty_writer_proxy();
+        let sn = SequenceNumber::new(0, 1);
+
+        proxy.mark_frag_received(sn, 4, [1, 3]);
+        assert!(proxy.calculate_missing_fragments(sn, sn).is_some(), "2 and 4 are still missing");
+
+        proxy.mark_frag_received(sn, 4, [2, 4]);
+        assert!(proxy.all_fragments_received(sn));
+        assert_eq!(
+            proxy.calculate_missing_fragments(sn, sn),
+            None,
+            "a whole sample must end the retry loop"
+        );
+    }
+
     /// A partially received sample is invisible to ACKNACK, so only a NACK_FRAG can recover it.
     ///
     /// `mark_frag_received` stamps the change `Received` on the first fragment, which takes it
