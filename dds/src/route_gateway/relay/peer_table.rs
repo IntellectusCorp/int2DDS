@@ -84,6 +84,12 @@ impl PeerTable {
         self.lock().get(prefix).map(|entry| entry.route)
     }
 
+    /// How many of this network's participants are currently carried, which is
+    /// what the configured cap is weighed against.
+    pub(crate) fn local_count(&self) -> usize {
+        self.lock().values().filter(|entry| matches!(entry.route, PeerRoute::Local(_))).count()
+    }
+
     pub(crate) fn is_local(&self, prefix: &GuidPrefix) -> bool {
         matches!(self.route(prefix), Some(PeerRoute::Local(_)))
     }
@@ -152,6 +158,16 @@ mod tests {
         table.insert_remote(PREFIX, LINK, LEASE, now);
         assert!(table.is_remote(&PREFIX));
         assert!(!table.is_local(&PREFIX));
+    }
+
+    #[test]
+    fn only_this_networks_participants_are_counted() {
+        let table = PeerTable::default();
+        let now = Instant::now();
+        table.insert_local(PREFIX, endpoints(), LEASE, now);
+        table.insert_remote(OTHER_PREFIX, LINK, LEASE, now);
+
+        assert_eq!(table.local_count(), 1);
     }
 
     #[test]

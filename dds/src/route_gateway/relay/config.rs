@@ -7,6 +7,8 @@ use std::{
 
 use crate::rtps::transport::port_manager::PortManager;
 
+use super::peer_policy::{Ipv4Prefix, PeerPolicy};
+
 /// Which end of one link this gateway is. Exactly one end of each pair listens.
 #[derive(Debug, Clone)]
 pub enum LinkRole {
@@ -29,6 +31,15 @@ pub struct RelayConfig {
     /// arrives on one is ever passed to another, so the gateways form a star
     /// around each network rather than a routed mesh.
     pub links: Vec<LinkRole>,
+    /// Addresses of this network's participants that may be carried across the
+    /// link. An empty list carries every participant.
+    pub allowed_peers: Vec<String>,
+    /// Addresses that are never carried, weighed before the allowed list.
+    pub denied_peers: Vec<String>,
+    /// Guard against a misconfigured network flooding the link. It bounds how
+    /// many participants are relayed at once and is not a way of choosing
+    /// between them: which participants cross is what the lists decide.
+    pub max_relayed_participants: Option<usize>,
 }
 
 impl RelayConfig {
@@ -38,7 +49,16 @@ impl RelayConfig {
         user_data_port: u16,
         link: LinkRole,
     ) -> Self {
-        Self { lan_domain_id, lan_ip: None, metatraffic_port, user_data_port, links: vec![link] }
+        Self {
+            lan_domain_id,
+            lan_ip: None,
+            metatraffic_port,
+            user_data_port,
+            links: vec![link],
+            allowed_peers: Vec::new(),
+            denied_peers: Vec::new(),
+            max_relayed_participants: None,
+        }
     }
 
     pub fn with_lan_ip(mut self, lan_ip: Ipv4Addr) -> Self {
@@ -49,6 +69,29 @@ impl RelayConfig {
     /// Adds another peer gateway to relay with.
     pub fn with_peer(mut self, link: LinkRole) -> Self {
         self.links.push(link);
+        self
+    }
+
+    pub fn with_allowed_peers<I, S>(mut self, prefixes: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.allowed_peers.extend(prefixes.into_iter().map(Into::into));
+        self
+    }
+
+    pub fn with_denied_peers<I, S>(mut self, prefixes: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.denied_peers.extend(prefixes.into_iter().map(Into::into));
+        self
+    }
+
+    pub fn with_max_relayed_participants(mut self, max: usize) -> Self {
+        self.max_relayed_participants = Some(max);
         self
     }
 
@@ -67,6 +110,14 @@ impl RelayConfig {
             ));
         }
 
+        // Parsed here so that a typo stops the gateway from starting instead
+        // of silently turning participants away at run time.
+        let policy = PeerPolicy::new(
+            parse_prefixes(&self.allowed_peers)?,
+            parse_prefixes(&self.denied_peers)?,
+            self.max_relayed_participants,
+        );
+
         let lan_ip = match self.lan_ip {
             Some(ip) => ip,
             None => detect_lan_ip()?,
@@ -81,6 +132,7 @@ impl RelayConfig {
                 self.lan_domain_id,
             ),
             links: self.links.clone(),
+            policy,
         })
     }
 }
@@ -93,6 +145,16 @@ pub(crate) struct ResolvedConfig {
     pub(crate) user_data_port: u16,
     pub(crate) discovery_multicast_port: u16,
     pub(crate) links: Vec<LinkRole>,
+    pub(crate) policy: PeerPolicy,
+}
+
+fn parse_prefixes(texts: &[String]) -> io::Result<Vec<Ipv4Prefix>> {
+    texts
+        .iter()
+        .map(|text| {
+            Ipv4Prefix::parse(text).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
+        })
+        .collect()
 }
 
 /// First routable IPv4 address of the host. The gateway has to advertise an
@@ -144,6 +206,11 @@ mod tests {
         let mut config = config();
         config.links.clear();
         assert!(config.resolve().is_err());
+    }
+
+    #[test]
+    fn resolve_rejects_a_malformed_peer_prefix() {
+        assert!(config().with_allowed_peers(["10.1.0.0/33"]).resolve().is_err());
     }
 
     #[test]

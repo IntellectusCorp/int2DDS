@@ -73,6 +73,33 @@ pub(crate) fn read_endpoints(payload: &[u8]) -> Option<SpdpEndpoints> {
     Some(SpdpEndpoints { metatraffic: metatraffic?, user_data: user_data? })
 }
 
+/// Every unicast address the announcement advertises. A participant with
+/// several interfaces advertises one locator per interface, and all of them
+/// name the same machine, so a policy weighing the participant has to see the
+/// whole set rather than whichever one happens to come first.
+pub(crate) fn read_unicast_addresses(payload: &[u8]) -> Vec<Ipv4Addr> {
+    let Some(little_endian) = payload_is_little_endian(payload) else {
+        return Vec::new();
+    };
+
+    let mut addresses = Vec::new();
+    for parameter in parse(payload, little_endian) {
+        if !matches!(
+            parameter.id,
+            PID_METATRAFFIC_UNICAST_LOCATOR | PID_DEFAULT_UNICAST_LOCATOR | PID_UNICAST_LOCATOR
+        ) {
+            continue;
+        }
+        if let Some(locator) = read_locator(payload, &parameter, little_endian) {
+            let address = *locator.ip();
+            if !addresses.contains(&address) {
+                addresses.push(address);
+            }
+        }
+    }
+    addresses
+}
+
 /// How long the participant asks to be remembered for. Absent when the
 /// announcement leaves the lease at its default. Only whole seconds are read,
 /// because a table swept once a second cannot act on anything finer.

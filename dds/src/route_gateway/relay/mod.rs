@@ -19,10 +19,12 @@ mod config;
 mod discovery_rewrite;
 mod gateway;
 mod link;
+mod peer_policy;
 mod peer_table;
 mod rtps_scan;
 mod stats;
 
 pub use config::{LinkRole, RelayConfig};
 pub use gateway::RelayGateway;
+pub use peer_policy::Ipv4Prefix;
 pub use stats::LinkStats;

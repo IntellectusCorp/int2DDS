@@ -172,6 +172,75 @@ fn relay_carries_discovery_and_samples_between_two_networks() {
     gateway_b.stop();
 }
 
+/// A participant its own gateway turned away. The far network must not learn
+/// of it at all, which takes more than dropping its announcement: it still
+/// hears the announcements the gateway injects, so it addresses the far network
+/// directly and the gateway has to refuse to carry that too.
+#[test]
+fn a_participant_the_policy_turned_away_never_reaches_the_far_network() {
+    let domain_a = next_domain_id();
+    let domain_b = next_domain_id();
+    let ports_a = GatewayPorts::for_domain(domain_a);
+    let ports_b = GatewayPorts::for_domain(domain_b);
+    let link_address = format!("127.0.0.1:{}", ports_a.link);
+
+    let gateway_a = RelayGateway::start(
+        RelayConfig::new(
+            domain_a as u32,
+            ports_a.metatraffic,
+            ports_a.user_data,
+            LinkRole::Listen(link_address.parse().unwrap()),
+        )
+        .with_denied_peers(["0.0.0.0/0"]),
+    )
+    .expect("gateway A failed to start");
+    let gateway_b =
+        start_gateway(domain_b, &ports_b, LinkRole::Connect(link_address.parse().unwrap()));
+
+    let factory = DomainParticipantFactory::get_instance();
+    let writer_participant = factory
+        .create_participant(domain_a, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+    let writer =
+        create_datawriter(&writer_participant, PublisherQos::default(), reliable_writer_qos());
+
+    let reader_participant = factory
+        .create_participant(domain_b, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+    let reader =
+        create_datareader(&reader_participant, SubscriberQos::default(), reliable_reader_qos());
+
+    let matched = wait_until(
+        || {
+            writer.get_publication_matched_status().map(|s| s.current_count() >= 1).unwrap_or(false)
+                || reader
+                    .get_subscription_matched_status()
+                    .map(|s| s.current_count() >= 1)
+                    .unwrap_or(false)
+        },
+        10_000,
+    );
+    assert!(!matched, "a denied participant matched across the relay anyway");
+
+    // Matching alone would not prove much: the far side may well ignore an
+    // endpoint whose participant it never discovered. What the policy promises
+    // is that nothing was put on the link in the first place.
+    let stats = gateway_a.link_stats();
+    assert_eq!(
+        stats.sent_metatraffic_frames + stats.sent_user_data_frames,
+        0,
+        "a denied participant still put {} B on the link",
+        stats.sent_metatraffic_bytes + stats.sent_user_data_bytes
+    );
+
+    writer_participant.delete_contained_entities().unwrap();
+    factory.delete_participant(writer_participant).unwrap();
+    reader_participant.delete_contained_entities().unwrap();
+    factory.delete_participant(reader_participant).unwrap();
+    gateway_a.stop();
+    gateway_b.stop();
+}
+
 /// One gateway serving two peers at once. The writer's network is linked to two
 /// others that are not linked to each other, so a sample reaching both readers
 /// proves the announcements went out on every link and that each reply found

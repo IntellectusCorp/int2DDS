@@ -30,8 +30,9 @@ use super::{
     config::{RelayConfig, ResolvedConfig},
     discovery_rewrite::{self, SpdpEndpoints},
     link::{self, Channel, Frame, LinkConnection, LinkEndpoint, LinkId},
+    peer_policy::Verdict,
     peer_table::{PeerRoute, PeerTable, DEFAULT_LEASE},
-    rtps_scan::{self, Announcement, ScannedMessage},
+    rtps_scan::{self, Announcement, GuidPrefix, ScannedMessage},
     stats::{LinkCounters, LinkStats},
 };
 
@@ -192,6 +193,14 @@ impl Shared {
             return;
         }
 
+        // A participant the policy turned away still hears the announcements
+        // this gateway injects, and would address the far network directly. It
+        // is held back here rather than at the announcement alone, because only
+        // participants the table admitted may put anything on a link.
+        if !self.table.is_local(&scanned.source_prefix) {
+            return;
+        }
+
         let Some(destination) = scanned.dest_prefix else {
             return;
         };
@@ -220,6 +229,9 @@ impl Shared {
             // The table may have been cleared since the injection, which leaves
             // the advertised address as the only proof of where it came from.
             if self.advertises(&endpoints) {
+                return;
+            }
+            if !self.admits(payload, &scanned.source_prefix) {
                 return;
             }
             let lease = discovery_rewrite::read_lease(payload).unwrap_or(DEFAULT_LEASE);
@@ -295,6 +307,33 @@ impl Shared {
 
         if let Err(e) = self.discovery_socket.send_to(datagram, self.multicast_target) {
             log::warn!("Relay failed to inject an announcement: {}", e);
+        }
+    }
+
+    /// Weighs a local participant against the configured policy. A refusal is
+    /// logged once per announcement rather than kept, because an operator
+    /// reading the log is the only one who can act on it.
+    fn admits(&self, payload: &[u8], prefix: &GuidPrefix) -> bool {
+        let addresses = discovery_rewrite::read_unicast_addresses(payload);
+        let verdict = self.config.policy.judge(
+            &addresses,
+            self.table.local_count(),
+            self.table.is_local(prefix),
+        );
+        match verdict {
+            Verdict::Admit => true,
+            Verdict::Denied => {
+                log::debug!("Relay policy turned away a participant at {:?}", addresses);
+                false
+            }
+            Verdict::OverCapacity => {
+                log::warn!(
+                    "Relay is already carrying {} participant(s), turning away {:?}",
+                    self.table.local_count(),
+                    addresses
+                );
+                false
+            }
         }
     }
 
