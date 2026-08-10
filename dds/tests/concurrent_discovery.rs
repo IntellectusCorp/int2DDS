@@ -3,22 +3,26 @@
 //! The DCPSPublication built-in reader uses KeepLast(1). When every
 //! CacheChange is stored under InstanceHandle::NIL, only the most recent
 //! publication survives in the cache — earlier ones are evicted on
-//! add_change. A polling consumer like AutoRelay that calls read() after
-//! all announcements have arrived will therefore see only the last one.
+//! add_change. A consumer that reads the built-in reader after all
+//! announcements have arrived will therefore see only the last one.
 //!
 //! This test deliberately lets all SEDP announcements settle into the
-//! built-in cache *before* the first discover_once() call, so the outcome
-//! is deterministic: with NIL instances only 1 relay is created (the last
-//! writer's topic), with per-endpoint instances all N relays are created.
+//! built-in cache *before* reading it, so the outcome is deterministic: with
+//! NIL instances only the last writer's topic survives, with per-endpoint
+//! instances all N do.
 
 mod common;
 
-use std::{sync::Arc, thread::sleep};
+use std::{collections::HashSet, thread::sleep};
 
 use common::*;
 use int2dds::{
+    common::builtin::topic::publication_builtin_topic_data::PublicationBuiltinTopicData,
     core::time::Duration,
-    domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
+    domain::{
+        domain_participant::DomainParticipant,
+        domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos,
+    },
     infrastructure::{
         qos_policy::{
             HistoryQosPolicy, HistoryQosPolicyKind, ReliabilityQosPolicy, ReliabilityQosPolicyKind,
@@ -29,7 +33,7 @@ use int2dds::{
         data_writer::DataWriter,
         qos::{DataWriterQos, PublisherQos},
     },
-    route_gateway::{AutoRelay, TopicFilter},
+    subscription::sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind},
     topic::qos::TopicQos,
 };
 
@@ -46,10 +50,7 @@ fn reliable_writer_qos() -> DataWriterQos {
     }
 }
 
-fn make_writer(
-    participant: &int2dds::domain::domain_participant::DomainParticipant,
-    topic_name: &str,
-) -> DataWriter<KeyedDataType> {
+fn make_writer(participant: &DomainParticipant, topic_name: &str) -> DataWriter<KeyedDataType> {
     let topic = participant
         .create_topic::<KeyedDataType>(
             topic_name,
@@ -71,89 +72,75 @@ fn make_writer(
         .unwrap()
 }
 
-/// Create the AutoRelay local_node first so it receives SEDP from the
-/// publisher participant.  Then burst-create N writers and wait long enough
-/// for all SEDP announcements to be delivered and stored in the built-in
-/// cache.  Only then call discover_once() — by this point the cache either
-/// holds all N samples (instance-per-endpoint) or just the last one (NIL).
+/// Every topic name the observer's built-in publication reader can still see.
+fn discovered_topics(observer: &DomainParticipant) -> HashSet<String> {
+    let builtin = observer.get_builtin_subscriber().expect("no builtin subscriber");
+    let reader = builtin
+        .lookup_datareader::<PublicationBuiltinTopicData>("DCPSPublication")
+        .expect("no DCPSPublication reader");
+
+    let mut topics = HashSet::new();
+    // Read rather than take, so repeated polling keeps seeing what the cache
+    // holds: whether earlier announcements survived at all is the question.
+    if let Ok(samples) = reader.read(
+        1000,
+        &[SampleStateKind::ANY_SAMPLE_STATE],
+        &[ViewStateKind::ANY_VIEW_STATE],
+        &[InstanceStateKind::ALIVE_INSTANCE_STATE],
+    ) {
+        for sample in samples.iter() {
+            if let Ok(data) = sample.data() {
+                topics.insert(data.topic_name().to_string());
+            }
+        }
+    }
+    topics
+}
+
+/// Create the observer first so it receives SEDP from the publisher
+/// participant. Then burst-create N writers and wait long enough for all
+/// announcements to be delivered and stored in the built-in cache. Only then
+/// read it — by that point the cache either holds all N samples
+/// (instance-per-endpoint) or just the last one (NIL).
 #[test]
-fn auto_relay_discovers_all_topics_after_sedp_settles() {
-    let domain_local = next_domain_id();
-    let domain_remote = next_domain_id();
+fn every_burst_created_writer_survives_in_the_builtin_cache() {
+    let domain_id = next_domain_id();
     let factory = DomainParticipantFactory::get_instance();
 
-    // Step 1: Create AutoRelay's local_node FIRST so it is already
-    // listening when the publisher participant joins.
-    let local_node = Arc::new(
-        factory
-            .create_participant(
-                domain_local,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap(),
-    );
-    let remote_node = Arc::new(
-        factory
-            .create_participant(
-                domain_remote,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap(),
-    );
-    let auto =
-        AutoRelay::new(Arc::clone(&local_node), Arc::clone(&remote_node), TopicFilter::default())
-            .expect("Failed to create AutoRelay");
+    let observer = factory
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
 
-    // Step 2: Create publisher participant + N writers in a burst.
     let publisher_participant = factory
-        .create_participant(
-            domain_local,
-            DomainParticipantQos::default(),
-            None,
-            StatusMask::default(),
-        )
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
         .unwrap();
 
     let topic_names: Vec<String> = (0..N_TOPICS).map(|i| format!("burst_topic_{i}")).collect();
     let _writers: Vec<DataWriter<KeyedDataType>> =
         topic_names.iter().map(|name| make_writer(&publisher_participant, name)).collect();
 
-    // Step 3: Wait for SEDP to deliver all announcements to local_node's
-    // built-in cache. With KeepLast(1) + NIL, only the last writer's
-    // sample survives; with per-endpoint keying, all N survive.
     sleep(std::time::Duration::from_secs(3));
 
-    // Step 4: Now poll discovery. If instances were correctly separated,
-    // all N topics produce relays. If NIL, only 1 (or very few).
+    let mut discovered = discovered_topics(&observer);
     for _ in 0..20 {
-        let _ = auto.discover_once();
+        if topic_names.iter().all(|name| discovered.contains(name)) {
+            break;
+        }
         sleep(std::time::Duration::from_millis(50));
+        discovered = discovered_topics(&observer);
     }
 
-    let active = auto.active_topics();
-    let relay_count = auto.relay_count();
+    let missing: Vec<&String> = topic_names.iter().filter(|n| !discovered.contains(*n)).collect();
+    assert!(
+        missing.is_empty(),
+        "built-in cache lost {} of {} publications, missing={:?}",
+        missing.len(),
+        N_TOPICS,
+        missing
+    );
 
-    if relay_count < N_TOPICS {
-        let missing: Vec<&String> = topic_names.iter().filter(|n| !active.contains(n)).collect();
-        panic!(
-            "AutoRelay missed topics: relay_count={}, expected={}, missing={:?}",
-            relay_count, N_TOPICS, missing
-        );
-    }
-
-    for name in &topic_names {
-        assert!(active.contains(name), "expected topic '{name}' to be relayed, got {active:?}");
-    }
-
+    observer.delete_contained_entities().unwrap();
+    factory.delete_participant(observer).unwrap();
     publisher_participant.delete_contained_entities().unwrap();
     factory.delete_participant(publisher_participant).unwrap();
-    drop(auto);
-    local_node.delete_contained_entities().unwrap();
-    factory.delete_participant((*local_node).clone()).unwrap();
-    remote_node.delete_contained_entities().unwrap();
-    factory.delete_participant((*remote_node).clone()).unwrap();
 }
