@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
+use crate::utils::notify::{callback_handle, notify_user};
 use std::{
     fmt::Debug,
     sync::{
@@ -863,48 +864,6 @@ impl Writer for StatefulWriter {
 
         Ok(true)
     }
-
-    fn remove_all_matched_readers_with_prefix_and_update_status(
-        &self,
-        prefix: GuidPrefix,
-    ) -> RtpsResult<usize> {
-        let mut reader_proxies = self
-            .matched_readers
-            .lock()
-            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
-
-        debug!(
-            "Before unmatching with reader, this writer had {:?} matched readers",
-            reader_proxies.len()
-        );
-        for reader_proxy in reader_proxies.iter() {
-            if reader_proxy.remote_reader_guid().prefix() == prefix {
-                self.update_publication_matched_status(
-                    -1,
-                    InstanceHandle::from_guid(&reader_proxy.remote_reader_guid()),
-                );
-            }
-        }
-        let len_before = reader_proxies.len();
-        reader_proxies.retain(|reader_proxy| reader_proxy.remote_reader_guid().prefix() != prefix);
-        let removed = len_before - reader_proxies.len();
-
-        debug!(
-            "Removed all unmatched reader proxies from unmatched participant: {}",
-            Guid::guid_prefix_to_string(&prefix)
-        );
-        debug!("Current number of matched reader: {:?}", reader_proxies.len());
-        drop(reader_proxies);
-
-        // Removed readers can advance the ack floor; recompute once the lock is released.
-        if removed > 0 {
-            debug!("[history-strict] trigger=unmatch-bulk");
-            self.process_acked_changes();
-            debug!("[history-strict] after unmatch-bulk rtps_len={}", self.rtps_cache_len());
-        }
-
-        Ok(removed)
-    }
 }
 
 impl Endpoint for StatefulWriter {
@@ -935,15 +894,10 @@ impl Entity for StatefulWriter {
     }
 
     fn update_status(&self, status: StatusKind, info: Option<Arc<dyn StatusInfo>>) {
-        match self.callback.lock() {
-            Ok(callback) => {
-                if let Some(callback) = callback.as_ref() {
-                    callback(status, info.clone());
-                }
-            }
-            Err(e) => {
-                log::error!("Failed to lock callback: {:?}", e);
-            }
+        // Lift the callback out before calling it: the listener it reaches may
+        // re-enter this entity, and an unwind through the call would poison the slot.
+        if let Some(callback) = callback_handle(&self.callback) {
+            notify_user("stateful_writer", || callback(status, info.clone()));
         }
     }
 
@@ -951,14 +905,7 @@ impl Entity for StatefulWriter {
         &self,
         f: Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>,
     ) {
-        match self.callback.lock() {
-            Ok(mut callback) => {
-                callback.replace(f);
-            }
-            Err(e) => {
-                log::error!("Failed to lock callback: {:?}", e);
-            }
-        }
+        self.callback.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).replace(f);
     }
 }
 

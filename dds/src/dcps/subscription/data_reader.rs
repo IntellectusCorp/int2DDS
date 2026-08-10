@@ -67,7 +67,7 @@ use crate::{
             EnableChild, Entity, EntityInternal, UpdateStatus,
         },
         history_cache::HistoryCache as DcpsHistoryCache,
-        qos_policy::{HistoryQosPolicyKind, Qos},
+        qos_policy::Qos,
         status::{
             LivelinessChangedStatus, RequestedDeadlineMissedStatus, RequestedIncompatibleQosStatus,
             RequestedIncompatibleTypeStatus, SampleLostStatus, SampleRejectedStatus, StatusInfo,
@@ -1007,57 +1007,66 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         // Check if already exists, then insert
         writer_samples.insert(seq_num);
 
-        // QoS-based size limit
-        let max_samples = self.get_max_samples()?;
-
-        if writer_samples.len() > max_samples {
-            self.cleanup_old_read_samples(writer_samples, max_samples)?;
-        }
-
+        // No count cap here. Evicting by count cannot tell a still-cached sample from one the
+        // cache has dropped, and evicting a cached one flips it back to NOT_READ so the next
+        // `read()` hands it out a second time. `prune_read_samples_to_cache` bounds this map
+        // against the cache instead, which is the only cut that is unobservable.
         Ok(())
     }
 
-    fn get_max_samples(&self) -> DdsResult<usize> {
-        let qos = self.get_qos_arc()?;
+    /// Drops read-state for samples the cache no longer holds.
+    ///
+    /// `read_samples` exists so a second `read()` can report `READ_SAMPLE_STATE`. Its only
+    /// bound was `get_max_samples`, which resolved to `usize::MAX` under the default
+    /// `LENGTH_UNLIMITED` limits, so the map grew for the reader's lifetime.
+    ///
+    /// The bound has to come from the cache rather than a count. `get_sample_state` answers
+    /// `READ` both for a sample recorded here and for a sample that is no longer cached, so
+    /// entries below the cache's low-water mark cannot change any answer -- dropping them is
+    /// unobservable. Dropping an entry whose sample is *still* cached is not: it would report
+    /// `NOT_READ` again and hand the sample out a second time.
+    ///
+    /// `changes` is the snapshot the caller already holds, so this needs no extra cache lock,
+    /// and being a pre-removal snapshot only makes the mark conservative.
+    fn prune_read_samples_to_cache(&self, changes: &[Arc<CacheChange>]) {
+        let Ok(mut read_samples) = self.read_samples.lock() else { return };
 
-        let samples_limit = match qos.history.kind {
-            HistoryQosPolicyKind::KeepLast(depth) => depth,
-            HistoryQosPolicyKind::KeepAll => {
-                if qos.resource_limits.max_samples_per_instance == -1 {
-                    i32::MAX
-                } else {
-                    qos.resource_limits.max_samples_per_instance
+        // Only `read()` records anything here, so a reader that only ever `take()`s -- the
+        // common case -- has nothing to prune. Bailing before the map is built keeps this off
+        // that path entirely rather than hashing a Guid per cached change for an empty result.
+        if read_samples.is_empty() {
+            return;
+        }
+
+        let mut low_water: HashMap<Guid, SequenceNumber> = HashMap::new();
+        for change in changes {
+            low_water
+                .entry(change.writer_guid())
+                .and_modify(|lowest| {
+                    if change.sequence_number() < *lowest {
+                        *lowest = change.sequence_number();
+                    }
+                })
+                .or_insert_with(|| change.sequence_number());
+        }
+
+        read_samples.retain(|writer_guid, seen| {
+            match low_water.get(writer_guid) {
+                // Every sample this writer had has left the cache, so nothing recorded for it
+                // is reachable any more. Dropping the entry also bounds the outer map, which
+                // otherwise kept one entry per writer GUID ever matched.
+                None => false,
+                // `split_off` allocates a fresh set and moves every retained element, so in the
+                // steady state -- nothing below the mark -- it would do maximal work for no
+                // benefit. Only pay it when something is actually prunable.
+                Some(lowest) => {
+                    if seen.first().is_some_and(|oldest| oldest < lowest) {
+                        *seen = seen.split_off(lowest);
+                    }
+                    !seen.is_empty()
                 }
             }
-        };
-
-        let max_instances = if qos.resource_limits.max_instances == -1 {
-            i32::MAX
-        } else {
-            qos.resource_limits.max_instances
-        };
-
-        let max_samples = i32::min(
-            qos.resource_limits.max_samples,
-            max_instances.saturating_mul(samples_limit), // Prevent overflow
-        );
-
-        Ok(max_samples as usize)
-    }
-
-    fn cleanup_old_read_samples(
-        &self,
-        writer_samples: &mut BTreeSet<SequenceNumber>,
-        max_samples: usize,
-    ) -> DdsResult<()> {
-        if writer_samples.len() >= max_samples {
-            if let Some(&oldest_seq_num) = writer_samples.iter().next() {
-                writer_samples.remove(&oldest_seq_num);
-                log::debug!("Removed oldest read sample with sequence number: {}", oldest_seq_num);
-            }
-        }
-
-        Ok(())
+        });
     }
 
     fn mark_instance_as_viewed(&self, handle: InstanceHandle) {
@@ -1402,6 +1411,14 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         Ok(())
     }
     fn handle_data_available_status(&self) -> DdsResult<()> {
+        // StatusCondition first. DDS 1.4 2.2.4.1: the flag becomes TRUE when the status
+        // changes, which is before any listener runs, so a thread already blocked in
+        // WaitSet::wait observes the change. Publishing it after the listeners also made the
+        // flag hostage to them completing -- a listener that panics is contained at the
+        // callback boundary, and the waiter would then block forever on a reader whose samples
+        // are sitting in the cache. `handle_liveliness_changed_status` uses this same order.
+        self.set_read_communication_status(true)?;
+
         // Listener
         if let Some(listener) = self.get_listener()? {
             listener.on_data_available(self);
@@ -1416,9 +1433,6 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
             listener.on_data_available(self);
             listener.on_data_on_readers(&subscriber);
         }
-
-        // StatusCondition
-        self.set_read_communication_status(true)?;
 
         Ok(())
     }
@@ -2916,6 +2930,7 @@ impl<Foo: DdsType> DataReader<Foo> {
             self.mark_instance_as_viewed(sample_info.instance_handle);
         }
 
+        self.prune_read_samples_to_cache(&changes);
         self.reevaluate_all_conditions()?;
 
         if result.is_empty() {
@@ -3122,6 +3137,7 @@ impl<Foo: DdsType> DataReader<Foo> {
             self.mark_instance_as_viewed(sample.sample_info().instance_handle);
         }
 
+        self.prune_read_samples_to_cache(&changes);
         self.reevaluate_all_conditions()?;
 
         if result_samples.is_empty() {
@@ -3923,7 +3939,7 @@ pub(crate) mod tests {
     use crate::domain::domain_participant_factory::DomainParticipantFactory;
     use crate::domain::qos::DomainParticipantQos;
     use crate::infrastructure::qos_policy::{
-        DurabilityQosPolicy, DurabilityQosPolicyKind, HistoryQosPolicy,
+        DurabilityQosPolicy, DurabilityQosPolicyKind, HistoryQosPolicy, HistoryQosPolicyKind,
         PresentationQosAccessScopeKind, PresentationQosPolicy, ReliabilityQosPolicy,
         ReliabilityQosPolicyKind,
     };
@@ -4240,6 +4256,164 @@ pub(crate) mod tests {
         assert_eq!(samples[1].sample_info().sample_rank, 0);
         assert_eq!(samples[0].data().unwrap().index, data1.index);
         assert_eq!(samples[1].data().unwrap().index, data2.index);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    /// `read()` records every sample it hands out in `read_samples` so a later `read()` can
+    /// report `READ_SAMPLE_STATE`. Nothing ever pruned that map, so it grew for the reader's
+    /// lifetime -- roughly 20 bytes per distinct sample read, unbounded.
+    ///
+    /// The bound must come from the cache, not from a count. `get_sample_state` answers
+    /// `READ` both for a sample recorded in `read_samples` and for a sample that is no longer
+    /// cached, so entries below the cache's low-water mark cannot change any answer and are
+    /// free to drop. Evicting an entry whose sample is *still cached* would flip it back to
+    /// `NOT_READ` and re-deliver it, which is why the last assertion here matters more than
+    /// the size one.
+    #[test]
+    fn read_samples_stays_bounded_without_redelivering() {
+        const SAMPLES: usize = 60;
+
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "read_samples_growth",
+                "HelloWorldType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        // KeepLast(1) on both ends: the cache holds one sample at a time, so a correctly
+        // bounded `read_samples` cannot accumulate either.
+        let history = HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepLast(1), strict: false };
+        let reliability = ReliabilityQosPolicy {
+            kind: ReliabilityQosPolicyKind::Reliable,
+            max_blocking_time: Duration::from_seconds(1),
+        };
+
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic,
+                DataWriterQos {
+                    history: history.clone(),
+                    reliability: reliability.clone(),
+                    ..Default::default()
+                },
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let data_reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &topic,
+                DataReaderQos { history, reliability, ..Default::default() },
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let condition = writer.get_statuscondition().unwrap().clone();
+        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
+        let wait_set = WaitSet::new();
+        wait_set.attach_condition(condition).unwrap();
+        // Bounded: `Duration::infinite()` here would wedge the whole test binary if matching
+        // ever regressed, and `cargo test` has no per-test timeout to save it.
+        wait_set.wait(Duration::from_seconds(10)).expect("writer never matched the reader");
+
+        // Read until a sample is actually observed, so the redelivery guard below is never
+        // skipped for want of data.
+        let mut ever_read = false;
+        for index in 0..SAMPLES as u32 {
+            writer
+                .write(&HelloWorld { index, message: "growth".to_string() }, InstanceHandle::NIL)
+                .unwrap();
+            // `read` is the non-consuming path, and the only one that records read state.
+            let read = data_reader.read(
+                1,
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            );
+            ever_read |= read.is_ok();
+        }
+        assert!(ever_read, "no sample was ever read, so this test proves nothing");
+
+        // The last write is still in flight when the loop ends: `write` hands the sample to the
+        // send path and returns, while delivery lands on the receive thread afterwards. A sample
+        // that reads NOT_READ because it has only just arrived is not the defect under test, so
+        // asserting before the final sample settles is a race -- one that fast loopback wins and
+        // slower stacks lose. Read until the last written index has been handed out, which
+        // leaves every cached sample genuinely already read.
+        let settle_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut read_last = false;
+        while !read_last && std::time::Instant::now() < settle_deadline {
+            if let Ok(samples) = data_reader.read(
+                1,
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            ) {
+                read_last = samples
+                    .iter()
+                    .any(|sample| matches!(sample.data(), Ok(d) if d.index == SAMPLES as u32 - 1));
+            }
+            if !read_last {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        assert!(
+            read_last,
+            "the last written sample never reached the reader, so the guard below would assert \
+             against a cache that is still filling rather than against redelivery"
+        );
+
+        let recorded: usize =
+            data_reader.read_samples.lock().unwrap().values().map(|set| set.len()).sum();
+
+        // Bounded by what a KeepLast(1) cache can retain, not by the number of samples read.
+        // Slack covers samples still in flight when the loop ends; the pre-fix behaviour
+        // recorded one entry per sample, so any bound well under SAMPLES discriminates.
+        assert!(
+            recorded <= 8,
+            "read_samples holds {recorded} sequence numbers for a depth-1 cache, so it is \
+             growing with every sample read rather than with what the cache retains"
+        );
+
+        // The guard that must hold before and after any bounding change: whatever is still
+        // cached and already read stays READ. A cap that evicts a live entry re-delivers it.
+        // Unconditional -- gating it on the preceding read succeeding is how a bounding bug
+        // would slip through unnoticed.
+        assert!(
+            data_reader
+                .read(
+                    1,
+                    &[SampleStateKind::NOT_READ_SAMPLE_STATE],
+                    &[ViewStateKind::ANY_VIEW_STATE],
+                    &[InstanceStateKind::ANY_INSTANCE_STATE],
+                )
+                .is_err(),
+            "a cached sample that was already read came back as NOT_READ, so bounding \
+             read_samples re-delivers already-read samples"
+        );
 
         participant.delete_contained_entities().unwrap();
         factory.delete_participant(participant).unwrap();

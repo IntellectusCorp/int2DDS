@@ -11,6 +11,7 @@
 //! - Ownership strength arbitration for exclusive ownership
 //! - TimeBasedFilter enforcement
 
+use crate::utils::notify::{callback_handle, notify_user};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt::Debug,
@@ -1053,27 +1054,20 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
         &self,
         f: Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>,
     ) {
-        match self.status_callback.lock() {
-            Ok(mut callback) => {
-                callback.replace(f);
-            }
-            Err(e) => {
-                log::error!("Failed to lock callback: {:?}", e);
-            }
-        }
+        self.status_callback.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).replace(f);
     }
 
     // Invokes the status callback when a sample is rejected.
+    //
+    // This is the only path to the user's `on_sample_rejected`, and it runs on the RTPS receive
+    // thread (via `ensure_capacity`) and on the timer thread (via `deliver_held_sample`), so it
+    // needs the same boundary as the RTPS-side callbacks: lift the callback out before calling
+    // it, and contain a panic rather than letting it end the thread.
     fn on_sample_rejected(&self, info: SampleRejectedStatus) {
-        match self.status_callback.lock() {
-            Ok(callback) => {
-                if let Some(callback) = callback.as_ref() {
-                    callback(StatusKind::SAMPLE_REJECTED, Some(Arc::new(info)));
-                }
-            }
-            Err(e) => {
-                log::error!("Failed to lock callback: {:?}", e);
-            }
+        if let Some(callback) = callback_handle(&self.status_callback) {
+            notify_user("data_reader_history", || {
+                callback(StatusKind::SAMPLE_REJECTED, Some(Arc::new(info)))
+            });
         }
     }
 }
