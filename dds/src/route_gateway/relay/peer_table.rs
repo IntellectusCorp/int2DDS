@@ -3,11 +3,25 @@
 //! Every relayed datagram is routed by this table alone: a prefix is either a
 //! participant on the gateway's own network, in which case its real addresses
 //! are known, or a participant behind the peer gateway, in which case the only
-//! way to reach it is the link.
+//! way to reach it is the link. An entry lives as long as the lease its owner
+//! announced, so a participant that stops announcing is forgotten even when it
+//! never got to say goodbye.
 
-use std::{collections::HashMap, sync::Mutex};
+use std::{
+    collections::HashMap,
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
-use super::{rtps_scan::GuidPrefix, spdp_rewrite::SpdpEndpoints};
+use super::{discovery_rewrite::SpdpEndpoints, rtps_scan::GuidPrefix};
+
+/// Lease given to an announcement that does not state one.
+pub(crate) const DEFAULT_LEASE: Duration = Duration::from_secs(100);
+
+/// A shorter lease would expire between two announcements, and a longer one is
+/// indistinguishable from never expiring.
+const MIN_LEASE: Duration = Duration::from_secs(1);
+const MAX_LEASE: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PeerRoute {
@@ -15,22 +29,53 @@ pub(crate) enum PeerRoute {
     Remote,
 }
 
+struct Entry {
+    route: PeerRoute,
+    expires_at: Instant,
+}
+
 #[derive(Default)]
 pub(crate) struct PeerTable {
-    routes: Mutex<HashMap<GuidPrefix, PeerRoute>>,
+    routes: Mutex<HashMap<GuidPrefix, Entry>>,
 }
 
 impl PeerTable {
-    pub(crate) fn insert_local(&self, prefix: GuidPrefix, endpoints: SpdpEndpoints) {
-        self.lock().insert(prefix, PeerRoute::Local(endpoints));
+    pub(crate) fn insert_local(
+        &self,
+        prefix: GuidPrefix,
+        endpoints: SpdpEndpoints,
+        lease: Duration,
+        now: Instant,
+    ) {
+        self.insert(prefix, PeerRoute::Local(endpoints), lease, now);
     }
 
-    pub(crate) fn insert_remote(&self, prefix: GuidPrefix) {
-        self.lock().insert(prefix, PeerRoute::Remote);
+    pub(crate) fn insert_remote(&self, prefix: GuidPrefix, lease: Duration, now: Instant) {
+        self.insert(prefix, PeerRoute::Remote, lease, now);
+    }
+
+    pub(crate) fn remove(&self, prefix: &GuidPrefix) {
+        self.lock().remove(prefix);
+    }
+
+    /// Drops every participant reached through the link. Returns how many were
+    /// dropped so the caller can say so.
+    pub(crate) fn forget_remote(&self) -> usize {
+        let mut routes = self.lock();
+        let before = routes.len();
+        routes.retain(|_, entry| entry.route != PeerRoute::Remote);
+        before - routes.len()
+    }
+
+    pub(crate) fn purge_expired(&self, now: Instant) -> usize {
+        let mut routes = self.lock();
+        let before = routes.len();
+        routes.retain(|_, entry| entry.expires_at > now);
+        before - routes.len()
     }
 
     pub(crate) fn route(&self, prefix: &GuidPrefix) -> Option<PeerRoute> {
-        self.lock().get(prefix).copied()
+        self.lock().get(prefix).map(|entry| entry.route)
     }
 
     pub(crate) fn is_local(&self, prefix: &GuidPrefix) -> bool {
@@ -41,9 +86,15 @@ impl PeerTable {
         matches!(self.route(prefix), Some(PeerRoute::Remote))
     }
 
+    fn insert(&self, prefix: GuidPrefix, route: PeerRoute, lease: Duration, now: Instant) {
+        let lease = lease.clamp(MIN_LEASE, MAX_LEASE);
+        let expires_at = now.checked_add(lease).unwrap_or(now);
+        self.lock().insert(prefix, Entry { route, expires_at });
+    }
+
     /// A poisoned table would strand every route, so the lock is recovered
     /// instead of propagating the panic into the relay threads.
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<GuidPrefix, PeerRoute>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<GuidPrefix, Entry>> {
         self.routes.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
@@ -55,6 +106,8 @@ mod tests {
     use super::*;
 
     const PREFIX: GuidPrefix = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+    const OTHER_PREFIX: GuidPrefix = [12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1];
+    const LEASE: Duration = Duration::from_secs(10);
 
     fn endpoints() -> SpdpEndpoints {
         SpdpEndpoints {
@@ -74,12 +127,73 @@ mod tests {
     #[test]
     fn local_and_remote_routes_are_distinguished() {
         let table = PeerTable::default();
-        table.insert_local(PREFIX, endpoints());
+        let now = Instant::now();
+
+        table.insert_local(PREFIX, endpoints(), LEASE, now);
         assert_eq!(table.route(&PREFIX), Some(PeerRoute::Local(endpoints())));
         assert!(table.is_local(&PREFIX));
 
-        table.insert_remote(PREFIX);
+        table.insert_remote(PREFIX, LEASE, now);
         assert!(table.is_remote(&PREFIX));
         assert!(!table.is_local(&PREFIX));
+    }
+
+    #[test]
+    fn a_departed_participant_is_removed() {
+        let table = PeerTable::default();
+        table.insert_local(PREFIX, endpoints(), LEASE, Instant::now());
+
+        table.remove(&PREFIX);
+        assert_eq!(table.route(&PREFIX), None);
+    }
+
+    #[test]
+    fn an_entry_lasts_exactly_its_lease() {
+        let table = PeerTable::default();
+        let now = Instant::now();
+        table.insert_local(PREFIX, endpoints(), LEASE, now);
+
+        assert_eq!(table.purge_expired(now + LEASE - Duration::from_millis(1)), 0);
+        assert!(table.is_local(&PREFIX));
+
+        assert_eq!(table.purge_expired(now + LEASE), 1);
+        assert_eq!(table.route(&PREFIX), None);
+    }
+
+    #[test]
+    fn a_repeated_announcement_extends_the_lease() {
+        let table = PeerTable::default();
+        let now = Instant::now();
+        table.insert_local(PREFIX, endpoints(), LEASE, now);
+
+        let later = now + LEASE / 2;
+        table.insert_local(PREFIX, endpoints(), LEASE, later);
+
+        assert_eq!(table.purge_expired(now + LEASE + Duration::from_millis(1)), 0);
+        assert!(table.is_local(&PREFIX));
+    }
+
+    #[test]
+    fn an_absurd_lease_is_clamped_instead_of_overflowing() {
+        let table = PeerTable::default();
+        let now = Instant::now();
+        table.insert_remote(PREFIX, Duration::MAX, now);
+        table.insert_remote(OTHER_PREFIX, Duration::ZERO, now);
+
+        assert_eq!(table.purge_expired(now + Duration::from_secs(2)), 1);
+        assert!(table.is_remote(&PREFIX));
+        assert_eq!(table.route(&OTHER_PREFIX), None);
+    }
+
+    #[test]
+    fn losing_the_link_forgets_only_the_far_network() {
+        let table = PeerTable::default();
+        let now = Instant::now();
+        table.insert_local(PREFIX, endpoints(), LEASE, now);
+        table.insert_remote(OTHER_PREFIX, LEASE, now);
+
+        assert_eq!(table.forget_remote(), 1);
+        assert!(table.is_local(&PREFIX));
+        assert_eq!(table.route(&OTHER_PREFIX), None);
     }
 }

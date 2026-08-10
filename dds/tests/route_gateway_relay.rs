@@ -48,6 +48,16 @@ impl GatewayPorts {
     }
 }
 
+fn start_gateway(domain_id: i32, ports: &GatewayPorts, link: LinkRole) -> RelayGateway {
+    RelayGateway::start(RelayConfig::new(
+        domain_id as u32,
+        ports.metatraffic,
+        ports.user_data,
+        link,
+    ))
+    .expect("gateway failed to start")
+}
+
 fn reliable_writer_qos() -> DataWriterQos {
     DataWriterQos {
         reliability: ReliabilityQosPolicy {
@@ -91,20 +101,10 @@ fn relay_carries_discovery_and_samples_between_two_networks() {
     let ports_b = GatewayPorts::for_domain(domain_b);
     let link_address = format!("127.0.0.1:{}", ports_a.link);
 
-    let gateway_a = RelayGateway::start(RelayConfig::new(
-        domain_a as u32,
-        ports_a.metatraffic,
-        ports_a.user_data,
-        LinkRole::Listen(link_address.parse().unwrap()),
-    ))
-    .expect("gateway A failed to start");
-    let gateway_b = RelayGateway::start(RelayConfig::new(
-        domain_b as u32,
-        ports_b.metatraffic,
-        ports_b.user_data,
-        LinkRole::Connect(link_address.parse().unwrap()),
-    ))
-    .expect("gateway B failed to start");
+    let gateway_a =
+        start_gateway(domain_a, &ports_a, LinkRole::Listen(link_address.parse().unwrap()));
+    let gateway_b =
+        start_gateway(domain_b, &ports_b, LinkRole::Connect(link_address.parse().unwrap()));
 
     let factory = DomainParticipantFactory::get_instance();
     let writer_participant = factory
@@ -163,6 +163,83 @@ fn relay_carries_discovery_and_samples_between_two_networks() {
         .unwrap();
     let values: Vec<i16> = samples.iter().filter_map(|s| s.data().ok().map(|d| d.value)).collect();
     assert_eq!(values, vec![10, 20, 30, 40, 50]);
+
+    writer_participant.delete_contained_entities().unwrap();
+    factory.delete_participant(writer_participant).unwrap();
+    reader_participant.delete_contained_entities().unwrap();
+    factory.delete_participant(reader_participant).unwrap();
+    gateway_a.stop();
+    gateway_b.stop();
+}
+
+/// One gateway is restarted under a running writer and reader. Neither
+/// participant is touched, so anything that arrives afterwards had to cross a
+/// second link that the surviving gateway accepted on its own.
+#[test]
+fn relay_recovers_after_one_gateway_restarts() {
+    let domain_a = next_domain_id();
+    let domain_b = next_domain_id();
+    let ports_a = GatewayPorts::for_domain(domain_a);
+    let ports_b = GatewayPorts::for_domain(domain_b);
+    let link_address = format!("127.0.0.1:{}", ports_a.link);
+
+    let gateway_a =
+        start_gateway(domain_a, &ports_a, LinkRole::Listen(link_address.parse().unwrap()));
+    let gateway_b =
+        start_gateway(domain_b, &ports_b, LinkRole::Connect(link_address.parse().unwrap()));
+
+    let factory = DomainParticipantFactory::get_instance();
+    let writer_participant = factory
+        .create_participant(domain_a, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+    let writer =
+        create_datawriter(&writer_participant, PublisherQos::default(), reliable_writer_qos());
+
+    let reader_participant = factory
+        .create_participant(domain_b, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+    let reader =
+        create_datareader(&reader_participant, SubscriberQos::default(), reliable_reader_qos());
+
+    let matched = wait_until(
+        || {
+            writer.get_publication_matched_status().map(|s| s.current_count() >= 1).unwrap_or(false)
+                && reader
+                    .get_subscription_matched_status()
+                    .map(|s| s.current_count() >= 1)
+                    .unwrap_or(false)
+        },
+        30_000,
+    );
+    assert!(matched, "writer and reader did not match through the relay");
+
+    gateway_b.stop();
+    sleep(StdDuration::from_secs(1));
+    let gateway_b =
+        start_gateway(domain_b, &ports_b, LinkRole::Connect(link_address.parse().unwrap()));
+
+    // Both tables are empty again and refill from the next round of
+    // announcements, which is what the samples below have to travel on.
+    sleep(StdDuration::from_secs(5));
+    for value in 1..=SAMPLE_COUNT {
+        writer.write(&KeyedDataType::new(1, value * 100), InstanceHandle::NIL).unwrap();
+    }
+
+    let received = wait_until(
+        || {
+            reader
+                .read(
+                    100,
+                    &[SampleStateKind::ANY_SAMPLE_STATE],
+                    &[ViewStateKind::ANY_VIEW_STATE],
+                    &[InstanceStateKind::ALIVE_INSTANCE_STATE],
+                )
+                .map(|samples| samples.len() >= SAMPLE_COUNT as usize)
+                .unwrap_or(false)
+        },
+        30_000,
+    );
+    assert!(received, "reader did not receive samples after the link was restored");
 
     writer_participant.delete_contained_entities().unwrap();
     factory.delete_participant(writer_participant).unwrap();

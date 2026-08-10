@@ -16,11 +16,11 @@
 //! writer and the final reader.
 
 mod config;
+mod discovery_rewrite;
 mod gateway;
 mod link;
 mod peer_table;
 mod rtps_scan;
-mod spdp_rewrite;
 
 pub use config::{LinkRole, RelayConfig};
 pub use gateway::RelayGateway;

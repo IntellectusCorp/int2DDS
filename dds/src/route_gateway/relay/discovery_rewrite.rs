@@ -1,4 +1,4 @@
-//! In-place rewrite of an SPDP participant announcement.
+//! In-place rewrite of a discovery announcement.
 //!
 //! A relayed participant must look, to the receiving network, like a plain
 //! local participant that happens to live at the gateway's address. Only the
@@ -6,16 +6,28 @@
 //! so the payload is edited in place: no parameter is inserted or removed and
 //! every RTPS length field upstream stays valid. Locators that must disappear
 //! are turned into PID_PAD, which every parameter list reader skips.
+//!
+//! An endpoint announcement needs the same treatment for the opposite reason.
+//! It carries the addresses its own network gave it, which mean nothing on the
+//! receiving one, so they are removed and the endpoint is left to inherit its
+//! participant's locators, which the gateway has already rewritten.
 
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::{
+    net::{Ipv4Addr, SocketAddrV4},
+    time::Duration,
+};
 
 const ENCAPSULATION_HEADER_LEN: usize = 4;
 const PARAMETER_HEADER_LEN: usize = 4;
 const LOCATOR_VALUE_LEN: usize = 24;
+const DURATION_VALUE_LEN: usize = 8;
 
 const PID_PAD: u16 = 0x0000;
 const PID_SENTINEL: u16 = 0x0001;
+const PID_PARTICIPANT_LEASE_DURATION: u16 = 0x0002;
 const PID_DOMAIN_ID: u16 = 0x000F;
+const PID_UNICAST_LOCATOR: u16 = 0x002F;
+const PID_MULTICAST_LOCATOR: u16 = 0x0030;
 const PID_DEFAULT_UNICAST_LOCATOR: u16 = 0x0031;
 const PID_METATRAFFIC_UNICAST_LOCATOR: u16 = 0x0032;
 const PID_METATRAFFIC_MULTICAST_LOCATOR: u16 = 0x0033;
@@ -59,6 +71,24 @@ pub(crate) fn read_endpoints(payload: &[u8]) -> Option<SpdpEndpoints> {
     }
 
     Some(SpdpEndpoints { metatraffic: metatraffic?, user_data: user_data? })
+}
+
+/// How long the participant asks to be remembered for. Absent when the
+/// announcement leaves the lease at its default. Only whole seconds are read,
+/// because a table swept once a second cannot act on anything finer.
+pub(crate) fn read_lease(payload: &[u8]) -> Option<Duration> {
+    let little_endian = payload_is_little_endian(payload)?;
+    let parameters = parse(payload, little_endian);
+
+    let lease = parameters.iter().find(|p| p.id == PID_PARTICIPANT_LEASE_DURATION)?;
+    if lease.value_len < DURATION_VALUE_LEN {
+        return None;
+    }
+    let seconds = read_u32(payload, lease.value_offset, little_endian) as i32;
+    if seconds <= 0 {
+        return None;
+    }
+    Some(Duration::from_secs(seconds as u64))
 }
 
 /// Replaces every advertised address with the gateway's own and retargets the
@@ -119,6 +149,21 @@ pub(crate) fn rewrite(
     }
 
     metatraffic_written && user_data_written
+}
+
+/// Takes the addresses out of an endpoint announcement. A receiver left with
+/// none falls back to the announcing participant's locators, which is exactly
+/// the gateway.
+pub(crate) fn strip_endpoint_locators(payload: &mut [u8]) {
+    let Some(little_endian) = payload_is_little_endian(payload) else {
+        return;
+    };
+
+    for parameter in &parse(payload, little_endian) {
+        if matches!(parameter.id, PID_UNICAST_LOCATOR | PID_MULTICAST_LOCATOR) {
+            neutralize(payload, parameter, little_endian);
+        }
+    }
 }
 
 fn parse(payload: &[u8], little_endian: bool) -> Vec<Parameter> {
@@ -239,9 +284,17 @@ mod tests {
         buf
     }
 
+    fn duration_value(seconds: i32) -> Vec<u8> {
+        let mut value = Vec::with_capacity(DURATION_VALUE_LEN);
+        value.extend_from_slice(&seconds.to_le_bytes());
+        value.extend_from_slice(&0u32.to_le_bytes());
+        value
+    }
+
     fn announcement() -> Vec<u8> {
         let mut payload = vec![0x00, 0x03, 0x00, 0x00];
         payload.extend_from_slice(&parameter(PID_DOMAIN_ID, &7u32.to_le_bytes()));
+        payload.extend_from_slice(&parameter(PID_PARTICIPANT_LEASE_DURATION, &duration_value(40)));
         payload.extend_from_slice(&parameter(
             PID_METATRAFFIC_UNICAST_LOCATOR,
             &locator_value(Ipv4Addr::new(10, 0, 0, 5), 7410),
@@ -267,6 +320,62 @@ mod tests {
         let endpoints = read_endpoints(&announcement()).expect("no endpoints");
         assert_eq!(endpoints.metatraffic, SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 5), 7410));
         assert_eq!(endpoints.user_data, SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 5), 7411));
+    }
+
+    fn endpoint_announcement() -> Vec<u8> {
+        let mut payload = vec![0x00, 0x03, 0x00, 0x00];
+        payload.extend_from_slice(&parameter(0x005A, &[7u8; 16])); // endpoint guid
+        payload.extend_from_slice(&parameter(
+            PID_UNICAST_LOCATOR,
+            &locator_value(Ipv4Addr::new(10, 0, 0, 5), 7411),
+        ));
+        payload.extend_from_slice(&parameter(
+            PID_UNICAST_LOCATOR,
+            &locator_value(Ipv4Addr::new(192, 168, 0, 5), 7411),
+        ));
+        payload.extend_from_slice(&parameter(
+            PID_MULTICAST_LOCATOR,
+            &locator_value(Ipv4Addr::new(239, 255, 0, 1), 7401),
+        ));
+        payload.extend_from_slice(&parameter(PID_SENTINEL, &[]));
+        payload
+    }
+
+    #[test]
+    fn stripping_leaves_an_endpoint_without_an_address_of_its_own() {
+        let mut payload = endpoint_announcement();
+        let before = payload.len();
+
+        strip_endpoint_locators(&mut payload);
+        assert_eq!(payload.len(), before, "stripping must not resize the payload");
+
+        let parameters = parse(&payload, true);
+        assert!(!parameters
+            .iter()
+            .any(|p| matches!(p.id, PID_UNICAST_LOCATOR | PID_MULTICAST_LOCATOR)));
+        assert_eq!(parameters.iter().filter(|p| p.id == PID_PAD).count(), 3);
+        assert!(parameters.iter().any(|p| p.id == 0x005A), "the endpoint guid must survive");
+    }
+
+    #[test]
+    fn reads_the_announced_lease() {
+        assert_eq!(read_lease(&announcement()), Some(Duration::from_secs(40)));
+    }
+
+    #[test]
+    fn lease_is_absent_when_the_announcement_omits_it() {
+        let mut payload = vec![0x00, 0x03, 0x00, 0x00];
+        payload.extend_from_slice(&parameter(PID_DOMAIN_ID, &1u32.to_le_bytes()));
+        payload.extend_from_slice(&parameter(PID_SENTINEL, &[]));
+
+        assert_eq!(read_lease(&payload), None);
+    }
+
+    #[test]
+    fn rewrite_leaves_the_lease_alone() {
+        let mut payload = announcement();
+        assert!(rewrite(&mut payload, Ipv4Addr::new(172, 16, 0, 1), 7500, 7501, 3));
+        assert_eq!(read_lease(&payload), Some(Duration::from_secs(40)));
     }
 
     #[test]
