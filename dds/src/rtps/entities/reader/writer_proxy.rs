@@ -435,18 +435,22 @@ impl WriterProxy {
             }),
         });
 
-        // Merge this submessage's fragment numbers into the accumulated set
-        if let Some(info) = &mut change.fragment_info {
-            // A HEARTBEAT_FRAG may have seeded this entry with a smaller
-            // last-fragment number than the sample's true total; keep the max.
-            info.total_fragments = info.total_fragments.max(total_fragments);
-            for fragment in received {
-                info.received_fragments.insert(fragment);
-            }
+        // A HEARTBEAT or HEARTBEAT_FRAG may have created this change with no
+        // fragment_info, so ensure it exists before merging received fragments.
+        let info = change.fragment_info.get_or_insert_with(|| FragmentInfo {
+            total_fragments,
+            received_fragments: std::collections::HashSet::new(),
+            is_complete: false,
+        });
 
-            // Update completion status
-            info.is_complete = info.received_fragments.len() == info.total_fragments as usize;
+        // A HEARTBEAT_FRAG may have seeded a smaller last-fragment number than
+        // the sample's true total, so keep the max.
+        info.total_fragments = info.total_fragments.max(total_fragments);
+        for fragment in received {
+            info.received_fragments.insert(fragment);
         }
+
+        info.is_complete = info.received_fragments.len() == info.total_fragments as usize;
     }
 
     pub(crate) fn on_sample_lost(&self) {
