@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -113,6 +113,9 @@ pub struct TimerTask {
     poll: Poll,
     waker: Arc<Waker>,
     timers: HashMap<TimerId, Timer>,
+    // Expiry-ordered index over the unpaused timers; every entry mirrors that
+    // timer's current next_trigger and is updated eagerly on each state change.
+    timers_sorted_by_expiry: BTreeSet<(Instant, TimerId)>,
     running: bool,
 }
 
@@ -122,7 +125,13 @@ impl TimerTask {
         let waker =
             Arc::new(Waker::new(poll.registry(), WAKER_TOKEN).expect("Failed to create waker"));
 
-        Self { poll, waker, timers: HashMap::new(), running: false }
+        Self {
+            poll,
+            waker,
+            timers: HashMap::new(),
+            timers_sorted_by_expiry: BTreeSet::new(),
+            running: false,
+        }
     }
 
     pub(crate) fn waker(&self) -> Arc<Waker> {
@@ -171,12 +180,10 @@ impl TimerTask {
     }
 
     fn calculate_next_timeout(&self, now: Instant) -> Option<Duration> {
-        // Return None to make event loop wait indefinitely if no timers are present
-        if self.timers.is_empty() {
-            return None;
-        }
-
-        self.timers.values().filter_map(|timer| timer.time_until_trigger(now)).min()
+        // Return None to make event loop wait indefinitely if nothing is scheduled
+        self.timers_sorted_by_expiry
+            .first()
+            .map(|(expiry, _)| expiry.saturating_duration_since(now))
     }
 
     fn process_messages(&mut self, message_queue: &TimerMessageQueue) {
@@ -222,14 +229,21 @@ impl TimerTask {
     }
 
     fn process_expired_timers(&mut self, now: Instant) {
-        self.timers.retain(|_, timer| {
-            if timer.is_ready(now) {
-                timer.trigger();
-                timer.repeating
-            } else {
-                true
+        while let Some(&(expiry, timer_id)) = self.timers_sorted_by_expiry.first() {
+            if expiry > now {
+                break;
             }
-        });
+            self.timers_sorted_by_expiry.pop_first();
+
+            let Some(timer) = self.timers.get_mut(&timer_id) else { continue };
+            timer.trigger();
+
+            if timer.repeating {
+                self.timers_sorted_by_expiry.insert((timer.next_trigger, timer_id));
+            } else {
+                self.timers.remove(&timer_id);
+            }
+        }
     }
 
     fn add_timer(
@@ -245,12 +259,14 @@ impl TimerTask {
         }
 
         let timer = Timer::new(timer_id, duration, repeating, callback);
+        self.timers_sorted_by_expiry.insert((timer.next_trigger, timer_id));
         self.timers.insert(timer_id, timer);
         debug!("Added timer '{}' with duration {:?}, repeating: {}", timer_id, duration, repeating);
     }
 
     fn remove_timer(&mut self, timer_id: &TimerId) {
-        if self.timers.remove(timer_id).is_some() {
+        if let Some(timer) = self.timers.remove(timer_id) {
+            self.timers_sorted_by_expiry.remove(&(timer.next_trigger, *timer_id));
             debug!("Removed timer '{}'", timer_id);
         } else {
             debug!("Attempted to remove non-existent timer '{}'", timer_id);
@@ -258,9 +274,19 @@ impl TimerTask {
     }
 
     fn remove_timers_by_entity(&mut self, entity_id: &EntityId) {
-        let before = self.timers.len();
-        self.timers.retain(|id, _| !id.belongs_to_entity(entity_id));
-        let removed = before - self.timers.len();
+        let Self { timers, timers_sorted_by_expiry, .. } = self;
+
+        let before = timers.len();
+        timers.retain(|id, timer| {
+            if id.belongs_to_entity(entity_id) {
+                timers_sorted_by_expiry.remove(&(timer.next_trigger, *id));
+                false
+            } else {
+                true
+            }
+        });
+
+        let removed = before - timers.len();
         if removed > 0 {
             debug!("Removed {} timer(s) for entity {}", removed, entity_id);
         }
@@ -268,6 +294,7 @@ impl TimerTask {
 
     fn pause_timer(&mut self, timer_id: &TimerId) {
         if let Some(timer) = self.timers.get_mut(timer_id) {
+            self.timers_sorted_by_expiry.remove(&(timer.next_trigger, *timer_id));
             timer.pause();
             debug!("Paused timer '{}'", timer_id);
         } else {
@@ -277,7 +304,12 @@ impl TimerTask {
 
     fn resume_timer(&mut self, timer_id: &TimerId) {
         if let Some(timer) = self.timers.get_mut(timer_id) {
+            let was_paused = timer.paused;
             timer.resume();
+
+            if was_paused {
+                self.timers_sorted_by_expiry.insert((timer.next_trigger, *timer_id));
+            }
             debug!("Resumed timer '{}'", timer_id);
         } else {
             debug!("Attempted to resume non-existent timer '{}'", timer_id);
@@ -286,7 +318,12 @@ impl TimerTask {
 
     fn modify_timer(&mut self, timer_id: &TimerId, new_duration: Duration) {
         if let Some(timer) = self.timers.get_mut(timer_id) {
+            self.timers_sorted_by_expiry.remove(&(timer.next_trigger, *timer_id));
             timer.modify_duration(new_duration);
+
+            if !timer.paused {
+                self.timers_sorted_by_expiry.insert((timer.next_trigger, *timer_id));
+            }
             debug!("Modified timer '{}' duration to {:?}", timer_id, new_duration);
         } else {
             debug!("Attempted to modify non-existent timer '{}'", timer_id);
@@ -365,5 +402,246 @@ mod tests {
         // Remove reader_b timers (3)
         task.remove_timers_by_entity(&reader_b);
         assert_eq!(task.list_timers().len(), 0);
+    }
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    fn counting_callback(counter: &Arc<AtomicUsize>) -> TimerCallback {
+        let counter = counter.clone();
+        Arc::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        })
+    }
+
+    fn entity(key: u8) -> EntityId {
+        EntityId { entity_key: [0x00, 0x00, key], entity_kind: EntityKind(0x02) }
+    }
+
+    fn heartbeat_id(key: u8) -> TimerId {
+        TimerId::PeriodicHeartbeat { entity_id: entity(key) }
+    }
+
+    // The expiry index must hold exactly the unpaused timers, each under its
+    // current next_trigger.
+    fn assert_expiry_index_consistent(task: &TimerTask) {
+        let unpaused_count = task.timers.values().filter(|timer| !timer.paused).count();
+        assert_eq!(task.timers_sorted_by_expiry.len(), unpaused_count);
+
+        for (expiry, timer_id) in &task.timers_sorted_by_expiry {
+            let timer = task.timers.get(timer_id).expect("scheduled timer must exist");
+            assert_eq!(*expiry, timer.next_trigger);
+            assert!(!timer.paused);
+        }
+    }
+
+    #[test]
+    fn fires_in_expiry_order_regardless_of_insertion_order() {
+        let mut task = TimerTask::new();
+        let order = Arc::new(Mutex::new(Vec::new()));
+
+        for (key, millis) in [(1u8, 30u64), (2, 10), (3, 20)] {
+            let order = order.clone();
+            task.add_timer(
+                heartbeat_id(key),
+                Duration::from_millis(millis),
+                false,
+                Arc::new(move || order.lock().unwrap().push(millis)),
+            );
+        }
+
+        task.process_expired_timers(Instant::now() + Duration::from_millis(50));
+
+        assert_eq!(*order.lock().unwrap(), vec![10, 20, 30]);
+        assert_expiry_index_consistent(&task);
+    }
+
+    #[test]
+    fn equal_expiries_each_fire_exactly_once() {
+        let mut task = TimerTask::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let expiry = Instant::now() + Duration::from_millis(10);
+
+        for key in [1u8, 2, 3] {
+            let timer_id = heartbeat_id(key);
+            let timer = Timer {
+                id: timer_id,
+                duration: Duration::from_millis(10),
+                next_trigger: expiry,
+                start_time: Instant::now(),
+                execution_count: 0,
+                repeating: false,
+                paused: false,
+                callback: counting_callback(&counter),
+            };
+            task.timers_sorted_by_expiry.insert((timer.next_trigger, timer_id));
+            task.timers.insert(timer_id, timer);
+        }
+
+        task.process_expired_timers(expiry + Duration::from_millis(1));
+
+        assert_eq!(counter.load(Ordering::SeqCst), 3);
+        assert!(task.timers.is_empty());
+        assert_expiry_index_consistent(&task);
+    }
+
+    #[test]
+    fn next_timeout_tracks_the_earliest_expiry() {
+        let mut task = TimerTask::new();
+        let now = Instant::now();
+
+        task.add_timer(heartbeat_id(1), Duration::from_millis(100), false, noop_callback());
+        let long_only = task.calculate_next_timeout(now).unwrap();
+        assert!(long_only > Duration::from_millis(50));
+
+        task.add_timer(heartbeat_id(2), Duration::from_millis(10), false, noop_callback());
+        let with_short = task.calculate_next_timeout(now).unwrap();
+        assert!(with_short < Duration::from_millis(20));
+
+        task.remove_timer(&heartbeat_id(2));
+        let after_remove = task.calculate_next_timeout(now).unwrap();
+        assert!(after_remove > Duration::from_millis(50));
+        assert_expiry_index_consistent(&task);
+    }
+
+    #[test]
+    fn modify_reschedules_and_old_expiry_does_not_fire() {
+        let mut task = TimerTask::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        task.add_timer(
+            heartbeat_id(1),
+            Duration::from_millis(10),
+            false,
+            counting_callback(&counter),
+        );
+        task.modify_timer(&heartbeat_id(1), Duration::from_secs(3600));
+
+        task.process_expired_timers(Instant::now() + Duration::from_millis(100));
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+
+        task.modify_timer(&heartbeat_id(1), Duration::from_millis(5));
+        task.process_expired_timers(Instant::now() + Duration::from_millis(100));
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        assert_expiry_index_consistent(&task);
+    }
+
+    #[test]
+    fn removed_timer_does_not_fire_and_readd_uses_new_expiry() {
+        let mut task = TimerTask::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        task.add_timer(
+            heartbeat_id(1),
+            Duration::from_millis(10),
+            false,
+            counting_callback(&counter),
+        );
+        task.remove_timer(&heartbeat_id(1));
+        task.add_timer(
+            heartbeat_id(1),
+            Duration::from_secs(3600),
+            false,
+            counting_callback(&counter),
+        );
+
+        task.process_expired_timers(Instant::now() + Duration::from_millis(100));
+
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+        assert_eq!(task.timers_sorted_by_expiry.len(), 1);
+        assert_expiry_index_consistent(&task);
+    }
+
+    #[test]
+    fn paused_timer_skips_and_resume_rearms() {
+        let mut task = TimerTask::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        task.add_timer(
+            heartbeat_id(1),
+            Duration::from_millis(10),
+            true,
+            counting_callback(&counter),
+        );
+        task.pause_timer(&heartbeat_id(1));
+        assert!(task.calculate_next_timeout(Instant::now()).is_none());
+
+        task.process_expired_timers(Instant::now() + Duration::from_millis(100));
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+
+        task.resume_timer(&heartbeat_id(1));
+        task.process_expired_timers(Instant::now() + Duration::from_millis(100));
+        assert!(counter.load(Ordering::SeqCst) >= 1);
+        assert_expiry_index_consistent(&task);
+    }
+
+    #[test]
+    fn repeating_rearms_and_oneshot_disappears() {
+        let mut task = TimerTask::new();
+        let repeating_count = Arc::new(AtomicUsize::new(0));
+        let oneshot_count = Arc::new(AtomicUsize::new(0));
+        let now = Instant::now();
+
+        task.add_timer(
+            heartbeat_id(1),
+            Duration::from_millis(10),
+            true,
+            counting_callback(&repeating_count),
+        );
+        task.add_timer(
+            heartbeat_id(2),
+            Duration::from_millis(10),
+            false,
+            counting_callback(&oneshot_count),
+        );
+
+        task.process_expired_timers(now + Duration::from_millis(15));
+
+        assert_eq!(oneshot_count.load(Ordering::SeqCst), 1);
+        assert!(repeating_count.load(Ordering::SeqCst) >= 1);
+        assert_eq!(task.timers.len(), 1);
+        assert_eq!(task.timers_sorted_by_expiry.len(), 1);
+        assert_expiry_index_consistent(&task);
+    }
+
+    #[test]
+    fn behind_schedule_repeating_catches_up_and_makes_progress() {
+        let mut task = TimerTask::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let far_future = Instant::now() + Duration::from_millis(45);
+
+        task.add_timer(
+            heartbeat_id(1),
+            Duration::from_millis(10),
+            true,
+            counting_callback(&counter),
+        );
+        task.process_expired_timers(far_future);
+
+        assert!(counter.load(Ordering::SeqCst) >= 4);
+        let (next_expiry, _) =
+            task.timers_sorted_by_expiry.first().expect("repeating timer stays scheduled");
+        assert!(*next_expiry > far_future);
+        assert_expiry_index_consistent(&task);
+    }
+
+    #[test]
+    fn entity_removal_prunes_the_expiry_index() {
+        let mut task = TimerTask::new();
+
+        task.add_timer(heartbeat_id(1), Duration::from_millis(10), true, noop_callback());
+        task.add_timer(heartbeat_id(2), Duration::from_millis(10), true, noop_callback());
+
+        task.remove_timers_by_entity(&entity(1));
+
+        assert_eq!(task.timers.len(), 1);
+        assert_eq!(task.timers_sorted_by_expiry.len(), 1);
+        assert_expiry_index_consistent(&task);
+    }
+
+    #[test]
+    fn empty_task_waits_indefinitely() {
+        let task = TimerTask::new();
+        assert!(task.calculate_next_timeout(Instant::now()).is_none());
     }
 }
