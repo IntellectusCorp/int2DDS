@@ -962,9 +962,8 @@ impl WlpLogic {
             if let Some(writer_proxy) =
                 matched_writers.iter_mut().find(|proxy| proxy.remote_writer_guid() == remote_guid)
             {
-                let missing_changes =
+                let (bitmap_base, missing_changes) =
                     writer_proxy.process_heartbeat(heartbeat.first_sn, heartbeat.last_sn);
-                let bitmap_base = writer_proxy.expected_sn();
 
                 let requires_response = !final_flag;
 
