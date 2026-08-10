@@ -620,6 +620,43 @@ mod tests {
         assert!(proxy.still_missing_fragments(nacked_sn), "the nacked sample really is short");
     }
 
+    /// A partially received sample is invisible to ACKNACK, so only a NACK_FRAG can recover it.
+    ///
+    /// `mark_frag_received` stamps the change `Received` on the first fragment, which takes it
+    /// out of `missing_changes_for_heartbeat`. `handle_heartbeat_message` must therefore route on
+    /// "is anything in this range short of fragments" -- not on whether the *last* sample is
+    /// whole. Routing on the latter sends a plain ACKNACK that omits the short sample, nothing
+    /// asks for it again, and the writer stops heartbeating once the rest is acked: permanent
+    /// loss on a RELIABLE reader rather than a delay.
+    #[test]
+    fn a_short_earlier_sample_is_invisible_to_acknack() {
+        let mut proxy = empty_writer_proxy();
+        let sn1 = SequenceNumber::new(0, 1);
+        let sn2 = SequenceNumber::new(0, 2);
+
+        proxy.mark_frag_received(sn1, 4, [1, 3, 4]); // SN 1 is short of fragment 2
+        proxy.mark_frag_received(sn2, 4, [1, 2, 3, 4]); // SN 2 is whole
+
+        // The two predicates the routing decision can be built from disagree here. This is the
+        // case the old condition got wrong.
+        assert!(
+            proxy.has_fragmented_changes(sn1, sn2),
+            "SN 1 is short, so a NACK_FRAG is owed for this heartbeat range"
+        );
+        assert!(
+            proxy.all_fragments_received(sn2),
+            "...while the range's last sample is whole, which is what used to force the ACKNACK \
+             branch"
+        );
+
+        // And the ACKNACK branch could not have recovered SN 1 anyway.
+        assert!(
+            !proxy.missing_changes_for_heartbeat(sn1, sn2).contains(&sn1),
+            "SN 1 is marked Received once any fragment arrives, so an ACKNACK never lists it; \
+             taking the ACKNACK branch here loses the sample outright"
+        );
+    }
+
     /// The same guard through serialization, since the sequence number is a wire field.
     #[test]
     fn the_nack_frag_on_the_wire_names_the_short_sample() {
