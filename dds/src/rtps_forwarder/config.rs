@@ -1,4 +1,4 @@
-//! Configuration of one side of a gateway pair.
+//! Configuration of one side of a forwarder pair.
 
 use std::{
     io,
@@ -9,7 +9,7 @@ use crate::rtps::transport::port_manager::PortManager;
 
 use super::peer_policy::{Ipv4Prefix, PeerPolicy};
 
-/// Which end of one link this gateway is. Exactly one end of each pair listens.
+/// Which end of one link this forwarder is. Exactly one end of each pair listens.
 #[derive(Debug, Clone)]
 pub enum LinkRole {
     Listen(SocketAddr),
@@ -17,18 +17,18 @@ pub enum LinkRole {
 }
 
 #[derive(Debug, Clone)]
-pub struct RelayConfig {
-    /// Domain the gateway's own network runs on. Announcements arriving from
-    /// the peer gateway are retargeted at this domain.
+pub struct ForwarderConfig {
+    /// Domain the forwarder's own network runs on. Announcements arriving from
+    /// the peer forwarder are retargeted at this domain.
     pub lan_domain_id: u32,
-    /// Address the gateway advertises to its network. Auto-detected when unset.
+    /// Address the forwarder advertises to its network. Auto-detected when unset.
     pub lan_ip: Option<Ipv4Addr>,
-    /// Port that stands in for every relayed participant's metatraffic locator.
+    /// Port that stands in for every forwarded participant's metatraffic locator.
     pub metatraffic_port: u16,
-    /// Port that stands in for every relayed participant's user data locator.
+    /// Port that stands in for every forwarded participant's user data locator.
     pub user_data_port: u16,
-    /// One entry per peer gateway. Each is an independent link: nothing that
-    /// arrives on one is ever passed to another, so the gateways form a star
+    /// One entry per peer forwarder. Each is an independent link: nothing that
+    /// arrives on one is ever passed to another, so the forwarders form a star
     /// around each network rather than a routed mesh.
     pub links: Vec<LinkRole>,
     /// Addresses of this network's participants that may be carried across the
@@ -37,12 +37,12 @@ pub struct RelayConfig {
     /// Addresses that are never carried, weighed before the allowed list.
     pub denied_peers: Vec<String>,
     /// Guard against a misconfigured network flooding the link. It bounds how
-    /// many participants are relayed at once and is not a way of choosing
+    /// many participants are forwarded at once and is not a way of choosing
     /// between them: which participants cross is what the lists decide.
-    pub max_relayed_participants: Option<usize>,
+    pub max_forwarded_participants: Option<usize>,
 }
 
-impl RelayConfig {
+impl ForwarderConfig {
     pub fn new(
         lan_domain_id: u32,
         metatraffic_port: u16,
@@ -57,7 +57,7 @@ impl RelayConfig {
             links: vec![link],
             allowed_peers: Vec::new(),
             denied_peers: Vec::new(),
-            max_relayed_participants: None,
+            max_forwarded_participants: None,
         }
     }
 
@@ -66,7 +66,7 @@ impl RelayConfig {
         self
     }
 
-    /// Adds another peer gateway to relay with.
+    /// Adds another peer forwarder to forwarder with.
     pub fn with_peer(mut self, link: LinkRole) -> Self {
         self.links.push(link);
         self
@@ -90,8 +90,8 @@ impl RelayConfig {
         self
     }
 
-    pub fn with_max_relayed_participants(mut self, max: usize) -> Self {
-        self.max_relayed_participants = Some(max);
+    pub fn with_max_forwarded_participants(mut self, max: usize) -> Self {
+        self.max_forwarded_participants = Some(max);
         self
     }
 
@@ -106,16 +106,16 @@ impl RelayConfig {
         if self.links.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "a relay needs at least one peer gateway",
+                "a forwarder needs at least one peer forwarder",
             ));
         }
 
-        // Parsed here so that a typo stops the gateway from starting instead
+        // Parsed here so that a typo stops the forwarder from starting instead
         // of silently turning participants away at run time.
         let policy = PeerPolicy::new(
             parse_prefixes(&self.allowed_peers)?,
             parse_prefixes(&self.denied_peers)?,
-            self.max_relayed_participants,
+            self.max_forwarded_participants,
         );
 
         let lan_ip = match self.lan_ip {
@@ -157,7 +157,7 @@ fn parse_prefixes(texts: &[String]) -> io::Result<Vec<Ipv4Prefix>> {
         .collect()
 }
 
-/// First routable IPv4 address of the host. The gateway has to advertise an
+/// First routable IPv4 address of the host. The forwarder has to advertise an
 /// address its own network can reach, so loopback is only a last resort.
 fn detect_lan_ip() -> io::Result<Ipv4Addr> {
     let interfaces = if_addrs::get_if_addrs()?;
@@ -183,8 +183,8 @@ fn detect_lan_ip() -> io::Result<Ipv4Addr> {
 mod tests {
     use super::*;
 
-    fn config() -> RelayConfig {
-        RelayConfig::new(2, 7500, 7501, LinkRole::Listen("127.0.0.1:9000".parse().unwrap()))
+    fn config() -> ForwarderConfig {
+        ForwarderConfig::new(2, 7500, 7501, LinkRole::Listen("127.0.0.1:9000".parse().unwrap()))
             .with_lan_ip(Ipv4Addr::new(10, 1, 2, 3))
     }
 
@@ -202,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_rejects_a_relay_without_a_peer() {
+    fn resolve_rejects_a_forwarder_without_a_peer() {
         let mut config = config();
         config.links.clear();
         assert!(config.resolve().is_err());

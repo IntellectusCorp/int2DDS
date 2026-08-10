@@ -1,8 +1,8 @@
-//! The link between two gateways.
+//! The link between two forwarders.
 //!
-//! The gateway only ever sees frames: a payload plus the channel that says
+//! The forwarder only ever sees frames: a payload plus the channel that says
 //! which of the two LAN ports the datagram entered by, which is the same port
-//! the peer gateway must deliver it to on the other side. How a frame reaches
+//! the peer forwarder must deliver it to on the other side. How a frame reaches
 //! the peer is the transport's business, so the length prefix below lives with
 //! the TCP transport that needs it — a datagram loses its own boundaries inside
 //! a byte stream, and a transport that preserves boundaries would not carry it.
@@ -23,7 +23,7 @@ use super::config::LinkRole;
 const RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const DIAL_TIMEOUT: Duration = Duration::from_millis(200);
 
-/// Which of the configured peer gateways a link stands for. Links are numbered
+/// Which of the configured peer forwarders a link stands for. Links are numbered
 /// by their place in the configuration, which is stable for the run and needs
 /// no identity handshake with the peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -58,10 +58,10 @@ pub(crate) struct Frame {
     pub(crate) payload: Vec<u8>,
 }
 
-/// The end of the link this gateway owns. It outlives every connection made
+/// The end of the link this forwarder owns. It outlives every connection made
 /// through it, because a peer that goes away has to be able to come back.
 pub(crate) trait LinkEndpoint: Send {
-    /// Blocks until the peer gateway is reachable, retrying until then.
+    /// Blocks until the peer forwarder is reachable, retrying until then.
     /// `None` once shutdown is set.
     fn connect(&self, shutdown: &AtomicBool) -> Option<Arc<dyn LinkConnection>>;
 }
@@ -141,7 +141,7 @@ impl LinkConnection for TcpLink {
 }
 
 /// Wide enough for a fragmented RTPS datagram, narrow enough that a corrupted
-/// length cannot make the relay allocate without bound.
+/// length cannot make the forwarder allocate without bound.
 const MAX_FRAME_LEN: usize = 64 * 1024;
 
 fn write_frame<W: Write>(writer: &mut W, channel: Channel, payload: &[u8]) -> io::Result<()> {

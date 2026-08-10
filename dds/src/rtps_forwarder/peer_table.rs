@@ -1,8 +1,8 @@
 //! Where a participant lives, keyed by GUID prefix.
 //!
-//! Every relayed datagram is routed by this table alone: a prefix is either a
-//! participant on the gateway's own network, in which case its real addresses
-//! are known, or a participant behind one of the peer gateways, in which case
+//! Every forwarded datagram is routed by this table alone: a prefix is either a
+//! participant on the forwarder's own network, in which case its real addresses
+//! are known, or a participant behind one of the peer forwarders, in which case
 //! the only way to reach it is the link it was learned on. An entry lives as
 //! long as the lease its owner announced, so a participant that stops
 //! announcing is forgotten even when it never got to say goodbye.
@@ -113,7 +113,7 @@ impl PeerTable {
     }
 
     /// A poisoned table would strand every route, so the lock is recovered
-    /// instead of propagating the panic into the relay threads.
+    /// instead of propagating the panic into the forwarder threads.
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<GuidPrefix, Entry>> {
         self.routes.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }

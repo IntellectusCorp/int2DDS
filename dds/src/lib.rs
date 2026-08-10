@@ -16,8 +16,9 @@ pub use bytes;
 pub use dcps::*;
 pub mod common;
 pub mod config;
-pub mod route_gateway;
+
 pub mod rtps;
+pub mod rtps_forwarder;
 #[doc(hidden)]
 pub mod serialize;
 pub mod xtypes;

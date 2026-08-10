@@ -3,7 +3,7 @@
 //! The decision is made on addresses rather than on anything the participant
 //! says about itself, because the deployment already decides which machines
 //! reach the far network and an address is what expresses that. A participant
-//! that is turned away here never reaches the peer gateway at all, so the cost
+//! that is turned away here never reaches the peer forwarder at all, so the cost
 //! it would have added to the link is never paid.
 
 use std::net::Ipv4Addr;
@@ -57,29 +57,29 @@ pub(crate) enum Verdict {
 pub(crate) struct PeerPolicy {
     allowed: Vec<Ipv4Prefix>,
     denied: Vec<Ipv4Prefix>,
-    max_relayed: Option<usize>,
+    max_forwarded: Option<usize>,
 }
 
 impl PeerPolicy {
     pub(crate) fn new(
         allowed: Vec<Ipv4Prefix>,
         denied: Vec<Ipv4Prefix>,
-        max_relayed: Option<usize>,
+        max_forwarded: Option<usize>,
     ) -> Self {
-        Self { allowed, denied, max_relayed }
+        Self { allowed, denied, max_forwarded }
     }
 
     /// A participant may advertise one address per interface it holds, and any
     /// of them identifies the same machine. Being denied on one is therefore
     /// enough to be turned away, while being allowed takes only one match.
     ///
-    /// `already_relayed` is how many participants the gateway carries now, and
+    /// `already_forwarded` is how many participants the forwarder carries now, and
     /// `is_renewal` says the participant is one of them: a participant that is
     /// already through must never be evicted by the cap it was admitted under.
     pub(crate) fn judge(
         &self,
         addresses: &[Ipv4Addr],
-        already_relayed: usize,
+        already_forwarded: usize,
         is_renewal: bool,
     ) -> Verdict {
         if addresses.iter().any(|address| self.denied.iter().any(|p| p.contains(*address))) {
@@ -90,8 +90,8 @@ impl PeerPolicy {
         {
             return Verdict::Denied;
         }
-        match self.max_relayed {
-            Some(max) if !is_renewal && already_relayed >= max => Verdict::OverCapacity,
+        match self.max_forwarded {
+            Some(max) if !is_renewal && already_forwarded >= max => Verdict::OverCapacity,
             _ => Verdict::Admit,
         }
     }

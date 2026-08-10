@@ -1,6 +1,6 @@
-//! What the relay costs as the two networks grow.
+//! What the forwarder costs as the two networks grow.
 //!
-//! The relay makes every participant discoverable to every participant on the
+//! The forwarder makes every participant discoverable to every participant on the
 //! far network, and discovery is directed traffic, so what crosses the link
 //! grows with the number of participant pairs rather than the number of
 //! participants. Sweeping the participant count is what makes that visible;
@@ -29,7 +29,7 @@ use int2dds::{
         data_writer::DataWriter,
         qos::{DataWriterQos, PublisherQos},
     },
-    route_gateway::{LinkRole, LinkStats, RelayConfig, RelayGateway},
+    rtps_forwarder::{Forwarder, ForwarderConfig, LinkRole, LinkStats},
     subscription::{
         data_reader::DataReader,
         qos::{DataReaderQos, SubscriberQos},
@@ -42,13 +42,13 @@ const SAMPLE_COUNT: i16 = 5;
 const MATCH_TIMEOUT_MS: u64 = 60_000;
 const DELIVERY_TIMEOUT_MS: u64 = 30_000;
 
-struct GatewayPorts {
+struct ForwarderPorts {
     metatraffic: u16,
     user_data: u16,
     link: u16,
 }
 
-impl GatewayPorts {
+impl ForwarderPorts {
     fn for_domain(domain_id: i32) -> Self {
         let base = 30000 + (domain_id as u16) * 4;
         Self { metatraffic: base, user_data: base + 1, link: base + 2 }
@@ -177,24 +177,24 @@ fn create_reader(participant: &DomainParticipant, topic_name: &str) -> DataReade
 fn measure(participants_per_side: usize, topics_each: usize) -> Measurement {
     let domain_a = next_domain_id();
     let domain_b = next_domain_id();
-    let ports_a = GatewayPorts::for_domain(domain_a);
-    let ports_b = GatewayPorts::for_domain(domain_b);
+    let ports_a = ForwarderPorts::for_domain(domain_a);
+    let ports_b = ForwarderPorts::for_domain(domain_b);
     let link_address: std::net::SocketAddr = format!("127.0.0.1:{}", ports_a.link).parse().unwrap();
 
-    let gateway_a = RelayGateway::start(RelayConfig::new(
+    let forwarder_a = Forwarder::start(ForwarderConfig::new(
         domain_a as u32,
         ports_a.metatraffic,
         ports_a.user_data,
         LinkRole::Listen(link_address),
     ))
-    .expect("gateway A failed to start");
-    let gateway_b = RelayGateway::start(RelayConfig::new(
+    .expect("forwarder A failed to start");
+    let forwarder_b = Forwarder::start(ForwarderConfig::new(
         domain_b as u32,
         ports_b.metatraffic,
         ports_b.user_data,
         LinkRole::Connect(link_address),
     ))
-    .expect("gateway B failed to start");
+    .expect("forwarder B failed to start");
 
     let factory = DomainParticipantFactory::get_instance();
     let mut writer_participants = Vec::new();
@@ -282,7 +282,7 @@ fn measure(participants_per_side: usize, topics_each: usize) -> Measurement {
         participants_per_side, topics_each
     );
 
-    let stats = gateway_a.link_stats();
+    let stats = forwarder_a.link_stats();
 
     drop(writers);
     drop(readers);
@@ -294,8 +294,8 @@ fn measure(participants_per_side: usize, topics_each: usize) -> Measurement {
         participant.delete_contained_entities().unwrap();
         factory.delete_participant(participant).unwrap();
     }
-    gateway_a.stop();
-    gateway_b.stop();
+    forwarder_a.stop();
+    forwarder_b.stop();
 
     Measurement { participants_per_side, topics_each, stats }
 }
@@ -310,7 +310,7 @@ fn discovery_cost_is_quadratic_in_participants_and_cheap_in_topics() {
     let sweep: Vec<Measurement> = [1usize, 2, 4, 8].iter().map(|n| measure(*n, 1)).collect();
     let more_topics = measure(1, 4);
 
-    println!("\nRelay link cost");
+    println!("\nForwarder link cost");
     for measurement in &sweep {
         measurement.report();
     }

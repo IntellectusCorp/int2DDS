@@ -1,7 +1,7 @@
 //! In-place rewrite of a discovery announcement.
 //!
-//! A relayed participant must look, to the receiving network, like a plain
-//! local participant that happens to live at the gateway's address. Only the
+//! A forwarded participant must look, to the receiving network, like a plain
+//! local participant that happens to live at the forwarder's address. Only the
 //! locators and the domain id have to change, and both are fixed width fields,
 //! so the payload is edited in place: no parameter is inserted or removed and
 //! every RTPS length field upstream stays valid. Locators that must disappear
@@ -10,7 +10,7 @@
 //! An endpoint announcement needs the same treatment for the opposite reason.
 //! It carries the addresses its own network gave it, which mean nothing on the
 //! receiving one, so they are removed and the endpoint is left to inherit its
-//! participant's locators, which the gateway has already rewritten.
+//! participant's locators, which the forwarder has already rewritten.
 
 use std::{
     net::{Ipv4Addr, SocketAddrV4},
@@ -118,12 +118,12 @@ pub(crate) fn read_lease(payload: &[u8]) -> Option<Duration> {
     Some(Duration::from_secs(seconds as u64))
 }
 
-/// Replaces every advertised address with the gateway's own and retargets the
+/// Replaces every advertised address with the forwarder's own and retargets the
 /// announcement at the local domain. Returns false when the payload is not a
 /// parameter list this function can walk.
 pub(crate) fn rewrite(
     payload: &mut [u8],
-    gateway_ip: Ipv4Addr,
+    forwarder_ip: Ipv4Addr,
     metatraffic_port: u16,
     user_data_port: u16,
     domain_id: u32,
@@ -147,7 +147,7 @@ pub(crate) fn rewrite(
                     metatraffic_written = write_locator(
                         payload,
                         parameter,
-                        gateway_ip,
+                        forwarder_ip,
                         metatraffic_port,
                         little_endian,
                     );
@@ -160,13 +160,13 @@ pub(crate) fn rewrite(
                     user_data_written = write_locator(
                         payload,
                         parameter,
-                        gateway_ip,
+                        forwarder_ip,
                         user_data_port,
                         little_endian,
                     );
                 }
             }
-            // A relayed participant is only reachable through the gateway, so
+            // A forwarded participant is only reachable through the forwarder, so
             // it must not claim to be on any multicast group of this network.
             PID_METATRAFFIC_MULTICAST_LOCATOR | PID_DEFAULT_MULTICAST_LOCATOR => {
                 neutralize(payload, parameter, little_endian);
@@ -180,7 +180,7 @@ pub(crate) fn rewrite(
 
 /// Takes the addresses out of an endpoint announcement. A receiver left with
 /// none falls back to the announcing participant's locators, which is exactly
-/// the gateway.
+/// the forwarder.
 pub(crate) fn strip_endpoint_locators(payload: &mut [u8]) {
     let Some(little_endian) = payload_is_little_endian(payload) else {
         return;
@@ -406,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_redirects_every_address_to_the_gateway() {
+    fn rewrite_redirects_every_address_to_the_forwarder() {
         let mut payload = announcement();
         let before = payload.len();
 

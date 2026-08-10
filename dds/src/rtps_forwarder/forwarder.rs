@@ -1,14 +1,14 @@
-//! The relay itself.
+//! The forwarder itself.
 //!
-//! The gateway is not a participant. It owns three UDP ports on its own network
-//! and one link per peer gateway, and it moves datagrams between them without
-//! ever interpreting what they carry. The one datagram it does touch is the
+//! The forwarder is not a participant. It owns three UDP ports on its own
+//! network and one link per peer forwarder, and it moves datagrams between them
+//! without ever interpreting what they carry. The one datagram it touches is the
 //! SPDP announcement: rewriting the addresses inside it is what makes the
 //! participants on both networks discover and match each other directly.
 //!
 //! Links never feed each other. A datagram that arrives on one link is either
 //! delivered to this network or dropped, so several peers form a star around
-//! each network and no datagram can circle between gateways.
+//! each network and no datagram can circle between forwarders.
 
 use std::{
     io,
@@ -27,7 +27,7 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use crate::rtps::common::locator::MULTICAST_IP;
 
 use super::{
-    config::{RelayConfig, ResolvedConfig},
+    config::{ForwarderConfig, ResolvedConfig},
     discovery_rewrite::{self, SpdpEndpoints},
     link::{self, Channel, Frame, LinkConnection, LinkEndpoint, LinkId},
     peer_policy::Verdict,
@@ -40,7 +40,7 @@ const RECV_BUFFER_LEN: usize = 64 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const LINK_QUEUE_LEN: usize = 1024;
 
-pub struct RelayGateway {
+pub struct Forwarder {
     shared: Arc<Shared>,
     shutdown: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
@@ -57,15 +57,15 @@ struct Shared {
     counters: LinkCounters,
 }
 
-/// One peer gateway: the queue feeding it and the connection carrying it,
+/// One peer forwarder: the queue feeding it and the connection carrying it,
 /// which is absent whenever that peer is unreachable.
 struct Link {
     tx: Sender<Frame>,
     connection: Mutex<Option<Arc<dyn LinkConnection>>>,
 }
 
-impl RelayGateway {
-    pub fn start(config: RelayConfig) -> io::Result<Self> {
+impl Forwarder {
+    pub fn start(config: ForwarderConfig) -> io::Result<Self> {
         let config = config.resolve()?;
 
         let discovery_socket = open_multicast_socket(&config)?;
@@ -103,21 +103,21 @@ impl RelayGateway {
 
         let mut threads = Vec::new();
         threads.push(spawn_receiver(
-            "relay-lan-discovery",
+            "forwarder-lan-discovery",
             shared.clone(),
             shutdown.clone(),
             |shared| &shared.discovery_socket,
             |shared, datagram| shared.handle_lan(datagram, Channel::Metatraffic),
         ));
         threads.push(spawn_receiver(
-            "relay-lan-metatraffic",
+            "forwarder-lan-metatraffic",
             shared.clone(),
             shutdown.clone(),
             |shared| &shared.metatraffic_socket,
             |shared, datagram| shared.handle_lan(datagram, Channel::Metatraffic),
         ));
         threads.push(spawn_receiver(
-            "relay-lan-user-data",
+            "forwarder-lan-user-data",
             shared.clone(),
             shutdown.clone(),
             |shared| &shared.user_data_socket,
@@ -126,18 +126,18 @@ impl RelayGateway {
 
         for (index, (queue, endpoint)) in queues.into_iter().zip(endpoints).enumerate() {
             let id = LinkId(index);
-            threads.push(spawn_named(&format!("relay-link-writer-{}", index), {
+            threads.push(spawn_named(&format!("forwarder-link-writer-{}", index), {
                 let shared = shared.clone();
                 let shutdown = shutdown.clone();
                 move || run_link_writer(shared, id, queue, shutdown)
             }));
-            threads.push(spawn_named(&format!("relay-link-reader-{}", index), {
+            threads.push(spawn_named(&format!("forwarder-link-reader-{}", index), {
                 let shared = shared.clone();
                 let shutdown = shutdown.clone();
                 move || run_link_reader(shared, id, endpoint, shutdown)
             }));
         }
-        threads.push(spawn_named("relay-reaper", {
+        threads.push(spawn_named("forwarder-reaper", {
             let shared = shared.clone();
             let shutdown = shutdown.clone();
             move || run_reaper(shared, shutdown)
@@ -146,7 +146,7 @@ impl RelayGateway {
         Ok(Self { shared, shutdown, threads })
     }
 
-    /// Address this gateway advertises on behalf of every relayed participant.
+    /// Address this forwarder advertises on behalf of every forwarded participant.
     pub fn advertised_address(&self) -> Ipv4Addr {
         self.shared.config.lan_ip
     }
@@ -161,7 +161,7 @@ impl RelayGateway {
     }
 }
 
-impl Drop for RelayGateway {
+impl Drop for Forwarder {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
 
@@ -194,7 +194,7 @@ impl Shared {
         }
 
         // A participant the policy turned away still hears the announcements
-        // this gateway injects, and would address the far network directly. It
+        // this forwarder injects, and would address the far network directly. It
         // is held back here rather than at the announcement alone, because only
         // participants the table admitted may put anything on a link.
         if !self.table.is_local(&scanned.source_prefix) {
@@ -210,11 +210,11 @@ impl Shared {
     }
 
     /// A local participant announcing itself. Its real addresses are recorded
-    /// before the announcement is handed to the peer gateway untouched: the
-    /// rewrite belongs to whichever gateway delivers it, because only that one
+    /// before the announcement is handed to the peer forwarder untouched: the
+    /// rewrite belongs to whichever forwarder delivers it, because only that one
     /// knows the address its own network can reach.
     fn handle_lan_announcement(&self, datagram: &[u8], scanned: &ScannedMessage) {
-        // Announcements this gateway injected come straight back on the group.
+        // Announcements this forwarder injected come straight back on the group.
         if self.table.is_remote(&scanned.source_prefix) {
             return;
         }
@@ -274,14 +274,14 @@ impl Shared {
             Channel::UserData => (&self.user_data_socket, endpoints.user_data),
         };
         if let Err(e) = socket.send_to(&datagram, target) {
-            log::warn!("Relay failed to deliver a datagram to {}: {}", target, e);
+            log::warn!("Forwarder failed to deliver a datagram to {}: {}", target, e);
         }
     }
 
     /// A participant on the far network, seen through the link. It is given the
-    /// gateway's own addresses so that this network can reach it at all.
+    /// forwarder's own addresses so that this network can reach it at all.
     fn inject_announcement(&self, link: LinkId, datagram: &mut [u8], scanned: &ScannedMessage) {
-        // Whatever the peer gateway says about this network came from here.
+        // Whatever the peer forwarder says about this network came from here.
         if self.table.is_local(&scanned.source_prefix) {
             return;
         }
@@ -299,14 +299,14 @@ impl Shared {
                 self.config.lan_domain_id,
             );
             if !rewritten {
-                log::warn!("Relay dropped an announcement it could not rewrite");
+                log::warn!("Forwarder dropped an announcement it could not rewrite");
                 return;
             }
             self.table.insert_remote(scanned.source_prefix, link, lease, Instant::now());
         }
 
         if let Err(e) = self.discovery_socket.send_to(datagram, self.multicast_target) {
-            log::warn!("Relay failed to inject an announcement: {}", e);
+            log::warn!("Forwarder failed to inject an announcement: {}", e);
         }
     }
 
@@ -323,12 +323,12 @@ impl Shared {
         match verdict {
             Verdict::Admit => true,
             Verdict::Denied => {
-                log::debug!("Relay policy turned away a participant at {:?}", addresses);
+                log::debug!("Forwarder policy turned away a participant at {:?}", addresses);
                 false
             }
             Verdict::OverCapacity => {
                 log::warn!(
-                    "Relay is already carrying {} participant(s), turning away {:?}",
+                    "Forwarder is already carrying {} participant(s), turning away {:?}",
                     self.table.local_count(),
                     addresses
                 );
@@ -337,7 +337,7 @@ impl Shared {
         }
     }
 
-    /// True for the addresses this gateway writes into every announcement it
+    /// True for the addresses this forwarder writes into every announcement it
     /// forwards, which no participant of its own network can hold.
     fn advertises(&self, endpoints: &SpdpEndpoints) -> bool {
         *endpoints.metatraffic.ip() == self.config.lan_ip
@@ -345,14 +345,14 @@ impl Shared {
     }
 
     /// Nothing behind a link is reachable while it is down, and that peer
-    /// gateway announces all of it again once the link is back. The other
+    /// forwarder announces all of it again once the link is back. The other
     /// links keep their participants.
     fn handle_link_lost(&self, link: LinkId) {
         *lock(&self.links[link.0].connection) = None;
         let forgotten = self.table.forget_remote(link);
         if forgotten > 0 {
             log::info!(
-                "Relay link {} lost, {} relayed participant(s) forgotten",
+                "Forwarder link {} lost, {} forwarded participant(s) forgotten",
                 link.0,
                 forgotten
             );
@@ -370,7 +370,7 @@ impl Shared {
     fn enqueue(&self, link: LinkId, channel: Channel, datagram: &[u8]) {
         let frame = Frame { channel, payload: datagram.to_vec() };
         if self.links[link.0].tx.try_send(frame).is_err() {
-            log::warn!("Relay queue for link {} is full, datagram dropped", link.0);
+            log::warn!("Forwarder queue for link {} is full, datagram dropped", link.0);
         }
     }
 
@@ -382,7 +382,7 @@ impl Shared {
         match connection.send(frame.channel, &frame.payload) {
             Ok(()) => self.counters.count_sent(frame.channel, frame.payload.len()),
             Err(e) => {
-                log::warn!("Relay link write failed: {}", e);
+                log::warn!("Forwarder link write failed: {}", e);
                 // The reader is blocked on the same connection and would
                 // otherwise sit there until the transport gives up, so it is
                 // torn down here.
@@ -425,7 +425,7 @@ fn run_link_reader(
                 Ok(frame) => shared.handle_link_frame(link, frame),
                 Err(e) => {
                     if !shutdown.load(Ordering::Relaxed) {
-                        log::warn!("Relay link {} closed: {}", link.0, e);
+                        log::warn!("Forwarder link {} closed: {}", link.0, e);
                     }
                     break;
                 }
@@ -441,7 +441,7 @@ fn run_reaper(shared: Arc<Shared>, shutdown: Arc<AtomicBool>) {
         thread::sleep(POLL_INTERVAL);
         let expired = shared.table.purge_expired(Instant::now());
         if expired > 0 {
-            log::debug!("Relay forgot {} participant(s) that stopped announcing", expired);
+            log::debug!("Forwarder forgot {} participant(s) that stopped announcing", expired);
         }
     }
 }
@@ -465,7 +465,7 @@ where
                 Err(ref e) if is_timeout(e) => continue,
                 Err(e) => {
                     if !shutdown.load(Ordering::Relaxed) {
-                        log::warn!("Relay receive failed: {}", e);
+                        log::warn!("Forwarder receive failed: {}", e);
                     }
                 }
             }
@@ -474,7 +474,10 @@ where
 }
 
 fn spawn_named<F: FnOnce() + Send + 'static>(name: &str, body: F) -> JoinHandle<()> {
-    thread::Builder::new().name(name.to_string()).spawn(body).expect("failed to spawn relay thread")
+    thread::Builder::new()
+        .name(name.to_string())
+        .spawn(body)
+        .expect("failed to spawn forwarder thread")
 }
 
 fn open_multicast_socket(config: &ResolvedConfig) -> io::Result<UdpSocket> {

@@ -1,6 +1,6 @@
 //! Byte level scan of an RTPS datagram.
 //!
-//! The relay never deserializes a message. It only needs three facts to route
+//! The forwarder never deserializes a message. It only needs three facts to route
 //! one: who sent it, who it is addressed to, and whether it carries a discovery
 //! announcement whose locators must be rewritten. Everything else stays opaque
 //! and is forwarded untouched.
@@ -36,7 +36,7 @@ const STATUS_INFO_VALUE_LEN: usize = 4;
 const STATUS_INFO_DEPARTURE: u8 = 0x03;
 
 /// What a discovery announcement describes. The two kinds are rewritten
-/// differently and are the only datagrams the relay looks inside.
+/// differently and are the only datagrams the forwarder looks inside.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Announcement {
     Participant,

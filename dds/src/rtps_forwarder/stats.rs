@@ -1,6 +1,6 @@
 //! What the link actually carries.
 //!
-//! The relay lets every participant discover every participant on the far
+//! The forwarder lets every participant discover every participant on the far
 //! network, so discovery cost grows with the number of participants while
 //! sample cost does not. Metatraffic and user data are therefore counted apart:
 //! their ratio is what says how many participants this design can carry across
