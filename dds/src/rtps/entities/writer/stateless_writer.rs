@@ -121,13 +121,25 @@ impl StatelessWriter {
             )),
         }
     }
-    pub(crate) fn reader_locator_add(&self, a_locator: ReaderLocator) {
+    /// Add `a_locator` unless the same (remote reader, locator) pair is already
+    /// present. Returns whether it was added.
+    ///
+    /// The check happens under the same lock as the insert: SEDP matching can be
+    /// driven concurrently by the local-creation path and the SEDP receive path,
+    /// and a plain `matched_reader_is_matched` guard at the call site leaves a
+    /// window where both callers pass it and push duplicate locators.
+    pub(crate) fn reader_locator_add(&self, a_locator: ReaderLocator) -> bool {
         match self.reader_locators.lock() {
             Ok(mut reader_locators) => {
+                if reader_locators.contains(&a_locator) {
+                    return false;
+                }
                 reader_locators.push(a_locator);
+                true
             }
             Err(e) => {
                 error!("Failed to lock reader_locators: {}", e);
+                false
             }
         }
     }
