@@ -2952,7 +2952,7 @@ mod tests {
                 .writer_cache()
                 .lock()
                 .expect("cache lock")
-                .add_change_builtin(change)
+                .add_change_builtin(change, sedp_writer.as_ref())
                 .expect("builtin add");
         }
 
@@ -2974,6 +2974,53 @@ mod tests {
             *sends.lock().expect("send counter"),
             3,
             "each announcement already in the history has to be sent to the new peer"
+        );
+    }
+
+    /// A builtin writer transmits because it has data, not because a caller remembered to ask:
+    /// `add_change_builtin` used to only insert, so a missed explicit send meant no DATA at all.
+    #[test]
+    fn adding_a_builtin_change_transmits_it_to_matched_readers() {
+        use crate::rtps::logic::user_logic::UserLogic;
+
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let transport = Arc::new(CountingTransport::default());
+        let sends = transport.sends.clone();
+        participant
+            .set_user_logic(Arc::new(Some(UserLogic::new(participant.clone(), transport.clone()))));
+        participant.wire_builtin_writer_histories_for_test();
+
+        let sedp_writer = participant.sedp_builtin_publications_writer();
+        let remote_reader_guid = Guid::new([5u8; 12], EntityId::SEDP_BUILTIN_PUBLICATIONS_READER);
+        sedp_writer.matched_reader_add(ReaderProxy::new(
+            remote_reader_guid,
+            remote_reader_guid.entity_id(),
+            vec![Locator::from_ip_v4_addr_and_port(&"127.0.0.1".parse().unwrap(), 7410)],
+            Vec::new(),
+            SequenceNumber::UNKNOWN,
+            SequenceNumber::UNKNOWN,
+            false,
+            true,
+            SubscriptionBuiltinTopicData::default(),
+            SequenceNumber::new(0, 0),
+        ));
+
+        let change = Arc::new(sedp_writer.new_change(
+            ChangeKind::Alive,
+            vec![1, 2, 3],
+            InstanceHandle::from_guid(&remote_reader_guid),
+            None,
+        ));
+        sedp_writer
+            .writer_cache()
+            .lock()
+            .expect("cache lock")
+            .add_change_builtin(change, sedp_writer.as_ref())
+            .expect("builtin add");
+
+        assert!(
+            *sends.lock().expect("send counter") > 0,
+            "the announcement has to reach the matched reader without anyone asking for it"
         );
     }
 }

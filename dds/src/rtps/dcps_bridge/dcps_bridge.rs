@@ -303,13 +303,12 @@ impl DcpsBridge {
             Some(RtpsTime::now()),
         );
         let cache_change = Arc::new(change);
-        let _ = self
-            .participant
-            .sedp_builtin_publications_writer()
+        let sedp_writer = self.participant.sedp_builtin_publications_writer();
+        let _ = sedp_writer
             .writer_cache()
             .lock()
             .unwrap()
-            .add_change_builtin(cache_change.clone());
+            .add_change_builtin(cache_change.clone(), sedp_writer.as_ref());
 
         self.participant
             .remote_publications()
@@ -446,13 +445,12 @@ impl DcpsBridge {
             Some(RtpsTime::now()),
         );
         let cache_change = Arc::new(change);
-        let _ = self
-            .participant
-            .sedp_builtin_subscriptions_writer()
+        let sedp_writer = self.participant.sedp_builtin_subscriptions_writer();
+        let _ = sedp_writer
             .writer_cache()
             .lock()
             .unwrap()
-            .add_change_builtin(cache_change.clone());
+            .add_change_builtin(cache_change.clone(), sedp_writer.as_ref());
 
         self.participant
             .remote_subscriptions()
@@ -657,9 +655,8 @@ impl DcpsBridge {
             Some(RtpsTime::now()),
         );
         let cache_change = Arc::new(change);
-        let _ = self
-            .participant
-            .sedp_builtin_subscriptions_writer()
+        let sedp_writer = self.participant.sedp_builtin_subscriptions_writer();
+        let _ = sedp_writer
             .writer_cache()
             .lock()
             .map_err(|e| {
@@ -668,7 +665,7 @@ impl DcpsBridge {
                     format!("Failed to lock history cache: {}", e),
                 )
             })?
-            .add_change_builtin(cache_change.clone());
+            .add_change_builtin(cache_change.clone(), sedp_writer.as_ref());
 
         self.send_sedp_message_and_match(
             cache_change,
@@ -729,9 +726,8 @@ impl DcpsBridge {
             Some(RtpsTime::now()),
         );
         let cache_change = Arc::new(change);
-        let _ = self
-            .participant
-            .sedp_builtin_publications_writer()
+        let sedp_writer = self.participant.sedp_builtin_publications_writer();
+        let _ = sedp_writer
             .writer_cache()
             .lock()
             .map_err(|e| {
@@ -740,7 +736,7 @@ impl DcpsBridge {
                     format!("Failed to lock history cache: {}", e),
                 )
             })?
-            .add_change_builtin(cache_change.clone());
+            .add_change_builtin(cache_change.clone(), sedp_writer.as_ref());
 
         self.send_sedp_message_and_match(
             cache_change,
@@ -1031,7 +1027,7 @@ mod tests {
                 );
                 match writer.writer_cache().lock() {
                     Ok(mut writer_cache) => {
-                        let _ = writer_cache.add_change_builtin(Arc::new(change));
+                        let _ = writer_cache.add_change_builtin(Arc::new(change), writer.as_ref());
                     }
                     Err(e) => {
                         log::error!("writer_cache lock error: {:?}", e);
