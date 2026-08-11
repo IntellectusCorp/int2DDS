@@ -44,6 +44,7 @@ use crate::{
 use bytes::Bytes;
 use core::net::SocketAddr;
 use log::{debug, error, warn};
+use smallvec::SmallVec;
 use speedy::Readable;
 use std::sync::Arc;
 
@@ -67,8 +68,12 @@ pub(crate) struct MessageReceiver {
     source_guid_prefix: GuidPrefix,
     dest_guid_prefix: GuidPrefix,
     participant_guid_prefix: GuidPrefix,
-    unicast_reply_locator_list: Vec<Locator>,
-    multicast_reply_locator_list: Vec<Locator>,
+    // RTPS 8.3.4 Receiver state. Maintained per the spec but not read by anything yet, so as
+    // `Vec` these were two heap allocations on every received datagram for nothing. Inline
+    // capacity 1, not the 4 used elsewhere for structured elements: every writer here stores
+    // exactly one locator, and only an INFO_REPLY carrying a longer list ever spills.
+    unicast_reply_locator_list: SmallVec<[Locator; 1]>,
+    multicast_reply_locator_list: SmallVec<[Locator; 1]>,
     have_timestamp: bool,
     timestamp: RtpsTime,
     rtps_message: Option<Arc<RtpsMessage<'static>>>,
@@ -86,15 +91,15 @@ impl MessageReceiver {
             source_guid_prefix: GUIDPREFIX_UNKNOWN,
             dest_guid_prefix: participant_guid_prefix,
             participant_guid_prefix,
-            unicast_reply_locator_list: vec![Locator::from_ip(
+            unicast_reply_locator_list: SmallVec::from_buf([Locator::from_ip(
                 from_addr.ip(),
                 LOCATOR_PORT_INVALID,
-            )],
-            multicast_reply_locator_list: vec![Locator::new(
+            )]),
+            multicast_reply_locator_list: SmallVec::from_buf([Locator::new(
                 LOCATOR_KIND_UDP_V4,
                 LOCATOR_PORT_INVALID,
                 LOCATOR_ADDRESS_INVALID,
-            )],
+            )]),
             have_timestamp: false,
             timestamp: RtpsTime::INVALID,
             rtps_message: None,
@@ -159,9 +164,11 @@ impl MessageReceiver {
         info_reply_header: &SubmessageHeader,
         info_reply: &InfoReply,
     ) {
-        self.unicast_reply_locator_list = info_reply.unicast_locator_list().to_vec();
+        self.unicast_reply_locator_list =
+            info_reply.unicast_locator_list().iter().cloned().collect();
         if let Some(true) = info_reply_header.multicast_flag() {
-            self.multicast_reply_locator_list = info_reply.multicast_locator_list().to_vec();
+            self.multicast_reply_locator_list =
+                info_reply.multicast_locator_list().iter().cloned().collect();
         } else {
             self.multicast_reply_locator_list.clear();
         }

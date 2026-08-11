@@ -69,6 +69,146 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread::{self, JoinHandle};
 
+/// Delay before the first NACK_FRAG, so a burst of DATA_FRAG is answered once rather than
+/// per fragment.
+const NACK_FRAG_SUPPRESSION: Duration = Duration::from_millis(5);
+
+/// Delay before re-asking when the request produced nothing.
+///
+/// Only silence gets here: every retransmitted fragment carries a heartbeat that re-arms the
+/// suppression timer, so a healthy repair never waits this long. Its job is to bound the case
+/// where the NACK_FRAG itself, or every fragment answering it, was lost -- which otherwise waits
+/// for the writer's periodic heartbeat (2 s by default).
+const NACK_FRAG_RETRY: Duration = Duration::from_millis(200);
+
+/// How many times a request re-asks before giving the job back to the periodic heartbeat.
+///
+/// Bounded on purpose. A writer that has gone away can leave an incomplete sample behind whose
+/// proxy is still matched; without a budget this would re-ask five times a second forever, which
+/// the one-shot timer it replaces never did.
+const NACK_FRAG_MAX_RETRIES: u32 = 10;
+
+/// Everything a deferred NACK_FRAG needs to build itself, so it can be re-armed without the
+/// caller's stack.
+#[derive(Clone)]
+struct NackFragRequest {
+    writer_proxies: Arc<Mutex<Vec<WriterProxy>>>,
+    transport: Arc<dyn TransportPlugin>,
+    participant: Arc<Participant>,
+    reader_guid: Guid,
+    remote_writer_guid: Guid,
+    /// The change the fragment numbers belong to; also keys the timer.
+    incomplete_sn: SequenceNumber,
+    /// For the piggybacked ACKNACK, which is about sequence numbers rather than fragments.
+    acknack_last_sn: SequenceNumber,
+    acknack_missing_changes: Vec<SequenceNumber>,
+    /// Re-asks left before the periodic heartbeat takes over again.
+    retries_left: u32,
+}
+
+impl NackFragRequest {
+    fn timer_id(&self) -> TimerId {
+        TimerId::NackFrag {
+            reader_entity_id: self.reader_guid.entity_id(),
+            remote_writer_guid: self.remote_writer_guid,
+            sequence_number: self.incomplete_sn,
+        }
+    }
+
+    /// Sends the request. Returns whether fragments are still outstanding, i.e. whether a retry
+    /// is owed.
+    fn fire(&self) -> bool {
+        let Ok(mut proxies) = self.writer_proxies.lock() else {
+            warn!("Failed to acquire writer_proxies lock");
+            return false;
+        };
+        let Some(proxy) =
+            proxies.iter_mut().find(|proxy| proxy.remote_writer_guid() == self.remote_writer_guid)
+        else {
+            return false;
+        };
+
+        // Recomputed rather than carried: fragments may have arrived since this was scheduled,
+        // and a retry that re-requests them would pull the whole sample down again.
+        let Some((_, missing_fragments)) =
+            proxy.calculate_missing_fragments(self.incomplete_sn, self.incomplete_sn)
+        else {
+            return false;
+        };
+
+        proxy.increase_acknack_count();
+        proxy.increase_nackfrag_count();
+        let acknack_info = Some((
+            proxy.acknack_count(),
+            self.acknack_last_sn,
+            self.acknack_missing_changes.clone(),
+        ));
+
+        let Ok(buffer) = MessageCreator::create_nackfrag_msg(
+            self.participant.guid(),
+            proxy.remote_writer_guid(),
+            self.reader_guid.entity_id(),
+            proxy.remote_writer_guid().entity_id(),
+            self.incomplete_sn,
+            missing_fragments,
+            proxy.nackfrag_count(),
+            acknack_info,
+        ) else {
+            return true;
+        };
+
+        // Same SHM > TCP > UDP priority filter as send_rtps_message_to_locators, with can_handle
+        // guarding the local-side reachability.
+        let locs: Vec<&Locator> = proxy.unicast_locator_list().iter().collect();
+        let try_kind = |is_kind: fn(&Locator) -> bool| -> Option<Vec<&Locator>> {
+            let v: Vec<&Locator> = locs
+                .iter()
+                .copied()
+                .filter(|l| is_kind(l) && self.transport.can_handle(l))
+                .collect();
+            (!v.is_empty()).then_some(v)
+        };
+        let chosen: Vec<&Locator> = try_kind(Locator::is_shm)
+            .or_else(|| try_kind(Locator::is_tcp))
+            .or_else(|| try_kind(Locator::is_udp))
+            .unwrap_or(locs);
+
+        for locator in chosen {
+            match self.transport.send(&buffer, &SendTarget::UserData(locator)) {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
+                    warn!("[UserLogic] {} locator found but no {} sender available", e, e);
+                }
+                Err(e) => warn!("[UserLogic] Failed to send NACK_FRAG: {:?}", e),
+            }
+        }
+
+        true
+    }
+}
+
+/// Arms `request` to fire after `delay`, re-arming itself at [`NACK_FRAG_RETRY`] for as long as
+/// fragments stay missing.
+///
+/// A named function rather than a self-referencing closure: the callback cannot clone itself, and
+/// a non-repeating timer is dropped after it triggers, so re-adding the same `TimerId` from
+/// inside the callback lands on the next tick against an empty slot.
+fn schedule_nackfrag(request: NackFragRequest, delay: Duration) {
+    let timer_handler = TimerHandler::get_instance(request.participant.guid().prefix());
+    let Ok(handler) = timer_handler.lock() else {
+        warn!("Failed to acquire timer handler lock for NACK_FRAG");
+        return;
+    };
+    let timer_id = request.timer_id();
+    handler.add_timer(timer_id, delay, false, move || {
+        if request.fire() && request.retries_left > 0 {
+            let mut next = request.clone();
+            next.retries_left -= 1;
+            schedule_nackfrag(next, NACK_FRAG_RETRY);
+        }
+    });
+}
+
 #[allow(dead_code)]
 #[derive(Clone)]
 pub(crate) struct UserLogic {
@@ -391,23 +531,29 @@ impl UserLogic {
                 let requested_change_sn = a_change.sequence_number();
                 debug!("[UserLogic] [RequestedChanges] Fragmented change: {}", requested_change_sn);
 
-                // In case of fragment, fragment state is checked via last seq number, so
-                // use current seq number in previous heartbeat to get ack from reader for retransmitted message
-                let heartbeat_info = piggyback.then(|| {
-                    (
-                        stateful_writer.heartbeat_count(),
-                        requested_change_sn,
-                        requested_change_sn,
-                        false, // final_flag
-                        false, // liveliness_flag = false for retransmission
-                    )
-                });
                 let timestamp = Utc::now();
 
                 for fragment_num in 1..=a_change.total_fragments() {
                     let Some(fragment_data) = a_change.get_fragment_data(fragment_num) else {
                         continue;
                     };
+
+                    // Fresh count per fragment, as the initial send does: the reader drops a
+                    // heartbeat whose count did not advance, and drops it before scheduling the
+                    // NACK_FRAG timer, so a reused count stalls repair until the periodic
+                    // heartbeat.
+                    //
+                    // Fragment state is checked via last seq number, so use the current seq
+                    // number to get an ack for the retransmitted message.
+                    let heartbeat_info = piggyback.then(|| {
+                        (
+                            stateful_writer.heartbeat_count(),
+                            requested_change_sn,
+                            requested_change_sn,
+                            false, // final_flag
+                            false, // liveliness_flag = false for retransmission
+                        )
+                    });
 
                     if MessageCreator::create_data_frag_msg(
                         &a_change,
@@ -425,10 +571,15 @@ impl UserLogic {
                     )
                     .is_ok()
                     {
-                        if let Err(e) =
-                            self.send_rtps_message_to_locators(locators.iter(), &send_buffer)
-                        {
-                            warn!("Failed to send DATA_FRAG for requested change: {:?}", e);
+                        match self.send_rtps_message_to_locators(locators.iter(), &send_buffer) {
+                            Ok(_) => {
+                                if piggyback {
+                                    stateful_writer.increase_heartbeat_count();
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Failed to send DATA_FRAG for requested change: {:?}", e)
+                            }
                         }
                     }
                 }
@@ -1650,6 +1801,24 @@ impl UserLogic {
         remote_guid: Guid,
         fragment_info: Option<FragmentInfo>,
     ) -> RtpsResult<()> {
+        // The batch is decided under the matched-writer guard, but delivered after it is
+        // released. Delivery ends in the user's `on_data_available`, and a listener calling
+        // `get_matched_publications`/`get_matched_publication_data` re-locks this very mutex --
+        // `std::sync::Mutex` is not reentrant, so notifying under the guard hangs the receive
+        // thread with no timeout anywhere in the stack.
+        //
+        // Ordering does not depend on the guard. Every RTPS submessage for a participant --
+        // DATA, HEARTBEAT, GAP, DATA_FRAG -- is decoded by the one
+        // `user_traffic_unicast_listening` thread, so no two of them can race here, and the
+        // sequence-number work below (`mark_change_received`, `expected_sn`,
+        // `flush_buffered_changes`) all stays inside the guard.
+        //
+        // What the guard protects the proxy list against is the other threads that reach it:
+        // discovery, the sending task, `liveliness_monitor`, the NACK_FRAG timer, and any user
+        // thread calling `get_matched_publications`. None of them delivers samples, so releasing
+        // before delivery costs no ordering.
+        let mut change_to_add: Vec<CacheChange> = Vec::new();
+
         // Update WriterProxy state - mark as Received if data was received
         if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
             if let Ok(mut matched_writers) = stateful_reader.writer_proxies().lock() {
@@ -1690,11 +1859,9 @@ impl UserLogic {
                         flushed_changes.last().map(|c| c.sequence_number())
                     );
 
-                    let mut change_to_add: Vec<CacheChange> =
-                        Vec::with_capacity(1 + flushed_changes.len());
+                    change_to_add.reserve(1 + flushed_changes.len());
                     change_to_add.push(change);
                     change_to_add.extend(flushed_changes);
-                    self.add_change_to_reader_cache_and_notify(reader, change_to_add)?;
                 }
                 // Buffer out-of-order changes
                 else if change.sequence_number() > writer_proxy.expected_sn() {
@@ -1717,11 +1884,17 @@ impl UserLogic {
                 // 8.4.12.1.2 The Best-Effort reader checks that the sequence number associated with the change is strictly greater than
                 // the highest sequence number of all changes received in the past from this RTPS Writer
                 if change.sequence_number() >= remote_writer_info.expected_sn() {
-                    let next_sn = change.sequence_number().add(1);
-                    self.add_change_to_reader_cache_and_notify(reader, vec![change])?;
-                    remote_writer_info.set_expected_sn(next_sn);
+                    // Advancing before delivery keeps the compare-and-set atomic under the
+                    // guard. Delivery cannot report failure -- the notify helper discards
+                    // per-change results and always returns Ok -- so nothing is lost by it.
+                    remote_writer_info.set_expected_sn(change.sequence_number().add(1));
+                    change_to_add.push(change);
                 }
             }
+        }
+
+        if !change_to_add.is_empty() {
+            self.add_change_to_reader_cache_and_notify(reader, change_to_add)?;
         }
 
         Ok(())
@@ -1790,31 +1963,31 @@ impl UserLogic {
             return;
         }
 
-        // Sort incomplete fragment buffers by created_at and remove oldest ones
+        // Evict the incomplete buffers that have gone longest without receiving a
+        // fragment, so a large sample still making progress is not sacrificed
         let mut incomplete_buffers: Vec<_> = self
             .fragment_buffers
             .iter()
             .filter(|entry| !entry.value().all_fragments_received())
-            .map(|entry| (*entry.key(), entry.value().created_at))
+            .map(|entry| (*entry.key(), entry.value().last_updated))
             .collect();
 
-        // Sort in ascending order by creation time (oldest first)
-        incomplete_buffers.sort_by_key(|(_, created_at)| *created_at);
+        incomplete_buffers.sort_by_key(|(_, last_updated)| *last_updated);
 
         let buffers_to_remove = self.fragment_buffers.len() - max_size;
         let mut removed_count = 0;
 
         for (key, _) in incomplete_buffers.iter().take(buffers_to_remove) {
-            if let Some((_, _removed_buffer)) = self.fragment_buffers.remove(key) {
-                // warn!(
-                //     "Cleaned up incomplete fragment buffer: writer_guid={:?}, seq_num={:?}, \
-                //      received_fragments={}/{}, age={:.2}s",
-                //     key.0,
-                //     key.1,
-                //     removed_buffer.received_fragments.len(),
-                //     removed_buffer.total_fragments,
-                //     removed_buffer.created_at.elapsed().as_secs_f64()
-                // );
+            if let Some((_, removed_buffer)) = self.fragment_buffers.remove(key) {
+                debug!(
+                    "Evicting incomplete fragment buffer: writer={}, seq={}, fragments={}/{}, idle={:.2}s, age={:.2}s",
+                    key.0,
+                    key.1.to_i64(),
+                    removed_buffer.received_count,
+                    removed_buffer.total_fragments,
+                    removed_buffer.last_updated.elapsed().as_secs_f64(),
+                    removed_buffer.created_at.elapsed().as_secs_f64()
+                );
                 removed_count += 1;
             }
         }
@@ -1882,8 +2055,9 @@ impl UserLogic {
             match self.transport.send(buffer, &SendTarget::UserData(locator)) {
                 Ok(_) => is_sent = true,
                 Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
-                    let kind = e.to_string();
-                    warn!("[UserLogic] {} locator found but no {} sender available", kind, kind);
+                    // `io::Error` is `Display`, so the macro formats it lazily; binding a
+                    // `String` first allocated even at a level that emits nothing.
+                    warn!("[UserLogic] {} locator found but no {} sender available", e, e);
                     continue;
                 }
                 Err(e) => {
@@ -2169,6 +2343,11 @@ impl UnicastMessageProcessor for UserLogic {
                 continue;
             };
 
+            // Collected under the guard, delivered after it: delivery reaches the user's
+            // listener, which may re-lock this mutex via `get_matched_publications`.
+            let pending_delivery: Vec<CacheChange>;
+            let mut acknack_result: RtpsResult<()> = Ok(());
+
             let writer_proxies = stateful_reader.writer_proxies();
             let mut matched_writers = writer_proxies.lock().map_err(|e| {
                 RtpsError::new(
@@ -2202,35 +2381,41 @@ impl UnicastMessageProcessor for UserLogic {
             let missing_changes =
                 writer_proxy.process_heartbeat(heartbeat.first_sn, heartbeat.last_sn);
 
-            // Case when ACKNACK sending is required: no fragments or
-            // all fragments have been received
-            if !writer_proxy.has_fragmented_changes(heartbeat.first_sn, heartbeat.last_sn)
-                || writer_proxy.all_fragments_received(heartbeat.last_sn)
-            {
-                // This is the first HB for reader
-                if writer_proxy.expected_sn() == SequenceNumber::UNKNOWN {
-                    writer_proxy.set_expected_sn(heartbeat.first_sn);
-                }
+            // This is the first HB for reader
+            if writer_proxy.expected_sn() == SequenceNumber::UNKNOWN {
+                writer_proxy.set_expected_sn(heartbeat.first_sn);
+            }
 
-                // Always flush buffer after updating sequence number
-                let change_to_add = writer_proxy.flush_buffered_changes();
-                self.add_change_to_reader_cache_and_notify(reader.as_ref(), change_to_add)?;
+            // Owed on both branches: a whole buffered sample must reach the cache even while
+            // another sample in the range is still short of fragments.
+            pending_delivery = writer_proxy.flush_buffered_changes();
 
+            // Any short change in the range means a NACK_FRAG, which piggybacks its own ACKNACK.
+            // Routing on `last_sn` alone stranded a short earlier sample: it is already marked
+            // `Received`, so the plain ACKNACK omits it too and nothing asks for it again.
+            if !writer_proxy.has_fragmented_changes(heartbeat.first_sn, heartbeat.last_sn) {
                 // Apply heartbeat response delay
                 let heartbeat_response_delay = stateful_reader.heartbeat_response_delay();
                 let delay_duration = heartbeat_response_delay.to_std_duration();
 
                 if delay_duration.is_zero() {
-                    // No delay - send immediately
+                    // No delay - send immediately.
+                    //
+                    // The error is carried, not propagated with `?`. `flush_buffered_changes`
+                    // above already removed those changes from the proxy and advanced
+                    // `expected_sn`, so returning here would drop `pending_delivery` on the
+                    // floor with no way to ever re-request it -- silent loss on a RELIABLE
+                    // reader. A failed ACKNACK only costs one ACKNACK; the next heartbeat
+                    // retries it.
                     let bitmap_base = writer_proxy.expected_sn();
-                    self.send_acknack_to_writer_proxy_inner(
+                    acknack_result = self.send_acknack_to_writer_proxy_inner(
                         writer_proxy,
                         stateful_reader,
                         missing_changes,
                         bitmap_base,
                         final_flag,
                         false,
-                    )?;
+                    );
                 } else {
                     // Schedule delayed ACKNACK via SendingHandler
                     let remote_writer_guid = writer_proxy.remote_writer_guid();
@@ -2270,114 +2455,40 @@ impl UnicastMessageProcessor for UserLogic {
                 let missing_fragments =
                     writer_proxy.calculate_missing_fragments(heartbeat.first_sn, heartbeat.last_sn);
 
-                if missing_fragments.is_some() {
-                    let writer_proxies_clone = writer_proxies.clone();
-                    let stateful_reader_guid = stateful_reader.guid();
-                    let participant = participant.clone();
-                    let transport_clone = self.transport.clone();
-                    let last_sn = heartbeat.last_sn;
-                    let missing_fragments_clone = missing_fragments.clone();
-                    let remote_writer_guid = writer_proxy.remote_writer_guid();
-
-                    writer_proxy.increase_nackfrag_count();
-
-                    let timer_id = TimerId::NackFrag {
-                        reader_entity_id: stateful_reader.guid().entity_id(),
-                        remote_writer_guid,
-                        sequence_number: last_sn,
+                // `incomplete_sn`, not `heartbeat.last_sn`: the writer resolves the request
+                // against `writer_sn`, and it also keys the suppression timer.
+                if let Some((incomplete_sn, _)) = missing_fragments {
+                    let request = NackFragRequest {
+                        writer_proxies: writer_proxies.clone(),
+                        transport: self.transport.clone(),
+                        participant: participant.clone(),
+                        reader_guid: stateful_reader.guid(),
+                        remote_writer_guid: writer_proxy.remote_writer_guid(),
+                        incomplete_sn,
+                        acknack_last_sn: heartbeat.last_sn,
+                        acknack_missing_changes: missing_changes,
+                        retries_left: NACK_FRAG_MAX_RETRIES,
                     };
-                    if let Ok(locked_timer_handler) =
+
+                    // Re-armed on every accepted heartbeat, so a burst is answered once after it
+                    // settles rather than per fragment.
+                    if let Ok(handler) =
                         TimerHandler::get_instance(participant.guid().prefix()).lock()
                     {
-                        locked_timer_handler.remove_timer(timer_id);
-                        locked_timer_handler.add_timer(
-                            timer_id,
-                            Duration::from_millis(5),
-                            false, // not repeating
-                            move || {
-                                let mut writer_proxies_guard = match writer_proxies_clone.lock() {
-                                    Ok(guard) => guard,
-                                    Err(e) => {
-                                        warn!("Failed to acquire writer_proxies lock: {}", e);
-                                        return;
-                                    }
-                                };
-
-                                if let Some(current_writer_proxy) = writer_proxies_guard
-                                    .iter_mut()
-                                    .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
-                                {
-                                    let still_missing =
-                                        current_writer_proxy.still_missing_fragments(last_sn);
-
-                                    if still_missing {
-                                        // Create and send NACK_FRAG message
-                                        current_writer_proxy.increase_acknack_count();
-
-                                        let acknack_info = Some((
-                                            current_writer_proxy.acknack_count(),
-                                            last_sn,
-                                            missing_changes.clone(),
-                                        ));
-
-                                            if let Ok(buffer) = MessageCreator::create_nackfrag_msg(
-                                                participant.guid(),
-                                                current_writer_proxy.remote_writer_guid(),
-                                                stateful_reader_guid.entity_id(),
-                                                current_writer_proxy
-                                                    .remote_writer_guid()
-                                                    .entity_id(),
-                                                last_sn,
-                                                missing_fragments_clone.as_ref().unwrap().clone(),
-                                                current_writer_proxy.nackfrag_count(),
-                                                acknack_info,
-                                            ) {
-                                                // Same SHM > TCP > UDP priority filter as
-                                                // send_rtps_message_to_locators, with can_handle
-                                                // guarding the local-side reachability.
-                                                let locs: Vec<&Locator> =
-                                                    current_writer_proxy.unicast_locator_list().iter().collect();
-                                                let try_kind = |is_kind: fn(&Locator) -> bool| -> Option<Vec<&Locator>> {
-                                                    let v: Vec<&Locator> = locs.iter().copied()
-                                                        .filter(|l| is_kind(l) && transport_clone.can_handle(l))
-                                                        .collect();
-                                                    (!v.is_empty()).then_some(v)
-                                                };
-                                                let chosen: Vec<&Locator> = try_kind(Locator::is_shm)
-                                                    .or_else(|| try_kind(Locator::is_tcp))
-                                                    .or_else(|| try_kind(Locator::is_udp))
-                                                    .unwrap_or(locs);
-                                                for locator in chosen {
-                                                    match transport_clone
-                                                        .send(&buffer, &SendTarget::UserData(locator))
-                                                    {
-                                                        Ok(_) => {}
-                                                        Err(e)
-                                                            if e.kind()
-                                                                == std::io::ErrorKind::Unsupported =>
-                                                        {
-                                                            let kind = e.to_string();
-                                                            warn!(
-                                                                "[UserLogic] {} locator found but no {} sender available",
-                                                                kind, kind
-                                                            );
-                                                        }
-                                                        Err(e) => {
-                                                            warn!(
-                                                                "[UserLogic] Failed to send NACK_FRAG: {:?}",
-                                                                e
-                                                            );
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                },
-                            );
+                        handler.remove_timer(request.timer_id());
                     }
+                    schedule_nackfrag(request, NACK_FRAG_SUPPRESSION);
                 }
             }
+
+            // All writer-proxy work for this reader is done; release before notifying so a
+            // listener may call back into the reader's matched-writer APIs.
+            drop(matched_writers);
+            if !pending_delivery.is_empty() {
+                self.add_change_to_reader_cache_and_notify(reader.as_ref(), pending_delivery)?;
+            }
+            // Reported only once the flushed samples are safely in the reader's cache.
+            acknack_result?;
         }
 
         Ok(())
@@ -2442,7 +2553,8 @@ impl UnicastMessageProcessor for UserLogic {
                 continue;
             }
 
-            let Some(missing_fragments) = writer_proxy
+            // Stamp with what the scan returned rather than re-deriving it.
+            let Some((incomplete_sn, missing_fragments)) = writer_proxy
                 .calculate_missing_fragments(heartbeat_frag.writer_sn, heartbeat_frag.writer_sn)
             else {
                 continue;
@@ -2456,7 +2568,7 @@ impl UnicastMessageProcessor for UserLogic {
                 writer_proxy.remote_writer_guid(),
                 stateful_reader.guid().entity_id(),
                 writer_proxy.remote_writer_guid().entity_id(),
-                heartbeat_frag.writer_sn,
+                incomplete_sn,
                 missing_fragments,
                 writer_proxy.nackfrag_count(),
                 None,
@@ -2663,6 +2775,10 @@ impl UnicastMessageProcessor for UserLogic {
         // DashMap is thread-safe, so no explicit lock is needed
         //println!("[DEBUG] FragmentBuffer count: {}, size: {}", self.fragment_buffers.len(), self.fragment_buffers.iter().map(|entry| entry.value().total_size as usize).sum::<usize>());
         if self.fragment_buffers.len() > 30 {
+            debug!(
+                "[UserLogic] Fragment buffer count exceeded threshold ({}), cleaning up old buffers.",
+                self.fragment_buffers.len()
+            );
             self.cleanup_old_fragment_buffers(30);
         }
 
@@ -2868,19 +2984,14 @@ impl UnicastMessageProcessor for UserLogic {
 
         let total_frags = change.total_fragments();
         let requested_fragments = frag_state.extract_numbers();
-        let heartbeat_count = stateful_writer.heartbeat_count();
         let last_sn = history_cache_guard.get_seq_num_max().ok_or_else(|| {
             RtpsError::new(
                 RtpsErrorCode::DataNotSet,
                 "Writer cache should not be empty while sending DATA_FRAG",
             )
         })?;
-        let heartbeat_info =
-            if reader_proxy.is_reliable() && !stateful_writer.disable_piggyback_heartbeat() {
-                Some((heartbeat_count, writer_sn, last_sn, false, false))
-            } else {
-                None
-            };
+        let piggyback =
+            reader_proxy.is_reliable() && !stateful_writer.disable_piggyback_heartbeat();
 
         let timestamp = Utc::now();
         let participant = self.get_upgraded_participant()?;
@@ -2893,7 +3004,12 @@ impl UnicastMessageProcessor for UserLogic {
             .acquire();
         for fragment_num in requested_fragments {
             if fragment_num >= 1 && fragment_num <= total_frags {
-                self.send_data_frag_to_reader_proxy(
+                // Fresh count per fragment: a reused count is dropped by the reader before it can
+                // schedule the NACK_FRAG that would continue the repair.
+                let heartbeat_info = piggyback
+                    .then(|| (stateful_writer.heartbeat_count(), writer_sn, last_sn, false, false));
+
+                if self.send_data_frag_to_reader_proxy(
                     &change,
                     reader_proxy,
                     writer_id,
@@ -2901,7 +3017,10 @@ impl UnicastMessageProcessor for UserLogic {
                     heartbeat_info,
                     timestamp,
                     &mut send_buffer,
-                );
+                ) && piggyback
+                {
+                    stateful_writer.increase_heartbeat_count();
+                }
             }
         }
         participant
@@ -2929,6 +3048,11 @@ impl UnicastMessageProcessor for UserLogic {
 
         for reader in matched_readers {
             if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
+                // Same rule as the DATA and HEARTBEAT paths: the batch is decided under the
+                // guard and delivered after it, because delivery ends in the user's listener
+                // and that listener may re-lock this mutex.
+                let mut pending_delivery: Vec<CacheChange> = Vec::new();
+
                 let writer_proxies_arc = stateful_reader.writer_proxies();
                 let mut writer_proxies = writer_proxies_arc.lock().map_err(|_| {
                     RtpsError::new(
@@ -2957,17 +3081,17 @@ impl UnicastMessageProcessor for UserLogic {
                 if let Some(last) = irrelevant_changes.last() {
                     if last >= &writer_proxy.expected_sn() {
                         writer_proxy.set_expected_sn(SequenceNumber::from_i64(last.to_i64() + 1));
-
-                        let flushed_changes = writer_proxy.flush_buffered_changes();
-                        self.add_change_to_reader_cache_and_notify(
-                            stateful_reader,
-                            flushed_changes,
-                        )?;
+                        pending_delivery = writer_proxy.flush_buffered_changes();
                     }
                 }
 
                 for seq_num in irrelevant_changes {
                     writer_proxy.irrelevant_change_set(seq_num);
+                }
+
+                drop(writer_proxies);
+                if !pending_delivery.is_empty() {
+                    self.add_change_to_reader_cache_and_notify(stateful_reader, pending_delivery)?;
                 }
             }
         }

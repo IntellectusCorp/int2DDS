@@ -10,42 +10,7 @@ use socket2::{Domain, Protocol, SockAddr, Socket as Socket2, Type};
 use std::env;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Mutex,
-};
-use std::time::Instant;
-
-static UDP_PROFILE_COUNT: AtomicU64 = AtomicU64::new(0);
-static UDP_PROFILE_LOCK_US: AtomicU64 = AtomicU64::new(0);
-static UDP_PROFILE_SENDTO_US: AtomicU64 = AtomicU64::new(0);
-static UDP_PROFILE_TOTAL_US: AtomicU64 = AtomicU64::new(0);
-
-fn udp_profile_enabled() -> bool {
-    std::env::var_os("RMW_INT2DDS_PROFILE").is_some()
-}
-
-fn elapsed_us(start: Instant, end: Instant) -> u64 {
-    end.duration_since(start).as_micros() as u64
-}
-
-fn record_udp_send_profile(lock_us: u64, sendto_us: u64, total_us: u64) {
-    let n = UDP_PROFILE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    UDP_PROFILE_LOCK_US.fetch_add(lock_us, Ordering::Relaxed);
-    UDP_PROFILE_SENDTO_US.fetch_add(sendto_us, Ordering::Relaxed);
-    UDP_PROFILE_TOTAL_US.fetch_add(total_us, Ordering::Relaxed);
-
-    if n % 4096 == 0 {
-        let divisor = n as f64;
-        eprintln!(
-            "INT2DDS_UDP_PROFILE count={} total_avg_us={:.3} lock_avg_us={:.3} sendto_avg_us={:.3}",
-            n,
-            UDP_PROFILE_TOTAL_US.load(Ordering::Relaxed) as f64 / divisor,
-            UDP_PROFILE_LOCK_US.load(Ordering::Relaxed) as f64 / divisor,
-            UDP_PROFILE_SENDTO_US.load(Ordering::Relaxed) as f64 / divisor,
-        );
-    }
-}
+use std::sync::Mutex;
 
 #[derive(Debug)]
 pub(crate) struct UdpSender {
@@ -111,24 +76,12 @@ impl UdpSender {
     }
 
     pub(crate) fn send(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
-        let profile = udp_profile_enabled();
-        let total_t0 = Instant::now();
-        let lock_t0 = Instant::now();
         let guard = self.socket.lock().map_err(|_| io::Error::other("Mutex poisoned"))?;
-        let lock_us = if profile { elapsed_us(lock_t0, Instant::now()) } else { 0 };
         let socket = guard
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "Socket is closed"))?;
         let sock_addr = SockAddr::from(*addr);
-        let sendto_t0 = Instant::now();
         let result = socket.send_to(data, &sock_addr);
-        if profile {
-            record_udp_send_profile(
-                lock_us,
-                elapsed_us(sendto_t0, Instant::now()),
-                elapsed_us(total_t0, Instant::now()),
-            );
-        }
         debug!("UDP send to {:?}: {:?}", addr, result);
         result
     }

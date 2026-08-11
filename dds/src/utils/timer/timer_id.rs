@@ -9,7 +9,7 @@ use crate::rtps::messages::submessage_id::SubmessageId;
 
 // Structured timer identifier used as the HashMap key for all timers.
 // Every timer in the system must use a `TimerId` variant, enforcing type safety.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum TimerId {
     // Writer: periodic HEARTBEAT sender
     PeriodicHeartbeat {

@@ -709,6 +709,22 @@ impl SedpLogic {
             }
         }
 
+        // Publish the announcement before looking for local writers.
+        //
+        // `DcpsBridge::create_rtps_writer` registers the new writer in the
+        // participant store and only then scans `remote_subscriptions()` for the
+        // topic. Both paths therefore publish their own fact before reading the
+        // other's, which guarantees at least one of them sees the other and the
+        // pair gets matched. Looking up local writers *before* storing would
+        // break that guarantee: a writer registered after the lookup below would
+        // scan `remote_subscriptions()` before this entry lands, and neither side
+        // would match. SEDP announces an endpoint once, so nothing repairs it.
+        participant
+            .remote_subscriptions()
+            .entry(topic_name.clone())
+            .or_default()
+            .insert(endpoint_guid, subscription_builtin_topic_data.clone());
+
         // First try to find local writer using exact match (find_writer_from_entry)
         // If no exact match, try finding writer using domain ID and topic name only
         let writers = participant.find_writers_from_topic_name(&topic_name);
@@ -752,12 +768,6 @@ impl SedpLogic {
             subscription_builtin_topic_data.type_identifier(),
             subscription_builtin_topic_data.type_object().is_some(),
         );
-
-        participant
-            .remote_subscriptions()
-            .entry(topic_name)
-            .or_default()
-            .insert(endpoint_guid, subscription_builtin_topic_data);
 
         Ok(())
     }
@@ -886,7 +896,12 @@ impl SedpLogic {
             last_irrelevant_sn,
         );
 
-        writer.matched_reader_add(reader_proxy);
+        // A concurrent caller may have matched this reader between the
+        // `matched_reader_is_matched` check above and here; if so the proxy is
+        // already in place and the match must not be applied a second time.
+        if !writer.matched_reader_add(reader_proxy) {
+            return Ok(());
+        }
 
         let writer_guid = writer.guid();
         if writer_guid.entity_id().entity_kind().is_user_defined() {
@@ -907,6 +922,18 @@ impl SedpLogic {
                 writer,
                 subscription_builtin_topic_data.endpoint_guid(),
             )?;
+
+            // Restart the stopped periodic heartbeat so the new reader can recover history
+            if !writer.heartbeat_timer_running()
+                && writer.last_change_sequence_number() > SequenceNumber::new(0, 0)
+            {
+                debug!(
+                    "Restarting periodic heartbeat of writer {} for late-joining reader {}",
+                    writer.guid(),
+                    subscription_builtin_topic_data.endpoint_guid()
+                );
+                writer.register_periodic_heartbeat_timer_after_delay(writer.heartbeat_period())?;
+            }
         }
 
         Ok(())
@@ -1016,6 +1043,13 @@ impl SedpLogic {
             highest_sent_change_sn = Some(writer.last_change_sequence_number());
         }
 
+        // A concurrent caller may have matched this reader between the
+        // `matched_reader_is_matched` check above and the adds below. Every
+        // usable locator already being present is how that shows up here, and
+        // the match must not then be counted a second time.
+        let mut attempted_locators = 0usize;
+        let mut added_locators = 0usize;
+
         for locator in subscription_builtin_topic_data.unicast_locator_list() {
             if !(locator.kind() == LOCATOR_KIND_UDP_V4
                 || locator.kind() == LOCATOR_KIND_UDP_V6
@@ -1025,14 +1059,21 @@ impl SedpLogic {
             {
                 continue;
             }
-            writer.reader_locator_add(ReaderLocator::new(
+            attempted_locators += 1;
+            if writer.reader_locator_add(ReaderLocator::new(
                 locator.clone(),
                 highest_sent_change_sn,
                 false,
                 subscription_builtin_topic_data.endpoint_guid().prefix(),
                 subscription_builtin_topic_data.endpoint_guid().entity_id(),
                 subscription_builtin_topic_data.clone(),
-            ));
+            )) {
+                added_locators += 1;
+            }
+        }
+
+        if attempted_locators > 0 && added_locators == 0 {
+            return Ok(());
         }
 
         writer.update_publication_matched_status(
@@ -1115,6 +1156,22 @@ impl SedpLogic {
             }
         }
 
+        // Publish the announcement before looking for local readers.
+        //
+        // `DcpsBridge::create_rtps_reader` registers the new reader in the
+        // participant store and only then scans `remote_publications()` for the
+        // topic. Both paths therefore publish their own fact before reading the
+        // other's, which guarantees at least one of them sees the other and the
+        // pair gets matched. Looking up local readers *before* storing would
+        // break that guarantee: a reader registered after the lookup below would
+        // scan `remote_publications()` before this entry lands, and neither side
+        // would match. SEDP announces an endpoint once, so nothing repairs it.
+        participant
+            .remote_publications()
+            .entry(topic_name.clone())
+            .or_default()
+            .insert(endpoint_guid, publication_builtin_topic_data.clone());
+
         // First try to find local reader using exact match (find_reader_from_entry)
         let readers = participant.find_readers_from_topic_name(&topic_name);
 
@@ -1140,12 +1197,6 @@ impl SedpLogic {
             publication_builtin_topic_data.type_identifier(),
             publication_builtin_topic_data.type_object().is_some(),
         );
-
-        participant
-            .remote_publications()
-            .entry(topic_name)
-            .or_default()
-            .insert(endpoint_guid, publication_builtin_topic_data);
 
         Ok(())
     }
@@ -1261,7 +1312,12 @@ impl SedpLogic {
             reader.get_update_status_callback(),
         );
 
-        reader.matched_writer_add(writer_proxy);
+        // A concurrent caller may have matched this writer between the
+        // `matched_writer_is_matched` check above and here; if so the proxy is
+        // already in place and the match must not be applied a second time.
+        if !reader.matched_writer_add(writer_proxy) {
+            return Ok(());
+        }
 
         let writer_guid = endpoint_guid;
         if writer_guid.entity_id().entity_kind().is_user_defined() {
@@ -1388,7 +1444,12 @@ impl SedpLogic {
 
         let remote_writer_info =
             RemoteWriterInfo::new(endpoint_guid, publication_builtin_topic_data.clone());
-        reader.matched_writer_add(remote_writer_info);
+        // A concurrent caller may have matched this writer between the
+        // `matched_writer_is_matched` check above and here; if so the entry is
+        // already in place and the match must not be applied a second time.
+        if !reader.matched_writer_add(remote_writer_info) {
+            return Ok(());
+        }
 
         let writer_guid = endpoint_guid;
         if writer_guid.entity_id().entity_kind().is_user_defined() {

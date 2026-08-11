@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
+use crate::utils::notify::{callback_handle, notify_user};
 use std::{
     fmt::Debug,
     sync::{Arc, Mutex, Weak},
@@ -27,7 +28,7 @@ use crate::{
     rtps::{
         common::{
             entity_id::EntityId,
-            guid::{Guid, GuidPrefix},
+            guid::Guid,
             locator::Locator,
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
             sequence::SequenceNumber,
@@ -120,13 +121,25 @@ impl StatelessWriter {
             )),
         }
     }
-    pub(crate) fn reader_locator_add(&self, a_locator: ReaderLocator) {
+    /// Add `a_locator` unless the same (remote reader, locator) pair is already
+    /// present. Returns whether it was added.
+    ///
+    /// The check happens under the same lock as the insert: SEDP matching can be
+    /// driven concurrently by the local-creation path and the SEDP receive path,
+    /// and a plain `matched_reader_is_matched` guard at the call site leaves a
+    /// window where both callers pass it and push duplicate locators.
+    pub(crate) fn reader_locator_add(&self, a_locator: ReaderLocator) -> bool {
         match self.reader_locators.lock() {
             Ok(mut reader_locators) => {
+                if reader_locators.contains(&a_locator) {
+                    return false;
+                }
                 reader_locators.push(a_locator);
+                true
             }
             Err(e) => {
                 error!("Failed to lock reader_locators: {}", e);
+                false
             }
         }
     }
@@ -506,47 +519,6 @@ impl Writer for StatelessWriter {
         debug!("Removed reader locator with guid {} from matched readers", reader_guid);
         Ok(true)
     }
-
-    fn remove_all_matched_readers_with_prefix_and_update_status(
-        &self,
-        prefix: GuidPrefix,
-    ) -> RtpsResult<usize> {
-        let mut reader_locator = self
-            .reader_locators
-            .lock()
-            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
-
-        debug!(
-            "Before unmatching with reader, this writer had {:?} matched readers",
-            reader_locator.len()
-        );
-
-        // Collect unique entity IDs to avoid duplicate callbacks (a reader can have
-        // multiple locators per NIC).
-        let unique_entity_ids: std::collections::HashSet<_> = reader_locator
-            .iter()
-            .filter(|locator| locator.guid_prefix() == prefix)
-            .map(|locator| locator.remote_entity_id())
-            .collect();
-
-        for entity_id in &unique_entity_ids {
-            self.update_publication_matched_status(
-                -1,
-                InstanceHandle::from_guid(&Guid::new(prefix, *entity_id)),
-            );
-        }
-
-        let len_before = reader_locator.len();
-        reader_locator.retain(|locator| locator.guid_prefix() != prefix);
-        let removed = len_before - reader_locator.len();
-
-        debug!(
-            "Removed all unmatched reader locators from participant: {}",
-            Guid::guid_prefix_to_string(&prefix)
-        );
-        debug!("Current number of matched reader: {:?}", reader_locator.len());
-        Ok(removed)
-    }
 }
 
 impl Endpoint for StatelessWriter {
@@ -577,15 +549,10 @@ impl Entity for StatelessWriter {
     }
 
     fn update_status(&self, status: StatusKind, info: Option<Arc<dyn StatusInfo>>) {
-        match self.callback.lock() {
-            Ok(callback) => {
-                if let Some(callback) = callback.as_ref() {
-                    callback(status, info.clone());
-                }
-            }
-            Err(e) => {
-                log::error!("Failed to lock callback: {:?}", e);
-            }
+        // Lift the callback out before calling it: the listener it reaches may
+        // re-enter this entity, and an unwind through the call would poison the slot.
+        if let Some(callback) = callback_handle(&self.callback) {
+            notify_user("stateless_writer", || callback(status, info.clone()));
         }
     }
 
@@ -593,13 +560,6 @@ impl Entity for StatelessWriter {
         &self,
         f: Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>,
     ) {
-        match self.callback.lock() {
-            Ok(mut callback) => {
-                callback.replace(f);
-            }
-            Err(e) => {
-                log::error!("Failed to lock callback: {:?}", e);
-            }
-        }
+        self.callback.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).replace(f);
     }
 }

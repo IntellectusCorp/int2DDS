@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
+use crate::utils::notify::{callback_handle, notify_user};
 use std::{
     cmp::max,
     collections::{BTreeMap, BTreeSet},
@@ -209,16 +210,24 @@ impl WriterProxy {
             .is_some_and(|info| info.is_complete)
     }
 
+    /// Reports the first incomplete change in `first_sn..=last_sn` with the sequence number it
+    /// belongs to.
+    ///
+    /// The caller stamps the NACK_FRAG with that sequence number and `handle_nack_frag` resolves
+    /// the fragment numbers against it, so the two must not be derived separately.
+    ///
+    /// The set covers `base..base+256` -- one bitmap window. `base` is the lowest missing
+    /// fragment, so each round advances.
     pub(crate) fn calculate_missing_fragments(
         &self,
         first_sn: SequenceNumber,
         last_sn: SequenceNumber,
-    ) -> Option<FragmentNumberSet> {
+    ) -> Option<(SequenceNumber, FragmentNumberSet)> {
         if last_sn < first_sn {
             return None;
         }
 
-        self.changes_from_writer.range(first_sn..=last_sn).find_map(|(_, change)| {
+        self.changes_from_writer.range(first_sn..=last_sn).find_map(|(seq_num, change)| {
             change.fragment_info.as_ref().and_then(|info| {
                 if info.is_complete {
                     return None;
@@ -237,7 +246,9 @@ impl WriterProxy {
                 }
 
                 if !missing_fragments.is_empty() {
-                    base_fragment.map(|base| FragmentNumberSet::from_vec(base, missing_fragments))
+                    base_fragment.map(|base| {
+                        (*seq_num, FragmentNumberSet::from_vec(base, missing_fragments))
+                    })
                 } else {
                     None
                 }
@@ -439,15 +450,10 @@ impl WriterProxy {
     }
 
     pub(crate) fn on_sample_lost(&self) {
-        match self.status_callback.lock() {
-            Ok(callback) => {
-                if let Some(callback) = callback.as_ref() {
-                    callback(StatusKind::SAMPLE_LOST, None);
-                }
-            }
-            Err(e) => {
-                log::error!("Failed to lock callback: {:?}", e);
-            }
+        // Lift the callback out before calling it: the listener it reaches may
+        // re-enter this entity, and an unwind through the call would poison the slot.
+        if let Some(callback) = callback_handle(&self.status_callback) {
+            notify_user("writer_proxy", || callback(StatusKind::SAMPLE_LOST, None));
         }
     }
 }
@@ -485,6 +491,12 @@ pub(crate) struct FragmentInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rtps::messages::{
+        message_creator::MessageCreator,
+        message_receiver::{MessageReceiver, TypedSubmessage},
+    };
+    use bytes::Bytes;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     fn empty_writer_proxy() -> WriterProxy {
         let pub_data = PublicationBuiltinTopicData::default();
@@ -511,7 +523,7 @@ mod tests {
         assert!(proxy.still_missing_fragments(sn));
         assert_eq!(
             proxy.calculate_missing_fragments(sn, sn),
-            Some(FragmentNumberSet::from_vec(2, vec![2, 4])),
+            Some((sn, FragmentNumberSet::from_vec(2, vec![2, 4]))),
         );
 
         proxy.mark_frag_received(sn, 4, 2..3); // fragment 2
@@ -530,10 +542,184 @@ mod tests {
         assert!(proxy.still_missing_fragments(sn));
         assert_eq!(
             proxy.calculate_missing_fragments(sn, sn),
-            Some(FragmentNumberSet::from_vec(3, vec![3, 4])),
+            Some((sn, FragmentNumberSet::from_vec(3, vec![3, 4]))),
         );
 
         proxy.mark_frag_received(sn, 4, 3..5); // fragments 3, 4
         assert!(proxy.all_fragments_received(sn));
+    }
+
+    fn holds_fragment(proxy: &WriterProxy, seq_num: SequenceNumber, fragment: u32) -> bool {
+        proxy
+            .changes_from_writer
+            .get(&seq_num)
+            .and_then(|change| change.fragment_info.as_ref())
+            .is_some_and(|info| info.received_fragments.contains(&fragment))
+    }
+
+    /// A heartbeat covers a range, so the scan may settle on any change in it. The answer has to
+    /// say which one.
+    #[test]
+    fn calculate_missing_fragments_names_the_sequence_number_it_answered_for() {
+        let mut proxy = empty_writer_proxy();
+        let sn1 = SequenceNumber::new(0, 1);
+        let sn2 = SequenceNumber::new(0, 2);
+
+        // Two fragmented samples in flight, each short of a *different* fragment.
+        proxy.mark_frag_received(sn1, 4, [1, 3, 4]); // SN 1 is missing fragment 2
+        proxy.mark_frag_received(sn2, 4, [1, 2, 3]); // SN 2 is missing fragment 4
+
+        let (answered_for, missing) = proxy
+            .calculate_missing_fragments(sn1, sn2)
+            .expect("both samples are incomplete, so something must be reported");
+
+        assert_eq!(answered_for, sn1, "the scan settled on the first incomplete change");
+        assert_eq!(missing, FragmentNumberSet::from_vec(2, vec![2]));
+    }
+
+    /// Every fragment named must be one the nacked sample is actually missing.
+    #[test]
+    fn every_nacked_fragment_must_be_missing_from_the_sn_the_nack_carries() {
+        let mut proxy = empty_writer_proxy();
+        let sn1 = SequenceNumber::new(0, 1);
+        let sn2 = SequenceNumber::new(0, 2);
+
+        proxy.mark_frag_received(sn1, 4, [1, 3, 4]); // SN 1 is missing fragment 2
+        proxy.mark_frag_received(sn2, 4, [1, 2, 3]); // SN 2 is missing fragment 4
+
+        let (nacked_sn, missing) = proxy
+            .calculate_missing_fragments(sn1, sn2)
+            .expect("both samples are incomplete, so a repair request is owed");
+
+        for fragment in missing.extract_numbers() {
+            assert!(
+                !holds_fragment(&proxy, nacked_sn, fragment),
+                "NACK_FRAG is stamped writer_sn={nacked_sn:?} but names fragment {fragment}, \
+                 which that sample already holds"
+            );
+        }
+    }
+
+    /// A short sample behind a complete one must still be nacked; naming the complete sample
+    /// leaves the short one unrepairable.
+    #[test]
+    fn an_earlier_short_sample_is_nacked_even_when_the_last_one_is_whole() {
+        let mut proxy = empty_writer_proxy();
+        let sn1 = SequenceNumber::new(0, 1);
+        let sn2 = SequenceNumber::new(0, 2);
+
+        proxy.mark_frag_received(sn1, 4, [1, 3, 4]); // SN 1 is missing fragment 2
+        proxy.mark_frag_received(sn2, 4, [1, 2, 3, 4]); // SN 2 is whole
+
+        let (nacked_sn, missing) = proxy
+            .calculate_missing_fragments(sn1, sn2)
+            .expect("SN 1 is incomplete, so a repair request is owed");
+
+        assert_eq!(nacked_sn, sn1, "the request must name the sample that is actually short");
+        assert_eq!(missing, FragmentNumberSet::from_vec(2, vec![2]));
+        assert!(proxy.still_missing_fragments(nacked_sn), "the nacked sample really is short");
+    }
+
+    /// The NACK_FRAG retry re-arms itself for as long as this reports something missing, so a
+    /// completed sample has to report `None` or the timer never stops.
+    #[test]
+    fn a_completed_sample_reports_nothing_missing() {
+        let mut proxy = empty_writer_proxy();
+        let sn = SequenceNumber::new(0, 1);
+
+        proxy.mark_frag_received(sn, 4, [1, 3]);
+        assert!(proxy.calculate_missing_fragments(sn, sn).is_some(), "2 and 4 are still missing");
+
+        proxy.mark_frag_received(sn, 4, [2, 4]);
+        assert!(proxy.all_fragments_received(sn));
+        assert_eq!(
+            proxy.calculate_missing_fragments(sn, sn),
+            None,
+            "a whole sample must end the retry loop"
+        );
+    }
+
+    /// A partially received sample is invisible to ACKNACK, so only a NACK_FRAG can recover it.
+    ///
+    /// `mark_frag_received` stamps the change `Received` on the first fragment, which takes it
+    /// out of `missing_changes_for_heartbeat`. `handle_heartbeat_message` must therefore route on
+    /// "is anything in this range short of fragments" -- not on whether the *last* sample is
+    /// whole. Routing on the latter sends a plain ACKNACK that omits the short sample, nothing
+    /// asks for it again, and the writer stops heartbeating once the rest is acked: permanent
+    /// loss on a RELIABLE reader rather than a delay.
+    #[test]
+    fn a_short_earlier_sample_is_invisible_to_acknack() {
+        let mut proxy = empty_writer_proxy();
+        let sn1 = SequenceNumber::new(0, 1);
+        let sn2 = SequenceNumber::new(0, 2);
+
+        proxy.mark_frag_received(sn1, 4, [1, 3, 4]); // SN 1 is short of fragment 2
+        proxy.mark_frag_received(sn2, 4, [1, 2, 3, 4]); // SN 2 is whole
+
+        // The two predicates the routing decision can be built from disagree here. This is the
+        // case the old condition got wrong.
+        assert!(
+            proxy.has_fragmented_changes(sn1, sn2),
+            "SN 1 is short, so a NACK_FRAG is owed for this heartbeat range"
+        );
+        assert!(
+            proxy.all_fragments_received(sn2),
+            "...while the range's last sample is whole, which is what used to force the ACKNACK \
+             branch"
+        );
+
+        // And the ACKNACK branch could not have recovered SN 1 anyway.
+        assert!(
+            !proxy.missing_changes_for_heartbeat(sn1, sn2).contains(&sn1),
+            "SN 1 is marked Received once any fragment arrives, so an ACKNACK never lists it; \
+             taking the ACKNACK branch here loses the sample outright"
+        );
+    }
+
+    /// The same guard through serialization, since the sequence number is a wire field.
+    #[test]
+    fn the_nack_frag_on_the_wire_names_the_short_sample() {
+        let mut proxy = empty_writer_proxy();
+        let sn1 = SequenceNumber::new(0, 1);
+        let sn2 = SequenceNumber::new(0, 2);
+
+        proxy.mark_frag_received(sn1, 4, [1, 3, 4]); // SN 1 is missing fragment 2
+        proxy.mark_frag_received(sn2, 4, [1, 2, 3, 4]); // SN 2 is whole
+
+        let (nacked_sn, missing) =
+            proxy.calculate_missing_fragments(sn1, sn2).expect("SN 1 is incomplete");
+        proxy.increase_nackfrag_count();
+
+        let reader_guid = Guid::new([1u8; 12], EntityId::SEDP_BUILTIN_PUBLICATIONS_READER);
+        let writer_guid = Guid::new([2u8; 12], EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER);
+
+        let buffer = MessageCreator::create_nackfrag_msg(
+            reader_guid,
+            writer_guid,
+            reader_guid.entity_id(),
+            writer_guid.entity_id(),
+            nacked_sn,
+            missing,
+            proxy.nackfrag_count(),
+            None,
+        )
+        .expect("the NACK_FRAG message must serialize");
+
+        let from_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7400);
+        let mut receiver = MessageReceiver::new(writer_guid.prefix(), &from_addr);
+        receiver.init(&Bytes::from(buffer.to_vec())).expect("the message must parse back");
+
+        let submessages = receiver.parse_submessages();
+        let nack_frags: Vec<_> = submessages
+            .iter()
+            .filter_map(|submessage| match submessage {
+                TypedSubmessage::NackFrag(_, nack_frag) => Some(*nack_frag),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(nack_frags.len(), 1, "one bitmap window per round");
+        assert_eq!(nack_frags[0].writer_sn, sn1, "the wire must name the short sample");
+        assert_eq!(nack_frags[0].fragment_number_state.extract_numbers(), vec![2]);
     }
 }
