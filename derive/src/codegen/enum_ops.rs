@@ -98,8 +98,11 @@ pub fn generate_enum_xcdr_serialize_impl(
         .collect();
 
     quote! {
+        // Enumerated types are not primitive types, so collections of them carry a
+        // DHEADER (DDS-XTypes 7.4.3.5.3/7.4.3.5.4). OMG issue DDSXTY14-56 proposes
+        // treating them as primitives, but it is unresolved.
         impl #crate_path::serialize::cdr::XcdrSerialize for #name {
-            const IS_PRIMITIVE: bool = true;
+            const IS_PRIMITIVE: bool = false;
             fn serialize_xcdr(&self, serializer: &mut #crate_path::serialize::cdr::XcdrSerializer) -> #crate_path::serialize::cdr::XcdrResult<()> {
                 use #crate_path::serialize::cdr::PrimitiveSerialize;
                 let discriminant: #disc_rust_type = match self {
@@ -134,7 +137,7 @@ pub fn generate_enum_xcdr_deserialize_impl(
 
     quote! {
         impl #crate_path::serialize::cdr::XcdrDeserialize for #name {
-            const IS_PRIMITIVE: bool = true;
+            const IS_PRIMITIVE: bool = false;
             fn deserialize_xcdr(deserializer: &mut #crate_path::serialize::cdr::XcdrDeserializer) -> #crate_path::serialize::cdr::XcdrResult<Self> {
                 let discriminant = deserializer.#deserialize_method()? as i64;
                 match discriminant {

@@ -224,8 +224,11 @@ pub fn derive_bitmask_impl(
             }
         }
 
+        // Bitmask is not a primitive type, so collections of it carry a DHEADER
+        // (DDS-XTypes 7.4.3.5.3/7.4.3.5.4, and DDSXTY14-56 names bitmask explicitly
+        // as a type that *would* need a spec change to become primitive).
         impl #crate_path::serialize::xcdr::XcdrSerialize for #value_name {
-            const IS_PRIMITIVE: bool = true;
+            const IS_PRIMITIVE: bool = false;
             fn serialize_xcdr(&self, serializer: &mut #crate_path::serialize::xcdr::XcdrSerializer) -> #crate_path::serialize::xcdr::XcdrResult<()> {
                 use #crate_path::serialize::cdr::PrimitiveSerialize;
                 serializer.#wire_ser(self.0)
@@ -233,7 +236,7 @@ pub fn derive_bitmask_impl(
         }
 
         impl #crate_path::serialize::xcdr::XcdrDeserialize for #value_name {
-            const IS_PRIMITIVE: bool = true;
+            const IS_PRIMITIVE: bool = false;
             fn deserialize_xcdr(deserializer: &mut #crate_path::serialize::xcdr::XcdrDeserializer) -> #crate_path::serialize::xcdr::XcdrResult<Self> {
                 use #crate_path::serialize::cdr::PrimitiveSerialize;
                 Ok(Self(deserializer.#wire_deser()?))
