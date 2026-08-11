@@ -631,9 +631,9 @@ impl UserLogic {
         // piggyback HEARTBEAT) submessage. On this topology that turns 12,015 sends per
         // publish cycle into 4,705; the hub topic writer goes from 123 datagrams to 45.
         //
-        // Only the plain case is batched - a plan that is exactly one non-fragmented
-        // DATA. GAPs, fragmentation and multi-change catch-up keep the original
-        // per-reader path below, so the well-tested message shape is untouched there.
+        // Only single-change plans are batched: one DATA duplicated per reader, or one
+        // fragmented change sent once to reader id UNKNOWN. GAPs and multi-change
+        // catch-up keep the original per-reader path below.
         //---------------------------------------------------------------------
         let mut deferred: Vec<(Guid, SendPlan)> = Vec::with_capacity(plans.len());
         // (destination prefix, sequence number, locators) -> readers
@@ -645,11 +645,8 @@ impl UserLogic {
                 [UnsentChangeType::Data(sn)] => Some(*sn),
                 _ => None,
             };
-            let batchable = single_data.filter(|sn| {
-                history_cache.get_change(*sn).is_some_and(|c| !c.is_fragmented())
-            });
 
-            match batchable {
+            match single_data {
                 Some(sn) => {
                     let key = (reader_guid.prefix(), sn, plan.locators.clone());
                     match groups.iter_mut().find(|(k, _)| *k == key) {
@@ -683,20 +680,85 @@ impl UserLogic {
             // One heartbeat count for the whole batch. Each reader still sees a
             // non-decreasing series, which is all HEARTBEAT.count requires.
             let heartbeat_count = writer.heartbeat_count();
+
+            if a_change.is_fragmented() {
+                // The fragment burst goes out once per participant: reader id UNKNOWN
+                // reaches every matched reader behind dst_prefix.
+                let is_piggyback_wanted =
+                    members.iter().any(|(_, plan)| plan.reliable && plan.piggyback);
+                let timestamp = Utc::now();
+                let mut is_any_fragment_sent = false;
+
+                debug!(
+                    "[Data] Batched DATA_FRAG sn={} to {} readers behind one participant",
+                    sn.to_i64(),
+                    members.len()
+                );
+
+                for fragment_num in 1..=a_change.total_fragments() {
+                    let Some(fragment_data) = a_change.get_fragment_data(fragment_num) else {
+                        continue;
+                    };
+
+                    // Piggyback one heartbeat on the final fragment so the sample is
+                    // advertised only after the whole burst is on the wire.
+                    let is_final_fragment = fragment_num == a_change.total_fragments();
+                    let heartbeat_info = (is_piggyback_wanted && is_final_fragment)
+                        .then(|| (heartbeat_count, first, last, false, false));
+
+                    if MessageCreator::create_data_frag_msg(
+                        &a_change,
+                        Guid::new(dst_prefix, EntityId::UNKNOWN),
+                        EntityId::UNKNOWN,
+                        writer.endpoint_id(),
+                        fragment_num,
+                        1,
+                        a_change.fragment_size() as u16,
+                        a_change.data_value().len() as u32,
+                        fragment_data,
+                        heartbeat_info,
+                        timestamp,
+                        &mut send_buffer,
+                    )
+                    .is_ok()
+                    {
+                        if self.send_rtps_message_to_locators(locators.iter(), &send_buffer).is_ok()
+                        {
+                            is_any_fragment_sent = true;
+                            if heartbeat_info.is_some() {
+                                writer.increase_heartbeat_count();
+                            }
+                        }
+                    }
+                }
+
+                if is_any_fragment_sent {
+                    for (reader_guid, plan) in &members {
+                        if plan.piggyback {
+                            readers_with_sent_data.push(*reader_guid);
+                        }
+                    }
+                }
+                continue;
+            }
+
             let mut any_piggyback = false;
-            let targets: Vec<(EntityId, Option<(u32, SequenceNumber, SequenceNumber, bool, bool)>, Option<_>)> =
-                members
-                    .iter()
-                    .map(|(_, plan)| {
-                        let hb = if plan.reliable && plan.piggyback {
-                            any_piggyback = true;
-                            Some((heartbeat_count, first, last, false, false))
-                        } else {
-                            None
-                        };
-                        (plan.group_id, hb, plan.content_filter.clone())
-                    })
-                    .collect();
+            let targets: Vec<(
+                EntityId,
+                Option<(u32, SequenceNumber, SequenceNumber, bool, bool)>,
+                Option<_>,
+            )> = members
+                .iter()
+                .map(|(_, plan)| {
+                    let hb = if plan.reliable && plan.piggyback {
+                        any_piggyback = true;
+                        Some((heartbeat_count, first, last, false, false))
+                    } else {
+                        None
+                    };
+                    (plan.group_id, hb, plan.content_filter.clone())
+                })
+                .collect();
 
             if let Err(e) = MessageCreator::create_data_msg_multi(
                 &a_change,
