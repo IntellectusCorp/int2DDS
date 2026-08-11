@@ -113,7 +113,13 @@ impl WriterHistoryCache {
         Ok(())
     }
 
-    pub(crate) fn add_change_builtin(&mut self, a_change: Arc<CacheChange>) -> RtpsResult<()> {
+    /// The caller must not hold `reader_proxies`: the pump below locks it, and
+    /// `std::sync::Mutex` is not reentrant.
+    pub(crate) fn add_change_builtin(
+        &mut self,
+        a_change: Arc<CacheChange>,
+        writer: &(dyn Writer + Send + Sync),
+    ) -> RtpsResult<()> {
         if !self.is_builtin() {
             return Err(RtpsError::new(
                 RtpsErrorCode::InvalidEntityKind,
@@ -135,7 +141,23 @@ impl WriterHistoryCache {
             self.highest_sn = sn;
         }
 
+        // Same pump as `add_change`; without it a builtin writer only transmits where a caller
+        // remembered to send explicitly.
+        if let Some(participant) = self.participant.upgrade() {
+            if let Some(user_logic_arc) = participant.user_logic_if_set() {
+                if let Some(user_logic) = user_logic_arc.as_ref() {
+                    user_logic.send_unsent_changes(writer, self)?
+                }
+            }
+        }
+
         Ok(())
+    }
+
+    /// Builtin writers are built before the owning `Arc<Participant>` exists, so their cache
+    /// starts with a `Weak` that never upgrades. Wiring it afterwards is what lets the pump run.
+    pub(crate) fn set_participant(&mut self, participant: Weak<Participant>) {
+        self.participant = participant;
     }
 
     pub(crate) fn highest_sn(&self) -> SequenceNumber {
