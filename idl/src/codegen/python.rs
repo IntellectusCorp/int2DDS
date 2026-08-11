@@ -1088,16 +1088,22 @@ impl<'a> PyGen<'a> {
     fn is_non_primitive_element(element: &ResolvedType) -> bool {
         // Per DDS-XTypes 7.4.3.5.4, sequences/arrays of non-primitive elements
         // are preceded by a DHEADER. Matches Rust `XcdrSerialize for Vec<T>`
-        // where T::IS_PRIMITIVE == false.
-        matches!(
-            element,
+        // where T::IS_PRIMITIVE == false. Enum and bitmask are constructed types,
+        // so they are non-primitive here; OMG issue DDSXTY14-56 proposes exempting
+        // them but is unresolved.
+        match element {
+            // Multidimensional arrays parse to nested `Array` but are one XTypes array of
+            // the base type: recurse instead of framing each dimension.
+            ResolvedType::Array { element, .. } => Self::is_non_primitive_element(element),
             ResolvedType::String { .. }
-                | ResolvedType::WString { .. }
-                | ResolvedType::Struct(_)
-                | ResolvedType::Sequence { .. }
-                | ResolvedType::Array { .. }
-                | ResolvedType::Map { .. }
-        )
+            | ResolvedType::WString { .. }
+            | ResolvedType::Struct(_)
+            | ResolvedType::Enum(_)
+            | ResolvedType::Bitmask(_)
+            | ResolvedType::Sequence { .. }
+            | ResolvedType::Map { .. } => true,
+            _ => false,
+        }
     }
 
     fn find_bitmask(&self, name: &str) -> Option<&ResolvedBitmask> {
@@ -1159,11 +1165,32 @@ impl<'a> PyGen<'a> {
                 self.line(&format!("{}._serialize_cdr_inline(w)", accessor));
             }
             ResolvedType::Sequence { element, .. } => {
-                self.line(&format!("w.write_seq_header(len({}))", accessor));
-                self.line(&format!("for _item in {}:", accessor));
-                self.indent += 1;
-                self.emit_write_field(element, "_item");
-                self.indent -= 1;
+                if Self::is_non_primitive_element(element) {
+                    self.line("if w._xcdr2:");
+                    self.indent += 1;
+                    self.line("_seq_token = w.write_dheader_begin()");
+                    self.line(&format!("w.write_seq_header(len({}))", accessor));
+                    self.line(&format!("for _item in {}:", accessor));
+                    self.indent += 1;
+                    self.emit_write_field(element, "_item");
+                    self.indent -= 1;
+                    self.line("w.write_dheader_finalize(_seq_token)");
+                    self.indent -= 1;
+                    self.line("else:");
+                    self.indent += 1;
+                    self.line(&format!("w.write_seq_header(len({}))", accessor));
+                    self.line(&format!("for _item in {}:", accessor));
+                    self.indent += 1;
+                    self.emit_write_field(element, "_item");
+                    self.indent -= 1;
+                    self.indent -= 1;
+                } else {
+                    self.line(&format!("w.write_seq_header(len({}))", accessor));
+                    self.line(&format!("for _item in {}:", accessor));
+                    self.indent += 1;
+                    self.emit_write_field(element, "_item");
+                    self.indent -= 1;
+                }
             }
             ResolvedType::Array { element, size } => {
                 self.line(&format!(
@@ -1450,6 +1477,12 @@ impl<'a> PyGen<'a> {
                 self.line(&format!("{} = {}._deserialize_cdr_inline(r)", name, cls));
             }
             ResolvedType::Sequence { element, .. } => {
+                if Self::is_non_primitive_element(element) {
+                    self.line("if r._xcdr2:");
+                    self.indent += 1;
+                    self.line("_seq_dsize, _seq_dstart = r.read_dheader()");
+                    self.indent -= 1;
+                }
                 self.line(&format!("_{}_count = r.read_seq_header()", name));
                 self.line(&format!("{} = []", name));
                 self.line(&format!("for _ in range(_{}_count):", name));
@@ -1458,6 +1491,12 @@ impl<'a> PyGen<'a> {
                 self.emit_read_field(element, &item_name);
                 self.line(&format!("{}.append({})", name, item_name));
                 self.indent -= 1;
+                if Self::is_non_primitive_element(element) {
+                    self.line("if r._xcdr2:");
+                    self.indent += 1;
+                    self.line("r.read_dheader_end(_seq_dsize, _seq_dstart)");
+                    self.indent -= 1;
+                }
             }
             ResolvedType::Array { element, size } => {
                 self.line(&format!("{} = []", name));

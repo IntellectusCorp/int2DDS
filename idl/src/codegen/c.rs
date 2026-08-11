@@ -911,6 +911,14 @@ impl<'a> CGen<'a> {
                 self.raw(&format!("{}{}(&w, ({}){});\n", indent, write_fn, cast_type, accessor));
             }
             ResolvedType::Sequence { element, .. } => {
+                let needs_dh = Self::sequence_element_needs_dheader(element);
+                if needs_dh {
+                    self.raw(&format!("{}{{ size_t _seq_dh = 0;\n", indent));
+                    self.raw(&format!(
+                        "{}if (w.xcdr2) {{ int2dds_cdr_write_dheader_begin(&w, &_seq_dh); }}\n",
+                        indent
+                    ));
+                }
                 self.raw(&format!(
                     "{}int2dds_cdr_write_seq_header(&w, {}.length);\n",
                     indent, accessor
@@ -930,6 +938,13 @@ impl<'a> CGen<'a> {
                         &elem_accessor,
                         &format!("{}    ", indent),
                     );
+                    self.raw(&format!("{}}}\n", indent));
+                }
+                if needs_dh {
+                    self.raw(&format!(
+                        "{}if (w.xcdr2) {{ int2dds_cdr_write_dheader_finalize(&w, _seq_dh); }}\n",
+                        indent
+                    ));
                     self.raw(&format!("{}}}\n", indent));
                 }
             }
@@ -1204,6 +1219,14 @@ impl<'a> CGen<'a> {
                 self.raw(&format!("{}{}(&r, ({}*)&{});\n", indent, read_fn, cast_type, accessor));
             }
             ResolvedType::Sequence { element, bound } => {
+                let needs_dh = Self::sequence_element_needs_dheader(element);
+                if needs_dh {
+                    self.raw(&format!("{}{{ uint32_t _seq_sz = 0; size_t _seq_sp = 0;\n", indent));
+                    self.raw(&format!(
+                        "{}if (r.xcdr2) {{ int2dds_cdr_read_dheader(&r, &_seq_sz, &_seq_sp); }}\n",
+                        indent
+                    ));
+                }
                 self.raw(&format!(
                     "{}int2dds_cdr_read_seq_header(&r, &{}.length);\n",
                     indent, accessor
@@ -1253,6 +1276,13 @@ impl<'a> CGen<'a> {
                         &elem_accessor,
                         &format!("{}    ", indent),
                     );
+                    self.raw(&format!("{}}}\n", indent));
+                }
+                if needs_dh {
+                    self.raw(&format!(
+                        "{}if (r.xcdr2) {{ int2dds_cdr_read_dheader_end(&r, _seq_sz, _seq_sp); }}\n",
+                        indent
+                    ));
                     self.raw(&format!("{}}}\n", indent));
                 }
             }
@@ -1411,16 +1441,24 @@ impl<'a> CGen<'a> {
     }
 
     /// Check if a sequence needs an outer DHEADER in XCDR2.
+    /// Enum and bitmask are constructed types, not primitives, so they need a DHEADER
+    /// too (DDS-XTypes 7.4.3.5.3/7.4.3.5.4). OMG issue DDSXTY14-56 proposes exempting
+    /// them; it is unresolved, so this follows the spec as written.
     fn sequence_element_needs_dheader(element: &ResolvedType) -> bool {
-        matches!(
-            element,
+        match element {
+            // A multidimensional IDL array parses to nested `Array`, but XTypes treats it
+            // as one array whose element is the base type, so recurse rather than frame
+            // each dimension. Mirrors Rust's `[T; N]: IS_PRIMITIVE = T::IS_PRIMITIVE`.
+            ResolvedType::Array { element, .. } => Self::sequence_element_needs_dheader(element),
             ResolvedType::String { .. }
-                | ResolvedType::WString { .. }
-                | ResolvedType::Struct(_)
-                | ResolvedType::Sequence { .. }
-                | ResolvedType::Array { .. }
-                | ResolvedType::Map { .. }
-        )
+            | ResolvedType::WString { .. }
+            | ResolvedType::Struct(_)
+            | ResolvedType::Enum(_)
+            | ResolvedType::Bitmask(_)
+            | ResolvedType::Sequence { .. }
+            | ResolvedType::Map { .. } => true,
+            _ => false,
+        }
     }
 
     /// Look up a bitset by name, returning it if found.

@@ -330,19 +330,34 @@ impl XcdrDeserialize for String {
 
 impl<T: XcdrSerialize> XcdrSerialize for Vec<T> {
     fn serialize_xcdr(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()> {
-        serializer.serialize_u32(self.len() as u32)?;
+        // DDS-XTypes 7.4.3.5.4: a sequence of non-primitive elements is preceded by a
+        // DHEADER carrying the byte size of length + elements. Primitives omit it.
         if T::IS_PRIMITIVE {
+            serializer.serialize_u32(self.len() as u32)?;
             serializer.buffer_mut().reserve(self.len() * std::mem::size_of::<T>());
+            for item in self {
+                item.serialize_xcdr(serializer)?;
+            }
+            Ok(())
+        } else {
+            let dheader_pos = serializer.reserve_dheader();
+            let content_start = serializer.position();
+            serializer.serialize_u32(self.len() as u32)?;
+            for item in self {
+                item.serialize_xcdr(serializer)?;
+            }
+            let content_size = (serializer.position() - content_start) as u32;
+            serializer.write_dheader_at(dheader_pos, content_size);
+            Ok(())
         }
-        for item in self {
-            item.serialize_xcdr(serializer)?;
-        }
-        Ok(())
     }
 }
 
 impl<T: XcdrDeserialize> XcdrDeserialize for Vec<T> {
     fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
+        if !T::IS_PRIMITIVE {
+            let _object_size = deserializer.read_dheader()?;
+        }
         let length = deserializer.deserialize_u32()? as usize;
         let capacity = deserializer.checked_capacity(length, 1)?;
         let mut result = Vec::with_capacity(capacity);
@@ -375,16 +390,39 @@ impl<T: XcdrDeserialize> XcdrDeserialize for Option<T> {
 }
 
 impl<T: XcdrSerialize, const N: usize> XcdrSerialize for [T; N] {
+    // A multidimensional IDL array (`long a[2][3]`) is one array whose element type is the
+    // base type, so the nested `[[T; N]; M]` that represents it must stay flat on the wire.
+    // Classifying an array by its element keeps the outer dimension from adding a DHEADER.
+    const IS_PRIMITIVE: bool = T::IS_PRIMITIVE;
+
     fn serialize_xcdr(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()> {
-        for item in self.iter() {
-            item.serialize_xcdr(serializer)?;
+        // DDS-XTypes 7.4.3.5.3: arrays of non-primitive elements carry a DHEADER of the
+        // element payload byte size (and no element count); primitive arrays do not.
+        if T::IS_PRIMITIVE {
+            for item in self.iter() {
+                item.serialize_xcdr(serializer)?;
+            }
+            Ok(())
+        } else {
+            let dheader_pos = serializer.reserve_dheader();
+            let content_start = serializer.position();
+            for item in self.iter() {
+                item.serialize_xcdr(serializer)?;
+            }
+            let content_size = (serializer.position() - content_start) as u32;
+            serializer.write_dheader_at(dheader_pos, content_size);
+            Ok(())
         }
-        Ok(())
     }
 }
 
 impl<T: XcdrDeserialize, const N: usize> XcdrDeserialize for [T; N] {
+    const IS_PRIMITIVE: bool = T::IS_PRIMITIVE;
+
     fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
+        if !T::IS_PRIMITIVE {
+            let _object_size = deserializer.read_dheader()?;
+        }
         let mut vec = Vec::with_capacity(N);
         for _ in 0..N {
             vec.push(T::deserialize_xcdr(deserializer)?);
@@ -686,10 +724,10 @@ impl XcdrDeserialize for WChar {
     }
 }
 
-/// Pins the `IS_PRIMITIVE` classification that decides whether an XCDR2 map
+/// Pins the `IS_PRIMITIVE` classification that decides whether an XCDR2 collection
 /// carries a DHEADER. The three IDL generators treat everything outside
-/// `String|WString|Struct|Sequence|Array|Map` as primitive, so any Rust type
-/// left at the trait default diverges from C/C#/Python on the wire.
+/// `String|WString|Struct|Enum|Bitmask|Sequence|Array|Map` as primitive, so any Rust
+/// type classified differently diverges from C/C#/Python on the wire.
 #[cfg(test)]
 mod element_classification_tests {
     use super::*;
@@ -727,14 +765,17 @@ mod element_classification_tests {
         assert_eq!(encode_xcdr2(&value), expected);
     }
 
+    /// Bitmask is a constructed type, not a primitive, so the map is framed
+    /// (DDS-XTypes 7.4.3.5.4; see the unresolved OMG issue DDSXTY14-56).
     #[test]
-    fn map_of_bitmask_omits_dheader() {
+    fn map_of_bitmask_keeps_dheader() {
         let mut value: BTreeMap<i32, FlagsValue> = BTreeMap::new();
         value.insert(1, FlagsValue::from(Flags::F0));
 
         #[rustfmt::skip]
         let expected: Vec<u8> = vec![
             0x00, 0x07, 0x00, 0x00,
+            0x09, 0x00, 0x00, 0x00,
             0x01, 0x00, 0x00, 0x00,
             0x01, 0x00, 0x00, 0x00,
             0x01,
@@ -790,5 +831,87 @@ mod element_classification_tests {
         let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
         let result = BTreeMap::<i32, WChar>::deserialize_xcdr(&mut deserializer).unwrap();
         assert_eq!(result, value);
+    }
+
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "crate")]
+    enum Color {
+        Red,
+        Blue,
+    }
+
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "crate", extensibility = "Final")]
+    struct Pt {
+        x: i32,
+        y: i32,
+    }
+
+    /// Round-trips and length checks cannot tell a correct DHEADER from one that
+    /// forgot to count the 4-byte element count, so pin the value itself. Per
+    /// DDS-XTypes 7.4.3.5.4 the sequence DHEADER spans length + elements.
+    #[test]
+    fn sequence_of_enum_dheader_counts_length_and_elements() {
+        let value = vec![Color::Red, Color::Blue];
+
+        #[rustfmt::skip]
+        let expected: Vec<u8> = vec![
+            0x00, 0x07, 0x00, 0x00,
+            0x0C, 0x00, 0x00, 0x00,
+            0x02, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+            0x01, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(encode_xcdr2(&value), expected);
+
+        let mut deserializer = XcdrDeserializer::new(&expected).unwrap();
+        assert_eq!(Vec::<Color>::deserialize_xcdr(&mut deserializer).unwrap(), value);
+    }
+
+    #[test]
+    fn sequence_of_struct_dheader_counts_length_and_elements() {
+        let value = vec![Pt { x: 1, y: 2 }, Pt { x: 3, y: 4 }];
+
+        #[rustfmt::skip]
+        let expected: Vec<u8> = vec![
+            0x00, 0x07, 0x00, 0x00,
+            0x14, 0x00, 0x00, 0x00,
+            0x02, 0x00, 0x00, 0x00,
+            0x01, 0x00, 0x00, 0x00,
+            0x02, 0x00, 0x00, 0x00,
+            0x03, 0x00, 0x00, 0x00,
+            0x04, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(encode_xcdr2(&value), expected);
+
+        let mut deserializer = XcdrDeserializer::new(&expected).unwrap();
+        assert_eq!(Vec::<Pt>::deserialize_xcdr(&mut deserializer).unwrap(), value);
+    }
+
+    /// `long a[2][3]` parses to a nested `[[i32; 3]; 2]`, but XTypes sees one array of a
+    /// primitive base type: the wire stays flat, with no DHEADER on either dimension.
+    #[test]
+    fn multidim_primitive_array_stays_flat() {
+        let value: [[i32; 3]; 2] = [[1, 2, 3], [4, 5, 6]];
+        assert_eq!(encode_xcdr2(&value).len(), 4 + 24);
+    }
+
+    /// The same nesting with a non-primitive base type frames both dimensions.
+    #[test]
+    fn multidim_struct_array_frames_each_dimension() {
+        let value: [[Pt; 1]; 2] = [[Pt { x: 1, y: 2 }], [Pt { x: 3, y: 4 }]];
+
+        #[rustfmt::skip]
+        let expected: Vec<u8> = vec![
+            0x00, 0x07, 0x00, 0x00,
+            0x18, 0x00, 0x00, 0x00,
+            0x08, 0x00, 0x00, 0x00,
+            0x01, 0x00, 0x00, 0x00,
+            0x02, 0x00, 0x00, 0x00,
+            0x08, 0x00, 0x00, 0x00,
+            0x03, 0x00, 0x00, 0x00,
+            0x04, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(encode_xcdr2(&value), expected);
     }
 }
