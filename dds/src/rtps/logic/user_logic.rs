@@ -127,7 +127,7 @@ impl NackFragRequest {
         // that also nacks this sample makes the writer resend it whole from fragment 1. All
         // missing fragments are requested at once as 256-wide windows, not one window per round.
         let first_nackfrag_count = proxy.nackfrag_count().wrapping_add(1);
-        let messages = match MessageCreator::create_multiple_nackfrag_msgs(
+        let (messages, consumed_count) = match MessageCreator::create_multiple_nackfrag_msgs(
             self.participant.guid(),
             proxy.remote_writer_guid(),
             self.reader_guid.entity_id(),
@@ -136,14 +136,14 @@ impl NackFragRequest {
             &mut missing_fragments,
             first_nackfrag_count,
         ) {
-            Ok(messages) => messages,
+            Ok(result) => result,
             Err(e) => {
                 warn!("[UserLogic] Failed to create NACK_FRAG: {:?}", e);
                 return true;
             }
         };
 
-        for _ in 0..messages.len() {
+        for _ in 0..consumed_count {
             proxy.increase_nackfrag_count();
         }
 
@@ -2122,7 +2122,7 @@ impl UnicastMessageProcessor for UserLogic {
             }
 
             let first_nackfrag_count = writer_proxy.nackfrag_count().wrapping_add(1);
-            let messages = match MessageCreator::create_multiple_nackfrag_msgs(
+            let (messages, consumed_count) = match MessageCreator::create_multiple_nackfrag_msgs(
                 stateful_reader.guid(),
                 writer_proxy.remote_writer_guid(),
                 stateful_reader.guid().entity_id(),
@@ -2131,14 +2131,14 @@ impl UnicastMessageProcessor for UserLogic {
                 &mut missing_fragments,
                 first_nackfrag_count,
             ) {
-                Ok(messages) => messages,
+                Ok(result) => result,
                 Err(e) => {
                     warn!("[UserLogic] Failed to create NACK_FRAG for HEARTBEAT_FRAG: {:?}", e);
                     continue;
                 }
             };
 
-            for _ in 0..messages.len() {
+            for _ in 0..consumed_count {
                 writer_proxy.increase_nackfrag_count();
             }
 
