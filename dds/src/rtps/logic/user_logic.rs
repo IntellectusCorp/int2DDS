@@ -417,14 +417,10 @@ impl UserLogic {
                         continue;
                     };
 
-                    // Fresh count per fragment, as the initial send does: the reader drops a
-                    // heartbeat whose count did not advance, and drops it before scheduling the
-                    // NACK_FRAG timer, so a reused count stalls repair until the periodic
-                    // heartbeat.
-                    //
-                    // Fragment state is checked via last seq number, so use the current seq
-                    // number to get an ack for the retransmitted message.
-                    let heartbeat_info = piggyback.then(|| {
+                    // Piggyback one heartbeat on the final fragment so the sample is
+                    // advertised only after the whole burst is on the wire.
+                    let is_final_fragment = fragment_num == a_change.total_fragments();
+                    let heartbeat_info = (piggyback && is_final_fragment).then(|| {
                         (
                             stateful_writer.heartbeat_count(),
                             requested_change_sn,
@@ -452,7 +448,7 @@ impl UserLogic {
                     {
                         match self.send_rtps_message_to_locators(locators.iter(), &send_buffer) {
                             Ok(_) => {
-                                if piggyback {
+                                if heartbeat_info.is_some() {
                                     stateful_writer.increase_heartbeat_count();
                                 }
                             }
@@ -693,7 +689,10 @@ impl UserLogic {
                                     continue;
                                 };
 
-                                let heartbeat_info = if reliable && piggyback {
+                                // Piggyback one heartbeat on the final fragment so the sample is
+                                // advertised only after the whole burst is on the wire.
+                                let is_final_fragment = fragment_num == a_change.total_fragments();
+                                let heartbeat_info = if reliable && piggyback && is_final_fragment {
                                     Some((
                                         writer.heartbeat_count(),
                                         first_sn,
@@ -729,7 +728,7 @@ impl UserLogic {
                                         .is_ok()
                                     {
                                         data_sent = true;
-                                        if piggyback {
+                                        if heartbeat_info.is_some() {
                                             writer.increase_heartbeat_count();
                                         }
                                     }
@@ -2568,11 +2567,17 @@ impl UnicastMessageProcessor for UserLogic {
                 RtpsError::new(RtpsErrorCode::LockError, "Failed to lock wire buffer pool")
             })?
             .acquire();
+        // Piggyback one heartbeat on the final requested fragment so the repair burst is
+        // advertised only after it is fully on the wire.
+        let final_requested_fn = requested_fragments
+            .iter()
+            .filter(|&&fragment_num| fragment_num >= 1 && fragment_num <= total_frags)
+            .max()
+            .copied();
+
         for fragment_num in requested_fragments {
             if fragment_num >= 1 && fragment_num <= total_frags {
-                // Fresh count per fragment: a reused count is dropped by the reader before it can
-                // schedule the NACK_FRAG that would continue the repair.
-                let heartbeat_info = piggyback
+                let heartbeat_info = (piggyback && Some(fragment_num) == final_requested_fn)
                     .then(|| (stateful_writer.heartbeat_count(), writer_sn, last_sn, false, false));
 
                 if self.send_data_frag_to_reader_proxy(
@@ -2583,7 +2588,7 @@ impl UnicastMessageProcessor for UserLogic {
                     heartbeat_info,
                     timestamp,
                     &mut send_buffer,
-                ) && piggyback
+                ) && heartbeat_info.is_some()
                 {
                     stateful_writer.increase_heartbeat_count();
                 }
