@@ -1685,7 +1685,7 @@ impl UserLogic {
                 RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, "WriterProxy not found")
             })?;
 
-        let bitmap_base = writer_proxy.expected_sn();
+        let bitmap_base = writer_proxy.calculate_bitmap_base();
         let last_sn = writer_proxy.changes_from_writer_max();
         let missing_changes = writer_proxy.missing_changes_for_heartbeat(bitmap_base, last_sn);
 
@@ -2378,7 +2378,7 @@ impl UnicastMessageProcessor for UserLogic {
             writer_proxy.set_last_heartbeat_count(heartbeat.count);
             writer_proxy.set_last_heartbeat_at(now);
 
-            let missing_changes =
+            let (bitmap_base, missing_changes) =
                 writer_proxy.process_heartbeat(heartbeat.first_sn, heartbeat.last_sn);
 
             // This is the first HB for reader
@@ -2407,7 +2407,6 @@ impl UnicastMessageProcessor for UserLogic {
                     // floor with no way to ever re-request it -- silent loss on a RELIABLE
                     // reader. A failed ACKNACK only costs one ACKNACK; the next heartbeat
                     // retries it.
-                    let bitmap_base = writer_proxy.expected_sn();
                     acknack_result = self.send_acknack_to_writer_proxy_inner(
                         writer_proxy,
                         stateful_reader,
