@@ -418,7 +418,7 @@ impl SedpLogic {
         );
         let cache_change = Arc::new(change);
         if let Ok(mut cache) = writer.writer_cache().lock() {
-            let _ = cache.add_change_builtin(cache_change.clone());
+            let _ = cache.add_change_builtin(cache_change.clone(), writer.as_ref());
         }
         let remote_reader_guid = Guid::new(remote_prefix, EntityId::TYPE_LOOKUP_REQUEST_READER);
         self.send_sedp_data_message(
@@ -468,7 +468,7 @@ impl SedpLogic {
         );
         let cache_change = Arc::new(change);
         if let Ok(mut cache) = writer.writer_cache().lock() {
-            let _ = cache.add_change_builtin(cache_change.clone());
+            let _ = cache.add_change_builtin(cache_change.clone(), writer.as_ref());
         }
         self.send_sedp_data_message(
             cache_change,

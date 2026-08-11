@@ -96,17 +96,25 @@ impl SubmessageCreator {
         let mut data_header_flag = SubmessageHeaderFlag::new();
         data_header_flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::ACKNACK);
 
-        // Convert missing changes to SequenceNumberSet
+        // `bitmap_base` is the reader's answer about its own receive ledger, and RTPS 2.5
+        // 8.3.7.1.1 has the writer read `base - 1` as a positive acknowledgement. It is carried
+        // through on both branches.
+        //
+        // Rebasing the set onto the first entry of the missing list -- as this used to do --
+        // acknowledges everything between the two whenever they differ, and they differ exactly
+        // when the thing the reader is still waiting on cannot appear in that list: a sample
+        // short of fragments is stamped `Received`, and a sequence number with no ledger entry
+        // sits outside the heartbeat range the list was built from.
+        //
+        // `from_vec` covers `base..base+255` and silently ignores anything beyond, so a distant
+        // sequence number simply waits for a later round as the base walks forward.
         let reader_sn_state = if missing_changes.is_empty() {
-            // If no missing changes, create empty set
             if !is_preemptive {
                 data_header_flag.add_flag(SubmessageFlagType::FinalFlag, SubmessageId::ACKNACK);
             }
             SequenceNumberSet::new_empty_with_base(bitmap_base)
         } else {
-            // If there are missing changes, create set with those sequence numbers
-            let base_sn = missing_changes[0];
-            SequenceNumberSet::from_vec(base_sn, missing_changes)
+            SequenceNumberSet::from_vec(bitmap_base, missing_changes)
         };
 
         let acknack_data =
@@ -276,6 +284,70 @@ impl SubmessageCreator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn acknack_state(
+        missing_changes: Vec<SequenceNumber>,
+        bitmap_base: SequenceNumber,
+    ) -> SequenceNumberSet {
+        let submessage = SubmessageCreator::create_acknack_submessage(
+            EntityId::SEDP_BUILTIN_PUBLICATIONS_READER,
+            EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER,
+            missing_changes,
+            1,
+            bitmap_base,
+            false,
+        )
+        .expect("the ACKNACK submessage must build");
+
+        match submessage.body {
+            SubmessageBody::AckNack(ack_nack) => ack_nack.reader_sn_state,
+            _ => panic!("expected an ACKNACK submessage"),
+        }
+    }
+
+    /// The base states what the reader received; the bitmap states which sequence numbers above
+    /// it are outstanding. Rebasing the set onto the first entry of the missing list discards the
+    /// reader's answer and silently acknowledges everything below that entry.
+    ///
+    /// The two diverge whenever the first thing the reader is still waiting on does not appear in
+    /// the missing list: a sample short of fragments is stamped `Received`, and a sequence number
+    /// with no ledger entry falls outside the heartbeat range the list was built from.
+    #[test]
+    fn the_acknack_keeps_the_base_the_reader_computed() {
+        let state = acknack_state(
+            vec![SequenceNumber::new(0, 5), SequenceNumber::new(0, 6)],
+            SequenceNumber::new(0, 3),
+        );
+
+        assert_eq!(
+            state.bitmap_base(),
+            SequenceNumber::new(0, 3),
+            "SN 3 and 4 were never received, so base - 1 must not reach them"
+        );
+        assert_eq!(
+            state.extract_numbers(),
+            vec![SequenceNumber::new(0, 5), SequenceNumber::new(0, 6)],
+            "the outstanding sequence numbers still have to be requested"
+        );
+    }
+
+    /// The bitmap covers `base .. base + 255`. Sequence numbers past that window cannot be named
+    /// in this ACKNACK, and `NumberSet::from_vec` drops them without a word -- so the base must
+    /// still be the reader's, and the request resumes as the window walks forward.
+    #[test]
+    fn a_missing_sequence_number_past_the_bitmap_window_does_not_move_the_base() {
+        let state = acknack_state(
+            vec![SequenceNumber::new(0, 10), SequenceNumber::new(0, 400)],
+            SequenceNumber::new(0, 2),
+        );
+
+        assert_eq!(state.bitmap_base(), SequenceNumber::new(0, 2));
+        assert_eq!(
+            state.extract_numbers(),
+            vec![SequenceNumber::new(0, 10)],
+            "400 is outside base..base+255 and waits for a later round"
+        );
+    }
 
     #[test]
     fn test_calculate_gap_sns_from_vec_empty_sns() {

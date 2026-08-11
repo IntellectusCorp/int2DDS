@@ -112,13 +112,26 @@ impl StatelessReader {
         }
     }
 
-    pub(crate) fn matched_writer_add(&self, a_writer_proxy: RemoteWriterInfo) {
+    /// Add `a_writer_proxy` unless an entry for the same remote writer is already
+    /// present. Returns whether it was added.
+    ///
+    /// The check happens under the same lock as the insert: SEDP matching can be
+    /// driven concurrently by the local-creation path and the SEDP receive path,
+    /// and a plain `matched_writer_is_matched` guard at the call site leaves a
+    /// window where both callers pass it and push a duplicate entry.
+    pub(crate) fn matched_writer_add(&self, a_writer_proxy: RemoteWriterInfo) -> bool {
         match self.matched_writers.lock() {
             Ok(mut matched_writers) => {
+                let remote_guid = a_writer_proxy.remote_writer_guid();
+                if matched_writers.iter().any(|info| info.remote_writer_guid() == remote_guid) {
+                    return false;
+                }
                 matched_writers.push(a_writer_proxy);
+                true
             }
             Err(e) => {
                 error!("Failed to acquire matched_writers lock: {}", e);
+                false
             }
         }
     }

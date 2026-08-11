@@ -320,6 +320,12 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
 
         let (_, sedp_logic_arc, _) = participant.get_logics();
         if let Some(sedp_logic) = sedp_logic_arc.as_ref().as_ref() {
+            // Announcements made before this peer existed are only in the history; the heartbeats
+            // armed below advertise them but nothing pumps a builtin writer's unsent changes.
+            if let Err(e) = sedp_logic.push_sedp_history_to_participant(remote_prefix) {
+                log::warn!("Failed to push SEDP history to {:?}: {}", remote_prefix, e);
+            }
+
             let _ = sedp_logic.register_periodic_send_timer(
                 remote_prefix,
                 EntityId::SPDP_BUILTIN_PARTICIPANT_WRITER,
@@ -436,7 +442,7 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
                 false,
                 true,
                 // 8.5.4.1 According to the DDS specification, the reliability QoS for these built-in Entities is set to 'reliable.'
-                SubscriptionBuiltinTopicData::default(),
+                SubscriptionBuiltinTopicData::builtin_reliable(),
                 SequenceNumber::new(0, 0), // Built-in endpoints are not volatile
             );
             writer.matched_reader_add(reader_proxy);

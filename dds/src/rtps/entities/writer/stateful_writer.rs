@@ -165,13 +165,26 @@ impl StatefulWriter {
             .clone())
     }
 
-    pub(crate) fn matched_reader_add(&self, a_reader_proxy: ReaderProxy) {
+    /// Add `a_reader_proxy` unless a proxy for the same remote reader is already
+    /// present. Returns whether it was added.
+    ///
+    /// The check happens under the same lock as the insert: SEDP matching can be
+    /// driven concurrently by the local-creation path and the SEDP receive path,
+    /// and a plain `matched_reader_is_matched` guard at the call site leaves a
+    /// window where both callers pass it and push a duplicate proxy.
+    pub(crate) fn matched_reader_add(&self, a_reader_proxy: ReaderProxy) -> bool {
         match self.matched_readers.lock() {
             Ok(mut matched_readers) => {
+                let remote_guid = a_reader_proxy.remote_reader_guid();
+                if matched_readers.iter().any(|proxy| proxy.remote_reader_guid() == remote_guid) {
+                    return false;
+                }
                 matched_readers.push(a_reader_proxy);
+                true
             }
             Err(e) => {
                 error!("Failed to acquire matched_readers lock: {}", e);
+                false
             }
         }
     }
