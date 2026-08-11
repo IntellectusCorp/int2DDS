@@ -553,6 +553,27 @@ mod tests {
         assert!(proxy.all_fragments_received(sn));
     }
 
+    // A HEARTBEAT that references a sequence number before any DATA_FRAG creates the change with
+    // no fragment_info. A later fragment must still register so the sample is tracked as
+    // fragmented and the reader can NACK_FRAG the rest.
+    #[test]
+    fn test_mark_frag_received_after_heartbeat_seeded_change() {
+        let mut proxy = empty_writer_proxy();
+        let sn = SequenceNumber::new(0, 1);
+
+        proxy.process_heartbeat(sn, sn);
+        assert!(!proxy.has_fragmented_changes(sn, sn));
+
+        proxy.mark_frag_received(sn, 4, 1..2); // fragment 1
+
+        assert!(proxy.has_fragmented_changes(sn, sn));
+        assert!(proxy.still_missing_fragments(sn));
+        assert_eq!(
+            proxy.calculate_missing_fragments(sn, sn),
+            Some((sn, FragmentNumberSet::from_vec(2, vec![2, 3, 4]))),
+        );
+    }
+
     fn holds_fragment(proxy: &WriterProxy, seq_num: SequenceNumber, fragment: u32) -> bool {
         proxy
             .changes_from_writer
