@@ -633,7 +633,9 @@ impl WlpLogic {
                 log::warn!("Failed to remove old change: {}", e);
             }
         }
-        if let Err(e) = cache_guard.add_change_builtin(cache_change.clone(), writer.as_ref()) {
+        // `proxies_guard` is held above and this function sends the change itself, so the
+        // transmitting variant would deadlock on a lock this thread already owns.
+        if let Err(e) = cache_guard.add_change_builtin_without_transmit(cache_change.clone()) {
             log::warn!(
                 "Failed to add liveliness change to cache: {}, continuing to send heartbeat anyway",
                 e
