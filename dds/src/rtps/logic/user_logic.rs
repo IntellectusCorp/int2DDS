@@ -90,9 +90,6 @@ struct NackFragRequest {
     remote_writer_guid: Guid,
     /// The change the fragment numbers belong to; also keys the timer.
     incomplete_sn: SequenceNumber,
-    /// For the piggybacked ACKNACK, which is about sequence numbers rather than fragments.
-    acknack_last_sn: SequenceNumber,
-    acknack_missing_changes: Vec<SequenceNumber>,
     /// Re-asks left before the periodic heartbeat takes over again.
     retries_left: u32,
 }
@@ -127,14 +124,10 @@ impl NackFragRequest {
             return false;
         };
 
-        proxy.increase_acknack_count();
         proxy.increase_nackfrag_count();
-        let acknack_info = Some((
-            proxy.acknack_count(),
-            self.acknack_last_sn,
-            self.acknack_missing_changes.clone(),
-        ));
 
+        // The incomplete fragmented sample is recovered by NACK_FRAG alone. Bundling an ACKNACK
+        // that also nacks this sample makes the writer resend it whole from fragment 1.
         let Ok(buffer) = MessageCreator::create_nackfrag_msg(
             self.participant.guid(),
             proxy.remote_writer_guid(),
@@ -143,7 +136,7 @@ impl NackFragRequest {
             self.incomplete_sn,
             missing_fragments,
             proxy.nackfrag_count(),
-            acknack_info,
+            None,
         ) else {
             return true;
         };
@@ -1953,9 +1946,9 @@ impl UnicastMessageProcessor for UserLogic {
             // another sample in the range is still short of fragments.
             pending_delivery = writer_proxy.flush_buffered_changes();
 
-            // Any short change in the range means a NACK_FRAG, which piggybacks its own ACKNACK.
-            // Routing on `last_sn` alone stranded a short earlier sample: it is already marked
-            // `Received`, so the plain ACKNACK omits it too and nothing asks for it again.
+            // A short change in the range is repaired by NACK_FRAG in the else branch, keyed on the
+            // sample that is actually short. Routing on `last_sn` alone stranded a short earlier
+            // sample: it is marked `Received`, so the plain ACKNACK omits it and nothing repairs it.
             if !writer_proxy.has_fragmented_changes(heartbeat.first_sn, heartbeat.last_sn) {
                 // Apply heartbeat response delay
                 let heartbeat_response_delay = stateful_reader.heartbeat_response_delay();
@@ -2028,8 +2021,6 @@ impl UnicastMessageProcessor for UserLogic {
                         reader_guid: stateful_reader.guid(),
                         remote_writer_guid: writer_proxy.remote_writer_guid(),
                         incomplete_sn,
-                        acknack_last_sn: heartbeat.last_sn,
-                        acknack_missing_changes: missing_changes,
                         retries_left: NACK_FRAG_MAX_RETRIES,
                     };
 
