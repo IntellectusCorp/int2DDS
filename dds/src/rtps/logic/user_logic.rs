@@ -626,14 +626,14 @@ impl UserLogic {
         //---------------------------------------------------------------------
         // Batched path: one datagram per destination participant.
         //
-        // INFO_DST addresses a participant, so readers behind the same GuidPrefix can
-        // share one header + INFO_DST + INFO_TS and differ only in their DATA (and
-        // piggyback HEARTBEAT) submessage. On this topology that turns 12,015 sends per
-        // publish cycle into 4,705; the hub topic writer goes from 123 datagrams to 45.
+        // INFO_DST addresses a participant and reader id UNKNOWN reaches every matched
+        // reader behind it, so one DATA (or DATA_FRAG burst) plus one piggyback
+        // HEARTBEAT serves the whole participant. On this topology that turns 12,015
+        // sends per publish cycle into 4,705; the hub topic writer goes from 123
+        // datagrams to 45.
         //
-        // Only single-change plans are batched: one DATA duplicated per reader, or one
-        // fragmented change sent once to reader id UNKNOWN. GAPs and multi-change
-        // catch-up keep the original per-reader path below.
+        // Only single-change plans are batched. GAPs and multi-change catch-up keep
+        // the original per-reader path below, so that message shape is untouched.
         //---------------------------------------------------------------------
         let mut deferred: Vec<(Guid, SendPlan)> = Vec::with_capacity(plans.len());
         // (destination prefix, sequence number, locators) -> readers
@@ -742,30 +742,25 @@ impl UserLogic {
                 continue;
             }
 
-            let mut any_piggyback = false;
-            let targets: Vec<(
-                EntityId,
-                Option<(u32, SequenceNumber, SequenceNumber, bool, bool)>,
-                Option<_>,
-            )> = members
-                .iter()
-                .map(|(_, plan)| {
-                    let hb = if plan.reliable && plan.piggyback {
-                        any_piggyback = true;
-                        Some((heartbeat_count, first, last, false, false))
-                    } else {
-                        None
-                    };
-                    (plan.group_id, hb, plan.content_filter.clone())
-                })
-                .collect();
+            let is_piggyback_wanted =
+                members.iter().any(|(_, plan)| plan.reliable && plan.piggyback);
+            let heartbeat_info =
+                is_piggyback_wanted.then(|| (heartbeat_count, first, last, false, false));
 
-            if let Err(e) = MessageCreator::create_data_msg_multi(
+            debug!(
+                "[Data] Batched DATA sn={} to {} readers behind one participant",
+                sn.to_i64(),
+                members.len()
+            );
+
+            if let Err(e) = MessageCreator::create_data_msg(
                 &a_change,
-                dst_prefix,
+                Guid::new(dst_prefix, EntityId::UNKNOWN),
+                EntityId::UNKNOWN,
                 writer.endpoint_id(),
-                &targets,
+                heartbeat_info,
                 true, // Use inline QoS (default)
+                None,
                 &mut send_buffer,
             ) {
                 warn!("[Data] Failed to build batched DATA: {:?}", e);
@@ -774,7 +769,7 @@ impl UserLogic {
             }
 
             if self.send_rtps_message_to_locators(locators.iter(), &send_buffer).is_ok() {
-                if any_piggyback {
+                if heartbeat_info.is_some() {
                     writer.increase_heartbeat_count();
                 }
                 for (reader_guid, plan) in &members {

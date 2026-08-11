@@ -245,9 +245,8 @@ impl MessageCreator {
     ///
     /// INFO_DST addresses a participant, so every writer behind one GuidPrefix can share
     /// a single header + INFO_DST and differ only in its ACKNACK submessage. This is the
-    /// return path of [`MessageCreator::create_data_msg_multi`]: a batched DATA message
-    /// delivers one heartbeat per reader behind this participant, and without this the
-    /// replies would go back one datagram at a time.
+    /// return path of a batched DATA heartbeat: every reader behind this participant
+    /// answers it, and without this the replies would go back one datagram at a time.
     pub(crate) fn create_acknack_msg_multi(
         local_participant_guid: Guid,
         dst_prefix: GuidPrefix,
@@ -325,64 +324,7 @@ impl MessageCreator {
         Ok(())
     }
 
-    /// One RTPS message carrying the same change to several readers of the **same**
-    /// remote participant.
-    ///
-    /// INFO_DST addresses a participant, not a reader, so every reader behind one
-    /// GuidPrefix can share a single header + INFO_DST + INFO_TS. Only the DATA (and
-    /// its piggyback HEARTBEAT) is per reader. On the Autoware topology this collapses
-    /// 12,015 sends per publish cycle into 4,705 - the hub topic writer alone goes from
-    /// 123 datagrams to 45.
-    ///
-    /// `targets` is (reader entity id, heartbeat info, content filter) per reader.
-    /// The caller must ensure every target sits behind `dst_prefix`.
-    pub(crate) fn create_data_msg_multi(
-        cache_change: &CacheChange,
-        dst_prefix: GuidPrefix,
-        writer_entity_id: EntityId,
-        targets: &[(
-            EntityId,
-            Option<(u32, SequenceNumber, SequenceNumber, bool, bool)>,
-            Option<ContentFilterInfo>,
-        )],
-        use_inline_qos: bool,
-        send_buffer: &mut Vec<u8>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut rtps_message = RtpsMessage::new(Header::new(cache_change.writer_guid().prefix()));
-        rtps_message.add_submessage(SubmessageCreator::create_info_dst_submessage(dst_prefix));
-        rtps_message.add_submessage(SubmessageCreator::create_info_ts_submessage(Utc::now()));
-
-        for (reader_entity_id, heartbeat_info, content_filter_info) in targets {
-            rtps_message.add_submessage(Self::build_data_submessage(
-                cache_change,
-                *reader_entity_id,
-                writer_entity_id,
-                use_inline_qos,
-                content_filter_info.clone(),
-            ));
-
-            if let Some((heartbeat_count, first_sn, last_sn, final_flag, liveliness_flag)) =
-                *heartbeat_info
-            {
-                rtps_message.add_submessage(SubmessageCreator::create_heartbeat_submessage(
-                    heartbeat_count,
-                    *reader_entity_id,
-                    writer_entity_id,
-                    first_sn,
-                    last_sn,
-                    final_flag,
-                    liveliness_flag,
-                )?);
-            }
-        }
-
-        send_buffer.clear();
-        rtps_message.write_to_stream_with_ctx(Endianness::LittleEndian, &mut *send_buffer)?;
-        Ok(())
-    }
-
-    /// The DATA submessage for one reader. Split out so the single-reader and the
-    /// batched message builders cannot drift apart.
+    /// The DATA submessage for one reader.
     fn build_data_submessage<'a>(
         cache_change: &'a CacheChange,
         reader_entity_id: EntityId,
