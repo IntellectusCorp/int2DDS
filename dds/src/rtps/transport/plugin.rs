@@ -152,6 +152,17 @@ pub(crate) trait TransportPlugin: Send + Sync {
     /// instead of silently falling back to unicast.
     fn ensure_user_multicast_listener(&self, group: Ipv4Addr) -> io::Result<()>;
 
+    /// Forget `group`, so a later reader on it is served by a freshly created
+    /// listener.
+    ///
+    /// Called once the last DataReader on the group is gone. The socket itself
+    /// belongs to the listening task by then, so the caller must have ended that
+    /// task first; releasing while it still reads leaves two sockets on one
+    /// group, each taking a copy of every datagram.
+    fn release_user_multicast_listener(&self, group: Ipv4Addr) {
+        let _ = group;
+    }
+
     /// Get the local port number used by this transport's sender.
     fn port(&self) -> u16;
 

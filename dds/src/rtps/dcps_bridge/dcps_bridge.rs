@@ -4,6 +4,7 @@
 //! managing participant lifecycles, entity creation, and message routing between
 //! the two layers.
 
+use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::{Arc, RwLock, Weak};
 
@@ -70,6 +71,8 @@ pub(crate) struct DcpsBridge {
     sedp_logic: Arc<Option<SedpLogic>>,
     user_logic: Arc<Option<UserLogic>>,
     thread_monitor: Option<ThreadMonitor>,
+
+    user_multicast_reader_counts: HashMap<Ipv4Addr, usize>,
 }
 
 pub(crate) static PARTICIPANTS: RwLock<Vec<Weak<Participant>>> = RwLock::new(Vec::new());
@@ -180,6 +183,7 @@ impl DcpsBridge {
             sedp_logic,
             user_logic,
             thread_monitor: None,
+            user_multicast_reader_counts: HashMap::new(),
         })
     }
 
@@ -226,7 +230,7 @@ impl DcpsBridge {
         Ok(())
     }
 
-    pub(crate) fn ensure_user_multicast_traffic(&self, group: Ipv4Addr) -> RtpsResult<()> {
+    pub(crate) fn ensure_user_multicast_traffic(&mut self, group: Ipv4Addr) -> RtpsResult<()> {
         let Some(user_logic) = self.user_logic.as_ref() else {
             return Err(RtpsError::new(RtpsErrorCode::NotInitialized, "user_logic is not set"));
         };
@@ -244,6 +248,26 @@ impl DcpsBridge {
         while let Some((group_locator, source)) = transport.take_user_data_multicast_source() {
             user_logic.start_user_multicast_traffic(group_locator, source)?;
         }
+
+        *self.user_multicast_reader_counts.entry(group).or_insert(0) += 1;
+        Ok(())
+    }
+
+    pub(crate) fn release_user_multicast_traffic(&mut self, group: Ipv4Addr) -> RtpsResult<()> {
+        let Some(count) = self.user_multicast_reader_counts.get_mut(&group) else {
+            return Ok(());
+        };
+
+        *count = count.saturating_sub(1);
+        if *count > 0 {
+            return Ok(());
+        }
+        self.user_multicast_reader_counts.remove(&group);
+
+        if let Some(user_logic) = self.user_logic.as_ref() {
+            user_logic.stop_user_multicast_traffic(group)?;
+        }
+        self.socket.transport().release_user_multicast_listener(group);
 
         Ok(())
     }
@@ -388,7 +412,17 @@ impl DcpsBridge {
         topic_name: String,
         entity_id: EntityId,
     ) -> Result<(), RtpsError> {
+        let group = self
+            .participant
+            .find_reader_from_entity_id(entity_id)
+            .and_then(|reader| reader.get_subscription_builtin_topic_data().ok())
+            .and_then(|data| data.reader_multicast_extension().group_ipv4());
+
         let _ = self.participant.remove_reader(topic_name, entity_id);
+
+        if let Some(group) = group {
+            self.release_user_multicast_traffic(group)?;
+        }
         Ok(())
     }
 
@@ -1618,6 +1652,87 @@ mod tests {
         assert!(
             guard.ensure_user_multicast_traffic(Ipv4Addr::new(10, 0, 0, 1)).is_err(),
             "the join path must still be reached after the listening threads started"
+        );
+
+        let _ = guard.disable();
+    }
+
+    #[test]
+    fn test_stopping_one_group_leaves_the_other_listening() {
+        let domain_id = unique_domain_id();
+        let dcps_bridge =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default()).unwrap()));
+
+        let mut guard = dcps_bridge.lock().unwrap();
+        guard.init().unwrap();
+
+        let stopped = Ipv4Addr::new(239, 255, 12, 9);
+        let kept = Ipv4Addr::new(239, 255, 12, 10);
+        guard.ensure_user_multicast_traffic(stopped).unwrap();
+        guard.ensure_user_multicast_traffic(kept).unwrap();
+
+        let user_logic =
+            guard.user_logic.as_ref().as_ref().expect("user_logic must be set").clone();
+        assert_eq!(user_logic.multicast_listening_groups(), vec![stopped, kept]);
+
+        // The join inside stop only returns once the thread has read the stop
+        // flag, so an unread flag hangs here instead of passing quietly.
+        user_logic.stop_user_multicast_traffic(stopped).unwrap();
+        assert_eq!(
+            user_logic.multicast_listening_groups(),
+            vec![kept],
+            "Stopping one group must not disturb the groups still in use"
+        );
+
+        user_logic
+            .stop_user_multicast_traffic(stopped)
+            .expect("stopping a group that is already gone must be accepted");
+
+        let _ = guard.disable();
+    }
+
+    #[test]
+    fn test_group_is_released_only_when_its_last_reader_is_gone() {
+        let domain_id = unique_domain_id();
+        let dcps_bridge =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default()).unwrap()));
+
+        let mut guard = dcps_bridge.lock().unwrap();
+        guard.init().unwrap();
+
+        let address = "239.255.12.11";
+        let group = Ipv4Addr::new(239, 255, 12, 11);
+
+        // Mirrors the DataReader path: reception is ensured, then the reader is made.
+        guard.ensure_user_multicast_traffic(group).unwrap();
+        let first = create_reader_and_take_subscription_data(&mut guard, "first", Some(address));
+        guard.ensure_user_multicast_traffic(group).unwrap();
+        let second = create_reader_and_take_subscription_data(&mut guard, "second", Some(address));
+
+        let user_logic =
+            guard.user_logic.as_ref().as_ref().expect("user_logic must be set").clone();
+        assert_eq!(user_logic.multicast_listening_groups(), vec![group]);
+
+        guard.delete_rtps_reader("first".to_string(), first.endpoint_guid().entity_id()).unwrap();
+        assert_eq!(
+            user_logic.multicast_listening_groups(),
+            vec![group],
+            "A group still carrying a reader must keep receiving"
+        );
+
+        guard.delete_rtps_reader("second".to_string(), second.endpoint_guid().entity_id()).unwrap();
+        assert!(
+            user_logic.multicast_listening_groups().is_empty(),
+            "The last reader leaving must end the reception"
+        );
+
+        // The transport has to forget the group as well, or this call would be
+        // taken as already served and leave the participant deaf to it.
+        guard.ensure_user_multicast_traffic(group).unwrap();
+        assert_eq!(
+            user_logic.multicast_listening_groups(),
+            vec![group],
+            "A released group must be joinable again"
         );
 
         let _ = guard.disable();

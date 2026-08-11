@@ -12,6 +12,7 @@ use bytes::Bytes;
 use log::{debug, error, info, warn};
 use mio::{Events, Interest, Poll, Waker};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
@@ -21,10 +22,15 @@ pub(crate) struct UserMulticastListeningTask {
     user_logic: Arc<Option<UserLogic>>,
     shutdown_waker: Arc<OnceLock<Arc<Waker>>>,
     group_locator: Locator,
+    stop: Arc<AtomicBool>,
 }
 
 impl UserMulticastListeningTask {
-    pub(crate) fn new(participant: Arc<Participant>, group_locator: Locator) -> Self {
+    pub(crate) fn new(
+        participant: Arc<Participant>,
+        group_locator: Locator,
+        stop: Arc<AtomicBool>,
+    ) -> Self {
         let (_, _, user_logic) = participant.get_logics();
         let guid_prefix = participant.guid().prefix();
         Self {
@@ -33,6 +39,7 @@ impl UserMulticastListeningTask {
             user_logic,
             shutdown_waker: Arc::new(OnceLock::new()),
             group_locator,
+            stop,
         }
     }
 
@@ -80,8 +87,8 @@ impl UserMulticastListeningTask {
                 Err(e) => return Err(e),
             }
 
-            if participant.is_terminated() {
-                debug!("Detected global termination flag, user traffic multicast listening loop is terminating...");
+            if participant.is_terminated() || self.stop.load(Ordering::Acquire) {
+                debug!("Detected termination flag, user traffic multicast listening loop is terminating...");
                 let _ = poll.registry().deregister(listener.socket());
                 return Ok(());
             }
@@ -89,8 +96,8 @@ impl UserMulticastListeningTask {
             for event in events.iter() {
                 if event.token() == token && event.is_readable() {
                     while let Some((buffer, from_addr)) = listener.get_message() {
-                        if participant.is_terminated() {
-                            debug!("Detected global termination flag during UDP processing");
+                        if participant.is_terminated() || self.stop.load(Ordering::Acquire) {
+                            debug!("Detected termination flag during UDP processing");
                             let _ = poll.registry().deregister(listener.socket());
                             return Ok(());
                         }

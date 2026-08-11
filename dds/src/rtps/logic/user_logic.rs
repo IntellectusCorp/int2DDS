@@ -64,6 +64,8 @@ use crate::utils::timer::{timer_handler::TimerHandler, timer_id::TimerId};
 use dashmap::DashMap;
 use mio::Waker;
 
+use std::net::Ipv4Addr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread::{self, JoinHandle};
 
@@ -75,8 +77,13 @@ pub(crate) struct UserLogic {
     fragment_buffers: Arc<DashMap<(Guid, SequenceNumber), FragmentBuffer>>,
     unicast_listening_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     unicast_listening_waker: Arc<OnceLock<Arc<Waker>>>,
-    multicast_listening_handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
-    multicast_listening_wakers: Arc<Mutex<Vec<Arc<OnceLock<Arc<Waker>>>>>>,
+    multicast_listeners: Arc<Mutex<HashMap<Ipv4Addr, MulticastListener>>>,
+}
+
+struct MulticastListener {
+    handle: JoinHandle<()>,
+    waker: Arc<OnceLock<Arc<Waker>>>,
+    stop: Arc<AtomicBool>,
 }
 
 // Initialization
@@ -88,8 +95,7 @@ impl UserLogic {
             fragment_buffers: Arc::new(DashMap::new()),
             unicast_listening_handle: Arc::new(Mutex::new(None)),
             unicast_listening_waker: Arc::new(OnceLock::new()),
-            multicast_listening_handles: Arc::new(Mutex::new(Vec::new())),
-            multicast_listening_wakers: Arc::new(Mutex::new(Vec::new())),
+            multicast_listeners: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -100,9 +106,9 @@ impl UserLogic {
     }
 
     pub(crate) fn wake_multicast_listening_thread(&self) {
-        if let Ok(wakers) = self.multicast_listening_wakers.lock() {
-            for waker in wakers.iter() {
-                if let Some(waker) = waker.get() {
+        if let Ok(listeners) = self.multicast_listeners.lock() {
+            for listener in listeners.values() {
+                if let Some(waker) = listener.waker.get() {
                     let _ = waker.wake();
                 }
             }
@@ -110,8 +116,10 @@ impl UserLogic {
     }
 
     pub(crate) fn join_multicast_listening_thread(&self) -> RtpsResult<()> {
-        let handles: Vec<JoinHandle<()>> = match self.multicast_listening_handles.lock() {
-            Ok(mut handle_guard) => handle_guard.drain(..).collect(),
+        let handles: Vec<JoinHandle<()>> = match self.multicast_listeners.lock() {
+            Ok(mut listener_guard) => {
+                listener_guard.drain().map(|(_, listener)| listener.handle).collect()
+            }
             Err(e) => return Err(RtpsError::new(RtpsErrorCode::LockError, e.to_string())),
         };
 
@@ -172,14 +180,15 @@ impl UserLogic {
     ) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
 
+        let group = group_locator.to_ip_v4_addr();
         let shutdown_waker = Arc::new(OnceLock::new());
-        let mut user_multicast_listening_task =
-            UserMulticastListeningTask::new(participant.clone(), group_locator.clone());
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut user_multicast_listening_task = UserMulticastListeningTask::new(
+            participant.clone(),
+            group_locator.clone(),
+            stop.clone(),
+        );
         user_multicast_listening_task.set_shutdown_waker(shutdown_waker.clone());
-        self.multicast_listening_wakers
-            .lock()
-            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?
-            .push(shutdown_waker);
         let participant_guid = participant.guid();
 
         let multicast_handle = thread::Builder::new()
@@ -202,11 +211,45 @@ impl UserLogic {
             })
             .expect("Failed to create user multicast listening thread");
 
-        if let Ok(mut handle_guard) = self.multicast_listening_handles.lock() {
-            handle_guard.push(multicast_handle);
+        if let Ok(mut listener_guard) = self.multicast_listeners.lock() {
+            listener_guard.insert(
+                group,
+                MulticastListener { handle: multicast_handle, waker: shutdown_waker, stop },
+            );
         }
 
         Ok(())
+    }
+
+    /// Returns once the thread has ended, so the socket is closed and its
+    /// group membership released before the caller can rejoin the same group.
+    pub(crate) fn stop_user_multicast_traffic(&self, group: Ipv4Addr) -> RtpsResult<()> {
+        let listener = match self.multicast_listeners.lock() {
+            Ok(mut listener_guard) => listener_guard.remove(&group),
+            Err(e) => return Err(RtpsError::new(RtpsErrorCode::LockError, e.to_string())),
+        };
+
+        let Some(listener) = listener else {
+            return Ok(());
+        };
+
+        listener.stop.store(true, Ordering::Release);
+        if let Some(waker) = listener.waker.get() {
+            let _ = waker.wake();
+        }
+        listener.handle.join().map_err(|_| RtpsError::new(RtpsErrorCode::ThreadJoinError, None))?;
+
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn multicast_listening_groups(&self) -> Vec<Ipv4Addr> {
+        let mut groups: Vec<Ipv4Addr> = match self.multicast_listeners.lock() {
+            Ok(listener_guard) => listener_guard.keys().copied().collect(),
+            Err(_) => Vec::new(),
+        };
+        groups.sort_by_key(|group| group.octets());
+        groups
     }
 }
 

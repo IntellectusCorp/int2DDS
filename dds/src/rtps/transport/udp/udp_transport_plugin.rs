@@ -230,6 +230,23 @@ impl TransportPlugin for UdpTransportPlugin {
         Ok(())
     }
 
+    fn release_user_multicast_listener(&self, group: Ipv4Addr) {
+        let mut joined = self.joined_user_multicast_groups.lock().expect("lock poisoned");
+        if !joined.remove(&group) {
+            return;
+        }
+
+        // Only a group refused before its source was ever taken still has a
+        // listener here; the rest live in their listening task.
+        if let Ok(mut listeners) = self.user_multicast_listeners.lock() {
+            if let Some(mut listener) = listeners.remove(&group) {
+                listener.close();
+            }
+        }
+
+        log::info!("[UdpTransportPlugin] user data multicast group {group} released");
+    }
+
     fn port(&self) -> u16 {
         self.sender.port()
     }
