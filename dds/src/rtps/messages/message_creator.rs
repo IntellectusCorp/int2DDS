@@ -340,7 +340,11 @@ impl MessageCreator {
         cache_change: &CacheChange,
         dst_prefix: GuidPrefix,
         writer_entity_id: EntityId,
-        targets: &[(EntityId, Option<(u32, SequenceNumber, SequenceNumber, bool, bool)>, Option<ContentFilterInfo>)],
+        targets: &[(
+            EntityId,
+            Option<(u32, SequenceNumber, SequenceNumber, bool, bool)>,
+            Option<ContentFilterInfo>,
+        )],
         use_inline_qos: bool,
         send_buffer: &mut Vec<u8>,
     ) -> Result<(), Box<dyn std::error::Error>> {
