@@ -3023,4 +3023,47 @@ mod tests {
             "the announcement has to reach the matched reader without anyone asking for it"
         );
     }
+
+    /// RTPS 8.5.4.1 makes the builtin endpoints RELIABLE, and the transmit path reads that off
+    /// the proxy to decide whether to GAP holes and piggyback a heartbeat.
+    #[test]
+    fn a_builtin_reader_proxy_is_reliable() {
+        let data = SubscriptionBuiltinTopicData::builtin_reliable();
+        assert!(
+            data.is_reliable(),
+            "a builtin reader proxy built from this would suppress GAPs and piggyback heartbeats"
+        );
+    }
+
+    /// A builtin reader carries its reliability twice: as the `reliability_level` its constructor
+    /// takes, and inside the `SubscriptionBuiltinTopicData` it holds. Nothing reads the second
+    /// one today, so a disagreement is silent until something does.
+    #[test]
+    fn a_builtin_reader_agrees_with_itself_about_reliability() {
+        use crate::rtps::entities::endpoint::Endpoint as _;
+
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let builtin = participant.builtin_endpoints();
+
+        for reader in [
+            &builtin.sedp_builtin_publications_reader,
+            &builtin.sedp_builtin_subscriptions_reader,
+            &builtin.sedp_builtin_topics_reader,
+            &builtin.builtin_participant_message_reader,
+            &builtin.type_lookup_request_reader,
+            &builtin.type_lookup_reply_reader,
+        ] {
+            let declared = reader.reliability_level() == ReliabilityQosPolicyKind::Reliable;
+            let carried = reader
+                .subscription_builtin_topic_data()
+                .expect("builtin readers always have topic data")
+                .is_reliable();
+            assert_eq!(
+                declared,
+                carried,
+                "{} declares reliable={declared} but carries reliable={carried}",
+                reader.guid()
+            );
+        }
+    }
 }

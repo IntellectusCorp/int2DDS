@@ -603,6 +603,26 @@ impl WlpLogic {
             Some(RtpsTime::now()),
         ));
 
+        // Read the proxy count and let go: `add_change_builtin` runs the transmit pump, which
+        // locks `reader_proxies` itself, and `std::sync::Mutex` is not reentrant.
+        let has_readers = {
+            let reader_proxies = writer.reader_proxies();
+            let proxies_guard = reader_proxies.lock().map_err(|e| {
+                RtpsError::new(
+                    RtpsErrorCode::LockError,
+                    format!("Failed to lock reader proxies: {}", e),
+                )
+            })?;
+            debug!("send_liveliness_once called, reader_proxy count: {}", proxies_guard.len());
+            !proxies_guard.is_empty()
+        };
+
+        // If no reader proxies, don't add to cache and don't send
+        if !has_readers {
+            debug!("No reader proxies, skipping");
+            return Ok(());
+        }
+
         let writer_cache_lock = writer.writer_cache();
         let mut cache_guard = writer_cache_lock.lock().map_err(|e| {
             RtpsError::new(
@@ -611,93 +631,18 @@ impl WlpLogic {
             )
         })?;
 
-        let reader_proxies = writer.reader_proxies();
-        let proxies_guard = reader_proxies.lock().map_err(|e| {
-            RtpsError::new(
-                RtpsErrorCode::LockError,
-                format!("Failed to lock reader proxies: {}", e),
-            )
-        })?;
-
-        debug!("send_liveliness_once called, reader_proxy count: {}", proxies_guard.len());
-
-        // If no reader proxies, don't add to cache and don't send
-        if proxies_guard.is_empty() {
-            debug!("No reader proxies, skipping");
-            return Ok(());
-        }
-
         let old_changes = cache_guard.get_changes();
         for old_change in old_changes {
             if let Err(e) = cache_guard.remove_change(old_change) {
                 log::warn!("Failed to remove old change: {}", e);
             }
         }
-        // `proxies_guard` is held above and this function sends the change itself, so the
-        // transmitting variant would deadlock on a lock this thread already owns.
-        if let Err(e) = cache_guard.add_change_builtin_without_transmit(cache_change.clone()) {
-            log::warn!(
-                "Failed to add liveliness change to cache: {}, continuing to send heartbeat anyway",
-                e
-            );
-            // Don't return - continue to send heartbeat even if cache add fails
+
+        // The pump sends the assertion to every matched reader with the same piggyback heartbeat
+        // this used to build by hand.
+        if let Err(e) = cache_guard.add_change_builtin(cache_change, writer.as_ref()) {
+            log::warn!("Failed to assert liveliness: {}", e);
         }
-
-        let participant = self.get_upgraded_participant()?;
-
-        for reader_proxy in proxies_guard.iter() {
-            // Get heartbeat info to include in the same RTPS message as Data
-            let heartbeat_info = {
-                let wlp_last_change_sn = writer.last_change_sequence_number();
-                let first_sn = cache_guard.get_seq_num_min().unwrap_or(wlp_last_change_sn + 1);
-                let last_sn = cache_guard.get_seq_num_max().unwrap_or(wlp_last_change_sn);
-                let info = Some((writer.heartbeat_count(), first_sn, last_sn, false, false));
-                debug!(
-                    "[WLP] heartbeat_info: count={}, first={}, last={}",
-                    writer.heartbeat_count(),
-                    first_sn,
-                    last_sn
-                );
-                info
-            };
-            let mut send_buffer = match participant.wire_buffer_pool().lock() {
-                Ok(mut pool) => pool.acquire(),
-                Err(_) => {
-                    log::warn!("Failed to lock wire buffer pool");
-                    continue; // Skip this reader proxy
-                }
-            };
-            let result = MessageCreator::create_data_msg(
-                &cache_change,
-                reader_proxy.remote_reader_guid(),
-                EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_READER,
-                EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER,
-                heartbeat_info, // Include heartbeat in the same message
-                false,
-                None,
-                &mut send_buffer,
-            );
-
-            if let Err(e) = result {
-                log::warn!("Failed to create P2P DATA message: {:?}", e);
-                if let Ok(mut pool) = participant.wire_buffer_pool().lock() {
-                    pool.release(send_buffer);
-                }
-                continue; // Skip this reader proxy
-            }
-
-            for locator in reader_proxy.unicast_locator_list() {
-                if let Err(e) =
-                    self.transport.send(&send_buffer, &SendTarget::SEDPDiscovery(&locator))
-                {
-                    log::warn!("Failed to send P2P DATA message: {:?}", e);
-                }
-            }
-            if let Ok(mut pool) = participant.wire_buffer_pool().lock() {
-                pool.release(send_buffer);
-            }
-        }
-        writer.increase_heartbeat_count();
 
         Ok(())
     }
