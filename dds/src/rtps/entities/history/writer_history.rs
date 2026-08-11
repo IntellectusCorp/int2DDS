@@ -113,31 +113,12 @@ impl WriterHistoryCache {
         Ok(())
     }
 
+    /// The caller must not hold `reader_proxies`: the pump below locks it, and
+    /// `std::sync::Mutex` is not reentrant.
     pub(crate) fn add_change_builtin(
         &mut self,
         a_change: Arc<CacheChange>,
         writer: &(dyn Writer + Send + Sync),
-    ) -> RtpsResult<()> {
-        self.add_change_builtin_without_transmit(a_change)?;
-
-        // Same pump as `add_change`; without it a builtin writer only transmits where a caller
-        // remembered to send explicitly.
-        if let Some(participant) = self.participant.upgrade() {
-            if let Some(user_logic_arc) = participant.user_logic_if_set() {
-                if let Some(user_logic) = user_logic_arc.as_ref() {
-                    user_logic.send_unsent_changes(writer, self)?
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Insert without transmitting, for a caller that sends the change itself or already holds
-    /// `reader_proxies` -- the pump locks that, and `std::sync::Mutex` is not reentrant.
-    pub(crate) fn add_change_builtin_without_transmit(
-        &mut self,
-        a_change: Arc<CacheChange>,
     ) -> RtpsResult<()> {
         if !self.is_builtin() {
             return Err(RtpsError::new(
@@ -158,6 +139,16 @@ impl WriterHistoryCache {
 
         if sn > self.highest_sn {
             self.highest_sn = sn;
+        }
+
+        // Same pump as `add_change`; without it a builtin writer only transmits where a caller
+        // remembered to send explicitly.
+        if let Some(participant) = self.participant.upgrade() {
+            if let Some(user_logic_arc) = participant.user_logic_if_set() {
+                if let Some(user_logic) = user_logic_arc.as_ref() {
+                    user_logic.send_unsent_changes(writer, self)?
+                }
+            }
         }
 
         Ok(())
