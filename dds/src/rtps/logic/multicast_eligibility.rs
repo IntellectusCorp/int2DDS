@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 
-use log::{debug, trace};
+use std::net::Ipv4Addr;
+
+use log::{debug, trace, warn};
 
 use crate::{
     common::builtin::topic::subscription_builtin_topic_data::SubscriptionBuiltinTopicData,
@@ -15,6 +17,20 @@ use crate::{
 pub(crate) enum ReaderMulticastVerdict {
     Eligible { group_locators: Vec<Locator> },
     Ineligible,
+}
+
+pub(crate) fn resolve_group_address(group_address: &str) -> Option<Ipv4Addr> {
+    let Ok(address) = group_address.parse::<Ipv4Addr>() else {
+        warn!("[Multicast] Group address '{}' is not an IPv4 address", group_address);
+        return None;
+    };
+
+    if !address.is_multicast() {
+        warn!("[Multicast] Group address {} is not a multicast address", address);
+        return None;
+    }
+
+    Some(address)
 }
 
 pub(crate) fn evaluate_reader_multicast(
@@ -232,6 +248,23 @@ mod tests {
 
     fn sn(value: i64) -> SequenceNumber {
         SequenceNumber::from_i64(value)
+    }
+
+    #[test]
+    fn multicast_group_address_resolves() {
+        assert_eq!(resolve_group_address("239.255.12.7"), Some(Ipv4Addr::new(239, 255, 12, 7)));
+    }
+
+    #[test]
+    fn unicast_group_address_does_not_resolve() {
+        assert_eq!(resolve_group_address("10.0.0.1"), None);
+    }
+
+    #[test]
+    fn malformed_group_address_does_not_resolve() {
+        for bad in ["", "239.255.12", "999.1.1.1", "not an address"] {
+            assert_eq!(resolve_group_address(bad), None, "{bad} should not resolve");
+        }
     }
 
     #[test]

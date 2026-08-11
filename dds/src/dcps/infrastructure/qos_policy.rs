@@ -63,6 +63,7 @@ use crate::{
         time::Duration,
         types::{deserialize_i32_or_unlimited, serialize_i32_or_unlimited, LENGTH_UNLIMITED},
     },
+    rtps::logic::multicast_eligibility::resolve_group_address,
     serialize::cdr::serializer::primitive::PrimitiveSerialize,
     topic::type_support::DdsType,
 };
@@ -2511,7 +2512,7 @@ pub struct ReaderMulticastExtensionQosPolicy {
 
 impl ReaderMulticastExtensionQosPolicy {
     pub(crate) fn group_ipv4(&self) -> Option<Ipv4Addr> {
-        self.group_address.as_deref()?.parse::<Ipv4Addr>().ok()
+        self.group_address.as_deref().and_then(resolve_group_address)
     }
 
     pub(crate) fn is_consistent(&self) -> DdsResult<()> {
@@ -2519,8 +2520,8 @@ impl ReaderMulticastExtensionQosPolicy {
             return Ok(());
         }
         match self.group_ipv4() {
-            Some(ip) if ip.is_multicast() => Ok(()),
-            _ => Err(DdsError::InconsistentPolicy),
+            Some(_) => Ok(()),
+            None => Err(DdsError::InconsistentPolicy),
         }
     }
 }

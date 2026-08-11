@@ -464,7 +464,6 @@ impl UserLogic {
                 .map(|rp| GroupCandidate {
                     reader_guid: rp.remote_reader_guid(),
                     subscription: rp.subscription_builtin_topic_data().clone(),
-                    // TODO: content filtering is not implemented.
                     has_content_filter: rp.generate_content_filter_info().is_some(),
                     start_sn: std::cmp::max(rp.highest_sent_change_sn(), rp.last_irrelevant_sn()),
                 })
