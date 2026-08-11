@@ -225,6 +225,7 @@ pub fn derive_bitmask_impl(
         }
 
         impl #crate_path::serialize::xcdr::XcdrSerialize for #value_name {
+            const IS_PRIMITIVE: bool = true;
             fn serialize_xcdr(&self, serializer: &mut #crate_path::serialize::xcdr::XcdrSerializer) -> #crate_path::serialize::xcdr::XcdrResult<()> {
                 use #crate_path::serialize::cdr::PrimitiveSerialize;
                 serializer.#wire_ser(self.0)
@@ -232,6 +233,7 @@ pub fn derive_bitmask_impl(
         }
 
         impl #crate_path::serialize::xcdr::XcdrDeserialize for #value_name {
+            const IS_PRIMITIVE: bool = true;
             fn deserialize_xcdr(deserializer: &mut #crate_path::serialize::xcdr::XcdrDeserializer) -> #crate_path::serialize::xcdr::XcdrResult<Self> {
                 use #crate_path::serialize::cdr::PrimitiveSerialize;
                 Ok(Self(deserializer.#wire_deser()?))

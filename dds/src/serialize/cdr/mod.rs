@@ -672,14 +672,123 @@ impl CdrDeserialize for WChar {
 }
 
 impl XcdrSerialize for WChar {
+    const IS_PRIMITIVE: bool = true;
     fn serialize_xcdr(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()> {
         serializer.serialize_wchar16(self.as_char())
     }
 }
 
 impl XcdrDeserialize for WChar {
+    const IS_PRIMITIVE: bool = true;
     fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
         let c = deserializer.deserialize_wchar16()?;
         Ok(WChar::from(c))
+    }
+}
+
+/// Pins the `IS_PRIMITIVE` classification that decides whether an XCDR2 map
+/// carries a DHEADER. The three IDL generators treat everything outside
+/// `String|WString|Struct|Sequence|Array|Map` as primitive, so any Rust type
+/// left at the trait default diverges from C/C#/Python on the wire.
+#[cfg(test)]
+mod element_classification_tests {
+    use super::*;
+    use crate::serialize::core::BufferManager;
+    use int2dds_derive::DdsType;
+    use std::collections::{BTreeMap, HashMap};
+
+    #[derive(DdsType)]
+    #[dds_type(bitmask, bit_bound = 8, crate_path = "crate")]
+    #[repr(u8)]
+    enum Flags {
+        #[dds(position = 0)]
+        F0 = 1,
+    }
+
+    fn encode_xcdr2<T: XcdrSerialize>(value: &T) -> Vec<u8> {
+        let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Final);
+        serializer.write_encapsulation_header().unwrap();
+        value.serialize_xcdr(&mut serializer).unwrap();
+        serializer.into_bytes()
+    }
+
+    #[test]
+    fn map_of_wchar_omits_dheader() {
+        let mut value: BTreeMap<i32, WChar> = BTreeMap::new();
+        value.insert(1, WChar::from('A'));
+
+        #[rustfmt::skip]
+        let expected: Vec<u8> = vec![
+            0x00, 0x07, 0x00, 0x00,
+            0x01, 0x00, 0x00, 0x00,
+            0x01, 0x00, 0x00, 0x00,
+            0x41, 0x00,
+        ];
+        assert_eq!(encode_xcdr2(&value), expected);
+    }
+
+    #[test]
+    fn map_of_bitmask_omits_dheader() {
+        let mut value: BTreeMap<i32, FlagsValue> = BTreeMap::new();
+        value.insert(1, FlagsValue::from(Flags::F0));
+
+        #[rustfmt::skip]
+        let expected: Vec<u8> = vec![
+            0x00, 0x07, 0x00, 0x00,
+            0x01, 0x00, 0x00, 0x00,
+            0x01, 0x00, 0x00, 0x00,
+            0x01,
+        ];
+        assert_eq!(encode_xcdr2(&value), expected);
+    }
+
+    /// Control: a genuinely non-primitive value must keep its DHEADER.
+    #[test]
+    fn map_of_string_keeps_dheader() {
+        let mut value: BTreeMap<i32, String> = BTreeMap::new();
+        value.insert(1, "ab".to_string());
+
+        #[rustfmt::skip]
+        let expected: Vec<u8> = vec![
+            0x00, 0x07, 0x00, 0x00,
+            0x0F, 0x00, 0x00, 0x00,
+            0x01, 0x00, 0x00, 0x00,
+            0x01, 0x00, 0x00, 0x00,
+            0x03, 0x00, 0x00, 0x00,
+            b'a', b'b', 0x00,
+        ];
+        assert_eq!(encode_xcdr2(&value), expected);
+    }
+
+    /// `HashMap` carries its own copy of the condition, so pin it too.
+    #[test]
+    fn hash_map_of_wchar_omits_dheader() {
+        let mut value: HashMap<i32, WChar> = HashMap::new();
+        value.insert(1, WChar::from('A'));
+
+        #[rustfmt::skip]
+        let expected: Vec<u8> = vec![
+            0x00, 0x07, 0x00, 0x00,
+            0x01, 0x00, 0x00, 0x00,
+            0x01, 0x00, 0x00, 0x00,
+            0x41, 0x00,
+        ];
+        assert_eq!(encode_xcdr2(&value), expected);
+
+        let mut deserializer = XcdrDeserializer::new(&expected).unwrap();
+        let result = HashMap::<i32, WChar>::deserialize_xcdr(&mut deserializer).unwrap();
+        assert_eq!(result, value);
+    }
+
+    #[test]
+    fn map_of_wchar_round_trips() {
+        let mut value: BTreeMap<i32, WChar> = BTreeMap::new();
+        value.insert(1, WChar::from('A'));
+        value.insert(2, WChar::from('Z'));
+
+        let bytes = encode_xcdr2(&value);
+        let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
+        let result = BTreeMap::<i32, WChar>::deserialize_xcdr(&mut deserializer).unwrap();
+        assert_eq!(result, value);
     }
 }
