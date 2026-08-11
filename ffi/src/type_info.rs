@@ -1604,7 +1604,16 @@ mod tests {
         let handle = dts.compute_key(&dyn_data);
 
         assert_eq!(handle, oracle, "array-of-struct key must match derive oracle");
-        assert_eq!(*handle.value(), [0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4]);
+        // The array of a non-primitive element carries a DHEADER inside the key holder
+        // too (XTypes 7.6.8 step 4 is PLAIN_CDR2, and rule (9) holds for any
+        // extensibility), which pushes the holder past 16 bytes and into MD5.
+        let derive_key = ArrKeyed::get_type_support().serialize_key(&inst as &dyn Any).unwrap();
+        assert_eq!(
+            derive_key.as_ref(),
+            &[0, 0, 0, 16, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4][..],
+            "DHEADER(16) then the four big-endian coordinates"
+        );
+        assert_ne!(*handle.value(), [0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4]);
     }
 
     /// Sequence-of-struct @key (`sequence<Point>`). Element referenced by content-hash
@@ -1666,10 +1675,10 @@ mod tests {
         assert_eq!(handle, oracle, "sequence-of-struct key must match derive oracle (MD5)");
     }
 
-    /// Sequence-of-enum @key. Enum became a non-primitive collection element (DDS-XTypes
-    /// 7.4.3.5.4), which frames it in the data wire — but the KeyHash holder is PLAIN_CDR2,
-    /// so neither the derive key path nor the dynamic one may emit that DHEADER. The two
-    /// reach that result by different mechanisms, so pin that they still agree.
+    /// Sequence-of-enum @key. Enum is a non-primitive collection element (DDS-XTypes
+    /// 7.4.3.5.4), so the sequence is framed in the key holder as well: XTypes 7.6.8
+    /// step 4 is PLAIN_CDR2, and rule (12) applies for any extensibility. Derive walks
+    /// its members while the dynamic path walks a descriptor, so pin that they agree.
     #[test]
     fn test_type_info_sequence_of_enum_key_matches_derive() {
         use int2dds::topic::type_support::{DdsType, TypeSupport};
@@ -1695,11 +1704,7 @@ mod tests {
         let inst = EnumSeqKeyed { tags: vec![Color::Red, Color::Blue, Color::Red], v: 9 };
         let oracle = EnumSeqKeyed::get_type_support().compute_key(&inst as &dyn Any);
         let derive_key = EnumSeqKeyed::get_type_support().serialize_key(&inst as &dyn Any).unwrap();
-        assert_eq!(
-            derive_key.len(),
-            16,
-            "PLAIN_CDR2 key holder: count + 3 enums, no collection DHEADER"
-        );
+        assert_eq!(derive_key.len(), 20, "key holder: DHEADER + count + 3 enums");
         let bytes = inst.serialize().unwrap();
 
         let mut color_ti = Int2DdsTypeInfo::new_enum("Color".to_string(), 32);
