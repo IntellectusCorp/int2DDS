@@ -1666,6 +1666,77 @@ mod tests {
         assert_eq!(handle, oracle, "sequence-of-struct key must match derive oracle (MD5)");
     }
 
+    /// Sequence-of-enum @key. Enum became a non-primitive collection element (DDS-XTypes
+    /// 7.4.3.5.4), which frames it in the data wire — but the KeyHash holder is PLAIN_CDR2,
+    /// so neither the derive key path nor the dynamic one may emit that DHEADER. The two
+    /// reach that result by different mechanisms, so pin that they still agree.
+    #[test]
+    fn test_type_info_sequence_of_enum_key_matches_derive() {
+        use int2dds::topic::type_support::{DdsType, TypeSupport};
+        use int2dds::xtypes::{
+            deserialize_dynamic_data, DynamicTypeSupport, HasTypeObject, TypeRegistry,
+        };
+        use std::any::Any;
+
+        #[derive(DdsType)]
+        #[dds_type(crate_path = "int2dds")]
+        enum Color {
+            Red,
+            Blue,
+        }
+        #[derive(DdsType)]
+        #[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+        struct EnumSeqKeyed {
+            #[dds(key)]
+            tags: Vec<Color>,
+            v: i32,
+        }
+
+        let inst = EnumSeqKeyed { tags: vec![Color::Red, Color::Blue, Color::Red], v: 9 };
+        let oracle = EnumSeqKeyed::get_type_support().compute_key(&inst as &dyn Any);
+        let derive_key = EnumSeqKeyed::get_type_support().serialize_key(&inst as &dyn Any).unwrap();
+        assert_eq!(
+            derive_key.len(),
+            16,
+            "PLAIN_CDR2 key holder: count + 3 enums, no collection DHEADER"
+        );
+        let bytes = inst.serialize().unwrap();
+
+        let mut color_ti = Int2DdsTypeInfo::new_enum("Color".to_string(), 32);
+        color_ti.push_enum_literal("Red".to_string(), 0, false);
+        color_ti.push_enum_literal("Blue".to_string(), 1, false);
+
+        let mut outer =
+            Int2DdsTypeInfo::new("EnumSeqKeyed".to_string(), ExtensibilityKind::Appendable);
+        outer.push_sequence_of_nested_field("tags".to_string(), &color_ti, 0, INT2DDS_MEMBER_KEY);
+        outer.push_field("v".to_string(), TypeIdentifier::Int32, 0);
+
+        let outer_to = outer.build_type_object();
+        assert_eq!(
+            match &outer_to {
+                TypeObject::Complete(c) => c.serialize(),
+                _ => panic!("Expected Complete"),
+            },
+            EnumSeqKeyed::complete_type_object().serialize(),
+            "outer TypeObject with sequence-of-enum key must byte-match derive"
+        );
+
+        let mut registry = TypeRegistry::new();
+        for (id, obj) in outer.dependency_closure() {
+            registry.register_type_object_with_id(&id, obj);
+        }
+        let dts = DynamicTypeSupport::from_type_object_with_registry(outer_to, &registry)
+            .expect("outer dynamic type must build with enum element resolved");
+        let dyn_data = deserialize_dynamic_data(&bytes, dts.dynamic_type())
+            .expect("sample must decode including sequence-of-enum member");
+
+        assert_eq!(
+            dts.compute_key(&dyn_data),
+            oracle,
+            "sequence-of-enum key must match derive oracle"
+        );
+    }
+
     /// The bitmask builder (`new_bitmask` + `push_bitmask_flag`) must byte-match the derive
     /// bitmask TypeObject (bit_bound, flag positions/names). Proves the polymorphic builder's
     /// bitmask arm so bitmask-typed members resolve via the same content-hash machinery.
