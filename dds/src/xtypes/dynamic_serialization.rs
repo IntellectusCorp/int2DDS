@@ -522,7 +522,7 @@ where
                 }
                 Ok(())
             };
-            let framed = !is_primitive_kind(element_type) && !serializer.plain_collections();
+            let framed = !is_primitive_kind(element_type);
             write_collection_framed(serializer, framed, write_inner)
         }
         DynamicValue::Array(items) => {
@@ -536,7 +536,7 @@ where
                 }
                 Ok(())
             };
-            let framed = !is_primitive_kind(element_type) && !serializer.plain_collections();
+            let framed = !is_primitive_kind(element_type);
             write_collection_framed(serializer, framed, write_inner)
         }
         DynamicValue::Optional(Some(inner)) => {
@@ -726,7 +726,7 @@ fn deserialize_value_xcdr2(
 ) -> DdsResult<DynamicValue> {
     match type_kind {
         DynamicTypeKind::Sequence { element_type, .. } => {
-            if !is_primitive_kind(element_type) && !deserializer.plain_collections() {
+            if !is_primitive_kind(element_type) {
                 let _ = deserializer.read_dheader().map_err(cdr_error)?;
             }
             let len = deserializer.deserialize_u32().map_err(cdr_error)? as usize;
@@ -737,7 +737,7 @@ fn deserialize_value_xcdr2(
             Ok(DynamicValue::Sequence(items))
         }
         DynamicTypeKind::Array { element_type, dimensions } => {
-            if !is_primitive_kind(element_type) && !deserializer.plain_collections() {
+            if !is_primitive_kind(element_type) {
                 let _ = deserializer.read_dheader().map_err(cdr_error)?;
             }
             let total_size = checked_array_len(dimensions)?;
@@ -1112,11 +1112,11 @@ pub fn serialize_key_cdr(data: &DynamicData) -> DdsResult<(Vec<u8>, bool)> {
     }
     let single_unbounded_string = is_single_string_key(&members);
 
-    // Per RTPS KeyHash spec (DDSI-RTPS 9.6.4.8 step 4): PLAIN_CDR2 big-endian
-    // (max alignment 4), no encapsulation header, Final => no DHEADER. Write the
-    // 4-byte header so the alignment math is relative to it, then strip it.
+    // Per XTypes 7.6.8 step 4: PLAIN_CDR2 big-endian (max alignment 4), no
+    // encapsulation header and no type or member header. Collections keep their
+    // DHEADER -- rules (9)/(12) hold for any extensibility. Write the 4-byte header
+    // so the alignment math is relative to it, then strip it.
     let mut serializer = Xcdr2Serializer::with_capacity(false, ExtensibilityKind::Final, 64);
-    serializer.set_plain_collections(true);
     serializer.write_encapsulation_header().map_err(cdr_error)?;
     let mut nested = serialize_key_holder_struct;
     for member in &members {
@@ -1143,7 +1143,6 @@ pub fn deserialize_key_cdr(
     dynamic_type: &Arc<DynamicType>,
 ) -> DdsResult<DynamicData> {
     let mut deserializer = Xcdr2Deserializer::new_without_header(bytes, false);
-    deserializer.set_plain_collections(true);
     deserialize_key_holder_struct(&mut deserializer, dynamic_type)
 }
 
@@ -1288,19 +1287,26 @@ fn type_kind_max_size(kind: &DynamicTypeKind) -> Option<(usize, usize)> {
             };
             Some((4, size))
         }
-        // Fixed array of finite-size elements: `N` packed (max-align-4) elements.
+        // Fixed array of finite-size elements: `N` packed (max-align-4) elements,
+        // preceded by a DHEADER unless the element type is primitive.
         DynamicTypeKind::Array { element_type, dimensions } => {
             let (elem_align, elem_size) = type_kind_max_size(element_type)?;
+            let framed = !is_primitive_kind(element_type);
             let count: usize = dimensions.iter().map(|d| *d as usize).product();
             if count == 0 {
                 return Some((elem_align, 0));
             }
             let stride = align_up(elem_size, elem_align);
             let size = stride.checked_mul(count - 1)?.checked_add(elem_size)?;
-            Some((elem_align, size))
+            if framed {
+                Some((4, size.checked_add(4)?))
+            } else {
+                Some((elem_align, size))
+            }
         }
         // Bounded sequence: `u32` length prefix (align 4) then up to `bound` packed
-        // (max-align-4) elements. Unbounded elements collapse the whole holder to MD5.
+        // (max-align-4) elements, preceded by a DHEADER unless the element type is
+        // primitive. Unbounded elements collapse the whole holder to MD5.
         DynamicTypeKind::Sequence { element_type, bound: Some(n) } => {
             let (elem_align, elem_size) = type_kind_max_size(element_type)?;
             let n = *n as usize;
@@ -1310,6 +1316,7 @@ fn type_kind_max_size(kind: &DynamicTypeKind) -> Option<(usize, usize)> {
                 let stride = align_up(elem_size, elem_align);
                 4usize.checked_add(stride.checked_mul(n - 1)?)?.checked_add(elem_size)?
             };
+            let size = if is_primitive_kind(element_type) { size } else { size.checked_add(4)? };
             Some((4, size))
         }
         // Unbounded string/wstring, unbounded sequences, maps, and anything else
@@ -2864,6 +2871,73 @@ mod fidelity_tests {
             dynamic_bytes(&dynamic, &format),
             concrete_xcdr(&concrete, ExtensibilityKind::Final)
         );
+    }
+
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "int2dds", extensibility = "Final")]
+    struct GridHolderFinal {
+        grid: [[InnerFinal; 2]; 2],
+    }
+
+    /// `InnerFinal grid[2][2]` is one array of four elements (DDS-XTypes 7.4.3.4), so it
+    /// carries a single DHEADER. The dynamic path stores the elements flat and could only
+    /// ever emit one; codegen nests, so this pins the two against each other.
+    #[test]
+    fn multidim_array_of_struct_byte_match_xcdr_final() {
+        let inner_complete = InnerFinal::complete_type_object();
+        let inner_hash = EquivalenceHash::compute(&inner_complete.serialize());
+        let mut registry = TypeRegistry::new();
+        registry.register_complete(inner_hash, "InnerFinal".into(), inner_complete);
+
+        let mut outer = CompleteStructType::new(
+            TypeFlag::new(crate::xtypes::ExtensibilityKind::Final, false, false),
+            "GridHolderFinal".into(),
+            None,
+        );
+        outer.add_member(CompleteStructMember::new(
+            0,
+            MemberFlag::new(TryConstructKind::Discard, false, false, false, false, false),
+            TypeIdentifier::PlainArrayLarge {
+                header: PlainCollectionHeader::default(),
+                array_bound_seq: vec![2, 2],
+                element_identifier: Box::new(TypeIdentifier::CompleteTypeId(inner_hash)),
+            },
+            "grid".to_string(),
+        ));
+        let outer_dt = Arc::new(
+            DynamicType::from_type_object_with_registry(
+                Arc::new(CompleteTypeObject::Struct(outer)),
+                TypeIdentifier::None,
+                &registry,
+            )
+            .unwrap(),
+        );
+        let inner_dt = standalone_type::<InnerFinal>();
+
+        let make = |a: i32, b: i32| {
+            let mut e = DynamicData::new(inner_dt.clone());
+            e.set("a", a).unwrap();
+            e.set("b", b).unwrap();
+            DynamicValue::Struct(Box::new(e))
+        };
+        let mut dynamic = DynamicData::new(outer_dt.clone());
+        dynamic
+            .set_value(
+                "grid",
+                DynamicValue::Array(vec![make(1, 2), make(3, 4), make(5, 6), make(7, 8)]),
+            )
+            .unwrap();
+
+        let concrete = GridHolderFinal {
+            grid: [
+                [InnerFinal { a: 1, b: 2 }, InnerFinal { a: 3, b: 4 }],
+                [InnerFinal { a: 5, b: 6 }, InnerFinal { a: 7, b: 8 }],
+            ],
+        };
+        let format = xcdr_format(ExtensibilityKind::Final);
+        let bytes = concrete_xcdr(&concrete, ExtensibilityKind::Final);
+        assert_eq!(bytes.len(), 4 + 4 + 32, "one DHEADER over all four elements");
+        assert_eq!(dynamic_bytes(&dynamic, &format), bytes);
     }
 
     fn enum_holder_dynamic_type() -> Arc<DynamicType> {
