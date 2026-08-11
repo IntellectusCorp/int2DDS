@@ -62,7 +62,7 @@ use std::thread::{self, JoinHandle};
 
 /// Delay before the first NACK_FRAG, so a burst of DATA_FRAG is answered once rather than
 /// per fragment.
-const NACK_FRAG_SUPPRESSION: Duration = Duration::from_millis(5);
+const NACK_FRAG_SUPPRESSION: Duration = Duration::from_millis(80);
 
 /// Delay before re-asking when the request produced nothing.
 ///
