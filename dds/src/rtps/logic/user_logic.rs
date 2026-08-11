@@ -39,8 +39,8 @@ use crate::rtps::logic::common::{
 use crate::rtps::logic::message_processor::multicast_message_processor::MulticastMessageProcessor;
 use crate::rtps::logic::message_processor::unicast_message_processor::UnicastMessageProcessor;
 use crate::rtps::logic::multicast_eligibility::{
-    evaluate_reader_multicast, group_can_carry_change, group_start_sequence_number,
-    group_targets_by_multicast, sample_allows_multicast, MulticastSendType, ReaderMulticastVerdict,
+    group_can_carry_change, group_start_sequence_number, group_targets_by_multicast,
+    readers_listening_on, sample_allows_multicast, MulticastSendType,
 };
 use crate::rtps::messages::header::Header;
 use crate::rtps::messages::message_creator::MessageCreator;
@@ -2951,20 +2951,13 @@ impl MulticastMessageProcessor for UserLogic {
         let matched_readers: Vec<Arc<dyn Reader + Send + Sync>> =
             self.get_matched_readers(remote_writer_guid, data.reader_id)?;
 
+        let mut candidates = Vec::with_capacity(matched_readers.len());
         for reader in matched_readers {
             let subscription = reader.get_subscription_builtin_topic_data()?;
-            let verdict =
-                evaluate_reader_multicast(&subscription, false, |locator| locator == arrival_group);
-            if verdict == ReaderMulticastVerdict::Ineligible {
-                trace!(
-                    "[UserMulticast] Reader {} does not listen on {}, skipping SN {}",
-                    subscription.endpoint_guid(),
-                    arrival_group,
-                    data.writer_sn
-                );
-                continue;
-            }
+            candidates.push((reader, subscription));
+        }
 
+        for reader in readers_listening_on(candidates, arrival_group) {
             self.deliver_data_change_to_reader(
                 &reader,
                 remote_writer_guid,

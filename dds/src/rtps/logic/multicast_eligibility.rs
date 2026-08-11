@@ -66,6 +66,33 @@ pub(crate) fn evaluate_reader_multicast(
     ReaderMulticastVerdict::Eligible { group_locators }
 }
 
+/// Select, among the Readers a multicast DATA reached, the ones listening on the group it
+/// arrived on.
+pub(crate) fn readers_listening_on<R>(
+    candidates: Vec<(R, SubscriptionBuiltinTopicData)>,
+    arrival_group: &Locator,
+) -> Vec<R> {
+    candidates
+        .into_iter()
+        .filter(|(_, subscription)| {
+            let verdict =
+                evaluate_reader_multicast(subscription, false, |locator| locator == arrival_group);
+
+            if verdict == ReaderMulticastVerdict::Ineligible {
+                trace!(
+                    "[Multicast] Reader {} does not listen on {}, skipping the datagram",
+                    subscription.endpoint_guid(),
+                    arrival_group
+                );
+                return false;
+            }
+
+            true
+        })
+        .map(|(reader, _)| reader)
+        .collect()
+}
+
 pub(crate) struct MulticastGroup<K> {
     pub(crate) locator: Locator,
     pub(crate) reader_list: Vec<K>,
@@ -248,6 +275,38 @@ mod tests {
 
     fn sn(value: i64) -> SequenceNumber {
         SequenceNumber::from_i64(value)
+    }
+
+    #[test]
+    fn a_reader_without_a_group_is_not_selected_for_an_arriving_datagram() {
+        let arrival_group = group_locator(1);
+        let other_group = group_locator(2);
+
+        let selected = readers_listening_on(
+            vec![
+                ("on_arrival_group", subscription_with_groups(&[arrival_group.clone()])),
+                ("on_other_group", subscription_with_groups(&[other_group])),
+                ("unicast_only", subscription_with_groups(&[])),
+            ],
+            &arrival_group,
+        );
+
+        assert_eq!(selected, vec!["on_arrival_group"]);
+    }
+
+    #[test]
+    fn every_reader_on_the_arriving_group_is_selected() {
+        let arrival_group = group_locator(1);
+
+        let selected = readers_listening_on(
+            vec![
+                ("first", subscription_with_groups(&[arrival_group.clone()])),
+                ("second", subscription_with_groups(&[arrival_group.clone()])),
+            ],
+            &arrival_group,
+        );
+
+        assert_eq!(selected, vec!["first", "second"]);
     }
 
     #[test]
