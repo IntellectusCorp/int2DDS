@@ -2787,6 +2787,12 @@ mod tests {
         fn advertised_default_unicast_locators(&self) -> Vec<Locator> {
             Vec::new()
         }
+        fn advertised_default_multicast_locators(&self, _groups: Vec<Ipv4Addr>) -> Vec<Locator> {
+            Vec::new()
+        }
+        fn ensure_user_multicast_listener(&self, _group: Ipv4Addr) -> std::io::Result<()> {
+            Ok(())
+        }
         fn take_discovery_multicast_source(&self) -> Option<MessageSource> {
             None
         }
