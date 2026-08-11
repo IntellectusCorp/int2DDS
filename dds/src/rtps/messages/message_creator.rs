@@ -448,11 +448,11 @@ impl MessageCreator {
         writer_sn: SequenceNumber,
         missing_fragments: &mut Vec<u32>,
         first_nackfrag_count: u32,
-    ) -> Result<Vec<Arc<Vec<u8>>>, Box<dyn std::error::Error>> {
+    ) -> Result<(Vec<Arc<Vec<u8>>>, u32), Box<dyn std::error::Error>> {
         missing_fragments.sort_unstable();
         missing_fragments.dedup();
         if missing_fragments.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), 0));
         }
 
         // submessageId + flags + submessageLength, ahead of the body length that
@@ -508,7 +508,11 @@ impl MessageCreator {
         // Send the last datagram.
         messages.push(Arc::new(rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian)?));
 
-        Ok(messages)
+        // Each NACK_FRAG submessage consumed one count; the caller advances its
+        // counter by this amount so the next request stays monotonic.
+        let consumed_count = nackfrag_count.wrapping_sub(first_nackfrag_count);
+
+        Ok((messages, consumed_count))
     }
 
     /// Create KeyHash inline QoS parameter

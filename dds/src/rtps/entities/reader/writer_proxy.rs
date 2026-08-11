@@ -693,7 +693,7 @@ mod tests {
         let reader_guid = Guid::new([1u8; 12], EntityId::SEDP_BUILTIN_PUBLICATIONS_READER);
         let writer_guid = Guid::new([2u8; 12], EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER);
 
-        let messages = MessageCreator::create_multiple_nackfrag_msgs(
+        let (messages, consumed_count) = MessageCreator::create_multiple_nackfrag_msgs(
             reader_guid,
             writer_guid,
             reader_guid.entity_id(),
@@ -704,6 +704,7 @@ mod tests {
         )
         .expect("the NACK_FRAG message must serialize");
         assert_eq!(messages.len(), 1, "a single window fits one datagram");
+        assert_eq!(consumed_count, 1, "one count per NACK_FRAG submessage");
 
         let from_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7400);
         let mut receiver = MessageReceiver::new(writer_guid.prefix(), &from_addr);
