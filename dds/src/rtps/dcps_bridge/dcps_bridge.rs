@@ -43,7 +43,7 @@ use crate::{
             writer::{StatefulWriter, StatelessWriter, Writer},
         },
         logic::{
-            common::{JoinAllThread as _, MulticastThreadHandler as _, UnicastThreadHandler as _},
+            common::{JoinAllThread as _, UnicastThreadHandler as _},
             sedp_logic::SedpLogic,
             spdp_logic::SpdpLogic,
             user_logic::UserLogic,
@@ -239,16 +239,13 @@ impl DcpsBridge {
             )
         })?;
 
-        let listening_handle = user_logic.get_multicast_listening_handle()?;
-        let already_listening = listening_handle
-            .lock()
-            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?
-            .is_some();
-        if already_listening {
-            return Ok(());
+        // A source only appears for a group whose socket was just created, so a
+        // group that is already being listened to starts no second thread.
+        while let Some((group_locator, source)) = transport.take_user_data_multicast_source() {
+            user_logic.start_user_multicast_traffic(group_locator, source)?;
         }
 
-        user_logic.start_user_multicast_traffic(transport.take_user_data_multicast_source())
+        Ok(())
     }
 
     pub(crate) fn next_entity_guid(&self, entity_kind: EntityKind) -> Guid {
@@ -806,6 +803,7 @@ mod tests {
     use std::{net::Ipv4Addr, sync::Mutex, thread, time::Duration as StdDuration};
 
     use super::*;
+    use crate::rtps::logic::common::MulticastThreadHandler as _;
     use crate::{
         core::time::Duration,
         infrastructure::{
@@ -1599,7 +1597,7 @@ mod tests {
     }
 
     #[test]
-    fn test_every_reader_joins_its_group_on_the_shared_listener() {
+    fn test_every_reader_gets_a_listener_for_its_group() {
         let domain_id = unique_domain_id();
         let dcps_bridge =
             Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default()).unwrap()));
@@ -1610,16 +1608,16 @@ mod tests {
         guard.ensure_user_multicast_traffic(Ipv4Addr::new(239, 255, 12, 7)).unwrap();
         guard
             .ensure_user_multicast_traffic(Ipv4Addr::new(239, 255, 12, 8))
-            .expect("a group requested once the listener exists must still be joined");
+            .expect("a second group must get a listener of its own");
         guard
             .ensure_user_multicast_traffic(Ipv4Addr::new(239, 255, 12, 7))
-            .expect("an already joined group must not be joined twice");
+            .expect("a group already served must be accepted without opening a second socket");
 
         // A unicast address cannot be joined. Reaching that failure proves the
-        // join runs on every call instead of being skipped once the thread is up.
+        // join runs on every call instead of being skipped once a thread is up.
         assert!(
             guard.ensure_user_multicast_traffic(Ipv4Addr::new(10, 0, 0, 1)).is_err(),
-            "the join path must still be reached after the listening thread started"
+            "the join path must still be reached after the listening threads started"
         );
 
         let _ = guard.disable();

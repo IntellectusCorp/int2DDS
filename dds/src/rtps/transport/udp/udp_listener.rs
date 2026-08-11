@@ -103,13 +103,45 @@ impl UdpListener {
         Self::new_multicast(port, working_ips, send_interface_ip, false, Some(&MULTICAST_IP))
     }
 
-    /// Multicast listener for user data.
+    /// Multicast listener for user data, one per group.
     ///
-    /// The groups are chosen per DataReader, so the socket is bound without any
-    /// membership and every group is joined afterwards through
-    /// [`Self::join_multicast_group`] on the retained handle.
-    pub(crate) fn new_user_multicast(port: u16, working_ips: &[String]) -> std::io::Result<Self> {
-        Self::new_multicast(port, working_ips, None, false, None)
+    /// Windows and macOS filter by the socket's own membership,
+    /// while Linux hands a socket bound to `0.0.0.0` every group joined anywhere
+    /// on the host until `IP_MULTICAST_ALL` is turned off.
+    pub(crate) fn new_user_multicast(
+        port: u16,
+        group: &Ipv4Addr,
+        working_ips: &[String],
+        send_interface_ip: Ipv4Addr,
+    ) -> std::io::Result<Self> {
+        let socket = Socket2::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+        socket.set_reuse_address(true)?;
+        #[cfg(unix)]
+        socket.set_reuse_port(true)?;
+
+        if let Some(size) = Self::get_socket_buffer_size() {
+            let _ = socket.set_recv_buffer_size(size);
+        } else if let Ok(current) = socket.recv_buffer_size() {
+            let _ = socket.set_recv_buffer_size(current.saturating_mul(2));
+        }
+
+        #[cfg(target_os = "linux")]
+        socket.set_multicast_all_v4(false)?;
+
+        let addr: SocketAddr = format!("0.0.0.0:{}", port).parse().unwrap();
+        socket.bind(&SockAddr::from(addr))?;
+
+        Self::join_multicast_group(&socket, group, working_ips, Some(send_interface_ip), true)?;
+
+        socket.set_nonblocking(true)?;
+        let udp_socket = mio::net::UdpSocket::from_std(socket.into());
+
+        Ok(Self {
+            socket: Some(udp_socket),
+            port,
+            recv_arena: new_recv_arena(),
+            multicast_group_handle: None,
+        })
     }
 
     /// Joining on the interface multicast is sent from matters for the

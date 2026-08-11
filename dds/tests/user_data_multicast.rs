@@ -33,6 +33,7 @@ use int2dds::{
 };
 
 const GROUP_ADDRESS: &str = "239.255.13.7";
+const OTHER_GROUP_ADDRESS: &str = "239.255.13.8";
 const SAMPLE_COUNT: i16 = 10;
 
 #[derive(DdsType)]
@@ -57,6 +58,34 @@ fn reliable_writer_qos() -> DataWriterQos {
 }
 
 fn reliable_group_reader_qos() -> DataReaderQos {
+    reader_qos_on_group(GROUP_ADDRESS)
+}
+
+fn best_effort_writer_qos() -> DataWriterQos {
+    DataWriterQos {
+        history: HistoryQosPolicy {
+            kind: HistoryQosPolicyKind::KeepLast(64),
+            ..Default::default()
+        },
+        reliability: ReliabilityQosPolicy {
+            kind: ReliabilityQosPolicyKind::BestEffort,
+            max_blocking_time: Duration { sec: 1, nanosec: 0 },
+        },
+        ..Default::default()
+    }
+}
+
+fn best_effort_reader_qos_on_group(group_address: &str) -> DataReaderQos {
+    DataReaderQos {
+        reliability: ReliabilityQosPolicy {
+            kind: ReliabilityQosPolicyKind::BestEffort,
+            max_blocking_time: Duration { sec: 1, nanosec: 0 },
+        },
+        ..reader_qos_on_group(group_address)
+    }
+}
+
+fn reader_qos_on_group(group_address: &str) -> DataReaderQos {
     DataReaderQos {
         history: HistoryQosPolicy {
             kind: HistoryQosPolicyKind::KeepLast(64),
@@ -67,7 +96,7 @@ fn reliable_group_reader_qos() -> DataReaderQos {
             max_blocking_time: Duration { sec: 1, nanosec: 0 },
         },
         reader_multicast_extension: ReaderMulticastExtensionQosPolicy {
-            group_address: Some(GROUP_ADDRESS.to_string()),
+            group_address: Some(group_address.to_string()),
         },
         ..Default::default()
     }
@@ -172,6 +201,109 @@ fn two_reliable_readers_on_one_group_receive_every_sample() {
         take_values(&second_reader, expected.len()),
         expected,
         "the second group member must receive the same run from the same datagrams"
+    );
+
+    cleanup(factory, vec![writer_participant, reader_participant]);
+}
+
+/// BestEffort has no repair, so a group Reader is reachable over multicast alone. That makes this
+/// the only case where the receive path is actually load-bearing: under Reliable the unicast
+/// repair would deliver the same run even if every group datagram were discarded.
+#[test]
+fn best_effort_readers_on_separate_groups_receive_over_multicast_alone() {
+    let domain_id = next_domain_id();
+    let factory = DomainParticipantFactory::get_instance();
+
+    let writer_participant = factory
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+    let reader_participant = factory
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+
+    let data_writer =
+        create_datawriter(&writer_participant, PublisherQos::default(), best_effort_writer_qos());
+    let first_group_reader = create_datareader(
+        &reader_participant,
+        SubscriberQos::default(),
+        best_effort_reader_qos_on_group(GROUP_ADDRESS),
+    );
+    let second_group_reader = create_datareader(
+        &reader_participant,
+        SubscriberQos::default(),
+        best_effort_reader_qos_on_group(OTHER_GROUP_ADDRESS),
+    );
+
+    wait_until_matched(&first_group_reader);
+    wait_until_matched(&second_group_reader);
+    wait_for_writer_match_count(&data_writer, 2);
+
+    for value in 1..=SAMPLE_COUNT {
+        data_writer.write(&KeyedDataType::new(1, value), InstanceHandle::NIL).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    let expected: Vec<i16> = (1..=SAMPLE_COUNT).collect();
+    assert_eq!(
+        take_values(&first_group_reader, expected.len()),
+        expected,
+        "a BestEffort Reader must take the datagrams its own group carried"
+    );
+    assert_eq!(
+        take_values(&second_group_reader, expected.len()),
+        expected,
+        "the Reader on the other group must take its own group's datagrams, not be starved by them"
+    );
+
+    cleanup(factory, vec![writer_participant, reader_participant]);
+}
+
+/// Two groups reach the same Participant through two sockets, and the receive path decides per
+/// Reader which of them may take a datagram. Getting that decision wrong is silent: too strict
+/// drops the group's own samples, too loose lets a Reader run ahead on another group's stream.
+#[test]
+fn readers_on_separate_groups_each_receive_every_sample() {
+    let domain_id = next_domain_id();
+    let factory = DomainParticipantFactory::get_instance();
+
+    let writer_participant = factory
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+    let reader_participant = factory
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+
+    let data_writer =
+        create_datawriter(&writer_participant, PublisherQos::default(), reliable_writer_qos());
+    let first_group_reader = create_datareader(
+        &reader_participant,
+        SubscriberQos::default(),
+        reader_qos_on_group(GROUP_ADDRESS),
+    );
+    let second_group_reader = create_datareader(
+        &reader_participant,
+        SubscriberQos::default(),
+        reader_qos_on_group(OTHER_GROUP_ADDRESS),
+    );
+
+    wait_until_matched(&first_group_reader);
+    wait_until_matched(&second_group_reader);
+    wait_for_writer_match_count(&data_writer, 2);
+
+    for value in 1..=SAMPLE_COUNT {
+        data_writer.write(&KeyedDataType::new(1, value), InstanceHandle::NIL).unwrap();
+    }
+
+    let expected: Vec<i16> = (1..=SAMPLE_COUNT).collect();
+    assert_eq!(
+        take_values(&first_group_reader, expected.len()),
+        expected,
+        "a Reader must receive the run its own group carried"
+    );
+    assert_eq!(
+        take_values(&second_group_reader, expected.len()),
+        expected,
+        "a Reader on the other group must receive the same run from its own datagrams"
     );
 
     cleanup(factory, vec![writer_participant, reader_participant]);

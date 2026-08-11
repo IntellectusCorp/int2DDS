@@ -1,7 +1,8 @@
 use crate::rtps::common::guid::GuidPrefix;
+use crate::rtps::common::locator::Locator;
 use crate::rtps::entities::entity::Entity;
 use crate::rtps::entities::participant::Participant;
-use crate::rtps::logic::message_processor::unicast_message_processor::UnicastMessageProcessor;
+use crate::rtps::logic::message_processor::multicast_message_processor::MulticastMessageProcessor;
 use crate::rtps::logic::user_logic::UserLogic;
 use crate::rtps::messages::message_receiver::MessageReceiver;
 use crate::rtps::transport::plugin::MessageSource;
@@ -19,10 +20,11 @@ pub(crate) struct UserMulticastListeningTask {
     participant: Weak<Participant>,
     user_logic: Arc<Option<UserLogic>>,
     shutdown_waker: Arc<OnceLock<Arc<Waker>>>,
+    group_locator: Locator,
 }
 
 impl UserMulticastListeningTask {
-    pub(crate) fn new(participant: Arc<Participant>) -> Self {
+    pub(crate) fn new(participant: Arc<Participant>, group_locator: Locator) -> Self {
         let (_, _, user_logic) = participant.get_logics();
         let guid_prefix = participant.guid().prefix();
         Self {
@@ -30,6 +32,7 @@ impl UserMulticastListeningTask {
             participant: Arc::downgrade(&participant),
             user_logic,
             shutdown_waker: Arc::new(OnceLock::new()),
+            group_locator,
         }
     }
 
@@ -106,7 +109,11 @@ impl UserMulticastListeningTask {
     }
 
     fn process_rtps_message(&mut self, bytes: Bytes, from_addr: SocketAddr) {
-        let mut message_receiver = MessageReceiver::new(self.guid_prefix, &from_addr);
+        let mut message_receiver = MessageReceiver::new_multicast(
+            self.guid_prefix,
+            &from_addr,
+            self.group_locator.clone(),
+        );
         let rtps_message = message_receiver.init(&bytes);
         if rtps_message.is_err() {
             error!("Failed to parse RTPS message from {:?}", from_addr);
@@ -115,7 +122,7 @@ impl UserMulticastListeningTask {
 
         let mut user_logic =
             self.user_logic.as_ref().as_ref().expect("UserLogic is not initialized").clone();
-        if let Err(e) = user_logic.handle_rtps_message(message_receiver) {
+        if let Err(e) = user_logic.handle_multicast_rtps_message(message_receiver) {
             debug!("Failed to handle user RTPS message from {:?}: {:?}", from_addr, e);
         }
     }

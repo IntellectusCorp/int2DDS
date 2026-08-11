@@ -33,13 +33,14 @@ use crate::rtps::entities::writer::reader_locator::ReaderLocator;
 use crate::rtps::entities::writer::reader_proxy::ReaderProxy;
 use crate::rtps::entities::writer::{StatefulWriter, StatelessWriter, Writer};
 use crate::rtps::logic::common::{
-    impl_multicast_thread_handler, impl_participant_accessor, impl_unicast_thread_handler,
-    MulticastThreadHandler, ParticipantAccessor, UnicastThreadHandler,
+    impl_participant_accessor, impl_unicast_thread_handler, ParticipantAccessor,
+    UnicastThreadHandler,
 };
+use crate::rtps::logic::message_processor::multicast_message_processor::MulticastMessageProcessor;
 use crate::rtps::logic::message_processor::unicast_message_processor::UnicastMessageProcessor;
 use crate::rtps::logic::multicast_eligibility::{
-    group_can_carry_change, group_start_sequence_number, group_targets_by_multicast,
-    sample_allows_multicast, MulticastSendType,
+    evaluate_reader_multicast, group_can_carry_change, group_start_sequence_number,
+    group_targets_by_multicast, sample_allows_multicast, MulticastSendType, ReaderMulticastVerdict,
 };
 use crate::rtps::messages::header::Header;
 use crate::rtps::messages::message_creator::MessageCreator;
@@ -74,8 +75,8 @@ pub(crate) struct UserLogic {
     fragment_buffers: Arc<DashMap<(Guid, SequenceNumber), FragmentBuffer>>,
     unicast_listening_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     unicast_listening_waker: Arc<OnceLock<Arc<Waker>>>,
-    multicast_listening_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
-    multicast_listening_waker: Arc<OnceLock<Arc<Waker>>>,
+    multicast_listening_handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    multicast_listening_wakers: Arc<Mutex<Vec<Arc<OnceLock<Arc<Waker>>>>>>,
 }
 
 // Initialization
@@ -87,8 +88,8 @@ impl UserLogic {
             fragment_buffers: Arc::new(DashMap::new()),
             unicast_listening_handle: Arc::new(Mutex::new(None)),
             unicast_listening_waker: Arc::new(OnceLock::new()),
-            multicast_listening_handle: Arc::new(Mutex::new(None)),
-            multicast_listening_waker: Arc::new(OnceLock::new()),
+            multicast_listening_handles: Arc::new(Mutex::new(Vec::new())),
+            multicast_listening_wakers: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -99,9 +100,25 @@ impl UserLogic {
     }
 
     pub(crate) fn wake_multicast_listening_thread(&self) {
-        if let Some(waker) = self.multicast_listening_waker.get() {
-            let _ = waker.wake();
+        if let Ok(wakers) = self.multicast_listening_wakers.lock() {
+            for waker in wakers.iter() {
+                if let Some(waker) = waker.get() {
+                    let _ = waker.wake();
+                }
+            }
         }
+    }
+
+    pub(crate) fn join_multicast_listening_thread(&self) -> RtpsResult<()> {
+        let handles: Vec<JoinHandle<()>> = match self.multicast_listening_handles.lock() {
+            Ok(mut handle_guard) => handle_guard.drain(..).collect(),
+            Err(e) => return Err(RtpsError::new(RtpsErrorCode::LockError, e.to_string())),
+        };
+
+        for handle in handles {
+            handle.join().map_err(|_| RtpsError::new(RtpsErrorCode::ThreadJoinError, None))?;
+        }
+        Ok(())
     }
 
     #[allow(unused_variables)]
@@ -146,22 +163,23 @@ impl UserLogic {
         Ok(())
     }
 
-    /// Started on demand by the first DataReader that enables multicast
-    /// reception, so a participant without such a reader never spawns it.
+    /// Started on demand per multicast group, so a participant without a
+    /// multicast DataReader never spawns one.
     pub(crate) fn start_user_multicast_traffic(
         &self,
-        user_multicast_source: Option<MessageSource>,
+        group_locator: Locator,
+        multicast_source: MessageSource,
     ) -> RtpsResult<()> {
-        let Some(multicast_source) = user_multicast_source else {
-            warn!("Transport has no user data multicast source; reception stays unicast only");
-            return Ok(());
-        };
-
         let participant = self.get_upgraded_participant()?;
 
+        let shutdown_waker = Arc::new(OnceLock::new());
         let mut user_multicast_listening_task =
-            UserMulticastListeningTask::new(participant.clone());
-        user_multicast_listening_task.set_shutdown_waker(self.multicast_listening_waker.clone());
+            UserMulticastListeningTask::new(participant.clone(), group_locator.clone());
+        user_multicast_listening_task.set_shutdown_waker(shutdown_waker.clone());
+        self.multicast_listening_wakers
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?
+            .push(shutdown_waker);
         let participant_guid = participant.guid();
 
         let multicast_handle = thread::Builder::new()
@@ -184,8 +202,8 @@ impl UserLogic {
             })
             .expect("Failed to create user multicast listening thread");
 
-        if let Ok(mut handle_guard) = self.multicast_listening_handle.lock() {
-            *handle_guard = Some(multicast_handle);
+        if let Ok(mut handle_guard) = self.multicast_listening_handles.lock() {
+            handle_guard.push(multicast_handle);
         }
 
         Ok(())
@@ -1879,6 +1897,49 @@ impl UserLogic {
         Ok(matched_readers)
     }
 
+    fn deliver_data_change_to_reader(
+        &self,
+        reader: &Arc<dyn Reader + Send + Sync>,
+        remote_writer_guid: Guid,
+        data: &Data,
+        message_receiver: &MessageReceiver,
+    ) -> RtpsResult<()> {
+        let mut change = match reader.reader_cache().lock() {
+            Ok(mut cache) => cache.acquire_change(),
+            Err(_) => {
+                return Err(RtpsError::new(
+                    RtpsErrorCode::LockError,
+                    "Failed to acquire reader cache lock",
+                ));
+            }
+        };
+        change.reset(
+            ChangeKind::Alive,
+            remote_writer_guid,
+            InstanceHandle::NIL,
+            data.writer_sn,
+            message_receiver.get_source_timestamp(),
+        );
+        // Zero-copy share of the socket buffer: `data.serialized_data()`
+        // returns a `Bytes` slice of the original socket allocation, so
+        // each reader gets an Arc refcount bump instead of a payload copy.
+        change.set_shared_payload(data.serialized_data());
+
+        self.apply_writer_attributes_to_change(reader.clone(), remote_writer_guid, &mut change)?;
+
+        if let Some(inline_qos) = data.inline_qos() {
+            self.apply_inline_qos_to_change(&inline_qos, &mut change)?;
+        }
+
+        self.deliver_change_to_reader(
+            change,
+            reader.as_ref(),
+            data.writer_sn,
+            remote_writer_guid,
+            None,
+        )
+    }
+
     fn find_stateful_writer(
         &self,
         entity_id: EntityId,
@@ -1989,7 +2050,6 @@ impl UserLogic {
 
 impl_participant_accessor!(UserLogic);
 impl_unicast_thread_handler!(UserLogic);
-impl_multicast_thread_handler!(UserLogic);
 
 impl UnicastMessageProcessor for UserLogic {
     fn handle_data_message(
@@ -2013,43 +2073,11 @@ impl UnicastMessageProcessor for UserLogic {
         }
 
         for reader in matched_readers {
-            let mut change = match reader.reader_cache().lock() {
-                Ok(mut cache) => cache.acquire_change(),
-                Err(_) => {
-                    return Err(RtpsError::new(
-                        RtpsErrorCode::LockError,
-                        "Failed to acquire reader cache lock",
-                    ));
-                }
-            };
-            change.reset(
-                ChangeKind::Alive,
+            self.deliver_data_change_to_reader(
+                &reader,
                 remote_writer_guid,
-                InstanceHandle::NIL,
-                data.writer_sn,
-                message_receiver.get_source_timestamp(),
-            );
-            // Zero-copy share of the socket buffer: `data.serialized_data()`
-            // returns a `Bytes` slice of the original socket allocation, so
-            // each reader gets an Arc refcount bump instead of a payload copy.
-            change.set_shared_payload(data.serialized_data());
-
-            self.apply_writer_attributes_to_change(
-                reader.clone(),
-                remote_writer_guid,
-                &mut change,
-            )?;
-
-            if let Some(inline_qos) = data.inline_qos() {
-                self.apply_inline_qos_to_change(&inline_qos, &mut change)?;
-            }
-
-            self.deliver_change_to_reader(
-                change,
-                reader.as_ref(),
-                data.writer_sn,
-                remote_writer_guid,
-                None,
+                data,
+                message_receiver,
             )?;
         }
 
@@ -2900,6 +2928,56 @@ impl UnicastMessageProcessor for UserLogic {
                     writer_proxy.irrelevant_change_set(seq_num);
                 }
             }
+        }
+
+        Ok(())
+    }
+}
+
+impl MulticastMessageProcessor for UserLogic {
+    fn handle_multicast_data_message(
+        &mut self,
+        rtps_header: &Header,
+        data: &Data,
+        message_receiver: &MessageReceiver,
+    ) -> RtpsResult<()> {
+        let arrival_group = message_receiver.arrival_multicast_group().ok_or_else(|| {
+            RtpsError::new(
+                RtpsErrorCode::InvalidDestinationGuid,
+                "A multicast DATA message carries no arrival group",
+            )
+        })?;
+
+        let remote_writer_guid = Guid::new(rtps_header.guid_prefix(), data.writer_id);
+        let matched_readers: Vec<Arc<dyn Reader + Send + Sync>> =
+            self.get_matched_readers(remote_writer_guid, data.reader_id)?;
+
+        for reader in matched_readers {
+            let subscription = reader.get_subscription_builtin_topic_data()?;
+            let verdict =
+                evaluate_reader_multicast(&subscription, false, |locator| locator == arrival_group);
+            if verdict == ReaderMulticastVerdict::Ineligible {
+                trace!(
+                    "[UserMulticast] Reader {} does not listen on {}, skipping SN {}",
+                    subscription.endpoint_guid(),
+                    arrival_group,
+                    data.writer_sn
+                );
+                continue;
+            }
+
+            self.deliver_data_change_to_reader(
+                &reader,
+                remote_writer_guid,
+                data,
+                message_receiver,
+            )?;
+        }
+
+        // The writer proved itself alive by sending, whether or not this
+        // participant has a reader in the group it sent to.
+        if let Some(wlp) = self.get_upgraded_participant()?.wlp_logic() {
+            wlp.mark_monitored_writer_alive(remote_writer_guid)?;
         }
 
         Ok(())

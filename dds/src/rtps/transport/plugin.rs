@@ -131,20 +131,23 @@ pub(crate) trait TransportPlugin: Send + Sync {
     /// is moved into `UserUnicastListeningTask`.
     fn take_user_data_unicast_source(&self) -> Option<MessageSource>;
 
-    /// Take ownership of the user data multicast message source.
+    /// Take ownership of one user data multicast source together with the group
+    /// locator it receives.
     ///
-    /// Returns `None` if the transport has no user data multicast source.
-    /// Called once during initialization. The returned `MessageSource`
-    /// is moved into `UserMulticastListeningTask`.
-    fn take_user_data_multicast_source(&self) -> Option<MessageSource> {
+    /// Returns `None` once every listener created so far has been handed out.
+    /// Each returned `MessageSource` is moved into its own
+    /// `UserMulticastListeningTask`, and the locator is the label that task
+    /// stamps on everything it reads.
+    fn take_user_data_multicast_source(&self) -> Option<(Locator, MessageSource)> {
         None
     }
 
-    /// Create the user data multicast listener if needed and join `group`.
+    /// Create the user data multicast listener for `group` unless it already
+    /// exists.
     ///
-    /// Called once per DataReader that asks for multicast reception. Only the
-    /// first call creates a listener; every call joins the group it was given
-    /// unless that group is already joined. A transport that cannot carry user
+    /// Called once per DataReader that asks for multicast reception. Readers
+    /// sharing a group share one listener, since two sockets on the same group
+    /// would each read the same datagram. A transport that cannot carry user
     /// data over multicast rejects here, so the DataReader fails to be created
     /// instead of silently falling back to unicast.
     fn ensure_user_multicast_listener(&self, group: Ipv4Addr) -> io::Result<()>;
