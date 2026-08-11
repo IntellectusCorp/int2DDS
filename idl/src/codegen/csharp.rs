@@ -926,17 +926,25 @@ impl<'a> CsGen<'a> {
     /// DDSXTY14-56 proposes exempting them but is unresolved.
     fn is_non_primitive_element(element: &ResolvedType) -> bool {
         match element {
-            // Multidimensional arrays parse to nested `Array` but are one XTypes array of
-            // the base type: recurse instead of framing each dimension.
-            ResolvedType::Array { element, .. } => Self::is_non_primitive_element(element),
             ResolvedType::String { .. }
             | ResolvedType::WString { .. }
             | ResolvedType::Struct(_)
             | ResolvedType::Enum(_)
             | ResolvedType::Bitmask(_)
             | ResolvedType::Sequence { .. }
+            | ResolvedType::Array { .. }
             | ResolvedType::Map { .. } => true,
             _ => false,
+        }
+    }
+
+    /// Whether an array frames itself. A multidimensional IDL array parses to nested
+    /// `Array` but XTypes treats it as one array of the base type (7.4.3.4), so look
+    /// through the dimensions.
+    fn array_needs_dheader(element: &ResolvedType) -> bool {
+        match element {
+            ResolvedType::Array { element, .. } => Self::array_needs_dheader(element),
+            other => Self::is_non_primitive_element(other),
         }
     }
 
@@ -1094,7 +1102,7 @@ impl<'a> CsGen<'a> {
                 }
             }
             ResolvedType::Array { element, .. } => {
-                let non_prim = Self::is_non_primitive_element(element);
+                let non_prim = Self::array_needs_dheader(element);
                 if non_prim {
                     self.line("{");
                     self.indent += 1;
@@ -1455,7 +1463,7 @@ impl<'a> CsGen<'a> {
             }
             ResolvedType::Array { element, size } => {
                 let cs_elem = Self::type_to_csharp(element);
-                let non_prim = Self::is_non_primitive_element(element);
+                let non_prim = Self::array_needs_dheader(element);
                 let size_var = format!("_{name}ArrSize");
                 let start_var = format!("_{name}ArrStart");
                 if non_prim {
@@ -1593,7 +1601,7 @@ impl<'a> CsGen<'a> {
             }
             ResolvedType::Array { element, size } => {
                 let cs_elem = Self::type_to_csharp(element);
-                let non_prim = Self::is_non_primitive_element(element);
+                let non_prim = Self::array_needs_dheader(element);
                 let size_var = format!("{var_name}ArrSize");
                 let start_var = format!("{var_name}ArrStart");
                 if non_prim {
@@ -1911,5 +1919,29 @@ mod tests {
         assert!(code.contains("Temperature"));
         assert!(!code.contains("@Data"));
         assert!(!code.contains("@Temperature"));
+    }
+
+    /// DDS-XTypes 7.4.3.5.3: an array of non-primitive elements carries a DHEADER over
+    /// the element payload; an array of primitives does not.
+    #[test]
+    fn test_array_of_struct_dheader_csharp() {
+        let defs = parse_idl(
+            r#"
+            struct Pt { long x; long y; };
+            struct Holder {
+                long nums[3];
+                Pt row[2];
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Holder.idl", &CSharpOptions::default());
+
+        assert!(code.contains("var _arrDt = w.DheaderBegin();"), "{}", code);
+        assert!(code.contains("w.DheaderFinalize(_arrDt);"), "{}", code);
+        assert!(code.contains("var (_RowArrSize, _RowArrStart) = r.ReadDheader();"), "{}", code);
+        assert!(code.contains("r.ReadDheaderEnd(_RowArrSize, _RowArrStart);"), "{}", code);
+        assert!(!code.contains("_NumsArrSize"), "primitive array stays unframed: {}", code);
     }
 }
