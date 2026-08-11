@@ -118,28 +118,34 @@ impl NackFragRequest {
 
         // Recomputed rather than carried: fragments may have arrived since this was scheduled,
         // and a retry that re-requests them would pull the whole sample down again.
-        let Some((_, missing_fragments)) =
-            proxy.calculate_missing_fragments(self.incomplete_sn, self.incomplete_sn)
-        else {
+        let mut missing_fragments = proxy.get_ascending_missing_fn_list(self.incomplete_sn);
+        if missing_fragments.is_empty() {
             return false;
-        };
-
-        proxy.increase_nackfrag_count();
+        }
 
         // The incomplete fragmented sample is recovered by NACK_FRAG alone. Bundling an ACKNACK
-        // that also nacks this sample makes the writer resend it whole from fragment 1.
-        let Ok(buffer) = MessageCreator::create_nackfrag_msg(
+        // that also nacks this sample makes the writer resend it whole from fragment 1. All
+        // missing fragments are requested at once as 256-wide windows, not one window per round.
+        let first_nackfrag_count = proxy.nackfrag_count().wrapping_add(1);
+        let messages = match MessageCreator::create_multiple_nackfrag_msgs(
             self.participant.guid(),
             proxy.remote_writer_guid(),
             self.reader_guid.entity_id(),
             proxy.remote_writer_guid().entity_id(),
             self.incomplete_sn,
-            missing_fragments,
-            proxy.nackfrag_count(),
-            None,
-        ) else {
-            return true;
+            &mut missing_fragments,
+            first_nackfrag_count,
+        ) {
+            Ok(messages) => messages,
+            Err(e) => {
+                warn!("[UserLogic] Failed to create NACK_FRAG: {:?}", e);
+                return true;
+            }
         };
+
+        for _ in 0..messages.len() {
+            proxy.increase_nackfrag_count();
+        }
 
         // Same SHM > TCP > UDP priority filter as send_rtps_message_to_locators, with can_handle
         // guarding the local-side reachability.
@@ -157,13 +163,15 @@ impl NackFragRequest {
             .or_else(|| try_kind(Locator::is_udp))
             .unwrap_or(locs);
 
-        for locator in chosen {
-            match self.transport.send(&buffer, &SendTarget::UserData(locator)) {
-                Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
-                    warn!("[UserLogic] {} locator found but no {} sender available", e, e);
+        for buffer in &messages {
+            for locator in &chosen {
+                match self.transport.send(buffer, &SendTarget::UserData(*locator)) {
+                    Ok(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
+                        warn!("[UserLogic] {} locator found but no {} sender available", e, e);
+                    }
+                    Err(e) => warn!("[UserLogic] Failed to send NACK_FRAG: {:?}", e),
                 }
-                Err(e) => warn!("[UserLogic] Failed to send NACK_FRAG: {:?}", e),
             }
         }
 
@@ -2008,12 +2016,11 @@ impl UnicastMessageProcessor for UserLogic {
                 }
             } else {
                 // Case when fragments are not completely received yet - apply suppression delay
-                let missing_fragments =
-                    writer_proxy.calculate_missing_fragments(heartbeat.first_sn, heartbeat.last_sn);
-
                 // `incomplete_sn`, not `heartbeat.last_sn`: the writer resolves the request
                 // against `writer_sn`, and it also keys the suppression timer.
-                if let Some((incomplete_sn, _)) = missing_fragments {
+                if let Some(incomplete_sn) = writer_proxy
+                    .first_incomplete_fragmented_sn(heartbeat.first_sn, heartbeat.last_sn)
+                {
                     let request = NackFragRequest {
                         writer_proxies: writer_proxies.clone(),
                         transport: self.transport.clone(),
@@ -2107,34 +2114,39 @@ impl UnicastMessageProcessor for UserLogic {
                 continue;
             }
 
-            // Stamp with what the scan returned rather than re-deriving it.
-            let Some((incomplete_sn, missing_fragments)) = writer_proxy
-                .calculate_missing_fragments(heartbeat_frag.writer_sn, heartbeat_frag.writer_sn)
-            else {
-                continue;
-            };
-
             // Respond immediately with NACK_FRAG (zero response delay); the
             // count check above suppresses duplicates per announcement.
-            writer_proxy.increase_nackfrag_count();
-            match MessageCreator::create_nackfrag_msg(
+            let mut missing_fragments =
+                writer_proxy.get_ascending_missing_fn_list(heartbeat_frag.writer_sn);
+            if missing_fragments.is_empty() {
+                continue;
+            }
+
+            let first_nackfrag_count = writer_proxy.nackfrag_count().wrapping_add(1);
+            let messages = match MessageCreator::create_multiple_nackfrag_msgs(
                 stateful_reader.guid(),
                 writer_proxy.remote_writer_guid(),
                 stateful_reader.guid().entity_id(),
                 writer_proxy.remote_writer_guid().entity_id(),
-                incomplete_sn,
-                missing_fragments,
-                writer_proxy.nackfrag_count(),
-                None,
+                heartbeat_frag.writer_sn,
+                &mut missing_fragments,
+                first_nackfrag_count,
             ) {
-                Ok(buffer) => {
-                    let locators: Vec<Locator> = writer_proxy.unicast_locator_list().to_vec();
-                    drop(matched_writers);
-                    self.send_rtps_message_to_locators(locators.iter(), &buffer)?;
-                }
+                Ok(messages) => messages,
                 Err(e) => {
                     warn!("[UserLogic] Failed to create NACK_FRAG for HEARTBEAT_FRAG: {:?}", e);
+                    continue;
                 }
+            };
+
+            for _ in 0..messages.len() {
+                writer_proxy.increase_nackfrag_count();
+            }
+
+            let locators: Vec<Locator> = writer_proxy.unicast_locator_list().to_vec();
+            drop(matched_writers);
+            for buffer in &messages {
+                self.send_rtps_message_to_locators(locators.iter(), buffer)?;
             }
         }
 

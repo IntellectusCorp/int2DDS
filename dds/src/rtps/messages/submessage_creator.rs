@@ -256,6 +256,21 @@ impl SubmessageCreator {
 
         (gap_start, sequence_number_set)
     }
+
+    // Pack the lowest missing fragment numbers into one FragmentNumberSet within
+    // the 256-wide window from the first entry, draining them from frag_list.
+    pub(crate) fn calculate_nackfrag_fns_from_vec(frag_list: &mut Vec<u32>) -> FragmentNumberSet {
+        if frag_list.is_empty() {
+            return FragmentNumberSet::new_empty_with_base(1);
+        }
+
+        let base = frag_list[0];
+        let window_end = base.saturating_add(255);
+        let split_at = frag_list.partition_point(|&frag| frag <= window_end);
+        let window: Vec<u32> = frag_list.drain(..split_at).collect();
+
+        FragmentNumberSet::from_vec(base, window)
+    }
 }
 
 #[cfg(test)]
@@ -479,4 +494,50 @@ mod tests {
     //     assert_eq!(res[2].bitmap_base(), SequenceNumber::new(0, 516));
     //     assert!(res[2].extract_numbers().is_empty());
     // }
+
+    #[test]
+    fn test_calculate_nackfrag_fns_from_vec_sparse() {
+        let mut frag_list = vec![1, 5, 8];
+
+        let fns = SubmessageCreator::calculate_nackfrag_fns_from_vec(&mut frag_list);
+
+        assert_eq!(fns.bitmap_base(), 1);
+        assert_eq!(fns.extract_numbers(), vec![1, 5, 8]);
+        assert!(frag_list.is_empty());
+    }
+
+    #[test]
+    fn test_calculate_nackfrag_fns_from_vec_over_256() {
+        // base = 1, 1 + 255 = 256 so 257 is over the window
+        let mut frag_list = vec![1, 5, 256, 257];
+
+        let fns = SubmessageCreator::calculate_nackfrag_fns_from_vec(&mut frag_list);
+
+        assert_eq!(fns.bitmap_base(), 1);
+        assert_eq!(fns.extract_numbers(), vec![1, 5, 256]);
+        assert_eq!(frag_list, vec![257]);
+    }
+
+    #[test]
+    fn test_calculate_nackfrag_fns_from_vec_3_msgs() {
+        // 1 -> window [1,256]; 257 -> window [257,512]; 513 -> window [513,768]
+        let mut frag_list = vec![1, 257, 513];
+
+        let mut res: Vec<FragmentNumberSet> = Vec::new();
+
+        while !frag_list.is_empty() {
+            res.push(SubmessageCreator::calculate_nackfrag_fns_from_vec(&mut frag_list));
+        }
+
+        assert_eq!(res.len(), 3);
+
+        assert_eq!(res[0].bitmap_base(), 1);
+        assert_eq!(res[0].extract_numbers(), vec![1]);
+
+        assert_eq!(res[1].bitmap_base(), 257);
+        assert_eq!(res[1].extract_numbers(), vec![257]);
+
+        assert_eq!(res[2].bitmap_base(), 513);
+        assert_eq!(res[2].extract_numbers(), vec![513]);
+    }
 }
