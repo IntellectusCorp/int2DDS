@@ -949,6 +949,14 @@ impl<'a> CGen<'a> {
                 }
             }
             ResolvedType::Array { element, size } => {
+                let needs_dh = Self::array_needs_dheader(element);
+                if needs_dh {
+                    self.raw(&format!("{}{{ size_t _arr_dh = 0;\n", indent));
+                    self.raw(&format!(
+                        "{}if (w.xcdr2) {{ int2dds_cdr_write_dheader_begin(&w, &_arr_dh); }}\n",
+                        indent
+                    ));
+                }
                 if let Some(kind) = self.bulk_element(element) {
                     self.emit_bulk_write(kind, accessor, &size.to_string(), indent);
                 } else {
@@ -959,6 +967,13 @@ impl<'a> CGen<'a> {
                         &elem_accessor,
                         &format!("{}    ", indent),
                     );
+                    self.raw(&format!("{}}}\n", indent));
+                }
+                if needs_dh {
+                    self.raw(&format!(
+                        "{}if (w.xcdr2) {{ int2dds_cdr_write_dheader_finalize(&w, _arr_dh); }}\n",
+                        indent
+                    ));
                     self.raw(&format!("{}}}\n", indent));
                 }
             }
@@ -1287,6 +1302,14 @@ impl<'a> CGen<'a> {
                 }
             }
             ResolvedType::Array { element, size } => {
+                let needs_dh = Self::array_needs_dheader(element);
+                if needs_dh {
+                    self.raw(&format!("{}{{ uint32_t _arr_sz = 0; size_t _arr_sp = 0;\n", indent));
+                    self.raw(&format!(
+                        "{}if (r.xcdr2) {{ int2dds_cdr_read_dheader(&r, &_arr_sz, &_arr_sp); }}\n",
+                        indent
+                    ));
+                }
                 if let Some(kind) = self.bulk_element(element) {
                     self.emit_bulk_read(kind, accessor, &size.to_string(), indent);
                 } else {
@@ -1297,6 +1320,13 @@ impl<'a> CGen<'a> {
                         &elem_accessor,
                         &format!("{}    ", indent),
                     );
+                    self.raw(&format!("{}}}\n", indent));
+                }
+                if needs_dh {
+                    self.raw(&format!(
+                        "{}if (r.xcdr2) {{ int2dds_cdr_read_dheader_end(&r, _arr_sz, _arr_sp); }}\n",
+                        indent
+                    ));
                     self.raw(&format!("{}}}\n", indent));
                 }
             }
@@ -1446,18 +1476,25 @@ impl<'a> CGen<'a> {
     /// them; it is unresolved, so this follows the spec as written.
     fn sequence_element_needs_dheader(element: &ResolvedType) -> bool {
         match element {
-            // A multidimensional IDL array parses to nested `Array`, but XTypes treats it
-            // as one array whose element is the base type, so recurse rather than frame
-            // each dimension. Mirrors Rust's `[T; N]: IS_PRIMITIVE = T::IS_PRIMITIVE`.
-            ResolvedType::Array { element, .. } => Self::sequence_element_needs_dheader(element),
             ResolvedType::String { .. }
             | ResolvedType::WString { .. }
             | ResolvedType::Struct(_)
             | ResolvedType::Enum(_)
             | ResolvedType::Bitmask(_)
             | ResolvedType::Sequence { .. }
+            | ResolvedType::Array { .. }
             | ResolvedType::Map { .. } => true,
             _ => false,
+        }
+    }
+
+    /// Whether an array frames itself. A multidimensional IDL array parses to nested
+    /// `Array` but XTypes treats it as one array of the base type (7.4.3.4), so look
+    /// through the dimensions. Mirrors Rust's `[T; N]::BASE_IS_PRIMITIVE`.
+    fn array_needs_dheader(element: &ResolvedType) -> bool {
+        match element {
+            ResolvedType::Array { element, .. } => Self::array_needs_dheader(element),
+            other => Self::sequence_element_needs_dheader(other),
         }
     }
 
@@ -2627,5 +2664,31 @@ mod tests {
         // Language identifiers are never mangled.
         assert!(code.contains("Status_type_info(void)"));
         assert!(code.contains("struct Status {"));
+    }
+
+    /// DDS-XTypes 7.4.3.5.3: an array of non-primitive elements carries a DHEADER over
+    /// the element payload; an array of primitives does not.
+    #[test]
+    fn test_array_of_struct_dheader_c() {
+        let defs = parse_idl(
+            r#"
+            struct Pt { long x; long y; };
+            struct Holder {
+                long nums[3];
+                Pt row[2];
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Holder.idl", &COptions::default());
+
+        assert!(code.contains("int2dds_cdr_write_dheader_begin(&w, &_arr_dh)"), "{}", code);
+        assert!(code.contains("int2dds_cdr_write_dheader_finalize(&w, _arr_dh)"), "{}", code);
+        assert!(code.contains("int2dds_cdr_read_dheader(&r, &_arr_sz, &_arr_sp)"), "{}", code);
+        assert!(code.contains("int2dds_cdr_read_dheader_end(&r, _arr_sz, _arr_sp)"), "{}", code);
+        // The primitive array is written in bulk with no framing of its own.
+        assert!(code.contains("int2dds_cdr_write_prim_array(&w, val->nums, 3, 4)"), "{}", code);
+        assert_eq!(code.matches("_arr_dh = 0").count(), 2, "one framed array per writer: {}", code);
     }
 }

@@ -1092,17 +1092,25 @@ impl<'a> PyGen<'a> {
         // so they are non-primitive here; OMG issue DDSXTY14-56 proposes exempting
         // them but is unresolved.
         match element {
-            // Multidimensional arrays parse to nested `Array` but are one XTypes array of
-            // the base type: recurse instead of framing each dimension.
-            ResolvedType::Array { element, .. } => Self::is_non_primitive_element(element),
             ResolvedType::String { .. }
             | ResolvedType::WString { .. }
             | ResolvedType::Struct(_)
             | ResolvedType::Enum(_)
             | ResolvedType::Bitmask(_)
             | ResolvedType::Sequence { .. }
+            | ResolvedType::Array { .. }
             | ResolvedType::Map { .. } => true,
             _ => false,
+        }
+    }
+
+    /// Whether an array frames itself. A multidimensional IDL array parses to nested
+    /// `Array` but XTypes treats it as one array of the base type (7.4.3.4), so look
+    /// through the dimensions.
+    fn array_needs_dheader(element: &ResolvedType) -> bool {
+        match element {
+            ResolvedType::Array { element, .. } => Self::array_needs_dheader(element),
+            other => Self::is_non_primitive_element(other),
         }
     }
 
@@ -1197,10 +1205,22 @@ impl<'a> PyGen<'a> {
                     "assert len({}) == {}, \"Array size mismatch\"",
                     accessor, size
                 ));
-                self.line(&format!("for _item in {}:", accessor));
-                self.indent += 1;
-                self.emit_write_field(element, "_item");
-                self.indent -= 1;
+                if Self::array_needs_dheader(element) {
+                    self.line("_arr_token = w.write_dheader_begin() if w._xcdr2 else None");
+                    self.line(&format!("for _item in {}:", accessor));
+                    self.indent += 1;
+                    self.emit_write_field(element, "_item");
+                    self.indent -= 1;
+                    self.line("if _arr_token is not None:");
+                    self.indent += 1;
+                    self.line("w.write_dheader_finalize(_arr_token)");
+                    self.indent -= 1;
+                } else {
+                    self.line(&format!("for _item in {}:", accessor));
+                    self.indent += 1;
+                    self.emit_write_field(element, "_item");
+                    self.indent -= 1;
+                }
             }
             ResolvedType::WChar => self.line(&format!("w.write_wchar({})", accessor)),
             ResolvedType::WString { .. } => self.line(&format!("w.write_wstring({})", accessor)),
@@ -1499,6 +1519,13 @@ impl<'a> PyGen<'a> {
                 }
             }
             ResolvedType::Array { element, size } => {
+                let needs_dh = Self::array_needs_dheader(element);
+                if needs_dh {
+                    self.line("if r._xcdr2:");
+                    self.indent += 1;
+                    self.line("_arr_dsize, _arr_dstart = r.read_dheader()");
+                    self.indent -= 1;
+                }
                 self.line(&format!("{} = []", name));
                 self.line(&format!("for _ in range({}):", size));
                 self.indent += 1;
@@ -1506,6 +1533,12 @@ impl<'a> PyGen<'a> {
                 self.emit_read_field(element, &item_name);
                 self.line(&format!("{}.append({})", name, item_name));
                 self.indent -= 1;
+                if needs_dh {
+                    self.line("if r._xcdr2:");
+                    self.indent += 1;
+                    self.line("r.read_dheader_end(_arr_dsize, _arr_dstart)");
+                    self.indent -= 1;
+                }
             }
             ResolvedType::WChar => self.line(&format!("{} = r.read_wchar()", name)),
             ResolvedType::WString { .. } => self.line(&format!("{} = r.read_wstring()", name)),
@@ -1786,5 +1819,30 @@ mod tests {
         // Should NOT have trailing underscore
         assert!(!code.contains("data_:"));
         assert!(!code.contains("sensor_id_:"));
+    }
+
+    /// DDS-XTypes 7.4.3.5.3: an array of non-primitive elements carries a DHEADER over
+    /// the element payload; an array of primitives does not.
+    #[test]
+    fn test_array_of_struct_dheader_python() {
+        let defs = parse_idl(
+            r#"
+            struct Pt { long x; long y; };
+            struct Holder {
+                long nums[3];
+                Pt row[2];
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Holder.idl", &PythonOptions::new());
+
+        assert!(code.contains("_arr_token = w.write_dheader_begin()"), "{}", code);
+        assert!(code.contains("w.write_dheader_finalize(_arr_token)"), "{}", code);
+        assert!(code.contains("_arr_dsize, _arr_dstart = r.read_dheader()"), "{}", code);
+        assert!(code.contains("r.read_dheader_end(_arr_dsize, _arr_dstart)"), "{}", code);
+        // The primitive array iterates unframed.
+        assert!(code.contains("for _item in self.nums:"), "{}", code);
     }
 }
