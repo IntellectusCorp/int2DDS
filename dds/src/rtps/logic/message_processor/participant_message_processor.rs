@@ -442,7 +442,7 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
                 false,
                 true,
                 // 8.5.4.1 According to the DDS specification, the reliability QoS for these built-in Entities is set to 'reliable.'
-                SubscriptionBuiltinTopicData::default(),
+                SubscriptionBuiltinTopicData::builtin_reliable(),
                 SequenceNumber::new(0, 0), // Built-in endpoints are not volatile
             );
             writer.matched_reader_add(reader_proxy);
