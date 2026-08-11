@@ -921,17 +921,23 @@ impl<'a> CsGen<'a> {
 
     /// Per DDS-XTypes 7.4.3.5.4, sequences/arrays of non-primitive elements are
     /// preceded by a DHEADER carrying the byte size of the payload. Matches
-    /// Rust `XcdrSerialize for Vec<T>` where T::IS_PRIMITIVE == false.
+    /// Rust `XcdrSerialize for Vec<T>` where T::IS_PRIMITIVE == false. Enum and
+    /// bitmask are constructed types, so they are non-primitive here; OMG issue
+    /// DDSXTY14-56 proposes exempting them but is unresolved.
     fn is_non_primitive_element(element: &ResolvedType) -> bool {
-        matches!(
-            element,
+        match element {
+            // Multidimensional arrays parse to nested `Array` but are one XTypes array of
+            // the base type: recurse instead of framing each dimension.
+            ResolvedType::Array { element, .. } => Self::is_non_primitive_element(element),
             ResolvedType::String { .. }
-                | ResolvedType::WString { .. }
-                | ResolvedType::Struct(_)
-                | ResolvedType::Sequence { .. }
-                | ResolvedType::Array { .. }
-                | ResolvedType::Map { .. }
-        )
+            | ResolvedType::WString { .. }
+            | ResolvedType::Struct(_)
+            | ResolvedType::Enum(_)
+            | ResolvedType::Bitmask(_)
+            | ResolvedType::Sequence { .. }
+            | ResolvedType::Map { .. } => true,
+            _ => false,
+        }
     }
 
     fn default_value(&self, ty: &ResolvedType) -> String {
@@ -1068,6 +1074,12 @@ impl<'a> CsGen<'a> {
                 self.line(&format!("{}.SerializeCdrInline(w);", accessor));
             }
             ResolvedType::Sequence { element, .. } => {
+                let non_prim = Self::is_non_primitive_element(element);
+                if non_prim {
+                    self.line("{");
+                    self.indent += 1;
+                    self.line("var _seqDt = w.DheaderBegin();");
+                }
                 self.line(&format!("w.WriteSeqHeader((uint){}.Count);", accessor));
                 self.line(&format!("foreach (var _item in {})", accessor));
                 self.line("{");
@@ -1075,14 +1087,30 @@ impl<'a> CsGen<'a> {
                 self.emit_write_field(element, "_item");
                 self.indent -= 1;
                 self.line("}");
+                if non_prim {
+                    self.line("w.DheaderFinalize(_seqDt);");
+                    self.indent -= 1;
+                    self.line("}");
+                }
             }
             ResolvedType::Array { element, .. } => {
+                let non_prim = Self::is_non_primitive_element(element);
+                if non_prim {
+                    self.line("{");
+                    self.indent += 1;
+                    self.line("var _arrDt = w.DheaderBegin();");
+                }
                 self.line(&format!("foreach (var _item in {})", accessor));
                 self.line("{");
                 self.indent += 1;
                 self.emit_write_field(element, "_item");
                 self.indent -= 1;
                 self.line("}");
+                if non_prim {
+                    self.line("w.DheaderFinalize(_arrDt);");
+                    self.indent -= 1;
+                    self.line("}");
+                }
             }
             ResolvedType::Map { key, value, .. } => {
                 let non_prim =
@@ -1403,6 +1431,12 @@ impl<'a> CsGen<'a> {
             ResolvedType::Sequence { element, .. } => {
                 let count_var = format!("_{name}Count");
                 let cs_elem = Self::type_to_csharp(element);
+                let non_prim = Self::is_non_primitive_element(element);
+                let size_var = format!("_{name}SeqSize");
+                let start_var = format!("_{name}SeqStart");
+                if non_prim {
+                    self.line(&format!("var ({}, {}) = r.ReadDheader();", size_var, start_var));
+                }
                 self.line(&format!("var {} = r.ReadSeqHeader();", count_var));
                 self.line(&format!(
                     "{}.{} = new List<{}>((int){});",
@@ -1415,9 +1449,18 @@ impl<'a> CsGen<'a> {
                 self.line(&format!("{}.{}.Add(_item);", obj, name));
                 self.indent -= 1;
                 self.line("}");
+                if non_prim {
+                    self.line(&format!("r.ReadDheaderEnd({}, {});", size_var, start_var));
+                }
             }
             ResolvedType::Array { element, size } => {
                 let cs_elem = Self::type_to_csharp(element);
+                let non_prim = Self::is_non_primitive_element(element);
+                let size_var = format!("_{name}ArrSize");
+                let start_var = format!("_{name}ArrStart");
+                if non_prim {
+                    self.line(&format!("var ({}, {}) = r.ReadDheader();", size_var, start_var));
+                }
                 self.line(&format!("{}.{} = new {}[{}];", obj, name, cs_elem, size));
                 self.line(&format!("for (var _i = 0; _i < {}; _i++)", size));
                 self.line("{");
@@ -1426,6 +1469,9 @@ impl<'a> CsGen<'a> {
                 self.line(&format!("{}.{}[_i] = _item;", obj, name));
                 self.indent -= 1;
                 self.line("}");
+                if non_prim {
+                    self.line(&format!("r.ReadDheaderEnd({}, {});", size_var, start_var));
+                }
             }
             ResolvedType::Map { key, value, .. } => {
                 let count_var = format!("_{name}Count");
@@ -1523,6 +1569,12 @@ impl<'a> CsGen<'a> {
             ResolvedType::Sequence { element, .. } => {
                 let count_var = format!("{var_name}Count");
                 let cs_elem = Self::type_to_csharp(element);
+                let non_prim = Self::is_non_primitive_element(element);
+                let size_var = format!("{var_name}SeqSize");
+                let start_var = format!("{var_name}SeqStart");
+                if non_prim {
+                    self.line(&format!("var ({}, {}) = r.ReadDheader();", size_var, start_var));
+                }
                 self.line(&format!("var {} = r.ReadSeqHeader();", count_var));
                 self.line(&format!(
                     "var {} = new List<{}>((int){});",
@@ -1535,9 +1587,18 @@ impl<'a> CsGen<'a> {
                 self.line(&format!("{}.Add(_inner);", var_name));
                 self.indent -= 1;
                 self.line("}");
+                if non_prim {
+                    self.line(&format!("r.ReadDheaderEnd({}, {});", size_var, start_var));
+                }
             }
             ResolvedType::Array { element, size } => {
                 let cs_elem = Self::type_to_csharp(element);
+                let non_prim = Self::is_non_primitive_element(element);
+                let size_var = format!("{var_name}ArrSize");
+                let start_var = format!("{var_name}ArrStart");
+                if non_prim {
+                    self.line(&format!("var ({}, {}) = r.ReadDheader();", size_var, start_var));
+                }
                 self.line(&format!("var {} = new {}[{}];", var_name, cs_elem, size));
                 self.line(&format!("for (var _j = 0; _j < {}; _j++)", size));
                 self.line("{");
@@ -1546,6 +1607,9 @@ impl<'a> CsGen<'a> {
                 self.line(&format!("{}[_j] = _inner;", var_name));
                 self.indent -= 1;
                 self.line("}");
+                if non_prim {
+                    self.line(&format!("r.ReadDheaderEnd({}, {});", size_var, start_var));
+                }
             }
             ResolvedType::Map { key, value, .. } => {
                 let count_var = format!("{var_name}Count");

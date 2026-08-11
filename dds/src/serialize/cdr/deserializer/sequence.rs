@@ -248,7 +248,9 @@ impl<'a> Xcdr2Deserializer<'a> {
         self.read_octet_run(length, |b| b as char)
     }
 
+    /// XCDR2: string is non-primitive, so the sequence is preceded by a DHEADER.
     pub fn deserialize_string_sequence(&mut self) -> Result<Vec<String>, CdrError> {
+        let _dheader = self.read_dheader()?;
         let length = self.deserialize_u32()? as usize;
         let mut result = Vec::with_capacity(self.checked_capacity(length, 4)?);
         for _ in 0..length {
@@ -257,10 +259,12 @@ impl<'a> Xcdr2Deserializer<'a> {
         Ok(result)
     }
 
+    /// XCDR2: reads the DHEADER that precedes a sequence of non-primitive elements.
     pub fn deserialize_sequence<T, F>(&mut self, mut deserialize_fn: F) -> Result<Vec<T>, CdrError>
     where
         F: FnMut(&mut Self) -> Result<T, CdrError>,
     {
+        let _dheader = self.read_dheader()?;
         let length = self.deserialize_u32()? as usize;
         let mut result = Vec::with_capacity(self.checked_capacity(length, 1)?);
         for _ in 0..length {

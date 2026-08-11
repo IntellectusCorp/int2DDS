@@ -13,6 +13,10 @@ pub struct Xcdr2Serializer {
     pub(super) buffer: Vec<u8>,
     pub(super) extensibility_kind: ExtensibilityKind,
     pub(super) type_hash: Option<[u8; 14]>,
+    /// PLAIN_CDR2 mode: collections carry no DHEADER even when their elements are
+    /// non-primitive. Used for the RTPS KeyHash holder (DDSI-RTPS 9.6.4.8 step 4),
+    /// whose serialization is plain rather than delimited.
+    plain_collections: bool,
 }
 
 impl Xcdr2Serializer {
@@ -23,6 +27,7 @@ impl Xcdr2Serializer {
             buffer: Vec::new(),
             extensibility_kind: extensibility,
             type_hash: None,
+            plain_collections: false,
         }
     }
 
@@ -37,6 +42,7 @@ impl Xcdr2Serializer {
             buffer: Vec::with_capacity(capacity),
             extensibility_kind: extensibility,
             type_hash: None,
+            plain_collections: false,
         }
     }
 
@@ -52,12 +58,24 @@ impl Xcdr2Serializer {
             buffer,
             extensibility_kind: extensibility,
             type_hash: None,
+            plain_collections: false,
         }
     }
 
     /// Consume the serializer and return the internal buffer (for ownership round-trip)
     pub fn into_buffer(self) -> Vec<u8> {
         self.buffer
+    }
+
+    /// Switch to PLAIN_CDR2 collection framing: no DHEADER on collections of
+    /// non-primitive elements. See [`Xcdr2Serializer::plain_collections`].
+    pub fn set_plain_collections(&mut self, plain: bool) {
+        self.plain_collections = plain;
+    }
+
+    /// Whether collections must be written without a DHEADER.
+    pub fn plain_collections(&self) -> bool {
+        self.plain_collections
     }
 
     /// Create XCDR serializer with type hash for type safety
@@ -71,6 +89,7 @@ impl Xcdr2Serializer {
             buffer: Vec::new(),
             extensibility_kind: extensibility,
             type_hash: Some(type_hash),
+            plain_collections: false,
         }
     }
 
@@ -279,6 +298,8 @@ pub struct Xcdr2Deserializer<'a> {
     /// Whether the data uses XCDR2 encoding (affects alignment rules)
     /// XCDR2 limits maximum alignment to 4 bytes, while XCDR1 allows 8 bytes
     is_xcdr2: bool,
+    /// Read counterpart of [`Xcdr2Serializer::plain_collections`].
+    plain_collections: bool,
 }
 
 impl<'a> Xcdr2Deserializer<'a> {
@@ -286,7 +307,24 @@ impl<'a> Xcdr2Deserializer<'a> {
     pub fn new(data: &'a [u8]) -> Result<Self, CdrError> {
         let (endianness, header_size, is_xcdr2) = parse_encapsulation_header(data)?;
 
-        Ok(Self { endianness, data: &data[header_size..], position: 0, header_size, is_xcdr2 })
+        Ok(Self {
+            endianness,
+            data: &data[header_size..],
+            position: 0,
+            header_size,
+            is_xcdr2,
+            plain_collections: false,
+        })
+    }
+
+    /// Read counterpart of [`Xcdr2Serializer::set_plain_collections`].
+    pub fn set_plain_collections(&mut self, plain: bool) {
+        self.plain_collections = plain;
+    }
+
+    /// Whether collections are expected without a DHEADER.
+    pub fn plain_collections(&self) -> bool {
+        self.plain_collections
     }
 
     /// Create deserializer without encapsulation header
@@ -298,6 +336,7 @@ impl<'a> Xcdr2Deserializer<'a> {
             position: 0,
             header_size: 0,
             is_xcdr2: true, // Default to XCDR2 behavior
+            plain_collections: false,
         }
     }
 

@@ -186,14 +186,11 @@ fn member_value_or_default<'a>(
 }
 
 fn is_primitive_kind(kind: &DynamicTypeKind) -> bool {
+    // Enum and bitmask are constructed types, not primitives, so collections of them are
+    // framed (DDS-XTypes 7.4.3.5.3/7.4.3.5.4). OMG issue DDSXTY14-56 proposes exempting
+    // them; it is unresolved, so this follows the spec as written.
     fn is_scalar(kind: &DynamicTypeKind) -> bool {
-        matches!(
-            kind,
-            DynamicTypeKind::Primitive(_)
-                | DynamicTypeKind::Enum(_)
-                | DynamicTypeKind::Bitmask(_)
-                | DynamicTypeKind::Bitset(_)
-        )
+        matches!(kind, DynamicTypeKind::Primitive(_) | DynamicTypeKind::Bitset(_))
     }
     match kind {
         DynamicTypeKind::TypeRef(inner) => is_scalar(inner.kind()),
@@ -518,21 +515,29 @@ where
                 DynamicTypeKind::Sequence { element_type, .. } => element_type.as_ref(),
                 _ => return Err(DdsError::Error("type mismatch: expected Sequence".to_string())),
             };
-            serializer.serialize_u32(items.len() as u32).map_err(cdr_error)?;
-            for item in items {
-                serialize_value_xcdr2(serializer, item, element_type, serialize_nested_struct)?;
-            }
-            Ok(())
+            let write_inner = |s: &mut Xcdr2Serializer| -> DdsResult<()> {
+                s.serialize_u32(items.len() as u32).map_err(cdr_error)?;
+                for item in items {
+                    serialize_value_xcdr2(s, item, element_type, serialize_nested_struct)?;
+                }
+                Ok(())
+            };
+            let framed = !is_primitive_kind(element_type) && !serializer.plain_collections();
+            write_collection_framed(serializer, framed, write_inner)
         }
         DynamicValue::Array(items) => {
             let element_type = match type_kind {
                 DynamicTypeKind::Array { element_type, .. } => element_type.as_ref(),
                 _ => return Err(DdsError::Error("type mismatch: expected Array".to_string())),
             };
-            for item in items {
-                serialize_value_xcdr2(serializer, item, element_type, serialize_nested_struct)?;
-            }
-            Ok(())
+            let write_inner = |s: &mut Xcdr2Serializer| -> DdsResult<()> {
+                for item in items {
+                    serialize_value_xcdr2(s, item, element_type, serialize_nested_struct)?;
+                }
+                Ok(())
+            };
+            let framed = !is_primitive_kind(element_type) && !serializer.plain_collections();
+            write_collection_framed(serializer, framed, write_inner)
         }
         DynamicValue::Optional(Some(inner)) => {
             serializer.serialize_bool(true).map_err(cdr_error)?;
@@ -721,6 +726,9 @@ fn deserialize_value_xcdr2(
 ) -> DdsResult<DynamicValue> {
     match type_kind {
         DynamicTypeKind::Sequence { element_type, .. } => {
+            if !is_primitive_kind(element_type) && !deserializer.plain_collections() {
+                let _ = deserializer.read_dheader().map_err(cdr_error)?;
+            }
             let len = deserializer.deserialize_u32().map_err(cdr_error)? as usize;
             let mut items = Vec::new();
             for _ in 0..len {
@@ -729,6 +737,9 @@ fn deserialize_value_xcdr2(
             Ok(DynamicValue::Sequence(items))
         }
         DynamicTypeKind::Array { element_type, dimensions } => {
+            if !is_primitive_kind(element_type) && !deserializer.plain_collections() {
+                let _ = deserializer.read_dheader().map_err(cdr_error)?;
+            }
             let total_size = checked_array_len(dimensions)?;
             let mut items = Vec::new();
             for _ in 0..total_size {
@@ -1105,6 +1116,7 @@ pub fn serialize_key_cdr(data: &DynamicData) -> DdsResult<(Vec<u8>, bool)> {
     // (max alignment 4), no encapsulation header, Final => no DHEADER. Write the
     // 4-byte header so the alignment math is relative to it, then strip it.
     let mut serializer = Xcdr2Serializer::with_capacity(false, ExtensibilityKind::Final, 64);
+    serializer.set_plain_collections(true);
     serializer.write_encapsulation_header().map_err(cdr_error)?;
     let mut nested = serialize_key_holder_struct;
     for member in &members {
@@ -1131,6 +1143,7 @@ pub fn deserialize_key_cdr(
     dynamic_type: &Arc<DynamicType>,
 ) -> DdsResult<DynamicData> {
     let mut deserializer = Xcdr2Deserializer::new_without_header(bytes, false);
+    deserializer.set_plain_collections(true);
     deserialize_key_holder_struct(&mut deserializer, dynamic_type)
 }
 
@@ -1849,7 +1862,7 @@ mod tests {
     }
 
     #[test]
-    fn test_nested_enum_name_resolution_and_vec_enum_has_no_dheader() {
+    fn test_nested_enum_name_resolution_and_vec_enum_has_dheader() {
         let (enum_obj, enum_hash) = color_enum();
         let mut registry = TypeRegistry::new();
         registry.register_complete(enum_hash, "Color".into(), enum_obj);
@@ -1887,7 +1900,8 @@ mod tests {
         .unwrap();
 
         let bytes = serialize_dynamic_data(&data, &xcdr_format(ExtensibilityKind::Final)).unwrap();
-        assert_eq!(bytes.len(), 20, "Vec<enum> should not have a collection DHEADER");
+        // encap(4) + color(4) + DHEADER(4) + count(4) + two 4-byte enums.
+        assert_eq!(bytes.len(), 24, "enum is non-primitive, so sequence<enum> is framed");
 
         let back = deserialize_dynamic_data(&bytes, &outer_dt).unwrap();
         match back.get_value("color").unwrap() {
