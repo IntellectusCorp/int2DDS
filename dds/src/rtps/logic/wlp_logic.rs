@@ -633,7 +633,7 @@ impl WlpLogic {
                 log::warn!("Failed to remove old change: {}", e);
             }
         }
-        if let Err(e) = cache_guard.add_change_builtin(cache_change.clone()) {
+        if let Err(e) = cache_guard.add_change_builtin(cache_change.clone(), writer.as_ref()) {
             log::warn!(
                 "Failed to add liveliness change to cache: {}, continuing to send heartbeat anyway",
                 e
