@@ -468,6 +468,124 @@ mod key_payload_tests {
         b: u64,
     }
 
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "int2dds", extensibility = "Final")]
+    struct MixedAlignKeyFinal {
+        #[dds(key)]
+        a: u32,
+        #[dds(key)]
+        b: u64,
+    }
+
+    // The three key serialization profiles below are deliberately different, and a
+    // refactor that merges any two of them is silently wrong on the wire. `MixedAlignKey`
+    // puts a u64 at a 4-but-not-8 offset so every difference shows up in these bytes:
+    // endianness, maximum alignment, encapsulation header and DHEADER all differ.
+    // See `serialize_key` / `serialize_key_payload` in derive's `key_methods.rs`.
+
+    /// `serialize_key` — RTPS 9.6.4.8 step 4 KeyHash: PLAIN_CDR2 big-endian, maximum
+    /// alignment 4, no encapsulation header.
+    const KEY_HASH_BE_ALIGN4: &[u8] = &[
+        0x00, 0x00, 0x00, 0x01, // a = 1, big-endian
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, // b = 2 at body offset 4
+    ];
+
+    /// `serialize_key_payload(Cdr)` — CDR_BE header plus classic CDR body, maximum
+    /// alignment 8, so `b` moves to body offset 8.
+    const KEY_PAYLOAD_CDR_BE_ALIGN8: &[u8] = &[
+        0x00, 0x00, 0x00, 0x00, // CDR_BE encapsulation header
+        0x00, 0x00, 0x00, 0x01, // a = 1, big-endian
+        0x00, 0x00, 0x00, 0x00, // padding to 8-byte alignment
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, // b = 2 at body offset 8
+    ];
+
+    /// `serialize_key_payload(Xcdr)` for an Appendable type — DELIMITED_CDR2_LE header,
+    /// struct DHEADER, little-endian body, maximum alignment 4.
+    const KEY_PAYLOAD_XCDR2_APPENDABLE_LE: &[u8] = &[
+        0x00, 0x09, 0x00, 0x00, // DELIMITED_CDR2_LE encapsulation header
+        0x0c, 0x00, 0x00, 0x00, // DHEADER: object size = 12 bytes
+        0x01, 0x00, 0x00, 0x00, // a = 1, little-endian
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // b = 2 at body offset 4
+    ];
+
+    /// `serialize_key_payload(Xcdr)` for a Final type — PLAIN_CDR2_LE header and no
+    /// DHEADER, which is a separate branch from the Appendable case above.
+    const KEY_PAYLOAD_XCDR2_FINAL_LE: &[u8] = &[
+        0x00, 0x07, 0x00, 0x00, // PLAIN_CDR2_LE encapsulation header
+        0x01, 0x00, 0x00, 0x00, // a = 1, little-endian
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // b = 2 at body offset 4
+    ];
+
+    fn xcdr_format(
+        extensibility_kind: crate::serialize::xcdr::ExtensibilityKind,
+        use_delimiters: bool,
+    ) -> SerializationFormat {
+        SerializationFormat::Xcdr { extensibility_kind, use_delimiters }
+    }
+
+    #[test]
+    fn key_hash_profile_is_headerless_big_endian_align4() {
+        let ts = MixedAlignKey::get_type_support();
+        let key = MixedAlignKey { a: 1, b: 2 };
+
+        let bytes = ts.serialize_key(&key as &dyn Any).unwrap();
+        assert_eq!(&*bytes, KEY_HASH_BE_ALIGN4);
+    }
+
+    #[test]
+    fn key_payload_xcdr2_appendable_profile_is_little_endian_align4() {
+        let ts = MixedAlignKey::get_type_support();
+        let key = MixedAlignKey { a: 1, b: 2 };
+
+        let payload = ts
+            .serialize_key_payload(
+                &key as &dyn Any,
+                &xcdr_format(crate::serialize::xcdr::ExtensibilityKind::Appendable, true),
+            )
+            .unwrap();
+        assert_eq!(&*payload, KEY_PAYLOAD_XCDR2_APPENDABLE_LE);
+    }
+
+    #[test]
+    fn key_payload_xcdr2_final_profile_omits_dheader() {
+        let ts = MixedAlignKeyFinal::get_type_support();
+        let key = MixedAlignKeyFinal { a: 1, b: 2 };
+
+        let payload = ts
+            .serialize_key_payload(
+                &key as &dyn Any,
+                &xcdr_format(crate::serialize::xcdr::ExtensibilityKind::Final, false),
+            )
+            .unwrap();
+        assert_eq!(&*payload, KEY_PAYLOAD_XCDR2_FINAL_LE);
+
+        let decoded = ts.deserialize_key_payload(&payload).unwrap();
+        let decoded = decoded.downcast_ref::<MixedAlignKeyFinal>().unwrap();
+        assert_eq!((decoded.a, decoded.b), (1, 2));
+    }
+
+    #[test]
+    fn three_key_profiles_stay_distinct() {
+        // Guards the refactor that says "these are duplicates, merge them". Round-trip
+        // tests survive such a merge because each profile stays self-consistent; only
+        // comparing the profiles against each other catches it.
+        let ts = MixedAlignKey::get_type_support();
+        let key = MixedAlignKey { a: 1, b: 2 };
+
+        let key_hash = ts.serialize_key(&key as &dyn Any).unwrap();
+        let cdr = ts.serialize_key_payload(&key as &dyn Any, &SerializationFormat::Cdr).unwrap();
+        let xcdr = ts
+            .serialize_key_payload(
+                &key as &dyn Any,
+                &xcdr_format(crate::serialize::xcdr::ExtensibilityKind::Appendable, true),
+            )
+            .unwrap();
+
+        assert_ne!(&cdr[4..], &*key_hash, "CDR body must not reuse the max-align-4 KeyHash body");
+        assert_ne!(&xcdr[4..], &*key_hash, "XCDR2 payload is little-endian, KeyHash is big-endian");
+        assert_ne!(&*cdr, &*xcdr, "CDR and XCDR2 key payloads must differ");
+    }
+
     #[test]
     fn serialize_key_payload_xcdr1_reencodes_8byte_alignment() {
         // A u32 followed by a u64: XCDR1 (8-byte max alignment) and the KeyHash body
@@ -481,8 +599,7 @@ mod key_payload_tests {
         let payload =
             ts.serialize_key_payload(&key as &dyn Any, &SerializationFormat::Cdr).unwrap();
         // CDR_BE header (4) + u32 a @0 (4) + 4 pad + u64 b @8 (8) = 20 bytes.
-        assert_eq!(&payload[..2], &[0x00, 0x00], "expected CDR_BE encapsulation id");
-        assert_eq!(payload.len(), 20, "u64 key member must be 8-byte aligned under XCDR1");
+        assert_eq!(&*payload, KEY_PAYLOAD_CDR_BE_ALIGN8);
 
         let decoded = ts.deserialize_key_payload(&payload).unwrap();
         let decoded = decoded.downcast_ref::<MixedAlignKey>().unwrap();
