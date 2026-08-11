@@ -284,14 +284,29 @@ pub trait XcdrSerialize {
     /// the element type of a sequence/array per DDS-XTypes 7.4.3.5.3-4).
     /// Defaults to `false`; primitive impls override to `true`.
     const IS_PRIMITIVE: bool = false;
+    /// Primitiveness of the base element once nested arrays are flattened. Only
+    /// `[T; N]` overrides it; it decides whether an array frames itself.
+    const BASE_IS_PRIMITIVE: bool = Self::IS_PRIMITIVE;
     fn serialize_xcdr(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()>;
+    /// Write this value as an element of an enclosing array. Multidimensional IDL
+    /// arrays serialize as one flat array (DDS-XTypes 7.4.3.4), so a nested array
+    /// contributes its elements without a DHEADER of its own.
+    fn serialize_xcdr_unframed(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()> {
+        self.serialize_xcdr(serializer)
+    }
 }
 
 /// Trait for types that can be deserialized using XCDR
 pub trait XcdrDeserialize: Sized {
     /// See [`XcdrSerialize::IS_PRIMITIVE`].
     const IS_PRIMITIVE: bool = false;
+    /// See [`XcdrSerialize::BASE_IS_PRIMITIVE`].
+    const BASE_IS_PRIMITIVE: bool = Self::IS_PRIMITIVE;
     fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self>;
+    /// See [`XcdrSerialize::serialize_xcdr_unframed`].
+    fn deserialize_xcdr_unframed(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
+        Self::deserialize_xcdr(deserializer)
+    }
 }
 
 crate::impl_primitive_serialization!(
@@ -389,43 +404,50 @@ impl<T: XcdrDeserialize> XcdrDeserialize for Option<T> {
     }
 }
 
+// A multidimensional IDL array (`long a[2][3]`) is one array of the base type
+// (DDS-XTypes 7.4.3.4), so the nested `[[T; N]; M]` that represents it carries a single
+// DHEADER over all elements: the outer array frames, inner arrays contribute unframed.
+// An array is never itself a primitive type, so an enclosing sequence/map always frames.
 impl<T: XcdrSerialize, const N: usize> XcdrSerialize for [T; N] {
-    // A multidimensional IDL array (`long a[2][3]`) is one array whose element type is the
-    // base type, so the nested `[[T; N]; M]` that represents it must stay flat on the wire.
-    // Classifying an array by its element keeps the outer dimension from adding a DHEADER.
-    const IS_PRIMITIVE: bool = T::IS_PRIMITIVE;
+    const BASE_IS_PRIMITIVE: bool = T::BASE_IS_PRIMITIVE;
 
     fn serialize_xcdr(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()> {
         // DDS-XTypes 7.4.3.5.3: arrays of non-primitive elements carry a DHEADER of the
         // element payload byte size (and no element count); primitive arrays do not.
-        if T::IS_PRIMITIVE {
-            for item in self.iter() {
-                item.serialize_xcdr(serializer)?;
-            }
-            Ok(())
+        if Self::BASE_IS_PRIMITIVE {
+            self.serialize_xcdr_unframed(serializer)
         } else {
             let dheader_pos = serializer.reserve_dheader();
             let content_start = serializer.position();
-            for item in self.iter() {
-                item.serialize_xcdr(serializer)?;
-            }
+            self.serialize_xcdr_unframed(serializer)?;
             let content_size = (serializer.position() - content_start) as u32;
             serializer.write_dheader_at(dheader_pos, content_size);
             Ok(())
         }
     }
+
+    fn serialize_xcdr_unframed(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()> {
+        for item in self.iter() {
+            item.serialize_xcdr_unframed(serializer)?;
+        }
+        Ok(())
+    }
 }
 
 impl<T: XcdrDeserialize, const N: usize> XcdrDeserialize for [T; N] {
-    const IS_PRIMITIVE: bool = T::IS_PRIMITIVE;
+    const BASE_IS_PRIMITIVE: bool = T::BASE_IS_PRIMITIVE;
 
     fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
-        if !T::IS_PRIMITIVE {
+        if !Self::BASE_IS_PRIMITIVE {
             let _object_size = deserializer.read_dheader()?;
         }
+        Self::deserialize_xcdr_unframed(deserializer)
+    }
+
+    fn deserialize_xcdr_unframed(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
         let mut vec = Vec::with_capacity(N);
         for _ in 0..N {
-            vec.push(T::deserialize_xcdr(deserializer)?);
+            vec.push(T::deserialize_xcdr_unframed(deserializer)?);
         }
         vec.try_into().map_err(|_| {
             SerializationError::DeserializationError("Failed to convert Vec to array".to_string())
@@ -896,10 +918,40 @@ mod element_classification_tests {
         assert_eq!(encode_xcdr2(&value).len(), 4 + 24);
     }
 
-    /// The same nesting with a non-primitive base type frames both dimensions.
+    /// The same nesting with a non-primitive base type is still one array, so it carries
+    /// exactly one DHEADER spanning every element -- not one per dimension.
     #[test]
-    fn multidim_struct_array_frames_each_dimension() {
+    fn multidim_struct_array_frames_once() {
         let value: [[Pt; 1]; 2] = [[Pt { x: 1, y: 2 }], [Pt { x: 3, y: 4 }]];
+
+        #[rustfmt::skip]
+        let expected: Vec<u8> = vec![
+            0x00, 0x07, 0x00, 0x00,
+            0x10, 0x00, 0x00, 0x00,
+            0x01, 0x00, 0x00, 0x00,
+            0x02, 0x00, 0x00, 0x00,
+            0x03, 0x00, 0x00, 0x00,
+            0x04, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(encode_xcdr2(&value), expected);
+
+        let mut deserializer = XcdrDeserializer::new(&expected).unwrap();
+        assert_eq!(<[[Pt; 1]; 2]>::deserialize_xcdr(&mut deserializer).unwrap(), value);
+    }
+
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "crate", extensibility = "Appendable")]
+    struct APt {
+        x: i32,
+        y: i32,
+    }
+
+    /// The array DHEADER spans the elements including each element's own framing. These
+    /// are the bytes the Python and C# generators emit for the same `Pt row[2]` member,
+    /// so they pin cross-language agreement, not just self-consistency.
+    #[test]
+    fn array_of_appendable_struct_frames_element_framing_too() {
+        let value: [APt; 2] = [APt { x: 1, y: 2 }, APt { x: 3, y: 4 }];
 
         #[rustfmt::skip]
         let expected: Vec<u8> = vec![
@@ -913,5 +965,30 @@ mod element_classification_tests {
             0x04, 0x00, 0x00, 0x00,
         ];
         assert_eq!(encode_xcdr2(&value), expected);
+
+        let mut deserializer = XcdrDeserializer::new(&expected).unwrap();
+        assert_eq!(<[APt; 2]>::deserialize_xcdr(&mut deserializer).unwrap(), value);
+    }
+
+    /// An array is not a primitive type, so a sequence of arrays is framed even when the
+    /// arrays themselves are not (DDS-XTypes 7.4.3.5.4: PSEQUENCE is primitive elements only).
+    #[test]
+    fn sequence_of_primitive_arrays_keeps_dheader() {
+        let value: Vec<[i32; 2]> = vec![[1, 2], [3, 4]];
+
+        #[rustfmt::skip]
+        let expected: Vec<u8> = vec![
+            0x00, 0x07, 0x00, 0x00,
+            0x14, 0x00, 0x00, 0x00,
+            0x02, 0x00, 0x00, 0x00,
+            0x01, 0x00, 0x00, 0x00,
+            0x02, 0x00, 0x00, 0x00,
+            0x03, 0x00, 0x00, 0x00,
+            0x04, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(encode_xcdr2(&value), expected);
+
+        let mut deserializer = XcdrDeserializer::new(&expected).unwrap();
+        assert_eq!(Vec::<[i32; 2]>::deserialize_xcdr(&mut deserializer).unwrap(), value);
     }
 }
