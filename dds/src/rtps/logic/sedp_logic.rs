@@ -709,6 +709,22 @@ impl SedpLogic {
             }
         }
 
+        // Publish the announcement before looking for local writers.
+        //
+        // `DcpsBridge::create_rtps_writer` registers the new writer in the
+        // participant store and only then scans `remote_subscriptions()` for the
+        // topic. Both paths therefore publish their own fact before reading the
+        // other's, which guarantees at least one of them sees the other and the
+        // pair gets matched. Looking up local writers *before* storing would
+        // break that guarantee: a writer registered after the lookup below would
+        // scan `remote_subscriptions()` before this entry lands, and neither side
+        // would match. SEDP announces an endpoint once, so nothing repairs it.
+        participant
+            .remote_subscriptions()
+            .entry(topic_name.clone())
+            .or_default()
+            .insert(endpoint_guid, subscription_builtin_topic_data.clone());
+
         // First try to find local writer using exact match (find_writer_from_entry)
         // If no exact match, try finding writer using domain ID and topic name only
         let writers = participant.find_writers_from_topic_name(&topic_name);
@@ -752,12 +768,6 @@ impl SedpLogic {
             subscription_builtin_topic_data.type_identifier(),
             subscription_builtin_topic_data.type_object().is_some(),
         );
-
-        participant
-            .remote_subscriptions()
-            .entry(topic_name)
-            .or_default()
-            .insert(endpoint_guid, subscription_builtin_topic_data);
 
         Ok(())
     }
@@ -886,7 +896,12 @@ impl SedpLogic {
             last_irrelevant_sn,
         );
 
-        writer.matched_reader_add(reader_proxy);
+        // A concurrent caller may have matched this reader between the
+        // `matched_reader_is_matched` check above and here; if so the proxy is
+        // already in place and the match must not be applied a second time.
+        if !writer.matched_reader_add(reader_proxy) {
+            return Ok(());
+        }
 
         let writer_guid = writer.guid();
         if writer_guid.entity_id().entity_kind().is_user_defined() {
@@ -1028,6 +1043,13 @@ impl SedpLogic {
             highest_sent_change_sn = Some(writer.last_change_sequence_number());
         }
 
+        // A concurrent caller may have matched this reader between the
+        // `matched_reader_is_matched` check above and the adds below. Every
+        // usable locator already being present is how that shows up here, and
+        // the match must not then be counted a second time.
+        let mut attempted_locators = 0usize;
+        let mut added_locators = 0usize;
+
         for locator in subscription_builtin_topic_data.unicast_locator_list() {
             if !(locator.kind() == LOCATOR_KIND_UDP_V4
                 || locator.kind() == LOCATOR_KIND_UDP_V6
@@ -1037,14 +1059,17 @@ impl SedpLogic {
             {
                 continue;
             }
-            writer.reader_locator_add(ReaderLocator::new(
+            attempted_locators += 1;
+            if writer.reader_locator_add(ReaderLocator::new(
                 locator.clone(),
                 highest_sent_change_sn,
                 false,
                 subscription_builtin_topic_data.endpoint_guid().prefix(),
                 subscription_builtin_topic_data.endpoint_guid().entity_id(),
                 subscription_builtin_topic_data.clone(),
-            ));
+            )) {
+                added_locators += 1;
+            }
         }
         for locator in subscription_builtin_topic_data.multicast_locator_list() {
             // Note: Currently, builtin_topic_data is sent via unicast only.
@@ -1070,7 +1095,14 @@ impl SedpLogic {
                 subscription_builtin_topic_data.endpoint_guid().entity_id(),
                 subscription_builtin_topic_data.clone(),
             );
-            writer.reader_locator_add(reader_locator);
+            attempted_locators += 1;
+            if writer.reader_locator_add(reader_locator) {
+                added_locators += 1;
+            }
+        }
+
+        if attempted_locators > 0 && added_locators == 0 {
+            return Ok(());
         }
 
         writer.update_publication_matched_status(
@@ -1155,6 +1187,22 @@ impl SedpLogic {
             }
         }
 
+        // Publish the announcement before looking for local readers.
+        //
+        // `DcpsBridge::create_rtps_reader` registers the new reader in the
+        // participant store and only then scans `remote_publications()` for the
+        // topic. Both paths therefore publish their own fact before reading the
+        // other's, which guarantees at least one of them sees the other and the
+        // pair gets matched. Looking up local readers *before* storing would
+        // break that guarantee: a reader registered after the lookup below would
+        // scan `remote_publications()` before this entry lands, and neither side
+        // would match. SEDP announces an endpoint once, so nothing repairs it.
+        participant
+            .remote_publications()
+            .entry(topic_name.clone())
+            .or_default()
+            .insert(endpoint_guid, publication_builtin_topic_data.clone());
+
         // First try to find local reader using exact match (find_reader_from_entry)
         let readers = participant.find_readers_from_topic_name(&topic_name);
 
@@ -1180,12 +1228,6 @@ impl SedpLogic {
             publication_builtin_topic_data.type_identifier(),
             publication_builtin_topic_data.type_object().is_some(),
         );
-
-        participant
-            .remote_publications()
-            .entry(topic_name)
-            .or_default()
-            .insert(endpoint_guid, publication_builtin_topic_data);
 
         Ok(())
     }
@@ -1301,7 +1343,12 @@ impl SedpLogic {
             reader.get_update_status_callback(),
         );
 
-        reader.matched_writer_add(writer_proxy);
+        // A concurrent caller may have matched this writer between the
+        // `matched_writer_is_matched` check above and here; if so the proxy is
+        // already in place and the match must not be applied a second time.
+        if !reader.matched_writer_add(writer_proxy) {
+            return Ok(());
+        }
 
         let writer_guid = endpoint_guid;
         if writer_guid.entity_id().entity_kind().is_user_defined() {
@@ -1428,7 +1475,12 @@ impl SedpLogic {
 
         let remote_writer_info =
             RemoteWriterInfo::new(endpoint_guid, publication_builtin_topic_data.clone());
-        reader.matched_writer_add(remote_writer_info);
+        // A concurrent caller may have matched this writer between the
+        // `matched_writer_is_matched` check above and here; if so the entry is
+        // already in place and the match must not be applied a second time.
+        if !reader.matched_writer_add(remote_writer_info) {
+            return Ok(());
+        }
 
         let writer_guid = endpoint_guid;
         if writer_guid.entity_id().entity_kind().is_user_defined() {
@@ -1739,6 +1791,52 @@ impl SedpLogic {
                 RtpsError::new(RtpsErrorCode::LockError, "Failed to lock wire buffer pool")
             })?
             .release(send_buffer);
+
+        Ok(())
+    }
+
+    /// Send the endpoint announcements this participant already holds to a newly discovered peer.
+    ///
+    /// Discovery only arms heartbeats, and nothing pumps a builtin writer's unsent changes, so
+    /// without this the peer is told a range exists and is never sent any of it.
+    pub(crate) fn push_sedp_history_to_participant(
+        &self,
+        remote_prefix: GuidPrefix,
+    ) -> RtpsResult<()> {
+        let participant = self.get_upgraded_participant()?;
+
+        for (writer, reader_entity_id) in [
+            (
+                participant.sedp_builtin_publications_writer(),
+                EntityId::SEDP_BUILTIN_PUBLICATIONS_READER,
+            ),
+            (
+                participant.sedp_builtin_subscriptions_writer(),
+                EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_READER,
+            ),
+        ] {
+            // Copy the list out and drop the guard: the sends below go to the wire.
+            let changes = match writer.writer_cache().lock() {
+                Ok(cache) => cache.get_changes(),
+                Err(e) => {
+                    warn!("[SEDP] cannot read {} history to push: {}", reader_entity_id, e);
+                    continue;
+                }
+            };
+
+            let remote_reader_guid = Guid::new(remote_prefix, reader_entity_id);
+            let writer_entity_id = writer.guid().entity_id();
+            for change in changes {
+                if let Err(e) = self.send_sedp_data_message(
+                    change,
+                    remote_reader_guid,
+                    reader_entity_id,
+                    writer_entity_id,
+                ) {
+                    warn!("[SEDP] failed to push an announcement to {}: {}", remote_reader_guid, e);
+                }
+            }
+        }
 
         Ok(())
     }
@@ -2084,6 +2182,26 @@ impl SedpLogic {
         }
     }
 
+    /// Reject an announcement missing `PID_ENDPOINT_GUID` or `PID_TOPIC_NAME`: nothing can match
+    /// it, and storing it files a phantom under the empty topic name.
+    fn reject_announcement_without_an_endpoint(
+        endpoint_guid: Guid,
+        topic_name: &str,
+        what: &str,
+    ) -> RtpsResult<()> {
+        if endpoint_guid == Guid::UNKNOWN || topic_name.is_empty() {
+            return Err(RtpsError::new(
+                RtpsErrorCode::DeserializationError,
+                format!(
+                    "{} carries no usable endpoint (guid={}, topic_name={:?}); discarding so it \
+                     can be requested again",
+                    what, endpoint_guid, topic_name
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     /// Check if the message is a SEDP Publication message.
     fn is_sedp_publication_data(&self, data: &Data) -> bool {
         (data.reader_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_READER
@@ -2191,12 +2309,6 @@ impl UnicastMessageProcessor for SedpLogic {
 
             let writer_guid = Guid::new(rtps_header.guid_prefix(), data.writer_id);
 
-            self.mark_as_received_in_writer_proxy(
-                &builtin_endpoint_pair.reader(),
-                writer_guid,
-                data.writer_sn,
-            )?;
-
             let payload = data.serialized_data();
 
             let store_wire_in_cache = |endpoint_guid: Guid| {
@@ -2216,76 +2328,122 @@ impl UnicastMessageProcessor for SedpLogic {
                 }
             };
 
-            if data.writer_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER {
+            let outcome = if data.writer_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER {
                 let is_termination = inline_qos_params
                     .as_ref()
                     .and_then(|qos| qos.get_status_info())
                     .is_some_and(|status| status.disposed() || status.unregistered());
-                if is_termination && payload.is_empty() {
-                    if let Some(terminated_writer_guid) =
-                        inline_qos_params.as_ref().and_then(|qos| qos.get_key_hash())
-                    {
-                        participant.cleanup_remote_writer_by_guid(InstanceHandle::to_guid(
+                let terminated_writer_guid = if is_termination && payload.is_empty() {
+                    inline_qos_params.as_ref().and_then(|qos| qos.get_key_hash())
+                } else {
+                    None
+                };
+
+                if let Some(terminated_writer_guid) = terminated_writer_guid {
+                    participant
+                        .cleanup_remote_writer_by_guid(InstanceHandle::to_guid(
                             &terminated_writer_guid,
-                        ))?;
-                        return Ok(());
-                    }
-                }
-
-                let writer_data = SEDPMessage::<DiscoveredWriterData>::from_serialized_payload(
-                    payload.as_ref(),
-                    is_big_endian,
-                )
-                .map_err(|e| {
-                    RtpsError::new(
-                        RtpsErrorCode::DeserializationError,
-                        format!("Failed to parse DiscoveredWriterData: {}", e),
+                        ))
+                        .map(|_| ())
+                } else {
+                    SEDPMessage::<DiscoveredWriterData>::from_serialized_payload(
+                        payload.as_ref(),
+                        is_big_endian,
                     )
-                })?;
+                    .map_err(|e| {
+                        RtpsError::new(
+                            RtpsErrorCode::DeserializationError,
+                            format!("Failed to parse DiscoveredWriterData: {}", e),
+                        )
+                    })
+                    .and_then(|writer_data| {
+                        let endpoint_guid =
+                            writer_data.publication_builtin_topic_data.endpoint_guid();
+                        // PL_CDR stops at the first unreadable parameter and reports success,
+                        // so a truncated payload arrives here fully defaulted.
+                        Self::reject_announcement_without_an_endpoint(
+                            endpoint_guid,
+                            &writer_data.publication_builtin_topic_data.topic_name(),
+                            "DiscoveredWriterData",
+                        )?;
 
-                store_wire_in_cache(writer_data.publication_builtin_topic_data.endpoint_guid());
+                        store_wire_in_cache(endpoint_guid);
 
-                debug!("SEDP Logic: DiscoveredWriterData: {:?}", writer_data);
-                return self.handle_publication_builtin_topic_data(
-                    writer_data.publication_builtin_topic_data,
-                    inline_qos_params,
-                );
+                        debug!("SEDP Logic: DiscoveredWriterData: {:?}", writer_data);
+                        self.handle_publication_builtin_topic_data(
+                            writer_data.publication_builtin_topic_data,
+                            inline_qos_params,
+                        )
+                    })
+                }
             } else if data.writer_id == EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_WRITER {
                 let is_termination = inline_qos_params
                     .as_ref()
                     .and_then(|qos| qos.get_status_info())
                     .is_some_and(|status| status.disposed() || status.unregistered());
-                if is_termination && payload.is_empty() {
-                    if let Some(terminated_reader_guid) =
-                        inline_qos_params.as_ref().and_then(|qos| qos.get_key_hash())
-                    {
-                        participant.cleanup_remote_reader_by_guid(InstanceHandle::to_guid(
+                let terminated_reader_guid = if is_termination && payload.is_empty() {
+                    inline_qos_params.as_ref().and_then(|qos| qos.get_key_hash())
+                } else {
+                    None
+                };
+
+                if let Some(terminated_reader_guid) = terminated_reader_guid {
+                    participant
+                        .cleanup_remote_reader_by_guid(InstanceHandle::to_guid(
                             &terminated_reader_guid,
-                        ))?;
-                        return Ok(());
-                    }
-                }
-
-                let reader_data = SEDPMessage::<DiscoveredReaderData>::from_serialized_payload(
-                    payload.as_ref(),
-                    is_big_endian,
-                )
-                .map_err(|e| {
-                    RtpsError::new(
-                        RtpsErrorCode::DeserializationError,
-                        format!("Failed to parse DiscoveredReaderData: {}", e),
+                        ))
+                        .map(|_| ())
+                } else {
+                    SEDPMessage::<DiscoveredReaderData>::from_serialized_payload(
+                        payload.as_ref(),
+                        is_big_endian,
                     )
-                })?;
+                    .map_err(|e| {
+                        RtpsError::new(
+                            RtpsErrorCode::DeserializationError,
+                            format!("Failed to parse DiscoveredReaderData: {}", e),
+                        )
+                    })
+                    .and_then(|reader_data| {
+                        let endpoint_guid =
+                            reader_data.subscription_builtin_topic_data.endpoint_guid();
+                        Self::reject_announcement_without_an_endpoint(
+                            endpoint_guid,
+                            &reader_data.subscription_builtin_topic_data.topic_name(),
+                            "DiscoveredReaderData",
+                        )?;
 
-                store_wire_in_cache(reader_data.subscription_builtin_topic_data.endpoint_guid());
+                        store_wire_in_cache(endpoint_guid);
 
-                debug!("SEDP Logic: DiscoveredReaderData: {:?}", reader_data);
-                return self.handle_subscription_builtin_topic_data(
-                    reader_data.subscription_builtin_topic_data,
-                    inline_qos_params,
-                    reader_data.content_filter,
-                );
+                        debug!("SEDP Logic: DiscoveredReaderData: {:?}", reader_data);
+                        self.handle_subscription_builtin_topic_data(
+                            reader_data.subscription_builtin_topic_data,
+                            inline_qos_params,
+                            reader_data.content_filter,
+                        )
+                    })
+                }
+            } else {
+                Ok(())
+            };
+
+            // The bytes arrived, so the sample is received (RTPS 8.4.12); re-requesting them
+            // cannot make an endpoint of them. Returning would drop the submessages behind it.
+            if let Err(e) = outcome {
+                if e.code == RtpsErrorCode::DeserializationError {
+                    warn!("[SEDP] discarding an unusable announcement from {}: {}", writer_guid, e);
+                } else {
+                    return Err(e);
+                }
             }
+
+            self.mark_as_received_in_writer_proxy(
+                &builtin_endpoint_pair.reader(),
+                writer_guid,
+                data.writer_sn,
+            )?;
+
+            return Ok(());
         } else if self.is_participant_data(data) {
             let (participant_proxy_data, inline_qos_params) = message_receiver
                 .extract_participant_proxy_data(participant.domain_id())
@@ -2401,8 +2559,8 @@ impl UnicastMessageProcessor for SedpLogic {
         writer_proxy.set_last_heartbeat_count(heartbeat.count);
         writer_proxy.set_last_heartbeat_at(now);
 
-        let missing_changes = writer_proxy.process_heartbeat(heartbeat.first_sn, heartbeat.last_sn);
-        let bitmap_base = writer_proxy.expected_sn();
+        let (bitmap_base, missing_changes) =
+            writer_proxy.process_heartbeat(heartbeat.first_sn, heartbeat.last_sn);
 
         // Check Heartbeat's final flag
         let requires_response = !final_flag;
@@ -2627,7 +2785,285 @@ impl UnicastMessageProcessor for SedpLogic {
 
 #[cfg(test)]
 mod tests {
-    // TODO: Tests need updating to use TransportPlugin + MessageSource pattern.
+    // TODO: The pre-existing tests need updating to use TransportPlugin + MessageSource pattern.
     // Previous tests used removed Socket methods (create_socket, sender, discovery_multicast_listener, etc.)
     // These will be updated when DcpsBridge migration (Phase 5+) is complete.
+
+    use super::*;
+    use crate::rtps::common::types::SubmessagePayload;
+    use crate::rtps::entities::reader::WriterProxy;
+    use crate::rtps::messages::submessage_header_flag::{SubmessageFlagType, SubmessageHeaderFlag};
+    use crate::rtps::messages::submessage_id::SubmessageId;
+    use crate::rtps::messages::submessages::data::Data;
+    use crate::rtps::transport::plugin::MessageSource;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    /// Counts what was handed to the wire; nothing leaves the process.
+    #[derive(Default)]
+    struct CountingTransport {
+        sends: Arc<Mutex<usize>>,
+    }
+
+    impl TransportPlugin for CountingTransport {
+        fn send(&self, _data: &[u8], _target: &SendTarget) -> std::io::Result<()> {
+            *self.sends.lock().expect("send counter") += 1;
+            Ok(())
+        }
+        fn can_handle(&self, _locator: &Locator) -> bool {
+            true
+        }
+        fn advertised_metatraffic_unicast_locators(&self) -> Vec<Locator> {
+            Vec::new()
+        }
+        fn advertised_default_unicast_locators(&self) -> Vec<Locator> {
+            Vec::new()
+        }
+        fn take_discovery_multicast_source(&self) -> Option<MessageSource> {
+            None
+        }
+        fn take_discovery_unicast_source(&self) -> Option<MessageSource> {
+            None
+        }
+        fn take_user_data_unicast_source(&self) -> Option<MessageSource> {
+            None
+        }
+        fn port(&self) -> u16 {
+            0
+        }
+        fn participant_id(&self) -> u32 {
+            0
+        }
+        fn close(&self) {}
+    }
+
+    /// The SEDP publications reader already knows the remote writer, so its announcement reaches
+    /// the ledger instead of being rejected as unmatched.
+    fn sedp_logic_with_matched_writer() -> (SedpLogic, Arc<Participant>, Guid) {
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let sedp_logic =
+            SedpLogic::new(participant.clone(), Arc::new(CountingTransport::default()));
+
+        let remote_writer_guid = Guid::new([9u8; 12], EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER);
+        let reader = participant.sedp_builtin_publications_reader();
+        let pub_data = PublicationBuiltinTopicData::default();
+        reader.matched_writer_add(WriterProxy::new(
+            remote_writer_guid,
+            remote_writer_guid.entity_id(),
+            Vec::new(),
+            Vec::new(),
+            0,
+            pub_data,
+            reader.get_update_status_callback(),
+        ));
+
+        (sedp_logic, participant, remote_writer_guid)
+    }
+
+    fn sequence_number_is_outstanding(
+        participant: &Participant,
+        remote_writer_guid: Guid,
+        seq_num: SequenceNumber,
+    ) -> bool {
+        let reader = participant.sedp_builtin_publications_reader();
+        let proxies = reader.writer_proxies();
+        let guard = proxies.lock().expect("writer proxies lock");
+        let proxy = guard
+            .iter()
+            .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
+            .expect("the proxy was added above");
+        proxy.missing_changes_for_heartbeat(seq_num, seq_num).contains(&seq_num)
+    }
+
+    /// A truncated payload reaches the handler fully defaulted, and storing it files a phantom
+    /// under the empty topic name. It is still marked received, and the datagram carries on.
+    #[test]
+    fn an_announcement_that_names_no_endpoint_is_discarded_rather_than_stored() {
+        let (mut sedp_logic, participant, remote_writer_guid) = sedp_logic_with_matched_writer();
+        let seq_num = SequenceNumber::new(0, 1);
+
+        let mut data = Data::new(
+            EntityId::SEDP_BUILTIN_PUBLICATIONS_READER,
+            EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER,
+            seq_num,
+        );
+        // Not a DiscoveredWriterData -- too short to even carry an encapsulation header.
+        data.add_serialized_data(SubmessagePayload::Owned(bytes::Bytes::from_static(&[
+            0xAA, 0xBB,
+        ])));
+
+        let mut flag = SubmessageHeaderFlag::new();
+        flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::DATA);
+        let submessage_header = SubmessageHeader::new(SubmessageId::DATA, flag.flag, 0);
+        let rtps_header = Header::new(remote_writer_guid.prefix());
+        let from_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7400);
+        let message_receiver = MessageReceiver::new(participant.guid().prefix(), &from_addr);
+
+        let result = sedp_logic.handle_data_message(
+            &rtps_header,
+            &submessage_header,
+            &data,
+            &message_receiver,
+        );
+
+        assert!(
+            result.is_ok(),
+            "one unreadable announcement must not abort the rest of the datagram: {:?}",
+            result
+        );
+
+        assert!(
+            participant.remote_publications().is_empty(),
+            "a payload with no endpoint GUID and no topic name must not register a publication; \
+             it registered {:?}",
+            participant
+                .remote_publications()
+                .iter()
+                .map(|e| (e.key().clone(), e.value().len()))
+                .collect::<Vec<_>>()
+        );
+
+        assert!(
+            !sequence_number_is_outstanding(&participant, remote_writer_guid, seq_num),
+            "the bytes arrived, so the sample is received; re-requesting them would never end"
+        );
+    }
+
+    /// SEDP announcements made before a peer was discovered have to reach it.
+    ///
+    /// Unlike a user writer, whose reader proxy starts at `UNKNOWN` and whose history is pumped
+    /// by `send_unsent_changes`, nothing drives a builtin writer: discovery only arms heartbeats.
+    /// Without a push the peer is told a range exists and is never sent any of it.
+    #[test]
+    fn discovering_a_participant_pushes_the_sedp_announcements_already_made() {
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let transport = Arc::new(CountingTransport::default());
+        let sends = transport.sends.clone();
+        let sedp_logic = SedpLogic::new(participant.clone(), transport);
+
+        let sedp_writer = participant.sedp_builtin_publications_writer();
+        for i in 0..3u8 {
+            let change = Arc::new(sedp_writer.new_change(
+                ChangeKind::Alive,
+                vec![i],
+                InstanceHandle::from_guid(&Guid::new([i; 12], EntityId::PARTICIPANT)),
+                None,
+            ));
+            sedp_writer
+                .writer_cache()
+                .lock()
+                .expect("cache lock")
+                .add_change_builtin(change, sedp_writer.as_ref())
+                .expect("builtin add");
+        }
+
+        let remote_prefix = [7u8; 12];
+        let mut remote = SPDPDiscoveredParticipantData::new(
+            0,
+            remote_prefix,
+            Participant::init_builtin_endpoints(),
+        );
+        remote.add_metatraffic_unicast_locator(Locator::from_ip_v4_addr_and_port(
+            &"127.0.0.1".parse().unwrap(),
+            7410,
+        ));
+        participant.add_remote_participant_proxy_data(remote);
+
+        sedp_logic.push_sedp_history_to_participant(remote_prefix).expect("the push must not fail");
+
+        assert_eq!(
+            *sends.lock().expect("send counter"),
+            3,
+            "each announcement already in the history has to be sent to the new peer"
+        );
+    }
+
+    /// A builtin writer transmits because it has data, not because a caller remembered to ask:
+    /// `add_change_builtin` used to only insert, so a missed explicit send meant no DATA at all.
+    #[test]
+    fn adding_a_builtin_change_transmits_it_to_matched_readers() {
+        use crate::rtps::logic::user_logic::UserLogic;
+
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let transport = Arc::new(CountingTransport::default());
+        let sends = transport.sends.clone();
+        participant
+            .set_user_logic(Arc::new(Some(UserLogic::new(participant.clone(), transport.clone()))));
+        participant.wire_builtin_writer_histories_for_test();
+
+        let sedp_writer = participant.sedp_builtin_publications_writer();
+        let remote_reader_guid = Guid::new([5u8; 12], EntityId::SEDP_BUILTIN_PUBLICATIONS_READER);
+        sedp_writer.matched_reader_add(ReaderProxy::new(
+            remote_reader_guid,
+            remote_reader_guid.entity_id(),
+            vec![Locator::from_ip_v4_addr_and_port(&"127.0.0.1".parse().unwrap(), 7410)],
+            Vec::new(),
+            SequenceNumber::UNKNOWN,
+            SequenceNumber::UNKNOWN,
+            false,
+            true,
+            SubscriptionBuiltinTopicData::default(),
+            SequenceNumber::new(0, 0),
+        ));
+
+        let change = Arc::new(sedp_writer.new_change(
+            ChangeKind::Alive,
+            vec![1, 2, 3],
+            InstanceHandle::from_guid(&remote_reader_guid),
+            None,
+        ));
+        sedp_writer
+            .writer_cache()
+            .lock()
+            .expect("cache lock")
+            .add_change_builtin(change, sedp_writer.as_ref())
+            .expect("builtin add");
+
+        assert!(
+            *sends.lock().expect("send counter") > 0,
+            "the announcement has to reach the matched reader without anyone asking for it"
+        );
+    }
+
+    /// RTPS 8.5.4.1 makes the builtin endpoints RELIABLE, and the transmit path reads that off
+    /// the proxy to decide whether to GAP holes and piggyback a heartbeat.
+    #[test]
+    fn a_builtin_reader_proxy_is_reliable() {
+        let data = SubscriptionBuiltinTopicData::builtin_reliable();
+        assert!(
+            data.is_reliable(),
+            "a builtin reader proxy built from this would suppress GAPs and piggyback heartbeats"
+        );
+    }
+
+    /// A builtin reader carries its reliability twice: as the `reliability_level` its constructor
+    /// takes, and inside the `SubscriptionBuiltinTopicData` it holds. Nothing reads the second
+    /// one today, so a disagreement is silent until something does.
+    #[test]
+    fn a_builtin_reader_agrees_with_itself_about_reliability() {
+        use crate::rtps::entities::endpoint::Endpoint as _;
+
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let builtin = participant.builtin_endpoints();
+
+        for reader in [
+            &builtin.sedp_builtin_publications_reader,
+            &builtin.sedp_builtin_subscriptions_reader,
+            &builtin.sedp_builtin_topics_reader,
+            &builtin.builtin_participant_message_reader,
+            &builtin.type_lookup_request_reader,
+            &builtin.type_lookup_reply_reader,
+        ] {
+            let declared = reader.reliability_level() == ReliabilityQosPolicyKind::Reliable;
+            let carried = reader
+                .subscription_builtin_topic_data()
+                .expect("builtin readers always have topic data")
+                .is_reliable();
+            assert_eq!(
+                declared,
+                carried,
+                "{} declares reliable={declared} but carries reliable={carried}",
+                reader.guid()
+            );
+        }
+    }
 }
