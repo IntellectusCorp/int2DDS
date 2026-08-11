@@ -1795,6 +1795,52 @@ impl SedpLogic {
         Ok(())
     }
 
+    /// Send the endpoint announcements this participant already holds to a newly discovered peer.
+    ///
+    /// Discovery only arms heartbeats, and nothing pumps a builtin writer's unsent changes, so
+    /// without this the peer is told a range exists and is never sent any of it.
+    pub(crate) fn push_sedp_history_to_participant(
+        &self,
+        remote_prefix: GuidPrefix,
+    ) -> RtpsResult<()> {
+        let participant = self.get_upgraded_participant()?;
+
+        for (writer, reader_entity_id) in [
+            (
+                participant.sedp_builtin_publications_writer(),
+                EntityId::SEDP_BUILTIN_PUBLICATIONS_READER,
+            ),
+            (
+                participant.sedp_builtin_subscriptions_writer(),
+                EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_READER,
+            ),
+        ] {
+            // Copy the list out and drop the guard: the sends below go to the wire.
+            let changes = match writer.writer_cache().lock() {
+                Ok(cache) => cache.get_changes(),
+                Err(e) => {
+                    warn!("[SEDP] cannot read {} history to push: {}", reader_entity_id, e);
+                    continue;
+                }
+            };
+
+            let remote_reader_guid = Guid::new(remote_prefix, reader_entity_id);
+            let writer_entity_id = writer.guid().entity_id();
+            for change in changes {
+                if let Err(e) = self.send_sedp_data_message(
+                    change,
+                    remote_reader_guid,
+                    reader_entity_id,
+                    writer_entity_id,
+                ) {
+                    warn!("[SEDP] failed to push an announcement to {}: {}", remote_reader_guid, e);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn send_sedp_acknack_message(
         &self,
         remote_guid: Guid,
@@ -2752,11 +2798,15 @@ mod tests {
     use crate::rtps::transport::plugin::MessageSource;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-    /// Sends nowhere; the handler under test only needs the receive side.
-    struct NullTransport;
+    /// Counts what was handed to the wire; nothing leaves the process.
+    #[derive(Default)]
+    struct CountingTransport {
+        sends: Arc<Mutex<usize>>,
+    }
 
-    impl TransportPlugin for NullTransport {
+    impl TransportPlugin for CountingTransport {
         fn send(&self, _data: &[u8], _target: &SendTarget) -> std::io::Result<()> {
+            *self.sends.lock().expect("send counter") += 1;
             Ok(())
         }
         fn can_handle(&self, _locator: &Locator) -> bool {
@@ -2790,7 +2840,8 @@ mod tests {
     /// the ledger instead of being rejected as unmatched.
     fn sedp_logic_with_matched_writer() -> (SedpLogic, Arc<Participant>, Guid) {
         let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
-        let sedp_logic = SedpLogic::new(participant.clone(), Arc::new(NullTransport));
+        let sedp_logic =
+            SedpLogic::new(participant.clone(), Arc::new(CountingTransport::default()));
 
         let remote_writer_guid = Guid::new([9u8; 12], EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER);
         let reader = participant.sedp_builtin_publications_reader();
@@ -2874,6 +2925,55 @@ mod tests {
         assert!(
             !sequence_number_is_outstanding(&participant, remote_writer_guid, seq_num),
             "the bytes arrived, so the sample is received; re-requesting them would never end"
+        );
+    }
+
+    /// SEDP announcements made before a peer was discovered have to reach it.
+    ///
+    /// Unlike a user writer, whose reader proxy starts at `UNKNOWN` and whose history is pumped
+    /// by `send_unsent_changes`, nothing drives a builtin writer: discovery only arms heartbeats.
+    /// Without a push the peer is told a range exists and is never sent any of it.
+    #[test]
+    fn discovering_a_participant_pushes_the_sedp_announcements_already_made() {
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let transport = Arc::new(CountingTransport::default());
+        let sends = transport.sends.clone();
+        let sedp_logic = SedpLogic::new(participant.clone(), transport);
+
+        let sedp_writer = participant.sedp_builtin_publications_writer();
+        for i in 0..3u8 {
+            let change = Arc::new(sedp_writer.new_change(
+                ChangeKind::Alive,
+                vec![i],
+                InstanceHandle::from_guid(&Guid::new([i; 12], EntityId::PARTICIPANT)),
+                None,
+            ));
+            sedp_writer
+                .writer_cache()
+                .lock()
+                .expect("cache lock")
+                .add_change_builtin(change)
+                .expect("builtin add");
+        }
+
+        let remote_prefix = [7u8; 12];
+        let mut remote = SPDPDiscoveredParticipantData::new(
+            0,
+            remote_prefix,
+            Participant::init_builtin_endpoints(),
+        );
+        remote.add_metatraffic_unicast_locator(Locator::from_ip_v4_addr_and_port(
+            &"127.0.0.1".parse().unwrap(),
+            7410,
+        ));
+        participant.add_remote_participant_proxy_data(remote);
+
+        sedp_logic.push_sedp_history_to_participant(remote_prefix).expect("the push must not fail");
+
+        assert_eq!(
+            *sends.lock().expect("send counter"),
+            3,
+            "each announcement already in the history has to be sent to the new peer"
         );
     }
 }
