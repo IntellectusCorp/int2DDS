@@ -113,6 +113,8 @@ enum MatchDecision {
 
 const TYPE_LOOKUP_MATCH_TIMEOUT: StdDuration = StdDuration::from_secs(5);
 
+pub(crate) const BUILTIN_SEDP_HB_PERIOD: StdDuration = StdDuration::from_millis(200);
+
 #[derive(Clone)]
 #[allow(dead_code)]
 pub(crate) struct SedpLogic {
@@ -1629,6 +1631,7 @@ impl SedpLogic {
 
         let mut is_sent = false;
         let mut matched_any = false;
+        let mut is_all_reliable_acked = true;
 
         let participant_guid = {
             let local_participant_data = participant.local_participant_proxy_data();
@@ -1645,6 +1648,11 @@ impl SedpLogic {
                         continue;
                     }
                     matched_any = true;
+
+                    if reader_proxy.is_reliable() && reader_proxy.max_acked_sn() < last_sn {
+                        is_all_reliable_acked = false;
+                    }
+
                     let buffer = MessageCreator::create_heartbeat_message(
                         participant_guid.prefix(),
                         reader_proxy.remote_reader_guid().prefix(),
@@ -1691,8 +1699,13 @@ impl SedpLogic {
             }
         }
 
-        // No matched readers remain: remove the scheduled SEDP timer.
-        if !matched_any {
+        // Stop the periodic heartbeat once no reader remains or every reliable reader
+        // behind this remote has acked. A new local change re-arms it.
+        if !matched_any || is_all_reliable_acked {
+            debug!(
+                "Stopping SEDP heartbeat to {:?} for writer {}: matched_any={}, all_reliable_acked={}",
+                *guid_prefix, entity_id, matched_any, is_all_reliable_acked
+            );
             if let Ok(handler) = self.timer_handler.lock() {
                 handler.remove_timer(TimerId::SedpScheduledMessage {
                     remote_prefix: *guid_prefix,
@@ -2822,20 +2835,23 @@ mod tests {
     use crate::rtps::common::types::SubmessagePayload;
     use crate::rtps::entities::reader::WriterProxy;
     use crate::rtps::messages::submessage_header_flag::{SubmessageFlagType, SubmessageHeaderFlag};
+    use crate::rtps::messages::message_receiver::TypedSubmessage;
     use crate::rtps::messages::submessage_id::SubmessageId;
     use crate::rtps::messages::submessages::data::Data;
     use crate::rtps::transport::plugin::MessageSource;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-    /// Counts what was handed to the wire; nothing leaves the process.
+    /// Counts what was handed to the wire and keeps each datagram; nothing leaves the process.
     #[derive(Default)]
     struct CountingTransport {
         sends: Arc<Mutex<usize>>,
+        buffers: Arc<Mutex<Vec<Vec<u8>>>>,
     }
 
     impl TransportPlugin for CountingTransport {
-        fn send(&self, _data: &[u8], _target: &SendTarget) -> std::io::Result<()> {
+        fn send(&self, data: &[u8], _target: &SendTarget) -> std::io::Result<()> {
             *self.sends.lock().expect("send counter") += 1;
+            self.buffers.lock().expect("send buffers").push(data.to_vec());
             Ok(())
         }
         fn can_handle(&self, _locator: &Locator) -> bool {
@@ -2966,7 +2982,7 @@ mod tests {
     fn discovering_a_participant_pushes_the_sedp_announcements_already_made() {
         let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
         let transport = Arc::new(CountingTransport::default());
-        let sends = transport.sends.clone();
+        let buffers = transport.buffers.clone();
         let sedp_logic = SedpLogic::new(participant.clone(), transport);
 
         let sedp_writer = participant.sedp_builtin_publications_writer();
@@ -2999,9 +3015,26 @@ mod tests {
 
         sedp_logic.push_sedp_history_to_participant(remote_prefix).expect("the push must not fail");
 
+        // Batched into as few datagrams as fit, so count the DATA submessages that reached
+        // the wire rather than the number of sends.
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7400);
+        let data_submessage_count: usize = buffers
+            .lock()
+            .expect("send buffers")
+            .iter()
+            .map(|buffer| {
+                let mut receiver = MessageReceiver::new(remote_prefix, &addr);
+                receiver.init(&bytes::Bytes::copy_from_slice(buffer)).expect("parse datagram");
+                receiver
+                    .parse_submessages()
+                    .iter()
+                    .filter(|submessage| matches!(submessage, TypedSubmessage::Data(..)))
+                    .count()
+            })
+            .sum();
+
         assert_eq!(
-            *sends.lock().expect("send counter"),
-            3,
+            data_submessage_count, 3,
             "each announcement already in the history has to be sent to the new peer"
         );
     }
