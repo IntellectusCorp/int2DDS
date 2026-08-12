@@ -505,6 +505,120 @@ impl UserLogic {
         Ok(())
     }
 
+    pub(crate) fn send_requested_fragments(
+        &self,
+        writer_entity_id: EntityId,
+        remote_reader_guid: Guid,
+    ) -> RtpsResult<()> {
+        let writer = self.find_stateful_writer(writer_entity_id)?;
+        let stateful_writer = writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
+
+        // LOCK ORDER: acquires `writer_cache` first, then `reader_proxies`.
+        let writer_cache = stateful_writer.writer_cache();
+        let history_cache_guard = writer_cache.lock().map_err(|_| {
+            RtpsError::new(RtpsErrorCode::LockError, "Failed to acquire history cache lock")
+        })?;
+
+        let reader_proxies = stateful_writer.reader_proxies();
+        let mut reader_proxies_guard = reader_proxies.lock().map_err(|_| {
+            RtpsError::new(RtpsErrorCode::LockError, "Failed to acquire reader_proxies lock")
+        })?;
+
+        let reader_proxy = reader_proxies_guard
+            .iter_mut()
+            .find(|proxy| proxy.remote_reader_guid() == remote_reader_guid)
+            .ok_or_else(|| {
+                RtpsError::new(RtpsErrorCode::InvalidEntityKind, "Reader proxy not found")
+            })?;
+
+        let requested_fragments_by_sn = reader_proxy.take_requested_fragments();
+
+        if requested_fragments_by_sn.is_empty() {
+            return Ok(());
+        }
+
+        let last_sn = history_cache_guard.get_seq_num_max().ok_or_else(|| {
+            RtpsError::new(
+                RtpsErrorCode::DataNotSet,
+                "Writer cache should not be empty while sending DATA_FRAG",
+            )
+        })?;
+
+        let piggyback =
+            reader_proxy.is_reliable() && !stateful_writer.disable_piggyback_heartbeat();
+
+        let timestamp = Utc::now();
+        let participant = self.get_upgraded_participant()?;
+        let mut send_buffer = participant
+            .wire_buffer_pool()
+            .lock()
+            .map_err(|_| {
+                RtpsError::new(RtpsErrorCode::LockError, "Failed to lock wire buffer pool")
+            })?
+            .acquire();
+
+        for (writer_sn, requested_fragments) in requested_fragments_by_sn {
+            // ACK may have been received in the meantime, so check first
+            if reader_proxy.max_acked_sn() >= writer_sn {
+                continue;
+            }
+
+            let Some(change) = history_cache_guard.get_change(writer_sn) else {
+                debug!(
+                    "[UserLogic] [NackFrag] Change removed before resend SN={}",
+                    writer_sn.to_i64()
+                );
+                continue;
+            };
+
+            if !change.is_fragmented() {
+                continue;
+            }
+
+            let total_frags = change.total_fragments();
+
+            // Piggyback one heartbeat on the final requested fragment so the repair burst is
+            // advertised only after it is fully on the wire.
+            let final_requested_fn = requested_fragments
+                .iter()
+                .filter(|&&fragment_num| fragment_num >= 1 && fragment_num <= total_frags)
+                .max()
+                .copied();
+
+            for fragment_num in requested_fragments {
+                if fragment_num >= 1 && fragment_num <= total_frags {
+                    let heartbeat_info = (piggyback && Some(fragment_num) == final_requested_fn)
+                        .then(|| {
+                            (stateful_writer.heartbeat_count(), writer_sn, last_sn, false, false)
+                        });
+
+                    if self.send_data_frag_to_reader_proxy(
+                        &change,
+                        reader_proxy,
+                        writer_entity_id,
+                        fragment_num,
+                        heartbeat_info,
+                        timestamp,
+                        &mut send_buffer,
+                    ) && heartbeat_info.is_some()
+                    {
+                        stateful_writer.increase_heartbeat_count();
+                    }
+                }
+            }
+        }
+
+        participant
+            .wire_buffer_pool()
+            .lock()
+            .map_err(|_| {
+                RtpsError::new(RtpsErrorCode::LockError, "Failed to lock wire buffer pool")
+            })?
+            .release(send_buffer);
+
+        Ok(())
+    }
+
     fn send_unsent_changes_of_stateful_writer(
         &self,
         writer: &StatefulWriter,
@@ -2748,60 +2862,52 @@ impl UnicastMessageProcessor for UserLogic {
             return Ok(()); // No processing needed for non-fragment case
         }
 
-        let total_frags = change.total_fragments();
-        let requested_fragments = frag_state.extract_numbers();
-        let last_sn = history_cache_guard.get_seq_num_max().ok_or_else(|| {
-            RtpsError::new(
-                RtpsErrorCode::DataNotSet,
-                "Writer cache should not be empty while sending DATA_FRAG",
-            )
-        })?;
-        let piggyback =
-            reader_proxy.is_reliable() && !stateful_writer.disable_piggyback_heartbeat();
+        reader_proxy.requested_fragments_add(
+            writer_sn,
+            frag_state.bitmap_base(),
+            frag_state.num_bits(),
+            frag_state.extract_numbers(),
+        );
 
-        let timestamp = Utc::now();
         let participant = self.get_upgraded_participant()?;
-        let mut send_buffer = participant
-            .wire_buffer_pool()
-            .lock()
-            .map_err(|_| {
-                RtpsError::new(RtpsErrorCode::LockError, "Failed to lock wire buffer pool")
-            })?
-            .acquire();
-        // Piggyback one heartbeat on the final requested fragment so the repair burst is
-        // advertised only after it is fully on the wire.
-        let final_requested_fn = requested_fragments
-            .iter()
-            .filter(|&&fragment_num| fragment_num >= 1 && fragment_num <= total_frags)
-            .max()
-            .copied();
 
-        for fragment_num in requested_fragments {
-            if fragment_num >= 1 && fragment_num <= total_frags {
-                let heartbeat_info = (piggyback && Some(fragment_num) == final_requested_fn)
-                    .then(|| (stateful_writer.heartbeat_count(), writer_sn, last_sn, false, false));
+        // Apply nack response delay
+        let nack_response_delay = stateful_writer.nack_response_delay();
+        let delay_duration = nack_response_delay.to_std_duration();
 
-                if self.send_data_frag_to_reader_proxy(
-                    &change,
-                    reader_proxy,
-                    writer_id,
-                    fragment_num,
-                    heartbeat_info,
-                    timestamp,
-                    &mut send_buffer,
-                ) && heartbeat_info.is_some()
-                {
-                    stateful_writer.increase_heartbeat_count();
-                }
+        if delay_duration.is_zero() {
+            // No delay - send immediately
+            let handler = SendingHandler::get_instance(participant.clone(), None);
+            handler.push_message_and_wake(MessageType::UserRequestedFragments(
+                writer_id,
+                remote_reader_guid,
+            ));
+        } else {
+            // Schedule delayed response via timer
+            let participant_guid = participant.guid();
+
+            let timer_id =
+                TimerId::NackFragResponse { writer_entity_id: writer_id, remote_reader_guid };
+
+            if let Ok(locked_timer_handler) =
+                TimerHandler::get_instance(participant.guid().prefix()).lock()
+            {
+                locked_timer_handler.add_timer(
+                    timer_id,
+                    delay_duration,
+                    false, // one-shot
+                    move || {
+                        if let Some(sending_handler) =
+                            SendingHandler::get_instance_by_participant_guid(participant_guid)
+                        {
+                            sending_handler.push_message_and_wake(
+                                MessageType::UserRequestedFragments(writer_id, remote_reader_guid),
+                            );
+                        }
+                    },
+                );
             }
         }
-        participant
-            .wire_buffer_pool()
-            .lock()
-            .map_err(|_| {
-                RtpsError::new(RtpsErrorCode::LockError, "Failed to lock wire buffer pool")
-            })?
-            .release(send_buffer);
 
         Ok(())
     }

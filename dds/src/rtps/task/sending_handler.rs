@@ -46,6 +46,7 @@ pub(crate) enum MessageType {
     UserHeartbeatToAll(EntityId),
     // UserUnsentChanges(EntityId),
     UserRequestedChanges(EntityId, Guid),
+    UserRequestedFragments(EntityId, Guid),
     UserAcknack(EntityId, Guid, bool, bool), // reader_entity_id, remote_writer_guid, final_flag, is_preemptive
     OnUserCacheChangeRemoval(bool, SequenceNumber, EntityId),
 }

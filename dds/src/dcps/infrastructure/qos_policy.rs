@@ -2316,7 +2316,7 @@ impl QosPolicy for TypeConsistencyEnforcementQosPolicy {
 /// - `initial_heartbeat_delay: 10ms` - Delay before sending initial heartbeat after reader discovery.
 /// - `push_mode: true` - (Unsupported) Writer pushes data to readers.
 /// - `nack_suppression_duration: 0` - (Unsupported) Duration to suppress NACKs.
-/// - `nack_response_delay: 10ms` - Delay before responding to a NACK.
+/// - `nack_response_delay: 100ms` - Delay before responding to a NACK.
 #[derive(DdsType, Copy, Eq)]
 #[dds_type(crate_path = "crate", no_default)]
 pub struct WriterReliabilityExtensionQosPolicy {
@@ -2343,7 +2343,7 @@ pub struct WriterReliabilityExtensionQosPolicy {
     pub nack_suppression_duration: Duration,
 
     /// Delay before responding to a NACK.
-    /// Default: 10ms
+    /// Default: 100ms
     pub nack_response_delay: Duration,
 }
 
@@ -2366,7 +2366,7 @@ impl ConstDefault for WriterReliabilityExtensionQosPolicy {
         initial_heartbeat_delay: Duration { sec: 0, nanosec: 10_000_000 },
         push_mode: true,
         nack_suppression_duration: Duration { sec: 0, nanosec: 0 },
-        nack_response_delay: Duration { sec: 0, nanosec: 10_000_000 },
+        nack_response_delay: Duration { sec: 0, nanosec: 100_000_000 },
     };
 }
 

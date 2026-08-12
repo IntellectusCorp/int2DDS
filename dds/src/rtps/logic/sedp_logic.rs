@@ -2834,8 +2834,8 @@ mod tests {
     use super::*;
     use crate::rtps::common::types::SubmessagePayload;
     use crate::rtps::entities::reader::WriterProxy;
-    use crate::rtps::messages::submessage_header_flag::{SubmessageFlagType, SubmessageHeaderFlag};
     use crate::rtps::messages::message_receiver::TypedSubmessage;
+    use crate::rtps::messages::submessage_header_flag::{SubmessageFlagType, SubmessageHeaderFlag};
     use crate::rtps::messages::submessage_id::SubmessageId;
     use crate::rtps::messages::submessages::data::Data;
     use crate::rtps::transport::plugin::MessageSource;

@@ -196,6 +196,11 @@ impl SendingTask {
                 Ok(())
             }
 
+            MessageType::UserRequestedFragments(writer_entity_id, remote_reader_guid) => {
+                user_logic.send_requested_fragments(writer_entity_id, remote_reader_guid)?;
+                Ok(())
+            }
+
             MessageType::UserAcknack(reader_id, remote_writer_guid, final_flag, is_preemptive) => {
                 user_logic.send_acknacks(&[PendingAckNack {
                     reader_id,
