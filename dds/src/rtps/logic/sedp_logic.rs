@@ -113,7 +113,7 @@ enum MatchDecision {
 
 const TYPE_LOOKUP_MATCH_TIMEOUT: StdDuration = StdDuration::from_secs(5);
 
-pub(crate) const BUILTIN_SEDP_HB_PERIOD: StdDuration = StdDuration::from_millis(200);
+pub(crate) const BUILTIN_SEDP_HB_PERIOD: StdDuration = StdDuration::from_millis(2000);
 
 #[derive(Clone)]
 #[allow(dead_code)]
