@@ -379,14 +379,14 @@ impl CacheChange {
         self.fragment_size
     }
 
-    // Apply fragmentation metadata based on the current `data_value` length.
-    pub(crate) fn apply_fragmentation(&mut self, max_payload_size: usize) {
+    // Fragment when the payload exceeds max_message_size, cutting into fragment_size chunks.
+    pub(crate) fn apply_fragmentation(&mut self, max_message_size: usize, fragment_size: usize) {
         self.fragment_set.clear();
         let data_len = self.data_value().len();
-        if max_payload_size > 0 && data_len > max_payload_size {
+        if max_message_size > 0 && fragment_size > 0 && data_len > max_message_size {
             self.fragmented = true;
-            self.fragment_size = max_payload_size as u32;
-            let num_fragments = data_len.div_ceil(max_payload_size);
+            self.fragment_size = fragment_size as u32;
+            let num_fragments = data_len.div_ceil(fragment_size);
             self.total_fragments = num_fragments as u32;
             for i in 1..=num_fragments {
                 self.fragment_set.insert(i as u32);
@@ -418,7 +418,8 @@ impl CacheChange {
         sequence_number: SequenceNumber,
         payload: &[u8],
         source_timestamp: Option<RtpsTime>,
-        max_payload_size: usize,
+        max_message_size: usize,
+        fragment_size: usize,
     ) -> Self {
         let mut change = Self::new(
             kind,
@@ -429,7 +430,79 @@ impl CacheChange {
             source_timestamp,
         );
 
-        change.apply_fragmentation(max_payload_size);
+        change.apply_fragmentation(max_message_size, fragment_size);
         change
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn change_with_payload(len: usize) -> CacheChange {
+        CacheChange::new(
+            ChangeKind::Alive,
+            Guid::UNKNOWN,
+            InstanceHandle::default(),
+            SequenceNumber::from_i64(1),
+            vec![0u8; len],
+            None,
+        )
+    }
+
+    // A payload over fragment_size but at or below max_message_size still goes as a
+    // single DATA: the trigger is max_message_size, not fragment_size.
+    #[test]
+    fn payload_within_max_is_not_fragmented() {
+        let mut change = change_with_payload(10_000);
+        change.apply_fragmentation(14_720, 1_344);
+        assert!(!change.is_fragmented());
+        assert_eq!(change.total_fragments(), 0);
+        assert_eq!(change.fragment_size(), 0);
+    }
+
+    // A payload over max_message_size is cut into fragment_size chunks.
+    #[test]
+    fn payload_above_max_fragments_by_fragment_size() {
+        let mut change = change_with_payload(20_000);
+        change.apply_fragmentation(14_720, 1_344);
+        assert!(change.is_fragmented());
+        assert_eq!(change.fragment_size(), 1_344);
+        assert_eq!(change.total_fragments(), 20_000u32.div_ceil(1_344));
+    }
+
+    // Equal knobs reproduce the single-size behavior: trigger and chunk are the same value.
+    #[test]
+    fn equal_max_and_fragment_size_matches_single_knob() {
+        let mut change = change_with_payload(100_000);
+        change.apply_fragmentation(65_000, 65_000);
+        assert!(change.is_fragmented());
+        assert_eq!(change.fragment_size(), 65_000);
+        assert_eq!(change.total_fragments(), 2);
+    }
+
+    // Zero on either knob disables fragmentation.
+    #[test]
+    fn zero_knob_disables_fragmentation() {
+        let mut change = change_with_payload(100_000);
+        change.apply_fragmentation(0, 1_344);
+        assert!(!change.is_fragmented());
+
+        let mut other = change_with_payload(100_000);
+        other.apply_fragmentation(14_720, 0);
+        assert!(!other.is_fragmented());
+    }
+
+    // The last fragment carries the remainder, shorter than fragment_size.
+    #[test]
+    fn last_fragment_holds_remainder() {
+        let mut change = change_with_payload(20_000);
+        change.apply_fragmentation(14_720, 1_344);
+
+        let total = change.total_fragments();
+        let expected_last = 20_000 - 1_344 * (total as usize - 1);
+
+        assert_eq!(change.get_fragment_data(1).unwrap().len(), 1_344);
+        assert_eq!(change.get_fragment_data(total).unwrap().len(), expected_last);
     }
 }

@@ -1010,7 +1010,9 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         unsafe {
             loan.change.data_mut().set_len(actual_size);
         }
-        loan.change.apply_fragmentation(rtps_writer.data_max_size_serialized() as usize);
+        let max_message_size = crate::common::env::get_max_message_size();
+        loan.change
+            .apply_fragmentation(max_message_size, rtps_writer.data_max_size_serialized() as usize);
 
         let mut datawriter_cache =
             self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
@@ -1453,7 +1455,9 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         change.reset(kind, rtps_writer.guid(), handle, seq_num, source_timestamp);
         self.configure_coherent_set(&mut change, seq_num)?;
         fill(change.data_mut())?;
-        change.apply_fragmentation(rtps_writer.data_max_size_serialized() as usize);
+        let max_message_size = crate::common::env::get_max_message_size();
+        change
+            .apply_fragmentation(max_message_size, rtps_writer.data_max_size_serialized() as usize);
 
         // 4. Add to history (may evict → release back to pool)
         {
