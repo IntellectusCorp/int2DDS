@@ -39,6 +39,8 @@ use crate::serialize::pl_cdr::InlineQosParameters;
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use bytes::Bytes;
 
     use super::*;
@@ -121,6 +123,91 @@ mod tests {
             .count();
 
         assert_eq!(count, 1);
+    }
+
+    // Env is process-global: serialize every INT2DDS_MAX_MESSAGE_SIZE mutation.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    // get_max_message_size resolves the env var, clamps to 1..=65000, and defaults to 65000.
+    #[test]
+    fn max_message_size_resolves_and_clamps() {
+        let _guard = lock_env();
+        let key = "INT2DDS_MAX_MESSAGE_SIZE";
+
+        unsafe { std::env::remove_var(key) };
+        assert_eq!(crate::common::env::get_max_message_size(), 65_000);
+
+        unsafe { std::env::set_var(key, "14720") };
+        assert_eq!(crate::common::env::get_max_message_size(), 14_720);
+
+        unsafe { std::env::set_var(key, "0") };
+        assert_eq!(crate::common::env::get_max_message_size(), 65_000);
+
+        unsafe { std::env::set_var(key, "70000") };
+        assert_eq!(crate::common::env::get_max_message_size(), 65_000);
+
+        unsafe { std::env::set_var(key, "not-a-number") };
+        assert_eq!(crate::common::env::get_max_message_size(), 65_000);
+
+        unsafe { std::env::remove_var(key) };
+    }
+
+    // Every batched GAP and NACK_FRAG datagram stays within INT2DDS_MAX_MESSAGE_SIZE,
+    // headers included, once the batch is large enough to span several datagrams.
+    #[test]
+    fn batched_datagrams_stay_within_max_message_size() {
+        let _guard = lock_env();
+        let key = "INT2DDS_MAX_MESSAGE_SIZE";
+        let max: usize = 400;
+        unsafe { std::env::set_var(key, max.to_string()) };
+
+        let local = Guid::new(LOCAL_PREFIX, EntityId::PARTICIPANT);
+        let remote = Guid::new(DST_PREFIX, EntityId::PARTICIPANT);
+        let reader_entity_id =
+            EntityId::new([0, 0, 0x10], EntityKind::USER_DEFINED_READER_WITH_KEY);
+        let writer_entity_id =
+            EntityId::new([0, 0, 0xA0], EntityKind::USER_DEFINED_WRITER_WITH_KEY);
+
+        // Scatter beyond 256 apart so each gap needs its own window instead of
+        // collapsing into one contiguous GAP submessage.
+        let mut gap_list: Vec<SequenceNumber> =
+            (0..80).map(|i| SequenceNumber::from_i64(i * 500 + 1)).collect();
+        let gap_msgs = MessageCreator::create_multiple_gap_msgs(
+            local,
+            remote,
+            reader_entity_id,
+            writer_entity_id,
+            &mut gap_list,
+        )
+        .unwrap();
+
+        assert!(gap_msgs.len() > 1, "gap batch must span several datagrams");
+        for datagram in &gap_msgs {
+            assert!(datagram.len() <= max, "gap datagram {} exceeds {}", datagram.len(), max);
+        }
+
+        let mut missing_fragments: Vec<u32> = (0..80).map(|i| i * 500 + 1).collect();
+        let (nackfrag_msgs, _) = MessageCreator::create_multiple_nackfrag_msgs(
+            local,
+            remote,
+            reader_entity_id,
+            writer_entity_id,
+            SequenceNumber::from_i64(1),
+            &mut missing_fragments,
+            0,
+        )
+        .unwrap();
+
+        assert!(nackfrag_msgs.len() > 1, "nackfrag batch must span several datagrams");
+        for datagram in &nackfrag_msgs {
+            assert!(datagram.len() <= max, "nackfrag datagram {} exceeds {}", datagram.len(), max);
+        }
+
+        unsafe { std::env::remove_var(key) };
     }
 }
 
