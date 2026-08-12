@@ -1826,12 +1826,27 @@ impl SedpLogic {
 
             let remote_reader_guid = Guid::new(remote_prefix, reader_entity_id);
             let writer_entity_id = writer.guid().entity_id();
-            for change in changes {
-                if let Err(e) = self.send_sedp_data_message(
-                    change,
+
+            let datagrams = match MessageCreator::create_multiple_data_msgs(
+                writer.guid(),
+                remote_reader_guid,
+                reader_entity_id,
+                writer_entity_id,
+                &changes,
+                true,
+            ) {
+                Ok(datagrams) => datagrams,
+                Err(e) => {
+                    warn!("[SEDP] failed to build announcements to {}: {}", remote_reader_guid, e);
+                    continue;
+                }
+            };
+
+            for datagram in &datagrams {
+                if let Err(e) = self.send_to_participant_metatraffic_locators(
+                    &datagram[..],
                     remote_reader_guid,
-                    reader_entity_id,
-                    writer_entity_id,
+                    "data",
                 ) {
                     warn!("[SEDP] failed to push an announcement to {}: {}", remote_reader_guid, e);
                 }
@@ -2710,12 +2725,26 @@ impl UnicastMessageProcessor for SedpLogic {
                 remote_reader_guid
             );
 
-            for change in missing_changes {
-                self.send_sedp_data_message(
-                    change,
+            let datagrams = MessageCreator::create_multiple_data_msgs(
+                local_writer.guid(),
+                remote_reader_guid,
+                acknack.reader_id,
+                acknack.writer_id,
+                &missing_changes,
+                true,
+            )
+            .map_err(|e| {
+                RtpsError::new(
+                    RtpsErrorCode::SerializationError,
+                    format!("Failed to create SEDP DATA messages: {}", e),
+                )
+            })?;
+
+            for datagram in &datagrams {
+                self.send_to_participant_metatraffic_locators(
+                    &datagram[..],
                     remote_reader_guid,
-                    acknack.reader_id,
-                    acknack.writer_id,
+                    "data",
                 )?;
             }
         }
