@@ -17,6 +17,7 @@ This document describes the environment variables available in int2dds.
 | `INT2DDS_UDP_SOCKET_BUFFER`          | UDP socket buffer size (bytes)             | OS default              |
 | `INT2DDS_SHM_BUFFER_SIZE`            | Shared-memory ring buffer size (bytes)     | 1048576 (1MB)           |
 | `INT2DDS_DATA_FRAG_SIZE`             | DATA_FRAG fragment size (bytes)            | 65000                   |
+| `INT2DDS_MAX_MESSAGE_SIZE`           | Max RTPS message size (bytes)              | 65000                   |
 | `INT2DDS_MULTICAST_TTL`              | IPv4 multicast TTL fallback (0-255)        | 1                       |
 | `INT2DDS_EXTENDED_DISCOVERY`         | Enable extended discovery                  | false                   |
 | `INT2DDS_INITIAL_PEERS`              | Initial peer list                          | none                    |
@@ -325,6 +326,40 @@ cargo run --example hello_world_pub
 The Rust core consumes the env var inside `DataFragQosPolicy::effective_max_size`
 when the RTPS writer is created, so the value must be set **before** the
 DataWriter is created.
+
+### INT2DDS_MAX_MESSAGE_SIZE
+
+Sets the maximum RTPS message size, in bytes: the threshold above which a
+DataWriter fragments a sample. A sample whose serialized payload exceeds this
+size is split into DATA_FRAG fragments of `INT2DDS_DATA_FRAG_SIZE` bytes each. A
+sample at or below it is sent as a single DATA submessage.
+
+`INT2DDS_DATA_FRAG_SIZE` sizes each fragment. This variable decides when
+fragmentation starts and how much payload one message carries, so keep it at or
+above `INT2DDS_DATA_FRAG_SIZE`.
+
+- Valid range: `1` - `65000`
+- Values outside the range, or values that do not parse as an integer, are
+  logged at warn level and ignored — the built-in default `65000` is used.
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_MAX_MESSAGE_SIZE = "14720"
+
+cargo run --example hello_world_pub
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_MAX_MESSAGE_SIZE=14720
+
+cargo run --example hello_world_pub
+```
+
+The Rust core reads this via `env::get_max_message_size` each time a sample is
+written, so a new value takes effect for samples written afterward.
 
 ### INT2DDS_MULTICAST_TTL
 
