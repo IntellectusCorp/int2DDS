@@ -646,6 +646,9 @@ impl UserLogic {
         let first_sn = history_cache.get_seq_num_min();
         let last_sn = history_cache.get_seq_num_max();
 
+        // Read once per call: bounds how many fragments ride in one DATA_FRAG.
+        let max_message_size = crate::common::env::get_max_message_size();
+
         let mut send_buffer = participant
             .wire_buffer_pool()
             .lock()
@@ -809,14 +812,25 @@ impl UserLogic {
                     members.len()
                 );
 
-                for fragment_num in 1..=a_change.total_fragments() {
-                    let Some(fragment_data) = a_change.get_fragment_data(fragment_num) else {
+                // Pack fragments per datagram: one per datagram costs the receiver a
+                // socket-buffer charge each, which is where small fragments lose data.
+                let total_fragments = a_change.total_fragments();
+                let frags_per_msg = a_change.fragments_per_submessage(max_message_size);
+                let mut fragment_num = 1;
+
+                while fragment_num <= total_fragments {
+                    let count =
+                        std::cmp::min(frags_per_msg as u32, total_fragments - fragment_num + 1)
+                            as u16;
+                    let Some(fragment_data) = a_change.get_fragment_range_data(fragment_num, count)
+                    else {
+                        fragment_num += count as u32;
                         continue;
                     };
 
                     // Piggyback one heartbeat on the final fragment so the sample is
                     // advertised only after the whole burst is on the wire.
-                    let is_final_fragment = fragment_num == a_change.total_fragments();
+                    let is_final_fragment = fragment_num + count as u32 - 1 == total_fragments;
                     let heartbeat_info = (is_piggyback_wanted && is_final_fragment)
                         .then(|| (heartbeat_count, first, last, false, false));
 
@@ -826,7 +840,7 @@ impl UserLogic {
                         EntityId::UNKNOWN,
                         writer.endpoint_id(),
                         fragment_num,
-                        1,
+                        count,
                         a_change.fragment_size() as u16,
                         a_change.data_value().len() as u32,
                         fragment_data,
@@ -844,6 +858,8 @@ impl UserLogic {
                             }
                         }
                     }
+
+                    fragment_num += count as u32;
                 }
 
                 if is_any_fragment_sent {
@@ -954,15 +970,26 @@ impl UserLogic {
 
                         if a_change.is_fragmented() {
                             let timestamp = Utc::now();
-                            for fragment_num in 1..=a_change.total_fragments() {
-                                let Some(fragment_data) = a_change.get_fragment_data(fragment_num)
+                            let total_fragments = a_change.total_fragments();
+                            let frags_per_msg = a_change.fragments_per_submessage(max_message_size);
+                            let mut fragment_num = 1;
+
+                            while fragment_num <= total_fragments {
+                                let count = std::cmp::min(
+                                    frags_per_msg as u32,
+                                    total_fragments - fragment_num + 1,
+                                ) as u16;
+                                let Some(fragment_data) =
+                                    a_change.get_fragment_range_data(fragment_num, count)
                                 else {
+                                    fragment_num += count as u32;
                                     continue;
                                 };
 
                                 // Piggyback one heartbeat on the final fragment so the sample is
                                 // advertised only after the whole burst is on the wire.
-                                let is_final_fragment = fragment_num == a_change.total_fragments();
+                                let is_final_fragment =
+                                    fragment_num + count as u32 - 1 == total_fragments;
                                 let heartbeat_info = if reliable && piggyback && is_final_fragment {
                                     Some((
                                         writer.heartbeat_count(),
@@ -981,7 +1008,7 @@ impl UserLogic {
                                     group_id,
                                     writer.endpoint_id(),
                                     fragment_num,
-                                    1,
+                                    count,
                                     a_change.fragment_size() as u16,
                                     a_change.data_value().len() as u32,
                                     fragment_data,
@@ -1004,6 +1031,8 @@ impl UserLogic {
                                         }
                                     }
                                 }
+
+                                fragment_num += count as u32;
                             }
                         } else {
                             let heartbeat_info = if reliable && piggyback {
@@ -1115,6 +1144,9 @@ impl UserLogic {
 
         let participant = self.get_upgraded_participant()?;
 
+        // Read once per call: bounds how many fragments ride in one DATA_FRAG.
+        let max_message_size = crate::common::env::get_max_message_size();
+
         for (reader_locator, changes) in reader_tasks.iter() {
             for change in changes.iter() {
                 // Create DATA or DATA_FRAG message
@@ -1134,33 +1166,47 @@ impl UserLogic {
                         .acquire();
 
                     // Send each fragment as DATA_FRAG submessage immediately
-                    for fragment_num in 1..=change.total_fragments() {
-                        if let Some(fragment_data) = change.get_fragment_data(fragment_num) {
-                            let result = MessageCreator::create_data_frag_msg(
-                                change,
-                                Guid::new(reader_locator.guid_prefix(), EntityId::PARTICIPANT),
-                                reader_locator.remote_entity_id(),
-                                writer.endpoint_id(),
-                                fragment_num,
-                                1,
-                                change.fragment_size() as u16,
-                                change.data_value().len() as u32,
-                                fragment_data,
-                                None,
-                                timestamp,
-                                &mut send_buffer,
-                            );
+                    let total_fragments = change.total_fragments();
+                    let frags_per_msg = change.fragments_per_submessage(max_message_size);
+                    let mut fragment_num = 1;
 
-                            if result.is_ok() {
-                                // Send fragmented message immediately
-                                if let Err(e) = self.send_rtps_message_to_locators(
-                                    &[reader_locator.locator()],
-                                    &send_buffer,
-                                ) {
-                                    warn!("Failed to send DATA_FRAG message: {:?}", e);
-                                }
+                    while fragment_num <= total_fragments {
+                        let count =
+                            std::cmp::min(frags_per_msg as u32, total_fragments - fragment_num + 1)
+                                as u16;
+                        let Some(fragment_data) =
+                            change.get_fragment_range_data(fragment_num, count)
+                        else {
+                            fragment_num += count as u32;
+                            continue;
+                        };
+
+                        let result = MessageCreator::create_data_frag_msg(
+                            change,
+                            Guid::new(reader_locator.guid_prefix(), EntityId::PARTICIPANT),
+                            reader_locator.remote_entity_id(),
+                            writer.endpoint_id(),
+                            fragment_num,
+                            count,
+                            change.fragment_size() as u16,
+                            change.data_value().len() as u32,
+                            fragment_data,
+                            None,
+                            timestamp,
+                            &mut send_buffer,
+                        );
+
+                        if result.is_ok() {
+                            // Send fragmented message immediately
+                            if let Err(e) = self.send_rtps_message_to_locators(
+                                &[reader_locator.locator()],
+                                &send_buffer,
+                            ) {
+                                warn!("Failed to send DATA_FRAG message: {:?}", e);
                             }
                         }
+
+                        fragment_num += count as u32;
                     }
 
                     participant
