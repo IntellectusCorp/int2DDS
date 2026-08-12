@@ -68,8 +68,7 @@ impl HybridTransportPlugin {
         // Hybrid processes on the same host both bind (domain, pid=0)'s UDP
         // unicast ports, the second `.ok()` swallows the conflict, and
         // discovery silently fails. (The TCP listen port is independent of
-        // participant_id; for several participants on one host, pin a distinct
-        // int2dds.transport.TCPv4.bind_port per participant.)
+        // participant_id and defaults to an ephemeral one, so it never collides.)
         let (discovery_uc, user_uc) = loop {
             let disc_port =
                 PortManager::get_discovery_traffic_unicast_port(domain_id, participant_id);
@@ -99,6 +98,10 @@ impl HybridTransportPlugin {
         // peers regardless of the configured value.
         let mut tcp_config = hybrid_config.tcp;
         tcp_config.accept_undefined_peers = true;
+        // Peers learn the TCP listen port from the SPDP locators carried over UDP
+        // multicast, so it never has to be predictable. Binding an ephemeral port
+        // by default lets several participants share one host without colliding.
+        tcp_config.bind_port = Some(tcp_config.bind_port.unwrap_or(0));
         let tcp_plugin = TcpTransportPlugin::new(
             domain_id,
             participant_id,
