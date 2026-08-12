@@ -324,6 +324,73 @@ impl MessageCreator {
         Ok(())
     }
 
+    // Pack several DATA changes bound for the same reader into as few datagrams as fit under
+    // INT2DDS_MAX_MESSAGE_SIZE. Each datagram is Header, INFO_DST, INFO_TS, then DATA submessages.
+    pub(crate) fn create_multiple_data_msgs(
+        local_participant_guid: Guid,
+        remote_guid: Guid,
+        reader_entity_id: EntityId,
+        writer_entity_id: EntityId,
+        cache_changes: &[Arc<CacheChange>],
+        use_inline_qos: bool,
+    ) -> Result<Vec<Arc<Vec<u8>>>, Box<dyn std::error::Error>> {
+        if cache_changes.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // submessageId + flags + submessageLength, ahead of the body length that
+        // submessage_length() reports.
+        const SUBMESSAGE_HEADER_LEN: usize = 4;
+
+        let max_message_size = crate::common::env::get_max_message_size();
+
+        let open_datagram = || {
+            let mut rtps_message = RtpsMessage::new(Header::new(local_participant_guid.prefix()));
+            rtps_message.add_submessage(SubmessageCreator::create_info_dst_submessage(
+                remote_guid.prefix(),
+            ));
+            rtps_message.add_submessage(SubmessageCreator::create_info_ts_submessage(Utc::now()));
+            rtps_message
+        };
+
+        // RTPS Header (20) + INFO_DST (4 + 12) + INFO_TS (4 + 8) that open_datagram writes
+        // before the batched DATA submessages.
+        const DATAGRAM_BASE_LEN: usize =
+            20 + SUBMESSAGE_HEADER_LEN + 12 + SUBMESSAGE_HEADER_LEN + 8;
+
+        let mut messages = Vec::new();
+        let mut rtps_message = open_datagram();
+        let mut packed_len = DATAGRAM_BASE_LEN;
+
+        for cache_change in cache_changes {
+            let data = Self::build_data_submessage(
+                cache_change,
+                reader_entity_id,
+                writer_entity_id,
+                use_inline_qos,
+                None,
+            );
+            let data_len = SUBMESSAGE_HEADER_LEN + data.header.submessage_length() as usize;
+
+            // Start a fresh datagram before this DATA would exceed the message-size budget.
+            // A single change larger than the budget still emits one oversized datagram,
+            // matching create_data_msg. SEDP has no DATA_FRAG path.
+            if packed_len > DATAGRAM_BASE_LEN && packed_len + data_len > max_message_size {
+                messages
+                    .push(Arc::new(rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian)?));
+                rtps_message = open_datagram();
+                packed_len = DATAGRAM_BASE_LEN;
+            }
+
+            rtps_message.add_submessage(data);
+            packed_len += data_len;
+        }
+
+        messages.push(Arc::new(rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian)?));
+
+        Ok(messages)
+    }
+
     /// The DATA submessage for one reader.
     fn build_data_submessage<'a>(
         cache_change: &'a CacheChange,
@@ -540,8 +607,8 @@ impl MessageCreator {
         // submessage_length() reports.
         const SUBMESSAGE_HEADER_LEN: usize = 4;
 
-        // INT2DDS_DATA_FRAG_SIZE bounds the serialized payload packed into one datagram.
-        let max_fragment_payload = crate::common::env::get_data_frag_size_override()
+        // INT2DDS_MAX_MESSAGE_SIZE bounds the datagram that batched submessages are packed into.
+        let max_message_size = crate::common::env::get_max_message_size_override()
             .filter(|&size| (1..=65000).contains(&size))
             .unwrap_or(65000) as usize;
 
@@ -553,9 +620,12 @@ impl MessageCreator {
             rtps_message
         };
 
+        // RTPS Header (20) + INFO_DST (4 + 12) that open_datagram writes before the batched submessages.
+        const DATAGRAM_BASE_LEN: usize = 20 + SUBMESSAGE_HEADER_LEN + 12;
+
         let mut gap_rtps_messages = Vec::new();
         let mut rtps_message = open_datagram();
-        let mut packed_len = 0;
+        let mut packed_len = DATAGRAM_BASE_LEN;
 
         while !gap_list.is_empty() {
             // Build the next 256-window of gap sequence numbers.
@@ -567,12 +637,12 @@ impl MessageCreator {
             let submessage_len =
                 SUBMESSAGE_HEADER_LEN + submessage.header.submessage_length() as usize;
 
-            // Start a fresh datagram before it would exceed the payload budget.
-            if packed_len > 0 && packed_len + submessage_len > max_fragment_payload {
+            // Start a fresh datagram before it would exceed the message-size budget.
+            if packed_len > DATAGRAM_BASE_LEN && packed_len + submessage_len > max_message_size {
                 gap_rtps_messages
                     .push(Arc::new(rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian)?));
                 rtps_message = open_datagram();
-                packed_len = 0;
+                packed_len = DATAGRAM_BASE_LEN;
             }
 
             rtps_message.add_submessage(submessage);
@@ -587,7 +657,7 @@ impl MessageCreator {
     }
 
     // Split missing fragments into 256-wide windows and pack as many NACK_FRAG
-    // submessages as fit under INT2DDS_DATA_FRAG_SIZE into each datagram.
+    // submessages as fit under INT2DDS_MAX_MESSAGE_SIZE into each datagram.
     pub(crate) fn create_multiple_nackfrag_msgs(
         reader_guid: Guid,
         writer_guid: Guid,
@@ -607,8 +677,8 @@ impl MessageCreator {
         // submessage_length() reports.
         const SUBMESSAGE_HEADER_LEN: usize = 4;
 
-        // INT2DDS_DATA_FRAG_SIZE bounds the serialized payload packed into one datagram.
-        let max_fragment_payload = crate::common::env::get_data_frag_size_override()
+        // INT2DDS_MAX_MESSAGE_SIZE bounds the datagram that batched submessages are packed into.
+        let max_message_size = crate::common::env::get_max_message_size_override()
             .filter(|&size| (1..=65000).contains(&size))
             .unwrap_or(65000) as usize;
 
@@ -621,10 +691,14 @@ impl MessageCreator {
             rtps_message
         };
 
+        // RTPS Header (20) + INFO_DST (4 + 12) + INFO_TS (4 + 8) that open_datagram writes first.
+        const DATAGRAM_BASE_LEN: usize =
+            20 + (SUBMESSAGE_HEADER_LEN + 12) + (SUBMESSAGE_HEADER_LEN + 8);
+
         let mut messages = Vec::new();
         let mut nackfrag_count = first_nackfrag_count;
         let mut rtps_message = open_datagram();
-        let mut packed_len = 0;
+        let mut packed_len = DATAGRAM_BASE_LEN;
 
         while !missing_fragments.is_empty() {
             // Build the next 256-window of missing fragments into a NACK_FRAG.
@@ -641,12 +715,12 @@ impl MessageCreator {
             let submessage_len =
                 SUBMESSAGE_HEADER_LEN + submessage.header.submessage_length() as usize;
 
-            // Start a fresh datagram before it would exceed the payload budget.
-            if packed_len > 0 && packed_len + submessage_len > max_fragment_payload {
+            // Start a fresh datagram before it would exceed the message-size budget.
+            if packed_len > DATAGRAM_BASE_LEN && packed_len + submessage_len > max_message_size {
                 messages
                     .push(Arc::new(rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian)?));
                 rtps_message = open_datagram();
-                packed_len = 0;
+                packed_len = DATAGRAM_BASE_LEN;
             }
 
             rtps_message.add_submessage(submessage);
