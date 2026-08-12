@@ -4,9 +4,7 @@
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Mutex;
-use std::thread;
 
-use flume::{bounded, Receiver};
 use log::{debug, info, warn};
 
 use crate::rtps::common::guid::GuidPrefix;
@@ -19,6 +17,7 @@ use crate::rtps::transport::udp::udp_sender::UdpSender;
 use crate::rtps::transport::HybridConfig;
 
 /// Channel buffer size for merged sources.
+#[allow(dead_code)]
 const CHANNEL_BUFFER_SIZE: usize = 256;
 
 /// Hybrid transport plugin — UDP multicast discovery + TCP/UDP unicast.
@@ -40,11 +39,15 @@ pub(crate) struct HybridTransportPlugin {
     // UDP listeners — multicast is always UDP
     discovery_multicast_listener: Mutex<Option<UdpListener>>,
 
-    // Merged discovery unicast: UDP unicast + TCP discovery channel
-    discovery_unicast_rx: Mutex<Option<Receiver<IncomingMessage>>>,
+    // Unicast sources handed straight through from the embedded TCP plugin.
+    // Hybrid advertises TCP-only unicast locators, so nothing ever arrives on the
+    // UDP unicast sockets; merging them only added a `try_send` drop stage that
+    // discarded SEDP and defeated the TCP layer's user-data backpressure.
+    discovery_unicast_source: Mutex<Option<MessageSource>>,
+    user_data_unicast_source: Mutex<Option<MessageSource>>,
 
-    // Merged user unicast: UDP unicast + TCP user data channel
-    user_data_unicast_rx: Mutex<Option<Receiver<IncomingMessage>>>,
+    // Kept bound (never read) so participant_id collision detection is unchanged.
+    _udp_unicast_listeners: Mutex<(Option<UdpListener>, Option<UdpListener>)>,
 }
 
 impl HybridTransportPlugin {
@@ -111,47 +114,12 @@ impl HybridTransportPlugin {
             tcp_config,
         )?;
 
-        // Create merged discovery unicast channel: UDP listener + TCP discovery rx
-        let (disc_merged_tx, disc_merged_rx) = bounded::<IncomingMessage>(CHANNEL_BUFFER_SIZE);
-        // Create merged user unicast channel: UDP listener + TCP user data rx
-        let (user_merged_tx, user_merged_rx) = bounded::<IncomingMessage>(CHANNEL_BUFFER_SIZE);
-
-        // Spawn merge thread for discovery unicast
+        // Hand the TCP plugin's unicast sources straight through — no merge stage.
+        // Both unicast locator sets advertised by hybrid are TCP-only, so the UDP
+        // unicast sockets never receive anything; merging them bought nothing and
+        // cost a `try_send` drop stage in front of every SEDP and user-data message.
         let tcp_disc_source = tcp_plugin.take_discovery_unicast_source();
-        let disc_tx = disc_merged_tx.clone();
-        if let Some(udp_listener) = discovery_uc {
-            thread::Builder::new()
-                .name("hybrid_discovery_merge".to_string())
-                .spawn(move || {
-                    merge_udp_and_channel(udp_listener, tcp_disc_source, disc_tx);
-                })
-                .expect("Failed to create hybrid discovery merge thread");
-        } else if let Some(MessageSource::Channel { rx }) = tcp_disc_source {
-            thread::Builder::new()
-                .name("hybrid_discovery_forward".to_string())
-                .spawn(move || {
-                    forward_channel(rx, disc_merged_tx);
-                })
-                .expect("Failed to create hybrid discovery forward thread");
-        }
-
-        // Spawn merge thread for user unicast
         let tcp_user_source = tcp_plugin.take_user_data_unicast_source();
-        if let Some(udp_listener) = user_uc {
-            thread::Builder::new()
-                .name("hybrid_user_merge".to_string())
-                .spawn(move || {
-                    merge_udp_and_channel(udp_listener, tcp_user_source, user_merged_tx);
-                })
-                .expect("Failed to create hybrid user merge thread");
-        } else if let Some(MessageSource::Channel { rx }) = tcp_user_source {
-            thread::Builder::new()
-                .name("hybrid_user_forward".to_string())
-                .spawn(move || {
-                    forward_channel(rx, user_merged_tx);
-                })
-                .expect("Failed to create hybrid user forward thread");
-        }
 
         info!("[HybridTransportPlugin] Created (domain={}, pid={})", domain_id, participant_id);
 
@@ -162,8 +130,9 @@ impl HybridTransportPlugin {
             participant_id,
             working_ips,
             discovery_multicast_listener: Mutex::new(discovery_mc),
-            discovery_unicast_rx: Mutex::new(Some(disc_merged_rx)),
-            user_data_unicast_rx: Mutex::new(Some(user_merged_rx)),
+            discovery_unicast_source: Mutex::new(tcp_disc_source),
+            user_data_unicast_source: Mutex::new(tcp_user_source),
+            _udp_unicast_listeners: Mutex::new((discovery_uc, user_uc)),
         })
     }
 
@@ -249,13 +218,11 @@ impl TransportPlugin for HybridTransportPlugin {
     }
 
     fn take_discovery_unicast_source(&self) -> Option<MessageSource> {
-        let rx = self.discovery_unicast_rx.lock().expect("lock poisoned").take()?;
-        Some(MessageSource::Channel { rx })
+        self.discovery_unicast_source.lock().expect("lock poisoned").take()
     }
 
     fn take_user_data_unicast_source(&self) -> Option<MessageSource> {
-        let rx = self.user_data_unicast_rx.lock().expect("lock poisoned").take()?;
-        Some(MessageSource::Channel { rx })
+        self.user_data_unicast_source.lock().expect("lock poisoned").take()
     }
 
     fn port(&self) -> u16 {
