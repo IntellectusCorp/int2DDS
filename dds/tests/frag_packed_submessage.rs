@@ -5,6 +5,12 @@
 //! the same payload in 17. This test fixes the reassembly, not the count: it proves the
 //! packed path does not lose, duplicate, or misplace a fragment.
 //!
+//! The payload is `i % 251` by byte position, not a repeated fill byte: 251 is prime and
+//! coprime with the 1344-byte fragment size, so no fragment-aligned reorder or rotation can
+//! reproduce the correct sequence by accident. A misplaced-but-fully-covering fragment run
+//! changes the bytes at that range and the content assertion catches it; a repeated fill byte
+//! would not have.
+//!
 //! Caveat: on a host whose receive buffer swallows the whole burst either path succeeds, so
 //! this guards correctness rather than the loss reduction. The socket buffer is deliberately
 //! shrunk below the burst so the repair path runs too.
@@ -36,7 +42,6 @@ use int2dds::{
 use std::time::Instant;
 
 const PAYLOAD_BYTES: usize = 1024 * 1024;
-const FILL: u8 = 0xA5;
 
 /// Small enough that the 1 MiB burst cannot fit, so fragments really are lost and repaired.
 /// Shrinking is safe on any host: rmem_max is an upper clamp, never a lower one.
@@ -51,6 +56,26 @@ const DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 pub struct PackedPayload {
     index: i32,
     data: Vec<u8>,
+}
+
+/// Position-varying payload: byte `i` is `i % 251`. 251 is prime and coprime with the
+/// 1344-byte fragment size, so a fragment run landing at the wrong offset changes the
+/// bytes there instead of accidentally reproducing the correct sequence.
+fn expected_payload() -> Vec<u8> {
+    (0..PAYLOAD_BYTES).map(|i| (i % 251) as u8).collect()
+}
+
+/// Byte-for-byte check against `expected_payload()`. Fails on the first mismatching index
+/// instead of `assert_eq!`'s whole-vector diff, which for a 1 MiB buffer is unreadable.
+fn assert_payload_matches(actual: &[u8], context: &str) {
+    let expected = expected_payload();
+    for (index, (a, e)) in actual.iter().zip(&expected).enumerate() {
+        assert_eq!(
+            a, e,
+            "{context}: byte {index} does not match the expected i % 251 pattern, so a \
+             fragment run landed at the wrong offset or is corrupted"
+        );
+    }
 }
 
 /// Sends one `PAYLOAD_BYTES` sample at `fragment_size` and returns the reassembled bytes.
@@ -121,7 +146,7 @@ fn round_trip(fragment_size: i32) -> Vec<u8> {
     .expect("reader never matched the writer");
 
     data_writer
-        .write(&PackedPayload { index: 0, data: vec![FILL; PAYLOAD_BYTES] }, InstanceHandle::NIL)
+        .write(&PackedPayload { index: 0, data: expected_payload() }, InstanceHandle::NIL)
         .unwrap();
 
     let mut received: Option<PackedPayload> = None;
@@ -165,10 +190,7 @@ fn a_packed_fragment_burst_reassembles_to_the_same_bytes() {
     // 65000 / 65000 = 1 fragment per submessage: the unpacked shape, unchanged by this work.
     let unpacked = round_trip(65_000);
     assert_eq!(unpacked.len(), PAYLOAD_BYTES, "unpacked reassembly lost or gained bytes");
-    assert!(
-        unpacked.iter().all(|byte| *byte == FILL),
-        "unpacked reassembly has the right length but the wrong content"
-    );
+    assert_payload_matches(&unpacked, "unpacked reassembly");
 
     // 65000 / 1344 = 48 fragments per submessage: the packed shape.
     let packed = round_trip(1_344);
@@ -177,11 +199,5 @@ fn a_packed_fragment_burst_reassembles_to_the_same_bytes() {
         PAYLOAD_BYTES,
         "packed reassembly lost or gained bytes, so a fragment run was mis-sized"
     );
-    assert!(
-        packed.iter().all(|byte| *byte == FILL),
-        "packed reassembly has the right length but the wrong content, so a fragment run \
-         landed at the wrong offset"
-    );
-
-    assert_eq!(packed, unpacked, "packing changed the delivered bytes");
+    assert_payload_matches(&packed, "packed reassembly");
 }
