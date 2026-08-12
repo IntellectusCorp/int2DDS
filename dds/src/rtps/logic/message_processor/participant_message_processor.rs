@@ -41,7 +41,7 @@ use crate::{
                 reader_proxy::ReaderProxy, StatefulWriter, Writer as _,
             },
         },
-        logic::common::ParticipantAccessor,
+        logic::{common::ParticipantAccessor, sedp_logic::BUILTIN_SEDP_HB_PERIOD},
         messages::message_creator::MessageCreator,
         task::sending_handler::{MessageType, SendingHandler},
     },
@@ -340,14 +340,22 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
             let _ = sedp_logic.register_periodic_send_timer(
                 remote_prefix,
                 EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER,
-                period,
-                MessageType::PeriodicPublicationHeartbeat(None, period, Arc::new(remote_prefix)),
+                BUILTIN_SEDP_HB_PERIOD,
+                MessageType::PeriodicPublicationHeartbeat(
+                    None,
+                    BUILTIN_SEDP_HB_PERIOD,
+                    Arc::new(remote_prefix),
+                ),
             );
             let _ = sedp_logic.register_periodic_send_timer(
                 remote_prefix,
                 EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_WRITER,
-                period,
-                MessageType::PeriodicSubscriptionHeartbeat(None, period, Arc::new(remote_prefix)),
+                BUILTIN_SEDP_HB_PERIOD,
+                MessageType::PeriodicSubscriptionHeartbeat(
+                    None,
+                    BUILTIN_SEDP_HB_PERIOD,
+                    Arc::new(remote_prefix),
+                ),
             );
         }
 

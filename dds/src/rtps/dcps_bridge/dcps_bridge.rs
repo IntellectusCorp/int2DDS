@@ -43,12 +43,15 @@ use crate::{
         },
         logic::{
             common::{JoinAllThread as _, UnicastThreadHandler as _},
-            sedp_logic::SedpLogic,
+            sedp_logic::{SedpLogic, BUILTIN_SEDP_HB_PERIOD},
             spdp_logic::SpdpLogic,
             user_logic::UserLogic,
         },
         messages::sedp_message::SEDPMessage,
-        task::{sending_handler::SendingHandler, thread_monitor::ThreadMonitor},
+        task::{
+            sending_handler::{MessageType, SendingHandler},
+            thread_monitor::ThreadMonitor,
+        },
         transport::{
             plugin::{TransportPlugin, TransportPluginFactory},
             socket::Socket,
@@ -520,6 +523,29 @@ impl DcpsBridge {
                     remote_guid,
                     reader_id,
                     writer_id,
+                );
+
+                // Re-arm this remote's periodic heartbeat so the new change is
+                // retransmitted until acked. add_timer skips it if still running.
+                let remote_prefix = remote_guid.prefix();
+                let heartbeat_message = if writer_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER {
+                    MessageType::PeriodicPublicationHeartbeat(
+                        None,
+                        BUILTIN_SEDP_HB_PERIOD,
+                        Arc::new(remote_prefix),
+                    )
+                } else {
+                    MessageType::PeriodicSubscriptionHeartbeat(
+                        None,
+                        BUILTIN_SEDP_HB_PERIOD,
+                        Arc::new(remote_prefix),
+                    )
+                };
+                let _ = sedp_logic.register_periodic_send_timer(
+                    remote_prefix,
+                    writer_id,
+                    BUILTIN_SEDP_HB_PERIOD,
+                    heartbeat_message,
                 );
             }
         }
