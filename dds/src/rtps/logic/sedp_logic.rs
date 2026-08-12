@@ -2092,6 +2092,11 @@ impl SedpLogic {
         stateful_reader: &StatefulReader,
         remote_writer_guid: Guid,
     ) -> RtpsResult<()> {
+        // Gated at registration, not at send: no timer is armed at all when disabled.
+        if crate::common::env::get_disable_preemptive() {
+            return Ok(());
+        }
+
         let stateful_reader_id = stateful_reader.guid().entity_id();
         let timer_id =
             TimerId::PreemptiveAcknack { entity_id: stateful_reader_id, remote_writer_guid };
@@ -2128,6 +2133,11 @@ impl SedpLogic {
         stateful_writer: &StatefulWriter,
         remote_reader_guid: Guid,
     ) -> RtpsResult<()> {
+        // Periodic heartbeats still cover the reader; only the one-shot initial burst is skipped.
+        if crate::common::env::get_disable_preemptive() {
+            return Ok(());
+        }
+
         let stateful_writer_id = stateful_writer.guid().entity_id();
         let timer_id =
             TimerId::PreemptiveHeartbeat { entity_id: stateful_writer_id, remote_reader_guid };

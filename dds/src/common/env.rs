@@ -42,6 +42,7 @@ pub fn init_from_env() {
     // - INT2DDS_SHM_BUFFER_SIZE: Set shared memory buffer size (bytes) - Default: 1048576 (1MB)
     // - INT2DDS_DATA_FRAG_SIZE: Set DATA_FRAG fragment size (1-65000) when the writer QoS specifies none - Default: 65000
     // - INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT: Set the default for the disable_piggyback_heartbeat writer QoS (true, false) - Default: false
+    // - INT2DDS_DISABLE_PREEMPTIVE: Disable preemptive ACKNACK and preemptive HEARTBEAT on new endpoint matches (true, false) - Default: false
 
     // - INT2DDS_INITIAL_PEERS: Set initial peers for SPDP unicast discovery (comma-separated, e.g., "192.168.1.10:7400,192.168.1.11:7400") - Default: none
 
@@ -337,25 +338,26 @@ pub fn set_data_frag_size(size: i32) {
     unsafe { std::env::set_var("INT2DDS_DATA_FRAG_SIZE", size.to_string()) };
 }
 
-// Read the disable_piggyback_heartbeat QoS default from
-// `INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT`.
+// Read a boolean env var, accepting `true`/`false`/`1`/`0` case-insensitively.
 // Returns `None` when unset, empty, or not a recognized boolean.
-pub fn get_disable_piggyback_heartbeat_default() -> Option<bool> {
-    let raw = std::env::var("INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT")
-        .ok()
-        .filter(|s| !s.is_empty())?;
+fn get_bool_env(name: &str) -> Option<bool> {
+    let raw = std::env::var(name).ok().filter(|s| !s.is_empty())?;
 
     if raw.eq_ignore_ascii_case("true") || raw == "1" {
         Some(true)
     } else if raw.eq_ignore_ascii_case("false") || raw == "0" {
         Some(false)
     } else {
-        log::warn!(
-            "Invalid INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT value '{}'. Ignoring env default.",
-            raw
-        );
+        log::warn!("Invalid {} value '{}'. Ignoring env default.", name, raw);
         None
     }
+}
+
+// Read the disable_piggyback_heartbeat QoS default from
+// `INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT`.
+// Returns `None` when unset, empty, or not a recognized boolean.
+pub fn get_disable_piggyback_heartbeat_default() -> Option<bool> {
+    get_bool_env("INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT")
 }
 
 // Set the disable_piggyback_heartbeat QoS default via
@@ -369,6 +371,19 @@ pub fn set_disable_piggyback_heartbeat_default(is_disabled: bool) {
     unsafe {
         std::env::set_var("INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT", is_disabled.to_string())
     };
+}
+
+// Read the preemptive ACKNACK/HEARTBEAT gate from `INT2DDS_DISABLE_PREEMPTIVE`.
+// Read at match time, so it only affects endpoint matches made after it is set.
+pub fn get_disable_preemptive() -> bool {
+    get_bool_env("INT2DDS_DISABLE_PREEMPTIVE").unwrap_or(false)
+}
+
+// Disable the preemptive ACKNACK and preemptive HEARTBEAT sent on a new endpoint
+// match, via `INT2DDS_DISABLE_PREEMPTIVE`. Responses to a peer's preemptive ACKNACK are unaffected.
+pub fn set_disable_preemptive(is_disabled: bool) {
+    log::info!("Environment variable set: INT2DDS_DISABLE_PREEMPTIVE = {}", is_disabled);
+    unsafe { std::env::set_var("INT2DDS_DISABLE_PREEMPTIVE", is_disabled.to_string()) };
 }
 
 // Read the public IPv4 advertised in SPDP from `INT2DDS_EXTERNAL_ADDRESS`.
@@ -410,9 +425,13 @@ fn parse_port_env(name: &str) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{get_multicast_ttl_override, set_multicast_ttl};
+    use super::{
+        get_disable_preemptive, get_multicast_ttl_override, set_disable_preemptive,
+        set_multicast_ttl,
+    };
 
     const ENV_KEY: &str = "INT2DDS_MULTICAST_TTL";
+    const PREEMPTIVE_KEY: &str = "INT2DDS_DISABLE_PREEMPTIVE";
 
     fn clear_env() {
         unsafe { std::env::remove_var(ENV_KEY) };
@@ -433,5 +452,28 @@ mod tests {
         assert_eq!(get_multicast_ttl_override(), None, "out-of-u8 range → None");
 
         clear_env();
+    }
+
+    /// Unset and unparseable both have to read as "enabled", or a typo would silently
+    /// turn preemptive traffic off for the whole participant.
+    #[test]
+    fn preemptive_gate_defaults_to_enabled() {
+        unsafe { std::env::remove_var(PREEMPTIVE_KEY) };
+        assert!(!get_disable_preemptive(), "unset → preemptive stays enabled");
+
+        for value in ["true", "TRUE", "1"] {
+            unsafe { std::env::set_var(PREEMPTIVE_KEY, value) };
+            assert!(get_disable_preemptive(), "{} → disabled", value);
+        }
+
+        for value in ["false", "0", "yes", ""] {
+            unsafe { std::env::set_var(PREEMPTIVE_KEY, value) };
+            assert!(!get_disable_preemptive(), "{:?} → enabled", value);
+        }
+
+        set_disable_preemptive(true);
+        assert!(get_disable_preemptive(), "setter round-trip");
+
+        unsafe { std::env::remove_var(PREEMPTIVE_KEY) };
     }
 }
