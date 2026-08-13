@@ -1429,7 +1429,7 @@ fn generate_cdr_mutable_deserialize_impl(
 
                 #(#field_declarations)*
 
-                while !deserializer.is_at_sentinel() {
+                loop {
                     let __param_hdr = deserializer.read_parameter_header()?;
                     let (member_id, member_length) = match __param_hdr {
                         PlCdrMemberHeader::Sentinel => break,

@@ -916,7 +916,7 @@ fn deserialize_struct_members_mutable_cdr(
     struct_desc: &StructDescriptor,
 ) -> DdsResult<HashMap<Arc<str>, DynamicValue>> {
     let mut values = HashMap::new();
-    while !deserializer.is_at_sentinel() {
+    loop {
         let (member_id, member_length, must_understand) =
             match deserializer.read_parameter_header().map_err(cdr_error)? {
                 PlCdrMemberHeader::Sentinel => break,
