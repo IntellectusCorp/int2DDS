@@ -2725,8 +2725,15 @@ impl UnicastMessageProcessor for UserLogic {
         let key = (remote_writer_guid, data_frag.writer_sn);
         let total_size = data_frag.sample_size;
 
-        let matched_readers: Vec<Arc<dyn Reader + Send + Sync>> =
-            self.get_matched_readers(remote_writer_guid, data_frag.reader_id)?;
+        // The buffer below is shared per (writer, SN) across the participant's readers, so
+        // both its bookkeeping and its completion must fan out to all of them -- a directed
+        // repair only narrows which datagram this is, not who the completed sample belongs
+        // to. Fall back to the addressed reader alone when none are matched yet.
+        let mut matched_readers: Vec<Arc<dyn Reader + Send + Sync>> =
+            self.get_matched_readers(remote_writer_guid, EntityId::UNKNOWN)?;
+        if matched_readers.is_empty() && data_frag.reader_id != EntityId::UNKNOWN {
+            matched_readers = self.get_matched_readers(remote_writer_guid, data_frag.reader_id)?;
+        }
 
         if matched_readers.is_empty() {
             debug!(
@@ -3064,7 +3071,7 @@ impl UnicastMessageProcessor for UserLogic {
 
 #[cfg(test)]
 mod tests {
-    use super::{contiguous_fragment_runs, fragment_send_plan, NonZeroU32};
+    use super::*;
     use std::collections::BTreeSet;
 
     fn fpm(n: u32) -> NonZeroU32 {
@@ -3246,5 +3253,260 @@ mod tests {
             vec![(1, 1, false), (2, 1, false), (3, 1, false), (4, 1, false), (5, 1, true)]
         );
         assert_plan_invariants(&runs, fpm(1));
+    }
+
+    // --- Fragment reassembly: a completed sample must reach every reader sharing the buffer ---
+    //
+    // Drives `handle_datafrag_message` directly against two readers on one participant, with
+    // no sockets, no packet loss, and no timing, so the shared-buffer fan-out defect is
+    // deterministic instead of depending on the kernel dropping a datagram.
+
+    use crate::common::builtin::topic::publication_builtin_topic_data::PublicationBuiltinTopicData;
+    use crate::common::builtin::topic::subscription_builtin_topic_data::SubscriptionBuiltinTopicData;
+    use crate::infrastructure::qos_policy::ReliabilityQosPolicyKind;
+    use crate::rtps::common::entity_kind::EntityKind;
+    use crate::rtps::common::types::{SubmessagePayload, TopicKind};
+    use crate::rtps::messages::submessage_id::SubmessageId;
+    use crate::rtps::messages::submessages::info::InfoTimestamp;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    struct NullTransport;
+
+    impl TransportPlugin for NullTransport {
+        fn send(&self, _data: &[u8], _target: &SendTarget) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn can_handle(&self, _locator: &Locator) -> bool {
+            true
+        }
+        fn advertised_metatraffic_unicast_locators(&self) -> Vec<Locator> {
+            Vec::new()
+        }
+        fn advertised_default_unicast_locators(&self) -> Vec<Locator> {
+            Vec::new()
+        }
+        fn take_discovery_multicast_source(&self) -> Option<MessageSource> {
+            None
+        }
+        fn take_discovery_unicast_source(&self) -> Option<MessageSource> {
+            None
+        }
+        fn take_user_data_unicast_source(&self) -> Option<MessageSource> {
+            None
+        }
+        fn port(&self) -> u16 {
+            0
+        }
+        fn participant_id(&self) -> u32 {
+            0
+        }
+        fn close(&self) {}
+    }
+
+    const FRAG_TEST_FRAGMENT_SIZE: u16 = 4;
+    const FRAG_TEST_SAMPLE_SIZE: u32 = 16; // 4 fragments of FRAG_TEST_FRAGMENT_SIZE bytes
+
+    /// Two `StatefulReader`s on one participant, both matched to one synthetic remote writer,
+    /// with `expected_sn` primed so the sample under test delivers immediately instead of
+    /// buffering forever. Builtin-kind entity ids sidestep needing a DCPS-connected DataReader
+    /// cache: fragment fan-out lives entirely at the RTPS layer and does not care which kind
+    /// of reader it is.
+    fn two_readers_matched_to_one_fragmented_writer(
+    ) -> (Arc<Participant>, UserLogic, Arc<StatefulReader>, Arc<StatefulReader>, Guid, SequenceNumber)
+    {
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let transport: Arc<dyn TransportPlugin> = Arc::new(NullTransport);
+        let user_logic = UserLogic::new(participant.clone(), transport);
+
+        let writer_guid = Guid::new(
+            [0xC0; 12],
+            EntityId::new([0x01, 0x00, 0x00], EntityKind::USER_DEFINED_WRITER_NO_KEY),
+        );
+        let sn = SequenceNumber::new(0, 1);
+
+        let make_reader = |key: [u8; 3]| -> Arc<StatefulReader> {
+            let entity_id = EntityId::new(key, EntityKind::BUILT_IN_READER_NO_KEY);
+            let guid = Guid::new(participant.guid().prefix(), entity_id);
+            let reader = Arc::new(StatefulReader::new(
+                guid,
+                TopicKind::NoKey,
+                ReliabilityQosPolicyKind::Reliable,
+                Vec::new(),
+                Vec::new(),
+                entity_id,
+                false,
+                None,
+                None,
+                SubscriptionBuiltinTopicData::default(),
+                participant.guid(),
+            ));
+            reader.matched_writer_add(WriterProxy::new(
+                writer_guid,
+                writer_guid.entity_id(),
+                Vec::new(),
+                Vec::new(),
+                0,
+                PublicationBuiltinTopicData::default(),
+                reader.get_update_status_callback(),
+            ));
+            // A fresh WriterProxy starts at `expected_sn = UNKNOWN`. Prime it as if a
+            // heartbeat had already announced this writer's first sequence number, so the
+            // sample under test delivers immediately instead of buffering forever.
+            let proxies = reader.writer_proxies();
+            let mut guard = proxies.lock().expect("writer proxies lock");
+            if let Some(proxy) = guard.iter_mut().find(|p| p.remote_writer_guid() == writer_guid) {
+                proxy.set_expected_sn(sn);
+            }
+            drop(guard);
+            participant.add_reader("frag_test_topic", reader.clone());
+            reader
+        };
+
+        let reader_a = make_reader([0xA0, 0x00, 0x00]);
+        let reader_b = make_reader([0xB0, 0x00, 0x00]);
+
+        (participant, user_logic, reader_a, reader_b, writer_guid, sn)
+    }
+
+    /// Feeds one DATA_FRAG submessage into `handle_datafrag_message` directly, addressed to
+    /// `reader_id`, carrying `fragments_in_submessage` fragments of `FRAG_TEST_FRAGMENT_SIZE`
+    /// bytes starting at `fragment_starting_num`.
+    #[allow(clippy::too_many_arguments)]
+    fn feed_fragment(
+        user_logic: &mut UserLogic,
+        participant_prefix: GuidPrefix,
+        writer_guid: Guid,
+        sn: SequenceNumber,
+        reader_id: EntityId,
+        fragment_starting_num: u32,
+        fragments_in_submessage: u16,
+        payload: Vec<u8>,
+    ) {
+        let mut data_frag = DataFrag::new(
+            reader_id,
+            writer_guid.entity_id(),
+            sn,
+            fragment_starting_num,
+            fragments_in_submessage,
+            FRAG_TEST_FRAGMENT_SIZE,
+            FRAG_TEST_SAMPLE_SIZE,
+        );
+        data_frag.add_serialized_data(SubmessagePayload::Owned(bytes::Bytes::from(payload)));
+
+        let rtps_header = Header::new(writer_guid.prefix());
+        let from_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7400);
+        let mut message_receiver = MessageReceiver::new(participant_prefix, &from_addr);
+        let ts_header = SubmessageHeader::new(SubmessageId::INFO_TS, 0, 0);
+        message_receiver.from_timestamp(&ts_header, &InfoTimestamp::new(Utc::now()));
+
+        user_logic
+            .handle_datafrag_message(&rtps_header, &data_frag, &message_receiver)
+            .expect("handle_datafrag_message must not error");
+    }
+
+    #[test]
+    fn completion_after_a_directed_repair_reaches_every_waiting_reader() {
+        let (participant, mut user_logic, reader_a, reader_b, writer_guid, sn) =
+            two_readers_matched_to_one_fragmented_writer();
+        let prefix = participant.guid().prefix();
+
+        // First transmission: broadcast, reaches every reader behind dst_prefix.
+        feed_fragment(
+            &mut user_logic,
+            prefix,
+            writer_guid,
+            sn,
+            EntityId::UNKNOWN,
+            1,
+            3,
+            vec![1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3],
+        );
+        // A directed repair for the last fragment, addressed to reader A alone.
+        feed_fragment(
+            &mut user_logic,
+            prefix,
+            writer_guid,
+            sn,
+            reader_a.guid().entity_id(),
+            4,
+            1,
+            vec![4, 4, 4, 4],
+        );
+
+        let expected = vec![1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4];
+        let held = |reader: &Arc<StatefulReader>| {
+            reader
+                .reader_cache()
+                .lock()
+                .expect("cache lock")
+                .get_change(sn, writer_guid)
+                .map(|c| c.data_value().to_vec())
+        };
+
+        assert_eq!(
+            held(&reader_a),
+            Some(expected.clone()),
+            "reader A was addressed directly and must hold the completed sample"
+        );
+        assert_eq!(
+            held(&reader_b),
+            Some(expected),
+            "reader B never asked for the repair, but the buffer it completed is shared \
+             with reader A, so the assembled sample belongs to reader B too"
+        );
+    }
+
+    #[test]
+    fn a_second_directed_repair_for_an_already_completed_sample_is_harmless() {
+        let (participant, mut user_logic, reader_a, reader_b, writer_guid, sn) =
+            two_readers_matched_to_one_fragmented_writer();
+        let prefix = participant.guid().prefix();
+
+        feed_fragment(
+            &mut user_logic,
+            prefix,
+            writer_guid,
+            sn,
+            EntityId::UNKNOWN,
+            1,
+            3,
+            vec![1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3],
+        );
+        feed_fragment(
+            &mut user_logic,
+            prefix,
+            writer_guid,
+            sn,
+            reader_a.guid().entity_id(),
+            4,
+            1,
+            vec![4, 4, 4, 4],
+        );
+        // The loser's own repair for the same fragment, arriving after the sample already
+        // completed via reader A's repair.
+        feed_fragment(
+            &mut user_logic,
+            prefix,
+            writer_guid,
+            sn,
+            reader_b.guid().entity_id(),
+            4,
+            1,
+            vec![4, 4, 4, 4],
+        );
+
+        let count_at_sn = |reader: &Arc<StatefulReader>| {
+            reader
+                .reader_cache()
+                .lock()
+                .expect("cache lock")
+                .get_changes()
+                .iter()
+                .filter(|c| c.sequence_number() == sn && c.writer_guid() == writer_guid)
+                .count()
+        };
+
+        assert_eq!(count_at_sn(&reader_a), 1, "reader A must not receive a duplicate");
+        assert_eq!(count_at_sn(&reader_b), 1, "reader B must not receive a duplicate");
     }
 }
