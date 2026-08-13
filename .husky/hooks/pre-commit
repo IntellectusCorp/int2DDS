@@ -6,5 +6,6 @@ STAGED_FILES=$(git diff --cached --name-only)
 cargo fmt --all
 
 printf '%s\n' "$STAGED_FILES" | while IFS= read -r f; do
-  [ -n "$f" ] && [ -e "$f" ] && git add "$f"
+  # A staged deletion has no file to re-add; do not let that end the script under set -e.
+  [ -n "$f" ] && [ -e "$f" ] && git add "$f" || true
 done
