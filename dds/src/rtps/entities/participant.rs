@@ -304,6 +304,22 @@ impl Participant {
         }
     }
 
+    /// The receive-buffer size a discovered participant advertised, or `None` when it did not
+    /// advertise a usable one. Reads under the lock without cloning the whole proxy, because
+    /// the send path asks once per destination on every fragmented send.
+    pub(crate) fn remote_receive_buffer_size(&self, guid_prefix: GuidPrefix) -> Option<usize> {
+        match self.remote_participant_proxy_datas.lock() {
+            Ok(datas) => datas
+                .iter()
+                .find(|data| data.guid_prefix() == guid_prefix)
+                .and_then(|data| data.receive_buffer_size()),
+            Err(e) => {
+                log::error!("Failed to lock remote_participant_proxy_datas: {:?}", e);
+                None
+            }
+        }
+    }
+
     pub(crate) fn add_remote_participant_proxy_data(
         &self,
         spdp_discovered_participant_data: SPDPDiscoveredParticipantData,

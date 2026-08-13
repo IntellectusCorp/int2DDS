@@ -232,6 +232,119 @@ fn fragment_send_plan(runs: &[(u32, u32)], frags_per_msg: NonZeroU32) -> Vec<(u3
     plan
 }
 
+/// Receive buffer assumed for a peer that advertised none and when this participant's own
+/// transport reports none either. Low enough that no real socket is smaller.
+const RECEIVE_BUFFER_FLOOR_BYTES: usize = 128 * 1024;
+
+/// IPv4 (20) + UDP (8) headers. The kernel charges the receive buffer for these alongside the
+/// RTPS message, so a window that counted only RTPS bytes would overshoot the socket.
+const UDP_IP_HEADER_BYTES: usize = 28;
+
+/// Everything `create_data_frag_msg` writes except the payload and its alignment padding:
+/// RTPS header (20) + INFO_DST (4 + 12) + INFO_TS (4 + 8) + the DATA_FRAG submessage header (4)
+/// and its fixed fields (32). `data_frag_datagram_bytes_match_the_builder` pins this down.
+const DATA_FRAG_FIXED_BYTES: usize = 20 + 16 + 12 + 4 + 32;
+
+/// A piggybacked HEARTBEAT: submessage header (4) plus its fixed body (28).
+const HEARTBEAT_SUBMESSAGE_BYTES: usize = 32;
+
+/// Wire bytes one writer may put toward one remote participant in a single send: two thirds of
+/// the receive buffer that participant reports, the last third left for the per-datagram
+/// overhead the kernel charges on top of the bytes counted here.
+///
+/// Resolution order is the peer's advertised value, then our own socket's, then a floor. A
+/// value that failed validation at parse arrives as `None`, indistinguishable from absence.
+fn receive_window_bytes(advertised: Option<usize>, own: Option<usize>) -> usize {
+    advertised.or(own).unwrap_or(RECEIVE_BUFFER_FLOOR_BYTES).saturating_mul(2) / 3
+}
+
+/// What one DATA_FRAG datagram costs the peer's receive buffer.
+fn data_frag_datagram_bytes(payload_bytes: usize, with_heartbeat: bool) -> usize {
+    DATA_FRAG_FIXED_BYTES
+        + payload_bytes.next_multiple_of(4)
+        + if with_heartbeat { HEARTBEAT_SUBMESSAGE_BYTES } else { 0 }
+        + UDP_IP_HEADER_BYTES
+}
+
+/// The leading part of `plan` that fits in `window_remaining` wire bytes, with the heartbeat
+/// flag moved onto the last entry kept. Returns that prefix and the bytes it costs.
+///
+/// A datagram is never split: an entry that does not fit whole ends the window, and the rest is
+/// dropped rather than deferred -- the reader re-asks for it once the window's heartbeat lands.
+/// Room for that heartbeat is reserved against every candidate, since whichever entry ends the
+/// window has to carry it.
+///
+/// One datagram addressed to several locators of one participant is written into that
+/// participant's one socket once per locator, so each entry costs `locator_count` times its
+/// size. `at_least_one` keeps a spent window from stalling a burst entirely.
+fn bound_fragment_plan(
+    plan: &[(u32, u32, bool)],
+    fragment_size: usize,
+    sample_size: usize,
+    locator_count: usize,
+    window_remaining: usize,
+    at_least_one: bool,
+    with_heartbeat: bool,
+) -> (Vec<(u32, u32, bool)>, usize) {
+    let heartbeat_bytes =
+        if with_heartbeat { HEARTBEAT_SUBMESSAGE_BYTES * locator_count } else { 0 };
+
+    let mut charged = 0usize;
+    let mut kept = 0usize;
+    for &(fragment_num, count, _) in plan {
+        let offset = (fragment_num.saturating_sub(1) as usize).saturating_mul(fragment_size);
+        let payload =
+            sample_size.saturating_sub(offset).min((count as usize).saturating_mul(fragment_size));
+        let cost = data_frag_datagram_bytes(payload, false).saturating_mul(locator_count);
+
+        if charged + cost + heartbeat_bytes > window_remaining && !(at_least_one && kept == 0) {
+            break;
+        }
+        charged += cost;
+        kept += 1;
+    }
+
+    let mut bounded: Vec<(u32, u32, bool)> = plan[..kept].to_vec();
+    if let Some(last) = bounded.last_mut() {
+        last.2 = true;
+        charged += heartbeat_bytes;
+    }
+    (bounded, charged)
+}
+
+/// Wire bytes already spent toward each remote participant in one send call.
+///
+/// Keyed by participant, not by reader: the receive buffer belongs to the participant's socket,
+/// and several readers behind one participant share it. A first transmission addressed to
+/// `ENTITYID_UNKNOWN` is also one datagram serving all of them.
+struct SendWindows {
+    /// This participant's own receive buffer, the fallback for a peer that does not advertise.
+    own: Option<usize>,
+    /// (window, bytes charged) per destination participant, resolved on first use.
+    state: HashMap<GuidPrefix, (usize, usize)>,
+}
+
+impl SendWindows {
+    fn new(transport: &dyn TransportPlugin) -> Self {
+        Self { own: transport.advertised_receive_buffer_size(), state: HashMap::new() }
+    }
+
+    /// Bytes still allowed toward `dst`, and whether nothing has gone out to it yet in this send.
+    fn remaining(&mut self, participant: &Participant, dst: GuidPrefix) -> (usize, bool) {
+        let own = self.own;
+        let (window, charged) = *self.state.entry(dst).or_insert_with(|| {
+            (receive_window_bytes(participant.remote_receive_buffer_size(dst), own), 0)
+        });
+        (window.saturating_sub(charged), charged == 0)
+    }
+
+    fn charge(&mut self, dst: GuidPrefix, bytes: usize) {
+        if let Some((_, charged)) = self.state.get_mut(&dst) {
+            *charged += bytes;
+        }
+    }
+}
+
 /// `exclude` must hold every key this call is about to write -- one DATA_FRAG fans out to one
 /// buffer per matched reader -- or an omitted key can become its own eviction victim.
 fn select_eviction_victims(
@@ -468,6 +581,8 @@ impl UserLogic {
             })?
             .acquire();
         let mut gap_list: Vec<SequenceNumber> = Vec::new();
+        let mut windows = SendWindows::new(self.transport.as_ref());
+        let dst_prefix = remote_reader_guid.prefix();
 
         for change_type in requested_change_types {
             let a_change = match change_type {
@@ -491,17 +606,30 @@ impl UserLogic {
                     a_change.fragments_per_submessage(max_message_size).into();
 
                 // A single contiguous run: the ACKNACK path always resends everything.
-                for (fragment_num, count, is_last) in
-                    fragment_send_plan(&[(1, total_fragments)], frags_per_msg)
-                {
+                let plan = fragment_send_plan(&[(1, total_fragments)], frags_per_msg);
+
+                // Bound the resend by what this participant's receive buffer still allows.
+                let (remaining, untouched) = windows.remaining(&participant, dst_prefix);
+                let (plan, charged) = bound_fragment_plan(
+                    &plan,
+                    a_change.fragment_size() as usize,
+                    a_change.data_value().len(),
+                    self.locators_to_send_to(locators.iter()).len(),
+                    remaining,
+                    untouched,
+                    piggyback,
+                );
+                windows.charge(dst_prefix, charged);
+
+                for (fragment_num, count, is_last) in plan {
                     let Some(fragment_data) =
                         a_change.get_fragment_range_data(fragment_num, count as u16)
                     else {
                         continue;
                     };
 
-                    // Piggyback one heartbeat on the final fragment so the sample is advertised
-                    // only after the whole burst is on the wire.
+                    // The heartbeat rides the last datagram of the window, not only the last of
+                    // the sample: without it the reader has no trigger to ask for the rest.
                     let heartbeat_info = (piggyback && is_last).then(|| {
                         (
                             stateful_writer.heartbeat_count(),
@@ -631,9 +759,13 @@ impl UserLogic {
 
         let piggyback =
             reader_proxy.is_reliable() && !stateful_writer.disable_piggyback_heartbeat();
+        // Same for every change below, and one datagram is written once per locator.
+        let locator_count = self.locators_to_send_to(reader_proxy.unicast_locator_list()).len();
+        let dst_prefix = remote_reader_guid.prefix();
 
         let timestamp = Utc::now();
         let participant = self.get_upgraded_participant()?;
+        let mut windows = SendWindows::new(self.transport.as_ref());
 
         let mut send_buffer = participant
             .wire_buffer_pool()
@@ -666,8 +798,25 @@ impl UserLogic {
             let frags_per_msg: NonZeroU32 =
                 change.fragments_per_submessage(max_message_size).into();
 
-            for (fragment_num, count, is_last) in fragment_send_plan(&runs, frags_per_msg) {
-                // One heartbeat per burst, on the submessage carrying the highest requested fragment.
+            let plan = fragment_send_plan(&runs, frags_per_msg);
+
+            // A request larger than one window is served as far as the window reaches; the rest
+            // is dropped, and the reader re-asks once this window's heartbeat arrives.
+            let (remaining, untouched) = windows.remaining(&participant, dst_prefix);
+            let (plan, charged) = bound_fragment_plan(
+                &plan,
+                change.fragment_size() as usize,
+                change.data_value().len(),
+                locator_count,
+                remaining,
+                untouched,
+                piggyback,
+            );
+            windows.charge(dst_prefix, charged);
+
+            for (fragment_num, count, is_last) in plan {
+                // The heartbeat rides the last datagram of the window, so the reader always has
+                // a trigger for the next NACK_FRAG.
                 let heartbeat_info = (piggyback && is_last)
                     .then(|| (stateful_writer.heartbeat_count(), writer_sn, last_sn, false, false));
 
@@ -727,6 +876,10 @@ impl UserLogic {
 
         // Read once per call: bounds how many fragments ride in one DATA_FRAG.
         let max_message_size = crate::common::env::get_max_message_size();
+
+        // Shared by the batched and the per-reader path below, so two readers behind one
+        // participant draw on that participant's one receive buffer rather than one each.
+        let mut windows = SendWindows::new(self.transport.as_ref());
 
         let mut send_buffer = participant
             .wire_buffer_pool()
@@ -896,18 +1049,31 @@ impl UserLogic {
                 let total_fragments = a_change.total_fragments();
                 let frags_per_msg: NonZeroU32 =
                     a_change.fragments_per_submessage(max_message_size).into();
+                let plan = fragment_send_plan(&[(1, total_fragments)], frags_per_msg);
 
-                for (fragment_num, count, is_last) in
-                    fragment_send_plan(&[(1, total_fragments)], frags_per_msg)
-                {
+                // Bound the burst by this participant's receive buffer; the fragments beyond
+                // the window are dropped, and the reader asks for them off the heartbeat below.
+                let (remaining, untouched) = windows.remaining(&participant, dst_prefix);
+                let (plan, charged) = bound_fragment_plan(
+                    &plan,
+                    a_change.fragment_size() as usize,
+                    a_change.data_value().len(),
+                    self.locators_to_send_to(locators.iter()).len(),
+                    remaining,
+                    untouched,
+                    is_piggyback_wanted,
+                );
+                windows.charge(dst_prefix, charged);
+
+                for (fragment_num, count, is_last) in plan {
                     let Some(fragment_data) =
                         a_change.get_fragment_range_data(fragment_num, count as u16)
                     else {
                         continue;
                     };
 
-                    // Piggyback one heartbeat on the final fragment so the sample is
-                    // advertised only after the whole burst is on the wire.
+                    // The heartbeat rides the last datagram of the window, not only the last of
+                    // the sample: without it the reader has no trigger to ask for the rest.
                     let heartbeat_info = (is_piggyback_wanted && is_last)
                         .then(|| (heartbeat_count, first, last, false, false));
 
@@ -1048,18 +1214,32 @@ impl UserLogic {
                             let total_fragments = a_change.total_fragments();
                             let frags_per_msg: NonZeroU32 =
                                 a_change.fragments_per_submessage(max_message_size).into();
+                            let plan = fragment_send_plan(&[(1, total_fragments)], frags_per_msg);
 
-                            for (fragment_num, count, is_last) in
-                                fragment_send_plan(&[(1, total_fragments)], frags_per_msg)
-                            {
+                            // Bound the burst by this participant's receive buffer; what is left
+                            // over is dropped and re-requested off the window's heartbeat.
+                            let (remaining, untouched) =
+                                windows.remaining(&participant, reader_guid.prefix());
+                            let (plan, charged) = bound_fragment_plan(
+                                &plan,
+                                a_change.fragment_size() as usize,
+                                a_change.data_value().len(),
+                                self.locators_to_send_to(locators.iter()).len(),
+                                remaining,
+                                untouched,
+                                reliable && piggyback,
+                            );
+                            windows.charge(reader_guid.prefix(), charged);
+
+                            for (fragment_num, count, is_last) in plan {
                                 let Some(fragment_data) =
                                     a_change.get_fragment_range_data(fragment_num, count as u16)
                                 else {
                                     continue;
                                 };
 
-                                // Piggyback one heartbeat on the final fragment so the sample is
-                                // advertised only after the whole burst is on the wire.
+                                // The heartbeat rides the last datagram of the window, not only
+                                // the last of the sample, or the reader has no trigger to re-ask.
                                 let heartbeat_info = if reliable && piggyback && is_last {
                                     Some((
                                         writer.heartbeat_count(),
@@ -1240,6 +1420,8 @@ impl UserLogic {
 
                     // A stateless writer's reader locators are not reliability-tracked, so
                     // there is no heartbeat to piggyback and the plan's `is_last` is unused.
+                    // No receive window either: with no heartbeat and no repair path, a bounded
+                    // burst would drop the remainder with nothing able to ask for it back.
                     for (fragment_num, count, _is_last) in
                         fragment_send_plan(&[(1, total_fragments)], frags_per_msg)
                     {
@@ -2016,16 +2198,13 @@ impl UserLogic {
         self.fragment_buffers.retain(|key, _| key.0 != writer_guid);
     }
 
-    /// Send `buffer` via the highest-priority transport reachable on both
-    /// sides (SHM > TCP > UDP); a peer advertising multiple transports gets
-    /// a single copy. Associated fn so `&self`-less closures (e.g. the
-    /// NACK_FRAG timer) can route through the same path.
-    fn send_rtps_message_to_locators<'a, T>(&self, locators: T, buffer: &[u8]) -> RtpsResult<()>
+    /// The locators one message is actually written to: the highest-priority kind reachable on
+    /// both sides (SHM > TCP > UDP), or the untouched list when none of them matches.
+    fn locators_to_send_to<'a, T>(&self, locators: T) -> Vec<&'a Locator>
     where
         T: IntoIterator<Item = &'a Locator>,
     {
         let locators: Vec<&Locator> = locators.into_iter().collect();
-
         let pick = |is_kind: fn(&Locator) -> bool| -> Option<Vec<&Locator>> {
             let v: Vec<&Locator> = locators
                 .iter()
@@ -2034,10 +2213,21 @@ impl UserLogic {
                 .collect();
             (!v.is_empty()).then_some(v)
         };
-        let locators: Vec<&Locator> = pick(Locator::is_shm)
+        pick(Locator::is_shm)
             .or_else(|| pick(Locator::is_tcp))
             .or_else(|| pick(Locator::is_udp))
-            .unwrap_or(locators);
+            .unwrap_or(locators)
+    }
+
+    /// Send `buffer` via the highest-priority transport reachable on both
+    /// sides (SHM > TCP > UDP); a peer advertising multiple transports gets
+    /// a single copy. Associated fn so `&self`-less closures (e.g. the
+    /// NACK_FRAG timer) can route through the same path.
+    fn send_rtps_message_to_locators<'a, T>(&self, locators: T, buffer: &[u8]) -> RtpsResult<()>
+    where
+        T: IntoIterator<Item = &'a Locator>,
+    {
+        let locators = self.locators_to_send_to(locators);
 
         let mut is_sent = false;
         let mut last_error = None;
@@ -3348,12 +3538,604 @@ mod tests {
         assert_plan_invariants(&runs, fpm(1));
     }
 
+    //-------------------------------------------------------------------------------------
+    // Receive-buffer flow control: the window a writer may fill toward one participant.
+    //-------------------------------------------------------------------------------------
+
+    /// The deployment shape: 1344-byte fragments, ten per datagram.
+    const WINDOW_TEST_FRAG_SIZE: usize = 1344;
+    const WINDOW_TEST_FRAGS_PER_MSG: u32 = 10;
+    /// `getsockopt(SO_RCVBUF)` on the deployment host, already doubled by the kernel.
+    const WINDOW_TEST_ADVERTISED: usize = 425_984;
+
+    #[test]
+    fn the_window_resolves_to_two_thirds_of_the_peers_advertised_buffer() {
+        assert_eq!(receive_window_bytes(Some(WINDOW_TEST_ADVERTISED), Some(1_000_000)), 283_989);
+    }
+
+    #[test]
+    fn the_window_falls_back_to_our_own_socket_when_the_peer_does_not_advertise() {
+        assert_eq!(receive_window_bytes(None, Some(WINDOW_TEST_ADVERTISED)), 283_989);
+    }
+
+    #[test]
+    fn the_window_falls_back_to_the_floor_when_neither_side_reports_one() {
+        assert_eq!(receive_window_bytes(None, None), 128 * 1024 * 2 / 3);
+        assert_eq!(receive_window_bytes(None, None), 87_381);
+    }
+
+    #[test]
+    fn a_huge_advertised_buffer_does_not_overflow_the_window() {
+        assert_eq!(receive_window_bytes(Some(usize::MAX), None), usize::MAX / 3);
+    }
+
+    /// The window is charged in wire bytes, so `data_frag_datagram_bytes` has to agree with what
+    /// the builder actually emits. Any drift in the message shape shows up here first.
+    #[test]
+    fn data_frag_datagram_bytes_match_the_builder() {
+        let sample_size = 3 * WINDOW_TEST_FRAG_SIZE + 7; // a ragged final fragment
+        let change = CacheChange::create_fragmented(
+            ChangeKind::Alive,
+            Guid::new([0xC0; 12], EntityId::new([1, 0, 0], EntityKind::USER_DEFINED_WRITER_NO_KEY)),
+            InstanceHandle::NIL,
+            SequenceNumber::new(0, 1),
+            &vec![0xA5; sample_size],
+            None,
+            WINDOW_TEST_FRAG_SIZE,
+            WINDOW_TEST_FRAG_SIZE,
+        );
+
+        let mut buffer = Vec::new();
+        for (fragment_num, count) in [(1u32, 2u16), (4, 1)] {
+            for with_heartbeat in [false, true] {
+                let heartbeat = with_heartbeat.then(|| {
+                    (1u32, SequenceNumber::new(0, 1), SequenceNumber::new(0, 1), false, false)
+                });
+                MessageCreator::create_data_frag_msg(
+                    &change,
+                    Guid::new([0xD0; 12], EntityId::UNKNOWN),
+                    EntityId::UNKNOWN,
+                    change.writer_guid().entity_id(),
+                    fragment_num,
+                    count,
+                    WINDOW_TEST_FRAG_SIZE as u16,
+                    sample_size as u32,
+                    change.get_fragment_range_data(fragment_num, count).unwrap(),
+                    heartbeat,
+                    Utc::now(),
+                    &mut buffer,
+                )
+                .unwrap();
+
+                let payload = change.get_fragment_range_data(fragment_num, count).unwrap().len();
+                assert_eq!(
+                    data_frag_datagram_bytes(payload, with_heartbeat),
+                    buffer.len() + UDP_IP_HEADER_BYTES,
+                    "modelled size disagrees with the builder for {count} fragments at \
+                     {fragment_num}, heartbeat={with_heartbeat}"
+                );
+            }
+        }
+    }
+
+    /// The plan for a whole sample at the deployment shape, unbounded.
+    fn whole_sample_plan(sample_size: usize) -> Vec<(u32, u32, bool)> {
+        let total = sample_size.div_ceil(WINDOW_TEST_FRAG_SIZE) as u32;
+        fragment_send_plan(&[(1, total)], fpm(WINDOW_TEST_FRAGS_PER_MSG))
+    }
+
+    #[test]
+    fn the_window_stops_before_it_would_be_exceeded_and_never_splits_a_datagram() {
+        let sample_size = 1024 * 1024;
+        let plan = whole_sample_plan(sample_size);
+        let window = receive_window_bytes(Some(WINDOW_TEST_ADVERTISED), None);
+
+        let (bounded, charged) =
+            bound_fragment_plan(&plan, WINDOW_TEST_FRAG_SIZE, sample_size, 1, window, true, true);
+
+        assert!(bounded.len() < plan.len(), "a 1 MiB sample must not fit in one window");
+        assert!(charged <= window, "charged {charged} bytes into a {window}-byte window");
+
+        // Adding back the datagram that was refused must overshoot: the window stops as late as
+        // it can, not early.
+        let (refused_num, refused_count, _) = plan[bounded.len()];
+        let refused_offset = (refused_num as usize - 1) * WINDOW_TEST_FRAG_SIZE;
+        let refused_payload =
+            (sample_size - refused_offset).min(refused_count as usize * WINDOW_TEST_FRAG_SIZE);
+        assert!(
+            charged + data_frag_datagram_bytes(refused_payload, false) > window,
+            "one more datagram would still have fit, so the window stopped early"
+        );
+
+        // Never split: what survives is a prefix of the plan with the same fragment counts.
+        for (kept, original) in bounded.iter().zip(plan.iter()) {
+            assert_eq!((kept.0, kept.1), (original.0, original.1), "a datagram was resized");
+        }
+    }
+
+    #[test]
+    fn exactly_one_heartbeat_rides_the_last_datagram_of_every_window() {
+        let sample_size = 1024 * 1024;
+        let plan = whole_sample_plan(sample_size);
+        let window = receive_window_bytes(Some(WINDOW_TEST_ADVERTISED), None);
+
+        let mut sent = 0usize;
+        let mut rounds = 0usize;
+        while sent < plan.len() {
+            let (bounded, charged) = bound_fragment_plan(
+                &plan[sent..],
+                WINDOW_TEST_FRAG_SIZE,
+                sample_size,
+                1,
+                window,
+                true,
+                true,
+            );
+            assert!(!bounded.is_empty(), "a window that carries nothing cannot make progress");
+            assert!(charged <= window, "round {rounds} charged {charged} into {window}");
+
+            let heartbeats = bounded.iter().filter(|&&(_, _, is_last)| is_last).count();
+            assert_eq!(heartbeats, 1, "round {rounds} carried {heartbeats} heartbeats, not one");
+            assert!(
+                bounded.last().unwrap().2,
+                "round {rounds} put the heartbeat somewhere other than the last datagram"
+            );
+
+            sent += bounded.len();
+            rounds += 1;
+        }
+        assert!(
+            rounds > 1,
+            "a 1 MiB sample at this window must take several rounds, took {rounds}"
+        );
+    }
+
+    #[test]
+    fn a_sample_shorter_than_the_window_goes_out_whole_with_one_heartbeat() {
+        let sample_size = 20 * WINDOW_TEST_FRAG_SIZE;
+        let plan = whole_sample_plan(sample_size);
+        let (bounded, _) = bound_fragment_plan(
+            &plan,
+            WINDOW_TEST_FRAG_SIZE,
+            sample_size,
+            1,
+            receive_window_bytes(Some(WINDOW_TEST_ADVERTISED), None),
+            true,
+            true,
+        );
+        assert_eq!(bounded.len(), plan.len(), "a small sample must not be truncated");
+        assert_eq!(bounded.iter().filter(|&&(_, _, is_last)| is_last).count(), 1);
+    }
+
+    #[test]
+    fn fanning_one_datagram_out_to_four_locators_costs_the_window_four_times() {
+        let sample_size = 1024 * 1024;
+        let plan = whole_sample_plan(sample_size);
+        let window = receive_window_bytes(Some(WINDOW_TEST_ADVERTISED), None);
+
+        let one =
+            bound_fragment_plan(&plan, WINDOW_TEST_FRAG_SIZE, sample_size, 1, window, true, true);
+        let four =
+            bound_fragment_plan(&plan, WINDOW_TEST_FRAG_SIZE, sample_size, 4, window, true, true);
+
+        assert_eq!(
+            four.0.len(),
+            one.0.len() / 4,
+            "the peer's one socket sees every locator write, so four NICs quarter the window"
+        );
+        assert!(four.1 <= window);
+    }
+
+    #[test]
+    fn a_spent_window_lets_one_datagram_through_only_when_nothing_has_gone_out_yet() {
+        let sample_size = 1024 * 1024;
+        let plan = whole_sample_plan(sample_size);
+
+        let (forced, _) =
+            bound_fragment_plan(&plan, WINDOW_TEST_FRAG_SIZE, sample_size, 1, 0, true, true);
+        assert_eq!(forced.len(), 1, "a burst must always make progress on its first datagram");
+
+        let (nothing, charged) =
+            bound_fragment_plan(&plan, WINDOW_TEST_FRAG_SIZE, sample_size, 1, 0, false, true);
+        assert!(nothing.is_empty(), "a window already spent must send nothing more");
+        assert_eq!(charged, 0);
+    }
+
+    //-------------------------------------------------------------------------------------
+    // The same window, measured on the datagrams the send path actually hands the transport.
+    //-------------------------------------------------------------------------------------
+
+    /// One datagram as the peer's socket would see it.
+    #[derive(Clone, Debug)]
+    struct SentDatagram {
+        locator: Locator,
+        /// RTPS bytes plus the UDP/IP headers the kernel charges alongside them.
+        wire_bytes: usize,
+        first_fragment: u32,
+        fragment_count: u16,
+        carries_heartbeat: bool,
+    }
+
+    /// A transport that sends nowhere and records what it was asked to send.
+    #[derive(Default)]
+    struct DatagramRecorder {
+        sent: Mutex<Vec<SentDatagram>>,
+    }
+
+    impl DatagramRecorder {
+        fn take(&self) -> Vec<SentDatagram> {
+            std::mem::take(&mut self.sent.lock().unwrap())
+        }
+
+        /// Walks the submessages of one datagram, reading the DATA_FRAG range out of the first
+        /// one and noting whether a HEARTBEAT rides along.
+        fn record(&self, data: &[u8], locator: Locator) {
+            let mut offset = 20; // RTPS header
+            let mut datagram = SentDatagram {
+                locator,
+                wire_bytes: data.len() + UDP_IP_HEADER_BYTES,
+                first_fragment: 0,
+                fragment_count: 0,
+                carries_heartbeat: false,
+            };
+            while offset + 4 <= data.len() {
+                let id = data[offset];
+                let body_len = u16::from_le_bytes([data[offset + 2], data[offset + 3]]) as usize;
+                let body = offset + 4;
+                if id == SubmessageId::HEARTBEAT.as_u8() {
+                    datagram.carries_heartbeat = true;
+                } else if id == SubmessageId::DATA_FRAG.as_u8() && body + 26 <= data.len() {
+                    datagram.first_fragment =
+                        u32::from_le_bytes(data[body + 20..body + 24].try_into().unwrap());
+                    datagram.fragment_count =
+                        u16::from_le_bytes([data[body + 24], data[body + 25]]);
+                }
+                if body_len == 0 {
+                    break; // the last submessage runs to the end of the datagram
+                }
+                offset = body + body_len;
+            }
+            self.sent.lock().unwrap().push(datagram);
+        }
+    }
+
+    impl TransportPlugin for DatagramRecorder {
+        fn send(&self, data: &[u8], target: &SendTarget) -> std::io::Result<()> {
+            if let SendTarget::UserData(locator) = target {
+                self.record(data, (*locator).clone());
+            }
+            Ok(())
+        }
+        fn can_handle(&self, _locator: &Locator) -> bool {
+            true
+        }
+        fn advertised_metatraffic_unicast_locators(&self) -> Vec<Locator> {
+            Vec::new()
+        }
+        fn advertised_default_unicast_locators(&self) -> Vec<Locator> {
+            Vec::new()
+        }
+        fn take_discovery_multicast_source(&self) -> Option<MessageSource> {
+            None
+        }
+        fn take_discovery_unicast_source(&self) -> Option<MessageSource> {
+            None
+        }
+        fn take_user_data_unicast_source(&self) -> Option<MessageSource> {
+            None
+        }
+        fn port(&self) -> u16 {
+            0
+        }
+        fn participant_id(&self) -> u32 {
+            0
+        }
+        fn close(&self) {}
+    }
+
+    /// A writer matched to `reader_count` readers behind one remote participant, each reachable
+    /// on `locator_count` locators, with that participant advertising `advertised` bytes of
+    /// receive buffer (`None` = it did not advertise).
+    #[allow(clippy::type_complexity)]
+    fn windowed_writer(
+        reader_count: usize,
+        locator_count: usize,
+        advertised: Option<usize>,
+    ) -> (Arc<Participant>, UserLogic, Arc<DatagramRecorder>, Arc<StatefulWriter>, GuidPrefix) {
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let recorder = Arc::new(DatagramRecorder::default());
+        let transport: Arc<dyn TransportPlugin> = recorder.clone();
+        let user_logic = UserLogic::new(participant.clone(), transport);
+        participant.set_user_logic(Arc::new(Some(user_logic.clone())));
+
+        let remote_prefix: GuidPrefix = [0xD0; 12];
+        let mut proxy_data = SPDPDiscoveredParticipantData::new(
+            0,
+            remote_prefix,
+            crate::rtps::builtin::data::builtin_endpoint_set::BuiltinEndpointSet::new(),
+        );
+        proxy_data.set_receive_buffer_size(advertised);
+        participant.add_remote_participant_proxy_data(proxy_data);
+
+        let writer_entity_id =
+            EntityId::new([0x10, 0x00, 0x00], EntityKind::USER_DEFINED_WRITER_NO_KEY);
+        // `Weak::new()` for the cache: `add_change` would otherwise pump the send path itself,
+        // and these tests drive it explicitly one round at a time.
+        let writer = Arc::new(StatefulWriter::new(
+            Guid::new(participant.guid().prefix(), writer_entity_id),
+            Vec::new(),
+            Vec::new(),
+            ReliabilityQosPolicyKind::Reliable,
+            TopicKind::NoKey,
+            writer_entity_id,
+            -1,
+            None,
+            PublicationBuiltinTopicData::default(),
+            Weak::new(),
+        ));
+
+        let locators: Vec<Locator> = (0..locator_count)
+            .map(|i| Locator::from_ip(Ipv4Addr::new(127, 0, 0, (i + 1) as u8), 7411))
+            .collect();
+        for r in 0..reader_count {
+            let reader_entity_id =
+                EntityId::new([0x20 + r as u8, 0x00, 0x00], EntityKind::USER_DEFINED_READER_NO_KEY);
+            writer.matched_reader_add(ReaderProxy::new(
+                Guid::new(remote_prefix, reader_entity_id),
+                EntityId::UNKNOWN,
+                locators.clone(),
+                Vec::new(),
+                SequenceNumber::new(0, 0),
+                SequenceNumber::new(0, 0),
+                false,
+                true,
+                SubscriptionBuiltinTopicData::builtin_reliable(),
+                SequenceNumber::new(0, 0),
+            ));
+        }
+
+        participant.add_writer("window_test_topic", writer.clone()).unwrap();
+        (participant, user_logic, recorder, writer, remote_prefix)
+    }
+
+    /// Puts one fragmented sample of `sample_size` bytes into `writer`'s cache and returns its
+    /// sequence number and total fragment count.
+    fn stage_fragmented_sample(
+        writer: &Arc<StatefulWriter>,
+        sample_size: usize,
+    ) -> (SequenceNumber, u32) {
+        let sn = SequenceNumber::new(0, 1);
+        let change = Arc::new(CacheChange::create_fragmented(
+            ChangeKind::Alive,
+            writer.guid(),
+            InstanceHandle::NIL,
+            sn,
+            &vec![0xA5; sample_size],
+            None,
+            WINDOW_TEST_FRAGS_PER_MSG as usize * WINDOW_TEST_FRAG_SIZE,
+            WINDOW_TEST_FRAG_SIZE,
+        ));
+        let total = change.total_fragments();
+        writer.writer_cache().lock().unwrap().add_change(change, writer.as_ref()).unwrap();
+        (sn, total)
+    }
+
+    /// Drives one first transmission and returns what reached the transport.
+    fn first_transmission(
+        user_logic: &UserLogic,
+        writer: &Arc<StatefulWriter>,
+        recorder: &DatagramRecorder,
+    ) -> Vec<SentDatagram> {
+        let cache_lock = writer.writer_cache();
+        let cache = cache_lock.lock().unwrap();
+        user_logic.send_unsent_changes(writer.as_ref(), &cache).unwrap();
+        drop(cache);
+        recorder.take()
+    }
+
+    fn assert_one_window(round: &[SentDatagram], window: usize, label: &str) {
+        let charged: usize = round.iter().map(|d| d.wire_bytes).sum();
+        assert!(!round.is_empty(), "{label}: nothing was sent, so the burst cannot progress");
+        assert!(charged <= window, "{label}: charged {charged} bytes into a {window}-byte window");
+
+        let heartbeats = round.iter().filter(|d| d.carries_heartbeat).count();
+        assert_eq!(heartbeats, 1, "{label}: {heartbeats} heartbeats in one window, expected one");
+        assert!(
+            round.last().unwrap().carries_heartbeat,
+            "{label}: the heartbeat did not ride the last datagram of the window"
+        );
+    }
+
+    /// A datagram is never split, so the fragments one locator receives in a round tile a
+    /// contiguous span: each datagram picks up exactly where the previous one stopped.
+    ///
+    /// Stated this way rather than as a cap on `fragment_count`, because how many fragments ride
+    /// in one DATA_FRAG comes from `INT2DDS_MAX_MESSAGE_SIZE`, which other tests in this binary
+    /// set and unset around themselves.
+    fn assert_datagrams_tile(round: &[SentDatagram], label: &str) {
+        let mut next_expected: HashMap<Locator, u32> = HashMap::new();
+        for datagram in round {
+            assert!(datagram.fragment_count >= 1, "{label}: an empty DATA_FRAG went out");
+            let expected = next_expected.entry(datagram.locator.clone()).or_insert(1);
+            assert_eq!(
+                datagram.first_fragment, *expected,
+                "{label}: a datagram started at {} where {expected} was owed, so the burst \
+                 overlapped or left a hole",
+                datagram.first_fragment
+            );
+            *expected += datagram.fragment_count as u32;
+        }
+    }
+
+    #[test]
+    fn a_first_transmission_is_bounded_by_the_peers_advertised_buffer() {
+        let (_participant, user_logic, recorder, writer, _) =
+            windowed_writer(1, 1, Some(WINDOW_TEST_ADVERTISED));
+        let (_sn, total) = stage_fragmented_sample(&writer, 1024 * 1024);
+
+        let round = first_transmission(&user_logic, &writer, &recorder);
+        let window = receive_window_bytes(Some(WINDOW_TEST_ADVERTISED), None);
+        assert_one_window(&round, window, "first transmission");
+
+        let sent_fragments: u32 = round.iter().map(|d| d.fragment_count as u32).sum();
+        assert!(
+            sent_fragments < total,
+            "the whole {total}-fragment sample went out in one go, so nothing bounded it"
+        );
+        assert_datagrams_tile(&round, "first transmission");
+    }
+
+    #[test]
+    fn four_locators_of_one_participant_each_charge_that_participants_window() {
+        let (_participant, user_logic, recorder, writer, _) =
+            windowed_writer(1, 4, Some(WINDOW_TEST_ADVERTISED));
+        stage_fragmented_sample(&writer, 1024 * 1024);
+        let round = first_transmission(&user_logic, &writer, &recorder);
+
+        let window = receive_window_bytes(Some(WINDOW_TEST_ADVERTISED), None);
+        let charged: usize = round.iter().map(|d| d.wire_bytes).sum();
+        assert!(charged <= window, "four locators charged {charged} into a {window}-byte window");
+
+        // Every locator gets the identical burst, so the window buys a quarter of the fragments
+        // it would at one locator -- which is right, because the peer's one socket is written to
+        // four times per datagram.
+        let mut per_locator: HashMap<Locator, Vec<u32>> = HashMap::new();
+        for datagram in &round {
+            per_locator.entry(datagram.locator.clone()).or_default().push(datagram.first_fragment);
+        }
+        assert_eq!(per_locator.len(), 4, "each locator must be written to separately");
+        let bursts: Vec<Vec<u32>> = per_locator.into_values().collect();
+        for burst in &bursts {
+            assert_eq!(burst, &bursts[0], "the four locators received different bursts");
+        }
+
+        // Four identical bursts inside one window means each burst is a quarter of it.
+        let per_datagram = round[0].wire_bytes;
+        assert!(
+            bursts[0].len() * 4 * per_datagram <= window,
+            "one burst of {} datagrams went four times into a {window}-byte window, so the \
+             locator writes were not each charged",
+            bursts[0].len()
+        );
+        assert_datagrams_tile(&round, "four locators");
+    }
+
+    #[test]
+    fn two_readers_behind_one_participant_share_one_window() {
+        let (_participant, user_logic, recorder, writer, remote_prefix) =
+            windowed_writer(1, 1, Some(WINDOW_TEST_ADVERTISED));
+
+        // A second reader on the same participant but a different locator, so the batcher cannot
+        // fold the two into one datagram and each gets its own burst. Counting per reader would
+        // let the two bursts total two windows into the one socket they share.
+        writer.matched_reader_add(ReaderProxy::new(
+            Guid::new(
+                remote_prefix,
+                EntityId::new([0x30, 0, 0], EntityKind::USER_DEFINED_READER_NO_KEY),
+            ),
+            EntityId::UNKNOWN,
+            vec![Locator::from_ip(Ipv4Addr::new(127, 0, 0, 9), 7411)],
+            Vec::new(),
+            SequenceNumber::new(0, 0),
+            SequenceNumber::new(0, 0),
+            false,
+            true,
+            SubscriptionBuiltinTopicData::builtin_reliable(),
+            SequenceNumber::new(0, 0),
+        ));
+        // Sized in bytes, at about three fifths of a window, so one burst fits comfortably and
+        // two do not however many fragments the ambient datagram budget packs into one
+        // DATA_FRAG. The second reader has to come up short, which per-reader accounting
+        // would hide.
+        stage_fragmented_sample(&writer, 170_000);
+
+        let round = first_transmission(&user_logic, &writer, &recorder);
+        let window = receive_window_bytes(Some(WINDOW_TEST_ADVERTISED), None);
+
+        let mut per_locator: HashMap<Locator, usize> = HashMap::new();
+        for datagram in &round {
+            *per_locator.entry(datagram.locator.clone()).or_default() += 1;
+        }
+        assert_eq!(per_locator.len(), 2, "the two readers must have taken separate bursts");
+
+        let charged: usize = round.iter().map(|d| d.wire_bytes).sum();
+        assert!(
+            charged <= window,
+            "two readers behind one participant charged {charged} bytes into their shared \
+             {window}-byte window"
+        );
+        // The second reader draws on what the first left, so its burst is the shorter one.
+        let mut counts: Vec<usize> = per_locator.into_values().collect();
+        counts.sort_unstable();
+        assert!(counts[0] < counts[1], "both readers got a full window instead of sharing one");
+    }
+
+    #[test]
+    fn a_multi_window_sample_completes_one_bounded_round_at_a_time() {
+        let (_participant, user_logic, recorder, writer, remote_prefix) =
+            windowed_writer(1, 1, Some(WINDOW_TEST_ADVERTISED));
+        let sample_size = 1024 * 1024;
+        let (sn, total) = stage_fragmented_sample(&writer, sample_size);
+        let window = receive_window_bytes(Some(WINDOW_TEST_ADVERTISED), None);
+
+        let mut delivered: BTreeSet<u32> = BTreeSet::new();
+        let record = |round: &[SentDatagram], delivered: &mut BTreeSet<u32>, label: &str| {
+            assert_one_window(round, window, label);
+            for datagram in round {
+                delivered.extend(
+                    datagram.first_fragment
+                        ..datagram.first_fragment + datagram.fragment_count as u32,
+                );
+            }
+        };
+
+        record(&first_transmission(&user_logic, &writer, &recorder), &mut delivered, "round 0");
+
+        // Each further round is the reader asking, off the window's heartbeat, for everything it
+        // is still missing -- which for a windowed send is the whole untransmitted tail.
+        let reader_guid = {
+            let proxies = writer.reader_proxies();
+            let guard = proxies.lock().unwrap();
+            guard[0].remote_reader_guid()
+        };
+        let mut rounds = 1;
+        while delivered.len() < total as usize {
+            assert!(rounds < 20, "a 1 MiB sample should not need {rounds} rounds");
+            let missing: Vec<u32> = (1..=total).filter(|n| !delivered.contains(n)).collect();
+            {
+                let proxies = writer.reader_proxies();
+                let mut guard = proxies.lock().unwrap();
+                guard[0].requested_fragments_add(sn, 1, total, missing);
+            }
+            user_logic.send_requested_fragments(writer.guid().entity_id(), reader_guid).unwrap();
+            record(&recorder.take(), &mut delivered, &format!("round {rounds}"));
+            rounds += 1;
+        }
+
+        assert!(rounds > 1, "the sample fit in one round, so no window was in force");
+        assert_eq!(delivered.len(), total as usize, "some fragments were never sent");
+        assert_eq!(*delivered.first().unwrap(), 1);
+        assert_eq!(*delivered.last().unwrap(), total);
+        assert_eq!(remote_prefix, [0xD0; 12]);
+    }
+
+    #[test]
+    fn a_peer_that_does_not_advertise_falls_back_without_stalling() {
+        let (_participant, user_logic, recorder, writer, _) = windowed_writer(1, 1, None);
+        stage_fragmented_sample(&writer, 1024 * 1024);
+
+        let round = first_transmission(&user_logic, &writer, &recorder);
+        // No peer value and a transport that reports none either: the floor applies.
+        assert_one_window(&round, receive_window_bytes(None, None), "non-advertising peer");
+    }
+
     // Fragment reassembly: drives `handle_datafrag_message` directly against two readers on
     // one participant, so the defects below are deterministic instead of loss-dependent.
 
     use crate::common::builtin::topic::publication_builtin_topic_data::PublicationBuiltinTopicData;
     use crate::common::builtin::topic::subscription_builtin_topic_data::SubscriptionBuiltinTopicData;
     use crate::infrastructure::qos_policy::ReliabilityQosPolicyKind;
+    use crate::rtps::builtin::data::spdp_discovered_participant_data::SPDPDiscoveredParticipantData;
     use crate::rtps::common::entity_kind::EntityKind;
     use crate::rtps::common::types::{SubmessagePayload, TopicKind};
     use crate::rtps::messages::submessage_id::SubmessageId;
