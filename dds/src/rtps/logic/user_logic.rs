@@ -245,6 +245,45 @@ fn fragment_send_plan(runs: &[(u32, u32)], frags_per_msg: NonZeroU32) -> Vec<(u3
     plan
 }
 
+/// `exclude` must hold every key this call is about to write -- one DATA_FRAG fans out to one
+/// buffer per matched reader -- or an omitted key can become its own eviction victim.
+fn select_eviction_victims(
+    buffers: &DashMap<(Guid, EntityId, SequenceNumber), FragmentBuffer>,
+    max_size: usize,
+    exclude: &[(Guid, EntityId, SequenceNumber)],
+) -> Vec<(Guid, EntityId, SequenceNumber)> {
+    if buffers.len() <= max_size {
+        return Vec::new();
+    }
+    let buffers_to_remove = buffers.len() - max_size;
+
+    let mut incomplete: Vec<_> = buffers
+        .iter()
+        .filter(|entry| !exclude.contains(entry.key()) && !entry.value().all_fragments_received())
+        .map(|entry| (*entry.key(), entry.value().last_updated))
+        .collect();
+    incomplete.sort_by_key(|(_, last_updated)| *last_updated);
+
+    let mut victims: Vec<_> =
+        incomplete.into_iter().take(buffers_to_remove).map(|(key, _)| key).collect();
+
+    if victims.len() < buffers_to_remove {
+        let mut complete: Vec<_> = buffers
+            .iter()
+            .filter(|entry| {
+                !exclude.contains(entry.key()) && entry.value().all_fragments_received()
+            })
+            .map(|entry| (*entry.key(), entry.value().created_at))
+            .collect();
+        complete.sort_by_key(|(_, created_at)| *created_at);
+
+        let remaining = buffers_to_remove - victims.len();
+        victims.extend(complete.into_iter().take(remaining).map(|(key, _)| key));
+    }
+
+    victims
+}
+
 #[allow(dead_code)]
 #[derive(Clone)]
 pub(crate) struct UserLogic {
@@ -1938,33 +1977,29 @@ impl UserLogic {
     }
 
     /// Evicts buffers over the cap and returns the keys removed, so the caller can retract the
-    /// arrival record the evicted key's reader holds.
+    /// arrival record the evicted key's reader holds. `exclude` is forwarded unchanged to
+    /// `select_eviction_victims`.
     fn cleanup_old_fragment_buffers(
         &self,
         max_size: usize,
+        exclude: &[(Guid, EntityId, SequenceNumber)],
     ) -> Vec<(Guid, EntityId, SequenceNumber)> {
-        // DashMap allows direct access without lock
-        if self.fragment_buffers.len() <= max_size {
-            return Vec::new();
-        }
+        let victims = select_eviction_victims(&self.fragment_buffers, max_size, exclude);
 
         let mut evicted = Vec::new();
-
-        // Evict the incomplete buffers that have gone longest without receiving a
-        // fragment, so a large sample still making progress is not sacrificed
-        let mut incomplete_buffers: Vec<_> = self
-            .fragment_buffers
-            .iter()
-            .filter(|entry| !entry.value().all_fragments_received())
-            .map(|entry| (*entry.key(), entry.value().last_updated))
-            .collect();
-
-        incomplete_buffers.sort_by_key(|(_, last_updated)| *last_updated);
-
-        let buffers_to_remove = self.fragment_buffers.len() - max_size;
-
-        for (key, _) in incomplete_buffers.iter().take(buffers_to_remove) {
-            if let Some((_, removed_buffer)) = self.fragment_buffers.remove(key) {
+        for key in &victims {
+            let Some((_, removed_buffer)) = self.fragment_buffers.remove(key) else {
+                continue;
+            };
+            if removed_buffer.all_fragments_received() {
+                debug!(
+                    "Cleaned up complete fragment buffer: writer_guid={}, reader={:?}, seq_num={}, age={:.2}s",
+                    key.0,
+                    key.1,
+                    key.2,
+                    removed_buffer.created_at.elapsed().as_secs_f64()
+                );
+            } else {
                 debug!(
                     "Evicting incomplete fragment buffer: writer={}, reader={:?}, seq={}, fragments={}/{}, idle={:.2}s, age={:.2}s",
                     key.0,
@@ -1975,36 +2010,9 @@ impl UserLogic {
                     removed_buffer.last_updated.elapsed().as_secs_f64(),
                     removed_buffer.created_at.elapsed().as_secs_f64()
                 );
-                evicted.push(*key);
             }
+            evicted.push(*key);
         }
-
-        // If not enough removed yet, also remove completed buffers (remove oldest ones)
-        if evicted.len() < buffers_to_remove {
-            let mut complete_buffers: Vec<_> = self
-                .fragment_buffers
-                .iter()
-                .filter(|entry| entry.value().all_fragments_received())
-                .map(|entry| (*entry.key(), entry.value().created_at))
-                .collect();
-
-            complete_buffers.sort_by_key(|(_, created_at)| *created_at);
-
-            let remaining_to_remove = buffers_to_remove - evicted.len();
-            for (key, _) in complete_buffers.iter().take(remaining_to_remove) {
-                if let Some((_, removed_buffer)) = self.fragment_buffers.remove(key) {
-                    debug!(
-                        "Cleaned up complete fragment buffer: writer_guid={}, reader={:?}, seq_num={}, age={:.2}s",
-                        key.0,
-                        key.1,
-                        key.2,
-                        removed_buffer.created_at.elapsed().as_secs_f64()
-                    );
-                    evicted.push(*key);
-                }
-            }
-        }
-
         evicted
     }
 
@@ -2753,8 +2761,14 @@ impl UnicastMessageProcessor for UserLogic {
                 "[UserLogic] Fragment buffer count exceeded threshold ({}), cleaning up old buffers.",
                 self.fragment_buffers.len()
             );
+            // This datagram is about to write one key per matched reader below; excluding all
+            // of them is what stops the arriving fragment from evicting its own buffer.
+            let arriving_keys: Vec<(Guid, EntityId, SequenceNumber)> = matched_readers
+                .iter()
+                .map(|reader| (remote_writer_guid, reader.guid().entity_id(), data_frag.writer_sn))
+                .collect();
             for (evicted_writer_guid, evicted_reader_id, evicted_sn) in
-                self.cleanup_old_fragment_buffers(FRAGMENT_BUFFER_LIMIT)
+                self.cleanup_old_fragment_buffers(FRAGMENT_BUFFER_LIMIT, &arriving_keys)
             {
                 // The bytes are gone, so the ledger must stop claiming them. The key names the
                 // one reader that lost them; every other reader's buffer is still whole.
@@ -3816,7 +3830,7 @@ mod tests {
 
         let before: std::collections::HashSet<_> =
             user_logic.fragment_buffers.iter().map(|entry| *entry.key()).collect();
-        let evicted = user_logic.cleanup_old_fragment_buffers(2);
+        let evicted = user_logic.cleanup_old_fragment_buffers(2, &[]);
         let after: std::collections::HashSet<_> =
             user_logic.fragment_buffers.iter().map(|entry| *entry.key()).collect();
 
@@ -3827,6 +3841,176 @@ mod tests {
             before.difference(&after).copied().collect::<std::collections::HashSet<_>>(),
             evicted_set,
             "the returned keys must be exactly the ones that left the map"
+        );
+    }
+
+    // --- Fragment reassembly: the cap check must not evict the buffer it was called for ---
+
+    #[test]
+    fn the_arriving_key_is_never_its_own_eviction_victim() {
+        let buffers: DashMap<(Guid, EntityId, SequenceNumber), FragmentBuffer> = DashMap::new();
+        let reader_id = EntityId::new([0xA0, 0x00, 0x00], EntityKind::BUILT_IN_READER_NO_KEY);
+        let sn = SequenceNumber::new(0, 1);
+
+        // Insertion order is last_updated order, so keys[0..2] are the two that would
+        // normally be picked first -- excluded together, as a multi-reader fan-out writes them.
+        let keys: Vec<_> = (0..6u8)
+            .map(|i| {
+                let writer_guid = Guid::new(
+                    [i; 12],
+                    EntityId::new([0x01, 0x00, 0x00], EntityKind::USER_DEFINED_WRITER_NO_KEY),
+                );
+                let key = (writer_guid, reader_id, sn);
+                let mut buffer =
+                    FragmentBuffer::new(sn, FRAG_TEST_SAMPLE_SIZE, FRAG_TEST_FRAGMENT_SIZE);
+                buffer.copy_fragment_data(
+                    1,
+                    bytes::Bytes::from(vec![0u8; FRAG_TEST_FRAGMENT_SIZE as usize]),
+                );
+                buffers.insert(key, buffer);
+                key
+            })
+            .collect();
+
+        let arriving_keys = [keys[0], keys[1]];
+        let victims = select_eviction_victims(&buffers, 3, &arriving_keys);
+
+        for key in &arriving_keys {
+            assert!(!victims.contains(key), "no key being written may be its own eviction victim");
+        }
+        assert_eq!(
+            victims,
+            vec![keys[2], keys[3], keys[4]],
+            "eviction must move on to the next-oldest keys once every arriving key is excluded"
+        );
+    }
+
+    /// One reader matched to `n` distinct synthetic writers, all reliable and primed past
+    /// `expected_sn` so every sample under test can deliver on arrival instead of buffering.
+    fn reader_matched_to_n_fragmented_writers(
+        n: usize,
+    ) -> (Arc<Participant>, UserLogic, Arc<StatefulReader>, Vec<Guid>, SequenceNumber) {
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let transport: Arc<dyn TransportPlugin> = Arc::new(NullTransport);
+        let user_logic = UserLogic::new(participant.clone(), transport);
+
+        let reader_entity_id =
+            EntityId::new([0xE0, 0x00, 0x00], EntityKind::BUILT_IN_READER_NO_KEY);
+        let reader = Arc::new(StatefulReader::new(
+            Guid::new(participant.guid().prefix(), reader_entity_id),
+            TopicKind::NoKey,
+            ReliabilityQosPolicyKind::Reliable,
+            Vec::new(),
+            Vec::new(),
+            reader_entity_id,
+            false,
+            None,
+            None,
+            SubscriptionBuiltinTopicData::default(),
+            participant.guid(),
+        ));
+
+        let sn = SequenceNumber::new(0, 1);
+        let writer_guids: Vec<Guid> = (0..n)
+            .map(|i| {
+                Guid::new(
+                    [i as u8; 12],
+                    EntityId::new([0x02, 0x00, 0x00], EntityKind::USER_DEFINED_WRITER_NO_KEY),
+                )
+            })
+            .collect();
+        for &writer_guid in &writer_guids {
+            reader.matched_writer_add(WriterProxy::new(
+                writer_guid,
+                writer_guid.entity_id(),
+                Vec::new(),
+                Vec::new(),
+                0,
+                PublicationBuiltinTopicData::default(),
+                reader.get_update_status_callback(),
+            ));
+            let proxies = reader.writer_proxies();
+            let mut guard = proxies.lock().expect("writer proxies lock");
+            if let Some(proxy) = guard.iter_mut().find(|p| p.remote_writer_guid() == writer_guid) {
+                proxy.set_expected_sn(sn);
+            }
+        }
+        participant.add_reader("frag_cap_test_topic", reader.clone());
+
+        (participant, user_logic, reader, writer_guids, sn)
+    }
+
+    #[test]
+    fn cap_plus_one_concurrent_reassemblies_all_complete_with_interleaved_arrival() {
+        const FRAGMENTS_PER_SAMPLE: u32 = 4; // FRAG_TEST_SAMPLE_SIZE / FRAG_TEST_FRAGMENT_SIZE
+        let n = FRAGMENT_BUFFER_LIMIT + 1;
+        let (participant, mut user_logic, reader, writer_guids, sn) =
+            reader_matched_to_n_fragmented_writers(n);
+        let prefix = participant.guid().prefix();
+        let payload = whole_sample();
+        let fragment_bytes = |lo: u32, hi: u32| -> Vec<u8> {
+            let start = (lo - 1) as usize * FRAG_TEST_FRAGMENT_SIZE as usize;
+            let end = hi as usize * FRAG_TEST_FRAGMENT_SIZE as usize;
+            payload[start..end].to_vec()
+        };
+
+        // One fragment per writer per pass, round robin: keeps all N buffers concurrently
+        // open past the cap, unlike a sequential per-writer burst.
+        for pass in 1..=FRAGMENTS_PER_SAMPLE {
+            for &writer_guid in &writer_guids {
+                if held_sample(&reader, writer_guid, sn).is_some() {
+                    continue;
+                }
+                feed_fragment(
+                    &mut user_logic,
+                    prefix,
+                    writer_guid,
+                    sn,
+                    EntityId::UNKNOWN,
+                    pass,
+                    1,
+                    fragment_bytes(pass, pass),
+                );
+            }
+        }
+
+        // Resend each straggler's exact missing span, like a real NACK_FRAG -- not the
+        // whole sample, or a self-eviction would be masked by the same call refilling
+        // everything regardless of the defect.
+        for _ in 0..8 {
+            let mut all_delivered = true;
+            for &writer_guid in &writer_guids {
+                if held_sample(&reader, writer_guid, sn).is_some() {
+                    continue;
+                }
+                all_delivered = false;
+                let missing = ledger_missing(&reader, writer_guid, sn);
+                let lo = *missing.first().expect("not-yet-delivered writer has something missing");
+                let hi = *missing.last().expect("not-yet-delivered writer has something missing");
+                feed_fragment(
+                    &mut user_logic,
+                    prefix,
+                    writer_guid,
+                    sn,
+                    EntityId::UNKNOWN,
+                    lo,
+                    (hi - lo + 1) as u16,
+                    fragment_bytes(lo, hi),
+                );
+            }
+            if all_delivered {
+                break;
+            }
+        }
+
+        let delivered = writer_guids
+            .iter()
+            .filter(|&&writer_guid| held_sample(&reader, writer_guid, sn).is_some())
+            .count();
+        assert_eq!(
+            delivered, n,
+            "every one of the {n} concurrent reassemblies must complete; falling short means \
+             the cap check evicted a buffer out from under the fragment that was about to fill it"
         );
     }
 }
