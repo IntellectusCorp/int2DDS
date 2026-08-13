@@ -307,6 +307,43 @@ impl ConnectionRegistry {
         self.backoff.remove(&addr);
     }
 
+    /// Hand a frame addressed to this participant's own user-traffic port
+    /// straight to the receive side, bypassing the wire.
+    ///
+    /// A Reader and a Writer in one Participant still address each other by
+    /// locator, and that locator is our own listener. Reaching it over a socket
+    /// would mean dialling ourselves — a connection pair, a TLS session and a
+    /// task pair to arrive where the frame already is. Discovery traffic is not
+    /// delivered this way: the discovery listener discards messages carrying our
+    /// own GUID prefix, so intra-participant matching is resolved locally
+    /// instead. Returns `false` when `logical_port` is not that port, leaving
+    /// the caller to decide what the frame was.
+    ///
+    /// Blocks while the channel is full: the consumer is a separate thread, and
+    /// waiting reproduces the pacing the TCP window would otherwise impose.
+    pub(crate) fn deliver_to_self(
+        &self,
+        source: SocketAddr,
+        logical_port: u16,
+        data: &[u8],
+    ) -> bool {
+        if logical_port
+            != PortManager::get_user_traffic_unicast_port(self.domain_id, self.participant_id)
+        {
+            return false;
+        }
+
+        let msg = IncomingMessage { data: data.to_vec(), source };
+        if let Err(e) = self.user_data_tx.send(msg) {
+            warn!(
+                "TcpSender [{}]: Failed to route intra-participant user data: {:?}",
+                TransportErrorCode::TcpChannelFull,
+                e
+            );
+        }
+        true
+    }
+
     /// Register a freshly-accepted inbound connection.
     ///
     /// Called by `mux_listener::accept_task` after spawning the reader/writer task pair.
