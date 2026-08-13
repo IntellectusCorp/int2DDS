@@ -287,6 +287,12 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
         let sending_handler = SendingHandler::get_instance(participant.clone(), None);
         let remote_prefix = spdp_discovered_participant_data.guid_prefix();
         let period = heartbeat_period.to_std_duration();
+        // SEDP heartbeats only. Shortening the SPDP repeat would enlarge the
+        // startup burst this is meant to survive.
+        let sedp_period = match crate::common::env::get_sedp_heartbeat_ms() {
+            Some(ms) => std::time::Duration::from_millis(ms),
+            None => period,
+        };
         let spdp_payload = self.create_spdp_message()?;
 
         // Send each SPDP message to the discovered participant before registering periodic timers
@@ -300,13 +306,13 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
 
         sending_handler.push_message_and_wake(MessageType::PeriodicPublicationHeartbeat(
             None,
-            period,
+            sedp_period,
             Arc::new(remote_prefix),
         ));
 
         sending_handler.push_message_and_wake(MessageType::PeriodicSubscriptionHeartbeat(
             None,
-            period,
+            sedp_period,
             Arc::new(remote_prefix),
         ));
 
@@ -340,14 +346,22 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
             let _ = sedp_logic.register_periodic_send_timer(
                 remote_prefix,
                 EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER,
-                period,
-                MessageType::PeriodicPublicationHeartbeat(None, period, Arc::new(remote_prefix)),
+                sedp_period,
+                MessageType::PeriodicPublicationHeartbeat(
+                    None,
+                    sedp_period,
+                    Arc::new(remote_prefix),
+                ),
             );
             let _ = sedp_logic.register_periodic_send_timer(
                 remote_prefix,
                 EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_WRITER,
-                period,
-                MessageType::PeriodicSubscriptionHeartbeat(None, period, Arc::new(remote_prefix)),
+                sedp_period,
+                MessageType::PeriodicSubscriptionHeartbeat(
+                    None,
+                    sedp_period,
+                    Arc::new(remote_prefix),
+                ),
             );
         }
 
