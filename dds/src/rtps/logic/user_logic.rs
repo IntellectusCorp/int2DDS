@@ -72,6 +72,10 @@ const NACK_FRAG_SUPPRESSION: Duration = Duration::from_millis(80);
 /// for the writer's periodic heartbeat (2 s by default).
 const NACK_FRAG_RETRY: Duration = Duration::from_millis(200);
 
+/// How many in-progress fragmented samples a participant holds before the oldest are evicted.
+/// One entry per (writer, reader, sample), so several readers of one topic each take a slot.
+const FRAGMENT_BUFFER_LIMIT: usize = 128;
+
 /// How many times a request re-asks before giving the job back to the periodic heartbeat.
 ///
 /// Bounded on purpose. A writer that has gone away can leave an incomplete sample behind whose
@@ -206,7 +210,9 @@ fn schedule_nackfrag(request: NackFragRequest, delay: Duration) {
 pub(crate) struct UserLogic {
     participant: Weak<Participant>,
     transport: Arc<dyn TransportPlugin>,
-    fragment_buffers: Arc<DashMap<(Guid, SequenceNumber), FragmentBuffer>>,
+    /// Keyed by the reader the DATA_FRAG was addressed to as well: the writer sends one copy
+    /// per reader, and merging those streams completes a buffer only one of them is given.
+    fragment_buffers: Arc<DashMap<(Guid, EntityId, SequenceNumber), FragmentBuffer>>,
     unicast_listening_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     unicast_listening_waker: Arc<OnceLock<Arc<Waker>>>,
 }
@@ -1554,9 +1560,10 @@ impl UserLogic {
         for (key, _) in incomplete_buffers.iter().take(buffers_to_remove) {
             if let Some((_, removed_buffer)) = self.fragment_buffers.remove(key) {
                 debug!(
-                    "Evicting incomplete fragment buffer: writer={}, seq={}, fragments={}/{}, idle={:.2}s, age={:.2}s",
+                    "Evicting incomplete fragment buffer: writer={}, reader={:?}, seq={}, fragments={}/{}, idle={:.2}s, age={:.2}s",
                     key.0,
-                    key.1.to_i64(),
+                    key.1,
+                    key.2.to_i64(),
                     removed_buffer.received_count,
                     removed_buffer.total_fragments,
                     removed_buffer.last_updated.elapsed().as_secs_f64(),
@@ -1581,9 +1588,10 @@ impl UserLogic {
             for (key, _) in complete_buffers.iter().take(remaining_to_remove) {
                 if let Some((_, removed_buffer)) = self.fragment_buffers.remove(key) {
                     debug!(
-                        "Cleaned up complete fragment buffer: writer_guid={}, seq_num={}, age={:.2}s",
+                        "Cleaned up complete fragment buffer: writer_guid={}, reader={:?}, seq_num={}, age={:.2}s",
                         key.0,
                         key.1,
+                        key.2,
                         removed_buffer.created_at.elapsed().as_secs_f64()
                     );
                     removed_count += 1;
@@ -2322,7 +2330,9 @@ impl UnicastMessageProcessor for UserLogic {
         let source_timestamp = message_receiver.get_source_timestamp();
         let remote_writer_guid = Guid::new(rtps_header.guid_prefix(), data_frag.writer_id);
 
-        let key = (remote_writer_guid, data_frag.writer_sn);
+        // `reader_id` partitions the buffer exactly as the writer addressed the sample: one
+        // buffer per reader now, and a single shared one again if it ever sends to UNKNOWN.
+        let key = (remote_writer_guid, data_frag.reader_id, data_frag.writer_sn);
         let total_size = data_frag.sample_size;
 
         let matched_readers: Vec<Arc<dyn Reader + Send + Sync>> =
@@ -2338,12 +2348,14 @@ impl UnicastMessageProcessor for UserLogic {
 
         // DashMap is thread-safe, so no explicit lock is needed
         //println!("[DEBUG] FragmentBuffer count: {}, size: {}", self.fragment_buffers.len(), self.fragment_buffers.iter().map(|entry| entry.value().total_size as usize).sum::<usize>());
-        if self.fragment_buffers.len() > 30 {
+        // Raised with the per-reader key: the same workload now needs one buffer per reader,
+        // and evicting an in-progress one is the very loss this key change removes.
+        if self.fragment_buffers.len() > FRAGMENT_BUFFER_LIMIT {
             debug!(
                 "[UserLogic] Fragment buffer count exceeded threshold ({}), cleaning up old buffers.",
                 self.fragment_buffers.len()
             );
-            self.cleanup_old_fragment_buffers(30);
+            self.cleanup_old_fragment_buffers(FRAGMENT_BUFFER_LIMIT);
         }
 
         // Copy fragment data using DashMap entry API
