@@ -250,7 +250,7 @@ enum InFlightAcquisition {
 pub(crate) struct TcpSender {
     domain_id: u32,
     participant_id: u32,
-    working_ip: String,
+    working_ips: Vec<String>,
     listener_port: u16,
     public_addr: Option<SocketAddr>,
     #[allow(dead_code)]
@@ -297,7 +297,7 @@ impl TcpSender {
     pub(crate) fn new(
         domain_id: u32,
         participant_id: u32,
-        working_ip: String,
+        working_ips: Vec<String>,
         listener_port: u16,
         local_guid_prefix: GuidPrefix,
         tls_config: Option<Arc<TlsConfig>>,
@@ -324,7 +324,7 @@ impl TcpSender {
         Arc::new(Self {
             domain_id,
             participant_id,
-            working_ip,
+            working_ips,
             listener_port,
             public_addr,
             local_guid_prefix,
@@ -522,14 +522,16 @@ impl TcpSender {
         &self.cancel
     }
 
-    /// Heuristic: is this address our own listener? Avoids loopback
-    /// self-connections during SPDP fan-out.
-    fn is_self_connection(&self, addr: &SocketAddr) -> bool {
+    /// Heuristic: is this address our own listener? Traffic aimed here never
+    /// reaches a socket — it is either delivered in-process or dropped.
+    pub(crate) fn is_self_connection(&self, addr: &SocketAddr) -> bool {
         if addr.port() != self.listener_port {
             return false;
         }
         match addr.ip() {
-            IpAddr::V4(v4) => v4.is_loopback() || self.working_ip == v4.to_string(),
+            IpAddr::V4(v4) => {
+                v4.is_loopback() || self.working_ips.iter().any(|ip| *ip == v4.to_string())
+            }
             IpAddr::V6(_) => false,
         }
     }
@@ -562,6 +564,13 @@ impl TcpSender {
     ) -> io::Result<()> {
         // A control connection is never a send target.
         if logical_port == CONTROL_LOGICAL_PORT {
+            return Ok(());
+        }
+
+        // Our own listener: user data goes to the receive side in-process, and
+        // anything else (an SPDP announcement that came back to us) is dropped.
+        if self.is_self_connection(&addr) {
+            self.shared.deliver_to_self(addr, logical_port, data);
             return Ok(());
         }
 
@@ -1186,7 +1195,7 @@ mod tests {
         let sender = TcpSender::new(
             0,
             participant_id,
-            "127.0.0.1".to_string(),
+            vec!["127.0.0.1".to_string()],
             listener_port,
             guid_prefix,
             None,
