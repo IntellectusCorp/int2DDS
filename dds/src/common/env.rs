@@ -386,6 +386,22 @@ pub fn set_disable_preemptive(is_disabled: bool) {
     unsafe { std::env::set_var("INT2DDS_DISABLE_PREEMPTIVE", is_disabled.to_string()) };
 }
 
+/// SEDP heartbeat period override from `INT2DDS_SEDP_HEARTBEAT_MS`, in ms.
+/// A lost announcement waits one period before the reader NACKs for it.
+pub fn get_sedp_heartbeat_ms() -> Option<u64> {
+    static CACHED: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let raw = std::env::var("INT2DDS_SEDP_HEARTBEAT_MS").ok()?;
+        match raw.trim().parse::<u64>() {
+            Ok(ms) if ms > 0 => {
+                log::info!("Environment variable set: INT2DDS_SEDP_HEARTBEAT_MS = {}", ms);
+                Some(ms)
+            }
+            _ => None,
+        }
+    })
+}
+
 // Read the public IPv4 advertised in SPDP from `INT2DDS_EXTERNAL_ADDRESS`.
 pub fn get_external_address() -> Option<std::net::Ipv4Addr> {
     let raw = std::env::var("INT2DDS_EXTERNAL_ADDRESS").ok().filter(|s| !s.is_empty())?;
