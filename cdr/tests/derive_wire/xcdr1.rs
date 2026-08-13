@@ -1,9 +1,8 @@
-#[cfg(test)]
 #[allow(unused_imports)]
 mod xcdr1_tests {
-    use crate::serialize::cdr::xcdr1::PID_SENTINEL;
-    use crate::serialize::cdr::MemberHeader;
-    use crate::{
+    use int2dds::serialize::cdr::xcdr1::PID_SENTINEL;
+    use int2dds::serialize::cdr::MemberHeader;
+    use int2dds::{
         dcps::topic::type_support::{DdsType, FieldAccessor},
         serialize::{
             cdr::{
@@ -408,7 +407,7 @@ mod xcdr1_tests {
 
     #[test]
     fn xcdr1_mutable_encap_header_is_pl_cdr_le() {
-        use crate::dcps::topic::type_support::{SerializationFormat, TypeSupport};
+        use int2dds::dcps::topic::type_support::{SerializationFormat, TypeSupport};
 
         let value = U64Mutable { a: 1, b: 2 };
         let ts = U64Mutable::get_type_support();
@@ -422,7 +421,7 @@ mod xcdr1_tests {
 
     #[test]
     fn xcdr1_mutable_serialize_round_trip() {
-        use crate::dcps::topic::type_support::{SerializationFormat, TypeSupport};
+        use int2dds::dcps::topic::type_support::{SerializationFormat, TypeSupport};
 
         let value = U64Mutable { a: 0xAAAA, b: 0xBBBB };
         let ts = U64Mutable::get_type_support();
@@ -435,7 +434,7 @@ mod xcdr1_tests {
 
     #[test]
     fn xcdr1_mutable_serialize_into_round_trip() {
-        use crate::dcps::topic::type_support::{SerializationFormat, TypeSupport};
+        use int2dds::dcps::topic::type_support::{SerializationFormat, TypeSupport};
 
         let value = U64Mutable { a: 0xCCCC, b: 0xDDDD };
         let ts = U64Mutable::get_type_support();
@@ -454,7 +453,7 @@ mod xcdr1_tests {
 
     #[test]
     fn xcdr1_mutable_serialize_into_matches_serialize() {
-        use crate::dcps::topic::type_support::{SerializationFormat, TypeSupport};
+        use int2dds::dcps::topic::type_support::{SerializationFormat, TypeSupport};
 
         let value = U64Mutable { a: 7, b: 8 };
         let ts = U64Mutable::get_type_support();

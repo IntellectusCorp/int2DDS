@@ -1,7 +1,6 @@
-#[cfg(test)]
 #[allow(unused_imports)]
 mod cdr_string_tests {
-    use crate::{
+    use int2dds::{
         dcps::topic::type_support::{DdsType, FieldAccessor},
         serialize::{
             cdr::{

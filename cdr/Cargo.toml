@@ -17,8 +17,14 @@ bytes = "1"
 log = { version = "0.4.11", features = ["release_max_level_error"] }
 speedy = "0.8.0"
 
-# No dev-dependency on `int2dds`, deliberately. A dev-dep would put a second
-# `int2dds-cdr` instance in the test binary -- the one built with `--test` plus the
-# rlib `int2dds` links -- and `crate::` types would stop unifying with `int2dds::`
-# ones. Tests here therefore stay kernel-internal; the ones that need
-# `#[derive(DdsType)]` live in `dds/src/serialize/cdr_tests/`.
+# Dev-only and deliberately path-only (Cargo strips path-only dev-dependencies on
+# publish, so this does not deadlock the cdr-then-dds publish order).
+#
+# This reaches `tests/` only, never `src/`. A `#[cfg(test)]` module inside `src/`
+# would see two `int2dds-cdr` instances -- its own `--test` build plus the rlib
+# `int2dds` links -- so `crate::` types would stop unifying with `int2dds::` ones.
+# An integration target links only the rlib, so there is one instance and the two
+# paths name the same type. Hence the split: kernel-internal tests in `src/`,
+# `#[derive(DdsType)]` wire vectors in `tests/derive_wire/`.
+[dev-dependencies]
+int2dds = { path = "../dds" }

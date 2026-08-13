@@ -1,6 +1,6 @@
 //! XCDR2 wire vectors pinned without `#[derive(DdsType)]`.
 //!
-//! The XCDR2 tests in `dds/src/serialize/cdr_tests/xcdr2.rs` all go through the
+//! The XCDR2 tests in `cdr/tests/derive_wire/xcdr2.rs` all go through the
 //! derive macro, so the code under test also produces the expectation; and the
 //! kernel's own XCDR2 tests are round-trip or error-path only. Neither can catch a
 //! framing change that is applied symmetrically to the writer and the reader —

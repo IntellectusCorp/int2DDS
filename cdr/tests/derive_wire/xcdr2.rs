@@ -1,8 +1,7 @@
-#[cfg(test)]
 #[allow(unused_imports)]
 mod xcdr2_tests {
-    use crate::serialize::cdr::MemberHeader;
-    use crate::{
+    use int2dds::serialize::cdr::MemberHeader;
+    use int2dds::{
         dcps::topic::type_support::{DdsType, FieldAccessor},
         serialize::{
             cdr::{
@@ -486,7 +485,7 @@ mod xcdr2_tests {
 
     #[test]
     fn test_lc6_u32_sequence_emheader() {
-        use crate::serialize::cdr::MemberHeader;
+        use int2dds::serialize::cdr::MemberHeader;
 
         let value = MutableWithSeqU32 { values: vec![1, 2, 3] };
 
@@ -709,7 +708,7 @@ mod xcdr2_tests {
 
     #[test]
     fn xcdr2_mutable_three_u64_serialize_into_round_trip() {
-        use crate::dcps::topic::type_support::{SerializationFormat, TypeSupport};
+        use int2dds::dcps::topic::type_support::{SerializationFormat, TypeSupport};
 
         let value = ThreeU64Mutable {
             a: 0xAAAA_AAAA_AAAA_AAAA,
@@ -732,7 +731,7 @@ mod xcdr2_tests {
 
     #[test]
     fn xcdr2_mutable_three_u64_serialize_into_matches_serialize() {
-        use crate::dcps::topic::type_support::{SerializationFormat, TypeSupport};
+        use int2dds::dcps::topic::type_support::{SerializationFormat, TypeSupport};
 
         let value = ThreeU64Mutable { a: 1, b: 2, c: 3 };
         let format = SerializationFormat::Xcdr {
