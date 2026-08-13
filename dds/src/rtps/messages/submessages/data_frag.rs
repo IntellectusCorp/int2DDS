@@ -25,6 +25,12 @@ use crate::rtps::{
 const EXTRA_FLAGS: u16 = 0; // 9.4.5.3.2 - extraFlags
 const OCTETS_TO_INLINE_QOS: u16 = 28; // 9.4.5.3.3 - octetsToInlineQos
 
+// Not spec text: bounds FragmentBuffer::new's slot Vec (32 bytes/slot, so this
+// is a 32 MiB worst case). No validity rule bounds total_fragments itself -- a
+// self-consistent sample_size/fragment_size pair can still name far more
+// fragments than any real sample needs (781 is the largest in this file's tests).
+const MAX_FRAGMENTS_PER_SAMPLE: u32 = 1_048_576; // 2^20
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DataFrag<'a> {
     pub reader_id: EntityId,
@@ -171,26 +177,6 @@ impl<'a> DataFrag<'a> {
         let sample_size = u32::read_from_stream_unbuffered_with_ctx(endianness, &mut cursor)
             .map_err(map_speedy_err)?;
 
-        // // 8.3.7.3.3 Validity
-        // let total_fragments_num = (sample_size / fragment_size as u32)
-        //     + if sample_size % fragment_size as u32 > 0 { 1 } else { 0 };
-
-        // if fragment_starting_num <= 0 || fragment_starting_num > total_fragments_num {
-        //     return Err(RtpsError::new(
-        //         RtpsErrorCode::InvalidSubmessageBody,
-        //         "FragmentStartingNum is not strictly positive (1, 2, ...) or exceeds the total number of fragments",
-        //     ));
-        // }
-
-        // Temporarily commented out because message is not received in message validity check
-        // 8.3.7.3.3 Validity
-        // if fragment_size > sample_size as u16 {
-        //     return Err(RtpsError::new(
-        //         RtpsErrorCode::InvalidSubmessageBody,
-        //         "Fragment size exceeds sample size",
-        //     ));
-        // }
-
         // 9.4.5.3.3 - should always use the octetsToInlineQos to skip any submessage headers it does not expect or understand
         cursor.set_position(
             4 + octets_to_inline_qos as u64, // extraFlags + octetsToInlineQos
@@ -220,6 +206,31 @@ impl<'a> DataFrag<'a> {
             ));
         }
 
+        // 8.3.7.3.3 Validity: "fragmentSize exceeds dataSize" is invalid. Compare
+        // as u32 -- narrowing sample_size to u16 first (the disabled form of this
+        // check) truncated it, so any sample_size whose low 16 bits happened to
+        // fall below fragment_size rejected an otherwise-legitimate fragment.
+        if fragment_size as u32 > sample_size {
+            return Err(RtpsError::new(
+                RtpsErrorCode::InvalidSubmessageBody,
+                "Fragment size exceeds sample size",
+            ));
+        }
+
+        // The spec's own formula (8.3.7.3.3 Logical Interpretation) -- and the
+        // exact quantity MAX_FRAGMENTS_PER_SAMPLE bounds, above.
+        let total_fragments_num = (sample_size / fragment_size as u32)
+            + if !sample_size.is_multiple_of(fragment_size as u32) { 1 } else { 0 };
+        if total_fragments_num > MAX_FRAGMENTS_PER_SAMPLE {
+            return Err(RtpsError::new(
+                RtpsErrorCode::InvalidSubmessageBody,
+                "Total fragment count exceeds the maximum allowed for a single sample",
+            ));
+        }
+
+        // Also enforces 8.3.7.3.3's "fragmentStartingNum ... exceeds the total
+        // number of fragments": for fragment_size > 0, offset >= sample_size
+        // holds exactly when fragment_starting_num > total_fragments_num.
         let fragment_start_offset = (fragment_starting_num - 1) as usize * fragment_size as usize;
         if fragment_start_offset >= sample_size as usize {
             return Err(RtpsError::new(
@@ -456,6 +467,44 @@ mod tests {
         if let Err(err) = result {
             assert_eq!(err.code, RtpsErrorCode::InvalidSubmessageBody);
         }
+    }
+
+    // A hostile sample_size/fragment_size pair is internally self-consistent --
+    // fragment_size (1) does not exceed sample_size (u32::MAX), so the spec's own
+    // "fragmentSize exceeds dataSize" rule does not catch it -- but it would ask
+    // FragmentBuffer::new for 4,294,967,295 slots (~128 GiB) from a ~36-byte wire
+    // message carrying a single real byte of payload.
+    #[test]
+    fn test_datafrag_rejects_sample_size_that_would_demand_a_huge_fragment_count() {
+        let mut datafrag = create_dummy_datafrag();
+        datafrag.sample_size = u32::MAX; // fragment_size stays 1, from the dummy
+
+        let buffer = datafrag.write_to_vec_with_ctx(Endianness::BigEndian).unwrap();
+        let header = create_dummy_submessage_header(buffer.len() as u16);
+
+        let result = DataFrag::deserialize(&Bytes::from(buffer.to_vec()), &header);
+        assert!(result.is_err());
+        if let Err(err) = result {
+            assert_eq!(err.code, RtpsErrorCode::InvalidSubmessageBody);
+        }
+    }
+
+    // 1,048,576 is a multiple of 65,536, so truncating it to u16 (the disabled
+    // check's original cast) gives 0: fragment_size(1344) > 0 would have wrongly
+    // rejected this legitimate fragment. The fixed, non-truncating comparison
+    // must not reject it.
+    #[test]
+    fn test_datafrag_accepts_large_sample_size_that_a_truncating_cast_would_zero() {
+        let mut datafrag = create_dummy_datafrag();
+        datafrag.fragment_size = 1344;
+        datafrag.sample_size = 1_048_576;
+        datafrag.serialized_data = SubmessagePayload::Owned(Bytes::from(vec![0xAB; 1344]));
+
+        let buffer = datafrag.write_to_vec_with_ctx(Endianness::BigEndian).unwrap();
+        let header = create_dummy_submessage_header(buffer.len() as u16);
+
+        let result = DataFrag::deserialize(&Bytes::from(buffer.to_vec()), &header);
+        assert!(result.is_ok());
     }
 
     #[test]
