@@ -75,7 +75,7 @@ pub fn gen_post_deserialize_bound_check(
                 while __inner.encode_utf16().count() > #max_len {
                     __inner.pop();
                 }
-                #field_name = #crate_path::serialize::core::bounded_types::WString::new(__inner);
+                #field_name = #crate_path::serialize::core::WString::new(__inner);
             };
             let action = gen_bound_violation_action(
                 field_name,
@@ -570,7 +570,7 @@ fn gen_deserialize_code(
                     while __inner.encode_utf16().count() > #max_len {
                         __inner.pop();
                     }
-                    #field_name = #crate_path::serialize::core::bounded_types::WString::new(__inner);
+                    #field_name = #crate_path::serialize::core::WString::new(__inner);
                 };
                 let action = gen_bound_violation_action(
                     field_name,

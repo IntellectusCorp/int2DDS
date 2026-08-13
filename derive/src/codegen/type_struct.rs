@@ -749,10 +749,10 @@ fn quote_deserialize_impl(
                             .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
                         match parse_body_per_field_dheader(&mut compat_deserializer) {
                             Ok(value) => {
-                                log::debug!("XCDR2 strict path failed, per-field DHEADER fallback succeeded");
+                                #crate_path::log::debug!("XCDR2 strict path failed, per-field DHEADER fallback succeeded");
                                 return Ok(Box::new(value));
                             }
-                            Err(e) => log::debug!("XCDR2 per-field DHEADER fallback failed: {}", e),
+                            Err(e) => #crate_path::log::debug!("XCDR2 per-field DHEADER fallback failed: {}", e),
                         }
                     }
 
@@ -760,11 +760,11 @@ fn quote_deserialize_impl(
                         .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
                     match parse_body(&mut fallback_deserializer) {
                         Ok(value) => {
-                            log::debug!("XCDR2 strict path failed, no-delimiter fallback succeeded");
+                            #crate_path::log::debug!("XCDR2 strict path failed, no-delimiter fallback succeeded");
                             Ok(Box::new(value))
                         }
                         Err(e) => {
-                            log::debug!("XCDR2 no-delimiter fallback failed: {}", e);
+                            #crate_path::log::debug!("XCDR2 no-delimiter fallback failed: {}", e);
                             Err(strict_err)
                         }
                     }
@@ -1425,6 +1425,7 @@ fn generate_cdr_mutable_deserialize_impl(
         impl #impl_generics #crate_path::serialize::cdr::CdrDeserialize for #name #ty_generics #where_clause {
             fn deserialize_cdr(deserializer: &mut #crate_path::serialize::cdr::CdrDeserializer) -> #crate_path::serialize::cdr::CdrResult<Self> {
                 use #crate_path::serialize::cdr::PlCdrMemberHeader;
+                use #crate_path::serialize::DeserializerReader;
 
                 #(#field_declarations)*
 
@@ -2015,6 +2016,8 @@ fn generate_mutable_deserialize_impl(
     quote! {
         impl #impl_generics #crate_path::serialize::xcdr::XcdrDeserialize for #name #ty_generics #where_clause {
             fn deserialize_xcdr(deserializer: &mut #crate_path::serialize::xcdr::XcdrDeserializer) -> #crate_path::serialize::xcdr::XcdrResult<Self> {
+                use #crate_path::serialize::DeserializerReader;
+
                 let (object_size, start_position) = deserializer.begin_struct()?;
                 let object_end = start_position + object_size as usize;
 

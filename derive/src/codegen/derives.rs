@@ -133,6 +133,7 @@ pub fn generate_additional_derives(
     let eq_fields = generate_eq_fields(input);
     let speedy_write_fields = generate_speedy_write_fields(input);
     let speedy_read_fields = generate_speedy_read_fields(input);
+    let crate_path = &config.crate_path;
 
     // Generate Default impl only if no_default is false
     let default_impl = if config.no_default {
@@ -189,16 +190,16 @@ pub fn generate_additional_derives(
         #partialeq_impl
 
         #[automatically_derived]
-        impl<C: speedy::Context> speedy::Writable<C> for #name {
-            fn write_to<T: ?Sized + speedy::Writer<C>>(&self, writer: &mut T) -> Result<(), C::Error> {
+        impl<C: #crate_path::speedy::Context> #crate_path::speedy::Writable<C> for #name {
+            fn write_to<T: ?Sized + #crate_path::speedy::Writer<C>>(&self, writer: &mut T) -> Result<(), C::Error> {
                 #(#speedy_write_fields)*
                 Ok(())
             }
         }
 
         #[automatically_derived]
-        impl<'a, C: speedy::Context> speedy::Readable<'a, C> for #name {
-            fn read_from<R: speedy::Reader<'a, C>>(reader: &mut R) -> Result<Self, C::Error> {
+        impl<'a, C: #crate_path::speedy::Context> #crate_path::speedy::Readable<'a, C> for #name {
+            fn read_from<R: #crate_path::speedy::Reader<'a, C>>(reader: &mut R) -> Result<Self, C::Error> {
                 Ok(Self {
                     #(#speedy_read_fields,)*
                 })
@@ -252,6 +253,7 @@ fn generate_tuple_struct_additional_derives(
             // Generate speedy Readable impl
             let speedy_read_fields: Vec<_> =
                 (0..field_count).map(|_| quote! { reader.read_value()? }).collect();
+            let crate_path = &config.crate_path;
 
             // Generate Default impl only if no_default is false
             let default_impl = if config.no_default {
@@ -305,16 +307,16 @@ fn generate_tuple_struct_additional_derives(
                 #partialeq_impl
 
                 #[automatically_derived]
-                impl<C: speedy::Context> speedy::Writable<C> for #name {
-                    fn write_to<T: ?Sized + speedy::Writer<C>>(&self, writer: &mut T) -> Result<(), C::Error> {
+                impl<C: #crate_path::speedy::Context> #crate_path::speedy::Writable<C> for #name {
+                    fn write_to<T: ?Sized + #crate_path::speedy::Writer<C>>(&self, writer: &mut T) -> Result<(), C::Error> {
                         #(#speedy_write_fields)*
                         Ok(())
                     }
                 }
 
                 #[automatically_derived]
-                impl<'a, C: speedy::Context> speedy::Readable<'a, C> for #name {
-                    fn read_from<R: speedy::Reader<'a, C>>(reader: &mut R) -> Result<Self, C::Error> {
+                impl<'a, C: #crate_path::speedy::Context> #crate_path::speedy::Readable<'a, C> for #name {
+                    fn read_from<R: #crate_path::speedy::Reader<'a, C>>(reader: &mut R) -> Result<Self, C::Error> {
                         Ok(Self(#(#speedy_read_fields),*))
                     }
                 }
@@ -336,6 +338,7 @@ fn generate_enum_additional_derives(
 
     if let Data::Enum(data) = &input.data {
         let variants = &data.variants;
+        let crate_path = &config.crate_path;
 
         // Generate Default impl only if no_default is false
         let default_impl = if config.no_default {
@@ -532,8 +535,8 @@ fn generate_enum_additional_derives(
             #partialeq_impl
 
             #[automatically_derived]
-            impl<C: speedy::Context> speedy::Writable<C> for #name {
-                fn write_to<T: ?Sized + speedy::Writer<C>>(&self, writer: &mut T) -> Result<(), C::Error> {
+            impl<C: #crate_path::speedy::Context> #crate_path::speedy::Writable<C> for #name {
+                fn write_to<T: ?Sized + #crate_path::speedy::Writer<C>>(&self, writer: &mut T) -> Result<(), C::Error> {
                     match self {
                         #(#speedy_write_arms)*
                     }
@@ -542,12 +545,12 @@ fn generate_enum_additional_derives(
             }
 
             #[automatically_derived]
-            impl<'a, C: speedy::Context> speedy::Readable<'a, C> for #name {
-                fn read_from<R: speedy::Reader<'a, C>>(reader: &mut R) -> Result<Self, C::Error> {
+            impl<'a, C: #crate_path::speedy::Context> #crate_path::speedy::Readable<'a, C> for #name {
+                fn read_from<R: #crate_path::speedy::Reader<'a, C>>(reader: &mut R) -> Result<Self, C::Error> {
                     let discriminant: u32 = reader.read_value()?;
                     Ok(match discriminant {
                         #(#speedy_read_arms)*
-                        _ => return Err(speedy::Error::custom("Invalid enum discriminant").into()),
+                        _ => return Err(#crate_path::speedy::Error::custom("Invalid enum discriminant").into()),
                     })
                 }
             }
