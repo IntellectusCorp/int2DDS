@@ -18,6 +18,7 @@ This document describes the environment variables available in int2dds.
 | `INT2DDS_SHM_BUFFER_SIZE`            | Shared-memory ring buffer size (bytes)     | 1048576 (1MB)           |
 | `INT2DDS_DATA_FRAG_SIZE`             | DATA_FRAG fragment size (bytes)            | 65000                   |
 | `INT2DDS_MULTICAST_TTL`              | IPv4 multicast TTL fallback (0-255)        | 1                       |
+| `INT2DDS_DISABLE_PREEMPTIVE`         | Disable preemptive ACKNACK/HEARTBEAT       | false                   |
 | `INT2DDS_EXTENDED_DISCOVERY`         | Enable extended discovery                  | false                   |
 | `INT2DDS_INITIAL_PEERS`              | Initial peer list                          | none                    |
 | `INT2DDS_THREAD_MONITORING`          | Enable thread monitoring                   | false                   |
@@ -374,6 +375,39 @@ Int2Dds.Core.Env.SetMulticastTtl(32);
 The Rust core consumes the env var inside `TransportConfig::from_property` at
 participant creation, so the value must be set **before** the first
 `DomainParticipant` is created.
+
+### INT2DDS_DISABLE_PREEMPTIVE
+
+Disables the two one-shot messages sent when a new endpoint match is made: the
+reader's preemptive ACKNACK and the writer's preemptive HEARTBEAT. Accepts
+`true`/`false`/`1`/`0`, case-insensitive; anything else is logged at warn level
+and treated as `false`.
+
+Both remain enabled by default. Disabling them removes discovery-time traffic at
+the cost of first-sample latency: a reader then learns the writer's sequence
+range from the first periodic HEARTBEAT instead of from an immediate one.
+Reliability is unaffected — periodic HEARTBEAT and the normal
+HEARTBEAT/ACKNACK repair loop still run, and a HEARTBEAT arriving from a peer is
+still answered.
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_DISABLE_PREEMPTIVE = "true"
+
+cargo run --example hello_world_sub
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_DISABLE_PREEMPTIVE=true
+
+cargo run --example hello_world_sub
+```
+
+The Rust core reads the env var when an endpoint match is made, so the value must
+be set **before** the DataReader/DataWriter that should skip it is matched.
 
 ### INT2DDS_EXTENDED_DISCOVERY
 
