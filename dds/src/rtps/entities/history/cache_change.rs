@@ -398,10 +398,6 @@ impl CacheChange {
         }
     }
 
-    pub(crate) fn get_fragment_data(&self, fragment_num: u32) -> Option<&[u8]> {
-        self.get_fragment_range_data(fragment_num, 1)
-    }
-
     /// Payload for `count` consecutive fragments starting at `fragment_num`, as one slice.
     /// The last fragment is short, so the slice is clamped to the payload end.
     pub(crate) fn get_fragment_range_data(&self, fragment_num: u32, count: u16) -> Option<&[u8]> {
@@ -522,8 +518,8 @@ mod tests {
         let total = change.total_fragments();
         let expected_last = 20_000 - 1_344 * (total as usize - 1);
 
-        assert_eq!(change.get_fragment_data(1).unwrap().len(), 1_344);
-        assert_eq!(change.get_fragment_data(total).unwrap().len(), expected_last);
+        assert_eq!(change.get_fragment_range_data(1, 1).unwrap().len(), 1_344);
+        assert_eq!(change.get_fragment_range_data(total, 1).unwrap().len(), expected_last);
     }
 
     // A change fragmented at 1344 bytes over a payload that needs 781 fragments.
@@ -580,20 +576,6 @@ mod tests {
         let mut unfragmented = packed_change();
         unfragmented.apply_fragmentation(65_000, 0);
         assert!(unfragmented.get_fragment_range_data(1, 1).is_none());
-    }
-
-    #[test]
-    fn get_fragment_data_is_unchanged_by_the_range_accessor() {
-        let change = packed_change();
-        for fragment_num in [1u32, 2, 400, 780, 781] {
-            assert_eq!(
-                change.get_fragment_data(fragment_num),
-                change.get_fragment_range_data(fragment_num, 1),
-                "single-fragment access must stay identical"
-            );
-        }
-        assert!(change.get_fragment_data(0).is_none());
-        assert!(change.get_fragment_data(782).is_none());
     }
 
     #[test]

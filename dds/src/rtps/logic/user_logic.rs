@@ -216,6 +216,27 @@ fn contiguous_fragment_runs(fragments: &BTreeSet<u32>, total: u32) -> Vec<(u32, 
     runs
 }
 
+/// One entry per DATA_FRAG submessage needed to send `runs`, as `(fragment_num, count,
+/// is_last)`, packing up to `frags_per_msg` fragments per submessage.
+///
+/// `is_last` is `true` for exactly one entry: the final chunk of the final run, i.e. the
+/// submessage carrying the highest requested fragment. That is the only one that should
+/// piggyback a heartbeat, so the repair burst is advertised only once it is fully sent.
+fn fragment_send_plan(runs: &[(u32, u32)], frags_per_msg: u32) -> Vec<(u32, u32, bool)> {
+    let last_run_index = runs.len().saturating_sub(1);
+    let mut plan = Vec::new();
+    for (run_index, &(run_start, run_len)) in runs.iter().enumerate() {
+        let mut offset = 0;
+        while offset < run_len {
+            let count = std::cmp::min(frags_per_msg, run_len - offset);
+            let is_last = run_index == last_run_index && offset + count == run_len;
+            plan.push((run_start + offset, count, is_last));
+            offset += count;
+        }
+    }
+    plan
+}
+
 #[allow(dead_code)]
 #[derive(Clone)]
 pub(crate) struct UserLogic {
@@ -403,9 +424,6 @@ impl UserLogic {
         let SendPlan { locators, group_id, reliable, requested_change_types } = plan;
         let piggyback = reliable && !stateful_writer.disable_piggyback_heartbeat();
 
-        // Read once per call: bounds how many fragments ride in one DATA_FRAG.
-        let max_message_size = crate::common::env::get_max_message_size();
-
         let mut send_buffer = participant
             .wire_buffer_pool()
             .lock()
@@ -430,6 +448,8 @@ impl UserLogic {
 
                 let timestamp = Utc::now();
 
+                // Read here, not once per call: most requests carry no fragmented change.
+                let max_message_size = crate::common::env::get_max_message_size();
                 let total_fragments = a_change.total_fragments();
                 let frags_per_msg = a_change.fragments_per_submessage(max_message_size) as u32;
                 let mut fragment_num = 1;
@@ -539,6 +559,9 @@ impl UserLogic {
         let writer = self.find_stateful_writer(writer_entity_id)?;
         let stateful_writer = writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
 
+        // Read before taking any lock below: bounds how many fragments ride in one DATA_FRAG.
+        let max_message_size = crate::common::env::get_max_message_size();
+
         // LOCK ORDER: acquires `writer_cache` first, then `reader_proxies`.
         let writer_cache = stateful_writer.writer_cache();
         let history_cache_guard = writer_cache.lock().map_err(|_| {
@@ -576,9 +599,6 @@ impl UserLogic {
         let timestamp = Utc::now();
         let participant = self.get_upgraded_participant()?;
 
-        // Read once per call: bounds how many fragments ride in one DATA_FRAG.
-        let max_message_size = crate::common::env::get_max_message_size();
-
         let mut send_buffer = participant
             .wire_buffer_pool()
             .lock()
@@ -606,37 +626,26 @@ impl UserLogic {
             }
 
             let total_frags = change.total_fragments();
-
             let runs = contiguous_fragment_runs(&requested_fragments, total_frags);
-            let Some(last_run_index) = runs.len().checked_sub(1) else {
-                continue;
-            };
             let frags_per_msg = change.fragments_per_submessage(max_message_size) as u32;
 
-            for (run_index, &(run_start, run_len)) in runs.iter().enumerate() {
-                let mut offset = 0;
-                while offset < run_len {
-                    let count = std::cmp::min(frags_per_msg, run_len - offset);
-                    // One heartbeat per burst, on the submessage carrying the highest requested fragment.
-                    let is_last = run_index == last_run_index && offset + count == run_len;
-                    let heartbeat_info = (piggyback && is_last).then(|| {
-                        (stateful_writer.heartbeat_count(), writer_sn, last_sn, false, false)
-                    });
+            for (fragment_num, count, is_last) in fragment_send_plan(&runs, frags_per_msg) {
+                // One heartbeat per burst, on the submessage carrying the highest requested fragment.
+                let heartbeat_info = (piggyback && is_last)
+                    .then(|| (stateful_writer.heartbeat_count(), writer_sn, last_sn, false, false));
 
-                    if self.send_data_frag_to_reader_proxy(
-                        &change,
-                        reader_proxy,
-                        writer_entity_id,
-                        run_start + offset,
-                        count as u16,
-                        heartbeat_info,
-                        timestamp,
-                        &mut send_buffer,
-                    ) && heartbeat_info.is_some()
-                    {
-                        stateful_writer.increase_heartbeat_count();
-                    }
-                    offset += count;
+                if self.send_data_frag_to_reader_proxy(
+                    &change,
+                    reader_proxy,
+                    writer_entity_id,
+                    fragment_num,
+                    count as u16,
+                    heartbeat_info,
+                    timestamp,
+                    &mut send_buffer,
+                ) && heartbeat_info.is_some()
+                {
+                    stateful_writer.increase_heartbeat_count();
                 }
             }
         }
@@ -1324,6 +1333,7 @@ impl UserLogic {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn send_data_frag_to_reader_proxy(
         &self,
         change: &CacheChange,
@@ -3062,7 +3072,7 @@ impl UnicastMessageProcessor for UserLogic {
 
 #[cfg(test)]
 mod tests {
-    use super::contiguous_fragment_runs;
+    use super::{contiguous_fragment_runs, fragment_send_plan};
     use std::collections::BTreeSet;
 
     #[test]
@@ -3075,5 +3085,57 @@ mod tests {
     fn an_empty_or_fully_out_of_range_request_yields_no_runs() {
         assert!(contiguous_fragment_runs(&BTreeSet::new(), 10).is_empty());
         assert!(contiguous_fragment_runs(&[0, 11].into_iter().collect(), 10).is_empty());
+    }
+
+    #[test]
+    fn fragment_num_equal_to_total_is_included() {
+        // The upper bound is inclusive: total itself is a valid, in-range fragment number.
+        assert_eq!(contiguous_fragment_runs(&[10].into_iter().collect(), 10), vec![(10, 1)]);
+    }
+
+    #[test]
+    fn a_run_shorter_than_one_chunk_is_a_single_submessage() {
+        assert_eq!(fragment_send_plan(&[(5, 3)], 10), vec![(5, 3, true)]);
+    }
+
+    #[test]
+    fn a_run_that_is_an_exact_multiple_of_the_chunk_size_splits_evenly() {
+        assert_eq!(fragment_send_plan(&[(1, 10)], 5), vec![(1, 5, false), (6, 5, true)]);
+    }
+
+    #[test]
+    fn a_run_one_longer_than_a_multiple_leaves_a_short_final_chunk() {
+        assert_eq!(
+            fragment_send_plan(&[(1, 11)], 5),
+            vec![(1, 5, false), (6, 5, false), (11, 1, true)]
+        );
+    }
+
+    #[test]
+    fn only_the_final_chunk_of_the_final_run_is_last_even_when_an_earlier_run_is_longer() {
+        // The first run needs two chunks; the shorter, final run needs only one. Only that
+        // final run's chunk may carry the heartbeat, never the longer first run's last chunk.
+        assert_eq!(
+            fragment_send_plan(&[(1, 10), (20, 3)], 5),
+            vec![(1, 5, false), (6, 5, false), (20, 3, true)]
+        );
+    }
+
+    #[test]
+    fn exactly_one_entry_is_last_and_it_ends_on_the_highest_requested_fragment() {
+        let asked: BTreeSet<u32> = [1, 2, 3, 7, 8, 11].into_iter().collect();
+        let runs = contiguous_fragment_runs(&asked, 20);
+        let plan = fragment_send_plan(&runs, 2);
+
+        let last_entries: Vec<_> = plan.iter().filter(|&&(_, _, is_last)| is_last).collect();
+        assert_eq!(last_entries.len(), 1, "exactly one submessage may carry the heartbeat");
+
+        let &(fragment_num, count, _) = last_entries[0];
+        assert_eq!(fragment_num + count - 1, 11, "must end on the highest requested fragment");
+    }
+
+    #[test]
+    fn an_empty_run_list_yields_an_empty_plan() {
+        assert!(fragment_send_plan(&[], 10).is_empty());
     }
 }
