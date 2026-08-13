@@ -1938,9 +1938,12 @@ impl UserLogic {
     }
 
     /// Evicts buffers over the cap and returns the keys removed, so the caller can retract the
-    /// arrival record each evicted key's readers hold -- the bytes are gone, and nothing else
+    /// arrival record each evicted key's reader holds -- the bytes are gone, and nothing else
     /// here knows that happened.
-    fn cleanup_old_fragment_buffers(&self, max_size: usize) -> Vec<(Guid, SequenceNumber)> {
+    fn cleanup_old_fragment_buffers(
+        &self,
+        max_size: usize,
+    ) -> Vec<(Guid, EntityId, SequenceNumber)> {
         // DashMap allows direct access without lock
         if self.fragment_buffers.len() <= max_size {
             return Vec::new();
@@ -2760,7 +2763,7 @@ impl UnicastMessageProcessor for UserLogic {
                 "[UserLogic] Fragment buffer count exceeded threshold ({}), cleaning up old buffers.",
                 self.fragment_buffers.len()
             );
-            for (evicted_writer_guid, evicted_sn) in
+            for (evicted_writer_guid, _evicted_reader_id, evicted_sn) in
                 self.cleanup_old_fragment_buffers(FRAGMENT_BUFFER_LIMIT)
             {
                 // The bytes behind this key are gone. Every reader matched to that writer must
@@ -3554,7 +3557,8 @@ mod tests {
         let transport: Arc<dyn TransportPlugin> = Arc::new(NullTransport);
         let user_logic = UserLogic::new(participant, transport);
 
-        // More incomplete buffers than the cap, each under its own writer/SN key.
+        // More incomplete buffers than the cap, each under its own writer/reader/SN key.
+        let reader_id = EntityId::new([0xA0, 0x00, 0x00], EntityKind::BUILT_IN_READER_NO_KEY);
         for i in 0..5u8 {
             let writer_guid = Guid::new(
                 [i; 12],
@@ -3567,7 +3571,7 @@ mod tests {
                 1,
                 bytes::Bytes::from(vec![0u8; FRAG_TEST_FRAGMENT_SIZE as usize]),
             );
-            user_logic.fragment_buffers.insert((writer_guid, sn), buffer);
+            user_logic.fragment_buffers.insert((writer_guid, reader_id, sn), buffer);
         }
 
         let before: std::collections::HashSet<_> =
