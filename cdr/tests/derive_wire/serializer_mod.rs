@@ -1,7 +1,6 @@
-#[cfg(test)]
 #[allow(unused_imports)]
 mod cdr_struct_tests {
-    use crate::{
+    use int2dds::{
         dcps::topic::type_support::{DdsType, FieldAccessor},
         serialize::{
             cdr::{
@@ -114,7 +113,7 @@ mod cdr_struct_tests {
 
     #[test]
     fn test_keyed_struct_cdr() {
-        use crate::dcps::topic::type_support::TypeSupport;
+        use int2dds::dcps::topic::type_support::TypeSupport;
 
         let value = KeyedStruct { id: 42, name: "test".to_string(), value: 3.14 };
 
@@ -141,7 +140,7 @@ mod cdr_struct_tests {
         // Compute key (instance handle)
         let instance_handle = type_support.compute_key(&value);
         assert!(type_support.is_compute_key_provided());
-        assert_ne!(instance_handle, crate::common::instance_handle::InstanceHandle::NIL);
+        assert_ne!(instance_handle, int2dds::common::instance_handle::InstanceHandle::NIL);
     }
 
     // Error Handling Tests
@@ -217,7 +216,7 @@ mod cdr_struct_tests {
 
     #[test]
     fn test_tuple_struct_type_support() {
-        use crate::dcps::topic::type_support::TypeSupport;
+        use int2dds::dcps::topic::type_support::TypeSupport;
 
         let value = TupleStruct(99);
         let type_support = TupleStruct::get_type_support();

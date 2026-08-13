@@ -3,7 +3,8 @@
 //! The CDR/XCDR wire rules live in the `int2dds-cdr` kernel crate. Everything the
 //! kernel owns is re-exported here under the paths it had before the split, which
 //! are the paths `#[derive(DdsType)]` writes into generated code; `derive/tests/facade.rs`
-//! is the compile gate for that. Keep the re-exports enumerated rather than glob:
+//! is the compile gate for that, and `cdr/tests/derive_wire/` exercises these paths
+//! from outside the crate. Keep the re-exports enumerated rather than glob:
 //! the list is what makes the facade auditable.
 //!
 //! `pl_cdr` (SPDP/SEDP/inline QoS) stays here. It shares the `PID(2)+length(2)`
@@ -11,9 +12,6 @@
 //! §9.6.2.2.2 counts trailing padding, XTypes does not — so the two must not merge.
 
 pub mod pl_cdr;
-
-#[cfg(test)]
-mod cdr_tests;
 
 pub use int2dds_cdr::{cdr, core, key_holder, xcdr};
 pub use int2dds_cdr::{key_holder_align_up, KeyHolder, KeyHolderAccessor, KeyHolderFallback};

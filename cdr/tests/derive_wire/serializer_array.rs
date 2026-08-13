@@ -1,7 +1,6 @@
-#[cfg(test)]
 #[allow(unused_imports)]
 mod cdr_array_tests {
-    use crate::{
+    use int2dds::{
         dcps::topic::type_support::{DdsType, FieldAccessor},
         serialize::{
             cdr::{
@@ -103,14 +102,14 @@ mod cdr_array_tests {
         b: u32,
     }
 
-    fn xcdr1_format() -> crate::dcps::topic::type_support::SerializationFormat {
-        crate::dcps::topic::type_support::SerializationFormat::Cdr
+    fn xcdr1_format() -> int2dds::dcps::topic::type_support::SerializationFormat {
+        int2dds::dcps::topic::type_support::SerializationFormat::Cdr
     }
 
     fn xcdr2_format(
         ext: ExtensibilityKind,
-    ) -> crate::dcps::topic::type_support::SerializationFormat {
-        crate::dcps::topic::type_support::SerializationFormat::Xcdr {
+    ) -> int2dds::dcps::topic::type_support::SerializationFormat {
+        int2dds::dcps::topic::type_support::SerializationFormat::Xcdr {
             extensibility_kind: ext,
             use_delimiters: !matches!(ext, ExtensibilityKind::Final),
         }
@@ -120,7 +119,7 @@ mod cdr_array_tests {
         ($name:ident, $ty:ident, $field_setter:expr, $field_getter:expr, $format:expr, $encap:expr) => {
             #[test]
             fn $name() {
-                use crate::dcps::topic::type_support::TypeSupport;
+                use int2dds::dcps::topic::type_support::TypeSupport;
 
                 let value: $ty = $field_setter;
                 let ts = <$ty>::get_type_support();

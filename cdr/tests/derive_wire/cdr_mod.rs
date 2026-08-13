@@ -2,16 +2,15 @@
 /// carries a DHEADER. The three IDL generators treat everything outside
 /// `String|WString|Struct|Enum|Bitmask|Sequence|Array|Map` as primitive, so any Rust
 /// type classified differently diverges from C/C#/Python on the wire.
-#[cfg(test)]
 mod element_classification_tests {
-    use crate::serialize::cdr::*;
-    use crate::serialize::core::BufferManager;
-    use crate::serialize::WChar;
-    use int2dds_derive::DdsType;
+    use int2dds::dcps::topic::type_support::DdsType;
+    use int2dds::serialize::cdr::*;
+    use int2dds::serialize::core::BufferManager;
+    use int2dds::serialize::WChar;
     use std::collections::{BTreeMap, HashMap};
 
     #[derive(DdsType)]
-    #[dds_type(bitmask, bit_bound = 8, crate_path = "crate")]
+    #[dds_type(bitmask, bit_bound = 8, crate_path = "int2dds")]
     #[repr(u8)]
     enum Flags {
         #[dds(position = 0)]
@@ -109,14 +108,14 @@ mod element_classification_tests {
     }
 
     #[derive(DdsType)]
-    #[dds_type(crate_path = "crate")]
+    #[dds_type(crate_path = "int2dds")]
     enum Color {
         Red,
         Blue,
     }
 
     #[derive(DdsType)]
-    #[dds_type(crate_path = "crate", extensibility = "Final")]
+    #[dds_type(crate_path = "int2dds", extensibility = "Final")]
     struct Pt {
         x: i32,
         y: i32,
@@ -193,7 +192,7 @@ mod element_classification_tests {
     }
 
     #[derive(DdsType)]
-    #[dds_type(crate_path = "crate", extensibility = "Appendable")]
+    #[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
     struct APt {
         x: i32,
         y: i32,

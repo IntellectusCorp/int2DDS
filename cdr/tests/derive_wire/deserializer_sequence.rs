@@ -1,7 +1,6 @@
-#[cfg(test)]
 #[allow(unused_imports)]
 mod try_construct_seq_tests {
-    use crate::{
+    use int2dds::{
         dcps::topic::type_support::{DdsType, FieldAccessor},
         serialize::{
             cdr::{
