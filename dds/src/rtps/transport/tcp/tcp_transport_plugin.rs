@@ -29,7 +29,7 @@ use crate::rtps::transport::{TcpConfig, TransportType};
 
 /// Capacity of the inbound channel. Single-slot so a full channel
 /// blocks the router at once, pushing backpressure onto the TCP window.
-const TO_RTPS_CHANNEL_CAPACITY: usize = 1;
+const TO_RTPS_CHANNEL_CAPACITY: usize = 256;
 
 // ── TcpTransportPlugin ──────────────────────────────────────────────────
 

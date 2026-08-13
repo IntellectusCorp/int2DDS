@@ -334,7 +334,7 @@ impl ConnectionRegistry {
         }
 
         let msg = IncomingMessage { data: data.to_vec(), source };
-        if let Err(e) = self.user_data_tx.send(msg) {
+        if let Err(e) = self.user_data_tx.try_send(msg) {
             warn!(
                 "TcpSender [{}]: Failed to route intra-participant user data: {:?}",
                 TransportErrorCode::TcpChannelFull,
