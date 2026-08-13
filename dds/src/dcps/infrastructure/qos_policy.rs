@@ -2446,14 +2446,14 @@ impl QosPolicy for DataFragQosPolicy {
 /// This policy provides additional control over reliable communication behavior.
 ///
 /// # Default
-/// - `heartbeat_response_delay: 10ms` - Delay before responding to a heartbeat.
+/// - `heartbeat_response_delay: 80ms` - Delay before responding to a heartbeat.
 /// - `heartbeat_suppression_duration: 0` - (Unsupported) Duration to suppress heartbeats.
 /// - `preemptive_acknack_delay: 80ms` - Delay before sending preemptive ACKNACK.
 #[derive(DdsType, Copy, Eq)]
 #[dds_type(crate_path = "crate", no_default)]
 pub struct ReaderReliabilityExtensionQosPolicy {
     /// Delay before responding to a heartbeat.
-    /// Default: 10ms
+    /// Default: 80ms
     pub heartbeat_response_delay: Duration,
 
     /// (Unsupported) Duration to suppress heartbeats from the same writer.
@@ -2473,7 +2473,7 @@ impl Default for ReaderReliabilityExtensionQosPolicy {
 
 impl ConstDefault for ReaderReliabilityExtensionQosPolicy {
     const DEFAULT: Self = Self {
-        heartbeat_response_delay: Duration { sec: 0, nanosec: 10_000_000 },
+        heartbeat_response_delay: Duration { sec: 0, nanosec: 80_000_000 },
         heartbeat_suppression_duration: Duration { sec: 0, nanosec: 0 },
         preemptive_acknack_delay: Duration { sec: 0, nanosec: 80_000_000 },
     };
