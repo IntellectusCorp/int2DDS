@@ -5,6 +5,7 @@
 //! data payload, instance handle, and metadata.
 
 use std::collections::HashSet;
+use std::num::NonZeroU16;
 use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
@@ -418,12 +419,13 @@ impl CacheChange {
     }
 
     /// How many fragments fit in one DATA_FRAG submessage under the datagram budget.
-    /// At least 1, so a budget below one fragment still makes progress.
-    pub(crate) fn fragments_per_submessage(&self, max_message_size: usize) -> u16 {
+    /// Never zero, so a caller packing fragments in a loop cannot spin without advancing.
+    pub(crate) fn fragments_per_submessage(&self, max_message_size: usize) -> NonZeroU16 {
         if self.fragment_size == 0 {
-            return 1;
+            return NonZeroU16::MIN;
         }
-        (max_message_size / self.fragment_size as usize).clamp(1, u16::MAX as usize) as u16
+        let capped = (max_message_size / self.fragment_size as usize).min(u16::MAX as usize) as u16;
+        NonZeroU16::new(capped).unwrap_or(NonZeroU16::MIN)
     }
 
     // Create fragmented cache change from payload
@@ -581,15 +583,24 @@ mod tests {
     #[test]
     fn fragments_per_submessage_divides_the_datagram_budget() {
         let change = packed_change();
-        assert_eq!(change.fragments_per_submessage(65_000), 48, "65000 / 1344");
-        assert_eq!(change.fragments_per_submessage(14_720), 10, "14720 / 1344");
-        assert_eq!(change.fragments_per_submessage(1_472), 1, "budget below two fragments");
-        assert_eq!(change.fragments_per_submessage(0), 1, "never returns zero");
-        assert_eq!(change.fragments_per_submessage(usize::MAX), u16::MAX, "clamped to u16");
+        assert_eq!(change.fragments_per_submessage(65_000).get(), 48, "65000 / 1344");
+        assert_eq!(change.fragments_per_submessage(14_720).get(), 10, "14720 / 1344");
+        assert_eq!(change.fragments_per_submessage(1_472).get(), 1, "budget below two fragments");
+        assert_eq!(change.fragments_per_submessage(0).get(), 1, "never returns zero");
+        assert_eq!(change.fragments_per_submessage(usize::MAX).get(), u16::MAX, "clamped to u16");
 
         // The default fragment size is the default budget, so packing is a no-op there.
         let mut default_size = packed_change();
         default_size.apply_fragmentation(65_000, 65_000);
-        assert_eq!(default_size.fragments_per_submessage(65_000), 1, "defaults do not pack");
+        assert_eq!(default_size.fragments_per_submessage(65_000).get(), 1, "defaults do not pack");
+    }
+
+    #[test]
+    fn fragments_per_submessage_is_one_when_fragment_size_is_zero() {
+        // apply_fragmentation(_, 0) leaves fragment_size at 0 (see zero_knob_disables_fragmentation).
+        // Dividing by it would panic; the guard must return 1 instead.
+        let mut change = packed_change();
+        change.apply_fragmentation(65_000, 0);
+        assert_eq!(change.fragments_per_submessage(65_000).get(), 1);
     }
 }
