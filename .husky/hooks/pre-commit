@@ -1,8 +1,10 @@
 #!/bin/sh
 set -e
 
-# core.quotePath defaults on: a non-ASCII or special-character path would otherwise come back
-# octal-quoted, never match a real path below, and be silently skipped.
+# core.quotePath defaults on, so a non-ASCII staged path comes back octal-quoted and would
+# never match a real path below; -c core.quotePath=false fixes that one case. It does not
+# help a path containing a literal quote or backslash (git C-quotes those regardless) or a
+# literal newline (the `read -r` loop below cannot parse that as one path either way).
 STAGED_FILES=$(git -c core.quotePath=false diff --cached --name-only)
 
 cargo fmt --all
