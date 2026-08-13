@@ -489,9 +489,10 @@ impl WriterProxy {
         info.is_complete = info.received_fragments.len() == info.total_fragments as usize;
     }
 
-    /// Undo `mark_frag_received` for one change. Called when the buffer backing it was
-    /// evicted: the bytes are gone, so the ledger must go back to reporting nothing received,
-    /// or the reader would only re-ask for the fragments it happened to see before eviction.
+    /// Undo `mark_frag_received` for one change. Called whenever the buffer backing it is gone
+    /// before delivery -- eviction, or a bail between completion and delivery: the bytes are
+    /// gone, so the ledger must go back to reporting nothing received, or the reader would only
+    /// re-ask for the fragments it happened to see before the buffer was lost.
     pub(crate) fn forget_fragments(&mut self, seq_num: SequenceNumber) {
         if let Some(info) = self
             .changes_from_writer

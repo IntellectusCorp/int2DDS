@@ -2209,6 +2209,29 @@ impl UserLogic {
 
         Ok(())
     }
+
+    /// Undo this reader's fragment arrival record for one sample. Used wherever
+    /// `handle_datafrag_message` bails between `mark_frag_received` reporting a sample whole and
+    /// actually delivering it, so the ledger does not outlive the buffer that would have done so.
+    fn forget_reader_frag_ledger(
+        reader: &Arc<dyn Reader + Send + Sync>,
+        remote_writer_guid: Guid,
+        seq_num: SequenceNumber,
+    ) {
+        let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() else {
+            return;
+        };
+        let writer_proxies = stateful_reader.writer_proxies();
+        let Ok(mut matched_writers) = writer_proxies.lock() else {
+            return;
+        };
+        if let Some(writer_proxy) = matched_writers
+            .iter_mut()
+            .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
+        {
+            writer_proxy.forget_fragments(seq_num);
+        }
+    }
 }
 
 impl_participant_accessor!(UserLogic);
@@ -2891,10 +2914,18 @@ impl UnicastMessageProcessor for UserLogic {
             // Use timestamp from first fragment, fallback to current message
             let assembled_timestamp = buffer.source_timestamp.or(source_timestamp);
             if assembled_timestamp.is_none() {
-                return Err(RtpsError::new(
-                    RtpsErrorCode::InvalidSubmessageBody,
-                    "No source timestamp available for assembled DataFrag (missing INFO_TS)",
-                ));
+                // Nothing to stamp the change with. The buffer is already gone, so retract the
+                // ledger too and move on to the next reader rather than aborting the datagram --
+                // an interop peer that never sends INFO_TS would otherwise strand every reader
+                // this loop has not reached yet.
+                debug!(
+                    "[UserLogic] No source timestamp for assembled DataFrag sn={:?} reader={}; \
+                     retracting its ledger instead of delivering",
+                    data_frag.writer_sn,
+                    reader.guid()
+                );
+                Self::forget_reader_frag_ledger(reader, remote_writer_guid, data_frag.writer_sn);
+                continue;
             }
 
             let mut ownership_strength = None;
@@ -2918,7 +2949,22 @@ impl UnicastMessageProcessor for UserLogic {
 
             let mut assembled_change = match reader.reader_cache().lock() {
                 Ok(mut cache) => cache.acquire_change(),
-                Err(_) => continue,
+                Err(_) => {
+                    // The buffer is already gone; retract the ledger so this reader re-asks
+                    // instead of acknowledging a sample it never actually received.
+                    debug!(
+                        "[UserLogic] Poisoned reader cache for reader={} sn={:?}; retracting its \
+                         fragment ledger",
+                        reader.guid(),
+                        data_frag.writer_sn
+                    );
+                    Self::forget_reader_frag_ledger(
+                        reader,
+                        remote_writer_guid,
+                        data_frag.writer_sn,
+                    );
+                    continue;
+                }
             };
             assembled_change.reset(
                 ChangeKind::Alive,
@@ -3445,6 +3491,38 @@ mod tests {
             .expect("handle_datafrag_message must not error");
     }
 
+    /// Like `feed_fragment`, but the datagram carries no INFO_TS -- the interop case Finding 1
+    /// is about. Returns the result instead of asserting success, since bailing without
+    /// delivering is exactly the behavior under test.
+    #[allow(clippy::too_many_arguments)]
+    fn feed_fragment_without_timestamp(
+        user_logic: &mut UserLogic,
+        participant_prefix: GuidPrefix,
+        writer_guid: Guid,
+        sn: SequenceNumber,
+        reader_id: EntityId,
+        fragment_starting_num: u32,
+        fragments_in_submessage: u16,
+        payload: Vec<u8>,
+    ) -> RtpsResult<()> {
+        let mut data_frag = DataFrag::new(
+            reader_id,
+            writer_guid.entity_id(),
+            sn,
+            fragment_starting_num,
+            fragments_in_submessage,
+            FRAG_TEST_FRAGMENT_SIZE,
+            FRAG_TEST_SAMPLE_SIZE,
+        );
+        data_frag.add_serialized_data(SubmessagePayload::Owned(bytes::Bytes::from(payload)));
+
+        let rtps_header = Header::new(writer_guid.prefix());
+        let from_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7400);
+        let message_receiver = MessageReceiver::new(participant_prefix, &from_addr);
+
+        user_logic.handle_datafrag_message(&rtps_header, &data_frag, &message_receiver)
+    }
+
     /// The payload of the whole four-fragment sample the tests below assemble.
     fn whole_sample() -> Vec<u8> {
         vec![1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4]
@@ -3800,6 +3878,73 @@ mod tests {
             "reader B's buffer still holds fragments 1..=3; retracting its record would make it \
              re-request bytes it has, and the writer resend them into a buffer that already \
              counted them"
+        );
+    }
+
+    // --- Fragment reassembly: a bail between completion and delivery must not leave the ---
+    // --- ledger claiming the sample arrived                                             ---
+
+    #[test]
+    fn a_reader_that_bails_on_a_missing_timestamp_does_not_end_up_with_a_complete_ledger() {
+        let (participant, mut user_logic, reader_a, _reader_b, writer_guid, sn) =
+            two_readers_matched_to_one_fragmented_writer();
+        let prefix = participant.guid().prefix();
+        let reader_a_id = reader_a.guid().entity_id();
+
+        // No INFO_TS anywhere in this datagram, directed so reader A is the only one it
+        // completes for.
+        let result = feed_fragment_without_timestamp(
+            &mut user_logic,
+            prefix,
+            writer_guid,
+            sn,
+            reader_a_id,
+            1,
+            4,
+            whole_sample(),
+        );
+
+        assert!(result.is_ok(), "a missing timestamp must not abort the datagram: {result:?}");
+        assert!(
+            held_sample(&reader_a, writer_guid, sn).is_none(),
+            "delivery must not have happened with no timestamp to stamp the change with"
+        );
+        assert!(
+            !ledger_reads_complete(&reader_a, writer_guid, sn),
+            "a bailed delivery must not leave the ledger claiming the sample was received"
+        );
+        assert_eq!(
+            ledger_missing(&reader_a, writer_guid, sn),
+            vec![1, 2, 3, 4],
+            "the reader must ask for the whole sample again"
+        );
+    }
+
+    #[test]
+    fn a_reader_that_bails_on_a_poisoned_cache_does_not_end_up_with_a_complete_ledger() {
+        let (participant, mut user_logic, reader_a, _reader_b, writer_guid, sn) =
+            two_readers_matched_to_one_fragmented_writer();
+        let prefix = participant.guid().prefix();
+        let reader_a_id = reader_a.guid().entity_id();
+
+        // Poison reader A's cache mutex, the same way a panicking listener would.
+        let cache = reader_a.reader_cache();
+        let _ = std::thread::spawn(move || {
+            let _guard = cache.lock().unwrap();
+            panic!("deliberate poison for test");
+        })
+        .join();
+
+        feed_fragment(&mut user_logic, prefix, writer_guid, sn, reader_a_id, 1, 4, whole_sample());
+
+        assert!(
+            !ledger_reads_complete(&reader_a, writer_guid, sn),
+            "a bailed delivery must not leave the ledger claiming the sample was received"
+        );
+        assert_eq!(
+            ledger_missing(&reader_a, writer_guid, sn),
+            vec![1, 2, 3, 4],
+            "the reader must ask for the whole sample again"
         );
     }
 
