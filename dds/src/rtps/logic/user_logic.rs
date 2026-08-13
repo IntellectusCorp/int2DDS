@@ -6,7 +6,7 @@
 use chrono::{DateTime, Utc};
 use log::{debug, trace, warn};
 // use rand::Rng;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::ops::Add;
 use std::time::{Duration, Instant};
 
@@ -201,6 +201,21 @@ fn schedule_nackfrag(request: NackFragRequest, delay: Duration) {
     });
 }
 
+/// Maximal runs of consecutive fragment numbers, as `(start, count)`.
+///
+/// A repair request is sparse, but one DATA_FRAG submessage carries only consecutive
+/// fragments, so each run is packed on its own. Numbers outside `1..=total` are dropped.
+fn contiguous_fragment_runs(fragments: &BTreeSet<u32>, total: u32) -> Vec<(u32, u32)> {
+    let mut runs: Vec<(u32, u32)> = Vec::new();
+    for &fragment_num in fragments.iter().filter(|&&n| n >= 1 && n <= total) {
+        match runs.last_mut() {
+            Some((start, count)) if *start + *count == fragment_num => *count += 1,
+            _ => runs.push((fragment_num, 1)),
+        }
+    }
+    runs
+}
+
 #[allow(dead_code)]
 #[derive(Clone)]
 pub(crate) struct UserLogic {
@@ -388,6 +403,9 @@ impl UserLogic {
         let SendPlan { locators, group_id, reliable, requested_change_types } = plan;
         let piggyback = reliable && !stateful_writer.disable_piggyback_heartbeat();
 
+        // Read once per call: bounds how many fragments ride in one DATA_FRAG.
+        let max_message_size = crate::common::env::get_max_message_size();
+
         let mut send_buffer = participant
             .wire_buffer_pool()
             .lock()
@@ -412,14 +430,21 @@ impl UserLogic {
 
                 let timestamp = Utc::now();
 
-                for fragment_num in 1..=a_change.total_fragments() {
-                    let Some(fragment_data) = a_change.get_fragment_data(fragment_num) else {
+                let total_fragments = a_change.total_fragments();
+                let frags_per_msg = a_change.fragments_per_submessage(max_message_size) as u32;
+                let mut fragment_num = 1;
+                while fragment_num <= total_fragments {
+                    let count = std::cmp::min(frags_per_msg, total_fragments - fragment_num + 1);
+                    let Some(fragment_data) =
+                        a_change.get_fragment_range_data(fragment_num, count as u16)
+                    else {
+                        fragment_num += count;
                         continue;
                     };
 
-                    // Piggyback one heartbeat on the final fragment so the sample is
-                    // advertised only after the whole burst is on the wire.
-                    let is_final_fragment = fragment_num == a_change.total_fragments();
+                    // Piggyback one heartbeat on the final fragment so the sample is advertised
+                    // only after the whole burst is on the wire.
+                    let is_final_fragment = fragment_num + count - 1 == total_fragments;
                     let heartbeat_info = (piggyback && is_final_fragment).then(|| {
                         (
                             stateful_writer.heartbeat_count(),
@@ -436,7 +461,7 @@ impl UserLogic {
                         group_id,
                         writer.endpoint_id(),
                         fragment_num,
-                        1,
+                        count as u16,
                         a_change.fragment_size() as u16,
                         a_change.data_value().len() as u32,
                         fragment_data,
@@ -457,6 +482,7 @@ impl UserLogic {
                             }
                         }
                     }
+                    fragment_num += count;
                 }
             } else if MessageCreator::create_data_msg(
                 &a_change,
@@ -549,6 +575,10 @@ impl UserLogic {
 
         let timestamp = Utc::now();
         let participant = self.get_upgraded_participant()?;
+
+        // Read once per call: bounds how many fragments ride in one DATA_FRAG.
+        let max_message_size = crate::common::env::get_max_message_size();
+
         let mut send_buffer = participant
             .wire_buffer_pool()
             .lock()
@@ -577,26 +607,28 @@ impl UserLogic {
 
             let total_frags = change.total_fragments();
 
-            // Piggyback one heartbeat on the final requested fragment so the repair burst is
-            // advertised only after it is fully on the wire.
-            let final_requested_fn = requested_fragments
-                .iter()
-                .filter(|&&fragment_num| fragment_num >= 1 && fragment_num <= total_frags)
-                .max()
-                .copied();
+            let runs = contiguous_fragment_runs(&requested_fragments, total_frags);
+            let Some(last_run_index) = runs.len().checked_sub(1) else {
+                continue;
+            };
+            let frags_per_msg = change.fragments_per_submessage(max_message_size) as u32;
 
-            for fragment_num in requested_fragments {
-                if fragment_num >= 1 && fragment_num <= total_frags {
-                    let heartbeat_info = (piggyback && Some(fragment_num) == final_requested_fn)
-                        .then(|| {
-                            (stateful_writer.heartbeat_count(), writer_sn, last_sn, false, false)
-                        });
+            for (run_index, &(run_start, run_len)) in runs.iter().enumerate() {
+                let mut offset = 0;
+                while offset < run_len {
+                    let count = std::cmp::min(frags_per_msg, run_len - offset);
+                    // One heartbeat per burst, on the submessage carrying the highest requested fragment.
+                    let is_last = run_index == last_run_index && offset + count == run_len;
+                    let heartbeat_info = (piggyback && is_last).then(|| {
+                        (stateful_writer.heartbeat_count(), writer_sn, last_sn, false, false)
+                    });
 
                     if self.send_data_frag_to_reader_proxy(
                         &change,
                         reader_proxy,
                         writer_entity_id,
-                        fragment_num,
+                        run_start + offset,
+                        count as u16,
                         heartbeat_info,
                         timestamp,
                         &mut send_buffer,
@@ -604,6 +636,7 @@ impl UserLogic {
                     {
                         stateful_writer.increase_heartbeat_count();
                     }
+                    offset += count;
                 }
             }
         }
@@ -1297,18 +1330,21 @@ impl UserLogic {
         reader_proxy: &ReaderProxy,
         writer_id: EntityId,
         fragment_num: u32,
+        fragments_in_submessage: u16,
         heartbeat_info: Option<(u32, SequenceNumber, SequenceNumber, bool, bool)>,
         timestamp: DateTime<Utc>,
         send_buffer: &mut Vec<u8>,
     ) -> bool {
-        if let Some(fragment_data) = change.get_fragment_data(fragment_num) {
+        if let Some(fragment_data) =
+            change.get_fragment_range_data(fragment_num, fragments_in_submessage)
+        {
             let result = MessageCreator::create_data_frag_msg(
                 change,
                 reader_proxy.remote_reader_guid(),
                 reader_proxy.remote_group_entity_id(),
                 writer_id,
                 fragment_num,
-                1,
+                fragments_in_submessage,
                 change.fragment_size() as u16,
                 change.data_value().len() as u32,
                 fragment_data,
@@ -3021,5 +3057,23 @@ impl UnicastMessageProcessor for UserLogic {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::contiguous_fragment_runs;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn runs_split_on_every_gap_and_clamp_to_total() {
+        let asked: BTreeSet<u32> = [1, 2, 3, 7, 8, 11, 99].into_iter().collect();
+        assert_eq!(contiguous_fragment_runs(&asked, 20), vec![(1, 3), (7, 2), (11, 1)]);
+    }
+
+    #[test]
+    fn an_empty_or_fully_out_of_range_request_yields_no_runs() {
+        assert!(contiguous_fragment_runs(&BTreeSet::new(), 10).is_empty());
+        assert!(contiguous_fragment_runs(&[0, 11].into_iter().collect(), 10).is_empty());
     }
 }
