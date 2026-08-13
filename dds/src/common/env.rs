@@ -41,7 +41,7 @@ pub fn init_from_env() {
     // - INT2DDS_UDP_SOCKET_BUFFER: Set UDP socket buffer size (bytes) - Default: OS default
     // - INT2DDS_SHM_BUFFER_SIZE: Set shared memory buffer size (bytes) - Default: 1048576 (1MB)
     // - INT2DDS_DATA_FRAG_SIZE: Set DATA_FRAG fragment size (1-65000) when the writer QoS specifies none - Default: 65000
-    // - INT2DDS_MAX_MESSAGE_SIZE: Set max UDP message size (1-65000), header-inclusive datagram budget bounding fragments packed per message - Default: 13440
+    // - INT2DDS_MAX_MESSAGE_SIZE: Set max UDP message size (1-65000), header-inclusive datagram budget bounding fragments packed per message - Default: 65000
     // - INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT: Set the default for the disable_piggyback_heartbeat writer QoS (true, false) - Default: false
 
     // - INT2DDS_INITIAL_PEERS: Set initial peers for SPDP unicast discovery (comma-separated, e.g., "192.168.1.10:7400,192.168.1.11:7400") - Default: none
@@ -362,10 +362,9 @@ pub fn set_max_message_size(size: i32) {
     unsafe { std::env::set_var("INT2DDS_MAX_MESSAGE_SIZE", size.to_string()) };
 }
 
-// Resolve INT2DDS_MAX_MESSAGE_SIZE to a concrete size, clamped to 1..=65000.
-// Default 13440 = 10 x the 1344-byte deployment DATA_FRAG fragment size.
+// Resolve INT2DDS_MAX_MESSAGE_SIZE to a concrete size, clamped to 1..=65000, default 65000.
 pub fn get_max_message_size() -> usize {
-    get_max_message_size_override().filter(|&size| (1..=65000).contains(&size)).unwrap_or(13440)
+    get_max_message_size_override().filter(|&size| (1..=65000).contains(&size)).unwrap_or(65000)
         as usize
 }
 
