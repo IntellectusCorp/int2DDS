@@ -65,7 +65,31 @@ impl<'a> DataFrag<'a> {
         self.serialized_data = serialized_data;
     }
 
-    pub(crate) fn octets_to_next_header(&self) -> u16 {
+    /// Bytes of padding needed to end this submessage on a 4-byte boundary.
+    ///
+    /// RTPS 2.5 - 9.4.1: submessages begin on 4-byte boundaries, and 9.4.5.1.3 defines
+    /// octetsToNextHeader as the distance to the header of the *next* submessage. A
+    /// receiver walks that chain, so a body left at an odd length puts it on a misaligned
+    /// offset. Cyclone DDS rejects the whole datagram as malformed rather than reading
+    /// misaligned data (`ddsi_receive.c`, "not 0 mod 4 and yet also not the number of
+    /// octets remaining").
+    ///
+    /// Every fragment but the last carries exactly `fragment_size` bytes, and fragment
+    /// sizes are multiples of four in practice, so this only bites on the final fragment
+    /// of a sample whose size is not a multiple of the fragment size - and then the sample
+    /// never completes, because that one fragment is dropped on every retry. `Data` has
+    /// always padded; DATA_FRAG did not.
+    fn alignment_padding(payload_len: usize) -> u16 {
+        let rem = payload_len % 4;
+        if rem == 0 {
+            0
+        } else {
+            (4 - rem) as u16
+        }
+    }
+
+    /// Length of the body as written, excluding any alignment padding.
+    fn unpadded_body_length(&self) -> u16 {
         2  /* extra_flags */
          + 2  /* octets_to_inline_qos */
          + 4  /* reader_id */
@@ -82,6 +106,11 @@ impl<'a> DataFrag<'a> {
             None => 0,
          }  /* inline_qos */
          + self.serialized_data.len() as u16
+    }
+
+    pub(crate) fn octets_to_next_header(&self) -> u16 {
+        let payload_len = self.unpadded_body_length();
+        payload_len + Self::alignment_padding(payload_len as usize)
     }
 
     /// Return the payload as `Bytes` for zero-copy sub-slicing on the receive path.
@@ -245,6 +274,10 @@ impl<C: Context> Writable<C> for DataFrag<'_> {
             writer.write_value(inline_qos)?;
         }
         writer.write_bytes(self.serialized_data.as_slice())?;
+        let padding = Self::alignment_padding(self.unpadded_body_length() as usize);
+        if padding > 0 {
+            writer.write_bytes(&vec![0u8; padding as usize])?;
+        }
 
         Ok(())
     }
@@ -517,5 +550,73 @@ mod tests {
         let mut buffer = three_fragment_buffer();
         // fragment 1 allows at most fragment_size (2) bytes
         assert!(!buffer.copy_fragment_data(1, Bytes::from_static(&[1, 2, 3])));
+    }
+
+    /// Build the final fragment of a sample, which is the only one whose payload is not a
+    /// whole `fragment_size`.
+    fn final_fragment(sample_size: u32, fragment_size: u16) -> DataFrag<'static> {
+        let total = sample_size.div_ceil(fragment_size as u32);
+        let remainder = sample_size - (total - 1) * fragment_size as u32;
+        DataFrag {
+            fragment_starting_num: total,
+            fragment_size,
+            sample_size,
+            serialized_data: SubmessagePayload::Owned(Bytes::from(vec![0xAB; remainder as usize])),
+            ..create_dummy_datafrag()
+        }
+    }
+
+    // A receiver locates the next submessage by adding octetsToNextHeader to the current
+    // one, so it has to be a multiple of four whenever another submessage follows - and
+    // int2DDS always follows DATA_FRAG with a piggyback HEARTBEAT.
+    #[test]
+    fn octets_to_next_header_is_four_byte_aligned_for_a_ragged_final_fragment() {
+        // The Autoware /map/vector_map case: 604663 bytes at 1344 per fragment leaves a
+        // 1207-byte fragment 450, which used to declare octetsToNextHeader = 1239.
+        let data_frag = final_fragment(604_663, 1344);
+
+        assert_eq!(data_frag.fragment_starting_num, 450);
+        assert_eq!(data_frag.serialized_data.len(), 1207);
+        assert_eq!(data_frag.octets_to_next_header(), 1240);
+        assert_eq!(data_frag.octets_to_next_header() % 4, 0);
+    }
+
+    // The declared length has to match the bytes actually written, or the padding shifts
+    // the next submessage instead of aligning it.
+    #[test]
+    fn a_padded_data_frag_writes_exactly_what_it_declares() {
+        let data_frag = final_fragment(604_663, 1344);
+        let declared = data_frag.octets_to_next_header();
+
+        let written = data_frag.write_to_vec_with_ctx(Endianness::LittleEndian).unwrap();
+
+        assert_eq!(written.len(), declared as usize);
+        assert_eq!(written.len(), 1207 + 33, "32 fixed fields + payload + 1 pad byte");
+        assert_eq!(&written[written.len() - 1..], &[0u8], "padding is zero-filled");
+    }
+
+    // An already-aligned fragment must not grow, or every fragment on the wire changes.
+    #[test]
+    fn an_aligned_fragment_is_not_padded() {
+        let data_frag = final_fragment(604_664, 1344); // remainder 1208, already a multiple of 4
+        assert_eq!(data_frag.serialized_data.len(), 1208);
+        assert_eq!(data_frag.octets_to_next_header(), 1240);
+
+        let written = data_frag.write_to_vec_with_ctx(Endianness::LittleEndian).unwrap();
+        assert_eq!(written.len(), 1240);
+    }
+
+    // The padding the sender adds has to survive the round trip: deserialize trims it back
+    // to the real fragment length, so reassembly still sees exactly the sample's bytes.
+    #[test]
+    fn padding_is_trimmed_again_on_deserialize() {
+        let data_frag = final_fragment(604_663, 1344);
+        let written = data_frag.write_to_vec_with_ctx(Endianness::LittleEndian).unwrap();
+        let header = SubmessageHeader::new(SubmessageId::DATA_FRAG, 0x01, written.len() as u16);
+
+        let parsed = DataFrag::deserialize(&Bytes::from(written), &header).unwrap();
+
+        assert_eq!(parsed.serialized_data.len(), 1207);
+        assert_eq!(parsed.fragment_starting_num, 450);
     }
 }

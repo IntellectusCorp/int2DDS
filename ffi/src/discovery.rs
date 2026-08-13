@@ -5,7 +5,12 @@
 //! retrieval, and field getters for opaque builtin topic data types.
 
 use crate::error::*;
+use crate::subscriber::{
+    INT2DDS_INSTANCE_STATE_ALIVE, INT2DDS_INSTANCE_STATE_NOT_ALIVE_DISPOSED,
+    INT2DDS_INSTANCE_STATE_NOT_ALIVE_NO_WRITERS,
+};
 use crate::types::{Int2DdsDataReader, Int2DdsDataWriter, Int2DdsParticipant};
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::time::{Duration as StdDuration, Instant};
 
@@ -18,12 +23,15 @@ use int2dds::common::{
     instance_handle::InstanceHandle,
 };
 use int2dds::core::time::Duration;
+use int2dds::core::types::LENGTH_UNLIMITED;
 use int2dds::infrastructure::qos_policy::{
     DurabilityQosPolicyKind, LivelinessQosPolicyKind, ReliabilityQosPolicyKind,
 };
 use int2dds::infrastructure::status::StatusMask;
 use int2dds::infrastructure::wait_set::WaitSet;
-use int2dds::subscription::sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind};
+use int2dds::subscription::sample_info::{
+    InstanceStateKind, SampleInfo, SampleStateKind, ViewStateKind,
+};
 
 // ============================================================================
 // Opaque builtin topic data types
@@ -41,12 +49,20 @@ pub struct Int2DdsSubscriptionBuiltinTopicData {
     pub(crate) inner: SubscriptionBuiltinTopicData,
 }
 
+/// One instance of a snapshot. `data` is absent for a dispose, which travels as a key with no
+/// payload, so the handle is the only identity a departure can be acted on by.
+pub(crate) struct SnapshotEntry<T> {
+    pub(crate) data: Option<T>,
+    pub(crate) instance_state: u32,
+    pub(crate) instance_handle: [u8; 16],
+}
+
 pub struct Int2DdsPublicationBuiltinTopicDataSeq {
-    pub(crate) items: Vec<PublicationBuiltinTopicData>,
+    pub(crate) items: Vec<SnapshotEntry<PublicationBuiltinTopicData>>,
 }
 
 pub struct Int2DdsSubscriptionBuiltinTopicDataSeq {
-    pub(crate) items: Vec<SubscriptionBuiltinTopicData>,
+    pub(crate) items: Vec<SnapshotEntry<SubscriptionBuiltinTopicData>>,
 }
 
 unsafe impl Send for Int2DdsParticipantBuiltinTopicData {}
@@ -60,10 +76,53 @@ unsafe impl Sync for Int2DdsPublicationBuiltinTopicDataSeq {}
 unsafe impl Send for Int2DdsSubscriptionBuiltinTopicDataSeq {}
 unsafe impl Sync for Int2DdsSubscriptionBuiltinTopicDataSeq {}
 
+/// Translate an `INT2DDS_INSTANCE_STATE_*` mask into the states a read selects on.
+/// An empty mask would select nothing, so it falls back to alive.
+fn instance_states_from_mask(mask: u32) -> Vec<InstanceStateKind> {
+    let mut states = Vec::new();
+    if mask & INT2DDS_INSTANCE_STATE_ALIVE != 0 {
+        states.push(InstanceStateKind::ALIVE_INSTANCE_STATE);
+    }
+    if mask & INT2DDS_INSTANCE_STATE_NOT_ALIVE_DISPOSED != 0 {
+        states.push(InstanceStateKind::NOT_ALIVE_DISPOSED_INSTANCE_STATE);
+    }
+    if mask & INT2DDS_INSTANCE_STATE_NOT_ALIVE_NO_WRITERS != 0 {
+        states.push(InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE);
+    }
+    if states.is_empty() {
+        states.push(InstanceStateKind::ALIVE_INSTANCE_STATE);
+    }
+    states
+}
+
+/// Fold one sample into the snapshot, keyed by instance. The instance state belongs to the
+/// instance so the later sample decides it, while the payload is kept from whichever sample had one.
+fn merge_snapshot_sample<T>(
+    by_handle: &mut HashMap<[u8; 16], SnapshotEntry<T>>,
+    info: &SampleInfo,
+    data: Option<T>,
+) {
+    let instance_handle = *info.instance_handle.value();
+    let instance_state = u32::from(info.instance_state);
+    match by_handle.entry(instance_handle) {
+        Entry::Occupied(mut occupied) => {
+            let entry = occupied.get_mut();
+            entry.instance_state = instance_state;
+            if data.is_some() {
+                entry.data = data;
+            }
+        }
+        Entry::Vacant(vacant) => {
+            vacant.insert(SnapshotEntry { data, instance_state, instance_handle });
+        }
+    }
+}
+
 fn collect_publication_snapshot(
     participant: &Int2DdsParticipant,
     timeout_ms: i32,
-) -> Result<Vec<PublicationBuiltinTopicData>, Int2DdsRet> {
+    instance_states: &[InstanceStateKind],
+) -> Result<Vec<SnapshotEntry<PublicationBuiltinTopicData>>, Int2DdsRet> {
     let builtin_subscriber =
         participant.inner.get_builtin_subscriber().map_err(|e| dds_error_to_code(&e))?;
     let publication_reader = builtin_subscriber
@@ -82,25 +141,25 @@ fn collect_publication_snapshot(
         Some(Instant::now() + StdDuration::from_millis(timeout_ms as u64))
     };
 
-    let mut by_guid: HashMap<_, PublicationBuiltinTopicData> = HashMap::new();
+    let mut by_handle: HashMap<[u8; 16], SnapshotEntry<PublicationBuiltinTopicData>> =
+        HashMap::new();
     loop {
         let _ = publication_reader.get_status_changes();
         if let Ok(samples) = publication_reader.read(
-            1000,
+            LENGTH_UNLIMITED,
             &[SampleStateKind::ANY_SAMPLE_STATE],
             &[ViewStateKind::ANY_VIEW_STATE],
-            &[InstanceStateKind::ALIVE_INSTANCE_STATE],
+            instance_states,
         ) {
             for sample in samples.iter() {
-                if let Ok(data) = sample.data() {
-                    by_guid.insert(data.endpoint_guid(), data);
-                }
+                let info = sample.sample_info();
+                merge_snapshot_sample(&mut by_handle, &info, sample.data().ok());
             }
         }
 
         match deadline {
             None => {
-                if !by_guid.is_empty() {
+                if !by_handle.is_empty() {
                     break;
                 }
                 let _ = wait_set.wait(Duration { sec: 0, nanosec: 200_000_000 });
@@ -120,13 +179,14 @@ fn collect_publication_snapshot(
         }
     }
 
-    Ok(by_guid.into_values().collect())
+    Ok(by_handle.into_values().collect())
 }
 
 fn collect_subscription_snapshot(
     participant: &Int2DdsParticipant,
     timeout_ms: i32,
-) -> Result<Vec<SubscriptionBuiltinTopicData>, Int2DdsRet> {
+    instance_states: &[InstanceStateKind],
+) -> Result<Vec<SnapshotEntry<SubscriptionBuiltinTopicData>>, Int2DdsRet> {
     let builtin_subscriber =
         participant.inner.get_builtin_subscriber().map_err(|e| dds_error_to_code(&e))?;
     let subscription_reader = builtin_subscriber
@@ -145,25 +205,25 @@ fn collect_subscription_snapshot(
         Some(Instant::now() + StdDuration::from_millis(timeout_ms as u64))
     };
 
-    let mut by_guid: HashMap<_, SubscriptionBuiltinTopicData> = HashMap::new();
+    let mut by_handle: HashMap<[u8; 16], SnapshotEntry<SubscriptionBuiltinTopicData>> =
+        HashMap::new();
     loop {
         let _ = subscription_reader.get_status_changes();
         if let Ok(samples) = subscription_reader.read(
-            1000,
+            LENGTH_UNLIMITED,
             &[SampleStateKind::ANY_SAMPLE_STATE],
             &[ViewStateKind::ANY_VIEW_STATE],
-            &[InstanceStateKind::ALIVE_INSTANCE_STATE],
+            instance_states,
         ) {
             for sample in samples.iter() {
-                if let Ok(data) = sample.data() {
-                    by_guid.insert(data.endpoint_guid(), data);
-                }
+                let info = sample.sample_info();
+                merge_snapshot_sample(&mut by_handle, &info, sample.data().ok());
             }
         }
 
         match deadline {
             None => {
-                if !by_guid.is_empty() {
+                if !by_handle.is_empty() {
                     break;
                 }
                 let _ = wait_set.wait(Duration { sec: 0, nanosec: 200_000_000 });
@@ -183,7 +243,7 @@ fn collect_subscription_snapshot(
         }
     }
 
-    Ok(by_guid.into_values().collect())
+    Ok(by_handle.into_values().collect())
 }
 
 // ============================================================================
@@ -317,14 +377,72 @@ pub unsafe extern "C" fn int2dds_participant_take_discovered_publications_snapsh
     check_null!(participant);
     check_null!(seq_out);
 
+    int2dds_participant_take_discovered_publications_snapshot_filtered(
+        participant,
+        timeout_ms,
+        INT2DDS_INSTANCE_STATE_ALIVE,
+        seq_out,
+    )
+}
+
+/// Collect a snapshot of discovered publications restricted to the given instance states.
+/// `instance_state_mask` takes `INT2DDS_INSTANCE_STATE_*` values combined with a bitwise or.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_participant_take_discovered_publications_snapshot_filtered(
+    participant: *const Int2DdsParticipant,
+    timeout_ms: i32,
+    instance_state_mask: u32,
+    seq_out: *mut *mut Int2DdsPublicationBuiltinTopicDataSeq,
+) -> Int2DdsRet {
+    check_null!(participant);
+    check_null!(seq_out);
+
     let participant_ref = &*participant;
-    let items = match collect_publication_snapshot(participant_ref, timeout_ms) {
+    let states = instance_states_from_mask(instance_state_mask);
+    let items = match collect_publication_snapshot(participant_ref, timeout_ms, &states) {
         Ok(items) => items,
         Err(ret) => return ret,
     };
 
     *seq_out = Box::into_raw(Box::new(Int2DdsPublicationBuiltinTopicDataSeq { items }));
     INT2DDS_RET_OK
+}
+
+/// Instance state of the entry at `index`, as an `INT2DDS_INSTANCE_STATE_*` value.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_seq_get_instance_state(
+    seq: *const Int2DdsPublicationBuiltinTopicDataSeq,
+    index: usize,
+    instance_state_out: *mut u32,
+) -> Int2DdsRet {
+    check_null!(seq);
+    check_null!(instance_state_out);
+    match (&(*seq).items).get(index) {
+        Some(entry) => {
+            *instance_state_out = entry.instance_state;
+            INT2DDS_RET_OK
+        }
+        None => INT2DDS_RET_PRECONDITION_NOT_MET,
+    }
+}
+
+/// Instance handle of the entry at `index`, which is the endpoint GUID.
+/// Present even for an entry with no announcement to read a GUID out of.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_seq_get_instance_handle(
+    seq: *const Int2DdsPublicationBuiltinTopicDataSeq,
+    index: usize,
+    handle_out: *mut [u8; 16],
+) -> Int2DdsRet {
+    check_null!(seq);
+    check_null!(handle_out);
+    match (&(*seq).items).get(index) {
+        Some(entry) => {
+            *handle_out = entry.instance_handle;
+            INT2DDS_RET_OK
+        }
+        None => INT2DDS_RET_PRECONDITION_NOT_MET,
+    }
 }
 
 #[no_mangle]
@@ -346,8 +464,9 @@ pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_seq_get(
 ) -> Int2DdsRet {
     check_null!(seq);
     check_null!(data_out);
-    let data = match (&(*seq).items).get(index) {
-        Some(item) => item.clone(),
+    // Absent for a key-only entry such as a dispose; read the instance handle for those.
+    let data = match (&(*seq).items).get(index).and_then(|entry| entry.data.clone()) {
+        Some(data) => data,
         None => return INT2DDS_RET_PRECONDITION_NOT_MET,
     };
     *data_out = Box::into_raw(Box::new(Int2DdsPublicationBuiltinTopicData { inner: data }));
@@ -373,14 +492,72 @@ pub unsafe extern "C" fn int2dds_participant_take_discovered_subscriptions_snaps
     check_null!(participant);
     check_null!(seq_out);
 
+    int2dds_participant_take_discovered_subscriptions_snapshot_filtered(
+        participant,
+        timeout_ms,
+        INT2DDS_INSTANCE_STATE_ALIVE,
+        seq_out,
+    )
+}
+
+/// Collect a snapshot of discovered subscriptions restricted to the given instance states.
+/// See `int2dds_participant_take_discovered_publications_snapshot_filtered` for the mask.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_participant_take_discovered_subscriptions_snapshot_filtered(
+    participant: *const Int2DdsParticipant,
+    timeout_ms: i32,
+    instance_state_mask: u32,
+    seq_out: *mut *mut Int2DdsSubscriptionBuiltinTopicDataSeq,
+) -> Int2DdsRet {
+    check_null!(participant);
+    check_null!(seq_out);
+
     let participant_ref = &*participant;
-    let items = match collect_subscription_snapshot(participant_ref, timeout_ms) {
+    let states = instance_states_from_mask(instance_state_mask);
+    let items = match collect_subscription_snapshot(participant_ref, timeout_ms, &states) {
         Ok(items) => items,
         Err(ret) => return ret,
     };
 
     *seq_out = Box::into_raw(Box::new(Int2DdsSubscriptionBuiltinTopicDataSeq { items }));
     INT2DDS_RET_OK
+}
+
+/// Instance state of the entry at `index`, as an `INT2DDS_INSTANCE_STATE_*` value.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_seq_get_instance_state(
+    seq: *const Int2DdsSubscriptionBuiltinTopicDataSeq,
+    index: usize,
+    instance_state_out: *mut u32,
+) -> Int2DdsRet {
+    check_null!(seq);
+    check_null!(instance_state_out);
+    match (&(*seq).items).get(index) {
+        Some(entry) => {
+            *instance_state_out = entry.instance_state;
+            INT2DDS_RET_OK
+        }
+        None => INT2DDS_RET_PRECONDITION_NOT_MET,
+    }
+}
+
+/// Instance handle of the entry at `index`, which is the endpoint GUID.
+/// See `int2dds_publication_builtin_topic_data_seq_get_instance_handle`.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_seq_get_instance_handle(
+    seq: *const Int2DdsSubscriptionBuiltinTopicDataSeq,
+    index: usize,
+    handle_out: *mut [u8; 16],
+) -> Int2DdsRet {
+    check_null!(seq);
+    check_null!(handle_out);
+    match (&(*seq).items).get(index) {
+        Some(entry) => {
+            *handle_out = entry.instance_handle;
+            INT2DDS_RET_OK
+        }
+        None => INT2DDS_RET_PRECONDITION_NOT_MET,
+    }
 }
 
 #[no_mangle]
@@ -402,8 +579,9 @@ pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_seq_get(
 ) -> Int2DdsRet {
     check_null!(seq);
     check_null!(data_out);
-    let data = match (&(*seq).items).get(index) {
-        Some(item) => item.clone(),
+    // Absent for a key-only entry such as a dispose; read the instance handle for those.
+    let data = match (&(*seq).items).get(index).and_then(|entry| entry.data.clone()) {
+        Some(data) => data,
         None => return INT2DDS_RET_PRECONDITION_NOT_MET,
     };
     *data_out = Box::into_raw(Box::new(Int2DdsSubscriptionBuiltinTopicData { inner: data }));

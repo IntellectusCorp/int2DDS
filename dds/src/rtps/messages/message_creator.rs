@@ -18,7 +18,7 @@ use crate::rtps::{
         guid::{Guid, GuidPrefix},
         parameters::{Parameter, ParameterId, ParameterList, StatusInfo},
         rtps_error_code::RtpsResult,
-        sequence::{FragmentNumberSet, SequenceNumber},
+        sequence::SequenceNumber,
         types::{ChangeKind, SubmessagePayload},
     },
     entities::{entity::Entity, history::cache_change::CacheChange, participant::Participant},
@@ -383,74 +383,136 @@ impl MessageCreator {
         writer_entity_id: EntityId,
         gap_list: &mut Vec<SequenceNumber>,
     ) -> Result<Vec<Arc<Vec<u8>>>, Box<dyn std::error::Error>> {
-        let mut gap_rtps_messages = Vec::with_capacity(gap_list.len());
         gap_list.sort();
+        if gap_list.is_empty() {
+            return Ok(Vec::new());
+        }
 
-        while !gap_list.is_empty() {
+        // submessageId + flags + submessageLength, ahead of the body length that
+        // submessage_length() reports.
+        const SUBMESSAGE_HEADER_LEN: usize = 4;
+
+        // INT2DDS_DATA_FRAG_SIZE bounds the serialized payload packed into one datagram.
+        let max_fragment_payload = crate::common::env::get_data_frag_size_override()
+            .filter(|&size| (1..=65000).contains(&size))
+            .unwrap_or(65000) as usize;
+
+        let open_datagram = || {
             let mut rtps_message = RtpsMessage::new(Header::new(local_participant_guid.prefix()));
-
             rtps_message.add_submessage(SubmessageCreator::create_info_dst_submessage(
                 remote_guid.prefix(),
             ));
-            rtps_message.add_submessage(SubmessageCreator::create_gap_submessage(
+            rtps_message
+        };
+
+        let mut gap_rtps_messages = Vec::new();
+        let mut rtps_message = open_datagram();
+        let mut packed_len = 0;
+
+        while !gap_list.is_empty() {
+            // Build the next 256-window of gap sequence numbers.
+            let submessage = SubmessageCreator::create_gap_submessage(
                 reader_entity_id,
                 writer_entity_id,
                 gap_list,
-            )?);
+            )?;
+            let submessage_len =
+                SUBMESSAGE_HEADER_LEN + submessage.header.submessage_length() as usize;
 
-            let serialized_message =
-                rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian)?;
-            gap_rtps_messages.push(Arc::new(serialized_message));
+            // Start a fresh datagram before it would exceed the payload budget.
+            if packed_len > 0 && packed_len + submessage_len > max_fragment_payload {
+                gap_rtps_messages
+                    .push(Arc::new(rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian)?));
+                rtps_message = open_datagram();
+                packed_len = 0;
+            }
+
+            rtps_message.add_submessage(submessage);
+            packed_len += submessage_len;
         }
+
+        // Send the last datagram.
+        gap_rtps_messages
+            .push(Arc::new(rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian)?));
 
         Ok(gap_rtps_messages)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn create_nackfrag_msg(
+    // Split missing fragments into 256-wide windows and pack as many NACK_FRAG
+    // submessages as fit under INT2DDS_DATA_FRAG_SIZE into each datagram.
+    pub(crate) fn create_multiple_nackfrag_msgs(
         reader_guid: Guid,
         writer_guid: Guid,
         reader_entity_id: EntityId,
         writer_entity_id: EntityId,
         writer_sn: SequenceNumber,
-        fragment_number_state: FragmentNumberSet,
-        nackfrag_count: u32,
-        acknack_info: Option<(u32, SequenceNumber, Vec<SequenceNumber>)>,
-    ) -> Result<Arc<Vec<u8>>, Box<dyn std::error::Error>> {
-        let mut rtps_message = RtpsMessage::new(Header::new(reader_guid.prefix()));
+        missing_fragments: &mut Vec<u32>,
+        first_nackfrag_count: u32,
+    ) -> Result<(Vec<Arc<Vec<u8>>>, u32), Box<dyn std::error::Error>> {
+        missing_fragments.sort_unstable();
+        missing_fragments.dedup();
+        if missing_fragments.is_empty() {
+            return Ok((Vec::new(), 0));
+        }
 
-        rtps_message
-            .add_submessage(SubmessageCreator::create_info_dst_submessage(writer_guid.prefix()));
-        let timestamp = Utc::now();
-        rtps_message.add_submessage(SubmessageCreator::create_info_ts_submessage(timestamp));
+        // submessageId + flags + submessageLength, ahead of the body length that
+        // submessage_length() reports.
+        const SUBMESSAGE_HEADER_LEN: usize = 4;
 
-        let nackfrag_submessage = SubmessageCreator::create_nackfrag_submessage(
-            reader_entity_id,
-            writer_entity_id,
-            writer_sn,
-            fragment_number_state,
-            nackfrag_count,
-        )?;
+        // INT2DDS_DATA_FRAG_SIZE bounds the serialized payload packed into one datagram.
+        let max_fragment_payload = crate::common::env::get_data_frag_size_override()
+            .filter(|&size| (1..=65000).contains(&size))
+            .unwrap_or(65000) as usize;
 
-        rtps_message.add_submessage(nackfrag_submessage);
+        let open_datagram = || {
+            let mut rtps_message = RtpsMessage::new(Header::new(reader_guid.prefix()));
+            rtps_message.add_submessage(SubmessageCreator::create_info_dst_submessage(
+                writer_guid.prefix(),
+            ));
+            rtps_message.add_submessage(SubmessageCreator::create_info_ts_submessage(Utc::now()));
+            rtps_message
+        };
 
-        if let Some((acknack_count, bitmap_base, missing_changes)) = acknack_info {
-            let acknack_submessage = SubmessageCreator::create_acknack_submessage(
+        let mut messages = Vec::new();
+        let mut nackfrag_count = first_nackfrag_count;
+        let mut rtps_message = open_datagram();
+        let mut packed_len = 0;
+
+        while !missing_fragments.is_empty() {
+            // Build the next 256-window of missing fragments into a NACK_FRAG.
+            let fragment_number_state =
+                SubmessageCreator::calculate_nackfrag_fns_from_vec(missing_fragments);
+            let submessage = SubmessageCreator::create_nackfrag_submessage(
                 reader_entity_id,
                 writer_entity_id,
-                missing_changes,
-                acknack_count,
-                bitmap_base,
-                false,
+                writer_sn,
+                fragment_number_state,
+                nackfrag_count,
             )?;
-            rtps_message.add_submessage(acknack_submessage);
+            nackfrag_count = nackfrag_count.wrapping_add(1);
+            let submessage_len =
+                SUBMESSAGE_HEADER_LEN + submessage.header.submessage_length() as usize;
+
+            // Start a fresh datagram before it would exceed the payload budget.
+            if packed_len > 0 && packed_len + submessage_len > max_fragment_payload {
+                messages
+                    .push(Arc::new(rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian)?));
+                rtps_message = open_datagram();
+                packed_len = 0;
+            }
+
+            rtps_message.add_submessage(submessage);
+            packed_len += submessage_len;
         }
 
-        // Serialize the complete RTPS message
-        match rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian) {
-            Ok(rtps_message_bytes) => Ok(Arc::new(rtps_message_bytes)),
-            Err(e) => Err(Box::new(e)),
-        }
+        // Send the last datagram.
+        messages.push(Arc::new(rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian)?));
+
+        // Each NACK_FRAG submessage consumed one count; the caller advances its
+        // counter by this amount so the next request stays monotonic.
+        let consumed_count = nackfrag_count.wrapping_sub(first_nackfrag_count);
+
+        Ok((messages, consumed_count))
     }
 
     /// Create KeyHash inline QoS parameter

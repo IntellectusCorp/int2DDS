@@ -400,6 +400,16 @@ impl Default for SubscriptionBuiltinTopicData {
     }
 }
 
+impl SubscriptionBuiltinTopicData {
+    /// The QoS a builtin endpoint's reader carries. `Default` is built from `DataReaderQos`,
+    /// whose reliability is BEST_EFFORT, but RTPS 8.5.4.1 makes builtin endpoints RELIABLE.
+    pub(crate) fn builtin_reliable() -> Self {
+        let mut qos = DataReaderQos::default();
+        qos.reliability.kind = ReliabilityQosPolicyKind::Reliable;
+        Self::new(&qos, &SubscriberQos::default(), &TopicQos::default())
+    }
+}
+
 #[cfg(test)]
 #[allow(unused_imports)]
 mod tests {
