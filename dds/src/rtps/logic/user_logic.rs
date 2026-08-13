@@ -2730,21 +2730,14 @@ impl UnicastMessageProcessor for UserLogic {
     ) -> RtpsResult<()> {
         let source_timestamp = message_receiver.get_source_timestamp();
         let remote_writer_guid = Guid::new(rtps_header.guid_prefix(), data_frag.writer_id);
-
-        // `reader_id` partitions the buffer exactly as the writer addressed the sample: one
-        // buffer per reader now, and a single shared one again if it ever sends to UNKNOWN.
-        let key = (remote_writer_guid, data_frag.reader_id, data_frag.writer_sn);
         let total_size = data_frag.sample_size;
 
-        // The buffer below is shared per (writer, SN) across the participant's readers, so
-        // both its bookkeeping and its completion must fan out to all of them -- a directed
-        // repair only narrows which datagram this is, not who the completed sample belongs
-        // to. Fall back to the addressed reader alone when none are matched yet.
-        let mut matched_readers: Vec<Arc<dyn Reader + Send + Sync>> =
-            self.get_matched_readers(remote_writer_guid, EntityId::UNKNOWN)?;
-        if matched_readers.is_empty() && data_frag.reader_id != EntityId::UNKNOWN {
-            matched_readers = self.get_matched_readers(remote_writer_guid, data_frag.reader_id)?;
-        }
+        // `reader_id` addresses the datagram, it does not name the sample's owner. UNKNOWN is
+        // one burst reaching every matched reader, so its fragments belong in every one of
+        // their buffers; a directed repair belongs only in the buffer of the reader it names.
+        // Resolving the id here yields exactly the readers this datagram arrived for.
+        let matched_readers: Vec<Arc<dyn Reader + Send + Sync>> =
+            self.get_matched_readers(remote_writer_guid, data_frag.reader_id)?;
 
         if matched_readers.is_empty() {
             debug!(
@@ -2792,42 +2785,57 @@ impl UnicastMessageProcessor for UserLogic {
             }
         }
 
-        // Copy fragment data using DashMap entry API
-        {
-            let mut buffer = self.fragment_buffers.entry(key).or_insert_with(|| {
-                FragmentBuffer::new(data_frag.writer_sn, total_size, data_frag.fragment_size)
-            });
+        // Readers that complete on this same datagram hold byte-identical chunks, so they can
+        // share one contiguous-fallback cache and that copy still materializes at most once
+        // for the whole burst. Allocated on the first completion, not per datagram.
+        let mut assembled_cache: Option<std::sync::Arc<std::sync::OnceLock<bytes::Bytes>>> = None;
 
-            if buffer.source_timestamp.is_none() {
-                // timestamp does not be set in buffer.source_timestmap yet
-                if let Some(ts) = source_timestamp {
-                    buffer.source_timestamp = Some(ts); // store source_timestamp from first fragment that equals to INFO_TS
-                }
-            }
-
-            // Zero-copy: `serialized_bytes` is the DataFrag payload as `Bytes`
-            // (a refcount on the socket buffer). Per-fragment slices below are
-            // again refcount bumps, not memcpys.
-            if let Some(serialized_bytes) = data_frag.serialized_bytes() {
-                let frag_size = data_frag.fragment_size as usize;
-                let total_len = serialized_bytes.len();
-                for i in 0..data_frag.fragments_in_submessage {
-                    let fragment_num = data_frag.fragment_starting_num + i as u32;
-                    let frag_data_start = i as usize * frag_size;
-                    let frag_data_end = std::cmp::min(frag_data_start + frag_size, total_len);
-                    buffer.copy_fragment_data(
-                        fragment_num,
-                        serialized_bytes.slice(frag_data_start..frag_data_end),
-                    );
-                }
-            }
-        } // buffer RefMut is automatically dropped here
-
-        // For StatefulReader case, update WriterProxy's ChangeFromWriter state for all matched readers
+        // The key carries the reader, so a broadcast fragment has to be written into every
+        // matched reader's buffer. Completion is then a single-reader event: the buffer that
+        // filled belongs to exactly one reader, and only that reader is owed the sample.
         for reader in &matched_readers {
+            let key = (remote_writer_guid, reader.guid().entity_id(), data_frag.writer_sn);
+
+            // Copy fragment data using DashMap entry API
+            {
+                let mut buffer = self.fragment_buffers.entry(key).or_insert_with(|| {
+                    FragmentBuffer::new(data_frag.writer_sn, total_size, data_frag.fragment_size)
+                });
+
+                if buffer.source_timestamp.is_none() {
+                    // timestamp does not be set in buffer.source_timestmap yet
+                    if let Some(ts) = source_timestamp {
+                        buffer.source_timestamp = Some(ts); // store source_timestamp from first fragment that equals to INFO_TS
+                    }
+                }
+
+                // Zero-copy: `serialized_bytes` is the DataFrag payload as `Bytes`
+                // (a refcount on the socket buffer). Per-fragment slices below are
+                // again refcount bumps, not memcpys, so fanning the write out across
+                // readers costs slot arrays rather than payload copies.
+                if let Some(serialized_bytes) = data_frag.serialized_bytes() {
+                    let frag_size = data_frag.fragment_size as usize;
+                    let total_len = serialized_bytes.len();
+                    for i in 0..data_frag.fragments_in_submessage {
+                        let fragment_num = data_frag.fragment_starting_num + i as u32;
+                        let frag_data_start = i as usize * frag_size;
+                        let frag_data_end = std::cmp::min(frag_data_start + frag_size, total_len);
+                        buffer.copy_fragment_data(
+                            fragment_num,
+                            serialized_bytes.slice(frag_data_start..frag_data_end),
+                        );
+                    }
+                }
+            } // buffer RefMut is automatically dropped here
+
+            // For StatefulReader case, update this reader's ChangeFromWriter state from the
+            // buffer that just took the fragments.
             if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
                 // Query buffer information from DashMap again
                 if let Some(buffer_ref) = self.fragment_buffers.get(&key) {
+                    let total_fragments = buffer_ref.total_fragments;
+                    drop(buffer_ref);
+
                     let writer_proxies = stateful_reader.writer_proxies();
                     let mut matched_writers = writer_proxies.lock().map_err(|e| {
                         RtpsError::new(
@@ -2845,93 +2853,82 @@ impl UnicastMessageProcessor for UserLogic {
                         let frag_end = frag_start + data_frag.fragments_in_submessage as u32;
                         writer_proxy.mark_frag_received(
                             data_frag.writer_sn,
-                            buffer_ref.total_fragments,
+                            total_fragments,
                             frag_start..frag_end,
                         );
                     }
                 }
             }
-        }
 
-        // Check if all fragments have been received and process
-        if let Some(buffer_ref) = self.fragment_buffers.get(&key) {
-            if buffer_ref.all_fragments_received() {
-                let total_fragments = buffer_ref.total_fragments;
-                // complete here; delivery FragmentInfo's set is unused when is_complete
-                let received_fragments: std::collections::HashSet<u32> =
-                    std::collections::HashSet::new();
-                let is_complete = buffer_ref.all_fragments_received();
-
-                // Drop buffer_ref to release DashMap lock
-                drop(buffer_ref);
-
-                // Move payload from buffer without cloning
-                let removed = self.fragment_buffers.remove(&key);
-                if removed.is_none() {
-                    return Ok(());
-                }
-                let (_, buffer) = removed.unwrap();
-                // Use timestamp from first fragment, fallback to current message
-                let assembled_timestamp = buffer.source_timestamp.or(source_timestamp);
-                if assembled_timestamp.is_none() {
-                    return Err(RtpsError::new(
-                        RtpsErrorCode::InvalidSubmessageBody,
-                        "No source timestamp available for assembled DataFrag (missing INFO_TS)",
-                    ));
-                }
-
-                // Scatter-gather: keep fragment chunks as-is instead of assembling
-                // a contiguous buffer. One shared cache per sample so any contiguous
-                // fallback materializes at most once across all readers.
-                let chunks = buffer.into_chunks();
-                let cached = std::sync::Arc::new(std::sync::OnceLock::new());
-
-                for reader in matched_readers.iter() {
-                    let mut ownership_strength = None;
-                    if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>()
-                    {
-                        let writer_proxies = stateful_reader.writer_proxies();
-                        let matched_writers = writer_proxies.lock().ok();
-                        if let Some(guard) = matched_writers {
-                            if let Some(writer_proxy) = guard
-                                .iter()
-                                .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
-                            {
-                                ownership_strength = Some(writer_proxy.get_ownership_strength());
-                            }
-                        }
-                    }
-
-                    let mut assembled_change = match reader.reader_cache().lock() {
-                        Ok(mut cache) => cache.acquire_change(),
-                        Err(_) => continue,
-                    };
-                    assembled_change.reset(
-                        ChangeKind::Alive,
-                        remote_writer_guid,
-                        InstanceHandle::NIL,
-                        data_frag.writer_sn,
-                        assembled_timestamp,
-                    );
-                    assembled_change.set_chained_payload(chunks.clone(), cached.clone());
-                    assembled_change.set_ownership_strength(ownership_strength);
-
-                    let _ = self.deliver_change_to_reader(
-                        assembled_change,
-                        reader.as_ref(),
-                        data_frag.writer_sn,
-                        remote_writer_guid,
-                        Some(FragmentInfo {
-                            total_fragments,
-                            received_fragments: received_fragments.clone(),
-                            is_complete,
-                        }),
-                    );
-                }
-
-                // Remove completed fragment buffer
-                self.fragment_buffers.remove(&key);
+            // Check if all fragments have been received and process
+            let Some(buffer_ref) = self.fragment_buffers.get(&key) else {
+                continue;
+            };
+            if !buffer_ref.all_fragments_received() {
+                continue;
             }
+            let total_fragments = buffer_ref.total_fragments;
+            // complete here; delivery FragmentInfo's set is unused when is_complete
+            let received_fragments: std::collections::HashSet<u32> =
+                std::collections::HashSet::new();
+
+            // Drop buffer_ref to release DashMap lock
+            drop(buffer_ref);
+
+            // Move payload from buffer without cloning
+            let Some((_, buffer)) = self.fragment_buffers.remove(&key) else {
+                continue;
+            };
+            // Use timestamp from first fragment, fallback to current message
+            let assembled_timestamp = buffer.source_timestamp.or(source_timestamp);
+            if assembled_timestamp.is_none() {
+                return Err(RtpsError::new(
+                    RtpsErrorCode::InvalidSubmessageBody,
+                    "No source timestamp available for assembled DataFrag (missing INFO_TS)",
+                ));
+            }
+
+            let mut ownership_strength = None;
+            if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
+                let writer_proxies = stateful_reader.writer_proxies();
+                let matched_writers = writer_proxies.lock().ok();
+                if let Some(guard) = matched_writers {
+                    if let Some(writer_proxy) =
+                        guard.iter().find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
+                    {
+                        ownership_strength = Some(writer_proxy.get_ownership_strength());
+                    }
+                }
+            }
+
+            // Scatter-gather: keep fragment chunks as-is instead of assembling a contiguous
+            // buffer.
+            let chunks = buffer.into_chunks();
+            let cached = assembled_cache
+                .get_or_insert_with(|| std::sync::Arc::new(std::sync::OnceLock::new()))
+                .clone();
+
+            let mut assembled_change = match reader.reader_cache().lock() {
+                Ok(mut cache) => cache.acquire_change(),
+                Err(_) => continue,
+            };
+            assembled_change.reset(
+                ChangeKind::Alive,
+                remote_writer_guid,
+                InstanceHandle::NIL,
+                data_frag.writer_sn,
+                assembled_timestamp,
+            );
+            assembled_change.set_chained_payload(chunks, cached);
+            assembled_change.set_ownership_strength(ownership_strength);
+
+            let _ = self.deliver_change_to_reader(
+                assembled_change,
+                reader.as_ref(),
+                data_frag.writer_sn,
+                remote_writer_guid,
+                Some(FragmentInfo { total_fragments, received_fragments, is_complete: true }),
+            );
         }
 
         Ok(())
@@ -3294,11 +3291,11 @@ mod tests {
         assert_plan_invariants(&runs, fpm(1));
     }
 
-    // --- Fragment reassembly: a completed sample must reach every reader sharing the buffer ---
+    // --- Fragment reassembly: one buffer per reader, filled by every datagram it arrived on ---
     //
     // Drives `handle_datafrag_message` directly against two readers on one participant, with
-    // no sockets, no packet loss, and no timing, so the shared-buffer fan-out defect is
-    // deterministic instead of depending on the kernel dropping a datagram.
+    // no sockets, no packet loss, and no timing, so the reassembly defects are deterministic
+    // instead of depending on the kernel dropping a datagram.
 
     use crate::common::builtin::topic::publication_builtin_topic_data::PublicationBuiltinTopicData;
     use crate::common::builtin::topic::subscription_builtin_topic_data::SubscriptionBuiltinTopicData;
@@ -3443,13 +3440,65 @@ mod tests {
             .expect("handle_datafrag_message must not error");
     }
 
+    /// The payload of the whole four-fragment sample the tests below assemble.
+    fn whole_sample() -> Vec<u8> {
+        vec![1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4]
+    }
+
+    /// The assembled sample a reader holds at `sn`, if any.
+    fn held_sample(
+        reader: &Arc<StatefulReader>,
+        writer_guid: Guid,
+        sn: SequenceNumber,
+    ) -> Option<Vec<u8>> {
+        reader
+            .reader_cache()
+            .lock()
+            .expect("cache lock")
+            .get_change(sn, writer_guid)
+            .map(|c| c.data_value().to_vec())
+    }
+
+    /// Fragment numbers this reader's ledger still calls missing for `sn`. Empty means the
+    /// ledger reads complete.
+    fn ledger_missing(
+        reader: &Arc<StatefulReader>,
+        writer_guid: Guid,
+        sn: SequenceNumber,
+    ) -> Vec<u32> {
+        let proxies = reader.writer_proxies();
+        let guard = proxies.lock().expect("writer proxies lock");
+        guard
+            .iter()
+            .find(|p| p.remote_writer_guid() == writer_guid)
+            .map(|p| p.get_ascending_missing_fn_list(sn))
+            .expect("the writer proxy must exist")
+    }
+
+    fn ledger_reads_complete(
+        reader: &Arc<StatefulReader>,
+        writer_guid: Guid,
+        sn: SequenceNumber,
+    ) -> bool {
+        let proxies = reader.writer_proxies();
+        let guard = proxies.lock().expect("writer proxies lock");
+        guard
+            .iter()
+            .find(|p| p.remote_writer_guid() == writer_guid)
+            .map(|p| p.all_fragments_received(sn))
+            .expect("the writer proxy must exist")
+    }
+
     #[test]
-    fn completion_after_a_directed_repair_reaches_every_waiting_reader() {
+    fn a_broadcast_burst_then_each_readers_own_repair_completes_for_both() {
         let (participant, mut user_logic, reader_a, reader_b, writer_guid, sn) =
             two_readers_matched_to_one_fragmented_writer();
         let prefix = participant.guid().prefix();
+        let reader_a_id = reader_a.guid().entity_id();
+        let reader_b_id = reader_b.guid().entity_id();
 
-        // First transmission: broadcast, reaches every reader behind dst_prefix.
+        // First transmission: one burst addressed to UNKNOWN, which physically reaches every
+        // reader behind dst_prefix, so its fragments belong in both readers' buffers.
         feed_fragment(
             &mut user_logic,
             prefix,
@@ -3460,75 +3509,95 @@ mod tests {
             3,
             vec![1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3],
         );
-        // A directed repair for the last fragment, addressed to reader A alone.
+
+        // A directed repair for the last fragment, addressed to reader A alone. It completes
+        // reader A's buffer and nobody else's.
         feed_fragment(
             &mut user_logic,
             prefix,
             writer_guid,
             sn,
-            reader_a.guid().entity_id(),
+            reader_a_id,
             4,
             1,
             vec![4, 4, 4, 4],
         );
 
-        let expected = vec![1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4];
-        let held = |reader: &Arc<StatefulReader>| {
-            reader
-                .reader_cache()
-                .lock()
-                .expect("cache lock")
-                .get_change(sn, writer_guid)
-                .map(|c| c.data_value().to_vec())
-        };
-
         assert_eq!(
-            held(&reader_a),
-            Some(expected.clone()),
-            "reader A was addressed directly and must hold the completed sample"
+            held_sample(&reader_a, writer_guid, sn),
+            Some(whole_sample()),
+            "reader A's buffer held the broadcast fragments and its own repair completed it"
         );
         assert_eq!(
-            held(&reader_b),
-            Some(expected),
-            "reader B never asked for the repair, but the buffer it completed is shared \
-             with reader A, so the assembled sample belongs to reader B too"
+            held_sample(&reader_b, writer_guid, sn),
+            None,
+            "reader B was never sent fragment 4, so nothing may have completed for it yet"
+        );
+        assert_eq!(
+            ledger_missing(&reader_b, writer_guid, sn),
+            vec![4],
+            "reader B's ledger must still ask for exactly the fragment it has not been sent"
+        );
+
+        // Reader B's own repair, arriving after A's completion removed A's buffer. This is the
+        // property the per-reader key exists for: B's buffer still holds the broadcast
+        // fragments under B's own key, so one fragment finishes it.
+        feed_fragment(
+            &mut user_logic,
+            prefix,
+            writer_guid,
+            sn,
+            reader_b_id,
+            4,
+            1,
+            vec![4, 4, 4, 4],
+        );
+
+        assert_eq!(
+            held_sample(&reader_b, writer_guid, sn),
+            Some(whole_sample()),
+            "reader B's repair carried one fragment; the other three had to already be in its \
+             own buffer, put there by the broadcast burst"
+        );
+        assert!(
+            ledger_missing(&reader_b, writer_guid, sn).is_empty(),
+            "reader B's ledger must read complete only now that it holds the sample"
         );
     }
 
     #[test]
-    fn a_second_directed_repair_for_an_already_completed_sample_is_harmless() {
+    fn a_repeated_directed_repair_after_completion_delivers_no_duplicate() {
         let (participant, mut user_logic, reader_a, reader_b, writer_guid, sn) =
             two_readers_matched_to_one_fragmented_writer();
         let prefix = participant.guid().prefix();
+        let reader_a_id = reader_a.guid().entity_id();
+        let reader_b_id = reader_b.guid().entity_id();
 
+        for reader_id in [EntityId::UNKNOWN, reader_a_id, reader_b_id] {
+            let (start, count, payload) = if reader_id == EntityId::UNKNOWN {
+                (1, 3, vec![1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3])
+            } else {
+                (4, 1, vec![4, 4, 4, 4])
+            };
+            feed_fragment(
+                &mut user_logic,
+                prefix,
+                writer_guid,
+                sn,
+                reader_id,
+                start,
+                count,
+                payload,
+            );
+        }
+
+        // A retransmit of reader A's own repair, arriving after the sample already completed.
         feed_fragment(
             &mut user_logic,
             prefix,
             writer_guid,
             sn,
-            EntityId::UNKNOWN,
-            1,
-            3,
-            vec![1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3],
-        );
-        feed_fragment(
-            &mut user_logic,
-            prefix,
-            writer_guid,
-            sn,
-            reader_a.guid().entity_id(),
-            4,
-            1,
-            vec![4, 4, 4, 4],
-        );
-        // The loser's own repair for the same fragment, arriving after the sample already
-        // completed via reader A's repair.
-        feed_fragment(
-            &mut user_logic,
-            prefix,
-            writer_guid,
-            sn,
-            reader_b.guid().entity_id(),
+            reader_a_id,
             4,
             1,
             vec![4, 4, 4, 4],
@@ -3547,6 +3616,18 @@ mod tests {
 
         assert_eq!(count_at_sn(&reader_a), 1, "reader A must not receive a duplicate");
         assert_eq!(count_at_sn(&reader_b), 1, "reader B must not receive a duplicate");
+
+        // The retransmit recreated reader A's buffer holding one fragment of four. Nothing
+        // completes it and nothing removes it: it is the stale entry the cap picks first.
+        assert!(
+            user_logic.fragment_buffers.contains_key(&(writer_guid, reader_a_id, sn)),
+            "a repair arriving after completion recreates the buffer, and that entry is the \
+             precondition the eviction reconciliation has to discriminate"
+        );
+        assert!(
+            ledger_reads_complete(&reader_a, writer_guid, sn),
+            "the retransmit must not knock reader A's ledger back off complete"
+        );
     }
 
     // --- Fragment reassembly: eviction must report exactly what it removed ---
