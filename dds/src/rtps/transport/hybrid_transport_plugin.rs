@@ -2,7 +2,7 @@
 #![allow(unused_variables)]
 
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::Ipv4Addr;
 use std::sync::Mutex;
 
 use log::{debug, info};
@@ -129,28 +129,9 @@ impl TransportPlugin for HybridTransportPlugin {
                 }
                 Ok(())
             }
-            SendTarget::SEDPDiscovery(locator) => {
+            SendTarget::SEDPDiscovery(locator) | SendTarget::UserData(locator) => {
                 if locator.is_tcp() {
                     self.tcp_plugin.send(data, target)
-                } else if locator.is_udp() {
-                    let ip = locator.to_ip_v4_addr();
-                    let port = locator.port() as u16;
-                    let addr = SocketAddr::new(IpAddr::V4(ip), port);
-                    self.udp_sender.send(&addr, data)?;
-                    Ok(())
-                } else {
-                    Err(io::Error::new(io::ErrorKind::Unsupported, locator.kind_name()))
-                }
-            }
-            SendTarget::UserData(locator) => {
-                if locator.is_tcp() {
-                    self.tcp_plugin.send(data, target)
-                } else if locator.is_udp() {
-                    let ip = locator.to_ip_v4_addr();
-                    let port = locator.port() as u16;
-                    let addr = SocketAddr::new(IpAddr::V4(ip), port);
-                    self.udp_sender.send(&addr, data)?;
-                    Ok(())
                 } else {
                     Err(io::Error::new(io::ErrorKind::Unsupported, locator.kind_name()))
                 }
@@ -159,8 +140,7 @@ impl TransportPlugin for HybridTransportPlugin {
     }
 
     fn can_handle(&self, locator: &Locator) -> bool {
-        // Hybrid carries both UDP and TCP senders.
-        locator.is_udp() || locator.is_tcp()
+        locator.is_tcp()
     }
 
     fn advertised_metatraffic_unicast_locators(&self) -> Vec<Locator> {
