@@ -175,6 +175,10 @@ impl NackFragRequest {
 /// A named function rather than a self-referencing closure: the callback cannot clone itself, and
 /// a non-repeating timer is dropped after it triggers, so re-adding the same `TimerId` from
 /// inside the callback lands on the next tick against an empty slot.
+///
+/// A zero `delay` still goes through the timer, firing on its next pass: the arming site holds
+/// the reader's `writer_proxies` lock and `fire()` takes it again, so firing inline would
+/// deadlock.
 fn schedule_nackfrag(request: NackFragRequest, delay: Duration) {
     let timer_handler = TimerHandler::get_instance(request.participant.guid().prefix());
     let Ok(handler) = timer_handler.lock() else {
@@ -2659,13 +2663,15 @@ impl UnicastMessageProcessor for UserLogic {
                         retry_delay: stateful_reader.nack_frag_retry_delay().to_std_duration(),
                     };
 
-                    // Re-armed on every accepted heartbeat, so a burst is answered once after it
-                    // settles rather than per fragment.
+                    // Re-armed on every accepted heartbeat, which also cancels the retry the
+                    // previous round left pending.
                     if let Ok(handler) =
                         TimerHandler::get_instance(participant.guid().prefix()).lock()
                     {
                         handler.remove_timer(request.timer_id());
                     }
+                    // Zero by default: a windowed send carries one heartbeat per window, so this
+                    // runs once per round and has no burst left to debounce.
                     let response_delay =
                         stateful_reader.nack_frag_response_delay().to_std_duration();
                     schedule_nackfrag(request, response_delay);
@@ -2859,7 +2865,9 @@ impl UnicastMessageProcessor for UserLogic {
 
             let participant = self.get_upgraded_participant()?;
 
-            // Apply nack response delay
+            // Same knob as the NACK_FRAG path, zero by default. `send_requested_changes` drains
+            // the requested set on entry, so a repeated trigger costs an empty call, not a
+            // duplicate resend.
             let nack_response_delay = stateful_writer.nack_response_delay();
             let delay_duration = nack_response_delay.to_std_duration();
 
@@ -3245,7 +3253,8 @@ impl UnicastMessageProcessor for UserLogic {
 
         let participant = self.get_upgraded_participant()?;
 
-        // Apply nack response delay
+        // Zero by default: the repair this answers is bounded by the peer's receive window, and
+        // one heartbeat per window means one request per round, so there is nothing to merge.
         let nack_response_delay = stateful_writer.nack_response_delay();
         let delay_duration = nack_response_delay.to_std_duration();
 
@@ -5225,6 +5234,73 @@ mod tests {
         // The budget must actually stop the chain, not just space it out.
         thread::sleep(Duration::from_millis(300));
         assert_eq!(sends.lock().unwrap().len(), 7, "kept retrying past its QoS-configured budget");
+
+        if let Ok(handler) = TimerHandler::get_instance(prefix).lock() {
+            handler.terminate();
+        }
+    }
+
+    /// A window's heartbeat is the reader's only trigger for the next round, so losing one leaves
+    /// the reader with nothing to react to. The self-re-arming retry is what recovers it, and
+    /// that is why the retry pair stays non-zero while the response delay goes to zero.
+    ///
+    /// The lost heartbeat here is the one that never arrives: exactly one is delivered, and the
+    /// remaining fragments are withheld until the retry has been observed on the wire. If the
+    /// chain did not re-arm there would be no second request and the sample would never be asked
+    /// for again.
+    #[test]
+    fn a_lost_window_heartbeat_is_recovered_by_the_retry_chain() {
+        let qos = ReaderReliabilityExtensionQosPolicy {
+            // Default response delay, i.e. zero: the first request answers the one heartbeat that
+            // did arrive. A short retry so the test does not sit through the 200ms default.
+            // `DEFAULT` and not `default()`, which reads process-global env that sibling tests
+            // in this binary set and clear around themselves.
+            nack_frag_retry_delay: DcpsDuration::from_millis(40),
+            nack_frag_max_retries: 3,
+            ..ReaderReliabilityExtensionQosPolicy::DEFAULT
+        };
+        let (participant, mut user_logic, reader, writer_guid, sn, sends) =
+            reader_with_nack_frag_qos(qos);
+        let prefix = participant.guid().prefix();
+        let reader_id = reader.guid().entity_id();
+
+        let armed_at = Instant::now();
+        arm_nack_frag_chain(&mut user_logic, prefix, writer_guid, reader_id, sn);
+
+        // The window's own heartbeat is answered at once. 30ms is well inside the 80ms the
+        // response delay used to cost and well outside the timer hop this actually takes.
+        let deadline = armed_at + Duration::from_millis(30);
+        while sends.lock().unwrap().is_empty() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            sends.lock().unwrap().len(),
+            1,
+            "the request for the window that did arrive was still waiting out a response delay"
+        );
+
+        // From here no heartbeat ever arrives again: this is the lost one. Only the retry chain
+        // can produce another request.
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while sends.lock().unwrap().len() < 2 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            sends.lock().unwrap().len() >= 2,
+            "no request followed the lost heartbeat, so the reader was stranded for good"
+        );
+
+        // The writer answers that retry with the rest of the sample, which now completes without
+        // any further heartbeat.
+        feed_fragment(&mut user_logic, prefix, writer_guid, sn, reader_id, 2, 1, vec![2, 2, 2, 2]);
+        feed_fragment(&mut user_logic, prefix, writer_guid, sn, reader_id, 3, 1, vec![3, 3, 3, 3]);
+        feed_fragment(&mut user_logic, prefix, writer_guid, sn, reader_id, 4, 1, vec![4, 4, 4, 4]);
+
+        assert_eq!(
+            held_sample(&reader, writer_guid, sn),
+            Some(whole_sample()),
+            "the sample did not complete after the retry recovered the lost heartbeat"
+        );
 
         if let Ok(handler) = TimerHandler::get_instance(prefix).lock() {
             handler.terminate();

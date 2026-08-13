@@ -44,9 +44,10 @@ pub fn init_from_env() {
     // - INT2DDS_MAX_MESSAGE_SIZE: Set max UDP message size (1-65000), header-inclusive datagram budget bounding fragments packed per message - Default: 65000
     // - INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT: Set the default for the disable_piggyback_heartbeat writer QoS (true, false) - Default: false
     // - INT2DDS_DISABLE_PREEMPTIVE: Disable preemptive ACKNACK and preemptive HEARTBEAT on new endpoint matches (true, false) - Default: false
-    // - INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS: Reader delay before the first NACK_FRAG for missing fragments (ms) - Default: 80
+    // - INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS: Reader delay before the first NACK_FRAG for missing fragments (ms) - Default: 0
     // - INT2DDS_NACK_FRAG_RETRY_MS: Reader retry interval when a NACK_FRAG got no reply (ms) - Default: 200
     // - INT2DDS_NACK_FRAG_MAX_RETRIES: Reader retries before yielding to the periodic heartbeat - Default: 10
+    // - INT2DDS_NACK_RESPONSE_DELAY_MS: Writer delay before answering an ACKNACK or NACK_FRAG (ms) - Default: 0
 
     // - INT2DDS_INITIAL_PEERS: Set initial peers for SPDP unicast discovery (comma-separated, e.g., "192.168.1.10:7400,192.168.1.11:7400") - Default: none
 
@@ -508,6 +509,29 @@ pub fn set_nack_frag_max_retries(retries: u32) {
     unsafe { std::env::set_var("INT2DDS_NACK_FRAG_MAX_RETRIES", retries.to_string()) };
 }
 
+/// Writer NACK response-delay override from `INT2DDS_NACK_RESPONSE_DELAY_MS`, in ms.
+/// Delay before the writer answers a reader's ACKNACK or NACK_FRAG with the repair.
+pub fn get_nack_response_delay_ms_override() -> Option<u32> {
+    let raw = std::env::var("INT2DDS_NACK_RESPONSE_DELAY_MS").ok().filter(|s| !s.is_empty())?;
+    match raw.parse::<u32>() {
+        Ok(ms) => Some(ms),
+        Err(e) => {
+            log::warn!(
+                "Invalid INT2DDS_NACK_RESPONSE_DELAY_MS value '{}': {}. Ignoring env override.",
+                raw,
+                e
+            );
+            None
+        }
+    }
+}
+
+/// Set the writer NACK response delay via `INT2DDS_NACK_RESPONSE_DELAY_MS`.
+pub fn set_nack_response_delay_ms(ms: u32) {
+    log::info!("Environment variable set: INT2DDS_NACK_RESPONSE_DELAY_MS = {}", ms);
+    unsafe { std::env::set_var("INT2DDS_NACK_RESPONSE_DELAY_MS", ms.to_string()) };
+}
+
 // Read the public IPv4 advertised in SPDP from `INT2DDS_EXTERNAL_ADDRESS`.
 pub fn get_external_address() -> Option<std::net::Ipv4Addr> {
     let raw = std::env::var("INT2DDS_EXTERNAL_ADDRESS").ok().filter(|s| !s.is_empty())?;
@@ -550,8 +574,9 @@ mod tests {
     use super::{
         get_disable_preemptive, get_multicast_ttl_override, get_nack_frag_max_retries_override,
         get_nack_frag_response_delay_ms_override, get_nack_frag_retry_ms_override,
-        set_disable_preemptive, set_multicast_ttl, set_nack_frag_max_retries,
-        set_nack_frag_response_delay_ms, set_nack_frag_retry_ms,
+        get_nack_response_delay_ms_override, set_disable_preemptive, set_multicast_ttl,
+        set_nack_frag_max_retries, set_nack_frag_response_delay_ms, set_nack_frag_retry_ms,
+        set_nack_response_delay_ms,
     };
 
     const ENV_KEY: &str = "INT2DDS_MULTICAST_TTL";
@@ -633,6 +658,24 @@ mod tests {
 
         unsafe { std::env::set_var(KEY, "-1") };
         assert_eq!(get_nack_frag_retry_ms_override(), None, "negative → None");
+
+        unsafe { std::env::remove_var(KEY) };
+    }
+
+    #[test]
+    fn nack_response_delay_env_round_trips_and_rejects_invalid() {
+        const KEY: &str = "INT2DDS_NACK_RESPONSE_DELAY_MS";
+        unsafe { std::env::remove_var(KEY) };
+        assert_eq!(get_nack_response_delay_ms_override(), None, "unset → None");
+
+        set_nack_response_delay_ms(100);
+        assert_eq!(get_nack_response_delay_ms_override(), Some(100));
+
+        unsafe { std::env::set_var(KEY, "abc") };
+        assert_eq!(get_nack_response_delay_ms_override(), None, "non-numeric → None");
+
+        unsafe { std::env::set_var(KEY, "-1") };
+        assert_eq!(get_nack_response_delay_ms_override(), None, "negative → None");
 
         unsafe { std::env::remove_var(KEY) };
     }

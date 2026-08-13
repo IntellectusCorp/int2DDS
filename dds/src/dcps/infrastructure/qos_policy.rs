@@ -2316,7 +2316,8 @@ impl QosPolicy for TypeConsistencyEnforcementQosPolicy {
 /// - `initial_heartbeat_delay: 10ms` - Delay before sending initial heartbeat after reader discovery.
 /// - `push_mode: true` - (Unsupported) Writer pushes data to readers.
 /// - `nack_suppression_duration: 0` - (Unsupported) Duration to suppress NACKs.
-/// - `nack_response_delay: 100ms` - Delay before responding to a NACK.
+/// - `nack_response_delay: 0` - Delay before responding to a NACK.
+///   Overridable via `INT2DDS_NACK_RESPONSE_DELAY_MS`.
 #[derive(DdsType, Copy, Eq)]
 #[dds_type(crate_path = "crate", no_default)]
 pub struct WriterReliabilityExtensionQosPolicy {
@@ -2342,8 +2343,13 @@ pub struct WriterReliabilityExtensionQosPolicy {
     /// Default: 0 (no suppression)
     pub nack_suppression_duration: Duration,
 
-    /// Delay before responding to a NACK.
-    /// Default: 100ms
+    /// Delay before responding to a NACK, both for a whole-sample ACKNACK and for a NACK_FRAG.
+    ///
+    /// Default: 0. This was a merge window folding several requests into one repair round.
+    /// A fragmented send is now bounded by the peer's receive buffer and carries one heartbeat
+    /// per window, so the reader asks once per round and there is nothing left to merge; the
+    /// delay would only add a fixed cost to every round. Set it back to 100ms to restore the
+    /// merge.
     pub nack_response_delay: Duration,
 }
 
@@ -2353,6 +2359,9 @@ impl Default for WriterReliabilityExtensionQosPolicy {
 
         if let Some(is_disabled) = crate::common::env::get_disable_piggyback_heartbeat_default() {
             qos.disable_piggyback_heartbeat = is_disabled;
+        }
+        if let Some(ms) = crate::common::env::get_nack_response_delay_ms_override() {
+            qos.nack_response_delay = Duration::from_millis(ms.into());
         }
 
         qos
@@ -2366,7 +2375,7 @@ impl ConstDefault for WriterReliabilityExtensionQosPolicy {
         initial_heartbeat_delay: Duration { sec: 0, nanosec: 10_000_000 },
         push_mode: true,
         nack_suppression_duration: Duration { sec: 0, nanosec: 0 },
-        nack_response_delay: Duration { sec: 0, nanosec: 100_000_000 },
+        nack_response_delay: Duration { sec: 0, nanosec: 0 },
     };
 }
 
@@ -2449,7 +2458,7 @@ impl QosPolicy for DataFragQosPolicy {
 /// - `heartbeat_response_delay: 80ms` - Delay before responding to a heartbeat.
 /// - `heartbeat_suppression_duration: 0` - (Unsupported) Duration to suppress heartbeats.
 /// - `preemptive_acknack_delay: 80ms` - Delay before sending preemptive ACKNACK.
-/// - `nack_frag_response_delay: 80ms` - Delay before the first NACK_FRAG for missing fragments.
+/// - `nack_frag_response_delay: 0` - Delay before the first NACK_FRAG for missing fragments.
 ///   Overridable via `INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS`.
 /// - `nack_frag_retry_delay: 200ms` - Delay before retrying a NACK_FRAG that got no reply.
 ///   Overridable via `INT2DDS_NACK_FRAG_RETRY_MS`.
@@ -2471,7 +2480,11 @@ pub struct ReaderReliabilityExtensionQosPolicy {
     pub preemptive_acknack_delay: Duration,
 
     /// Delay before sending the first NACK_FRAG for a sample's missing fragments.
-    /// Default: 80ms
+    ///
+    /// Default: 0. This was a debounce against one NACK_FRAG per DATA_FRAG. A fragmented send
+    /// is now bounded by the peer's receive buffer and carries one heartbeat per window, so the
+    /// reader is triggered once per window and there is nothing left to collapse. Set it back to
+    /// 80ms to restore the debounce.
     pub nack_frag_response_delay: Duration,
 
     /// Delay before retrying a NACK_FRAG that got no reply.
@@ -2506,7 +2519,9 @@ impl ConstDefault for ReaderReliabilityExtensionQosPolicy {
         heartbeat_response_delay: Duration { sec: 0, nanosec: 80_000_000 },
         heartbeat_suppression_duration: Duration { sec: 0, nanosec: 0 },
         preemptive_acknack_delay: Duration { sec: 0, nanosec: 80_000_000 },
-        nack_frag_response_delay: Duration { sec: 0, nanosec: 80_000_000 },
+        nack_frag_response_delay: Duration { sec: 0, nanosec: 0 },
+        // Kept at 200ms: when a window's heartbeat is lost the reader has no trigger at all, and
+        // this self-re-arming retry is the only thing that recovers the round.
         nack_frag_retry_delay: Duration { sec: 0, nanosec: 200_000_000 },
         nack_frag_max_retries: 10,
     };
@@ -2595,6 +2610,37 @@ mod writer_reliability_extension_tests {
 
         unsafe { std::env::remove_var(ENV_KEY) };
     }
+
+    // Env is process-global and tests run in parallel: keep every
+    // INT2DDS_NACK_RESPONSE_DELAY_MS assertion inside this single test.
+    #[test]
+    fn nack_response_delay_defaults_to_zero_and_resolves_through_env() {
+        const DELAY_KEY: &str = "INT2DDS_NACK_RESPONSE_DELAY_MS";
+        unsafe { std::env::remove_var(DELAY_KEY) };
+        assert_eq!(
+            WriterReliabilityExtensionQosPolicy::default().nack_response_delay,
+            Duration::from_millis(0)
+        );
+
+        // The pre-window value, which a deployment can put back.
+        crate::common::env::set_nack_response_delay_ms(100);
+        assert_eq!(
+            WriterReliabilityExtensionQosPolicy::default().nack_response_delay,
+            Duration::from_millis(100)
+        );
+
+        for (raw, why) in [("abc", "non-numeric"), ("-1", "negative"), ("", "empty")] {
+            unsafe { std::env::set_var(DELAY_KEY, raw) };
+            assert_eq!(
+                WriterReliabilityExtensionQosPolicy::default().nack_response_delay,
+                Duration::from_millis(0),
+                "{} env falls back to default",
+                why
+            );
+        }
+
+        unsafe { std::env::remove_var(DELAY_KEY) };
+    }
 }
 
 #[cfg(test)]
@@ -2602,9 +2648,12 @@ mod reader_reliability_extension_tests {
     use super::*;
 
     #[test]
-    fn nack_frag_defaults_are_80ms_200ms_10() {
+    /// Zero response delay is what makes a windowed round cost a round trip instead of a round
+    /// trip plus a debounce. The retry pair stays non-zero on purpose: it is the only recovery
+    /// when a window's heartbeat is lost.
+    fn nack_frag_defaults_are_0ms_200ms_10() {
         let default = ReaderReliabilityExtensionQosPolicy::DEFAULT;
-        assert_eq!(default.nack_frag_response_delay, Duration::from_millis(80));
+        assert_eq!(default.nack_frag_response_delay, Duration::from_millis(0));
         assert_eq!(default.nack_frag_retry_delay, Duration::from_millis(200));
         assert_eq!(default.nack_frag_max_retries, 10);
     }
@@ -2630,7 +2679,7 @@ mod reader_reliability_extension_tests {
         unsafe { std::env::remove_var(ENV_KEY) };
         assert_eq!(
             ReaderReliabilityExtensionQosPolicy::default().nack_frag_response_delay,
-            Duration::from_millis(80)
+            Duration::from_millis(0)
         );
 
         crate::common::env::set_nack_frag_response_delay_ms(500);
@@ -2643,7 +2692,7 @@ mod reader_reliability_extension_tests {
             unsafe { std::env::set_var(ENV_KEY, raw) };
             assert_eq!(
                 ReaderReliabilityExtensionQosPolicy::default().nack_frag_response_delay,
-                Duration::from_millis(80),
+                Duration::from_millis(0),
                 "{} env falls back to default",
                 why
             );
