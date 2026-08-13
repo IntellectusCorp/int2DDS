@@ -489,6 +489,20 @@ mod tests {
         assert_eq!(change.total_fragments(), 20_000u32.div_ceil(1_344));
     }
 
+    // get_max_message_size()'s default is now 13440, not 65000: a payload in that
+    // gap fragments where it used to go out as a single DATA.
+    #[test]
+    fn payload_between_the_old_and_new_default_now_fragments() {
+        let mut below = change_with_payload(13_000);
+        below.apply_fragmentation(13_440, 1_344);
+        assert!(!below.is_fragmented(), "still under the new default");
+
+        let mut above = change_with_payload(30_000);
+        above.apply_fragmentation(13_440, 1_344);
+        assert!(above.is_fragmented(), "over the new default, but under the old one");
+        assert_eq!(above.total_fragments(), 30_000u32.div_ceil(1_344));
+    }
+
     // Equal knobs reproduce the single-size behavior: trigger and chunk are the same value.
     #[test]
     fn equal_max_and_fragment_size_matches_single_knob() {
@@ -589,10 +603,15 @@ mod tests {
         assert_eq!(change.fragments_per_submessage(0).get(), 1, "never returns zero");
         assert_eq!(change.fragments_per_submessage(usize::MAX).get(), u16::MAX, "clamped to u16");
 
-        // The default fragment size is the default budget, so packing is a no-op there.
-        let mut default_size = packed_change();
-        default_size.apply_fragmentation(65_000, 65_000);
-        assert_eq!(default_size.fragments_per_submessage(65_000).get(), 1, "defaults do not pack");
+        // 65000 is the fragment-size default and the max-message-size clamp ceiling
+        // (no longer the max-message-size default): equal knobs still make packing a no-op.
+        let mut equal_knobs = packed_change();
+        equal_knobs.apply_fragmentation(65_000, 65_000);
+        assert_eq!(
+            equal_knobs.fragments_per_submessage(65_000).get(),
+            1,
+            "equal knobs do not pack"
+        );
     }
 
     #[test]

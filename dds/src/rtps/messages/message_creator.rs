@@ -132,26 +132,26 @@ mod tests {
         ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    // get_max_message_size resolves the env var, clamps to 1..=65000, and defaults to 65000.
+    // get_max_message_size resolves the env var, clamps to 1..=65000, and defaults to 13440.
     #[test]
     fn max_message_size_resolves_and_clamps() {
         let _guard = lock_env();
         let key = "INT2DDS_MAX_MESSAGE_SIZE";
 
         unsafe { std::env::remove_var(key) };
-        assert_eq!(crate::common::env::get_max_message_size(), 65_000);
+        assert_eq!(crate::common::env::get_max_message_size(), 13_440);
 
         unsafe { std::env::set_var(key, "14720") };
         assert_eq!(crate::common::env::get_max_message_size(), 14_720);
 
         unsafe { std::env::set_var(key, "0") };
-        assert_eq!(crate::common::env::get_max_message_size(), 65_000);
+        assert_eq!(crate::common::env::get_max_message_size(), 13_440);
 
         unsafe { std::env::set_var(key, "70000") };
-        assert_eq!(crate::common::env::get_max_message_size(), 65_000);
+        assert_eq!(crate::common::env::get_max_message_size(), 13_440);
 
         unsafe { std::env::set_var(key, "not-a-number") };
-        assert_eq!(crate::common::env::get_max_message_size(), 65_000);
+        assert_eq!(crate::common::env::get_max_message_size(), 13_440);
 
         unsafe { std::env::remove_var(key) };
     }
@@ -695,9 +695,7 @@ impl MessageCreator {
         const SUBMESSAGE_HEADER_LEN: usize = 4;
 
         // INT2DDS_MAX_MESSAGE_SIZE bounds the datagram that batched submessages are packed into.
-        let max_message_size = crate::common::env::get_max_message_size_override()
-            .filter(|&size| (1..=65000).contains(&size))
-            .unwrap_or(65000) as usize;
+        let max_message_size = crate::common::env::get_max_message_size();
 
         let open_datagram = || {
             let mut rtps_message = RtpsMessage::new(Header::new(local_participant_guid.prefix()));
@@ -765,9 +763,7 @@ impl MessageCreator {
         const SUBMESSAGE_HEADER_LEN: usize = 4;
 
         // INT2DDS_MAX_MESSAGE_SIZE bounds the datagram that batched submessages are packed into.
-        let max_message_size = crate::common::env::get_max_message_size_override()
-            .filter(|&size| (1..=65000).contains(&size))
-            .unwrap_or(65000) as usize;
+        let max_message_size = crate::common::env::get_max_message_size();
 
         let open_datagram = || {
             let mut rtps_message = RtpsMessage::new(Header::new(reader_guid.prefix()));
