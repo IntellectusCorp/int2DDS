@@ -151,13 +151,14 @@ impl DcpsBridge {
         let metatraffic_unicast_locators = transport.advertised_metatraffic_unicast_locators();
         let default_unicast_locators = transport.advertised_default_unicast_locators();
 
-        let participant = Participant::new(
+        let mut participant = Participant::new(
             domain_id,
             participant_id,
             socket.working_ips(),
             metatraffic_unicast_locators,
             default_unicast_locators,
         );
+        participant.set_local_receive_buffer_size(transport.advertised_receive_buffer_size());
         let guid_prefix = participant.guid().prefix();
         let participant = Arc::new(participant);
 
@@ -905,6 +906,87 @@ mod tests {
                 TimerHandler::get_instance_by_participant_guid(participant_guid).is_none(),
                 "TimerHandler should be removed after disable"
             );
+        }
+    }
+
+    // Env is process-global: serialize the frag-size/message-size overrides
+    // against any other test mutating them concurrently.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Two participants, one host: each must learn the other's advertised
+    /// receive-buffer size over SPDP, and that value must match what a fresh
+    /// socket on this host is actually granted - not what int2dds requested.
+    #[test]
+    fn spdp_advertises_receive_buffer_size_between_peers() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        unsafe {
+            std::env::set_var("INT2DDS_DATA_FRAG_SIZE", "1344");
+            std::env::set_var("INT2DDS_MAX_MESSAGE_SIZE", "13440");
+            // Both peers must take the "double the OS default" branch below,
+            // not an explicit override left set by another test/session.
+            std::env::remove_var("INT2DDS_UDP_SOCKET_BUFFER");
+        }
+
+        // Independent oracle, computed with socket2 directly (not via
+        // UdpListener::new): what any fresh socket on this host is actually
+        // granted after asking to double its default SO_RCVBUF.
+        let probe = socket2::Socket::new(
+            socket2::Domain::IPV4,
+            socket2::Type::DGRAM,
+            Some(socket2::Protocol::UDP),
+        )
+        .expect("probe socket");
+        let current = probe.recv_buffer_size().expect("read default SO_RCVBUF");
+        probe.set_recv_buffer_size(current.saturating_mul(2)).expect("set SO_RCVBUF");
+        let expected = probe.recv_buffer_size().expect("read granted SO_RCVBUF");
+
+        let domain_id = unique_domain_id() as u32;
+        let mut bridge_a = DcpsBridge::new(domain_id, &Default::default()).unwrap();
+        bridge_a.init().unwrap();
+        let mut bridge_b = DcpsBridge::new(domain_id, &Default::default()).unwrap();
+        bridge_b.init().unwrap();
+
+        let guid_a = bridge_a.participant.guid();
+        let guid_b = bridge_b.participant.guid();
+
+        // Each side's own advertised value must already be the granted one,
+        // before either has heard from the other.
+        assert_eq!(
+            bridge_a.participant.local_participant_proxy_data().receive_buffer_size(),
+            Some(expected)
+        );
+        assert_eq!(
+            bridge_b.participant.local_participant_proxy_data().receive_buffer_size(),
+            Some(expected)
+        );
+
+        let deadline = std::time::Instant::now() + StdDuration::from_secs(15);
+        loop {
+            let a_knows_b =
+                bridge_a.participant.find_remote_participant_proxy_data(guid_b.prefix()).is_some();
+            let b_knows_a =
+                bridge_b.participant.find_remote_participant_proxy_data(guid_a.prefix()).is_some();
+            if a_knows_b && b_knows_a {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "participants did not discover each other in time"
+            );
+            thread::sleep(StdDuration::from_millis(50));
+        }
+
+        let a_view_of_b =
+            bridge_a.participant.find_remote_participant_proxy_data(guid_b.prefix()).unwrap();
+        let b_view_of_a =
+            bridge_b.participant.find_remote_participant_proxy_data(guid_a.prefix()).unwrap();
+
+        assert_eq!(a_view_of_b.receive_buffer_size(), Some(expected));
+        assert_eq!(b_view_of_a.receive_buffer_size(), Some(expected));
+
+        unsafe {
+            std::env::remove_var("INT2DDS_DATA_FRAG_SIZE");
+            std::env::remove_var("INT2DDS_MAX_MESSAGE_SIZE");
         }
     }
 

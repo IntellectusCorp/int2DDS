@@ -515,6 +515,12 @@ impl MessageReceiver {
                     }
                     spdp_data.set_entity_name(name.clone());
                 }
+                ParameterValue::ReceiveBufferSize(size) => {
+                    if log_on {
+                        debug!("Parameter {}: Receive buffer size: {}", index, size);
+                    }
+                    spdp_data.set_receive_buffer_size(Some(*size as usize));
+                }
                 ParameterValue::PropertyList(properties) => {
                     if log_on {
                         debug!(
@@ -691,4 +697,43 @@ impl MessageReceiver {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+    use crate::rtps::common::guid::GUIDPREFIX_UNKNOWN;
+
+    fn receiver() -> MessageReceiver {
+        MessageReceiver::new(GUIDPREFIX_UNKNOWN, &"127.0.0.1:0".parse().unwrap())
+    }
+
+    fn empty_proxy() -> SPDPDiscoveredParticipantData {
+        SPDPDiscoveredParticipantData::new(0, GUIDPREFIX_UNKNOWN, BuiltinEndpointSet::default())
+    }
+
+    // A peer that never sends PidReceiveBufferSize must read as absent, not as
+    // zero - a later window computation divides by this value.
+    #[test]
+    fn proxy_without_receive_buffer_param_reads_none() {
+        let mut proxy = empty_proxy();
+        let parameters = vec![Parameter {
+            id: ParameterId::PidVendorId,
+            value: ParameterValue::VendorId([9, 9]),
+        }];
+
+        receiver().process_discovery_parameters(&parameters, &mut proxy);
+
+        assert_eq!(proxy.receive_buffer_size(), None);
+    }
+
+    #[test]
+    fn proxy_with_receive_buffer_param_reads_the_advertised_value() {
+        let mut proxy = empty_proxy();
+        let parameters = vec![Parameter {
+            id: ParameterId::PidReceiveBufferSize,
+            value: ParameterValue::ReceiveBufferSize(425984),
+        }];
+
+        receiver().process_discovery_parameters(&parameters, &mut proxy);
+
+        assert_eq!(proxy.receive_buffer_size(), Some(425984usize));
+    }
+}
