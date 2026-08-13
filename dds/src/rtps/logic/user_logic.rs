@@ -2756,13 +2756,14 @@ impl UnicastMessageProcessor for UserLogic {
                 "[UserLogic] Fragment buffer count exceeded threshold ({}), cleaning up old buffers.",
                 self.fragment_buffers.len()
             );
-            for (evicted_writer_guid, _evicted_reader_id, evicted_sn) in
+            for (evicted_writer_guid, evicted_reader_id, evicted_sn) in
                 self.cleanup_old_fragment_buffers(FRAGMENT_BUFFER_LIMIT)
             {
-                // The bytes behind this key are gone. Every reader matched to that writer must
-                // forget what it thinks it has, or its ledger will read complete while the
-                // buffer holds nothing and it will never ask again.
-                let Ok(readers) = self.get_matched_readers(evicted_writer_guid, EntityId::UNKNOWN)
+                // The bytes behind this key are gone, so its reader must forget what it thinks
+                // it has, or its ledger will read complete while the buffer holds nothing and
+                // it will never ask again. The key names that reader, and only that one: every
+                // other reader's buffer for this writer is still whole.
+                let Ok(readers) = self.get_matched_readers(evicted_writer_guid, evicted_reader_id)
                 else {
                     continue;
                 };
@@ -3489,6 +3490,30 @@ mod tests {
             .expect("the writer proxy must exist")
     }
 
+    /// Inserts `count` already-complete buffers under distinct synthetic writers. Eviction
+    /// takes incomplete buffers first, so these only push the map over the cap: they never
+    /// compete to be the victim with the incomplete buffer a test is about.
+    fn fill_with_complete_buffers(user_logic: &UserLogic, count: u8) {
+        let reader_id = EntityId::new([0xF0, 0x00, 0x00], EntityKind::BUILT_IN_READER_NO_KEY);
+        let sn = SequenceNumber::new(0, 1);
+        for i in 0..count {
+            let writer_guid = Guid::new(
+                [i; 12],
+                EntityId::new([0x02, 0x00, 0x00], EntityKind::USER_DEFINED_WRITER_NO_KEY),
+            );
+            let mut buffer =
+                FragmentBuffer::new(sn, FRAG_TEST_SAMPLE_SIZE, FRAG_TEST_FRAGMENT_SIZE);
+            for fragment in 1..=4u32 {
+                buffer.copy_fragment_data(
+                    fragment,
+                    bytes::Bytes::from(vec![0u8; FRAG_TEST_FRAGMENT_SIZE as usize]),
+                );
+            }
+            assert!(buffer.all_fragments_received(), "filler buffers must not be eviction bait");
+            user_logic.fragment_buffers.insert((writer_guid, reader_id, sn), buffer);
+        }
+    }
+
     #[test]
     fn a_broadcast_burst_then_each_readers_own_repair_completes_for_both() {
         let (participant, mut user_logic, reader_a, reader_b, writer_guid, sn) =
@@ -3627,6 +3652,76 @@ mod tests {
         assert!(
             ledger_reads_complete(&reader_a, writer_guid, sn),
             "the retransmit must not knock reader A's ledger back off complete"
+        );
+    }
+
+    #[test]
+    fn evicting_one_readers_buffer_leaves_the_other_readers_ledger_alone() {
+        let (participant, mut user_logic, reader_a, reader_b, writer_guid, sn) =
+            two_readers_matched_to_one_fragmented_writer();
+        let prefix = participant.guid().prefix();
+        let reader_a_id = reader_a.guid().entity_id();
+        let reader_b_id = reader_b.guid().entity_id();
+
+        // Both readers take fragment 1 from the same burst.
+        feed_fragment(
+            &mut user_logic,
+            prefix,
+            writer_guid,
+            sn,
+            EntityId::UNKNOWN,
+            1,
+            1,
+            vec![1, 1, 1, 1],
+        );
+        // Only reader B takes fragment 2, which also makes its buffer the more recently used
+        // of the two, so eviction reaches for reader A's first.
+        feed_fragment(
+            &mut user_logic,
+            prefix,
+            writer_guid,
+            sn,
+            reader_b_id,
+            2,
+            1,
+            vec![2, 2, 2, 2],
+        );
+
+        fill_with_complete_buffers(&user_logic, FRAGMENT_BUFFER_LIMIT as u8 - 1);
+        assert_eq!(user_logic.fragment_buffers.len(), FRAGMENT_BUFFER_LIMIT + 1);
+
+        // One more datagram for reader B: the cap check runs first and evicts exactly one
+        // buffer, reader A's, which is the least recently used incomplete one.
+        feed_fragment(
+            &mut user_logic,
+            prefix,
+            writer_guid,
+            sn,
+            reader_b_id,
+            3,
+            1,
+            vec![3, 3, 3, 3],
+        );
+        assert!(
+            !user_logic.fragment_buffers.contains_key(&(writer_guid, reader_a_id, sn)),
+            "reader A's buffer must be the one evicted"
+        );
+        assert!(
+            user_logic.fragment_buffers.contains_key(&(writer_guid, reader_b_id, sn)),
+            "reader B's buffer must survive, which is what makes its ledger worth keeping"
+        );
+
+        assert_eq!(
+            ledger_missing(&reader_a, writer_guid, sn),
+            vec![1, 2, 3, 4],
+            "reader A lost its bytes, so it must go back to asking for the whole sample"
+        );
+        assert_eq!(
+            ledger_missing(&reader_b, writer_guid, sn),
+            vec![4],
+            "reader B's buffer still holds fragments 1..=3; retracting its record would make it \
+             re-request bytes it has, and the writer resend them into a buffer that already \
+             counted them"
         );
     }
 
