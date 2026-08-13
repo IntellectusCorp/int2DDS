@@ -21,6 +21,14 @@
 //! `presentation/coherent_access.rs` (one participant hosting two readers).
 //!
 //! Env is process-global and this file rewrites it, so there is exactly one `#[test]`.
+//!
+//! Also a regression guard for the shared-buffer fan-out defect: on a host with a small
+//! `net.core.rmem_max`, this 131 KB burst genuinely overruns the kernel receive buffer, so
+//! completion here often rides on a real per-reader NACK_FRAG repair race rather than the
+//! batched burst alone. Before the fix, whichever reader's repair happened to complete the
+//! shared reassembly buffer first was delivered the sample while the buffer was destroyed,
+//! permanently stranding the other reader. The byte-for-byte checks on both readers below
+//! catch that regardless of which arm ran or how much repair it took to get there.
 
 mod common;
 
