@@ -1938,8 +1938,7 @@ impl UserLogic {
     }
 
     /// Evicts buffers over the cap and returns the keys removed, so the caller can retract the
-    /// arrival record each evicted key's reader holds -- the bytes are gone, and nothing else
-    /// here knows that happened.
+    /// arrival record the evicted key's reader holds.
     fn cleanup_old_fragment_buffers(
         &self,
         max_size: usize,
@@ -2732,10 +2731,8 @@ impl UnicastMessageProcessor for UserLogic {
         let remote_writer_guid = Guid::new(rtps_header.guid_prefix(), data_frag.writer_id);
         let total_size = data_frag.sample_size;
 
-        // `reader_id` addresses the datagram, it does not name the sample's owner. UNKNOWN is
-        // one burst reaching every matched reader, so its fragments belong in every one of
-        // their buffers; a directed repair belongs only in the buffer of the reader it names.
-        // Resolving the id here yields exactly the readers this datagram arrived for.
+        // `reader_id` addresses the datagram, not the sample: UNKNOWN is one burst that reached
+        // every matched reader, a directed repair only the reader it names.
         let matched_readers: Vec<Arc<dyn Reader + Send + Sync>> =
             self.get_matched_readers(remote_writer_guid, data_frag.reader_id)?;
 
@@ -2759,10 +2756,8 @@ impl UnicastMessageProcessor for UserLogic {
             for (evicted_writer_guid, evicted_reader_id, evicted_sn) in
                 self.cleanup_old_fragment_buffers(FRAGMENT_BUFFER_LIMIT)
             {
-                // The bytes behind this key are gone, so its reader must forget what it thinks
-                // it has, or its ledger will read complete while the buffer holds nothing and
-                // it will never ask again. The key names that reader, and only that one: every
-                // other reader's buffer for this writer is still whole.
+                // The bytes are gone, so the ledger must stop claiming them. The key names the
+                // one reader that lost them; every other reader's buffer is still whole.
                 let Ok(readers) = self.get_matched_readers(evicted_writer_guid, evicted_reader_id)
                 else {
                     continue;
@@ -2780,20 +2775,22 @@ impl UnicastMessageProcessor for UserLogic {
                         .iter_mut()
                         .find(|proxy| proxy.remote_writer_guid() == evicted_writer_guid)
                     {
-                        writer_proxy.forget_fragments(evicted_sn);
+                        // A complete ledger means the sample was already delivered and a late
+                        // repair merely recreated the buffer. Only a stranded one is retracted.
+                        if !writer_proxy.all_fragments_received(evicted_sn) {
+                            writer_proxy.forget_fragments(evicted_sn);
+                        }
                     }
                 }
             }
         }
 
-        // Readers that complete on this same datagram hold byte-identical chunks, so they can
-        // share one contiguous-fallback cache and that copy still materializes at most once
-        // for the whole burst. Allocated on the first completion, not per datagram.
+        // Readers completing on this datagram hold byte-identical chunks, so one shared cache
+        // keeps any contiguous fallback to a single materialization.
         let mut assembled_cache: Option<std::sync::Arc<std::sync::OnceLock<bytes::Bytes>>> = None;
 
-        // The key carries the reader, so a broadcast fragment has to be written into every
-        // matched reader's buffer. Completion is then a single-reader event: the buffer that
-        // filled belongs to exactly one reader, and only that reader is owed the sample.
+        // The key carries the reader, so the fragments go into each matched reader's own
+        // buffer. Completion is then single-reader: a buffer belongs to exactly one.
         for reader in &matched_readers {
             let key = (remote_writer_guid, reader.guid().entity_id(), data_frag.writer_sn);
 
@@ -2810,10 +2807,8 @@ impl UnicastMessageProcessor for UserLogic {
                     }
                 }
 
-                // Zero-copy: `serialized_bytes` is the DataFrag payload as `Bytes`
-                // (a refcount on the socket buffer). Per-fragment slices below are
-                // again refcount bumps, not memcpys, so fanning the write out across
-                // readers costs slot arrays rather than payload copies.
+                // Zero-copy: per-fragment slices are refcount bumps on the socket buffer, so
+                // fanning the write out across readers costs slot arrays, not payload copies.
                 if let Some(serialized_bytes) = data_frag.serialized_bytes() {
                     let frag_size = data_frag.fragment_size as usize;
                     let total_len = serialized_bytes.len();
@@ -2829,8 +2824,7 @@ impl UnicastMessageProcessor for UserLogic {
                 }
             } // buffer RefMut is automatically dropped here
 
-            // For StatefulReader case, update this reader's ChangeFromWriter state from the
-            // buffer that just took the fragments.
+            // Update this reader's ChangeFromWriter state from the buffer that just took them.
             if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
                 // Query buffer information from DashMap again
                 if let Some(buffer_ref) = self.fragment_buffers.get(&key) {
@@ -2902,8 +2896,7 @@ impl UnicastMessageProcessor for UserLogic {
                 }
             }
 
-            // Scatter-gather: keep fragment chunks as-is instead of assembling a contiguous
-            // buffer.
+            // Scatter-gather: keep the chunks instead of assembling a contiguous buffer.
             let chunks = buffer.into_chunks();
             let cached = assembled_cache
                 .get_or_insert_with(|| std::sync::Arc::new(std::sync::OnceLock::new()))
@@ -3292,11 +3285,8 @@ mod tests {
         assert_plan_invariants(&runs, fpm(1));
     }
 
-    // --- Fragment reassembly: one buffer per reader, filled by every datagram it arrived on ---
-    //
-    // Drives `handle_datafrag_message` directly against two readers on one participant, with
-    // no sockets, no packet loss, and no timing, so the reassembly defects are deterministic
-    // instead of depending on the kernel dropping a datagram.
+    // Fragment reassembly: drives `handle_datafrag_message` directly against two readers on
+    // one participant, so the defects below are deterministic instead of loss-dependent.
 
     use crate::common::builtin::topic::publication_builtin_topic_data::PublicationBuiltinTopicData;
     use crate::common::builtin::topic::subscription_builtin_topic_data::SubscriptionBuiltinTopicData;
@@ -3490,9 +3480,8 @@ mod tests {
             .expect("the writer proxy must exist")
     }
 
-    /// Inserts `count` already-complete buffers under distinct synthetic writers. Eviction
-    /// takes incomplete buffers first, so these only push the map over the cap: they never
-    /// compete to be the victim with the incomplete buffer a test is about.
+    /// Inserts `count` already-complete buffers. Eviction takes incomplete ones first, so
+    /// these push the map over the cap without competing to be the victim.
     fn fill_with_complete_buffers(user_logic: &UserLogic, count: u8) {
         let reader_id = EntityId::new([0xF0, 0x00, 0x00], EntityKind::BUILT_IN_READER_NO_KEY);
         let sn = SequenceNumber::new(0, 1);
@@ -3522,8 +3511,7 @@ mod tests {
         let reader_a_id = reader_a.guid().entity_id();
         let reader_b_id = reader_b.guid().entity_id();
 
-        // First transmission: one burst addressed to UNKNOWN, which physically reaches every
-        // reader behind dst_prefix, so its fragments belong in both readers' buffers.
+        // First transmission: one UNKNOWN burst, which reaches every reader behind dst_prefix.
         feed_fragment(
             &mut user_logic,
             prefix,
@@ -3535,8 +3523,7 @@ mod tests {
             vec![1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3],
         );
 
-        // A directed repair for the last fragment, addressed to reader A alone. It completes
-        // reader A's buffer and nobody else's.
+        // A directed repair for the last fragment, which completes reader A's buffer alone.
         feed_fragment(
             &mut user_logic,
             prefix,
@@ -3564,9 +3551,8 @@ mod tests {
             "reader B's ledger must still ask for exactly the fragment it has not been sent"
         );
 
-        // Reader B's own repair, arriving after A's completion removed A's buffer. This is the
-        // property the per-reader key exists for: B's buffer still holds the broadcast
-        // fragments under B's own key, so one fragment finishes it.
+        // Reader B's own repair, after A's completion removed A's buffer. One fragment
+        // finishes it only if the burst reached B's own key.
         feed_fragment(
             &mut user_logic,
             prefix,
@@ -3642,8 +3628,8 @@ mod tests {
         assert_eq!(count_at_sn(&reader_a), 1, "reader A must not receive a duplicate");
         assert_eq!(count_at_sn(&reader_b), 1, "reader B must not receive a duplicate");
 
-        // The retransmit recreated reader A's buffer holding one fragment of four. Nothing
-        // completes it and nothing removes it: it is the stale entry the cap picks first.
+        // The retransmit recreated A's buffer at one fragment of four. Nothing completes or
+        // removes it, so it is the stale entry the cap picks first.
         assert!(
             user_logic.fragment_buffers.contains_key(&(writer_guid, reader_a_id, sn)),
             "a repair arriving after completion recreates the buffer, and that entry is the \
@@ -3652,6 +3638,85 @@ mod tests {
         assert!(
             ledger_reads_complete(&reader_a, writer_guid, sn),
             "the retransmit must not knock reader A's ledger back off complete"
+        );
+    }
+
+    #[test]
+    fn evicting_a_stale_buffer_keeps_the_delivered_samples_ledger_complete() {
+        let (participant, mut user_logic, reader_a, reader_b, writer_guid, sn) =
+            two_readers_matched_to_one_fragmented_writer();
+        let prefix = participant.guid().prefix();
+        let reader_a_id = reader_a.guid().entity_id();
+        let reader_b_id = reader_b.guid().entity_id();
+
+        feed_fragment(
+            &mut user_logic,
+            prefix,
+            writer_guid,
+            sn,
+            EntityId::UNKNOWN,
+            1,
+            3,
+            vec![1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3],
+        );
+        for reader_id in [reader_a_id, reader_b_id] {
+            feed_fragment(
+                &mut user_logic,
+                prefix,
+                writer_guid,
+                sn,
+                reader_id,
+                4,
+                1,
+                vec![4, 4, 4, 4],
+            );
+        }
+        // The retransmit that leaves a stale one-fragment buffer behind for reader A.
+        feed_fragment(
+            &mut user_logic,
+            prefix,
+            writer_guid,
+            sn,
+            reader_a_id,
+            4,
+            1,
+            vec![4, 4, 4, 4],
+        );
+        assert_eq!(
+            user_logic.fragment_buffers.len(),
+            1,
+            "only the stale entry may remain: both delivered buffers were removed"
+        );
+        assert!(held_sample(&reader_a, writer_guid, sn).is_some());
+
+        // One over the cap, with the stale entry the only incomplete buffer in the map.
+        fill_with_complete_buffers(&user_logic, FRAGMENT_BUFFER_LIMIT as u8);
+        assert_eq!(user_logic.fragment_buffers.len(), FRAGMENT_BUFFER_LIMIT + 1);
+
+        // The cap check runs before this datagram's own insert.
+        feed_fragment(
+            &mut user_logic,
+            prefix,
+            writer_guid,
+            sn.next(),
+            reader_b_id,
+            1,
+            1,
+            vec![9, 9, 9, 9],
+        );
+        assert!(
+            !user_logic.fragment_buffers.contains_key(&(writer_guid, reader_a_id, sn)),
+            "the stale entry must be the buffer eviction chose"
+        );
+
+        assert!(
+            ledger_reads_complete(&reader_a, writer_guid, sn),
+            "reader A already holds this sample; retracting its arrival record would drag the \
+             ACKNACK base back below a sequence number it has, and reopen a NACK_FRAG for it"
+        );
+        assert!(
+            ledger_missing(&reader_a, writer_guid, sn).is_empty(),
+            "a complete ledger must report nothing missing"
         );
     }
 
@@ -3674,8 +3739,8 @@ mod tests {
             1,
             vec![1, 1, 1, 1],
         );
-        // Only reader B takes fragment 2, which also makes its buffer the more recently used
-        // of the two, so eviction reaches for reader A's first.
+        // Only reader B takes fragment 2, which also makes its buffer the more recently used,
+        // so eviction reaches for reader A's first.
         feed_fragment(
             &mut user_logic,
             prefix,
@@ -3690,8 +3755,7 @@ mod tests {
         fill_with_complete_buffers(&user_logic, FRAGMENT_BUFFER_LIMIT as u8 - 1);
         assert_eq!(user_logic.fragment_buffers.len(), FRAGMENT_BUFFER_LIMIT + 1);
 
-        // One more datagram for reader B: the cap check runs first and evicts exactly one
-        // buffer, reader A's, which is the least recently used incomplete one.
+        // One more datagram for reader B: the cap check evicts one buffer, reader A's.
         feed_fragment(
             &mut user_logic,
             prefix,
