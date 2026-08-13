@@ -1,7 +1,9 @@
 #!/bin/sh
 set -e
 
-STAGED_FILES=$(git diff --cached --name-only)
+# core.quotePath defaults on: a non-ASCII or special-character path would otherwise come back
+# octal-quoted, never match a real path below, and be silently skipped.
+STAGED_FILES=$(git -c core.quotePath=false diff --cached --name-only)
 
 cargo fmt --all
 
