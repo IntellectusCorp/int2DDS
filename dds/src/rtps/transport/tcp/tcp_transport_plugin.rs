@@ -27,12 +27,9 @@ use crate::rtps::transport::tcp::tcp_sender::TcpSender;
 use crate::rtps::transport::tcp::tls::TlsConfig;
 use crate::rtps::transport::{TcpConfig, TransportType};
 
-/// Capacity of inbound discovery channels.
-const DISCOVERY_CHANNEL_CAPACITY: usize = 512;
-
-/// Capacity of the inbound user_data channel. Single-slot so a full channel
+/// Capacity of the inbound channel. Single-slot so a full channel
 /// blocks the router at once, pushing backpressure onto the TCP window.
-const USER_CHANNEL_CAPACITY: usize = 1;
+const TO_RTPS_CHANNEL_CAPACITY: usize = 1;
 
 // ── TcpTransportPlugin ──────────────────────────────────────────────────
 
@@ -129,8 +126,8 @@ impl TcpTransportPlugin {
         }
 
         // Bridge async → sync.
-        let (discovery_tx, discovery_rx) = bounded::<IncomingMessage>(DISCOVERY_CHANNEL_CAPACITY);
-        let (user_data_tx, user_data_rx) = bounded::<IncomingMessage>(USER_CHANNEL_CAPACITY);
+        let (discovery_tx, discovery_rx) = bounded::<IncomingMessage>(TO_RTPS_CHANNEL_CAPACITY);
+        let (user_data_tx, user_data_rx) = bounded::<IncomingMessage>(TO_RTPS_CHANNEL_CAPACITY);
 
         let worker_threads = tcp_config.async_workers.unwrap_or_else(default_worker_count);
         let runtime = Arc::new(

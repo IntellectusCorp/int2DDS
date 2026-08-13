@@ -288,9 +288,11 @@ impl ConnectionRegistry {
 
         let msg = IncomingMessage { data: payload, source: remote_addr };
 
+        // discovery & user-data: Backpressure instead of dropping.
+        // A full channel makes the reader stop reading → the socket fills → the TCP window closes
+        // → the blocking sender is paced to the consumer's rate.
         if PortManager::is_discovery_unicast_port_logically(self.domain_id, logical_port) {
-            // Discovery: drop on a full channel rather than backpressure.
-            if let Err(e) = self.discovery_tx.try_send(msg) {
+            if let Err(e) = self.discovery_tx.send_async(msg).await {
                 warn!(
                     "TcpMuxListener [{}]: Failed to route discovery: {:?}",
                     TransportErrorCode::TcpChannelFull,
@@ -298,9 +300,6 @@ impl ConnectionRegistry {
                 );
             }
         } else if PortManager::is_user_unicast_port_logically(self.domain_id, logical_port) {
-            // User data: backpressure instead of dropping. A full channel makes
-            // the reader stop reading → the socket fills → the TCP window closes
-            // → the blocking sender is paced to the consumer's rate.
             if let Err(e) = self.user_data_tx.send_async(msg).await {
                 warn!(
                     "TcpMuxListener [{}]: Failed to route user data: {:?}",
