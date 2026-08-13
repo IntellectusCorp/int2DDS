@@ -10,7 +10,6 @@ use crate::{
 };
 
 use super::builtin_topic_key::BuiltinTopicKey;
-use crate::serialize::DeserializerReader;
 
 #[derive(DdsType)]
 #[dds_type(crate_path = "crate", no_default, extensibility = "Mutable")]

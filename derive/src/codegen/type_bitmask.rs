@@ -256,15 +256,15 @@ pub fn derive_bitmask_impl(
         }
 
         #[automatically_derived]
-        impl<C: speedy::Context> speedy::Writable<C> for #value_name {
-            fn write_to<T: ?Sized + speedy::Writer<C>>(&self, writer: &mut T) -> Result<(), C::Error> {
+        impl<C: #crate_path::speedy::Context> #crate_path::speedy::Writable<C> for #value_name {
+            fn write_to<T: ?Sized + #crate_path::speedy::Writer<C>>(&self, writer: &mut T) -> Result<(), C::Error> {
                 writer.write_value(&self.0)
             }
         }
 
         #[automatically_derived]
-        impl<'a, C: speedy::Context> speedy::Readable<'a, C> for #value_name {
-            fn read_from<R: speedy::Reader<'a, C>>(reader: &mut R) -> Result<Self, C::Error> {
+        impl<'a, C: #crate_path::speedy::Context> #crate_path::speedy::Readable<'a, C> for #value_name {
+            fn read_from<R: #crate_path::speedy::Reader<'a, C>>(reader: &mut R) -> Result<Self, C::Error> {
                 Ok(Self(reader.read_value()?))
             }
         }

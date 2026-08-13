@@ -23,4 +23,11 @@ syn = { version = "2.0", features = ["full", "extra-traits"] }
 quote = "1.0"
 proc-macro2 = "1.0"
 md5 = "0.8"
-# int2dds = { path = "int2DDS" }
+
+# Dev-only and deliberately path-only (Cargo strips path-only dev-dependencies on
+# publish, so this does not deadlock the derive-then-dds publish order).
+# `derive` is the one workspace crate that pulls in neither `log` nor `speedy`,
+# which makes it the only place `tests/facade.rs` can compile macro output the way
+# a downstream consumer sees it.
+[dev-dependencies]
+int2dds = { path = "../dds" }

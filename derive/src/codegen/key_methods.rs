@@ -281,7 +281,7 @@ fn generate_key_impls_from_fields(
                 }
             }
             Err(e) => {
-                log::error!("Warning: Key serialization failed for type {}: {:?}. Using NIL instance handle.",
+                #crate_path::log::error!("Warning: Key serialization failed for type {}: {:?}. Using NIL instance handle.",
                     std::any::type_name::<#full_type>(), e);
                 #crate_path::common::instance_handle::InstanceHandle::NIL
             }

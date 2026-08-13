@@ -4,7 +4,6 @@
 //! discovered DataReader information in the DDS discovery protocol.
 
 use super::builtin_topic_key::BuiltinTopicKey;
-use crate::serialize::DeserializerReader;
 use crate::{
     infrastructure::qos_policy::{
         DataRepresentationQosPolicy, DeadlineQosPolicy, DestinationOrderQosPolicy,

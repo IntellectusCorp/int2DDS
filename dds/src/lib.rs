@@ -9,11 +9,16 @@ pub mod dcps;
 pub use crate::publication::data_writer::DataWriterBase;
 #[doc(hidden)]
 pub use crate::subscription::data_reader::DataReaderBase;
-// Re-exported so derive-macro output can name `bytes::Bytes` via the int2dds path.
+// Re-exported so derive-macro output can name these via the crate_path prefix
+// instead of requiring every downstream crate to depend on them directly.
 #[doc(hidden)]
 pub use bytes;
 #[doc(hidden)]
 pub use dcps::*;
+#[doc(hidden)]
+pub use log;
+#[doc(hidden)]
+pub use speedy;
 pub mod common;
 pub mod config;
 pub mod route_gateway;

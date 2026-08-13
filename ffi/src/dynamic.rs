@@ -1379,7 +1379,7 @@ mod tests {
     }
 
     use int2dds::serialize::cdr::{ExtensibilityKind as CdrExtKind, XcdrSerialize, XcdrSerializer};
-    use int2dds::serialize::{BufferManager, DeserializerReader};
+    use int2dds::serialize::BufferManager;
     use int2dds::xtypes::{CompleteTypeObject as XtCompleteTypeObject, HasTypeObject, TypeObject};
     use int2dds_derive::DdsType;
 

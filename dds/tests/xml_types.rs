@@ -29,7 +29,7 @@ use int2dds::{
         },
         topic::type_support::DdsType,
     },
-    serialize::{cdr::PrimitiveSerialize, DeserializerReader, WString},
+    serialize::{cdr::PrimitiveSerialize, WString},
     topic::qos::TopicQos,
     xtypes::{
         CompleteStructMember, CompleteStructType, CompleteTypeObject, DynamicData, DynamicTypeKind,
