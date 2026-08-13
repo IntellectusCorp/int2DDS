@@ -1,52 +1,30 @@
-pub mod cdr;
-pub mod core;
-pub mod key_holder;
+//! Serialization facade.
+//!
+//! The CDR/XCDR wire rules live in the `int2dds-cdr` kernel crate. Everything the
+//! kernel owns is re-exported here under the paths it had before the split, which
+//! are the paths `#[derive(DdsType)]` writes into generated code; `derive/tests/facade.rs`
+//! is the compile gate for that. Keep the re-exports enumerated rather than glob:
+//! the list is what makes the facade auditable.
+//!
+//! `pl_cdr` (SPDP/SEDP/inline QoS) stays here. It shares the `PID(2)+length(2)`
+//! header shape with XTypes PL_CDR but obeys the opposite length rule — RTPS 2.5
+//! §9.6.2.2.2 counts trailing padding, XTypes does not — so the two must not merge.
+
 pub mod pl_cdr;
-pub use core::xcdr;
-pub use key_holder::{
-    align_up as key_holder_align_up, KeyHolder, KeyHolderAccessor, KeyHolderFallback,
-};
 
-#[doc(hidden)]
-#[macro_export]
-macro_rules! impl_primitive_serialization {
-    (
-        trait Serialize = $serialize_trait:ident::$serialize_method:ident,
-        trait Deserialize = $deserialize_trait:ident::$deserialize_method:ident,
-        serializer = $serializer:ident,
-        deserializer = $deserializer:ident,
-        result = $result:ident,
-        { $($ty:ty => ($ser_fn:ident, $de_fn:ident)),+ $(,)? }
-    ) => {
-        $(
-            impl $serialize_trait for $ty {
-                const IS_PRIMITIVE: bool = true;
-                #[inline]
-                fn $serialize_method(&self, serializer: &mut $serializer) -> $result<()> {
-                    serializer.$ser_fn(*self)
-                }
-            }
+#[cfg(test)]
+mod cdr_tests;
 
-            impl $deserialize_trait for $ty {
-                const IS_PRIMITIVE: bool = true;
-                #[inline]
-                fn $deserialize_method(deserializer: &mut $deserializer) -> $result<Self> {
-                    deserializer.$de_fn()
-                }
-            }
-        )+
-    };
-}
+pub use int2dds_cdr::{cdr, core, key_holder, xcdr};
+pub use int2dds_cdr::{key_holder_align_up, KeyHolder, KeyHolderAccessor, KeyHolderFallback};
 
 pub use crate::infrastructure::qos_policy::DataRepresentationId;
-pub use core::{
+pub use int2dds_cdr::{
     // Alignment utilities
     align_buffer,
     align_buffer_with_header_offset,
     align_position_with_header_offset,
     deserialize_array_common,
-    // Data payload deserialization
-    deserialize_data_payload,
     deserialize_optional_common,
     deserialize_sequence_common,
     // Endianness utilities
@@ -80,3 +58,11 @@ pub use core::{
     WChar,
     WString,
 };
+
+/// Deserialize data payload using derive-based DdsType
+pub fn deserialize_data_payload<T>(payload: &[u8]) -> Result<T, String>
+where
+    T: crate::dcps::topic::type_support::DdsType,
+{
+    T::deserialize(payload).map_err(|e| format!("Failed to deserialize data: {:?}", e))
+}

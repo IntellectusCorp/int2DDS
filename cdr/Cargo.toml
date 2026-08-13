@@ -1,0 +1,24 @@
+[package]
+name = "int2dds-cdr"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "CDR/XCDR serialization kernel for int2DDS - wire format encoding independent of DDS entities"
+keywords = ["dds", "cdr", "xcdr", "serialization", "rtps"]
+categories = ["encoding", "network-programming"]
+documentation = "https://docs.rs/int2dds-cdr"
+
+[dependencies]
+bytes = "1"
+log = { version = "0.4.11", features = ["release_max_level_error"] }
+speedy = "0.8.0"
+
+# No dev-dependency on `int2dds`, deliberately. A dev-dep would put a second
+# `int2dds-cdr` instance in the test binary -- the one built with `--test` plus the
+# rlib `int2dds` links -- and `crate::` types would stop unifying with `int2dds::`
+# ones. Tests here therefore stay kernel-internal; the ones that need
+# `#[derive(DdsType)]` live in `dds/src/serialize/cdr_tests/`.

@@ -1,6 +1,6 @@
-use crate::serialize::cdr::{CdrDeserializer, CdrError, Xcdr2Deserializer};
+use crate::cdr::{CdrDeserializer, CdrError, Xcdr2Deserializer};
 
-use crate::serialize::{
+use crate::{
     from_bytes_f32, from_bytes_f64, from_bytes_i16, from_bytes_i32, from_bytes_i64, from_bytes_u16,
     from_bytes_u32, from_bytes_u64,
 };

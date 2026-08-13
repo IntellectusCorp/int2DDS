@@ -1040,6 +1040,7 @@ dependencies = [
  "hostname",
  "husky-rs",
  "if-addrs",
+ "int2dds-cdr",
  "int2dds-derive",
  "libc",
  "libloading",
@@ -1071,6 +1072,15 @@ dependencies = [
  "uuid",
  "winapi",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "int2dds-cdr"
+version = "0.1.1"
+dependencies = [
+ "bytes",
+ "log",
+ "speedy",
 ]
 
 [[package]]

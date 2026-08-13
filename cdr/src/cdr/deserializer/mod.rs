@@ -6,8 +6,8 @@ mod string;
 use speedy::Endianness;
 
 use super::CdrError;
-use crate::serialize::core::endianness_from_bool;
-use crate::serialize::{align_position_with_header_offset, DeserializerReader};
+use crate::core::endianness_from_bool;
+use crate::{align_position_with_header_offset, DeserializerReader};
 
 /// Deprecated. Use `cdr::CdrDeserializer` (re-export of `xcdr1::CdrDeserializer`).
 #[allow(dead_code)]
@@ -93,14 +93,11 @@ impl<'a> DeserializerReader for CdrDeserializer<'a> {
 #[allow(unused_imports)]
 mod cdr_error_tests {
     use crate::{
-        dcps::topic::type_support::{DdsType, FieldAccessor},
-        serialize::{
-            cdr::{
-                CdrDeserialize, CdrDeserializer, CdrSerialize, CdrSerializer, ExtensibilityKind,
-                XcdrDeserialize, XcdrDeserializer, XcdrSerialize, XcdrSerializer,
-            },
-            BufferManager, DeserializerReader, WChar, WString,
+        cdr::{
+            CdrDeserialize, CdrDeserializer, CdrSerialize, CdrSerializer, ExtensibilityKind,
+            XcdrDeserialize, XcdrDeserializer, XcdrSerialize, XcdrSerializer,
         },
+        BufferManager, DeserializerReader, WChar, WString,
     };
     use std::collections::HashMap;
     #[test]

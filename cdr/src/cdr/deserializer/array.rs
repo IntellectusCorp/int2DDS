@@ -1,4 +1,4 @@
-use crate::serialize::cdr::{CdrDeserializer, CdrError, Xcdr2Deserializer};
+use crate::cdr::{CdrDeserializer, CdrError, Xcdr2Deserializer};
 
 // Fixed-size arrays carry no length prefix, so each of these is the sequence body read
 // with the element count supplied by the caller. The bulk machinery is shared with

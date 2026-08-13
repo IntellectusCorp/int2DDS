@@ -3,9 +3,9 @@ use std::convert::TryFrom;
 use super::primitive::PrimitiveSerialize;
 use super::string::StringSerialize;
 use super::CdrSerializerCommon;
-use crate::serialize::cdr::prim_bulk::{extend_prim_slice, NativeBytes};
-use crate::serialize::cdr::{CdrError, CdrSerializer, Xcdr2Serializer};
-use crate::serialize::SerializationError;
+use crate::cdr::prim_bulk::{extend_prim_slice, NativeBytes};
+use crate::cdr::{CdrError, CdrSerializer, Xcdr2Serializer};
+use crate::SerializationError;
 
 fn checked_length(len: usize) -> Result<u32, CdrError> {
     u32::try_from(len).map_err(|_| {
@@ -236,14 +236,11 @@ impl Xcdr2Serializer {
 #[allow(unused_imports)]
 mod cdr_sequence_tests {
     use crate::{
-        dcps::topic::type_support::{DdsType, FieldAccessor},
-        serialize::{
-            cdr::{
-                CdrDeserialize, CdrDeserializer, CdrSerialize, CdrSerializer, ExtensibilityKind,
-                XcdrDeserialize, XcdrDeserializer, XcdrSerialize, XcdrSerializer,
-            },
-            BufferManager, DeserializerReader, WChar, WString,
+        cdr::{
+            CdrDeserialize, CdrDeserializer, CdrSerialize, CdrSerializer, ExtensibilityKind,
+            XcdrDeserialize, XcdrDeserializer, XcdrSerialize, XcdrSerializer,
         },
+        BufferManager, DeserializerReader, WChar, WString,
     };
     use std::collections::HashMap;
     #[test]
@@ -270,7 +267,7 @@ mod cdr_sequence_tests {
     /// another member did not round-trip between int2DDS and int2DDS-ffi.
     #[test]
     fn empty_sequence_emits_length_only() {
-        use crate::serialize::cdr::SequenceSerialize;
+        use crate::cdr::SequenceSerialize;
 
         let mut s = CdrSerializer::new(true);
         s.write_encapsulation_header().unwrap();
@@ -292,7 +289,7 @@ mod cdr_sequence_tests {
     /// disagree about where the next member starts.
     #[test]
     fn empty_sequence_round_trips_with_a_following_member() {
-        use crate::serialize::cdr::{PrimitiveSerialize, SequenceSerialize};
+        use crate::cdr::{PrimitiveSerialize, SequenceSerialize};
 
         let mut s = CdrSerializer::new(true);
         s.write_encapsulation_header().unwrap();
@@ -310,7 +307,7 @@ mod cdr_sequence_tests {
     /// orders — the swap path is only exercised when the stream order differs from the host.
     #[test]
     fn primitive_sequences_round_trip_in_both_byte_orders() {
-        use crate::serialize::cdr::SequenceSerialize;
+        use crate::cdr::SequenceSerialize;
 
         for little_endian in [true, false] {
             macro_rules! case {
@@ -381,7 +378,7 @@ mod cdr_sequence_tests {
         assert!(CdrDeserializer::new_without_header(&wire, true)
             .deserialize_byte_sequence()
             .is_err());
-        assert!(crate::serialize::cdr::Xcdr2Deserializer::new_without_header(&wire, true)
+        assert!(crate::cdr::Xcdr2Deserializer::new_without_header(&wire, true)
             .deserialize_f64_sequence()
             .is_err());
     }

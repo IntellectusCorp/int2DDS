@@ -108,7 +108,7 @@ pub(crate) fn read_prim_vec<T: NativeBytes>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::serialize::{to_bytes_f64, to_bytes_i16, to_bytes_u32};
+    use crate::{to_bytes_f64, to_bytes_i16, to_bytes_u32};
 
     fn both() -> [Endianness; 2] {
         [Endianness::LittleEndian, Endianness::BigEndian]

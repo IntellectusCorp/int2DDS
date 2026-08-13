@@ -23,11 +23,3 @@ pub trait BufferManager {
     fn as_bytes(&self) -> &[u8];
     fn reset(&mut self);
 }
-
-/// Deserialize data payload using derive-based DdsType
-pub fn deserialize_data_payload<T>(payload: &[u8]) -> Result<T, String>
-where
-    T: crate::dcps::topic::type_support::DdsType,
-{
-    T::deserialize(payload).map_err(|e| format!("Failed to deserialize data: {:?}", e))
-}
