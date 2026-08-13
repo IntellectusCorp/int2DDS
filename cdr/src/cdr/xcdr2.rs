@@ -273,7 +273,6 @@ pub struct Xcdr2Deserializer<'a> {
     pub(super) endianness: Endianness,
     pub(super) data: &'a [u8],
     pub(super) position: usize,
-    header_size: usize,
     /// Whether the data uses XCDR2 encoding (affects alignment rules)
     /// XCDR2 limits maximum alignment to 4 bytes, while XCDR1 allows 8 bytes
     is_xcdr2: bool,
@@ -284,7 +283,7 @@ impl<'a> Xcdr2Deserializer<'a> {
     pub fn new(data: &'a [u8]) -> Result<Self, CdrError> {
         let (endianness, header_size, is_xcdr2) = parse_encapsulation_header(data)?;
 
-        Ok(Self { endianness, data: &data[header_size..], position: 0, header_size, is_xcdr2 })
+        Ok(Self { endianness, data: &data[header_size..], position: 0, is_xcdr2 })
     }
 
     /// Create deserializer without encapsulation header
@@ -294,7 +293,6 @@ impl<'a> Xcdr2Deserializer<'a> {
             endianness: endianness_from_bool(little_endian),
             data,
             position: 0,
-            header_size: 0,
             is_xcdr2: true, // Default to XCDR2 behavior
         }
     }
@@ -308,7 +306,9 @@ impl<'a> Xcdr2Deserializer<'a> {
         self.data
     }
 
-    /// Align position to boundary (accounting for removed header)
+    /// Align position to boundary. Positions are relative to the start of the
+    /// encapsulated stream, i.e. the encapsulation header is not counted — the
+    /// same convention as `CdrSerializer`/`CdrDeserializer`.
     /// XCDR2 limits maximum alignment to 4 bytes to reduce padding
     /// XCDR1 (CDR) allows full alignment (up to 8 bytes for double/i64/u64)
     pub(super) fn align(&mut self, alignment: usize) {
@@ -317,7 +317,7 @@ impl<'a> Xcdr2Deserializer<'a> {
         } else {
             alignment // XCDR1: no alignment limit
         };
-        align_position_with_header_offset(&mut self.position, actual_alignment, self.header_size);
+        align_position_with_header_offset(&mut self.position, actual_alignment, 0);
     }
 
     /// Check if enough data is available
