@@ -49,8 +49,10 @@ pub(crate) struct SPDPDiscoveredParticipantData {
     key: BuiltinTopicKey,
     user_data: UserDataQosPolicy,
     // builtin_endpoint_qos: BuiltinEndpointQos,
-    // Advertised receive-buffer size (PidReceiveBufferSize). `None` means the peer
-    // didn't send it, which must stay distinct from an advertised zero.
+    // Advertised receive-buffer size (PidReceiveBufferSize). `None` covers
+    // absence, an implausible value, and a foreign vendor's same-numbered
+    // parameter alike (see message_receiver.rs) - never Some(0), since a
+    // later window computation divides by this value.
     receive_buffer_size: Option<usize>,
 }
 
