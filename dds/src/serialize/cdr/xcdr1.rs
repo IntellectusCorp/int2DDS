@@ -306,11 +306,16 @@ impl<'a> CdrDeserializer<'a> {
         Ok(PlCdrMemberHeader::Short { pid: raw_pid, length, must_understand })
     }
 
+    /// Peeks for the sentinel at the position [`Self::read_parameter_header`] would
+    /// read from: a member whose declared length excludes its trailing padding leaves
+    /// the cursor unaligned, and peeking there reads padding rather than the next PID.
     pub fn is_at_sentinel(&self) -> bool {
-        if self.position + 4 > self.input.len() {
+        let mut position = self.position;
+        align_position_with_header_offset(&mut position, 4, 0);
+        if position + 4 > self.input.len() {
             return false;
         }
-        let pid_bytes = self.input.read_array::<2>(self.position);
+        let pid_bytes = self.input.read_array::<2>(position);
         let pid = from_bytes_u16(pid_bytes, self.endianness);
         (pid & 0x3FFF) == (PID_SENTINEL & 0x3FFF)
     }
@@ -408,6 +413,7 @@ mod chained_tests {
 #[cfg(test)]
 #[allow(unused_imports)]
 mod xcdr1_tests {
+    use crate::serialize::cdr::xcdr1::PID_SENTINEL;
     use crate::serialize::cdr::MemberHeader;
     use crate::{
         dcps::topic::type_support::{DdsType, FieldAccessor},
@@ -426,6 +432,73 @@ mod xcdr1_tests {
     struct MutableV1Simple {
         pub x: u32,
         pub y: u16,
+    }
+
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "int2dds", extensibility = "Mutable")]
+    struct MutableV1Padded {
+        pub a: u16,
+        pub b: u32,
+    }
+
+    /// `a` is two bytes, so the next member header needs two bytes of padding. XTypes
+    /// counts only the member itself in the parameter length; RTI's default compliance
+    /// mask counts the padding too (`parameter_length_with_padding`, documented by RTI
+    /// as non-compliant). Both have to decode.
+    fn padded_member_wire(declared_len_of_a: u16) -> Vec<u8> {
+        padded_member_wire_with(declared_len_of_a, [0x00, 0x00])
+    }
+
+    fn padded_member_wire_with(declared_len_of_a: u16, padding: [u8; 2]) -> Vec<u8> {
+        let mut bytes = vec![0x00, 0x03, 0x00, 0x00];
+        bytes.extend_from_slice(&0x0000u16.to_le_bytes());
+        bytes.extend_from_slice(&declared_len_of_a.to_le_bytes());
+        bytes.extend_from_slice(&0xBEEFu16.to_le_bytes());
+        bytes.extend_from_slice(&padding);
+        bytes.extend_from_slice(&0x0001u16.to_le_bytes());
+        bytes.extend_from_slice(&4u16.to_le_bytes());
+        bytes.extend_from_slice(&0x11223344u32.to_le_bytes());
+        bytes.extend_from_slice(&PID_SENTINEL.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn test_xcdr1_reads_both_parameter_length_conventions() {
+        for declared_len in [2u16, 4u16] {
+            let bytes = padded_member_wire(declared_len);
+            let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+            let result = MutableV1Padded::deserialize_cdr(&mut deserializer).unwrap();
+            assert_eq!(result.a, 0xBEEF, "declared_len {}", declared_len);
+            assert_eq!(result.b, 0x11223344, "declared_len {}", declared_len);
+        }
+    }
+
+    /// The spec does not constrain the content of inter-member padding, so a peer that
+    /// leaves it uninitialised can put sentinel-looking bytes there. Only the aligned
+    /// header position decides where the member list ends.
+    #[test]
+    fn test_xcdr1_sentinel_lookalike_padding_is_not_end_of_struct() {
+        let bytes = padded_member_wire_with(2, PID_SENTINEL.to_le_bytes());
+        let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+        let result = MutableV1Padded::deserialize_cdr(&mut deserializer).unwrap();
+        assert_eq!(result.a, 0xBEEF);
+        assert_eq!(result.b, 0x11223344);
+    }
+
+    #[test]
+    fn test_xcdr1_parameter_length_excludes_trailing_padding() {
+        let value = MutableV1Padded { a: 0xBEEF, b: 0x11223344 };
+
+        let mut serializer = CdrSerializer::new_mutable(true);
+        serializer.write_encapsulation_header().unwrap();
+        value.serialize_cdr(&mut serializer).unwrap();
+
+        let payload = &serializer.into_bytes()[4..];
+        assert_eq!(u16::from_le_bytes([payload[0], payload[1]]) & 0x3FFF, 0);
+        assert_eq!(u16::from_le_bytes([payload[2], payload[3]]), 2);
+        assert_eq!(u16::from_le_bytes([payload[8], payload[9]]) & 0x3FFF, 1);
+        assert_eq!(payload, &padded_member_wire(2)[4..]);
     }
 
     #[test]
