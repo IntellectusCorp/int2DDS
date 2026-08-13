@@ -3069,6 +3069,20 @@ impl DomainParticipant {
         }
     }
 
+    /// Register a consumer for remote endpoint (SEDP) discovery events. The
+    /// callback fires on every remote reader/writer discovered or disposed,
+    /// letting a consumer keep an incremental graph instead of pulling
+    /// snapshots. Additive: the existing pull APIs are unchanged.
+    pub fn set_endpoint_discovery_callback(
+        &self,
+        f: std::sync::Arc<
+            dyn Fn(&crate::rtps::entities::participant::EndpointDiscoveryEvent) + Send + Sync,
+        >,
+    ) -> DdsResult<()> {
+        self.get_rtps_participant()?.set_endpoint_discovery_cb(f);
+        Ok(())
+    }
+
     fn has_manual_by_participant_writers(&self) -> DdsResult<bool> {
         let publishers = self.get_publishers()?;
         for publisher in publishers {

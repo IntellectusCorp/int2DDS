@@ -32,6 +32,7 @@ use int2dds::infrastructure::wait_set::WaitSet;
 use int2dds::subscription::sample_info::{
     InstanceStateKind, SampleInfo, SampleStateKind, ViewStateKind,
 };
+use int2dds::EndpointDiscoveryEvent;
 
 // ============================================================================
 // Opaque builtin topic data types
@@ -1210,5 +1211,92 @@ pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_destroy(
 ) -> Int2DdsRet {
     check_null!(data);
     drop(Box::from_raw(data));
+    INT2DDS_RET_OK
+}
+
+// ============================================================================
+// Endpoint (SEDP) discovery push callback
+// ============================================================================
+
+/// C callback invoked on every remote endpoint discovery/dispose.
+/// `is_writer`: 1 = publication/writer, 0 = subscription/reader.
+/// `is_alive`:  1 = alive (`pub_data` or `sub_data` valid), 0 = disposed (data null).
+/// `guid` always points to the 16-byte endpoint GUID (valid only during the call).
+/// All pointers are borrowed and must be copied out before returning.
+pub type Int2DdsEndpointDiscoveryCallback = extern "C" fn(
+    ctx: *mut core::ffi::c_void,
+    is_writer: i32,
+    is_alive: i32,
+    pub_data: *const Int2DdsPublicationBuiltinTopicData,
+    sub_data: *const Int2DdsSubscriptionBuiltinTopicData,
+    guid: *const [u8; 16],
+);
+
+struct EndpointDiscoveryCtx(*mut core::ffi::c_void);
+// The consumer (rmw) owns `ctx` and guarantees it outlives the callback
+// registration (it disables the callback or destroys the participant before
+// freeing `ctx`).
+unsafe impl Send for EndpointDiscoveryCtx {}
+unsafe impl Sync for EndpointDiscoveryCtx {}
+
+/// Register a consumer for remote endpoint discovery events. Additive: the
+/// existing pull snapshot APIs are unchanged. `callback` must be non-null; to
+/// disable, register a no-op callback (or destroy the participant) before
+/// freeing `ctx`.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_participant_set_endpoint_discovery_callback(
+    participant: *const Int2DdsParticipant,
+    callback: Int2DdsEndpointDiscoveryCallback,
+    ctx: *mut core::ffi::c_void,
+) -> Int2DdsRet {
+    check_null!(participant);
+    let participant_ref = &*participant;
+
+    let ctx_wrap = EndpointDiscoveryCtx(ctx);
+    let cb = callback;
+    let closure: std::sync::Arc<dyn Fn(&EndpointDiscoveryEvent) + Send + Sync> =
+        std::sync::Arc::new(move |event: &EndpointDiscoveryEvent| {
+            // Force capture of the whole ctx_wrap (which is Send+Sync). Rust 2021
+            // disjoint capture would otherwise grab only the raw `.0` pointer
+            // field, defeating the Send/Sync wrapper.
+            let ctx_wrap = &ctx_wrap;
+            let ctx = ctx_wrap.0;
+            match event {
+                EndpointDiscoveryEvent::WriterAlive(data) => {
+                    let guid = data.endpoint_guid().to_bytes();
+                    let wrapped = Int2DdsPublicationBuiltinTopicData { inner: data.clone() };
+                    cb(
+                        ctx,
+                        1,
+                        1,
+                        &wrapped as *const Int2DdsPublicationBuiltinTopicData,
+                        core::ptr::null(),
+                        &guid as *const [u8; 16],
+                    );
+                }
+                EndpointDiscoveryEvent::WriterDisposed(g) => {
+                    let guid = g.to_bytes();
+                    cb(ctx, 1, 0, core::ptr::null(), core::ptr::null(), &guid as *const [u8; 16]);
+                }
+                EndpointDiscoveryEvent::ReaderAlive(data) => {
+                    let guid = data.endpoint_guid().to_bytes();
+                    let wrapped = Int2DdsSubscriptionBuiltinTopicData { inner: data.clone() };
+                    cb(
+                        ctx,
+                        0,
+                        1,
+                        core::ptr::null(),
+                        &wrapped as *const Int2DdsSubscriptionBuiltinTopicData,
+                        &guid as *const [u8; 16],
+                    );
+                }
+                EndpointDiscoveryEvent::ReaderDisposed(g) => {
+                    let guid = g.to_bytes();
+                    cb(ctx, 0, 0, core::ptr::null(), core::ptr::null(), &guid as *const [u8; 16]);
+                }
+            }
+        });
+
+    ffi_try!(participant_ref.inner.set_endpoint_discovery_callback(closure));
     INT2DDS_RET_OK
 }
