@@ -49,6 +49,9 @@ pub(crate) struct SPDPDiscoveredParticipantData {
     key: BuiltinTopicKey,
     user_data: UserDataQosPolicy,
     // builtin_endpoint_qos: BuiltinEndpointQos,
+    // Advertised receive-buffer size (PidReceiveBufferSize). `None` means the peer
+    // didn't send it, which must stay distinct from an advertised zero.
+    receive_buffer_size: Option<usize>,
 }
 
 impl SPDPDiscoveredParticipantData {
@@ -76,6 +79,7 @@ impl SPDPDiscoveredParticipantData {
             heartbeat_period: RtpsDuration::new(2, 0),
             key: BuiltinTopicKey { value: [0; 3] },
             user_data: UserDataQosPolicy::default(),
+            receive_buffer_size: None,
         }
     }
 
@@ -140,6 +144,14 @@ impl SPDPDiscoveredParticipantData {
 
     pub(crate) fn lease_duration(&self) -> RtpsDuration {
         self.lease_duration
+    }
+
+    pub(crate) fn receive_buffer_size(&self) -> Option<usize> {
+        self.receive_buffer_size
+    }
+
+    pub(crate) fn set_receive_buffer_size(&mut self, size: Option<usize>) {
+        self.receive_buffer_size = size;
     }
 
     pub(crate) fn key(&self) -> &BuiltinTopicKey {

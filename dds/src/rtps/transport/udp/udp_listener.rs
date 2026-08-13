@@ -24,6 +24,9 @@ pub(crate) struct UdpListener {
     port: u16,
     socket: Option<mio::net::UdpSocket>,
     recv_arena: RecvArena,
+    // What the kernel actually granted (getsockopt, post-set) - not what was
+    // requested. Linux clamps to net.core.rmem_max and then doubles the result.
+    recv_buffer_size: Option<usize>,
 }
 
 impl Drop for UdpListener {
@@ -39,6 +42,7 @@ impl UdpListener {
     }
 
     pub(crate) fn new(port: u16) -> std::io::Result<Self> {
+        let recv_buffer_size;
         let socket = {
             let saddr: SocketAddr = SocketAddr::new("0.0.0.0".parse().unwrap(), port);
 
@@ -50,7 +54,9 @@ impl UdpListener {
                 let _ = socket2.set_recv_buffer_size(new_size);
             }
 
-            // println!("[socket2] new_listener recv_buffer_size: {:?}", socket2.recv_buffer_size());
+            // Re-read via getsockopt rather than trust what was requested: the OS
+            // may silently cap it (see set_recv_buffer_size above).
+            recv_buffer_size = socket2.recv_buffer_size().ok();
 
             let sock_addr = SockAddr::from(saddr);
             socket2.bind(&sock_addr)?;
@@ -62,11 +68,18 @@ impl UdpListener {
             mio::net::UdpSocket::from_std(std_socket)
         };
 
-        Ok(Self { socket: Some(socket), port, recv_arena: new_recv_arena() })
+        Ok(Self { socket: Some(socket), port, recv_arena: new_recv_arena(), recv_buffer_size })
     }
 
     pub(crate) fn port(&self) -> u16 {
         self.port
+    }
+
+    /// What `getsockopt(SO_RCVBUF)` reported right after this listener bound -
+    /// the value actually granted, already doubled by Linux. `None` if the
+    /// read-back failed.
+    pub(crate) fn recv_buffer_size(&self) -> Option<usize> {
+        self.recv_buffer_size
     }
 
     fn get_interface_address(port: u16) -> Vec<Locator> {
@@ -97,6 +110,7 @@ impl UdpListener {
             let new_size = current.saturating_mul(2);
             let _ = socket.set_recv_buffer_size(new_size);
         }
+        let recv_buffer_size = socket.recv_buffer_size().ok();
 
         // Join multicast group on each working interface individually,
         // so multicast works regardless of OS default route availability.
@@ -188,7 +202,7 @@ impl UdpListener {
         //     });
         // }
 
-        Ok(Self { socket: Some(socket), port, recv_arena: new_recv_arena() })
+        Ok(Self { socket: Some(socket), port, recv_arena: new_recv_arena(), recv_buffer_size })
     }
 
     pub(crate) fn socket(&mut self) -> &mut mio::net::UdpSocket {
@@ -239,5 +253,29 @@ impl UdpListener {
             }
             drop(socket);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Pins the fix this task is about: recv_buffer_size() must be what
+    // getsockopt reads back after set_recv_buffer_size, not the pre-set value -
+    // Linux always doubles a granted SO_RCVBUF, so requested != granted.
+    #[test]
+    fn recv_buffer_size_reports_the_post_set_kernel_grant() {
+        let listener = UdpListener::new(0).expect("bind ephemeral port");
+        let granted = listener.recv_buffer_size().expect("kernel reported a value");
+
+        // Independent oracle: the exact "double the current default, set, read
+        // back" sequence, called directly on a throwaway socket rather than
+        // through UdpListener::new, so a broken capture can't also break this.
+        let probe = Socket2::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+        let current = probe.recv_buffer_size().unwrap();
+        probe.set_recv_buffer_size(current.saturating_mul(2)).unwrap();
+        let expected = probe.recv_buffer_size().unwrap();
+
+        assert_eq!(granted, expected);
     }
 }

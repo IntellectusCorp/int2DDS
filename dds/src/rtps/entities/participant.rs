@@ -218,6 +218,18 @@ impl Participant {
         self.local_participant_proxy_data.clone()
     }
 
+    /// Record this participant's own receive-buffer size for SPDP to advertise.
+    /// Called once, right after construction, while the proxy Arc is still
+    /// uniquely owned - `Arc::get_mut` fails silently (a no-op) otherwise.
+    pub(crate) fn set_local_receive_buffer_size(&mut self, size: Option<usize>) {
+        match Arc::get_mut(&mut self.local_participant_proxy_data) {
+            Some(proxy) => proxy.set_receive_buffer_size(size),
+            None => log::warn!(
+                "local_participant_proxy_data already shared; receive buffer size not recorded"
+            ),
+        }
+    }
+
     pub(crate) fn remote_participant_proxy_datas(
         &self,
     ) -> Arc<Mutex<Vec<SPDPDiscoveredParticipantData>>> {
