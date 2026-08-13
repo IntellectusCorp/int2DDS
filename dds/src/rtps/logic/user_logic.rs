@@ -1931,11 +1931,16 @@ impl UserLogic {
         Ok(())
     }
 
-    fn cleanup_old_fragment_buffers(&self, max_size: usize) {
+    /// Evicts buffers over the cap and returns the keys removed, so the caller can retract the
+    /// arrival record each evicted key's readers hold -- the bytes are gone, and nothing else
+    /// here knows that happened.
+    fn cleanup_old_fragment_buffers(&self, max_size: usize) -> Vec<(Guid, SequenceNumber)> {
         // DashMap allows direct access without lock
         if self.fragment_buffers.len() <= max_size {
-            return;
+            return Vec::new();
         }
+
+        let mut evicted = Vec::new();
 
         // Evict the incomplete buffers that have gone longest without receiving a
         // fragment, so a large sample still making progress is not sacrificed
@@ -1949,7 +1954,6 @@ impl UserLogic {
         incomplete_buffers.sort_by_key(|(_, last_updated)| *last_updated);
 
         let buffers_to_remove = self.fragment_buffers.len() - max_size;
-        let mut removed_count = 0;
 
         for (key, _) in incomplete_buffers.iter().take(buffers_to_remove) {
             if let Some((_, removed_buffer)) = self.fragment_buffers.remove(key) {
@@ -1962,12 +1966,12 @@ impl UserLogic {
                     removed_buffer.last_updated.elapsed().as_secs_f64(),
                     removed_buffer.created_at.elapsed().as_secs_f64()
                 );
-                removed_count += 1;
+                evicted.push(*key);
             }
         }
 
         // If not enough removed yet, also remove completed buffers (remove oldest ones)
-        if removed_count < buffers_to_remove {
+        if evicted.len() < buffers_to_remove {
             let mut complete_buffers: Vec<_> = self
                 .fragment_buffers
                 .iter()
@@ -1977,7 +1981,7 @@ impl UserLogic {
 
             complete_buffers.sort_by_key(|(_, created_at)| *created_at);
 
-            let remaining_to_remove = buffers_to_remove - removed_count;
+            let remaining_to_remove = buffers_to_remove - evicted.len();
             for (key, _) in complete_buffers.iter().take(remaining_to_remove) {
                 if let Some((_, removed_buffer)) = self.fragment_buffers.remove(key) {
                     debug!(
@@ -1986,18 +1990,12 @@ impl UserLogic {
                         key.1,
                         removed_buffer.created_at.elapsed().as_secs_f64()
                     );
-                    removed_count += 1;
+                    evicted.push(*key);
                 }
             }
         }
 
-        if removed_count > 0 {
-            // warn!(
-            //     "Fragment buffer cleanup completed: removed {} buffers, remaining {} buffers",
-            //     removed_count,
-            //     self.fragment_buffers.len()
-            // );
-        }
+        evicted
     }
 
     /// Send `buffer` via the highest-priority transport reachable on both
@@ -2750,7 +2748,31 @@ impl UnicastMessageProcessor for UserLogic {
                 "[UserLogic] Fragment buffer count exceeded threshold ({}), cleaning up old buffers.",
                 self.fragment_buffers.len()
             );
-            self.cleanup_old_fragment_buffers(30);
+            for (evicted_writer_guid, evicted_sn) in self.cleanup_old_fragment_buffers(30) {
+                // The bytes behind this key are gone. Every reader matched to that writer must
+                // forget what it thinks it has, or its ledger will read complete while the
+                // buffer holds nothing and it will never ask again.
+                let Ok(readers) = self.get_matched_readers(evicted_writer_guid, EntityId::UNKNOWN)
+                else {
+                    continue;
+                };
+                for reader in readers {
+                    let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>()
+                    else {
+                        continue;
+                    };
+                    let writer_proxies = stateful_reader.writer_proxies();
+                    let Ok(mut matched_writers) = writer_proxies.lock() else {
+                        continue;
+                    };
+                    if let Some(writer_proxy) = matched_writers
+                        .iter_mut()
+                        .find(|proxy| proxy.remote_writer_guid() == evicted_writer_guid)
+                    {
+                        writer_proxy.forget_fragments(evicted_sn);
+                    }
+                }
+            }
         }
 
         // Copy fragment data using DashMap entry API
@@ -3508,5 +3530,45 @@ mod tests {
 
         assert_eq!(count_at_sn(&reader_a), 1, "reader A must not receive a duplicate");
         assert_eq!(count_at_sn(&reader_b), 1, "reader B must not receive a duplicate");
+    }
+
+    // --- Fragment reassembly: eviction must report exactly what it removed ---
+
+    #[test]
+    fn eviction_returns_the_keys_it_removed() {
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let transport: Arc<dyn TransportPlugin> = Arc::new(NullTransport);
+        let user_logic = UserLogic::new(participant, transport);
+
+        // More incomplete buffers than the cap, each under its own writer/SN key.
+        for i in 0..5u8 {
+            let writer_guid = Guid::new(
+                [i; 12],
+                EntityId::new([0x01, 0x00, 0x00], EntityKind::USER_DEFINED_WRITER_NO_KEY),
+            );
+            let sn = SequenceNumber::new(0, 1);
+            let mut buffer =
+                FragmentBuffer::new(sn, FRAG_TEST_SAMPLE_SIZE, FRAG_TEST_FRAGMENT_SIZE);
+            buffer.copy_fragment_data(
+                1,
+                bytes::Bytes::from(vec![0u8; FRAG_TEST_FRAGMENT_SIZE as usize]),
+            );
+            user_logic.fragment_buffers.insert((writer_guid, sn), buffer);
+        }
+
+        let before: std::collections::HashSet<_> =
+            user_logic.fragment_buffers.iter().map(|entry| *entry.key()).collect();
+        let evicted = user_logic.cleanup_old_fragment_buffers(2);
+        let after: std::collections::HashSet<_> =
+            user_logic.fragment_buffers.iter().map(|entry| *entry.key()).collect();
+
+        assert_eq!(after.len(), 2, "cleanup must leave exactly the cap behind");
+        let evicted_set: std::collections::HashSet<_> = evicted.iter().copied().collect();
+        assert_eq!(evicted_set.len(), evicted.len(), "no key is reported evicted twice");
+        assert_eq!(
+            before.difference(&after).copied().collect::<std::collections::HashSet<_>>(),
+            evicted_set,
+            "the returned keys must be exactly the ones that left the map"
+        );
     }
 }

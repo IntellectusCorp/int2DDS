@@ -480,11 +480,27 @@ impl WriterProxy {
         // A HEARTBEAT_FRAG may have seeded a smaller last-fragment number than
         // the sample's true total, so keep the max.
         info.total_fragments = info.total_fragments.max(total_fragments);
-        for fragment in received {
+        // Reject fragment numbers outside the sample's total: an unbounded insert would let a
+        // mislabeled range satisfy the completion count without the buffer holding those bytes.
+        for fragment in received.into_iter().filter(|f| (1..=info.total_fragments).contains(f)) {
             info.received_fragments.insert(fragment);
         }
 
         info.is_complete = info.received_fragments.len() == info.total_fragments as usize;
+    }
+
+    /// Undo `mark_frag_received` for one change. Called when the buffer backing it was
+    /// evicted: the bytes are gone, so the ledger must go back to reporting nothing received,
+    /// or the reader would only re-ask for the fragments it happened to see before eviction.
+    pub(crate) fn forget_fragments(&mut self, seq_num: SequenceNumber) {
+        if let Some(info) = self
+            .changes_from_writer
+            .get_mut(&seq_num)
+            .and_then(|change| change.fragment_info.as_mut())
+        {
+            info.received_fragments.clear();
+            info.is_complete = false;
+        }
     }
 
     pub(crate) fn on_sample_lost(&self) {
@@ -921,5 +937,41 @@ mod tests {
         assert_eq!(nack_frags.len(), 1, "one bitmap window per round");
         assert_eq!(nack_frags[0].writer_sn, sn1, "the wire must name the short sample");
         assert_eq!(nack_frags[0].fragment_number_state.extract_numbers(), vec![2]);
+    }
+
+    /// Eviction destroys the buffered bytes but leaves the ledger untouched unless something
+    /// retracts the arrival record too. Forgetting must reset the change to "nothing received",
+    /// not just clear the completion flag, or the reader would re-ask for only the fragments it
+    /// never actually has.
+    #[test]
+    fn an_evicted_reassembly_is_re_requested_from_the_start() {
+        let mut proxy = empty_writer_proxy();
+        let sn = SequenceNumber::new(0, 1);
+
+        proxy.mark_frag_received(sn, 4, [1, 2]);
+        assert_eq!(proxy.get_ascending_missing_fn_list(sn), vec![3, 4]);
+
+        proxy.forget_fragments(sn);
+
+        assert_eq!(
+            proxy.get_ascending_missing_fn_list(sn),
+            vec![1, 2, 3, 4],
+            "the buffer behind this entry is gone; nothing may be treated as received"
+        );
+        assert!(!proxy.all_fragments_received(sn));
+    }
+
+    /// A fragment number outside the sample's total must never be recorded. Left unbounded, a
+    /// range that names numbers beyond `total_fragments` could fill `received_fragments` to the
+    /// same count as `total_fragments` while the buffer backing it holds none of the real bytes.
+    #[test]
+    fn mark_frag_received_rejects_fragment_numbers_outside_the_total() {
+        let mut proxy = empty_writer_proxy();
+        let sn = SequenceNumber::new(0, 1);
+
+        proxy.mark_frag_received(sn, 4, 5..9);
+
+        assert_eq!(proxy.get_ascending_missing_fn_list(sn), vec![1, 2, 3, 4]);
+        assert!(!proxy.all_fragments_received(sn));
     }
 }
