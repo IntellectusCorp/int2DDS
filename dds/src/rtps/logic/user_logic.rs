@@ -61,28 +61,9 @@ use mio::Waker;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread::{self, JoinHandle};
 
-/// Delay before the first NACK_FRAG, so a burst of DATA_FRAG is answered once rather than
-/// per fragment.
-const NACK_FRAG_SUPPRESSION: Duration = Duration::from_millis(80);
-
-/// Delay before re-asking when the request produced nothing.
-///
-/// Only silence gets here: every retransmitted fragment carries a heartbeat that re-arms the
-/// suppression timer, so a healthy repair never waits this long. Its job is to bound the case
-/// where the NACK_FRAG itself, or every fragment answering it, was lost -- which otherwise waits
-/// for the writer's periodic heartbeat (2 s by default).
-const NACK_FRAG_RETRY: Duration = Duration::from_millis(200);
-
 /// How many in-progress fragmented samples a participant holds before the oldest are evicted.
 /// One entry per (writer, reader, sample), so several readers of one topic each take a slot.
 const FRAGMENT_BUFFER_LIMIT: usize = 128;
-
-/// How many times a request re-asks before giving the job back to the periodic heartbeat.
-///
-/// Bounded on purpose. A writer that has gone away can leave an incomplete sample behind whose
-/// proxy is still matched; without a budget this would re-ask five times a second forever, which
-/// the one-shot timer it replaces never did.
-const NACK_FRAG_MAX_RETRIES: u32 = 10;
 
 /// Everything a deferred NACK_FRAG needs to build itself, so it can be re-armed without the
 /// caller's stack.
@@ -95,8 +76,12 @@ struct NackFragRequest {
     remote_writer_guid: Guid,
     /// The change the fragment numbers belong to; also keys the timer.
     incomplete_sn: SequenceNumber,
-    /// Re-asks left before the periodic heartbeat takes over again.
+    /// Re-asks left before the periodic heartbeat takes over again. Bounded so a writer that
+    /// has gone away, with its proxy still matched, cannot be re-asked forever.
     retries_left: u32,
+    /// Delay before re-asking when a request got no reply. From QoS, but carried here rather
+    /// than re-read on re-arm, because the request itself is rebuilt from scratch each time.
+    retry_delay: Duration,
 }
 
 impl NackFragRequest {
@@ -184,8 +169,8 @@ impl NackFragRequest {
     }
 }
 
-/// Arms `request` to fire after `delay`, re-arming itself at [`NACK_FRAG_RETRY`] for as long as
-/// fragments stay missing.
+/// Arms `request` to fire after `delay`, re-arming itself at `request.retry_delay` for as long
+/// as fragments stay missing.
 ///
 /// A named function rather than a self-referencing closure: the callback cannot clone itself, and
 /// a non-repeating timer is dropped after it triggers, so re-adding the same `TimerId` from
@@ -201,7 +186,9 @@ fn schedule_nackfrag(request: NackFragRequest, delay: Duration) {
         if request.fire() && request.retries_left > 0 {
             let mut next = request.clone();
             next.retries_left -= 1;
-            schedule_nackfrag(next, NACK_FRAG_RETRY);
+            // `next` is moved into the call below, so its Copy field is read out first.
+            let retry_delay = next.retry_delay;
+            schedule_nackfrag(next, retry_delay);
         }
     });
 }
@@ -2478,7 +2465,8 @@ impl UnicastMessageProcessor for UserLogic {
                         reader_guid: stateful_reader.guid(),
                         remote_writer_guid: writer_proxy.remote_writer_guid(),
                         incomplete_sn,
-                        retries_left: NACK_FRAG_MAX_RETRIES,
+                        retries_left: stateful_reader.nack_frag_max_retries(),
+                        retry_delay: stateful_reader.nack_frag_retry_delay().to_std_duration(),
                     };
 
                     // Re-armed on every accepted heartbeat, so a burst is answered once after it
@@ -2488,7 +2476,9 @@ impl UnicastMessageProcessor for UserLogic {
                     {
                         handler.remove_timer(request.timer_id());
                     }
-                    schedule_nackfrag(request, NACK_FRAG_SUPPRESSION);
+                    let response_delay =
+                        stateful_reader.nack_frag_response_delay().to_std_duration();
+                    schedule_nackfrag(request, response_delay);
                 }
             }
 
@@ -4246,5 +4236,216 @@ mod tests {
             "every one of the {n} concurrent reassemblies must complete; falling short means \
              the cap check evicted a buffer out from under the fragment that was about to fill it"
         );
+    }
+
+    // NACK_FRAG QoS wiring: drives `handle_heartbeat_message` for real, so the arming site and
+    // `schedule_nackfrag`'s self re-arm both run, observed through send() timestamps.
+
+    use crate::core::time::Duration as DcpsDuration;
+    use crate::infrastructure::qos_policy::ReaderReliabilityExtensionQosPolicy;
+    use crate::subscription::qos::{DataReaderQos, SubscriberQos};
+    use crate::topic::qos::TopicQos;
+    use const_default::ConstDefault;
+
+    /// Records when each send happens, so a test can observe NACK_FRAG re-fire timing without a
+    /// real socket.
+    struct RecordingTransport {
+        sends: Arc<Mutex<Vec<Instant>>>,
+    }
+
+    impl TransportPlugin for RecordingTransport {
+        fn send(&self, _data: &[u8], _target: &SendTarget) -> std::io::Result<()> {
+            self.sends.lock().expect("sends lock").push(Instant::now());
+            Ok(())
+        }
+        fn can_handle(&self, _locator: &Locator) -> bool {
+            true
+        }
+        fn advertised_metatraffic_unicast_locators(&self) -> Vec<Locator> {
+            Vec::new()
+        }
+        fn advertised_default_unicast_locators(&self) -> Vec<Locator> {
+            Vec::new()
+        }
+        fn take_discovery_multicast_source(&self) -> Option<MessageSource> {
+            None
+        }
+        fn take_discovery_unicast_source(&self) -> Option<MessageSource> {
+            None
+        }
+        fn take_user_data_unicast_source(&self) -> Option<MessageSource> {
+            None
+        }
+        fn port(&self) -> u16 {
+            0
+        }
+        fn participant_id(&self) -> u32 {
+            0
+        }
+        fn close(&self) {}
+    }
+
+    /// One `StatefulReader` matched to one synthetic writer with a real unicast locator, so
+    /// `NackFragRequest::fire` reaches `RecordingTransport` instead of finding no locator to
+    /// send to. `qos` becomes the reader's NACK_FRAG timing.
+    #[allow(clippy::type_complexity)]
+    fn reader_with_nack_frag_qos(
+        qos: ReaderReliabilityExtensionQosPolicy,
+    ) -> (
+        Arc<Participant>,
+        UserLogic,
+        Arc<StatefulReader>,
+        Guid,
+        SequenceNumber,
+        Arc<Mutex<Vec<Instant>>>,
+    ) {
+        let sends = Arc::new(Mutex::new(Vec::new()));
+        let transport: Arc<dyn TransportPlugin> =
+            Arc::new(RecordingTransport { sends: sends.clone() });
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let user_logic = UserLogic::new(participant.clone(), transport);
+        participant.set_user_logic(Arc::new(Some(user_logic.clone())));
+
+        let writer_guid = Guid::new(
+            [0xD0; 12],
+            EntityId::new([0x01, 0x00, 0x00], EntityKind::USER_DEFINED_WRITER_NO_KEY),
+        );
+        let sn = SequenceNumber::new(0, 1);
+        let entity_id = EntityId::new([0xE0, 0x00, 0x00], EntityKind::BUILT_IN_READER_NO_KEY);
+        let guid = Guid::new(participant.guid().prefix(), entity_id);
+
+        let datareader_qos =
+            DataReaderQos { reader_reliability_extension: qos, ..DataReaderQos::default() };
+        let subscription_data = SubscriptionBuiltinTopicData::new(
+            &datareader_qos,
+            &SubscriberQos::default(),
+            &TopicQos::default(),
+        );
+
+        let reader = Arc::new(StatefulReader::new(
+            guid,
+            TopicKind::NoKey,
+            ReliabilityQosPolicyKind::Reliable,
+            Vec::new(),
+            Vec::new(),
+            entity_id,
+            false,
+            None,
+            None,
+            subscription_data,
+            participant.guid(),
+        ));
+        // A real locator, unlike the other fixtures' empty lists: `fire()` must actually reach
+        // the transport for its timing to be observable.
+        reader.matched_writer_add(WriterProxy::new(
+            writer_guid,
+            writer_guid.entity_id(),
+            vec![Locator::from_ip_v4_addr_and_port(&Ipv4Addr::LOCALHOST, 17000)],
+            Vec::new(),
+            0,
+            PublicationBuiltinTopicData::default(),
+            reader.get_update_status_callback(),
+        ));
+        let proxies = reader.writer_proxies();
+        let mut guard = proxies.lock().expect("writer proxies lock");
+        if let Some(proxy) = guard.iter_mut().find(|p| p.remote_writer_guid() == writer_guid) {
+            proxy.set_expected_sn(sn);
+        }
+        drop(guard);
+        participant.add_reader("nack_frag_qos_test_topic", reader.clone());
+
+        (participant, user_logic, reader, writer_guid, sn, sends)
+    }
+
+    /// Feeds 1 of 4 fragments, then a heartbeat covering `sn`, which arms the NACK_FRAG chain
+    /// exactly as a real incomplete-sample repair would. The other 3 fragments never arrive, so
+    /// the chain runs to its own budget instead of stopping early.
+    fn arm_nack_frag_chain(
+        user_logic: &mut UserLogic,
+        prefix: GuidPrefix,
+        writer_guid: Guid,
+        reader_id: EntityId,
+        sn: SequenceNumber,
+    ) {
+        feed_fragment(user_logic, prefix, writer_guid, sn, reader_id, 1, 1, vec![1, 1, 1, 1]);
+        let heartbeat = Heartbeat::new(reader_id, writer_guid.entity_id(), sn, sn, 1);
+        let rtps_header = Header::new(writer_guid.prefix());
+        let submessage_header = SubmessageHeader::new(SubmessageId::HEARTBEAT, 0, 0);
+        user_logic
+            .handle_heartbeat_message(&rtps_header, &submessage_header, &heartbeat)
+            .expect("heartbeat handling must not error");
+    }
+
+    #[test]
+    fn nack_frag_response_delay_from_qos_gates_the_first_repair_request() {
+        let qos = ReaderReliabilityExtensionQosPolicy {
+            nack_frag_response_delay: DcpsDuration::from_millis(500),
+            ..ReaderReliabilityExtensionQosPolicy::DEFAULT
+        };
+        let (participant, mut user_logic, reader, writer_guid, sn, sends) =
+            reader_with_nack_frag_qos(qos);
+        let prefix = participant.guid().prefix();
+        let reader_id = reader.guid().entity_id();
+
+        arm_nack_frag_chain(&mut user_logic, prefix, writer_guid, reader_id, sn);
+
+        // The old hardcoded response delay was 80ms; a 500ms QoS delay must still be silent
+        // well past that.
+        thread::sleep(Duration::from_millis(250));
+        assert_eq!(
+            sends.lock().unwrap().len(),
+            0,
+            "fired before its QoS-configured response delay"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while sends.lock().unwrap().is_empty() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            sends.lock().unwrap().len(),
+            1,
+            "never fired even after its QoS response delay elapsed"
+        );
+
+        if let Ok(handler) = TimerHandler::get_instance(prefix).lock() {
+            handler.terminate();
+        }
+    }
+
+    #[test]
+    fn nack_frag_retry_interval_and_budget_come_from_the_request_not_a_const() {
+        let qos = ReaderReliabilityExtensionQosPolicy {
+            nack_frag_response_delay: DcpsDuration::from_millis(20),
+            nack_frag_retry_delay: DcpsDuration::from_millis(40),
+            nack_frag_max_retries: 6,
+            ..ReaderReliabilityExtensionQosPolicy::DEFAULT
+        };
+        let (participant, mut user_logic, reader, writer_guid, sn, sends) =
+            reader_with_nack_frag_qos(qos);
+        let prefix = participant.guid().prefix();
+        let reader_id = reader.guid().entity_id();
+
+        arm_nack_frag_chain(&mut user_logic, prefix, writer_guid, reader_id, sn);
+
+        // 1 initial request plus 6 retries, 40ms apart, complete by ~260ms. At the old
+        // hardcoded 200ms retry this window would see at most 5 -- nowhere near the budget of 7.
+        let deadline = Instant::now() + Duration::from_millis(900);
+        while sends.lock().unwrap().len() < 7 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            sends.lock().unwrap().len(),
+            7,
+            "the retry chain did not complete at its QoS-configured interval and budget"
+        );
+
+        // The budget must actually stop the chain, not just space it out.
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(sends.lock().unwrap().len(), 7, "kept retrying past its QoS-configured budget");
+
+        if let Ok(handler) = TimerHandler::get_instance(prefix).lock() {
+            handler.terminate();
+        }
     }
 }
