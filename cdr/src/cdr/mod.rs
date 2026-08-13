@@ -4,6 +4,8 @@ mod prim_bulk;
 pub mod serializer;
 pub mod xcdr1;
 pub mod xcdr2;
+#[cfg(test)]
+mod xcdr2_wire_tests;
 
 use crate::core::{SerializationError, SerializationResult};
 
@@ -60,20 +62,6 @@ pub enum LcHint {
     SeqMul4,
     SeqMul8,
     Dheader,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LengthCode {
-    /// LC 0-3: Length is directly in lower 16 bits (0-65535 bytes)
-    Direct = 0,
-    /// LC 4: Next 4 bytes contain the actual length
-    NextInt = 4,
-    /// LC 5: Length is (next 4 bytes) * 4
-    NextIntMul4 = 5,
-    /// LC 6: Length is (next 4 bytes) * 8
-    NextIntMul8 = 6,
-    /// LC 7: Nested length (complex case)
-    Nested = 7,
 }
 
 impl MemberHeader {
