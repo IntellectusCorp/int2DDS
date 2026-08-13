@@ -16,6 +16,8 @@ pub use bytes;
 #[doc(hidden)]
 pub use dcps::*;
 #[doc(hidden)]
+pub use int2dds_cdr::impl_primitive_serialization;
+#[doc(hidden)]
 pub use log;
 #[doc(hidden)]
 pub use speedy;

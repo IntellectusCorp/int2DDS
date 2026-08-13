@@ -1,6 +1,6 @@
 use super::CdrSerializerCommon;
-use crate::serialize::cdr::{CdrError, CdrSerializer, Xcdr2Serializer};
-use crate::serialize::{
+use crate::cdr::{CdrError, CdrSerializer, Xcdr2Serializer};
+use crate::{
     to_bytes_f32, to_bytes_f64, to_bytes_i16, to_bytes_i32, to_bytes_i64, to_bytes_u16,
     to_bytes_u32, to_bytes_u64,
 };
@@ -110,14 +110,11 @@ impl PrimitiveSerialize for Xcdr2Serializer {}
 #[allow(unused_imports)]
 mod cdr_primitive_tests {
     use crate::{
-        dcps::topic::type_support::{DdsType, FieldAccessor},
-        serialize::{
-            cdr::{
-                CdrDeserialize, CdrDeserializer, CdrSerialize, CdrSerializer, ExtensibilityKind,
-                XcdrDeserialize, XcdrDeserializer, XcdrSerialize, XcdrSerializer,
-            },
-            BufferManager, DeserializerReader, WChar, WString,
+        cdr::{
+            CdrDeserialize, CdrDeserializer, CdrSerialize, CdrSerializer, ExtensibilityKind,
+            XcdrDeserialize, XcdrDeserializer, XcdrSerialize, XcdrSerializer,
         },
+        BufferManager, DeserializerReader, WChar, WString,
     };
     use std::collections::HashMap;
     #[test]

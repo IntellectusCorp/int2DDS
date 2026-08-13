@@ -6,15 +6,13 @@
 //! PLAIN_CDR2 big-endian with maximum alignment 4 and no member headers.
 //!
 //! This trait is the static (derive-generated) counterpart of the runtime
-//! projection in [`crate::xtypes::dynamic_serialization`]; the two must produce
+//! projection in `int2dds::xtypes::dynamic_serialization`; the two must produce
 //! byte-identical KeyHash streams. Derived structs/enums implement it via the
 //! proc-macro; primitive and string leaves implement it here.
 
-use crate::serialize::cdr::{
-    Xcdr2Deserializer, Xcdr2Serializer, XcdrDeserialize, XcdrResult, XcdrSerialize,
-};
-use crate::serialize::core::SerializationError;
-use crate::serialize::WString;
+use crate::cdr::{Xcdr2Deserializer, Xcdr2Serializer, XcdrDeserialize, XcdrResult, XcdrSerialize};
+use crate::core::SerializationError;
+use crate::WString;
 
 /// Projection of a value into its RTPS KeyHash key-holder form.
 pub trait KeyHolder {

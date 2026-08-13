@@ -1,6 +1,6 @@
 [workspace]
-members = ["dds", "derive", "ffi", "rpc", "idl"]
-default-members = ["dds", "derive", "ffi", "rpc", "idl"]
+members = ["cdr", "dds", "derive", "ffi", "rpc", "idl"]
+default-members = ["cdr", "dds", "derive", "ffi", "rpc", "idl"]
 resolver = "2"
 
 [workspace.package]

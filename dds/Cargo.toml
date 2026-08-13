@@ -19,6 +19,7 @@ default = []
 factory-hook = []
 
 [dependencies]
+int2dds-cdr = { path = "../cdr" }
 int2dds-derive = { path = "../derive" }
 mio = { version = "1.0.2", features = ["net", "os-poll"] }
 network-interface = "2.0.0"
