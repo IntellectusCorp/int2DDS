@@ -2449,6 +2449,12 @@ impl QosPolicy for DataFragQosPolicy {
 /// - `heartbeat_response_delay: 80ms` - Delay before responding to a heartbeat.
 /// - `heartbeat_suppression_duration: 0` - (Unsupported) Duration to suppress heartbeats.
 /// - `preemptive_acknack_delay: 80ms` - Delay before sending preemptive ACKNACK.
+/// - `nack_frag_response_delay: 80ms` - Delay before the first NACK_FRAG for missing fragments.
+///   Overridable via `INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS`.
+/// - `nack_frag_retry_delay: 200ms` - Delay before retrying a NACK_FRAG that got no reply.
+///   Overridable via `INT2DDS_NACK_FRAG_RETRY_MS`.
+/// - `nack_frag_max_retries: 10` - Retries before yielding to the periodic heartbeat.
+///   Overridable via `INT2DDS_NACK_FRAG_MAX_RETRIES`.
 #[derive(DdsType, Copy, Eq)]
 #[dds_type(crate_path = "crate", no_default)]
 pub struct ReaderReliabilityExtensionQosPolicy {
@@ -2463,11 +2469,35 @@ pub struct ReaderReliabilityExtensionQosPolicy {
     /// Delay before sending preemptive ACKNACK after writer discovery.
     /// Default: 80ms
     pub preemptive_acknack_delay: Duration,
+
+    /// Delay before sending the first NACK_FRAG for a sample's missing fragments.
+    /// Default: 80ms
+    pub nack_frag_response_delay: Duration,
+
+    /// Delay before retrying a NACK_FRAG that got no reply.
+    /// Default: 200ms
+    pub nack_frag_retry_delay: Duration,
+
+    /// Retries before a stalled fragment repair yields to the periodic heartbeat.
+    /// Default: 10
+    pub nack_frag_max_retries: u32,
 }
 
 impl Default for ReaderReliabilityExtensionQosPolicy {
     fn default() -> Self {
-        Self::DEFAULT
+        let mut qos = Self::DEFAULT;
+
+        if let Some(ms) = crate::common::env::get_nack_frag_response_delay_ms_override() {
+            qos.nack_frag_response_delay = Duration::from_millis(ms.into());
+        }
+        if let Some(ms) = crate::common::env::get_nack_frag_retry_ms_override() {
+            qos.nack_frag_retry_delay = Duration::from_millis(ms.into());
+        }
+        if let Some(retries) = crate::common::env::get_nack_frag_max_retries_override() {
+            qos.nack_frag_max_retries = retries;
+        }
+
+        qos
     }
 }
 
@@ -2476,6 +2506,9 @@ impl ConstDefault for ReaderReliabilityExtensionQosPolicy {
         heartbeat_response_delay: Duration { sec: 0, nanosec: 80_000_000 },
         heartbeat_suppression_duration: Duration { sec: 0, nanosec: 0 },
         preemptive_acknack_delay: Duration { sec: 0, nanosec: 80_000_000 },
+        nack_frag_response_delay: Duration { sec: 0, nanosec: 80_000_000 },
+        nack_frag_retry_delay: Duration { sec: 0, nanosec: 200_000_000 },
+        nack_frag_max_retries: 10,
     };
 }
 
@@ -2559,6 +2592,116 @@ mod writer_reliability_extension_tests {
             !WriterReliabilityExtensionQosPolicy::default().disable_piggyback_heartbeat,
             "unrecognized env is ignored"
         );
+
+        unsafe { std::env::remove_var(ENV_KEY) };
+    }
+}
+
+#[cfg(test)]
+mod reader_reliability_extension_tests {
+    use super::*;
+
+    #[test]
+    fn nack_frag_defaults_are_80ms_200ms_10() {
+        let default = ReaderReliabilityExtensionQosPolicy::DEFAULT;
+        assert_eq!(default.nack_frag_response_delay, Duration::from_millis(80));
+        assert_eq!(default.nack_frag_retry_delay, Duration::from_millis(200));
+        assert_eq!(default.nack_frag_max_retries, 10);
+    }
+
+    #[test]
+    fn nack_frag_fields_are_overridable_through_struct() {
+        let qos = ReaderReliabilityExtensionQosPolicy {
+            nack_frag_response_delay: Duration::from_millis(1),
+            nack_frag_retry_delay: Duration::from_millis(2),
+            nack_frag_max_retries: 3,
+            ..ReaderReliabilityExtensionQosPolicy::DEFAULT
+        };
+        assert_eq!(qos.nack_frag_response_delay, Duration::from_millis(1));
+        assert_eq!(qos.nack_frag_retry_delay, Duration::from_millis(2));
+        assert_eq!(qos.nack_frag_max_retries, 3);
+    }
+
+    // Env is process-global and tests run in parallel: keep every
+    // INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS assertion inside this single test.
+    #[test]
+    fn nack_frag_response_delay_resolves_through_env() {
+        const ENV_KEY: &str = "INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS";
+        unsafe { std::env::remove_var(ENV_KEY) };
+        assert_eq!(
+            ReaderReliabilityExtensionQosPolicy::default().nack_frag_response_delay,
+            Duration::from_millis(80)
+        );
+
+        crate::common::env::set_nack_frag_response_delay_ms(500);
+        assert_eq!(
+            ReaderReliabilityExtensionQosPolicy::default().nack_frag_response_delay,
+            Duration::from_millis(500)
+        );
+
+        for (raw, why) in [("abc", "non-numeric"), ("-1", "negative"), ("", "empty")] {
+            unsafe { std::env::set_var(ENV_KEY, raw) };
+            assert_eq!(
+                ReaderReliabilityExtensionQosPolicy::default().nack_frag_response_delay,
+                Duration::from_millis(80),
+                "{} env falls back to default",
+                why
+            );
+        }
+
+        unsafe { std::env::remove_var(ENV_KEY) };
+    }
+
+    // Env is process-global and tests run in parallel: keep every
+    // INT2DDS_NACK_FRAG_RETRY_MS assertion inside this single test.
+    #[test]
+    fn nack_frag_retry_delay_resolves_through_env() {
+        const ENV_KEY: &str = "INT2DDS_NACK_FRAG_RETRY_MS";
+        unsafe { std::env::remove_var(ENV_KEY) };
+        assert_eq!(
+            ReaderReliabilityExtensionQosPolicy::default().nack_frag_retry_delay,
+            Duration::from_millis(200)
+        );
+
+        crate::common::env::set_nack_frag_retry_ms(750);
+        assert_eq!(
+            ReaderReliabilityExtensionQosPolicy::default().nack_frag_retry_delay,
+            Duration::from_millis(750)
+        );
+
+        for (raw, why) in [("abc", "non-numeric"), ("-1", "negative"), ("", "empty")] {
+            unsafe { std::env::set_var(ENV_KEY, raw) };
+            assert_eq!(
+                ReaderReliabilityExtensionQosPolicy::default().nack_frag_retry_delay,
+                Duration::from_millis(200),
+                "{} env falls back to default",
+                why
+            );
+        }
+
+        unsafe { std::env::remove_var(ENV_KEY) };
+    }
+
+    // Env is process-global and tests run in parallel: keep every
+    // INT2DDS_NACK_FRAG_MAX_RETRIES assertion inside this single test.
+    #[test]
+    fn nack_frag_max_retries_resolves_through_env() {
+        const ENV_KEY: &str = "INT2DDS_NACK_FRAG_MAX_RETRIES";
+        unsafe { std::env::remove_var(ENV_KEY) };
+        assert_eq!(ReaderReliabilityExtensionQosPolicy::default().nack_frag_max_retries, 10);
+
+        crate::common::env::set_nack_frag_max_retries(25);
+        assert_eq!(ReaderReliabilityExtensionQosPolicy::default().nack_frag_max_retries, 25);
+
+        for (raw, why) in [("abc", "non-numeric"), ("-1", "negative"), ("", "empty")] {
+            unsafe { std::env::set_var(ENV_KEY, raw) };
+            assert_eq!(
+                ReaderReliabilityExtensionQosPolicy::default().nack_frag_max_retries,
+                10,
+                "{} env falls back to default",
+                why
+            );
+        }
 
         unsafe { std::env::remove_var(ENV_KEY) };
     }
