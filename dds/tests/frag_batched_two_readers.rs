@@ -22,13 +22,12 @@
 //!
 //! Env is process-global and this file rewrites it, so there is exactly one `#[test]`.
 //!
-//! Also a regression guard for the shared-buffer fan-out defect: on a host with a small
-//! `net.core.rmem_max`, this 131 KB burst genuinely overruns the kernel receive buffer, so
-//! completion here often rides on a real per-reader NACK_FRAG repair race rather than the
-//! batched burst alone. Before the fix, whichever reader's repair happened to complete the
-//! shared reassembly buffer first was delivered the sample while the buffer was destroyed,
-//! permanently stranding the other reader. The byte-for-byte checks on both readers below
-//! catch that regardless of which arm ran or how much repair it took to get there.
+//! Also a regression guard for fragment reassembly across the two addressing modes. On a host
+//! with a small `net.core.rmem_max` this 131 KB burst genuinely overruns the kernel receive
+//! buffer, so completion here often rides on a real per-reader NACK_FRAG repair rather than the
+//! batched burst alone. A repair carries a specific reader id and only a few fragments, so it
+//! can only complete if the `ENTITYID_UNKNOWN` burst's fragments are already in that reader's
+//! own reassembly buffer. The byte-for-byte checks on both readers catch it either way.
 
 mod common;
 
@@ -56,9 +55,15 @@ use int2dds::{
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-/// 131,072 bytes at a 1344-byte fragment size is 98 fragments; at a 65,000-byte message budget
-/// (48 fragments/submessage) that packs into three DATA_FRAG submessages: (1,48) (49,48) (97,2).
+/// 131,072 bytes at a 1344-byte fragment size is 98 fragments; at the 13,440-byte deployment
+/// message budget (10 fragments/submessage) that is ten DATA_FRAG submessages, nine of ten
+/// fragments and a final eight.
 const PAYLOAD_BYTES: usize = 131_072;
+
+/// The deployment configuration, pinned here rather than inherited: the built-in defaults are
+/// 65000/65000, which packs the whole sample into one submessage and exercises nothing.
+const FRAGMENT_SIZE: i32 = 1_344;
+const MAX_MESSAGE_SIZE: i32 = 13_440;
 
 /// Far above the sub-second delivery seen on the development board, low enough that a stalled
 /// burst fails rather than hanging the binary.
@@ -147,7 +152,8 @@ fn two_readers_on_one_participant_reach_the_batched_data_frag_arm() {
 
     // Pinned explicitly: built-in defaults are not this test's business, and depending on them
     // is exactly the failure mode that let frag_small_payload.rs validate the wrong thing.
-    int2dds::common::env::set_max_message_size(65_000);
+    int2dds::common::env::set_data_frag_size(FRAGMENT_SIZE);
+    int2dds::common::env::set_max_message_size(MAX_MESSAGE_SIZE);
 
     let domain_id = next_domain_id();
     let factory = DomainParticipantFactory::get_instance();
@@ -205,7 +211,7 @@ fn two_readers_on_one_participant_reach_the_batched_data_frag_arm() {
             DataWriterQos {
                 reliability,
                 history,
-                data_frag: DataFragQosPolicy { max_size: 1_344 },
+                data_frag: DataFragQosPolicy { max_size: FRAGMENT_SIZE },
                 ..DataWriterQos::default()
             },
             None,
