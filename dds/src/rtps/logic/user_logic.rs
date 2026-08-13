@@ -2016,6 +2016,19 @@ impl UserLogic {
         evicted
     }
 
+    /// Drop every reassembly buffer addressed to `reader_id`. Called when that reader is
+    /// removed: it can never complete these, and `get_matched_readers` will not find it again,
+    /// so nothing but this would ever reclaim them.
+    pub(crate) fn forget_fragment_buffers_for_reader(&self, reader_id: EntityId) {
+        self.fragment_buffers.retain(|key, _| key.1 != reader_id);
+    }
+
+    /// Drop every reassembly buffer waiting on `writer_guid`. Called when that writer is
+    /// unmatched: it will send no further DATA_FRAG, so nothing but this would ever reclaim them.
+    pub(crate) fn forget_fragment_buffers_for_writer(&self, writer_guid: Guid) {
+        self.fragment_buffers.retain(|key, _| key.0 != writer_guid);
+    }
+
     /// Send `buffer` via the highest-priority transport reachable on both
     /// sides (SHM > TCP > UDP); a peer advertising multiple transports gets
     /// a single copy. Associated fn so `&self`-less closures (e.g. the
@@ -3404,6 +3417,9 @@ mod tests {
         let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
         let transport: Arc<dyn TransportPlugin> = Arc::new(NullTransport);
         let user_logic = UserLogic::new(participant.clone(), transport);
+        // Wire it back onto the participant, as production startup does, so teardown paths
+        // that look it up via `user_logic_if_set` can reach the same `fragment_buffers`.
+        participant.set_user_logic(Arc::new(Some(user_logic.clone())));
 
         let writer_guid = Guid::new(
             [0xC0; 12],
@@ -3945,6 +3961,79 @@ mod tests {
             ledger_missing(&reader_a, writer_guid, sn),
             vec![1, 2, 3, 4],
             "the reader must ask for the whole sample again"
+        );
+    }
+
+    // --- Fragment reassembly: buffers must not outlive the reader or writer they wait on ---
+
+    #[test]
+    fn deleting_a_reader_frees_only_its_own_half_assembled_fragment_buffer() {
+        let (participant, mut user_logic, reader_a, reader_b, writer_guid, sn) =
+            two_readers_matched_to_one_fragmented_writer();
+        let prefix = participant.guid().prefix();
+        let reader_a_id = reader_a.guid().entity_id();
+        let reader_b_id = reader_b.guid().entity_id();
+
+        // Directed repairs half-assemble one sample per reader, each under its own key.
+        for reader_id in [reader_a_id, reader_b_id] {
+            feed_fragment(
+                &mut user_logic,
+                prefix,
+                writer_guid,
+                sn,
+                reader_id,
+                1,
+                2,
+                vec![1, 1, 1, 1, 2, 2, 2, 2],
+            );
+        }
+        assert!(user_logic.fragment_buffers.contains_key(&(writer_guid, reader_a_id, sn)));
+        assert!(user_logic.fragment_buffers.contains_key(&(writer_guid, reader_b_id, sn)));
+
+        participant
+            .remove_reader("frag_test_topic".to_string(), reader_a_id)
+            .expect("remove_reader");
+
+        assert!(
+            !user_logic.fragment_buffers.contains_key(&(writer_guid, reader_a_id, sn)),
+            "reader A's buffer must be freed once the reader that owned it is deleted"
+        );
+        assert!(
+            user_logic.fragment_buffers.contains_key(&(writer_guid, reader_b_id, sn)),
+            "reader B's own buffer must survive: the purge must be scoped to the deleted reader"
+        );
+    }
+
+    #[test]
+    fn unmatching_a_remote_writer_frees_the_reassembly_buffers_waiting_on_it() {
+        let (participant, mut user_logic, reader_a, reader_b, writer_guid, sn) =
+            two_readers_matched_to_one_fragmented_writer();
+        let prefix = participant.guid().prefix();
+        let reader_a_id = reader_a.guid().entity_id();
+        let reader_b_id = reader_b.guid().entity_id();
+
+        for reader_id in [reader_a_id, reader_b_id] {
+            feed_fragment(
+                &mut user_logic,
+                prefix,
+                writer_guid,
+                sn,
+                reader_id,
+                1,
+                2,
+                vec![1, 1, 1, 1, 2, 2, 2, 2],
+            );
+        }
+        assert!(user_logic.fragment_buffers.contains_key(&(writer_guid, reader_a_id, sn)));
+        assert!(user_logic.fragment_buffers.contains_key(&(writer_guid, reader_b_id, sn)));
+
+        participant
+            .cleanup_resources_for_remote_writer(writer_guid, "frag_test_topic")
+            .expect("cleanup_resources_for_remote_writer");
+
+        assert!(
+            user_logic.fragment_buffers.is_empty(),
+            "every buffer waiting on the unmatched writer must be freed, for both readers"
         );
     }
 

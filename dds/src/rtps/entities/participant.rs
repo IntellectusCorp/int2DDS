@@ -676,6 +676,15 @@ impl Participant {
         // Remove from store
         self.rtps_reader_store.remove(&topic_name, entity_id);
 
+        // The reader is gone, so any reassembly still addressed to it can never complete and
+        // will not be reached by the normal completion path -- only by cap-driven eviction,
+        // which may not run again for a long time.
+        if let Some(user_logic_arc) = self.user_logic_if_set() {
+            if let Some(user_logic) = user_logic_arc.as_ref() {
+                user_logic.forget_fragment_buffers_for_reader(entity_id);
+            }
+        }
+
         // Unmatch with intra participant writers
         self.cleanup_resources_for_remote_reader(
             Guid::new(self.guid().prefix(), entity_id),
@@ -718,6 +727,16 @@ impl Participant {
         writer_guid: Guid,
         topic_name: &str,
     ) -> RtpsResult<()> {
+        // The writer is gone, so no further DATA_FRAG can ever complete or evict a reassembly
+        // still waiting on it. Also reached per-writer from `unmatch_with_remote_participant`
+        // via `remove_all_unmatched_endpoint_from_terminated_participant`, so that path is
+        // covered too without a separate hook there.
+        if let Some(user_logic_arc) = self.user_logic_if_set() {
+            if let Some(user_logic) = user_logic_arc.as_ref() {
+                user_logic.forget_fragment_buffers_for_writer(writer_guid);
+            }
+        }
+
         // Fire LIVELINESS_CHANGED first; it iterates reader's writer_proxies to find matches.
         if writer_guid.entity_id().entity_kind().is_user_defined() {
             if let Some(wlp_logic) = self.wlp_logic() {
