@@ -2092,6 +2092,11 @@ impl SedpLogic {
         stateful_reader: &StatefulReader,
         remote_writer_guid: Guid,
     ) -> RtpsResult<()> {
+        // Gated at registration, not at send: no timer is armed at all when disabled.
+        if crate::common::env::get_disable_preemptive() {
+            return Ok(());
+        }
+
         let stateful_reader_id = stateful_reader.guid().entity_id();
         let timer_id =
             TimerId::PreemptiveAcknack { entity_id: stateful_reader_id, remote_writer_guid };
@@ -2128,6 +2133,11 @@ impl SedpLogic {
         stateful_writer: &StatefulWriter,
         remote_reader_guid: Guid,
     ) -> RtpsResult<()> {
+        // Periodic heartbeats still cover the reader; only the one-shot initial burst is skipped.
+        if crate::common::env::get_disable_preemptive() {
+            return Ok(());
+        }
+
         let stateful_writer_id = stateful_writer.guid().entity_id();
         let timer_id =
             TimerId::PreemptiveHeartbeat { entity_id: stateful_writer_id, remote_reader_guid };
@@ -2311,13 +2321,15 @@ impl UnicastMessageProcessor for SedpLogic {
 
             let payload = data.serialized_data();
 
-            let store_wire_in_cache = |endpoint_guid: Guid| {
+            // The change kind has to travel with the announcement: a termination recorded as Alive
+            // leaves the builtin reader claiming a departed endpoint is still there.
+            let store_wire_in_cache = |endpoint_guid: Guid, change_kind: ChangeKind| {
                 let instance_handle = InstanceHandle::from_guid(&endpoint_guid);
                 let reader = builtin_endpoint_pair.reader();
                 if let Ok(mut cache_guard) = reader.reader_cache().lock() {
                     let mut cache_change = cache_guard.acquire_change();
                     cache_change.reset(
-                        ChangeKind::Alive,
+                        change_kind,
                         writer_guid,
                         instance_handle,
                         data.writer_sn,
@@ -2340,6 +2352,12 @@ impl UnicastMessageProcessor for SedpLogic {
                 };
 
                 if let Some(terminated_writer_guid) = terminated_writer_guid {
+                    // A dispose arrives as a key with no payload, so this is the branch a
+                    // termination takes; without recording it the builtin reader never hears of it.
+                    store_wire_in_cache(
+                        InstanceHandle::to_guid(&terminated_writer_guid),
+                        ChangeKind::NotAliveDisposed,
+                    );
                     participant
                         .cleanup_remote_writer_by_guid(InstanceHandle::to_guid(
                             &terminated_writer_guid,
@@ -2367,7 +2385,14 @@ impl UnicastMessageProcessor for SedpLogic {
                             "DiscoveredWriterData",
                         )?;
 
-                        store_wire_in_cache(endpoint_guid);
+                        store_wire_in_cache(
+                            endpoint_guid,
+                            if is_termination {
+                                ChangeKind::NotAliveDisposed
+                            } else {
+                                ChangeKind::Alive
+                            },
+                        );
 
                         debug!("SEDP Logic: DiscoveredWriterData: {:?}", writer_data);
                         self.handle_publication_builtin_topic_data(
@@ -2388,6 +2413,12 @@ impl UnicastMessageProcessor for SedpLogic {
                 };
 
                 if let Some(terminated_reader_guid) = terminated_reader_guid {
+                    // See the publications branch: a payload-less dispose has to be recorded here
+                    // or the departure never reaches the builtin reader.
+                    store_wire_in_cache(
+                        InstanceHandle::to_guid(&terminated_reader_guid),
+                        ChangeKind::NotAliveDisposed,
+                    );
                     participant
                         .cleanup_remote_reader_by_guid(InstanceHandle::to_guid(
                             &terminated_reader_guid,
@@ -2413,7 +2444,14 @@ impl UnicastMessageProcessor for SedpLogic {
                             "DiscoveredReaderData",
                         )?;
 
-                        store_wire_in_cache(endpoint_guid);
+                        store_wire_in_cache(
+                            endpoint_guid,
+                            if is_termination {
+                                ChangeKind::NotAliveDisposed
+                            } else {
+                                ChangeKind::Alive
+                            },
+                        );
 
                         debug!("SEDP Logic: DiscoveredReaderData: {:?}", reader_data);
                         self.handle_subscription_builtin_topic_data(

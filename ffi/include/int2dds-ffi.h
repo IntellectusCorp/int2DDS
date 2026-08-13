@@ -1050,6 +1050,30 @@ Int2DdsRet int2dds_participant_take_discovered_publications_snapshot(const struc
                                                                      int32_t timeout_ms,
                                                                      struct Int2DdsPublicationBuiltinTopicDataSeq **seq_out);
 
+/**
+ * Collect a snapshot of discovered publications restricted to the given instance states.
+ * `instance_state_mask` takes `INT2DDS_INSTANCE_STATE_*` values combined with a bitwise or.
+ */
+Int2DdsRet int2dds_participant_take_discovered_publications_snapshot_filtered(const struct Int2DdsParticipant *participant,
+                                                                              int32_t timeout_ms,
+                                                                              uint32_t instance_state_mask,
+                                                                              struct Int2DdsPublicationBuiltinTopicDataSeq **seq_out);
+
+/**
+ * Instance state of the entry at `index`, as an `INT2DDS_INSTANCE_STATE_*` value.
+ */
+Int2DdsRet int2dds_publication_builtin_topic_data_seq_get_instance_state(const struct Int2DdsPublicationBuiltinTopicDataSeq *seq,
+                                                                         uintptr_t index,
+                                                                         uint32_t *instance_state_out);
+
+/**
+ * Instance handle of the entry at `index`, which is the endpoint GUID.
+ * Present even for an entry with no announcement to read a GUID out of.
+ */
+Int2DdsRet int2dds_publication_builtin_topic_data_seq_get_instance_handle(const struct Int2DdsPublicationBuiltinTopicDataSeq *seq,
+                                                                          uintptr_t index,
+                                                                          uint8_t (*handle_out)[16]);
+
 Int2DdsRet int2dds_publication_builtin_topic_data_seq_length(const struct Int2DdsPublicationBuiltinTopicDataSeq *seq,
                                                              uintptr_t *count_out);
 
@@ -1065,6 +1089,30 @@ Int2DdsRet int2dds_publication_builtin_topic_data_seq_delete(struct Int2DdsPubli
 Int2DdsRet int2dds_participant_take_discovered_subscriptions_snapshot(const struct Int2DdsParticipant *participant,
                                                                       int32_t timeout_ms,
                                                                       struct Int2DdsSubscriptionBuiltinTopicDataSeq **seq_out);
+
+/**
+ * Collect a snapshot of discovered subscriptions restricted to the given instance states.
+ * See `int2dds_participant_take_discovered_publications_snapshot_filtered` for the mask.
+ */
+Int2DdsRet int2dds_participant_take_discovered_subscriptions_snapshot_filtered(const struct Int2DdsParticipant *participant,
+                                                                               int32_t timeout_ms,
+                                                                               uint32_t instance_state_mask,
+                                                                               struct Int2DdsSubscriptionBuiltinTopicDataSeq **seq_out);
+
+/**
+ * Instance state of the entry at `index`, as an `INT2DDS_INSTANCE_STATE_*` value.
+ */
+Int2DdsRet int2dds_subscription_builtin_topic_data_seq_get_instance_state(const struct Int2DdsSubscriptionBuiltinTopicDataSeq *seq,
+                                                                          uintptr_t index,
+                                                                          uint32_t *instance_state_out);
+
+/**
+ * Instance handle of the entry at `index`, which is the endpoint GUID.
+ * See `int2dds_publication_builtin_topic_data_seq_get_instance_handle`.
+ */
+Int2DdsRet int2dds_subscription_builtin_topic_data_seq_get_instance_handle(const struct Int2DdsSubscriptionBuiltinTopicDataSeq *seq,
+                                                                           uintptr_t index,
+                                                                           uint8_t (*handle_out)[16]);
 
 Int2DdsRet int2dds_subscription_builtin_topic_data_seq_length(const struct Int2DdsSubscriptionBuiltinTopicDataSeq *seq,
                                                               uintptr_t *count_out);
