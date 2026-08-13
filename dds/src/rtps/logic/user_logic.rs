@@ -862,23 +862,21 @@ impl UserLogic {
                 // Pack fragments per datagram: one per datagram costs the receiver a
                 // socket-buffer charge each, which is where small fragments lose data.
                 let total_fragments = a_change.total_fragments();
-                let frags_per_msg = a_change.fragments_per_submessage(max_message_size).get();
-                let mut fragment_num = 1;
+                let frags_per_msg: NonZeroU32 =
+                    a_change.fragments_per_submessage(max_message_size).into();
 
-                while fragment_num <= total_fragments {
-                    let count =
-                        std::cmp::min(frags_per_msg as u32, total_fragments - fragment_num + 1)
-                            as u16;
-                    let Some(fragment_data) = a_change.get_fragment_range_data(fragment_num, count)
+                for (fragment_num, count, is_last) in
+                    fragment_send_plan(&[(1, total_fragments)], frags_per_msg)
+                {
+                    let Some(fragment_data) =
+                        a_change.get_fragment_range_data(fragment_num, count as u16)
                     else {
-                        fragment_num += count as u32;
                         continue;
                     };
 
                     // Piggyback one heartbeat on the final fragment so the sample is
                     // advertised only after the whole burst is on the wire.
-                    let is_final_fragment = fragment_num + count as u32 - 1 == total_fragments;
-                    let heartbeat_info = (is_piggyback_wanted && is_final_fragment)
+                    let heartbeat_info = (is_piggyback_wanted && is_last)
                         .then(|| (heartbeat_count, first, last, false, false));
 
                     if MessageCreator::create_data_frag_msg(
@@ -887,7 +885,7 @@ impl UserLogic {
                         EntityId::UNKNOWN,
                         writer.endpoint_id(),
                         fragment_num,
-                        count,
+                        count as u16,
                         a_change.fragment_size() as u16,
                         a_change.data_value().len() as u32,
                         fragment_data,
@@ -905,8 +903,6 @@ impl UserLogic {
                             }
                         }
                     }
-
-                    fragment_num += count as u32;
                 }
 
                 if is_any_fragment_sent {
@@ -1018,27 +1014,21 @@ impl UserLogic {
                         if a_change.is_fragmented() {
                             let timestamp = Utc::now();
                             let total_fragments = a_change.total_fragments();
-                            let frags_per_msg =
-                                a_change.fragments_per_submessage(max_message_size).get();
-                            let mut fragment_num = 1;
+                            let frags_per_msg: NonZeroU32 =
+                                a_change.fragments_per_submessage(max_message_size).into();
 
-                            while fragment_num <= total_fragments {
-                                let count = std::cmp::min(
-                                    frags_per_msg as u32,
-                                    total_fragments - fragment_num + 1,
-                                ) as u16;
+                            for (fragment_num, count, is_last) in
+                                fragment_send_plan(&[(1, total_fragments)], frags_per_msg)
+                            {
                                 let Some(fragment_data) =
-                                    a_change.get_fragment_range_data(fragment_num, count)
+                                    a_change.get_fragment_range_data(fragment_num, count as u16)
                                 else {
-                                    fragment_num += count as u32;
                                     continue;
                                 };
 
                                 // Piggyback one heartbeat on the final fragment so the sample is
                                 // advertised only after the whole burst is on the wire.
-                                let is_final_fragment =
-                                    fragment_num + count as u32 - 1 == total_fragments;
-                                let heartbeat_info = if reliable && piggyback && is_final_fragment {
+                                let heartbeat_info = if reliable && piggyback && is_last {
                                     Some((
                                         writer.heartbeat_count(),
                                         first_sn,
@@ -1056,7 +1046,7 @@ impl UserLogic {
                                     group_id,
                                     writer.endpoint_id(),
                                     fragment_num,
-                                    count,
+                                    count as u16,
                                     a_change.fragment_size() as u16,
                                     a_change.data_value().len() as u32,
                                     fragment_data,
@@ -1079,8 +1069,6 @@ impl UserLogic {
                                         }
                                     }
                                 }
-
-                                fragment_num += count as u32;
                             }
                         } else {
                             let heartbeat_info = if reliable && piggyback {
@@ -1215,17 +1203,17 @@ impl UserLogic {
 
                     // Send each fragment as DATA_FRAG submessage immediately
                     let total_fragments = change.total_fragments();
-                    let frags_per_msg = change.fragments_per_submessage(max_message_size).get();
-                    let mut fragment_num = 1;
+                    let frags_per_msg: NonZeroU32 =
+                        change.fragments_per_submessage(max_message_size).into();
 
-                    while fragment_num <= total_fragments {
-                        let count =
-                            std::cmp::min(frags_per_msg as u32, total_fragments - fragment_num + 1)
-                                as u16;
+                    // A stateless writer's reader locators are not reliability-tracked, so
+                    // there is no heartbeat to piggyback and the plan's `is_last` is unused.
+                    for (fragment_num, count, _is_last) in
+                        fragment_send_plan(&[(1, total_fragments)], frags_per_msg)
+                    {
                         let Some(fragment_data) =
-                            change.get_fragment_range_data(fragment_num, count)
+                            change.get_fragment_range_data(fragment_num, count as u16)
                         else {
-                            fragment_num += count as u32;
                             continue;
                         };
 
@@ -1235,7 +1223,7 @@ impl UserLogic {
                             reader_locator.remote_entity_id(),
                             writer.endpoint_id(),
                             fragment_num,
-                            count,
+                            count as u16,
                             change.fragment_size() as u16,
                             change.data_value().len() as u32,
                             fragment_data,
@@ -1253,8 +1241,6 @@ impl UserLogic {
                                 warn!("Failed to send DATA_FRAG message: {:?}", e);
                             }
                         }
-
-                        fragment_num += count as u32;
                     }
 
                     participant
