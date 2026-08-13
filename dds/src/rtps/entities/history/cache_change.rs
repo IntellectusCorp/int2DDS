@@ -489,18 +489,19 @@ mod tests {
         assert_eq!(change.total_fragments(), 20_000u32.div_ceil(1_344));
     }
 
-    // get_max_message_size()'s default is now 13440, not 65000: a payload in that
-    // gap fragments where it used to go out as a single DATA.
+    // get_max_message_size()'s default is 65000: a payload at that size still goes
+    // out as a single DATA, one byte over it fragments. Pins the default threshold
+    // so a change to it fails here instead of only showing up in production.
     #[test]
-    fn payload_between_the_old_and_new_default_now_fragments() {
-        let mut below = change_with_payload(13_000);
-        below.apply_fragmentation(13_440, 1_344);
-        assert!(!below.is_fragmented(), "still under the new default");
+    fn payload_at_the_default_threshold_stays_whole_above_it_fragments() {
+        let mut at_default = change_with_payload(65_000);
+        at_default.apply_fragmentation(65_000, 1_344);
+        assert!(!at_default.is_fragmented(), "at the default, still a single DATA");
 
-        let mut above = change_with_payload(30_000);
-        above.apply_fragmentation(13_440, 1_344);
-        assert!(above.is_fragmented(), "over the new default, but under the old one");
-        assert_eq!(above.total_fragments(), 30_000u32.div_ceil(1_344));
+        let mut over_default = change_with_payload(65_001);
+        over_default.apply_fragmentation(65_000, 1_344);
+        assert!(over_default.is_fragmented(), "one byte over the default, fragments");
+        assert_eq!(over_default.total_fragments(), 65_001u32.div_ceil(1_344));
     }
 
     // Equal knobs reproduce the single-size behavior: trigger and chunk are the same value.
@@ -603,15 +604,10 @@ mod tests {
         assert_eq!(change.fragments_per_submessage(0).get(), 1, "never returns zero");
         assert_eq!(change.fragments_per_submessage(usize::MAX).get(), u16::MAX, "clamped to u16");
 
-        // 65000 is the fragment-size default and the max-message-size clamp ceiling
-        // (no longer the max-message-size default): equal knobs still make packing a no-op.
-        let mut equal_knobs = packed_change();
-        equal_knobs.apply_fragmentation(65_000, 65_000);
-        assert_eq!(
-            equal_knobs.fragments_per_submessage(65_000).get(),
-            1,
-            "equal knobs do not pack"
-        );
+        // The default fragment size is the default budget, so packing is a no-op there.
+        let mut default_size = packed_change();
+        default_size.apply_fragmentation(65_000, 65_000);
+        assert_eq!(default_size.fragments_per_submessage(65_000).get(), 1, "defaults do not pack");
     }
 
     #[test]
