@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use log::{debug, trace, warn};
 // use rand::Rng;
 use std::collections::{BTreeSet, HashMap};
+use std::num::NonZeroU32;
 use std::ops::Add;
 use std::time::{Duration, Instant};
 
@@ -222,13 +223,16 @@ fn contiguous_fragment_runs(fragments: &BTreeSet<u32>, total: u32) -> Vec<(u32, 
 /// `is_last` is `true` for exactly one entry: the final chunk of the final run, i.e. the
 /// submessage carrying the highest requested fragment. That is the only one that should
 /// piggyback a heartbeat, so the repair burst is advertised only once it is fully sent.
-fn fragment_send_plan(runs: &[(u32, u32)], frags_per_msg: u32) -> Vec<(u32, u32, bool)> {
+///
+/// `frags_per_msg` is `NonZeroU32` so a zero budget cannot make `offset` stall: the loop
+/// below would spin forever, while `writer_cache` and `reader_proxies` are both held.
+fn fragment_send_plan(runs: &[(u32, u32)], frags_per_msg: NonZeroU32) -> Vec<(u32, u32, bool)> {
     let last_run_index = runs.len().saturating_sub(1);
     let mut plan = Vec::new();
     for (run_index, &(run_start, run_len)) in runs.iter().enumerate() {
         let mut offset = 0;
         while offset < run_len {
-            let count = std::cmp::min(frags_per_msg, run_len - offset);
+            let count = std::cmp::min(frags_per_msg.get(), run_len - offset);
             let is_last = run_index == last_run_index && offset + count == run_len;
             plan.push((run_start + offset, count, is_last));
             offset += count;
@@ -451,21 +455,22 @@ impl UserLogic {
                 // Read here, not once per call: most requests carry no fragmented change.
                 let max_message_size = crate::common::env::get_max_message_size();
                 let total_fragments = a_change.total_fragments();
-                let frags_per_msg = a_change.fragments_per_submessage(max_message_size) as u32;
-                let mut fragment_num = 1;
-                while fragment_num <= total_fragments {
-                    let count = std::cmp::min(frags_per_msg, total_fragments - fragment_num + 1);
+                let frags_per_msg: NonZeroU32 =
+                    a_change.fragments_per_submessage(max_message_size).into();
+
+                // A single contiguous run: the ACKNACK path always resends everything.
+                for (fragment_num, count, is_last) in
+                    fragment_send_plan(&[(1, total_fragments)], frags_per_msg)
+                {
                     let Some(fragment_data) =
                         a_change.get_fragment_range_data(fragment_num, count as u16)
                     else {
-                        fragment_num += count;
                         continue;
                     };
 
                     // Piggyback one heartbeat on the final fragment so the sample is advertised
                     // only after the whole burst is on the wire.
-                    let is_final_fragment = fragment_num + count - 1 == total_fragments;
-                    let heartbeat_info = (piggyback && is_final_fragment).then(|| {
+                    let heartbeat_info = (piggyback && is_last).then(|| {
                         (
                             stateful_writer.heartbeat_count(),
                             requested_change_sn,
@@ -502,7 +507,6 @@ impl UserLogic {
                             }
                         }
                     }
-                    fragment_num += count;
                 }
             } else if MessageCreator::create_data_msg(
                 &a_change,
@@ -627,7 +631,8 @@ impl UserLogic {
 
             let total_frags = change.total_fragments();
             let runs = contiguous_fragment_runs(&requested_fragments, total_frags);
-            let frags_per_msg = change.fragments_per_submessage(max_message_size) as u32;
+            let frags_per_msg: NonZeroU32 =
+                change.fragments_per_submessage(max_message_size).into();
 
             for (fragment_num, count, is_last) in fragment_send_plan(&runs, frags_per_msg) {
                 // One heartbeat per burst, on the submessage carrying the highest requested fragment.
@@ -857,7 +862,7 @@ impl UserLogic {
                 // Pack fragments per datagram: one per datagram costs the receiver a
                 // socket-buffer charge each, which is where small fragments lose data.
                 let total_fragments = a_change.total_fragments();
-                let frags_per_msg = a_change.fragments_per_submessage(max_message_size);
+                let frags_per_msg = a_change.fragments_per_submessage(max_message_size).get();
                 let mut fragment_num = 1;
 
                 while fragment_num <= total_fragments {
@@ -1013,7 +1018,8 @@ impl UserLogic {
                         if a_change.is_fragmented() {
                             let timestamp = Utc::now();
                             let total_fragments = a_change.total_fragments();
-                            let frags_per_msg = a_change.fragments_per_submessage(max_message_size);
+                            let frags_per_msg =
+                                a_change.fragments_per_submessage(max_message_size).get();
                             let mut fragment_num = 1;
 
                             while fragment_num <= total_fragments {
@@ -1209,7 +1215,7 @@ impl UserLogic {
 
                     // Send each fragment as DATA_FRAG submessage immediately
                     let total_fragments = change.total_fragments();
-                    let frags_per_msg = change.fragments_per_submessage(max_message_size);
+                    let frags_per_msg = change.fragments_per_submessage(max_message_size).get();
                     let mut fragment_num = 1;
 
                     while fragment_num <= total_fragments {
@@ -3072,8 +3078,12 @@ impl UnicastMessageProcessor for UserLogic {
 
 #[cfg(test)]
 mod tests {
-    use super::{contiguous_fragment_runs, fragment_send_plan};
+    use super::{contiguous_fragment_runs, fragment_send_plan, NonZeroU32};
     use std::collections::BTreeSet;
+
+    fn fpm(n: u32) -> NonZeroU32 {
+        NonZeroU32::new(n).unwrap()
+    }
 
     #[test]
     fn runs_split_on_every_gap_and_clamp_to_total() {
@@ -3094,48 +3104,161 @@ mod tests {
     }
 
     #[test]
+    fn a_number_one_past_total_never_extends_the_run_at_total() {
+        // If the upper filter became `n <= total + 1`, 11 would wrongly extend the run at
+        // 10 into (10, 2): an over-claimed count, not just a missing fragment.
+        assert_eq!(contiguous_fragment_runs(&[10, 11].into_iter().collect(), 10), vec![(10, 1)]);
+    }
+
+    #[test]
+    fn a_run_ending_exactly_at_total_is_its_own_trailing_run() {
+        let asked: BTreeSet<u32> = [1, 2, 3, 5].into_iter().collect();
+        assert_eq!(contiguous_fragment_runs(&asked, 5), vec![(1, 3), (5, 1)]);
+    }
+
+    #[test]
+    fn two_consecutive_fragment_numbers_merge_into_one_run() {
+        // Isolates the adjacency check: a set like {1, 3, 5} would not catch
+        // `*start + *count == n` regressing to `... - 1 == n`, since none of those pairs
+        // are actually adjacent, so packing would silently revert to one fragment each.
+        assert_eq!(contiguous_fragment_runs(&[1, 2].into_iter().collect(), 10), vec![(1, 2)]);
+    }
+
+    #[test]
+    fn a_total_of_zero_yields_no_runs_regardless_of_input() {
+        assert!(contiguous_fragment_runs(&BTreeSet::new(), 0).is_empty());
+        assert!(contiguous_fragment_runs(&[1, 2, 3].into_iter().collect(), 0).is_empty());
+    }
+
+    /// Properties that must hold for any `fragment_send_plan` output, not just the exact
+    /// shape of one hand-picked example: every requested fragment is covered exactly once,
+    /// no chunk exceeds the datagram budget, and exactly one chunk -- the last one in the
+    /// plan -- ends on the highest fragment number across all runs.
+    fn assert_plan_invariants(runs: &[(u32, u32)], frags_per_msg: NonZeroU32) {
+        let plan = fragment_send_plan(runs, frags_per_msg);
+
+        let expected: Vec<u32> = runs.iter().flat_map(|&(start, len)| start..start + len).collect();
+        let mut covered: Vec<u32> = Vec::new();
+        for &(start, count, _) in &plan {
+            assert!(count >= 1, "a chunk must carry at least one fragment");
+            assert!(count <= frags_per_msg.get(), "a chunk must never exceed the datagram budget");
+            covered.extend(start..start + count);
+        }
+        assert_eq!(covered, expected, "chunks must reproduce the runs exactly, in order");
+
+        let last_count = plan.iter().filter(|&&(_, _, is_last)| is_last).count();
+        match expected.last() {
+            None => assert_eq!(last_count, 0, "an empty plan carries no heartbeat"),
+            Some(&highest) => {
+                assert_eq!(last_count, 1, "exactly one submessage may carry the heartbeat");
+                let &(start, count, is_last) = plan.last().unwrap();
+                assert!(is_last, "the marked submessage must be the final entry in the plan");
+                assert_eq!(
+                    start + count - 1,
+                    highest,
+                    "the marked submessage must end on the highest fragment"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_run_shorter_than_one_chunk_is_a_single_submessage() {
-        assert_eq!(fragment_send_plan(&[(5, 3)], 10), vec![(5, 3, true)]);
+        let runs = [(5, 3)];
+        assert_eq!(fragment_send_plan(&runs, fpm(10)), vec![(5, 3, true)]);
+        assert_plan_invariants(&runs, fpm(10));
     }
 
     #[test]
     fn a_run_that_is_an_exact_multiple_of_the_chunk_size_splits_evenly() {
-        assert_eq!(fragment_send_plan(&[(1, 10)], 5), vec![(1, 5, false), (6, 5, true)]);
+        let runs = [(1, 10)];
+        assert_eq!(fragment_send_plan(&runs, fpm(5)), vec![(1, 5, false), (6, 5, true)]);
+        assert_plan_invariants(&runs, fpm(5));
     }
 
     #[test]
     fn a_run_one_longer_than_a_multiple_leaves_a_short_final_chunk() {
+        let runs = [(1, 11)];
         assert_eq!(
-            fragment_send_plan(&[(1, 11)], 5),
+            fragment_send_plan(&runs, fpm(5)),
             vec![(1, 5, false), (6, 5, false), (11, 1, true)]
         );
+        assert_plan_invariants(&runs, fpm(5));
     }
 
     #[test]
     fn only_the_final_chunk_of_the_final_run_is_last_even_when_an_earlier_run_is_longer() {
         // The first run needs two chunks; the shorter, final run needs only one. Only that
         // final run's chunk may carry the heartbeat, never the longer first run's last chunk.
+        let runs = [(1, 10), (20, 3)];
         assert_eq!(
-            fragment_send_plan(&[(1, 10), (20, 3)], 5),
+            fragment_send_plan(&runs, fpm(5)),
             vec![(1, 5, false), (6, 5, false), (20, 3, true)]
         );
+        assert_plan_invariants(&runs, fpm(5));
     }
 
     #[test]
     fn exactly_one_entry_is_last_and_it_ends_on_the_highest_requested_fragment() {
         let asked: BTreeSet<u32> = [1, 2, 3, 7, 8, 11].into_iter().collect();
         let runs = contiguous_fragment_runs(&asked, 20);
-        let plan = fragment_send_plan(&runs, 2);
+        let plan = fragment_send_plan(&runs, fpm(2));
 
         let last_entries: Vec<_> = plan.iter().filter(|&&(_, _, is_last)| is_last).collect();
         assert_eq!(last_entries.len(), 1, "exactly one submessage may carry the heartbeat");
 
         let &(fragment_num, count, _) = last_entries[0];
         assert_eq!(fragment_num + count - 1, 11, "must end on the highest requested fragment");
+        assert_plan_invariants(&runs, fpm(2));
     }
 
     #[test]
     fn an_empty_run_list_yields_an_empty_plan() {
-        assert!(fragment_send_plan(&[], 10).is_empty());
+        assert!(fragment_send_plan(&[], fpm(10)).is_empty());
+        assert_plan_invariants(&[], fpm(10));
+    }
+
+    #[test]
+    fn the_production_shape_packs_781_fragments_into_17_submessages() {
+        // 781 fragments at 48 per submessage (65000 / 1344): the real repair geometry.
+        // Kills an inverted/dropped `min` (a chunk would exceed 48) and a dropped `-1` in
+        // `is_last` (no entry would ever end exactly on fragment 781, since 769+13 = 782).
+        let runs = [(1, 781)];
+        let plan = fragment_send_plan(&runs, fpm(48));
+        assert_eq!(plan.len(), 17);
+        assert_eq!(plan[0], (1, 48, false));
+        assert_eq!(plan[16], (769, 13, true));
+        assert_plan_invariants(&runs, fpm(48));
+    }
+
+    #[test]
+    fn a_chunk_can_land_exactly_on_the_final_fragment() {
+        // A geometry where the final chunk's end coincides with total; 781/48 never
+        // produces this shape.
+        let runs = [(1, 5)];
+        assert_eq!(
+            fragment_send_plan(&runs, fpm(2)),
+            vec![(1, 2, false), (3, 2, false), (5, 1, true)]
+        );
+        assert_plan_invariants(&runs, fpm(2));
+    }
+
+    #[test]
+    fn only_the_short_final_fragment_requested_is_the_classic_repair_case() {
+        let runs = [(781, 1)];
+        assert_eq!(fragment_send_plan(&runs, fpm(48)), vec![(781, 1, true)]);
+        assert_plan_invariants(&runs, fpm(48));
+    }
+
+    #[test]
+    fn the_unpacked_shape_still_emits_exactly_one_heartbeat() {
+        // frags_per_msg = 1 reproduces one-fragment-per-datagram; even then, exactly one
+        // submessage in the burst must carry the heartbeat.
+        let runs = [(1, 5)];
+        assert_eq!(
+            fragment_send_plan(&runs, fpm(1)),
+            vec![(1, 1, false), (2, 1, false), (3, 1, false), (4, 1, false), (5, 1, true)]
+        );
+        assert_plan_invariants(&runs, fpm(1));
     }
 }
