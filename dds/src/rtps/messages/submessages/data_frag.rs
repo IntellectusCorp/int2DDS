@@ -243,6 +243,19 @@ impl<'a> DataFrag<'a> {
         // `buffer.slice(start_pos..)`, so slicing it further is a zero-copy
         // refcount bump on the same backing allocation.
         let actual_len = std::cmp::min(serialized_data_bytes.len(), expected_data_size);
+
+        // All but the last claimed fragment must be fully present, or the
+        // receive path's per-fragment slicing reads past the payload end.
+        // fragments_in_submessage == 1 makes this 0, so a short final
+        // fragment sent alone is never rejected.
+        let min_data_size = (fragments_in_submessage as usize - 1) * fragment_size as usize;
+        if actual_len <= min_data_size {
+            return Err(RtpsError::new(
+                RtpsErrorCode::InvalidSubmessageBody,
+                "Serialized data size is too small to reach the last claimed fragment",
+            ));
+        }
+
         let serialized_data = SubmessagePayload::Owned(serialized_data_bytes.slice(..actual_len));
 
         Ok(Self {
@@ -467,6 +480,53 @@ mod tests {
     }
 
     #[test]
+    fn test_datafrag_rejects_payload_too_small_for_claimed_fragment_count() {
+        let mut datafrag = create_dummy_datafrag();
+        datafrag.fragment_starting_num = 1;
+        datafrag.fragments_in_submessage = 2;
+        datafrag.fragment_size = 8;
+        datafrag.sample_size = 32;
+
+        // Claims 2 fragments of 8 bytes each but only carries 3 bytes: not
+        // even enough to fill fragment 1, let alone reach fragment 2.
+        datafrag.serialized_data = SubmessagePayload::Owned(Bytes::from(vec![1, 2, 3]));
+
+        let buffer = datafrag.write_to_vec_with_ctx(Endianness::BigEndian).unwrap();
+        let header = create_dummy_submessage_header(buffer.len() as u16);
+
+        let result = DataFrag::deserialize(&Bytes::from(buffer), &header);
+        assert!(result.is_err());
+        if let Err(err) = result {
+            assert_eq!(err.code, RtpsErrorCode::InvalidSubmessageBody);
+        }
+    }
+
+    // fragments_in_submessage can overclaim past the sample's remaining bytes;
+    // sample-size clamping then truncates the stored payload below the
+    // minimum even though the raw wire length looked large enough.
+    #[test]
+    fn test_datafrag_rejects_overclaimed_fragment_count_after_sample_size_truncation() {
+        let mut datafrag = create_dummy_datafrag();
+        datafrag.fragment_starting_num = 1;
+        datafrag.fragments_in_submessage = 5; // claims 5 fragments (40 bytes)...
+        datafrag.fragment_size = 8;
+        datafrag.sample_size = 30; // ...but the sample only has room for 4
+
+        // 33 bytes passes the too-large check, but truncates to 30 bytes
+        // stored - short of the 32 needed to reach fragment 5.
+        datafrag.serialized_data = SubmessagePayload::Owned(Bytes::from(vec![0xAB; 33]));
+
+        let buffer = datafrag.write_to_vec_with_ctx(Endianness::BigEndian).unwrap();
+        let header = create_dummy_submessage_header(buffer.len() as u16);
+
+        let result = DataFrag::deserialize(&Bytes::from(buffer), &header);
+        assert!(result.is_err());
+        if let Err(err) = result {
+            assert_eq!(err.code, RtpsErrorCode::InvalidSubmessageBody);
+        }
+    }
+
+    #[test]
     fn test_datafrag_truncates_alignment_padding_on_last_fragment() {
         let mut datafrag = create_dummy_datafrag();
         datafrag.fragment_starting_num = 2;
@@ -618,5 +678,42 @@ mod tests {
 
         assert_eq!(parsed.serialized_data.len(), 1207);
         assert_eq!(parsed.fragment_starting_num, 450);
+    }
+
+    // A short final fragment sent alone must still be accepted:
+    // fragments_in_submessage == 1 makes the minimum zero.
+    #[test]
+    fn test_datafrag_accepts_short_final_fragment_sent_alone() {
+        // 1,048,576 bytes at 1,344-byte fragments leaves a 256-byte fragment 781.
+        let data_frag = final_fragment(1_048_576, 1344);
+        assert_eq!(data_frag.fragment_starting_num, 781);
+        assert_eq!(data_frag.serialized_data.len(), 256);
+
+        let written = data_frag.write_to_vec_with_ctx(Endianness::BigEndian).unwrap();
+        let header = create_dummy_submessage_header(written.len() as u16);
+
+        let parsed = DataFrag::deserialize(&Bytes::from(written), &header).unwrap();
+        assert_eq!(parsed.serialized_data.len(), 256);
+    }
+
+    // A packed run that ends at the sample's last fragment is also legitimately
+    // short: it carries full-size fragments for everything but the last one.
+    #[test]
+    fn test_datafrag_accepts_packed_run_ending_at_final_fragment() {
+        // Same sample as above, packed as fragments 769..=781 (13 fragments):
+        // 12 full fragments plus the 256-byte final one, not 13 full ones.
+        let mut datafrag = create_dummy_datafrag();
+        datafrag.fragment_starting_num = 769;
+        datafrag.fragments_in_submessage = 13;
+        datafrag.fragment_size = 1344;
+        datafrag.sample_size = 1_048_576;
+        let payload_len = 12 * 1344 + 256;
+        datafrag.serialized_data = SubmessagePayload::Owned(Bytes::from(vec![0xAB; payload_len]));
+
+        let buffer = datafrag.write_to_vec_with_ctx(Endianness::BigEndian).unwrap();
+        let header = create_dummy_submessage_header(buffer.len() as u16);
+
+        let parsed = DataFrag::deserialize(&Bytes::from(buffer), &header).unwrap();
+        assert_eq!(parsed.serialized_data.len(), payload_len);
     }
 }
