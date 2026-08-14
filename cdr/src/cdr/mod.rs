@@ -3,6 +3,8 @@ pub mod deserializer;
 mod prim_bulk;
 pub mod serializer;
 pub mod xcdr1;
+#[cfg(test)]
+mod xcdr1_wire_tests;
 pub mod xcdr2;
 #[cfg(test)]
 mod xcdr2_wire_tests;
