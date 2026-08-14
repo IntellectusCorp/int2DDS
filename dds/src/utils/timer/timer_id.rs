@@ -27,6 +27,12 @@ pub(crate) enum TimerId {
         remote_reader_guid: Guid,
     },
 
+    // Writer: delayed DATA_FRAG resend in response to NACK_FRAG
+    NackFragResponse {
+        writer_entity_id: EntityId,
+        remote_reader_guid: Guid,
+    },
+
     // Reader: delayed ACKNACK in response to HEARTBEAT
     Acknack {
         reader_entity_id: EntityId,
@@ -126,6 +132,15 @@ impl fmt::Display for TimerId {
                     Self::guid_u128(remote_reader_guid)
                 )
             }
+            TimerId::NackFragResponse { writer_entity_id, remote_reader_guid } => {
+                write!(
+                    f,
+                    "{}_{:02x}_{:x}",
+                    Self::id_hex(writer_entity_id),
+                    SubmessageId::DATA_FRAG.as_u8(),
+                    Self::guid_u128(remote_reader_guid)
+                )
+            }
             TimerId::Acknack { reader_entity_id, remote_writer_guid } => {
                 write!(
                     f,
@@ -219,6 +234,7 @@ impl TimerId {
             TimerId::PeriodicHeartbeat { entity_id: eid } => eid == entity_id,
             TimerId::PeriodicHeartbeatDelay { entity_id: eid } => eid == entity_id,
             TimerId::NackResponse { writer_entity_id, .. } => writer_entity_id == entity_id,
+            TimerId::NackFragResponse { writer_entity_id, .. } => writer_entity_id == entity_id,
             TimerId::Acknack { reader_entity_id, .. } => reader_entity_id == entity_id,
             TimerId::NackFrag { reader_entity_id, .. } => reader_entity_id == entity_id,
             TimerId::PreemptiveHeartbeat { entity_id: eid, .. } => eid == entity_id,

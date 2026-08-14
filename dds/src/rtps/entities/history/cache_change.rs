@@ -5,6 +5,7 @@
 //! data payload, instance handle, and metadata.
 
 use std::collections::HashSet;
+use std::num::NonZeroU16;
 use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
@@ -379,14 +380,14 @@ impl CacheChange {
         self.fragment_size
     }
 
-    // Apply fragmentation metadata based on the current `data_value` length.
-    pub(crate) fn apply_fragmentation(&mut self, max_payload_size: usize) {
+    // Fragment when the payload exceeds max_message_size, cutting into fragment_size chunks.
+    pub(crate) fn apply_fragmentation(&mut self, max_message_size: usize, fragment_size: usize) {
         self.fragment_set.clear();
         let data_len = self.data_value().len();
-        if max_payload_size > 0 && data_len > max_payload_size {
+        if max_message_size > 0 && fragment_size > 0 && data_len > max_message_size {
             self.fragmented = true;
-            self.fragment_size = max_payload_size as u32;
-            let num_fragments = data_len.div_ceil(max_payload_size);
+            self.fragment_size = fragment_size as u32;
+            let num_fragments = data_len.div_ceil(fragment_size);
             self.total_fragments = num_fragments as u32;
             for i in 1..=num_fragments {
                 self.fragment_set.insert(i as u32);
@@ -398,16 +399,33 @@ impl CacheChange {
         }
     }
 
-    pub(crate) fn get_fragment_data(&self, fragment_num: u32) -> Option<&[u8]> {
-        if !self.fragmented || fragment_num == 0 || fragment_num > self.total_fragments {
+    /// Payload for `count` consecutive fragments starting at `fragment_num`, as one slice.
+    /// The last fragment is short, so the slice is clamped to the payload end.
+    pub(crate) fn get_fragment_range_data(&self, fragment_num: u32, count: u16) -> Option<&[u8]> {
+        if !self.fragmented
+            || fragment_num == 0
+            || fragment_num > self.total_fragments
+            || count == 0
+        {
             return None;
         }
 
         let data = self.data_value();
-        let start = (fragment_num - 1) * self.fragment_size;
-        let end = std::cmp::min(start + self.fragment_size, data.len() as u32);
+        let start = (fragment_num - 1) as usize * self.fragment_size as usize;
+        let span = count as usize * self.fragment_size as usize;
+        let end = std::cmp::min(start.saturating_add(span), data.len());
 
-        Some(&data[start as usize..end as usize])
+        Some(&data[start..end])
+    }
+
+    /// How many fragments fit in one DATA_FRAG submessage under the datagram budget.
+    /// Never zero, so a caller packing fragments in a loop cannot spin without advancing.
+    pub(crate) fn fragments_per_submessage(&self, max_message_size: usize) -> NonZeroU16 {
+        if self.fragment_size == 0 {
+            return NonZeroU16::MIN;
+        }
+        let capped = (max_message_size / self.fragment_size as usize).min(u16::MAX as usize) as u16;
+        NonZeroU16::new(capped).unwrap_or(NonZeroU16::MIN)
     }
 
     // Create fragmented cache change from payload
@@ -418,7 +436,8 @@ impl CacheChange {
         sequence_number: SequenceNumber,
         payload: &[u8],
         source_timestamp: Option<RtpsTime>,
-        max_payload_size: usize,
+        max_message_size: usize,
+        fragment_size: usize,
     ) -> Self {
         let mut change = Self::new(
             kind,
@@ -429,7 +448,174 @@ impl CacheChange {
             source_timestamp,
         );
 
-        change.apply_fragmentation(max_payload_size);
+        change.apply_fragmentation(max_message_size, fragment_size);
         change
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn change_with_payload(len: usize) -> CacheChange {
+        CacheChange::new(
+            ChangeKind::Alive,
+            Guid::UNKNOWN,
+            InstanceHandle::default(),
+            SequenceNumber::from_i64(1),
+            vec![0u8; len],
+            None,
+        )
+    }
+
+    // A payload over fragment_size but at or below max_message_size still goes as a
+    // single DATA: the trigger is max_message_size, not fragment_size.
+    #[test]
+    fn payload_within_max_is_not_fragmented() {
+        let mut change = change_with_payload(10_000);
+        change.apply_fragmentation(14_720, 1_344);
+        assert!(!change.is_fragmented());
+        assert_eq!(change.total_fragments(), 0);
+        assert_eq!(change.fragment_size(), 0);
+    }
+
+    // A payload over max_message_size is cut into fragment_size chunks.
+    #[test]
+    fn payload_above_max_fragments_by_fragment_size() {
+        let mut change = change_with_payload(20_000);
+        change.apply_fragmentation(14_720, 1_344);
+        assert!(change.is_fragmented());
+        assert_eq!(change.fragment_size(), 1_344);
+        assert_eq!(change.total_fragments(), 20_000u32.div_ceil(1_344));
+    }
+
+    // get_max_message_size()'s default is 65000: a payload at that size still goes
+    // out as a single DATA, one byte over it fragments. Pins the default threshold
+    // so a change to it fails here instead of only showing up in production.
+    #[test]
+    fn payload_at_the_default_threshold_stays_whole_above_it_fragments() {
+        let mut at_default = change_with_payload(65_000);
+        at_default.apply_fragmentation(65_000, 1_344);
+        assert!(!at_default.is_fragmented(), "at the default, still a single DATA");
+
+        let mut over_default = change_with_payload(65_001);
+        over_default.apply_fragmentation(65_000, 1_344);
+        assert!(over_default.is_fragmented(), "one byte over the default, fragments");
+        assert_eq!(over_default.total_fragments(), 65_001u32.div_ceil(1_344));
+    }
+
+    // Equal knobs reproduce the single-size behavior: trigger and chunk are the same value.
+    #[test]
+    fn equal_max_and_fragment_size_matches_single_knob() {
+        let mut change = change_with_payload(100_000);
+        change.apply_fragmentation(65_000, 65_000);
+        assert!(change.is_fragmented());
+        assert_eq!(change.fragment_size(), 65_000);
+        assert_eq!(change.total_fragments(), 2);
+    }
+
+    // Zero on either knob disables fragmentation.
+    #[test]
+    fn zero_knob_disables_fragmentation() {
+        let mut change = change_with_payload(100_000);
+        change.apply_fragmentation(0, 1_344);
+        assert!(!change.is_fragmented());
+
+        let mut other = change_with_payload(100_000);
+        other.apply_fragmentation(14_720, 0);
+        assert!(!other.is_fragmented());
+    }
+
+    // The last fragment carries the remainder, shorter than fragment_size.
+    #[test]
+    fn last_fragment_holds_remainder() {
+        let mut change = change_with_payload(20_000);
+        change.apply_fragmentation(14_720, 1_344);
+
+        let total = change.total_fragments();
+        let expected_last = 20_000 - 1_344 * (total as usize - 1);
+
+        assert_eq!(change.get_fragment_range_data(1, 1).unwrap().len(), 1_344);
+        assert_eq!(change.get_fragment_range_data(total, 1).unwrap().len(), expected_last);
+    }
+
+    // A change fragmented at 1344 bytes over a payload that needs 781 fragments.
+    // The payload is patterned, not zeroed, so a slice taken at the wrong offset is visible.
+    fn packed_change() -> CacheChange {
+        let payload: Vec<u8> = (0..1_048_576u32).map(|i| (i % 251) as u8).collect();
+        let mut change = CacheChange::new(
+            ChangeKind::Alive,
+            Guid::UNKNOWN,
+            InstanceHandle::default(),
+            SequenceNumber::from_i64(1),
+            payload,
+            None,
+        );
+        change.apply_fragmentation(65_000, 1_344);
+        change
+    }
+
+    #[test]
+    fn fragment_range_returns_consecutive_fragments_as_one_slice() {
+        let change = packed_change();
+        assert_eq!(change.total_fragments(), 781);
+
+        let one = change.get_fragment_range_data(1, 1).unwrap();
+        assert_eq!(one.len(), 1_344, "a count of one matches a single fragment");
+
+        let ten = change.get_fragment_range_data(1, 10).unwrap();
+        assert_eq!(ten.len(), 13_440, "ten fragments concatenate");
+        assert_eq!(&ten[..1_344], one, "the range starts at the same offset");
+
+        let from_eleven = change.get_fragment_range_data(11, 10).unwrap();
+        assert_eq!(from_eleven, &change.data_value()[13_440..26_880]);
+    }
+
+    #[test]
+    fn fragment_range_clamps_to_the_payload_end() {
+        let change = packed_change();
+        let total = change.total_fragments();
+        // 781 * 1344 = 1_049_664, which is 1088 past the 1_048_576-byte payload.
+        let last = change.get_fragment_range_data(total, 1).unwrap();
+        assert_eq!(last.len(), 1_048_576 - 780 * 1_344);
+
+        let overrun = change.get_fragment_range_data(total - 4, 100).unwrap();
+        assert_eq!(overrun.len(), 1_048_576 - (total as usize - 5) * 1_344);
+    }
+
+    #[test]
+    fn fragment_range_rejects_out_of_range_input() {
+        let change = packed_change();
+        assert!(change.get_fragment_range_data(0, 1).is_none(), "fragment numbers are 1-based");
+        assert!(change.get_fragment_range_data(782, 1).is_none(), "past the last fragment");
+        assert!(change.get_fragment_range_data(1, 0).is_none(), "a count of zero has no payload");
+
+        let mut unfragmented = packed_change();
+        unfragmented.apply_fragmentation(65_000, 0);
+        assert!(unfragmented.get_fragment_range_data(1, 1).is_none());
+    }
+
+    #[test]
+    fn fragments_per_submessage_divides_the_datagram_budget() {
+        let change = packed_change();
+        assert_eq!(change.fragments_per_submessage(65_000).get(), 48, "65000 / 1344");
+        assert_eq!(change.fragments_per_submessage(14_720).get(), 10, "14720 / 1344");
+        assert_eq!(change.fragments_per_submessage(1_472).get(), 1, "budget below two fragments");
+        assert_eq!(change.fragments_per_submessage(0).get(), 1, "never returns zero");
+        assert_eq!(change.fragments_per_submessage(usize::MAX).get(), u16::MAX, "clamped to u16");
+
+        // The default fragment size is the default budget, so packing is a no-op there.
+        let mut default_size = packed_change();
+        default_size.apply_fragmentation(65_000, 65_000);
+        assert_eq!(default_size.fragments_per_submessage(65_000).get(), 1, "defaults do not pack");
+    }
+
+    #[test]
+    fn fragments_per_submessage_is_one_when_fragment_size_is_zero() {
+        // apply_fragmentation(_, 0) leaves fragment_size at 0 (see zero_knob_disables_fragmentation).
+        // Dividing by it would panic; the guard must return 1 instead.
+        let mut change = packed_change();
+        change.apply_fragmentation(65_000, 0);
+        assert_eq!(change.fragments_per_submessage(65_000).get(), 1);
     }
 }

@@ -36,6 +36,12 @@ pub(crate) trait Reader: Entity + Endpoint + Debug + Any {
     fn expects_inline_qos(&self) -> bool;
     fn heartbeat_response_delay(&self) -> RtpsDuration;
     fn heartbeat_suppression_duration(&self) -> RtpsDuration;
+    /// Delay before the first NACK_FRAG for a sample's missing fragments.
+    fn nack_frag_response_delay(&self) -> RtpsDuration;
+    /// Delay before retrying a NACK_FRAG that got no reply.
+    fn nack_frag_retry_delay(&self) -> RtpsDuration;
+    /// Retries before a stalled fragment repair yields to the periodic heartbeat.
+    fn nack_frag_max_retries(&self) -> u32;
     fn matched_writer_is_matched(&self, writer_guid: Guid) -> bool;
     fn matched_writers_guids(&self) -> Vec<Guid>;
     fn on_change(&self, change: Arc<CacheChange>);

@@ -25,7 +25,9 @@ use crate::{
             parameters::{ParameterId, ParameterId as CommonParameterId, ParameterList},
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
             time::{RtpsDuration, RtpsTime},
-            types::{ProtocolVersion, VendorId, RTPS_HEADER_LENGTH, VENDORID_UNKNOWN},
+            types::{
+                ProtocolVersion, VendorId, RTPS_HEADER_LENGTH, VENDORID_INT2, VENDORID_UNKNOWN,
+            },
         },
         messages::{
             header::Header,
@@ -38,6 +40,7 @@ use crate::{
                 heartbeat_frag::HeartbeatFrag, info::InfoReplyIp4, nack_frag::NackFrag,
             },
         },
+        transport::udp::recv_arena::MAX_UDP_PACKET_BYTES,
     },
     serialize::pl_cdr::parse_discovery_data,
 };
@@ -321,6 +324,7 @@ impl MessageReceiver {
                                     self.process_discovery_parameters(
                                         &parameters,
                                         &mut spdp_discovered_participant_data,
+                                        header.vendor_id(),
                                     );
                                 }
                                 Err(e) => {
@@ -389,10 +393,17 @@ impl MessageReceiver {
         self.dest_guid_prefix == guid_prefix
     }
 
+    // Smallest post-doubling SO_RCVBUF a peer sizing for one datagram could
+    // report; below this a window computed from it would divide toward zero.
+    const MIN_PLAUSIBLE_RECEIVE_BUFFER_BYTES: usize = 2 * MAX_UDP_PACKET_BYTES;
+
+    // Header vendor id, not the payload's PidVendorId parameter - the latter's
+    // order relative to PidReceiveBufferSize in the list isn't guaranteed.
     fn process_discovery_parameters(
         &self,
         parameters: &[Parameter],
         spdp_data: &mut SPDPDiscoveredParticipantData,
+        sender_vendor_id: VendorId,
     ) {
         let log_on = false;
         if log_on {
@@ -514,6 +525,33 @@ impl MessageReceiver {
                         debug!("Parameter {}: Entity name: '{}'", index, name);
                     }
                     spdp_data.set_entity_name(name.clone());
+                }
+                ParameterValue::ReceiveBufferSize(size) => {
+                    // Vendor-specific PID: a different vendor could use 0x8001 for
+                    // something else entirely, so only trust it from our own kind.
+                    if sender_vendor_id != VENDORID_INT2 {
+                        if log_on {
+                            debug!(
+                                "Parameter {}: Ignoring PidReceiveBufferSize from vendor {:02X}{:02X}",
+                                index, sender_vendor_id[0], sender_vendor_id[1]
+                            );
+                        }
+                        spdp_data.set_receive_buffer_size(None);
+                    } else if (*size as usize) < Self::MIN_PLAUSIBLE_RECEIVE_BUFFER_BYTES {
+                        warn!(
+                            "Parameter {}: Implausible receive buffer size {} (min {}); \
+                             treating as absent",
+                            index,
+                            size,
+                            Self::MIN_PLAUSIBLE_RECEIVE_BUFFER_BYTES
+                        );
+                        spdp_data.set_receive_buffer_size(None);
+                    } else {
+                        if log_on {
+                            debug!("Parameter {}: Receive buffer size: {}", index, size);
+                        }
+                        spdp_data.set_receive_buffer_size(Some(*size as usize));
+                    }
                 }
                 ParameterValue::PropertyList(properties) => {
                     if log_on {
@@ -691,4 +729,118 @@ impl MessageReceiver {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+    use crate::rtps::common::guid::GUIDPREFIX_UNKNOWN;
+
+    fn receiver() -> MessageReceiver {
+        MessageReceiver::new(GUIDPREFIX_UNKNOWN, &"127.0.0.1:0".parse().unwrap())
+    }
+
+    fn empty_proxy() -> SPDPDiscoveredParticipantData {
+        SPDPDiscoveredParticipantData::new(0, GUIDPREFIX_UNKNOWN, BuiltinEndpointSet::default())
+    }
+
+    // A peer that never sends PidReceiveBufferSize must read as absent, not as
+    // zero - a later window computation divides by this value.
+    #[test]
+    fn proxy_without_receive_buffer_param_reads_none() {
+        let mut proxy = empty_proxy();
+        let parameters = vec![Parameter {
+            id: ParameterId::PidVendorId,
+            value: ParameterValue::VendorId([9, 9]),
+        }];
+
+        receiver().process_discovery_parameters(&parameters, &mut proxy, VENDORID_INT2);
+
+        assert_eq!(proxy.receive_buffer_size(), None);
+    }
+
+    // A legitimate value, from our own vendor, must round-trip unchanged.
+    #[test]
+    fn proxy_with_receive_buffer_param_reads_the_advertised_value() {
+        let mut proxy = empty_proxy();
+        let parameters = vec![Parameter {
+            id: ParameterId::PidReceiveBufferSize,
+            value: ParameterValue::ReceiveBufferSize(425984),
+        }];
+
+        receiver().process_discovery_parameters(&parameters, &mut proxy, VENDORID_INT2);
+
+        assert_eq!(proxy.receive_buffer_size(), Some(425984usize));
+    }
+
+    fn receive_buffer_parameters(size: u32) -> Vec<Parameter<'static>> {
+        vec![Parameter {
+            id: ParameterId::PidReceiveBufferSize,
+            value: ParameterValue::ReceiveBufferSize(size),
+        }]
+    }
+
+    // The gap this task closes: an explicit zero would collapse a later send
+    // window to nothing. It must read as absent, not as Some(0).
+    #[test]
+    fn proxy_receive_buffer_param_zero_reads_none() {
+        let mut proxy = empty_proxy();
+        receiver().process_discovery_parameters(
+            &receive_buffer_parameters(0),
+            &mut proxy,
+            VENDORID_INT2,
+        );
+        assert_eq!(proxy.receive_buffer_size(), None);
+    }
+
+    // One byte under the floor must still be rejected...
+    #[test]
+    fn proxy_receive_buffer_param_just_below_floor_reads_none() {
+        let mut proxy = empty_proxy();
+        let below = MessageReceiver::MIN_PLAUSIBLE_RECEIVE_BUFFER_BYTES as u32 - 1;
+        receiver().process_discovery_parameters(
+            &receive_buffer_parameters(below),
+            &mut proxy,
+            VENDORID_INT2,
+        );
+        assert_eq!(proxy.receive_buffer_size(), None);
+    }
+
+    // ...while the floor itself is accepted - it is not part of the invalid range.
+    #[test]
+    fn proxy_receive_buffer_param_at_floor_round_trips() {
+        let mut proxy = empty_proxy();
+        let at_floor = MessageReceiver::MIN_PLAUSIBLE_RECEIVE_BUFFER_BYTES as u32;
+        receiver().process_discovery_parameters(
+            &receive_buffer_parameters(at_floor),
+            &mut proxy,
+            VENDORID_INT2,
+        );
+        assert_eq!(proxy.receive_buffer_size(), Some(at_floor as usize));
+    }
+
+    // No upper bound: this codebase has no established ceiling for a socket
+    // buffer (not even for its own local override), so a large-but-legitimate
+    // wire value is accepted rather than second-guessed against an invented cap.
+    #[test]
+    fn proxy_receive_buffer_param_implausibly_huge_value_still_round_trips() {
+        let mut proxy = empty_proxy();
+        receiver().process_discovery_parameters(
+            &receive_buffer_parameters(u32::MAX),
+            &mut proxy,
+            VENDORID_INT2,
+        );
+        assert_eq!(proxy.receive_buffer_size(), Some(u32::MAX as usize));
+    }
+
+    // 0x8001 is vendor-specific; a different vendor could use it for something
+    // else, so a value from any other vendor must not be trusted as ours.
+    #[test]
+    fn proxy_receive_buffer_param_from_other_vendor_reads_none() {
+        let mut proxy = empty_proxy();
+        let other_vendor: VendorId = [9, 9];
+        receiver().process_discovery_parameters(
+            &receive_buffer_parameters(425984),
+            &mut proxy,
+            other_vendor,
+        );
+        assert_eq!(proxy.receive_buffer_size(), None);
+    }
+}
