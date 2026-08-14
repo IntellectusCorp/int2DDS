@@ -10,6 +10,7 @@ pub mod xcdr2;
 mod xcdr2_wire_tests;
 
 use crate::core::{SerializationError, SerializationResult};
+use deserializer::read::CdrRead;
 
 // Re-export v1 (CDR) types
 pub use xcdr1::{CdrDeserializer, CdrSerializer, PlCdrMemberHeader};
