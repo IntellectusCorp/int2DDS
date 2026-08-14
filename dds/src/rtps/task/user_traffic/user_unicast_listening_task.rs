@@ -1,36 +1,36 @@
 use bytes::Bytes;
 
-use crate::rtps::common::guid::GuidPrefix;
-use crate::rtps::entities::entity::Entity;
 use crate::rtps::entities::participant::Participant;
-use crate::rtps::logic::message_processor::unicast_message_processor::UnicastMessageProcessor as _;
-use crate::rtps::logic::user_logic::UserLogic;
-use crate::rtps::messages::message_receiver::MessageReceiver;
+use crate::rtps::task::user_traffic::user_worker::USER_RECV_QUEUE_BYTE_CAP;
 use crate::rtps::transport::plugin::MessageSource;
 use crate::rtps::transport::shm::shm_listener::ShmListener;
 use crate::rtps::transport::socket::MAX_EVENTS;
 use crate::rtps::transport::tokens::ListenerToken;
-use log::{debug, error, info, warn};
+use flume::{Sender, TrySendError};
+use log::{debug, info, warn};
 use mio::{Events, Interest, Poll, Waker};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
 pub(crate) struct UserUnicastListeningTask {
-    guid_prefix: GuidPrefix,
     participant: Weak<Participant>,
-    user_logic: Arc<Option<UserLogic>>,
+    tx: Sender<(Bytes, SocketAddr)>,
+    queued_bytes: Arc<AtomicUsize>,
     shutdown_waker: Arc<OnceLock<Arc<Waker>>>,
 }
 
 impl UserUnicastListeningTask {
-    pub(crate) fn new(participant: Arc<Participant>) -> Self {
-        let (_, _, user_logic) = participant.get_logics();
-        let guid_prefix = participant.guid().prefix();
+    pub(crate) fn new(
+        participant: Arc<Participant>,
+        tx: Sender<(Bytes, SocketAddr)>,
+        queued_bytes: Arc<AtomicUsize>,
+    ) -> Self {
         Self {
-            guid_prefix,
             participant: Arc::downgrade(&participant),
-            user_logic,
+            tx,
+            queued_bytes,
             shutdown_waker: Arc::new(OnceLock::new()),
         }
     }
@@ -94,7 +94,7 @@ impl UserUnicastListeningTask {
                             let _ = poll.registry().deregister(listener.socket());
                             return Ok(());
                         }
-                        self.process_rtps_message(buffer, from_addr);
+                        self.enqueue(buffer, from_addr);
                     }
                 }
             }
@@ -151,7 +151,7 @@ impl UserUnicastListeningTask {
                             let _ = poll.registry().deregister(listener.socket());
                             return Ok(());
                         }
-                        self.process_rtps_message(buffer, from_addr);
+                        self.enqueue(buffer, from_addr);
                     }
                 }
             }
@@ -163,7 +163,7 @@ impl UserUnicastListeningTask {
                     let _ = poll.registry().deregister(listener.socket());
                     return Ok(());
                 }
-                self.process_rtps_message(buffer, from_addr);
+                self.enqueue(buffer, from_addr);
                 shm_had_data = true;
             }
 
@@ -192,7 +192,7 @@ impl UserUnicastListeningTask {
                         debug!("Detected global termination flag, user unicast channel listening terminating...");
                         return Ok(());
                     }
-                    self.process_rtps_message(Bytes::from(msg.data), msg.source);
+                    self.enqueue(Bytes::from(msg.data), msg.source);
                 }
                 Err(flume::RecvTimeoutError::Timeout) => {
                     if participant.is_terminated() {
@@ -208,18 +208,32 @@ impl UserUnicastListeningTask {
         }
     }
 
-    fn process_rtps_message(&mut self, bytes: Bytes, from_addr: SocketAddr) {
-        let mut message_receiver = MessageReceiver::new(self.guid_prefix, &from_addr);
-        let rtps_message = message_receiver.init(&bytes);
-        if rtps_message.is_err() {
-            error!("Failed to parse RTPS message from {:?}", from_addr);
+    // Hand the datagram to the worker without blocking the socket thread. The
+    // byte cap bounds queued payload; over it we drop and rely on retransmit.
+    fn enqueue(&self, buffer: Bytes, from_addr: SocketAddr) {
+        let len = buffer.len();
+
+        if self.queued_bytes.load(Ordering::Acquire) + len > USER_RECV_QUEUE_BYTE_CAP {
+            debug!(
+                "user recv queue over byte cap, dropping datagram from {:?} (len {})",
+                from_addr, len
+            );
             return;
         }
-        let mut user_logic =
-            self.user_logic.as_ref().as_ref().expect("UserLogic is not initialized").clone();
 
-        if let Err(e) = user_logic.handle_rtps_message(message_receiver) {
-            debug!("Failed to handle user RTPS message from {:?}: {:?}", from_addr, e);
+        match self.tx.try_send((buffer, from_addr)) {
+            Ok(()) => {
+                self.queued_bytes.fetch_add(len, Ordering::AcqRel);
+            }
+            Err(TrySendError::Full(_)) => {
+                debug!(
+                    "user recv queue count backstop full, dropping datagram from {:?}",
+                    from_addr
+                );
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                debug!("user worker gone, dropping datagram from {:?}", from_addr);
+            }
         }
     }
 }
