@@ -268,12 +268,21 @@ mod tests {
         let listener = UdpListener::new(0).expect("bind ephemeral port");
         let granted = listener.recv_buffer_size().expect("kernel reported a value");
 
-        // Independent oracle: the exact "double the current default, set, read
-        // back" sequence, called directly on a throwaway socket rather than
-        // through UdpListener::new, so a broken capture can't also break this.
+        // Independent oracle: the same set-then-read-back sequence hand-rolled on a throwaway
+        // socket rather than through UdpListener::new, so a broken capture cannot also break
+        // this. It has to branch on the env exactly as the listener does, or a run that sets
+        // INT2DDS_UDP_SOCKET_BUFFER compares two different requests. Where the kernel clamps
+        // both to the same ceiling that mismatch hides; where it grants what is asked, it does
+        // not.
         let probe = Socket2::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
-        let current = probe.recv_buffer_size().unwrap();
-        probe.set_recv_buffer_size(current.saturating_mul(2)).unwrap();
+        if let Some(size) = std::env::var("INT2DDS_UDP_SOCKET_BUFFER")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+        {
+            let _ = probe.set_recv_buffer_size(size);
+        } else if let Ok(current) = probe.recv_buffer_size() {
+            let _ = probe.set_recv_buffer_size(current.saturating_mul(2));
+        }
         let expected = probe.recv_buffer_size().unwrap();
 
         assert_eq!(granted, expected);
