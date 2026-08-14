@@ -49,6 +49,9 @@ use crate::rtps::messages::submessages::heartbeat_frag::HeartbeatFrag;
 use crate::rtps::messages::submessages::nack_frag::NackFrag;
 use crate::rtps::task::sending_handler::{MessageType, SendingHandler};
 use crate::rtps::task::user_traffic::user_unicast_listening_task::UserUnicastListeningTask;
+use crate::rtps::task::user_traffic::user_worker::{
+    UserTrafficWorker, USER_RECV_QUEUE_COUNT_BACKSTOP,
+};
 use crate::rtps::transport::plugin::{MessageSource, SendTarget, TransportPlugin};
 use crate::rtps::{
     entities::participant::Participant, messages::message_receiver::MessageReceiver,
@@ -58,6 +61,7 @@ use crate::utils::timer::{timer_handler::TimerHandler, timer_id::TimerId};
 use dashmap::DashMap;
 use mio::Waker;
 
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread::{self, JoinHandle};
 
@@ -426,11 +430,41 @@ impl UserLogic {
     ) -> RtpsResult<()> {
         if let Some(unicast_source) = user_unicast_source {
             let participant = self.get_upgraded_participant()?;
+            let guid_prefix = participant.guid().prefix();
+
+            let (tx, rx) = flume::bounded(USER_RECV_QUEUE_COUNT_BACKSTOP);
+            let queued_bytes = Arc::new(AtomicUsize::new(0));
 
             let mut user_unicast_listening_task =
-                UserUnicastListeningTask::new(participant.clone());
+                UserUnicastListeningTask::new(participant.clone(), tx, Arc::clone(&queued_bytes));
             user_unicast_listening_task.set_shutdown_waker(self.unicast_listening_waker.clone());
-            let participant_guid = participant.guid();
+
+            let worker = UserTrafficWorker::new(
+                guid_prefix,
+                Arc::downgrade(&participant),
+                self.clone(),
+                rx,
+                queued_bytes,
+            );
+            let worker_handle = thread::Builder::new()
+                .name("user_traffic_worker".to_string())
+                .spawn(move || {
+                    {
+                        use crate::rtps::task::thread_monitor::ThreadMonitor;
+                        ThreadMonitor::register_current_thread_name_with_guid_prefix(
+                            "user_traffic_worker",
+                            guid_prefix,
+                        );
+                    }
+
+                    worker.run();
+                    {
+                        use crate::rtps::task::thread_monitor::ThreadMonitor;
+                        ThreadMonitor::remove_map_guard();
+                    }
+                    debug!("user unicast worker thread finished");
+                })
+                .map_err(|_| RtpsError::new(RtpsErrorCode::ThreadSpawnError, None))?;
 
             let unicast_handle = thread::Builder::new()
                 .name("user_traffic_unicast_listening".to_string())
@@ -439,18 +473,23 @@ impl UserLogic {
                         use crate::rtps::task::thread_monitor::ThreadMonitor;
                         ThreadMonitor::register_current_thread_name_with_guid_prefix(
                             "user_traffic_unicast_listening",
-                            participant_guid.prefix(),
+                            guid_prefix,
                         );
                     }
 
                     let _ = user_unicast_listening_task.unicast_listening(unicast_source);
+
+                    // Wait for the worker to drain and exit before this thread ends.
+                    if let Err(e) = worker_handle.join() {
+                        debug!("failed to join user unicast worker thread: {:?}", e);
+                    }
                     {
                         use crate::rtps::task::thread_monitor::ThreadMonitor;
                         ThreadMonitor::remove_map_guard();
                     }
                     debug!("user unicast listening thread finished");
                 })
-                .expect("Failed to create user unicast listening thread");
+                .map_err(|_| RtpsError::new(RtpsErrorCode::ThreadSpawnError, None))?;
 
             if let Ok(mut handle_guard) = self.unicast_listening_handle.lock() {
                 *handle_guard = Some(unicast_handle);
