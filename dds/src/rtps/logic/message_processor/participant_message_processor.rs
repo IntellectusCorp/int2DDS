@@ -41,7 +41,7 @@ use crate::{
                 reader_proxy::ReaderProxy, StatefulWriter, Writer as _,
             },
         },
-        logic::{common::ParticipantAccessor, sedp_logic::BUILTIN_SEDP_HB_PERIOD},
+        logic::common::ParticipantAccessor,
         messages::message_creator::MessageCreator,
         task::sending_handler::{MessageType, SendingHandler},
     },
