@@ -1079,6 +1079,7 @@ name = "int2dds-cdr"
 version = "0.1.1"
 dependencies = [
  "bytes",
+ "criterion",
  "int2dds",
  "log",
  "speedy",
