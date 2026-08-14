@@ -20,6 +20,9 @@ This document describes the environment variables available in int2dds.
 | `INT2DDS_MAX_MESSAGE_SIZE`           | Max RTPS message size (bytes)              | 65000                   |
 | `INT2DDS_MULTICAST_TTL`              | IPv4 multicast TTL fallback (0-255)        | 1                       |
 | `INT2DDS_DISABLE_PREEMPTIVE`         | Disable preemptive ACKNACK/HEARTBEAT       | false                   |
+| `INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS` | Reader delay before first NACK_FRAG (ms)  | 80                      |
+| `INT2DDS_NACK_FRAG_RETRY_MS`         | Reader NACK_FRAG retry interval (ms)       | 200                     |
+| `INT2DDS_NACK_FRAG_MAX_RETRIES`      | Reader NACK_FRAG retries before yielding   | 10                      |
 | `INT2DDS_EXTENDED_DISCOVERY`         | Enable extended discovery                  | false                   |
 | `INT2DDS_INITIAL_PEERS`              | Initial peer list                          | none                    |
 | `INT2DDS_THREAD_MONITORING`          | Enable thread monitoring                   | false                   |
@@ -509,6 +512,86 @@ cargo run --example hello_world_pub
 
 ---
 
+## Reliability Tuning
+
+These control a reliable reader's NACK_FRAG repair loop: the request sent to
+ask a matched writer to resend a sample's missing fragments. Each maps to a
+`ReaderReliabilityExtensionQosPolicy` field; an explicit QoS setting always
+wins over the env fallback, and an invalid or out-of-range value is ignored
+in favor of the default rather than propagating.
+
+### INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS
+
+Delay before the reader sends its first NACK_FRAG for a sample reported
+incomplete by a HEARTBEAT. Maps to `nack_frag_response_delay`.
+
+- Default: `80` (milliseconds)
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS = "150"
+
+cargo run --example hello_world_sub
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS=150
+
+cargo run --example hello_world_sub
+```
+
+### INT2DDS_NACK_FRAG_RETRY_MS
+
+Delay before the reader re-asks when a NACK_FRAG produced no fragments. Maps
+to `nack_frag_retry_delay`.
+
+- Default: `200` (milliseconds)
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_NACK_FRAG_RETRY_MS = "300"
+
+cargo run --example hello_world_sub
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_NACK_FRAG_RETRY_MS=300
+
+cargo run --example hello_world_sub
+```
+
+### INT2DDS_NACK_FRAG_MAX_RETRIES
+
+How many times the reader re-asks before handing an incomplete fragmented
+sample back to the writer's periodic HEARTBEAT. Maps to
+`nack_frag_max_retries`.
+
+- Default: `10`
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_NACK_FRAG_MAX_RETRIES = "5"
+
+cargo run --example hello_world_sub
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_NACK_FRAG_MAX_RETRIES=5
+
+cargo run --example hello_world_sub
+```
+
+---
+
 ## NAT / WAN Traversal Settings
 
 When two int2DDS hosts need to communicate across the public Internet (WAN)
@@ -725,5 +808,5 @@ cargo run --example hello_world_pub
 - [dds/src/common/log.rs](../../dds/src/common/log.rs) - Logging configuration
 - [dds/src/rtps/transport/mod.rs](../../dds/src/rtps/transport/mod.rs) - Transport type definition
 - [dds/src/rtps/transport/transport_config.rs](../../dds/src/rtps/transport/transport_config.rs) - Multicast TTL resolution
-- [dds/src/dcps/infrastructure/qos_policy.rs](../../dds/src/dcps/infrastructure/qos_policy.rs) - DATA_FRAG fragment size resolution
+- [dds/src/dcps/infrastructure/qos_policy.rs](../../dds/src/dcps/infrastructure/qos_policy.rs) - DATA_FRAG fragment size and NACK_FRAG timing resolution
 - [dds/src/rtps/transport/udp/udp_sender.rs](../../dds/src/rtps/transport/udp/udp_sender.rs) - UDP transport settings
