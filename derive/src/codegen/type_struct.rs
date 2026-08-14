@@ -786,9 +786,24 @@ fn quote_deserialize_impl(
                             .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
                         return Ok(Box::new(result));
                     }
+                    // XCDR2 reads across the chunks too, but only on the strict path:
+                    // the two fallbacks in `deserialize` re-read the payload from the
+                    // start, so a sample that needs one falls through to the
+                    // materialized path below and gets all three attempts there.
+                    // A caller-supplied format can also name a codec the encapsulation
+                    // id disagrees with, which that path is the one that resolves.
+                    if format.is_none() && matches!(encoding_id, 0x0006..=0x000B) {
+                        use #crate_path::serialize::xcdr::{Xcdr2Deserializer, XcdrDeserialize};
+                        if let Ok(mut deserializer) = Xcdr2Deserializer::new_chained(chunks) {
+                            if let Ok(value) = <#full_type as XcdrDeserialize>::deserialize_xcdr(&mut deserializer) {
+                                return Ok(Box::new(value));
+                            }
+                        }
+                    }
                 }
             }
-            // XCDR2/PL_CDR/builtin: materialize once, then delegate to deserialize.
+            // PL_CDR/builtin, and any XCDR2 sample the strict path above declined:
+            // materialize once, then delegate to deserialize.
             let total: usize = chunks.iter().map(|c| c.len()).sum();
             let mut buf = Vec::with_capacity(total);
             for c in chunks {

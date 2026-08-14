@@ -8,11 +8,12 @@
 
 use std::collections::BTreeMap;
 
+use bytes::Bytes;
 use speedy::Endianness;
 
 use crate::cdr::{
     CdrSerializer, ExtensibilityKind, LcHint, MemberHeader, PrimitiveSerialize, SequenceSerialize,
-    Xcdr2Deserializer, Xcdr2Serializer, XcdrSerialize,
+    StringSerialize, Xcdr2Deserializer, Xcdr2Serializer, XcdrSerialize,
 };
 use crate::{BufferManager, SerializationError, WChar};
 
@@ -420,4 +421,135 @@ fn insert_nextint_slot_shifts_the_payload_without_disturbing_it() {
     s.serialize_u32(0x1122_3344).unwrap();
     s.insert_nextint_slot_at(4);
     assert_eq!(body(s), [0, 0, 0, 0, 0x44, 0x33, 0x22, 0x11]);
+}
+
+// -- fragment input (`new_chained`) ------------------------------------------
+//
+// Reading across fragments must decode the same bytes as reading the reassembled
+// payload. A round trip cannot show that: both paths run the same reader, so a
+// stitching mistake that is symmetric stays invisible. These compare the two
+// paths against each other, and place the chunk boundary where the arithmetic
+// differs — inside a member, inside the encapsulation header, inside an EMHEADER.
+
+fn cut_at(data: &[u8], cut: usize) -> Vec<Bytes> {
+    vec![Bytes::copy_from_slice(&data[..cut]), Bytes::copy_from_slice(&data[cut..])]
+}
+
+#[test]
+fn chained_decodes_as_contiguous_at_every_boundary() {
+    let mut s = ser(LE, ExtensibilityKind::Final);
+    s.serialize_u8(0x11).unwrap();
+    s.serialize_u64(0x8899_AABB_CCDD_EEFF).unwrap();
+    s.serialize_u32(0x1122_3344).unwrap();
+    s.serialize_string("chained").unwrap();
+    s.serialize_u64_sequence(&[1, 2]).unwrap();
+    let payload = s.into_bytes();
+
+    let decode = |d: &mut Xcdr2Deserializer| {
+        (
+            d.deserialize_u8().unwrap(),
+            d.deserialize_u64().unwrap(),
+            d.deserialize_u32().unwrap(),
+            d.deserialize_string().unwrap(),
+            d.deserialize_u64_sequence().unwrap(),
+        )
+    };
+
+    let expected = decode(&mut Xcdr2Deserializer::new(&payload).unwrap());
+    assert_eq!(expected.0, 0x11);
+    assert_eq!(expected.3, "chained");
+    assert_eq!(expected.4, vec![1, 2]);
+
+    for cut in 1..payload.len() {
+        let chunks = cut_at(&payload, cut);
+        let mut d = Xcdr2Deserializer::new_chained(&chunks).unwrap();
+        assert_eq!(decode(&mut d), expected, "chunk boundary at {cut}");
+    }
+}
+
+/// The 8-byte member sits at body offset 4, not 8. Reading it from a chunk that
+/// starts mid-member is where a stray XCDR1 alignment rule would show up as the
+/// wrong bytes rather than as a length error.
+#[test]
+fn chained_reads_an_eight_byte_member_at_its_four_capped_offset() {
+    let mut s = ser(LE, ExtensibilityKind::Final);
+    s.serialize_u8(0x11).unwrap();
+    s.serialize_u64(0x8899_AABB_CCDD_EEFF).unwrap();
+    let payload = s.into_bytes();
+    assert_eq!(payload.len(), 4 + 12, "u64 follows three pad bytes, not seven");
+
+    let chunks = cut_at(&payload, 4 + 6);
+    let mut d = Xcdr2Deserializer::new_chained(&chunks).unwrap();
+    assert_eq!(d.deserialize_u8().unwrap(), 0x11);
+    assert_eq!(d.deserialize_u64().unwrap(), 0x8899_AABB_CCDD_EEFF);
+}
+
+#[test]
+fn chained_gathers_an_encapsulation_header_split_across_chunks() {
+    let mut s = ser(LE, ExtensibilityKind::Final);
+    s.serialize_u32(0xAABB_CCDD).unwrap();
+    let payload = s.into_bytes();
+
+    for cut in [1, 2, 3] {
+        let chunks = cut_at(&payload, cut);
+        let mut d = Xcdr2Deserializer::new_chained(&chunks).unwrap();
+        assert_eq!(d.deserialize_u32().unwrap(), 0xAABB_CCDD, "header split at {cut}");
+    }
+
+    let short = [Bytes::from_static(&[0x00, 0x07]), Bytes::from_static(&[0x00])];
+    assert!(Xcdr2Deserializer::new_chained(&short).is_err(), "a header needs four bytes");
+}
+
+#[test]
+fn chained_gathers_a_member_header_split_across_chunks() {
+    let mut s = ser(LE, ExtensibilityKind::Mutable);
+    s.write_member_with(1, false, |s| {
+        for b in [0x11u8, 0x22, 0x33] {
+            s.serialize_u8(b)?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    let payload = s.into_bytes();
+
+    // LC=4: EMHEADER and its NEXTINT span body 0..8, so cut inside each word.
+    for cut in [4 + 2, 4 + 5] {
+        let chunks = cut_at(&payload, cut);
+        let mut d = Xcdr2Deserializer::new_chained(&chunks).unwrap();
+        assert_eq!(d.peek_member_header(8), Some((1, 3)), "peek across split at {cut}");
+        assert_eq!(d.read_member_header().unwrap(), (1, 3), "read across split at {cut}");
+        assert_eq!(d.deserialize_u8().unwrap(), 0x11);
+    }
+}
+
+/// The gathered window stops at the end of the body, so a header that claims a
+/// NEXTINT the payload does not carry still fails instead of reading past it.
+#[test]
+fn chained_member_header_without_its_nextint_errs() {
+    let truncated = [
+        Bytes::from_static(&[0x00, 0x0B, 0x00, 0x00]),
+        Bytes::from_static(&[0x01, 0x00, 0x00, 0x40]),
+    ];
+    let mut d = Xcdr2Deserializer::new_chained(&truncated).unwrap();
+    assert!(d.read_member_header().is_err());
+}
+
+/// `get_data()` hands out a slice its callers index freely, so on fragment input
+/// it has to be the whole body — a short one would panic in the caller rather
+/// than fail here. Repeating the call must not move it, since a caller may hold
+/// the first slice while taking a second.
+#[test]
+fn chained_get_data_returns_the_whole_body() {
+    let mut s = ser(LE, ExtensibilityKind::Final);
+    s.serialize_u32(0x1122_3344).unwrap();
+    s.serialize_string("backing slice").unwrap();
+    let payload = s.into_bytes();
+    let body = &payload[4..];
+
+    for cut in 1..payload.len() {
+        let chunks = cut_at(&payload, cut);
+        let d = Xcdr2Deserializer::new_chained(&chunks).unwrap();
+        assert_eq!(d.get_data(), body, "chunk boundary at {cut}");
+        assert_eq!(d.get_data(), body, "second call, chunk boundary at {cut}");
+    }
 }

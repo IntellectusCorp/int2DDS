@@ -13,7 +13,7 @@ impl<'a> CdrRead for CdrDeserializer<'a> {
 
 impl<'a> CdrRead for Xcdr2Deserializer<'a> {
     fn bytes_at(&self, offset: usize, len: usize) -> Cow<'_, [u8]> {
-        Cow::Borrowed(&self.data[offset..offset + len])
+        self.input.bytes(offset, len)
     }
 
     fn read_collection_dheader(&mut self) -> Result<(), CdrError> {

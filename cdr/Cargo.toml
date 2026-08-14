@@ -28,3 +28,8 @@ speedy = "0.8.0"
 # `#[derive(DdsType)]` wire vectors in `tests/derive_wire/`.
 [dev-dependencies]
 int2dds = { path = "../dds" }
+criterion = "0.7.0"
+
+[[bench]]
+name = "fragment_decode"
+harness = false

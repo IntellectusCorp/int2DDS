@@ -9,6 +9,7 @@
 //! code does. Tests of kernel-internal items stay in `cdr/src/**`.
 
 mod cdr_mod;
+mod chained;
 mod deserializer_sequence;
 mod deserializer_string;
 mod serializer_array;

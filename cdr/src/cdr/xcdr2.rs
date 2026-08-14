@@ -1,8 +1,10 @@
+use bytes::Bytes;
 use speedy::Endianness;
+use std::cell::OnceCell;
 
 use super::{
-    CdrError, CdrSerializerCommon, EncodingKind, ExtensibilityKind, LcHint, MemberHeader,
-    MEMBER_ID_MAX,
+    cdr_input::CdrInput, CdrError, CdrSerializerCommon, EncodingKind, ExtensibilityKind, LcHint,
+    MemberHeader, MEMBER_ID_MAX,
 };
 use crate::core::endianness_from_bool;
 use crate::{align_position_with_header_offset, to_bytes_u32, BufferManager, DeserializerReader};
@@ -240,11 +242,13 @@ impl BufferManager for Xcdr2Serializer {
 /// XCDR v2 Deserializer
 pub struct Xcdr2Deserializer<'a> {
     pub(super) endianness: Endianness,
-    pub(super) data: &'a [u8],
+    pub(super) input: CdrInput<'a>,
     pub(super) position: usize,
     /// Whether the data uses XCDR2 encoding (affects alignment rules)
     /// XCDR2 limits maximum alignment to 4 bytes, while XCDR1 allows 8 bytes
     is_xcdr2: bool,
+    /// Fragment input gathered into one buffer, filled by the first `get_data()`.
+    gathered: OnceCell<Vec<u8>>,
 }
 
 impl<'a> Xcdr2Deserializer<'a> {
@@ -252,7 +256,13 @@ impl<'a> Xcdr2Deserializer<'a> {
     pub fn new(data: &'a [u8]) -> Result<Self, CdrError> {
         let (endianness, header_size, is_xcdr2) = parse_encapsulation_header(data)?;
 
-        Ok(Self { endianness, data: &data[header_size..], position: 0, is_xcdr2 })
+        Ok(Self {
+            endianness,
+            input: CdrInput::Contiguous(&data[header_size..]),
+            position: 0,
+            is_xcdr2,
+            gathered: OnceCell::new(),
+        })
     }
 
     /// Create deserializer without encapsulation header
@@ -260,19 +270,65 @@ impl<'a> Xcdr2Deserializer<'a> {
     pub fn new_without_header(data: &'a [u8], little_endian: bool) -> Self {
         Self {
             endianness: endianness_from_bool(little_endian),
-            data,
+            input: CdrInput::Contiguous(data),
             position: 0,
             is_xcdr2: true, // Default to XCDR2 behavior
+            gathered: OnceCell::new(),
         }
+    }
+
+    /// Fragment receive path: deserialize directly across fragment chunks with no
+    /// contiguous reassembly buffer. Reads the 4-byte encapsulation header from the
+    /// chunks (like `new`), then exposes the body via `skip` so positions stay
+    /// body-relative. Mirrors [`CdrDeserializer::new_chained`].
+    ///
+    /// [`CdrDeserializer::new_chained`]: super::CdrDeserializer::new_chained
+    pub fn new_chained(chunks: &'a [Bytes]) -> Result<Self, CdrError> {
+        let total: usize = chunks.iter().map(|c| c.len()).sum();
+        if total < 4 {
+            return Err(CdrError::InsufficientData);
+        }
+
+        // Gathered, so a chunk boundary inside the header is handled.
+        let header = CdrInput::chained(chunks, 0).read_array::<4>(0);
+        let (endianness, header_size, is_xcdr2) = parse_encapsulation_header(&header)?;
+
+        Ok(Self {
+            endianness,
+            input: CdrInput::chained(chunks, header_size),
+            position: 0,
+            is_xcdr2,
+            gathered: OnceCell::new(),
+        })
     }
 
     pub fn position(&self) -> usize {
         self.position
     }
 
-    // Backing slice. xcdr2 input is always contiguous (no fragment reassembly).
+    // Backing slice, for callers that index the payload directly instead of
+    // reading through the deserializer. Contiguous input already is one; fragment
+    // input is gathered once and kept, since a caller holding a slice expects to
+    // index all of it. The receive path does not reach this today -- the direct
+    // indexers (TypeLookup, TypeObject) build their deserializer from a contiguous
+    // payload -- but `TypeObject`'s `XcdrDeserialize` impl is public and slices
+    // what this returns, so anything short of the whole body would panic there.
     pub fn get_data(&self) -> &[u8] {
-        self.data
+        match &self.input {
+            CdrInput::Contiguous(data) => data,
+            CdrInput::Chained { .. } => {
+                self.gathered.get_or_init(|| self.input.copy_to_vec(0, self.input.len()))
+            }
+        }
+    }
+
+    // EMHEADER bytes at `position`, gathered when the input is fragmented. The
+    // window is bounded at 8 -- one header word plus the NEXTINT word LC=4 adds --
+    // and stops at the end of the body, which keeps `MemberHeader::read`'s own
+    // length checks meaning what they meant against the whole buffer.
+    fn member_header_window(&self, position: usize) -> std::borrow::Cow<'_, [u8]> {
+        let len = self.input.len().saturating_sub(position).min(8);
+        self.input.bytes(position, len)
     }
 
     /// Align position to boundary. Positions are relative to the start of the
@@ -292,7 +348,7 @@ impl<'a> Xcdr2Deserializer<'a> {
     /// Check if enough data is available
     #[inline]
     pub(super) fn check_available(&self, size: usize) -> Result<(), CdrError> {
-        if self.position + size > self.data.len() {
+        if self.position + size > self.input.len() {
             Err(CdrError::InsufficientData)
         } else {
             Ok(())
@@ -348,7 +404,7 @@ impl<'a> Xcdr2Deserializer<'a> {
 
         self.align(4); // EMHEADER is u32, needs 4-byte alignment
         let (header, bytes_consumed) =
-            MemberHeader::read(self.data, self.position, self.endianness)?;
+            MemberHeader::read(&self.member_header_window(self.position), 0, self.endianness)?;
 
         self.position += bytes_consumed;
 
@@ -362,7 +418,7 @@ impl<'a> Xcdr2Deserializer<'a> {
 
         self.align(4); // EMHEADER is u32, needs 4-byte alignment
         let (header, bytes_consumed) =
-            MemberHeader::read(self.data, self.position, self.endianness)?;
+            MemberHeader::read(&self.member_header_window(self.position), 0, self.endianness)?;
 
         self.position += bytes_consumed;
 
@@ -384,11 +440,11 @@ impl<'a> Xcdr2Deserializer<'a> {
             return None;
         }
 
-        if self.position + 4 > self.data.len() {
+        if self.position + 4 > self.input.len() {
             return None;
         }
 
-        MemberHeader::read(self.data, self.position, self.endianness)
+        MemberHeader::read(&self.member_header_window(self.position), 0, self.endianness)
             .ok()
             .map(|(h, _)| (h.member_id, h.member_length))
     }
@@ -402,7 +458,7 @@ impl<'a> DeserializerReader for Xcdr2Deserializer<'a> {
     }
 
     fn copy_bytes_at(&self, offset: usize, out: &mut [u8]) {
-        out.copy_from_slice(&self.data[offset..offset + out.len()]);
+        self.input.copy_to(offset, out);
     }
 
     fn get_position(&self) -> usize {
