@@ -17,8 +17,12 @@ This document describes the environment variables available in int2dds.
 | `INT2DDS_UDP_SOCKET_BUFFER`          | UDP socket buffer size (bytes)             | OS default              |
 | `INT2DDS_SHM_BUFFER_SIZE`            | Shared-memory ring buffer size (bytes)     | 1048576 (1MB)           |
 | `INT2DDS_DATA_FRAG_SIZE`             | DATA_FRAG fragment size (bytes)            | 65000                   |
+| `INT2DDS_MAX_MESSAGE_SIZE`           | Max RTPS message size (bytes)              | 65000                   |
 | `INT2DDS_MULTICAST_TTL`              | IPv4 multicast TTL fallback (0-255)        | 1                       |
 | `INT2DDS_DISABLE_PREEMPTIVE`         | Disable preemptive ACKNACK/HEARTBEAT       | false                   |
+| `INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS` | Reader delay before first NACK_FRAG (ms)  | 80                      |
+| `INT2DDS_NACK_FRAG_RETRY_MS`         | Reader NACK_FRAG retry interval (ms)       | 200                     |
+| `INT2DDS_NACK_FRAG_MAX_RETRIES`      | Reader NACK_FRAG retries before yielding   | 10                      |
 | `INT2DDS_EXTENDED_DISCOVERY`         | Enable extended discovery                  | false                   |
 | `INT2DDS_INITIAL_PEERS`              | Initial peer list                          | none                    |
 | `INT2DDS_THREAD_MONITORING`          | Enable thread monitoring                   | false                   |
@@ -327,6 +331,40 @@ The Rust core consumes the env var inside `DataFragQosPolicy::effective_max_size
 when the RTPS writer is created, so the value must be set **before** the
 DataWriter is created.
 
+### INT2DDS_MAX_MESSAGE_SIZE
+
+Sets the maximum RTPS message size, in bytes: the threshold above which a
+DataWriter fragments a sample. A sample whose serialized payload exceeds this
+size is split into DATA_FRAG fragments of `INT2DDS_DATA_FRAG_SIZE` bytes each. A
+sample at or below it is sent as a single DATA submessage.
+
+`INT2DDS_DATA_FRAG_SIZE` sizes each fragment. This variable decides when
+fragmentation starts and how much payload one message carries, so keep it at or
+above `INT2DDS_DATA_FRAG_SIZE`.
+
+- Valid range: `1` - `65000`
+- Values outside the range, or values that do not parse as an integer, are
+  logged at warn level and ignored — the built-in default `65000` is used.
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_MAX_MESSAGE_SIZE = "14720"
+
+cargo run --example hello_world_pub
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_MAX_MESSAGE_SIZE=14720
+
+cargo run --example hello_world_pub
+```
+
+The Rust core reads this via `env::get_max_message_size` each time a sample is
+written, so a new value takes effect for samples written afterward.
+
 ### INT2DDS_MULTICAST_TTL
 
 Sets the IPv4 multicast TTL (Time-To-Live) used when no explicit
@@ -470,6 +508,86 @@ cargo run --example hello_world_pub
 export INT2DDS_INITIAL_PEERS="192.168.1.100:17410,192.168.1.100:17412"
 
 cargo run --example hello_world_pub
+```
+
+---
+
+## Reliability Tuning
+
+These control a reliable reader's NACK_FRAG repair loop: the request sent to
+ask a matched writer to resend a sample's missing fragments. Each maps to a
+`ReaderReliabilityExtensionQosPolicy` field; an explicit QoS setting always
+wins over the env fallback, and an invalid or out-of-range value is ignored
+in favor of the default rather than propagating.
+
+### INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS
+
+Delay before the reader sends its first NACK_FRAG for a sample reported
+incomplete by a HEARTBEAT. Maps to `nack_frag_response_delay`.
+
+- Default: `80` (milliseconds)
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS = "150"
+
+cargo run --example hello_world_sub
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS=150
+
+cargo run --example hello_world_sub
+```
+
+### INT2DDS_NACK_FRAG_RETRY_MS
+
+Delay before the reader re-asks when a NACK_FRAG produced no fragments. Maps
+to `nack_frag_retry_delay`.
+
+- Default: `200` (milliseconds)
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_NACK_FRAG_RETRY_MS = "300"
+
+cargo run --example hello_world_sub
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_NACK_FRAG_RETRY_MS=300
+
+cargo run --example hello_world_sub
+```
+
+### INT2DDS_NACK_FRAG_MAX_RETRIES
+
+How many times the reader re-asks before handing an incomplete fragmented
+sample back to the writer's periodic HEARTBEAT. Maps to
+`nack_frag_max_retries`.
+
+- Default: `10`
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_NACK_FRAG_MAX_RETRIES = "5"
+
+cargo run --example hello_world_sub
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_NACK_FRAG_MAX_RETRIES=5
+
+cargo run --example hello_world_sub
 ```
 
 ---
@@ -690,5 +808,5 @@ cargo run --example hello_world_pub
 - [dds/src/common/log.rs](../../dds/src/common/log.rs) - Logging configuration
 - [dds/src/rtps/transport/mod.rs](../../dds/src/rtps/transport/mod.rs) - Transport type definition
 - [dds/src/rtps/transport/transport_config.rs](../../dds/src/rtps/transport/transport_config.rs) - Multicast TTL resolution
-- [dds/src/dcps/infrastructure/qos_policy.rs](../../dds/src/dcps/infrastructure/qos_policy.rs) - DATA_FRAG fragment size resolution
+- [dds/src/dcps/infrastructure/qos_policy.rs](../../dds/src/dcps/infrastructure/qos_policy.rs) - DATA_FRAG fragment size and NACK_FRAG timing resolution
 - [dds/src/rtps/transport/udp/udp_sender.rs](../../dds/src/rtps/transport/udp/udp_sender.rs) - UDP transport settings

@@ -218,6 +218,18 @@ impl Participant {
         self.local_participant_proxy_data.clone()
     }
 
+    /// Record this participant's own receive-buffer size for SPDP to advertise.
+    /// Called once, right after construction, while the proxy Arc is still
+    /// uniquely owned - `Arc::get_mut` fails silently (a no-op) otherwise.
+    pub(crate) fn set_local_receive_buffer_size(&mut self, size: Option<usize>) {
+        match Arc::get_mut(&mut self.local_participant_proxy_data) {
+            Some(proxy) => proxy.set_receive_buffer_size(size),
+            None => log::warn!(
+                "local_participant_proxy_data already shared; receive buffer size not recorded"
+            ),
+        }
+    }
+
     pub(crate) fn remote_participant_proxy_datas(
         &self,
     ) -> Arc<Mutex<Vec<SPDPDiscoveredParticipantData>>> {
@@ -285,6 +297,22 @@ impl Participant {
                 }
                 None
             }
+            Err(e) => {
+                log::error!("Failed to lock remote_participant_proxy_datas: {:?}", e);
+                None
+            }
+        }
+    }
+
+    /// The receive-buffer size a discovered participant advertised, or `None` when it did not
+    /// advertise a usable one. Reads under the lock without cloning the whole proxy, because
+    /// the send path asks once per destination on every fragmented send.
+    pub(crate) fn remote_receive_buffer_size(&self, guid_prefix: GuidPrefix) -> Option<usize> {
+        match self.remote_participant_proxy_datas.lock() {
+            Ok(datas) => datas
+                .iter()
+                .find(|data| data.guid_prefix() == guid_prefix)
+                .and_then(|data| data.receive_buffer_size()),
             Err(e) => {
                 log::error!("Failed to lock remote_participant_proxy_datas: {:?}", e);
                 None
@@ -664,6 +692,15 @@ impl Participant {
         // Remove from store
         self.rtps_reader_store.remove(&topic_name, entity_id);
 
+        // The reader is gone, so any reassembly still addressed to it can never complete and
+        // will not be reached by the normal completion path -- only by cap-driven eviction,
+        // which may not run again for a long time.
+        if let Some(user_logic_arc) = self.user_logic_if_set() {
+            if let Some(user_logic) = user_logic_arc.as_ref() {
+                user_logic.forget_fragment_buffers_for_reader(entity_id);
+            }
+        }
+
         // Unmatch with intra participant writers
         self.cleanup_resources_for_remote_reader(
             Guid::new(self.guid().prefix(), entity_id),
@@ -706,6 +743,16 @@ impl Participant {
         writer_guid: Guid,
         topic_name: &str,
     ) -> RtpsResult<()> {
+        // The writer is gone, so no further DATA_FRAG can ever complete or evict a reassembly
+        // still waiting on it. Also reached per-writer from `unmatch_with_remote_participant`
+        // via `remove_all_unmatched_endpoint_from_terminated_participant`, so that path is
+        // covered too without a separate hook there.
+        if let Some(user_logic_arc) = self.user_logic_if_set() {
+            if let Some(user_logic) = user_logic_arc.as_ref() {
+                user_logic.forget_fragment_buffers_for_writer(writer_guid);
+            }
+        }
+
         // Fire LIVELINESS_CHANGED first; it iterates reader's writer_proxies to find matches.
         if writer_guid.entity_id().entity_kind().is_user_defined() {
             if let Some(wlp_logic) = self.wlp_logic() {
