@@ -67,6 +67,9 @@ pub enum LcHint {
     Dheader,
 }
 
+/// An EMHEADER carries the member id in 28 bits (DDS-XTypes 7.4.3.4.2).
+pub(crate) const MEMBER_ID_MAX: u32 = 0x0FFF_FFFF;
+
 impl MemberHeader {
     pub fn new(member_id: u32, length: usize) -> Self {
         Self { member_id, member_length: length as u32, must_understand: false }
@@ -76,7 +79,41 @@ impl MemberHeader {
         Self { member_id, member_length: length as u32, must_understand }
     }
 
+    /// Pick the length code for a member of `len` bytes — the inverse of the `lc`
+    /// match in [`MemberHeader::read`], and the only place either writer decides.
+    ///
+    /// LC=5/6/7 answer `None` because their NEXTINT *is* the payload's own first
+    /// word (a DHEADER or a sequence count), so no caller writes one; the hint
+    /// guards say when the payload is shaped to stand in for it.
+    pub(crate) fn select_lc(len: u32, hint: LcHint) -> (u32, Option<u32>) {
+        if let LcHint::Dheader = hint {
+            return (5u32 << 28, None);
+        }
+        match len {
+            1 => (0u32 << 28, None),
+            2 => (1u32 << 28, None),
+            4 => (2u32 << 28, None),
+            8 => (3u32 << 28, None),
+            _ => match hint {
+                LcHint::SeqMul4 if len >= 4 && (len - 4) % 4 == 0 => (6u32 << 28, None),
+                LcHint::SeqMul8 if len >= 4 && (len - 4) % 8 == 0 => (7u32 << 28, None),
+                _ => (4u32 << 28, Some(len)),
+            },
+        }
+    }
+
+    /// Pack the EMHEADER word. Callers reject an over-wide `member_id` before
+    /// writing anything; the mask here only keeps a stray one out of the flag bits.
+    pub(crate) fn emheader(member_id: u32, must_understand: bool, lc_word: u32) -> u32 {
+        let must_bit = if must_understand { 0x8000_0000u32 } else { 0 };
+        must_bit | lc_word | (member_id & MEMBER_ID_MAX)
+    }
+
     /// Write EMHEADER1 per DDS-XTypes 7.4.3.4.2.
+    ///
+    /// This writer prefixes a member whose length is already known, so it only
+    /// reaches the codes that carry their own NEXTINT: `Auto` never selects
+    /// LC=5/6/7, which borrow a word this writer does not own.
     pub fn write(
         &self,
         buffer: &mut Vec<u8>,
@@ -84,19 +121,12 @@ impl MemberHeader {
     ) -> Result<(), SerializationError> {
         use crate::to_bytes_u32;
 
-        if self.member_id > 0x0FFF_FFFF {
+        if self.member_id > MEMBER_ID_MAX {
             return Err(SerializationError::InvalidMemberId(self.member_id));
         }
 
-        let must_bit = if self.must_understand { 0x8000_0000u32 } else { 0 };
-        let (lc_word, nextint) = match self.member_length {
-            1 => (0u32 << 28, None),
-            2 => (1u32 << 28, None),
-            4 => (2u32 << 28, None),
-            8 => (3u32 << 28, None),
-            n => (4u32 << 28, Some(n)),
-        };
-        let header = must_bit | lc_word | (self.member_id & 0x0FFF_FFFF);
+        let (lc_word, nextint) = Self::select_lc(self.member_length, LcHint::Auto);
+        let header = Self::emheader(self.member_id, self.must_understand, lc_word);
         buffer.extend_from_slice(&to_bytes_u32(header, endianness));
         if let Some(len) = nextint {
             buffer.extend_from_slice(&to_bytes_u32(len, endianness));
@@ -124,7 +154,7 @@ impl MemberHeader {
 
         let must_understand = (header & 0x8000_0000) != 0;
         let lc = ((header >> 28) & 0x07) as u8;
-        let member_id = header & 0x0FFF_FFFF;
+        let member_id = header & MEMBER_ID_MAX;
 
         let read_nextint = |buf: &[u8]| -> Result<u32, SerializationError> {
             if position + 8 > buf.len() {

@@ -157,6 +157,26 @@ fn write_member_auto_picks_a_fixed_length_code() {
     assert_eq!(body(s), [0x01, 0x00, 0x00, 0x20, 0xDD, 0xCC, 0xBB, 0xAA]);
 }
 
+/// The test above reaches LC=2 only, yet every `u8`, `u16` and `u64` member of a
+/// mutable struct takes one of the other compact codes. Without these, the LC=0/1/3
+/// rows of the shared table are pinned solely through `MemberHeader::write`, which
+/// no production path calls.
+#[test]
+fn write_member_auto_reaches_every_compact_length_code() {
+    let mut s = ser(LE, ExtensibilityKind::Mutable);
+    s.write_member_with(1, false, |s| s.serialize_u8(0x11)).unwrap();
+    assert_eq!(body(s), [0x01, 0x00, 0x00, 0x00, 0x11]);
+
+    let mut s = ser(LE, ExtensibilityKind::Mutable);
+    s.write_member_with(1, false, |s| s.serialize_u16(0x2233)).unwrap();
+    assert_eq!(body(s), [0x01, 0x00, 0x00, 0x10, 0x33, 0x22]);
+
+    let mut s = ser(LE, ExtensibilityKind::Mutable);
+    s.write_member_with(1, false, |s| s.serialize_u64(0x8899_AABB_CCDD_EEFF)).unwrap();
+    let expected = [0x01, 0x00, 0x00, 0x30, 0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA, 0x99, 0x88];
+    assert_eq!(body(s), expected, "an 8-byte member is LC=3, and XCDR2 caps its alignment at 4");
+}
+
 #[test]
 fn write_member_auto_falls_back_to_lc4_with_an_inserted_nextint() {
     let mut s = ser(LE, ExtensibilityKind::Mutable);

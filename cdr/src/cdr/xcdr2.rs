@@ -1,6 +1,9 @@
 use speedy::Endianness;
 
-use super::{CdrError, CdrSerializerCommon, EncodingKind, ExtensibilityKind, LcHint, MemberHeader};
+use super::{
+    CdrError, CdrSerializerCommon, EncodingKind, ExtensibilityKind, LcHint, MemberHeader,
+    MEMBER_ID_MAX,
+};
 use crate::core::endianness_from_bool;
 use crate::{align_position_with_header_offset, to_bytes_u32, BufferManager, DeserializerReader};
 
@@ -160,7 +163,7 @@ impl Xcdr2Serializer {
     where
         F: FnOnce(&mut Self) -> Result<(), CdrError>,
     {
-        if member_id > 0x0FFF_FFFF {
+        if member_id > MEMBER_ID_MAX {
             return Err(CdrError::InvalidMemberId(member_id));
         }
         let emh_pos = self.reserve_dheader();
@@ -168,53 +171,19 @@ impl Xcdr2Serializer {
         write_value(self)?;
         let len = (self.position() - start) as u32;
 
-        let must_bit: u32 = if must_understand { 0x8000_0000 } else { 0 };
-
-        let (lc_word, nextint) = self.select_lc(len, lc_hint);
-        let lc = lc_word >> 28;
-
-        let emh = must_bit | lc_word | (member_id & 0x0FFF_FFFF);
-        match lc {
-            // LC=4: separate NEXTINT slot before payload
-            4 => {
-                let ni = nextint.expect("LC=4 always has NEXTINT");
+        let (lc_word, nextint) = MemberHeader::select_lc(len, lc_hint);
+        let emh = MemberHeader::emheader(member_id, must_understand, lc_word);
+        match nextint {
+            // LC=4 owns its NEXTINT, so open a slot for it ahead of the payload.
+            Some(ni) => {
                 self.insert_nextint_slot_at(emh_pos + 4);
                 self.write_dheader_at(emh_pos, emh);
                 self.write_dheader_at(emh_pos + 4, ni);
             }
-            // LC=5/6/7: NEXTINT overlaps with payload's first 4 bytes
-            5 | 6 | 7 => {
-                self.write_dheader_at(emh_pos, emh);
-            }
-            // LC=0..=3: no NEXTINT
-            _ => {
-                self.write_dheader_at(emh_pos, emh);
-            }
+            // LC=0..3 need no NEXTINT; LC=5/6/7 read the payload's own first word.
+            None => self.write_dheader_at(emh_pos, emh),
         }
         Ok(())
-    }
-
-    fn select_lc(&self, len: u32, hint: LcHint) -> (u32, Option<u32>) {
-        // The value already wrote its own DHEADER as its first 4 bytes; reuse it as
-        // the NEXTINT (LC=5, byte-length form) instead of inserting a separate one.
-        if let LcHint::Dheader = hint {
-            return (5u32 << 28, None);
-        }
-        match len {
-            1 => (0u32 << 28, None),
-            2 => (1u32 << 28, None),
-            4 => (2u32 << 28, None),
-            8 => (3u32 << 28, None),
-            _ => match hint {
-                LcHint::SeqMul4 if len >= 4 && (len - 4) % 4 == 0 => {
-                    (6u32 << 28, Some((len - 4) / 4))
-                }
-                LcHint::SeqMul8 if len >= 4 && (len - 4) % 8 == 0 => {
-                    (7u32 << 28, Some((len - 4) / 8))
-                }
-                _ => (4u32 << 28, Some(len)),
-            },
-        }
     }
 
     /// Helper method for writing u32 (used by begin_struct)
