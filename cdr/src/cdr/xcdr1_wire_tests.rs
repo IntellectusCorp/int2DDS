@@ -310,6 +310,21 @@ fn a_generic_sequence_carries_no_dheader_either() {
     assert_eq!(d.deserialize_sequence(|d| d.deserialize_u32()).unwrap(), vec![42u32]);
 }
 
+/// A declared count larger than the bytes left is rejected before the first element is
+/// read, so a hostile length cannot drive an allocation or a long element loop.
+#[test]
+fn a_generic_sequence_validates_its_count_before_reading_elements() {
+    let body = [0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00];
+    let mut d = de(&body, LE);
+    let mut elements_read = 0;
+    let result: Result<Vec<u32>, _> = d.deserialize_sequence(|d| {
+        elements_read += 1;
+        d.deserialize_u32()
+    });
+    assert!(result.is_err());
+    assert_eq!(elements_read, 0);
+}
+
 #[test]
 fn a_fixed_array_has_no_count_but_still_aligns() {
     let body = [

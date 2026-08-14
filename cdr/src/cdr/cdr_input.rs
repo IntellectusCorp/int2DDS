@@ -88,6 +88,7 @@ impl<'a> CdrInput<'a> {
     }
 
     // Read a single byte at offset.
+    #[cfg(test)]
     pub(crate) fn read_byte(&self, offset: usize) -> u8 {
         let mut b = [0u8; 1];
         self.copy_to(offset, &mut b);
