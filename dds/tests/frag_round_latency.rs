@@ -20,6 +20,10 @@
 //! heartbeat re-arms the reader before its retry comes due -- so narrowing them changes no
 //! timing, it only stops them standing in for the mechanism under test.
 //!
+//! The receive buffer is pinned rather than inherited, because the window is two thirds of what
+//! the host grants and the host is not the test's to choose: where a runner grants megabytes the
+//! whole sample lands in one window, no round ever happens, and both arms measure a plain burst.
+//!
 //! Run with `INT2DDS_DATA_FRAG_SIZE=1344 INT2DDS_MAX_MESSAGE_SIZE=13440`, the deployment shape.
 
 mod common;
@@ -52,9 +56,14 @@ use std::time::Instant;
 
 const FRAGMENT_SIZE: i32 = 1344;
 
-/// Several windows against the largest receive buffer this host will grant, so the number of
-/// rounds is large enough for a per-round delay to dominate the transfer.
+/// Several windows against the pinned receive buffer below, so the number of rounds is large
+/// enough for a per-round delay to dominate the transfer.
 const PAYLOAD_BYTES: usize = 512 * 1024;
+
+/// Asked of every socket this process opens, before the first one binds. Linux grants twice
+/// this and the other platforms grant it as asked; either way a window holds far less than the
+/// sample, which is the only property this test needs from it.
+const SOCKET_BUFFER_BYTES: &str = "131072";
 
 /// Generous: it only has to catch a transfer that never completes at all.
 const DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
@@ -189,6 +198,10 @@ fn time_one_multi_window_sample(
 
 #[test]
 fn a_multi_window_sample_is_paced_by_the_round_trip_not_by_the_fixed_delays() {
+    // Read by every listener as it binds, so it has to be set before the first participant.
+    // This binary holds one test, so no other test in the process sees the change.
+    std::env::set_var("INT2DDS_UDP_SOCKET_BUFFER", SOCKET_BUFFER_BYTES);
+
     let domain_id = next_domain_id();
     let factory = DomainParticipantFactory::get_instance();
     let participant = factory
@@ -220,7 +233,7 @@ fn a_multi_window_sample_is_paced_by_the_round_trip_not_by_the_fixed_delays() {
         at_defaults * 3 < with_delays,
         "a multi-window sample took {at_defaults:?} at the default delays and {with_delays:?} \
          with the pre-window 80ms/100ms restored. The two are too close for the delays to be \
-         what paces a round, which means either the default is not zero or the scheduling sites \
-         no longer read the QoS."
+         what paces a round: either the default is not zero, or the scheduling sites no longer \
+         read the QoS, or the sample no longer spans more than one window."
     );
 }

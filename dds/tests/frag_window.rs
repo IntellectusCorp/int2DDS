@@ -6,8 +6,9 @@
 //! reads as missing to it, and the heartbeat riding the window's last datagram is what lets it
 //! ask. Every round after the first is that exchange.
 //!
-//! The sample below is sized so it cannot fit in one window at any plausible socket size, which
-//! makes several rounds mandatory rather than incidental.
+//! The receive buffer is pinned rather than inherited, because the window is two thirds of what
+//! the host grants: a runner that grants megabytes takes the whole sample in one window, and the
+//! transfer then completes without a single round. Pinned, several rounds are mandatory.
 //!
 //! Two backstops are turned down on purpose, because either one alone carries a transfer of this
 //! size to completion whether or not a heartbeat ever arrives, and a test that cannot tell those
@@ -46,13 +47,20 @@ use std::time::Instant;
 
 const FRAGMENT_SIZE: i32 = 1344;
 
-/// Several windows even against the largest receive buffer this host will grant. The window is
-/// two thirds of that buffer, and one datagram of ten fragments is about 13.5 kB of wire.
+/// Several windows against the pinned receive buffer below, whatever `INT2DDS_MAX_MESSAGE_SIZE`
+/// packs into one datagram: the window is two thirds of that buffer, so it takes several either
+/// way -- at the 13440 of the deployment shape, and at the 65000 default.
 const PAYLOAD_BYTES: usize = 512 * 1024;
 
-/// A healthy multi-window transfer costs one round trip per window and lands near 1.5 s here.
-/// With the two backstops narrowed above, a writer that heartbeats only on the last datagram of
-/// the whole sample instead of the last of each window never finishes at all.
+/// Asked of every socket this process opens, before the first one binds. Linux grants twice
+/// this and the other platforms grant it as asked; either way a window holds far less than the
+/// sample, which is the only property this test needs from it.
+const SOCKET_BUFFER_BYTES: &str = "131072";
+
+/// A healthy multi-window transfer costs one round trip per window, and at the zero default
+/// delays those rounds are tens of milliseconds in total. With the two backstops narrowed above,
+/// a writer that heartbeats only on the sample's last datagram rather than each window's never
+/// finishes at all, which is the gap this deadline has to be generous enough to attribute.
 const DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[derive(DdsType)]
@@ -64,6 +72,10 @@ pub struct WindowPayload {
 
 #[test]
 fn a_sample_several_windows_long_completes() {
+    // Read by every listener as it binds, so it has to be set before the first participant.
+    // This binary holds one test, so no other test in the process sees the change.
+    std::env::set_var("INT2DDS_UDP_SOCKET_BUFFER", SOCKET_BUFFER_BYTES);
+
     let domain_id = next_domain_id();
     let factory = DomainParticipantFactory::get_instance();
     let participant = factory
