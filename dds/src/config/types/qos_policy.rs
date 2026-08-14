@@ -722,15 +722,16 @@ pub(crate) struct ReaderReliabilityExtensionQosPolicy {
     pub(crate) heartbeat_response_delay: Duration,
     pub(crate) heartbeat_suppression_duration: Duration,
     pub(crate) preemptive_acknack_delay: Duration,
+    pub(crate) nack_frag_response_delay: Duration,
+    pub(crate) nack_frag_retry_delay: Duration,
+    pub(crate) nack_frag_max_retries: u32,
 }
 
+// Delegates rather than repeating the literals, so an env override (INT2DDS_NACK_FRAG_*)
+// also applies to profiles that don't set these fields, same as the writer-side sibling.
 impl Default for ReaderReliabilityExtensionQosPolicy {
     fn default() -> Self {
-        Self {
-            heartbeat_response_delay: Duration { sec: 0, nanosec: 80_000_000 },
-            heartbeat_suppression_duration: Duration { sec: 0, nanosec: 0 },
-            preemptive_acknack_delay: Duration { sec: 0, nanosec: 80_000_000 },
-        }
+        qos_policy::ReaderReliabilityExtensionQosPolicy::default().into()
     }
 }
 
@@ -740,6 +741,9 @@ impl From<ReaderReliabilityExtensionQosPolicy> for qos_policy::ReaderReliability
             heartbeat_response_delay: external.heartbeat_response_delay,
             heartbeat_suppression_duration: external.heartbeat_suppression_duration,
             preemptive_acknack_delay: external.preemptive_acknack_delay,
+            nack_frag_response_delay: external.nack_frag_response_delay,
+            nack_frag_retry_delay: external.nack_frag_retry_delay,
+            nack_frag_max_retries: external.nack_frag_max_retries,
         }
     }
 }
@@ -750,6 +754,9 @@ impl From<qos_policy::ReaderReliabilityExtensionQosPolicy> for ReaderReliability
             heartbeat_response_delay: internal.heartbeat_response_delay,
             heartbeat_suppression_duration: internal.heartbeat_suppression_duration,
             preemptive_acknack_delay: internal.preemptive_acknack_delay,
+            nack_frag_response_delay: internal.nack_frag_response_delay,
+            nack_frag_retry_delay: internal.nack_frag_retry_delay,
+            nack_frag_max_retries: internal.nack_frag_max_retries,
         }
     }
 }

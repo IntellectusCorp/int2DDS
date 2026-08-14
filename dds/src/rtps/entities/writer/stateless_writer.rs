@@ -311,7 +311,9 @@ impl Writer for StatelessWriter {
             }
         };
 
-        if data.len() > self.data_max_size_serialized as usize {
+        let max_message_size = crate::common::env::get_max_message_size();
+
+        if data.len() > max_message_size {
             // Create fragmented cache change for large payload
             CacheChange::create_fragmented(
                 kind,
@@ -320,6 +322,7 @@ impl Writer for StatelessWriter {
                 last_change_sequence_number,
                 &data,
                 source_timestamp,
+                max_message_size,
                 self.data_max_size_serialized as usize,
             )
         } else {
@@ -355,7 +358,9 @@ impl Writer for StatelessWriter {
 
         let data = data_fn(self.guid, last_change_sequence_number);
 
-        if data.len() > self.data_max_size_serialized as usize {
+        let max_message_size = crate::common::env::get_max_message_size();
+
+        if data.len() > max_message_size {
             CacheChange::create_fragmented(
                 kind,
                 self.guid,
@@ -363,6 +368,7 @@ impl Writer for StatelessWriter {
                 last_change_sequence_number,
                 &data,
                 source_timestamp,
+                max_message_size,
                 self.data_max_size_serialized as usize,
             )
         } else {
