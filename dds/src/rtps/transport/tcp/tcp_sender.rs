@@ -1785,7 +1785,11 @@ mod tests {
     /// "the write was not abandoned".
     #[tokio::test(flavor = "multi_thread")]
     async fn cancel_does_not_interrupt_a_write_in_flight() {
-        const FRAME: usize = 64 * 1024;
+        // Bigger than any socket buffer an OS will autotune to, so the frame
+        // cannot fit whole in the peer that never reads it. A frame the peer
+        // swallowed entirely would complete its write and read here as one the
+        // cancel abandoned.
+        const FRAME: usize = 16 * 1024 * 1024;
 
         let cfg =
             TcpConfig { send_deadline: Some(Duration::from_millis(50)), ..TcpConfig::default() };
@@ -1794,10 +1798,6 @@ mod tests {
         // A peer that accepts and never reads: the write cannot finish.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let peer_addr = listener.local_addr().unwrap();
-        // Pin the peer's recv buffer small (accepted sockets inherit it) so an
-        // unread frame stays parked. An OS that autotunes the recv buffer up
-        // would keep swallowing bytes until the frame completes, which reads
-        // here as an abandoned write rather than one still in flight.
         let _ = socket2::SockRef::from(&listener).set_recv_buffer_size(4 * 1024);
         let accepted = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
@@ -1821,7 +1821,7 @@ mod tests {
         let ws = Arc::clone(&write_state);
         tokio::task::spawn_blocking(move || {
             let payload = vec![0xEE; FRAME];
-            for _ in 0..64 {
+            for _ in 0..4 {
                 let _ = s.write_frame(peer_addr, 7400, &handle, &payload);
             }
             // The lock is held by the stalled write; anything else times out.
