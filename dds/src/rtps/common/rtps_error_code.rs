@@ -58,7 +58,6 @@ pub enum RtpsErrorCode {
     LockError = 300,
     ThreadJoinError = 301,
     ArcUpgradeError = 302,
-    ThreadSpawnError = 303,
 
     // Existence/Matching/Discovery
     RtpsEntityNotFound = 400,
@@ -113,7 +112,6 @@ impl RtpsErrorCode {
             300 => Some(RtpsErrorCode::LockError),
             301 => Some(RtpsErrorCode::ThreadJoinError),
             302 => Some(RtpsErrorCode::ArcUpgradeError),
-            303 => Some(RtpsErrorCode::ThreadSpawnError),
 
             // Existence/Matching/Discovery
             400 => Some(RtpsErrorCode::RtpsEntityNotFound),
@@ -157,7 +155,6 @@ impl RtpsErrorCode {
             RtpsErrorCode::InvalidEntityKind => "Invalid entity kind",
             RtpsErrorCode::LockError => "Failed to acquire lock",
             RtpsErrorCode::ThreadJoinError => "Failed to join thread",
-            RtpsErrorCode::ThreadSpawnError => "Failed to spawn thread",
             RtpsErrorCode::RtpsEntityNotFound => "RTPS entity not found",
             RtpsErrorCode::DowncastError => "Failed to downcast RTPS entity",
             RtpsErrorCode::DataNotSet => "Data Not Set",
