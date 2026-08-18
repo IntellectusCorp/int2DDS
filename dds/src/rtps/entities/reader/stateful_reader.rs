@@ -355,6 +355,18 @@ impl Reader for StatefulReader {
         RtpsDuration::from(self.reader_reliability_extension.heartbeat_suppression_duration)
     }
 
+    fn nack_frag_response_delay(&self) -> RtpsDuration {
+        RtpsDuration::from(self.reader_reliability_extension.nack_frag_response_delay)
+    }
+
+    fn nack_frag_retry_delay(&self) -> RtpsDuration {
+        RtpsDuration::from(self.reader_reliability_extension.nack_frag_retry_delay)
+    }
+
+    fn nack_frag_max_retries(&self) -> u32 {
+        self.reader_reliability_extension.nack_frag_max_retries
+    }
+
     fn matched_writer_is_matched(&self, writer_guid: Guid) -> bool {
         match self.matched_writers.lock() {
             Ok(matched_writers) => {
@@ -480,5 +492,61 @@ impl Reader for StatefulReader {
 
         debug!("Removed writer proxy with guid {} from matched writers", writer_guid);
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        core::time::Duration as DcpsDuration,
+        rtps::common::entity_kind::EntityKind,
+        subscription::qos::{DataReaderQos, SubscriberQos},
+        topic::qos::TopicQos,
+    };
+    use const_default::ConstDefault;
+
+    #[test]
+    fn nack_frag_accessors_read_through_reliability_extension_qos() {
+        let guid =
+            Guid::new([9; 12], EntityId::new([0, 0, 1], EntityKind::USER_DEFINED_READER_WITH_KEY));
+        let datareader_qos = DataReaderQos {
+            reader_reliability_extension: ReaderReliabilityExtensionQosPolicy {
+                nack_frag_response_delay: DcpsDuration::from_millis(123),
+                nack_frag_retry_delay: DcpsDuration::from_millis(456),
+                nack_frag_max_retries: 7,
+                ..ReaderReliabilityExtensionQosPolicy::DEFAULT
+            },
+            ..DataReaderQos::default()
+        };
+        let subscription_data = SubscriptionBuiltinTopicData::new(
+            &datareader_qos,
+            &SubscriberQos::default(),
+            &TopicQos::default(),
+        );
+
+        let reader = StatefulReader::new(
+            guid,
+            TopicKind::WithKey,
+            ReliabilityQosPolicyKind::Reliable,
+            Vec::new(),
+            Vec::new(),
+            guid.entity_id(),
+            false,
+            None,
+            None,
+            subscription_data,
+            guid,
+        );
+
+        assert_eq!(
+            reader.nack_frag_response_delay(),
+            RtpsDuration::from(DcpsDuration::from_millis(123))
+        );
+        assert_eq!(
+            reader.nack_frag_retry_delay(),
+            RtpsDuration::from(DcpsDuration::from_millis(456))
+        );
+        assert_eq!(reader.nack_frag_max_retries(), 7);
     }
 }

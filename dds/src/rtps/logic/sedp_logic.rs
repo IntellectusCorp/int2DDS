@@ -6,7 +6,7 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, Weak},
+    sync::{atomic::AtomicUsize, Arc, Mutex, Weak},
     thread::{self, JoinHandle},
     time::{Duration as StdDuration, Instant},
 };
@@ -81,6 +81,7 @@ use crate::{
             discovery_traffic::{
                 discovery_multicast_listening_task::DiscoveryMulticastListeningTask,
                 discovery_unicast_listening_task::DiscoveryUnicastListeningTask,
+                discovery_worker::{DiscoveryWorker, DISCOVERY_RECV_QUEUE_COUNT_BACKSTOP},
             },
             sending_handler::{MessageType, SendingHandler},
         },
@@ -93,6 +94,17 @@ use crate::{
         TypeObject,
     },
 };
+
+// Take and join the shared discovery worker. The first listening thread to
+// finish joins it; a later caller finds it already taken.
+fn join_discovery_worker(worker_handle: &Arc<Mutex<Option<JoinHandle<()>>>>) {
+    let handle = worker_handle.lock().ok().and_then(|mut guard| guard.take());
+    if let Some(handle) = handle {
+        if let Err(e) = handle.join() {
+            debug!("failed to join discovery worker thread: {:?}", e);
+        }
+    }
+}
 
 enum MatchType {
     ReaderPublication,
@@ -112,6 +124,8 @@ enum MatchDecision {
 }
 
 const TYPE_LOOKUP_MATCH_TIMEOUT: StdDuration = StdDuration::from_secs(5);
+
+pub(crate) const BUILTIN_SEDP_HB_PERIOD: StdDuration = StdDuration::from_millis(2000);
 
 #[derive(Clone)]
 #[allow(dead_code)]
@@ -394,16 +408,62 @@ impl SedpLogic {
     ) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
 
-        let participant_guid = participant.guid().clone();
+        // No discovery sources means no worker to set up.
+        if discovery_multicast_source.is_none() && discovery_unicast_source.is_none() {
+            return Ok(());
+        }
+
+        let guid_prefix = participant.guid().prefix();
+        let domain_id = participant.domain_id();
+
+        let (tx, rx) = flume::bounded(DISCOVERY_RECV_QUEUE_COUNT_BACKSTOP);
+        let queued_bytes = Arc::new(AtomicUsize::new(0));
+
+        // A single worker drains both discovery sockets off their socket threads.
+        let (spdp_logic, sedp_logic, _) = participant.get_logics();
+        let worker = DiscoveryWorker::new(
+            guid_prefix,
+            domain_id,
+            Arc::downgrade(&participant),
+            spdp_logic,
+            sedp_logic,
+            rx,
+            Arc::clone(&queued_bytes),
+        );
+        let worker_handle = thread::Builder::new()
+            .name("discovery_traffic_worker".to_string())
+            .spawn(move || {
+                {
+                    use crate::rtps::task::thread_monitor::ThreadMonitor;
+                    ThreadMonitor::register_current_thread_name_with_guid_prefix(
+                        "discovery_traffic_worker",
+                        guid_prefix,
+                    );
+                }
+
+                worker.run();
+                {
+                    use crate::rtps::task::thread_monitor::ThreadMonitor;
+                    ThreadMonitor::remove_map_guard();
+                }
+                debug!("discovery worker thread finished");
+            })
+            .map_err(|_| RtpsError::new(RtpsErrorCode::ThreadSpawnError, None))?;
+
+        // Whichever listening thread finishes first joins the shared worker.
+        let worker_handle = Arc::new(Mutex::new(Some(worker_handle)));
 
         // multicast listening (only if transport provides a multicast source)
         if let Some(multicast_source) = discovery_multicast_source {
-            let mut discovery_multicast_listening_task =
-                DiscoveryMulticastListeningTask::new(participant.clone());
+            let mut discovery_multicast_listening_task = DiscoveryMulticastListeningTask::new(
+                participant.clone(),
+                tx.clone(),
+                Arc::clone(&queued_bytes),
+            );
             discovery_multicast_listening_task
                 .set_shutdown_waker(self.multicast_listening_waker.clone());
 
-            let mc_guid = participant_guid;
+            let worker_handle = Arc::clone(&worker_handle);
             let multicast_handle = thread::Builder::new()
                 .name("discovery_traffic_multicast_listening".to_string())
                 .spawn(move || {
@@ -411,19 +471,21 @@ impl SedpLogic {
                         use crate::rtps::task::thread_monitor::ThreadMonitor;
                         ThreadMonitor::register_current_thread_name_with_guid_prefix(
                             "discovery_traffic_multicast_listening",
-                            mc_guid.prefix(),
+                            guid_prefix,
                         );
                     }
 
                     let _ =
                         discovery_multicast_listening_task.multicast_listening(multicast_source);
+
+                    join_discovery_worker(&worker_handle);
                     {
                         use crate::rtps::task::thread_monitor::ThreadMonitor;
                         ThreadMonitor::remove_map_guard();
                     }
                     debug!("discovery multicast listening thread finished");
                 })
-                .expect("Failed to create discovery multicast listening thread");
+                .map_err(|_| RtpsError::new(RtpsErrorCode::ThreadSpawnError, None))?;
 
             if let Ok(mut handle_guard) = self.multicast_listening_handle.lock() {
                 *handle_guard = Some(multicast_handle);
@@ -432,12 +494,15 @@ impl SedpLogic {
 
         // unicast listening (only if transport provides a unicast source)
         if let Some(unicast_source) = discovery_unicast_source {
-            let mut discovery_unicast_listening_task =
-                DiscoveryUnicastListeningTask::new(participant.clone());
+            let mut discovery_unicast_listening_task = DiscoveryUnicastListeningTask::new(
+                participant.clone(),
+                tx.clone(),
+                Arc::clone(&queued_bytes),
+            );
             discovery_unicast_listening_task
                 .set_shutdown_waker(self.unicast_listening_waker.clone());
 
-            let unicast_guid = participant_guid;
+            let worker_handle = Arc::clone(&worker_handle);
             let unicast_handle = thread::Builder::new()
                 .name("discovery_traffic_unicast_listening".to_string())
                 .spawn(move || {
@@ -445,18 +510,20 @@ impl SedpLogic {
                         use crate::rtps::task::thread_monitor::ThreadMonitor;
                         ThreadMonitor::register_current_thread_name_with_guid_prefix(
                             "discovery_traffic_unicast_listening",
-                            unicast_guid.prefix(),
+                            guid_prefix,
                         );
                     }
 
                     let _ = discovery_unicast_listening_task.unicast_listening(unicast_source);
+
+                    join_discovery_worker(&worker_handle);
                     {
                         use crate::rtps::task::thread_monitor::ThreadMonitor;
                         ThreadMonitor::remove_map_guard();
                     }
                     debug!("discovery unicast listening thread finished");
                 })
-                .expect("Failed to create discovery unicast listening thread");
+                .map_err(|_| RtpsError::new(RtpsErrorCode::ThreadSpawnError, None))?;
 
             if let Ok(mut handle_guard) = self.unicast_listening_handle.lock() {
                 *handle_guard = Some(unicast_handle);
@@ -1651,6 +1718,7 @@ impl SedpLogic {
 
         let mut is_sent = false;
         let mut matched_any = false;
+        let mut is_all_reliable_acked = true;
 
         let participant_guid = {
             let local_participant_data = participant.local_participant_proxy_data();
@@ -1667,6 +1735,11 @@ impl SedpLogic {
                         continue;
                     }
                     matched_any = true;
+
+                    if reader_proxy.is_reliable() && reader_proxy.max_acked_sn() < last_sn {
+                        is_all_reliable_acked = false;
+                    }
+
                     let buffer = MessageCreator::create_heartbeat_message(
                         participant_guid.prefix(),
                         reader_proxy.remote_reader_guid().prefix(),
@@ -1713,8 +1786,13 @@ impl SedpLogic {
             }
         }
 
-        // No matched readers remain: remove the scheduled SEDP timer.
-        if !matched_any {
+        // Stop the periodic heartbeat once no reader remains or every reliable reader
+        // behind this remote has acked. A new local change re-arms it.
+        if !matched_any || is_all_reliable_acked {
+            debug!(
+                "Stopping SEDP heartbeat to {:?} for writer {}: matched_any={}, all_reliable_acked={}",
+                *guid_prefix, entity_id, matched_any, is_all_reliable_acked
+            );
             if let Ok(handler) = self.timer_handler.lock() {
                 handler.remove_timer(TimerId::SedpScheduledMessage {
                     remote_prefix: *guid_prefix,
@@ -1848,12 +1926,27 @@ impl SedpLogic {
 
             let remote_reader_guid = Guid::new(remote_prefix, reader_entity_id);
             let writer_entity_id = writer.guid().entity_id();
-            for change in changes {
-                if let Err(e) = self.send_sedp_data_message(
-                    change,
+
+            let datagrams = match MessageCreator::create_multiple_data_msgs(
+                writer.guid(),
+                remote_reader_guid,
+                reader_entity_id,
+                writer_entity_id,
+                &changes,
+                true,
+            ) {
+                Ok(datagrams) => datagrams,
+                Err(e) => {
+                    warn!("[SEDP] failed to build announcements to {}: {}", remote_reader_guid, e);
+                    continue;
+                }
+            };
+
+            for datagram in &datagrams {
+                if let Err(e) = self.send_to_participant_metatraffic_locators(
+                    &datagram[..],
                     remote_reader_guid,
-                    reader_entity_id,
-                    writer_entity_id,
+                    "data",
                 ) {
                     warn!("[SEDP] failed to push an announcement to {}: {}", remote_reader_guid, e);
                 }
@@ -2780,12 +2873,26 @@ impl UnicastMessageProcessor for SedpLogic {
                 remote_reader_guid
             );
 
-            for change in missing_changes {
-                self.send_sedp_data_message(
-                    change,
+            let datagrams = MessageCreator::create_multiple_data_msgs(
+                local_writer.guid(),
+                remote_reader_guid,
+                acknack.reader_id,
+                acknack.writer_id,
+                &missing_changes,
+                true,
+            )
+            .map_err(|e| {
+                RtpsError::new(
+                    RtpsErrorCode::SerializationError,
+                    format!("Failed to create SEDP DATA messages: {}", e),
+                )
+            })?;
+
+            for datagram in &datagrams {
+                self.send_to_participant_metatraffic_locators(
+                    &datagram[..],
                     remote_reader_guid,
-                    acknack.reader_id,
-                    acknack.writer_id,
+                    "data",
                 )?;
             }
         }
@@ -2862,21 +2969,24 @@ mod tests {
     use super::*;
     use crate::rtps::common::types::SubmessagePayload;
     use crate::rtps::entities::reader::WriterProxy;
+    use crate::rtps::messages::message_receiver::TypedSubmessage;
     use crate::rtps::messages::submessage_header_flag::{SubmessageFlagType, SubmessageHeaderFlag};
     use crate::rtps::messages::submessage_id::SubmessageId;
     use crate::rtps::messages::submessages::data::Data;
     use crate::rtps::transport::plugin::MessageSource;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-    /// Counts what was handed to the wire; nothing leaves the process.
+    /// Counts what was handed to the wire and keeps each datagram; nothing leaves the process.
     #[derive(Default)]
     struct CountingTransport {
         sends: Arc<Mutex<usize>>,
+        buffers: Arc<Mutex<Vec<Vec<u8>>>>,
     }
 
     impl TransportPlugin for CountingTransport {
-        fn send(&self, _data: &[u8], _target: &SendTarget) -> std::io::Result<()> {
+        fn send(&self, data: &[u8], _target: &SendTarget) -> std::io::Result<()> {
             *self.sends.lock().expect("send counter") += 1;
+            self.buffers.lock().expect("send buffers").push(data.to_vec());
             Ok(())
         }
         fn can_handle(&self, _locator: &Locator) -> bool {
@@ -3007,7 +3117,7 @@ mod tests {
     fn discovering_a_participant_pushes_the_sedp_announcements_already_made() {
         let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
         let transport = Arc::new(CountingTransport::default());
-        let sends = transport.sends.clone();
+        let buffers = transport.buffers.clone();
         let sedp_logic = SedpLogic::new(participant.clone(), transport);
 
         let sedp_writer = participant.sedp_builtin_publications_writer();
@@ -3040,9 +3150,26 @@ mod tests {
 
         sedp_logic.push_sedp_history_to_participant(remote_prefix).expect("the push must not fail");
 
+        // Batched into as few datagrams as fit, so count the DATA submessages that reached
+        // the wire rather than the number of sends.
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7400);
+        let data_submessage_count: usize = buffers
+            .lock()
+            .expect("send buffers")
+            .iter()
+            .map(|buffer| {
+                let mut receiver = MessageReceiver::new(remote_prefix, &addr);
+                receiver.init(&bytes::Bytes::copy_from_slice(buffer)).expect("parse datagram");
+                receiver
+                    .parse_submessages()
+                    .iter()
+                    .filter(|submessage| matches!(submessage, TypedSubmessage::Data(..)))
+                    .count()
+            })
+            .sum();
+
         assert_eq!(
-            *sends.lock().expect("send counter"),
-            3,
+            data_submessage_count, 3,
             "each announcement already in the history has to be sent to the new peer"
         );
     }
