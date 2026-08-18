@@ -698,7 +698,8 @@ ffi.cdef("""
     );
     Int2DdsRet int2dds_datareader_qos_set_reliability(
         Int2DdsDataReaderQos *qos,
-        int32_t kind
+        int32_t kind,
+        int64_t max_blocking_time_ns
     );
     Int2DdsRet int2dds_datareader_qos_set_durability(
         Int2DdsDataReaderQos *qos,
