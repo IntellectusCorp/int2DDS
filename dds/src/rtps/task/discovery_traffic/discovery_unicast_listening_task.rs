@@ -1,46 +1,35 @@
 use bytes::Bytes;
 
-use crate::common::instance_handle::InstanceHandle;
-use crate::rtps::common::guid::{Guid, GuidPrefix};
-use crate::rtps::common::rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult};
-use crate::rtps::common::types::DomainId;
-use crate::rtps::entities::entity::Entity;
 use crate::rtps::entities::participant::Participant;
-use crate::rtps::logic::message_processor::participant_message_processor::ParticipantMessageProcessor as _;
-use crate::rtps::logic::message_processor::unicast_message_processor::UnicastMessageProcessor as _;
-use crate::rtps::logic::sedp_logic::SedpLogic;
-use crate::rtps::logic::spdp_logic::SpdpLogic;
-use crate::rtps::messages::message_receiver::MessageReceiver;
+use crate::rtps::task::discovery_traffic::discovery_worker::{enqueue_discovery, DiscoverySource};
 use crate::rtps::transport::plugin::MessageSource;
 use crate::rtps::transport::socket::MAX_EVENTS;
 use crate::rtps::transport::tokens::ListenerToken;
-use crate::serialize::pl_cdr::InlineQosParameters;
-use log::{debug, error, info, warn};
+use flume::Sender;
+use log::{debug, info, warn};
 use mio::{Events, Interest, Poll, Waker};
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
 pub(crate) struct DiscoveryUnicastListeningTask {
-    guid_prefix: GuidPrefix,
-    domain_id: DomainId,
     participant: Weak<Participant>,
-    spdp_logic: Arc<Option<SpdpLogic>>,
-    sedp_logic: Arc<Option<SedpLogic>>,
+    tx: Sender<(Bytes, SocketAddr, DiscoverySource)>,
+    queued_bytes: Arc<AtomicUsize>,
     shutdown_waker: Arc<OnceLock<Arc<Waker>>>,
 }
 
 impl DiscoveryUnicastListeningTask {
-    pub(crate) fn new(participant: Arc<Participant>) -> Self {
-        let (spdp_logic, sedp_logic, _) = participant.get_logics();
-        let guid_prefix = participant.guid().prefix();
-        let domain_id = participant.domain_id();
+    pub(crate) fn new(
+        participant: Arc<Participant>,
+        tx: Sender<(Bytes, SocketAddr, DiscoverySource)>,
+        queued_bytes: Arc<AtomicUsize>,
+    ) -> Self {
         Self {
-            guid_prefix,
-            domain_id,
             participant: Arc::downgrade(&participant),
-            spdp_logic,
-            sedp_logic,
+            tx,
+            queued_bytes,
             shutdown_waker: Arc::new(OnceLock::new()),
         }
     }
@@ -107,7 +96,13 @@ impl DiscoveryUnicastListeningTask {
                             let _ = poll.registry().deregister(listener.socket());
                             return Ok(());
                         }
-                        let _ = self.process_rtps_message(buffer, from_addr);
+                        enqueue_discovery(
+                            &self.tx,
+                            &self.queued_bytes,
+                            buffer,
+                            from_addr,
+                            DiscoverySource::Unicast,
+                        );
                     }
                 }
             }
@@ -132,7 +127,13 @@ impl DiscoveryUnicastListeningTask {
                         debug!("Detected global termination flag, discovery unicast channel listening terminating...");
                         return Ok(());
                     }
-                    let _ = self.process_rtps_message(Bytes::from(msg.data), msg.source);
+                    enqueue_discovery(
+                        &self.tx,
+                        &self.queued_bytes,
+                        Bytes::from(msg.data),
+                        msg.source,
+                        DiscoverySource::Unicast,
+                    );
                 }
                 Err(flume::RecvTimeoutError::Timeout) => {
                     if participant.is_terminated() {
@@ -146,90 +147,6 @@ impl DiscoveryUnicastListeningTask {
                 }
             }
         }
-    }
-
-    fn process_rtps_message(&mut self, bytes: Bytes, from_addr: SocketAddr) -> RtpsResult<()> {
-        let mut message_receiver = MessageReceiver::new(self.guid_prefix, &from_addr);
-        let rtps_message = message_receiver.init(&bytes)?;
-
-        // Ignore messages sent by myself
-        if rtps_message.header.guid_prefix() == self.guid_prefix {
-            debug!(
-                "[DiscoveryUnicast] Filtering out self-sent message - guid_prefix: {}",
-                Guid::guid_prefix_to_string(&self.guid_prefix)
-            );
-            return Ok(());
-        }
-
-        // Check if this is an SPDP message (TCP mode sends SPDP via unicast)
-        if self.is_spdp_message(&message_receiver) {
-            let participant_proxy_data =
-                message_receiver.extract_participant_proxy_data(self.domain_id);
-            if let Some((participant_proxy_data, inline_qos_params)) = participant_proxy_data {
-                let spdp_logic = self.spdp_logic.as_ref().as_ref().ok_or_else(|| {
-                    RtpsError::new(RtpsErrorCode::DataNotSet, "SpdpLogic is not initialized")
-                })?;
-
-                let is_termination = inline_qos_params
-                    .as_ref()
-                    .and_then(|qos| qos.get_status_info())
-                    .is_some_and(|status| status.disposed() || status.unregistered());
-
-                if is_termination {
-                    let terminated_participant_guid = inline_qos_params
-                        .as_ref()
-                        .and_then(|qos| qos.get_key_hash())
-                        .unwrap_or_else(|| {
-                            InstanceHandle::from_guid(&participant_proxy_data.participant_guid())
-                        });
-
-                    if let Err(e) = spdp_logic.handle_participant_termination_message(
-                        &terminated_participant_guid.to_guid(),
-                    ) {
-                        error!("Failed to handle participant termination message: {:?}", e);
-                    }
-                } else if let Err(e) =
-                    spdp_logic.handle_discovered_participant_data(participant_proxy_data)
-                {
-                    error!("[DiscoveryUnicast] Failed to handle SPDP data: {:?}", e);
-                }
-            }
-            return Ok(());
-        }
-
-        // SEDP processing
-        let participant = self.participant.upgrade().ok_or_else(|| {
-            RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped")
-        })?;
-        let mut sedp_logic = self
-            .sedp_logic
-            .as_ref()
-            .as_ref()
-            .ok_or_else(|| {
-                RtpsError::new(RtpsErrorCode::DataNotSet, "SedpLogic is not initialized")
-            })?
-            .clone();
-
-        sedp_logic.handle_rtps_message(message_receiver.clone())?;
-        if let Some(mut wlp_logic) = participant.wlp_logic() {
-            wlp_logic.handle_rtps_message(message_receiver)?;
-        }
-        Ok(())
-    }
-
-    /// Check if the RTPS message contains SPDP data (writer_id == SPDP_BUILTIN_PARTICIPANT_WRITER)
-    fn is_spdp_message(&self, message_receiver: &MessageReceiver) -> bool {
-        use crate::rtps::common::entity_id::EntityId;
-        use crate::rtps::messages::message_receiver::TypedSubmessage;
-
-        for submessage in message_receiver.parse_submessages() {
-            if let TypedSubmessage::Data(_, data) = submessage {
-                if data.writer_id == EntityId::SPDP_BUILTIN_PARTICIPANT_WRITER {
-                    return true;
-                }
-            }
-        }
-        false
     }
 }
 
