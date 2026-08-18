@@ -28,9 +28,9 @@ use int2dds::{
     },
 };
 
-/// Pure-TCP participant QoS on a pinned port. `initial_peers` is mandatory for
-/// TCP but irrelevant here: everything this test exchanges stays inside the one
-/// participant, so it points at a port nobody answers.
+/// Pure-TCP participant QoS on a pinned port. Everything this test exchanges
+/// stays inside the one participant, so `initial_peers` points at a port nobody
+/// answers — set only to keep the dial policy explicit.
 fn tcp_qos(bind_port: u16) -> DomainParticipantQos {
     let mut property = PropertyQosPolicy::default();
     property.add_property("int2dds.transport", "tcp", false);
