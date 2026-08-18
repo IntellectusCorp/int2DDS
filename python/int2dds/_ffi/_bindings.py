@@ -340,6 +340,10 @@ typedef struct Int2DdsInconsistentTopicStatus {
   int32_t total_count_change;
 } Int2DdsInconsistentTopicStatus;
 
+uint32_t int2dds_abi_version(void);
+
+uint64_t int2dds_abi_capabilities(void);
+
 Int2DdsRet int2dds_guardcondition_new(struct Int2DdsGuardCondition **condition_out);
 
 Int2DdsRet int2dds_guardcondition_set_trigger_value(const struct Int2DdsGuardCondition *condition,

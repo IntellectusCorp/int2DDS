@@ -1,14 +1,14 @@
 //! The C header against the two hand-maintained bindings.
 //!
-//! `include/int2dds-ffi.h` is the ABI. Measured once with
-//! `llvm-readobj --coff-exports` on the built cdylib: the committed header's function
-//! set and the export table are equal, 453 either way, nothing exported but undeclared
-//! and nothing declared but unexported. That includes the block `build.rs` appends by
-//! hand for the macro-generated entry points cbindgen cannot see. `build.rs`
-//! regenerates the header when this crate's sources change, which is what keeps the
-//! two equal — note that a change to `csharp/` or `python/` alone does not trigger it,
-//! so what this test reads on such a branch is the committed file. Keeping that file
-//! honest is `build.rs`'s job, not this test's.
+//! `include/int2dds-ffi.h` is the ABI. Measured with `llvm-readobj --coff-exports` on
+//! the built cdylib: the committed header's function set and the export table are
+//! equal in both directions, nothing exported but undeclared and nothing declared but
+//! unexported (453 either way when measured, at `36e317ce`). That includes the block
+//! `build.rs` appends by hand for the macro-generated entry points cbindgen cannot see.
+//! `build.rs` regenerates the header when this crate's sources change, which is what
+//! keeps the two equal — note that a change to `csharp/` or `python/` alone does not
+//! trigger it, so what this test reads on such a branch is the committed file. Keeping
+//! that file honest is `build.rs`'s job, not this test's.
 //!
 //! What the bindings do not have is any such check of their own. C# `[DllImport]` is
 //! written by hand against the header, and nothing noticed when an export landed in

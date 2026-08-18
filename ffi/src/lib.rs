@@ -49,6 +49,7 @@
 #[macro_use]
 pub mod error;
 
+pub mod abi;
 pub mod condition;
 pub mod config;
 pub mod context;

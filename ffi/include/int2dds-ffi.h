@@ -821,6 +821,43 @@ extern "C" {
 #endif // __cplusplus
 
 /**
+ * This library's ABI version, packed as `0x00MMmmpp`: major in bits 16-23, minor in
+ * 8-15, patch in 0-7, bits 24-31 zero.
+ *
+ * The value is the crate version, which the workspace declares once and everything
+ * else derives from — the C# binding reads it from `Cargo.toml`, and `ffi/build.rs`
+ * builds the ELF soname and the Windows VERSIONINFO out of it. So this is not a
+ * second version to maintain; it is the same one, readable at runtime.
+ *
+ * Which part is the compatibility boundary depends on where the version is. Post-1.0
+ * it is `major` alone, which is why the soname carries the major only. While the
+ * version stays `0.x` a **minor** bump can break the ABI as well, so until then a
+ * binding must compare `major.minor` — comparing only the major would accept a
+ * library it cannot call. `ffi/build.rs` records the same caveat for the soname;
+ * the two are the same rule and should stay reconciled.
+ */
+uint32_t int2dds_abi_version(void);
+
+/**
+ * The optional capabilities of this build, as a bit set. **Every bit is reserved and
+ * reads 0.**
+ *
+ * That is the contract, not a stub waiting to be filled in. A bit belongs here only
+ * once some build can clear it, and nothing in this workspace is conditionally
+ * compiled: the `ffi` crate declares no features, and the one `dds` declares
+ * (`factory-hook`) is not forwarded through here. Bits for surfaces that are always
+ * present would be a word of constant ones — it would tell a caller nothing, and the
+ * list of names behind it would drift out of step with the code with nothing to
+ * notice.
+ *
+ * The export earns its place through the direction it fails in. An unknown bit reads
+ * 0, so a binding built against a newer library than the one it loaded can gate on a
+ * bit this build has never heard of and take the unsupported branch, instead of
+ * calling an entry point that is not there and faulting at the call site.
+ */
+uint64_t int2dds_abi_capabilities(void);
+
+/**
  * Create a new GuardCondition
  *
  * # Safety
