@@ -37,7 +37,17 @@ namespace Int2Dds.Interop
         internal static extern int int2dds_participant_take_discovered_publications_snapshot(IntPtr participant, int timeout_ms, out IntPtr seq_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_participant_take_discovered_publications_snapshot_filtered(IntPtr participant, int timeout_ms, uint instance_state_mask, out IntPtr seq_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_publication_builtin_topic_data_seq_length(IntPtr seq, out UIntPtr count_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_publication_builtin_topic_data_seq_get_instance_state(IntPtr seq, UIntPtr index, out uint instance_state_out);
+
+        // Handle of the entry at `index`, present even where the entry carries no announcement.
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_publication_builtin_topic_data_seq_get_instance_handle(IntPtr seq, UIntPtr index, byte* handle_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_publication_builtin_topic_data_seq_get(IntPtr seq, UIntPtr index, out IntPtr data_out);
@@ -49,7 +59,16 @@ namespace Int2Dds.Interop
         internal static extern int int2dds_participant_take_discovered_subscriptions_snapshot(IntPtr participant, int timeout_ms, out IntPtr seq_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_participant_take_discovered_subscriptions_snapshot_filtered(IntPtr participant, int timeout_ms, uint instance_state_mask, out IntPtr seq_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_subscription_builtin_topic_data_seq_length(IntPtr seq, out UIntPtr count_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_subscription_builtin_topic_data_seq_get_instance_state(IntPtr seq, UIntPtr index, out uint instance_state_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_subscription_builtin_topic_data_seq_get_instance_handle(IntPtr seq, UIntPtr index, byte* handle_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_subscription_builtin_topic_data_seq_get(IntPtr seq, UIntPtr index, out IntPtr data_out);

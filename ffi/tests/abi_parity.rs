@@ -12,7 +12,8 @@
 //!
 //! What the bindings do not have is any such check of their own. C# `[DllImport]` is
 //! written by hand against the header, and nothing noticed when an export landed in
-//! one binding and not the other: 12 exports have no C# declaration. Two directions
+//! one binding and not the other: 12 exports had no C# declaration when this test was
+//! written, of which 8 were oversights and are now bound. Two directions
 //! to pin, and they fail differently. A declaration naming an export that does not
 //! exist is a runtime fault in the binding's own language
 //! (`EntryPointNotFoundException`, cffi `AttributeError`) at whatever moment the call
@@ -39,23 +40,15 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-/// Exports with no C# `[DllImport]`. The content-filtered-topic entries are
-/// deliberate — C# has no ContentFilteredTopic class, so the three constructors and
-/// the field-descriptor topic they need have nothing to bind to. The rest are
-/// exports that were added after the C# surface was last swept.
+/// Exports with no C# `[DllImport]`, and every one of them is deliberate: C# has no
+/// ContentFilteredTopic class, so the filter's create/delete pair, the reader
+/// constructor that takes one, and the field-descriptor topic they need have nothing
+/// to bind to.
 const UNBOUND_CSHARP: &[&str] = &[
     "int2dds_create_contentfilteredtopic",
     "int2dds_create_datareader_cft",
     "int2dds_create_topic_with_field_descriptors",
     "int2dds_delete_contentfilteredtopic",
-    "int2dds_participant_take_discovered_publications_snapshot_filtered",
-    "int2dds_participant_take_discovered_subscriptions_snapshot_filtered",
-    "int2dds_publication_builtin_topic_data_seq_get_instance_handle",
-    "int2dds_publication_builtin_topic_data_seq_get_instance_state",
-    "int2dds_subscription_builtin_topic_data_seq_get_instance_handle",
-    "int2dds_subscription_builtin_topic_data_seq_get_instance_state",
-    "int2dds_type_info_add_bitmask_flag",
-    "int2dds_type_info_create_bitmask",
 ];
 
 /// Exports with no Python `cdef`, and there are none: the `cdef` is the header,

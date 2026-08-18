@@ -42,6 +42,12 @@ namespace Int2Dds.Interop
         internal static unsafe extern int int2dds_type_info_add_enum_literal(IntPtr type_info, byte* literal_name, int value, int is_default);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_type_info_create_bitmask(byte* type_name, ushort bit_bound, out IntPtr out_type_info);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_type_info_add_bitmask_flag(IntPtr type_info, byte* flag_name, ushort position);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static unsafe extern int int2dds_type_info_add_sequence_of_named_field(IntPtr type_info, byte* field_name, byte* element_hash_name, uint bound, int flags);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
