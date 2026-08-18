@@ -25,6 +25,7 @@ use crate::rtps::transport::error::TransportErrorCode;
 use crate::rtps::transport::plugin::IncomingMessage;
 use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::tcp::protocol::ControlMsg;
+use crate::rtps::transport::tcp::self_delivery;
 
 mod handlers;
 
@@ -204,6 +205,12 @@ pub(crate) fn apply_socket_tuning(tcp: &tokio::net::TcpStream, tuning: &TcpSocke
     apply_keepalive(tcp, tuning.keepalive);
 }
 
+/// How long an intra-participant frame waits for room on the inbound channel
+/// before it is refused. A liveness backstop, not a pacing knob: the wait is
+/// what paces the caller, and a healthy consumer clears the channel orders of
+/// magnitude faster than this.
+const SELF_DELIVERY_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// First reconnect-backoff delay after a failed outbound connect.
 pub(crate) const BACKOFF_BASE: Duration = Duration::from_millis(500);
 /// Cap for the exponential reconnect-backoff growth (kept high on purpose so a
@@ -334,7 +341,18 @@ impl ConnectionRegistry {
         }
 
         let msg = IncomingMessage { data: data.to_vec(), source };
-        if let Err(e) = self.user_data_tx.send(msg) {
+
+        // Raised on the thread that decodes RTPS messages, this frame goes to
+        // that thread's own queue. It is the channel's only consumer, so putting
+        // the frame on the channel here would be waiting on itself.
+        let Some(msg) = self_delivery::push(msg) else {
+            return true;
+        };
+
+        // Every other thread keeps the channel's backpressure — pacing the
+        // application's write path is what it is for — bounded only so a wedged
+        // consumer surfaces as a refused frame instead of a stopped thread.
+        if let Err(e) = self.user_data_tx.send_timeout(msg, SELF_DELIVERY_TIMEOUT) {
             warn!(
                 "TcpSender [{}]: Failed to route intra-participant user data: {:?}",
                 TransportErrorCode::TcpChannelFull,
@@ -594,6 +612,78 @@ mod tests {
         let (d_tx, _d_rx) = flume::bounded(8);
         let (u_tx, _u_rx) = flume::bounded(8);
         ConnectionRegistry::new(domain_id, 0, [0u8; 12], TcpSocketTuning::default(), d_tx, u_tx)
+    }
+
+    /// A registry whose inbound user-data channel holds one frame and is never
+    /// drained: anything that reaches it wedges the caller for good.
+    fn registry_with_a_stalled_inbound_channel(
+        domain_id: u32,
+    ) -> (Arc<ConnectionRegistry>, flume::Receiver<IncomingMessage>) {
+        let (d_tx, _d_rx) = flume::bounded(8);
+        let (u_tx, u_rx) = flume::bounded(1);
+        let registry = ConnectionRegistry::new(
+            domain_id,
+            0,
+            [0u8; 12],
+            TcpSocketTuning::default(),
+            d_tx,
+            u_tx,
+        );
+        (Arc::new(registry), u_rx)
+    }
+
+    /// One handled message owes the local endpoints more than one response --
+    /// two matched readers, or a repair round -- and the thread that handles it
+    /// is the inbound channel's only consumer. Routing those responses through
+    /// the channel parks that thread on a queue nobody else can drain, so they
+    /// are queued aside and settled in order once the message is done.
+    #[test]
+    fn responses_a_handled_message_owes_never_reach_the_inbound_channel() {
+        const DOMAIN_ID: u32 = 951;
+        const RESPONSES: usize = 8;
+
+        let (registry, u_rx) = registry_with_a_stalled_inbound_channel(DOMAIN_ID);
+        let logical_port = PortManager::get_user_traffic_unicast_port(DOMAIN_ID, 0);
+        let source: SocketAddr = "127.0.0.1:7400".parse().unwrap();
+        let (done_tx, done_rx) = flume::bounded(1);
+
+        std::thread::spawn(move || {
+            self_delivery::install();
+            for i in 0..RESPONSES {
+                assert!(registry.deliver_to_self(source, logical_port, &[i as u8]));
+            }
+
+            let mut settled = Vec::new();
+            self_delivery::drain(|msg| settled.push(msg.data));
+            let _ = done_tx.send(settled);
+        });
+
+        let settled = done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the handling thread never finished: it parked on its own inbound channel");
+        assert_eq!(settled, (0..RESPONSES).map(|i| vec![i as u8]).collect::<Vec<_>>());
+        assert!(u_rx.is_empty());
+    }
+
+    /// The channel keeps its backpressure for every other thread: a frame raised
+    /// outside message handling still goes through it, which is what paces the
+    /// application's write path.
+    #[test]
+    fn a_frame_raised_outside_message_handling_still_uses_the_channel() {
+        const DOMAIN_ID: u32 = 952;
+
+        let (registry, u_rx) = registry_with_a_stalled_inbound_channel(DOMAIN_ID);
+        let logical_port = PortManager::get_user_traffic_unicast_port(DOMAIN_ID, 0);
+        let source: SocketAddr = "127.0.0.1:7400".parse().unwrap();
+
+        std::thread::spawn(move || {
+            assert!(registry.deliver_to_self(source, logical_port, b"rtps"));
+        })
+        .join()
+        .expect("delivery thread panicked");
+
+        let msg = u_rx.try_recv().expect("the frame should have gone through the channel");
+        assert_eq!(msg.data, b"rtps");
     }
 
     /// `PeerConnectionGroup` tracks occupied roles and reports `has_data_conns`.
