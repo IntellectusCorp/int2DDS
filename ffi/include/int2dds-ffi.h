@@ -426,6 +426,20 @@ typedef struct Int2DdsXmlTypeRegistry Int2DdsXmlTypeRegistry;
 typedef int32_t Int2DdsRet;
 
 /**
+ * C callback invoked on every remote endpoint discovery/dispose.
+ * `is_writer`: 1 = publication/writer, 0 = subscription/reader.
+ * `is_alive`:  1 = alive (`pub_data` or `sub_data` valid), 0 = disposed (data null).
+ * `guid` always points to the 16-byte endpoint GUID (valid only during the call).
+ * All pointers are borrowed and must be copied out before returning.
+ */
+typedef void (*Int2DdsEndpointDiscoveryCallback)(void *ctx,
+                                                 int32_t is_writer,
+                                                 int32_t is_alive,
+                                                 const struct Int2DdsPublicationBuiltinTopicData *pub_data,
+                                                 const struct Int2DdsSubscriptionBuiltinTopicData *sub_data,
+                                                 const uint8_t (*guid)[16]);
+
+/**
  * C-visible per-member information returned by `int2dds_type_object_member_info`.
  */
 typedef struct Int2DdsMemberInfo {
@@ -1424,6 +1438,16 @@ Int2DdsRet int2dds_subscription_builtin_topic_data_get_user_data(const struct In
  * Free a SubscriptionBuiltinTopicData obtained from discovery.
  */
 Int2DdsRet int2dds_subscription_builtin_topic_data_destroy(struct Int2DdsSubscriptionBuiltinTopicData *data);
+
+/**
+ * Register a consumer for remote endpoint discovery events. Additive: the
+ * existing pull snapshot APIs are unchanged. `callback` must be non-null; to
+ * disable, register a no-op callback (or destroy the participant) before
+ * freeing `ctx`.
+ */
+Int2DdsRet int2dds_participant_set_endpoint_discovery_callback(const struct Int2DdsParticipant *participant,
+                                                               Int2DdsEndpointDiscoveryCallback callback,
+                                                               void *ctx);
 
 /**
  * Get the builtin subscriber for discovery topics.
