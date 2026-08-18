@@ -3069,6 +3069,19 @@ impl DomainParticipant {
         }
     }
 
+    /// Register a callback for remote endpoint (SEDP) discovery events.
+    ///
+    /// The callback fires when a remote reader or writer is discovered or disposed.
+    pub fn set_endpoint_discovery_callback(
+        &self,
+        f: std::sync::Arc<
+            dyn Fn(&crate::rtps::entities::participant::EndpointDiscoveryEvent) + Send + Sync,
+        >,
+    ) -> DdsResult<()> {
+        self.get_rtps_participant()?.set_endpoint_discovery_cb(f);
+        Ok(())
+    }
+
     fn has_manual_by_participant_writers(&self) -> DdsResult<bool> {
         let publishers = self.get_publishers()?;
         for publisher in publishers {
