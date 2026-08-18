@@ -6,7 +6,7 @@
 
 use std::{
     collections::HashMap,
-    sync::{atomic::AtomicUsize, Arc, Mutex, Weak},
+    sync::{Arc, Mutex, Weak},
     thread::{self, JoinHandle},
     time::{Duration as StdDuration, Instant},
 };
@@ -81,7 +81,6 @@ use crate::{
             discovery_traffic::{
                 discovery_multicast_listening_task::DiscoveryMulticastListeningTask,
                 discovery_unicast_listening_task::DiscoveryUnicastListeningTask,
-                discovery_worker::{DiscoveryWorker, DISCOVERY_RECV_QUEUE_COUNT_BACKSTOP},
             },
             sending_handler::{MessageType, SendingHandler},
         },
@@ -94,17 +93,6 @@ use crate::{
         TypeObject,
     },
 };
-
-// Take and join the shared discovery worker. The first listening thread to
-// finish joins it; a later caller finds it already taken.
-fn join_discovery_worker(worker_handle: &Arc<Mutex<Option<JoinHandle<()>>>>) {
-    let handle = worker_handle.lock().ok().and_then(|mut guard| guard.take());
-    if let Some(handle) = handle {
-        if let Err(e) = handle.join() {
-            debug!("failed to join discovery worker thread: {:?}", e);
-        }
-    }
-}
 
 enum MatchType {
     ReaderPublication,
@@ -408,62 +396,16 @@ impl SedpLogic {
     ) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
 
-        // No discovery sources means no worker to set up.
-        if discovery_multicast_source.is_none() && discovery_unicast_source.is_none() {
-            return Ok(());
-        }
-
-        let guid_prefix = participant.guid().prefix();
-        let domain_id = participant.domain_id();
-
-        let (tx, rx) = flume::bounded(DISCOVERY_RECV_QUEUE_COUNT_BACKSTOP);
-        let queued_bytes = Arc::new(AtomicUsize::new(0));
-
-        // A single worker drains both discovery sockets off their socket threads.
-        let (spdp_logic, sedp_logic, _) = participant.get_logics();
-        let worker = DiscoveryWorker::new(
-            guid_prefix,
-            domain_id,
-            Arc::downgrade(&participant),
-            spdp_logic,
-            sedp_logic,
-            rx,
-            Arc::clone(&queued_bytes),
-        );
-        let worker_handle = thread::Builder::new()
-            .name("discovery_traffic_worker".to_string())
-            .spawn(move || {
-                {
-                    use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name_with_guid_prefix(
-                        "discovery_traffic_worker",
-                        guid_prefix,
-                    );
-                }
-
-                worker.run();
-                {
-                    use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::remove_map_guard();
-                }
-                debug!("discovery worker thread finished");
-            })
-            .map_err(|_| RtpsError::new(RtpsErrorCode::ThreadSpawnError, None))?;
-
-        // Whichever listening thread finishes first joins the shared worker.
-        let worker_handle = Arc::new(Mutex::new(Some(worker_handle)));
+        let participant_guid = participant.guid().clone();
 
         // multicast listening (only if transport provides a multicast source)
         if let Some(multicast_source) = discovery_multicast_source {
-            let mut discovery_multicast_listening_task = DiscoveryMulticastListeningTask::new(
-                participant.clone(),
-                tx.clone(),
-                Arc::clone(&queued_bytes),
-            );
+            let mut discovery_multicast_listening_task =
+                DiscoveryMulticastListeningTask::new(participant.clone());
             discovery_multicast_listening_task
                 .set_shutdown_waker(self.multicast_listening_waker.clone());
 
-            let worker_handle = Arc::clone(&worker_handle);
+            let mc_guid = participant_guid;
             let multicast_handle = thread::Builder::new()
                 .name("discovery_traffic_multicast_listening".to_string())
                 .spawn(move || {
@@ -471,21 +413,19 @@ impl SedpLogic {
                         use crate::rtps::task::thread_monitor::ThreadMonitor;
                         ThreadMonitor::register_current_thread_name_with_guid_prefix(
                             "discovery_traffic_multicast_listening",
-                            guid_prefix,
+                            mc_guid.prefix(),
                         );
                     }
 
                     let _ =
                         discovery_multicast_listening_task.multicast_listening(multicast_source);
-
-                    join_discovery_worker(&worker_handle);
                     {
                         use crate::rtps::task::thread_monitor::ThreadMonitor;
                         ThreadMonitor::remove_map_guard();
                     }
                     debug!("discovery multicast listening thread finished");
                 })
-                .map_err(|_| RtpsError::new(RtpsErrorCode::ThreadSpawnError, None))?;
+                .expect("Failed to create discovery multicast listening thread");
 
             if let Ok(mut handle_guard) = self.multicast_listening_handle.lock() {
                 *handle_guard = Some(multicast_handle);
@@ -494,15 +434,12 @@ impl SedpLogic {
 
         // unicast listening (only if transport provides a unicast source)
         if let Some(unicast_source) = discovery_unicast_source {
-            let mut discovery_unicast_listening_task = DiscoveryUnicastListeningTask::new(
-                participant.clone(),
-                tx.clone(),
-                Arc::clone(&queued_bytes),
-            );
+            let mut discovery_unicast_listening_task =
+                DiscoveryUnicastListeningTask::new(participant.clone());
             discovery_unicast_listening_task
                 .set_shutdown_waker(self.unicast_listening_waker.clone());
 
-            let worker_handle = Arc::clone(&worker_handle);
+            let unicast_guid = participant_guid;
             let unicast_handle = thread::Builder::new()
                 .name("discovery_traffic_unicast_listening".to_string())
                 .spawn(move || {
@@ -510,20 +447,18 @@ impl SedpLogic {
                         use crate::rtps::task::thread_monitor::ThreadMonitor;
                         ThreadMonitor::register_current_thread_name_with_guid_prefix(
                             "discovery_traffic_unicast_listening",
-                            guid_prefix,
+                            unicast_guid.prefix(),
                         );
                     }
 
                     let _ = discovery_unicast_listening_task.unicast_listening(unicast_source);
-
-                    join_discovery_worker(&worker_handle);
                     {
                         use crate::rtps::task::thread_monitor::ThreadMonitor;
                         ThreadMonitor::remove_map_guard();
                     }
                     debug!("discovery unicast listening thread finished");
                 })
-                .map_err(|_| RtpsError::new(RtpsErrorCode::ThreadSpawnError, None))?;
+                .expect("Failed to create discovery unicast listening thread");
 
             if let Ok(mut handle_guard) = self.unicast_listening_handle.lock() {
                 *handle_guard = Some(unicast_handle);
