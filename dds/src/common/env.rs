@@ -48,6 +48,7 @@ pub fn init_from_env() {
     // - INT2DDS_NACK_FRAG_RETRY_MS: Reader retry interval when a NACK_FRAG got no reply (ms) - Default: 200
     // - INT2DDS_NACK_FRAG_MAX_RETRIES: Reader retries before yielding to the periodic heartbeat - Default: 10
     // - INT2DDS_NACK_RESPONSE_DELAY_MS: Writer delay before answering an ACKNACK or NACK_FRAG (ms) - Default: 0
+    // - INT2DDS_SEND_CREDIT_BACKSTOP_MS: Writer age at which a send charge toward a silent peer stops counting (ms) - Default: 500
 
     // - INT2DDS_INITIAL_PEERS: Set initial peers for SPDP unicast discovery (comma-separated, e.g., "192.168.1.10:7400,192.168.1.11:7400") - Default: none
 
@@ -532,6 +533,30 @@ pub fn set_nack_response_delay_ms(ms: u32) {
     unsafe { std::env::set_var("INT2DDS_NACK_RESPONSE_DELAY_MS", ms.to_string()) };
 }
 
+/// Send-credit backstop override from `INT2DDS_SEND_CREDIT_BACKSTOP_MS`, in ms.
+/// Age at which wire bytes charged toward a remote participant stop counting against its send
+/// window, for a peer that never sends the ACKNACK or NACK_FRAG that would release them.
+pub fn get_send_credit_backstop_ms_override() -> Option<u32> {
+    let raw = std::env::var("INT2DDS_SEND_CREDIT_BACKSTOP_MS").ok().filter(|s| !s.is_empty())?;
+    match raw.parse::<u32>() {
+        Ok(ms) => Some(ms),
+        Err(e) => {
+            log::warn!(
+                "Invalid INT2DDS_SEND_CREDIT_BACKSTOP_MS value '{}': {}. Ignoring env override.",
+                raw,
+                e
+            );
+            None
+        }
+    }
+}
+
+/// Set the send-credit backstop via `INT2DDS_SEND_CREDIT_BACKSTOP_MS`.
+pub fn set_send_credit_backstop_ms(ms: u32) {
+    log::info!("Environment variable set: INT2DDS_SEND_CREDIT_BACKSTOP_MS = {}", ms);
+    unsafe { std::env::set_var("INT2DDS_SEND_CREDIT_BACKSTOP_MS", ms.to_string()) };
+}
+
 // Read the public IPv4 advertised in SPDP from `INT2DDS_EXTERNAL_ADDRESS`.
 pub fn get_external_address() -> Option<std::net::Ipv4Addr> {
     let raw = std::env::var("INT2DDS_EXTERNAL_ADDRESS").ok().filter(|s| !s.is_empty())?;
@@ -574,9 +599,10 @@ mod tests {
     use super::{
         get_disable_preemptive, get_multicast_ttl_override, get_nack_frag_max_retries_override,
         get_nack_frag_response_delay_ms_override, get_nack_frag_retry_ms_override,
-        get_nack_response_delay_ms_override, set_disable_preemptive, set_multicast_ttl,
-        set_nack_frag_max_retries, set_nack_frag_response_delay_ms, set_nack_frag_retry_ms,
-        set_nack_response_delay_ms,
+        get_nack_response_delay_ms_override, get_send_credit_backstop_ms_override,
+        set_disable_preemptive, set_multicast_ttl, set_nack_frag_max_retries,
+        set_nack_frag_response_delay_ms, set_nack_frag_retry_ms, set_nack_response_delay_ms,
+        set_send_credit_backstop_ms,
     };
 
     const ENV_KEY: &str = "INT2DDS_MULTICAST_TTL";
@@ -694,6 +720,24 @@ mod tests {
 
         unsafe { std::env::set_var(KEY, "-1") };
         assert_eq!(get_nack_frag_max_retries_override(), None, "negative → None");
+
+        unsafe { std::env::remove_var(KEY) };
+    }
+
+    #[test]
+    fn send_credit_backstop_env_round_trips_and_rejects_invalid() {
+        const KEY: &str = "INT2DDS_SEND_CREDIT_BACKSTOP_MS";
+        unsafe { std::env::remove_var(KEY) };
+        assert_eq!(get_send_credit_backstop_ms_override(), None, "unset → None");
+
+        set_send_credit_backstop_ms(750);
+        assert_eq!(get_send_credit_backstop_ms_override(), Some(750));
+
+        unsafe { std::env::set_var(KEY, "abc") };
+        assert_eq!(get_send_credit_backstop_ms_override(), None, "non-numeric → None");
+
+        unsafe { std::env::set_var(KEY, "-1") };
+        assert_eq!(get_send_credit_backstop_ms_override(), None, "negative → None");
 
         unsafe { std::env::remove_var(KEY) };
     }
