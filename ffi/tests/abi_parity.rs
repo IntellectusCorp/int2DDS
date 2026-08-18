@@ -10,16 +10,16 @@
 //! so what this test reads on such a branch is the committed file. Keeping that file
 //! honest is `build.rs`'s job, not this test's.
 //!
-//! What the bindings do not have is any such check. C# `[DllImport]` and Python
-//! `cdef` are written by hand against the header, and nothing noticed when an
-//! export landed in one and not the other: 12 exports have no C# declaration and 48
-//! have no Python one. Two directions to pin, and they fail differently. A
-//! declaration naming an export that does not exist is a runtime fault in the
-//! binding's own language (`EntryPointNotFoundException`, cffi `AttributeError`) at
-//! whatever moment the call is first made, so that is a hard failure here with no
-//! way to record an exception. An export with no declaration is only a gap, so
-//! those are listed below and the list is checked in both directions — a new export
-//! left unbound fails, and so does one that gets bound without being struck off.
+//! What the bindings do not have is any such check of their own. C# `[DllImport]` is
+//! written by hand against the header, and nothing noticed when an export landed in
+//! one binding and not the other: 12 exports have no C# declaration. Two directions
+//! to pin, and they fail differently. A declaration naming an export that does not
+//! exist is a runtime fault in the binding's own language
+//! (`EntryPointNotFoundException`, cffi `AttributeError`) at whatever moment the call
+//! is first made, so that is a hard failure here with no way to record an exception.
+//! An export with no declaration is only a gap, so those are listed below and the
+//! list is checked in both directions — a new export left unbound fails, and so does
+//! one that gets bound without being struck off.
 //!
 //! Both extractors count what they matched and fail if a construct went unparsed,
 //! because the failure mode of a loose pattern is a silent undercount that reads as
@@ -28,9 +28,13 @@
 //!
 //! What this cannot catch: it compares names, so a declaration with the wrong arity
 //! or the wrong parameter types passes every check here and then corrupts the stack
-//! at the call. That is the widest gap between this being green and the bindings
-//! being right, and closing it needs the header's signatures parsed and matched
-//! against each binding's, not just its identifiers.
+//! at the call. That is the widest gap between this being green and a binding being
+//! right, and closing it needs the header's signatures parsed and matched against the
+//! binding's, not just its identifiers. Python no longer sits in that gap — its `cdef`
+//! is generated from this header by `python/tools/generate_bindings.py`, so every
+//! signature is the header's, and the empty unbound list below is what fails when the
+//! generated file goes stale. C# still does: a `[DllImport]` is a marshalling decision
+//! the header does not carry, so it stays hand-written and name-checked only.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -54,60 +58,11 @@ const UNBOUND_CSHARP: &[&str] = &[
     "int2dds_type_info_create_bitmask",
 ];
 
-/// Exports with no Python `cdef`. No deliberate omissions here — these are QoS
-/// getters, listener and matched-endpoint accessors, the state-filtered serialized
-/// read/take pair, and the discovered-participant surface, none of which the Python
-/// binding has caught up to.
-const UNBOUND_PYTHON: &[&str] = &[
-    "int2dds_create_participant_with_profile",
-    "int2dds_datareader_get_listener",
-    "int2dds_datareader_get_matched_publication_data",
-    "int2dds_datareader_get_matched_publications",
-    "int2dds_datareader_qos_get_data_representation",
-    "int2dds_datareader_qos_get_deadline",
-    "int2dds_datareader_qos_get_destination_order",
-    "int2dds_datareader_qos_get_latency_budget",
-    "int2dds_datareader_qos_get_liveliness",
-    "int2dds_datareader_qos_get_ownership",
-    "int2dds_datareader_qos_get_reader_data_lifecycle",
-    "int2dds_datareader_qos_get_time_based_filter",
-    "int2dds_datareader_read_serialized_batch_w_states",
-    "int2dds_datareader_read_serialized_w_states",
-    "int2dds_datareader_take_serialized_batch_w_states",
-    "int2dds_datareader_take_serialized_w_states",
-    "int2dds_datareader_wait_for_historical_data",
-    "int2dds_datawriter_assert_liveliness",
-    "int2dds_datawriter_get_key_value",
-    "int2dds_datawriter_get_listener",
-    "int2dds_datawriter_get_matched_subscription_data",
-    "int2dds_datawriter_get_matched_subscriptions",
-    "int2dds_datawriter_qos_get_deadline",
-    "int2dds_datawriter_qos_get_destination_order",
-    "int2dds_datawriter_qos_get_latency_budget",
-    "int2dds_datawriter_qos_get_liveliness",
-    "int2dds_datawriter_qos_get_ownership",
-    "int2dds_datawriter_qos_get_ownership_strength",
-    "int2dds_datawriter_qos_get_transport_priority",
-    "int2dds_datawriter_qos_get_writer_data_lifecycle",
-    "int2dds_datawriter_wait_for_acknowledgments",
-    "int2dds_datawriter_write_serialized_w_timestamp",
-    "int2dds_dynamic_reader_get_qos",
-    "int2dds_dynamic_writer_get_qos",
-    "int2dds_participant_builtin_topic_data_destroy",
-    "int2dds_participant_builtin_topic_data_get_key",
-    "int2dds_participant_builtin_topic_data_get_user_data",
-    "int2dds_participant_get_discovered_participant_data",
-    "int2dds_participant_get_discovered_participants",
-    "int2dds_participant_take_discovered_publications_snapshot_filtered",
-    "int2dds_participant_take_discovered_subscriptions_snapshot_filtered",
-    "int2dds_publication_builtin_topic_data_seq_get_instance_handle",
-    "int2dds_publication_builtin_topic_data_seq_get_instance_state",
-    "int2dds_publisher_wait_for_acknowledgments",
-    "int2dds_subscription_builtin_topic_data_seq_get_instance_handle",
-    "int2dds_subscription_builtin_topic_data_seq_get_instance_state",
-    "int2dds_type_info_add_bitmask_flag",
-    "int2dds_type_info_create_bitmask",
-];
+/// Exports with no Python `cdef`, and there are none: the `cdef` is the header,
+/// generated by `python/tools/generate_bindings.py`. Keep this empty. An entry
+/// appearing here does not mean a binding is missing — it means the generated file
+/// is older than the header and needs regenerating.
+const UNBOUND_PYTHON: &[&str] = &[];
 
 const PREFIX: &[u8] = b"int2dds_";
 

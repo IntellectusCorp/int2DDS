@@ -339,7 +339,7 @@ class DataReader(Generic[T]):
         self._buffer = ffi.new(f"uint8_t[{required}]")
 
     def _take_or_read_one(self, native_fn) -> Sample[T] | None:
-        actual_size = ffi.new("size_t *")
+        actual_size = ffi.new("uintptr_t *")
         info = ffi.new("Int2DdsSampleInfo *")
 
         while True:
@@ -494,7 +494,7 @@ class DataReader(Generic[T]):
         try:
             count = lib.int2dds_sample_seq_length(seq)
             info = ffi.new("Int2DdsSampleInfo *")
-            actual_size = ffi.new("size_t *")
+            actual_size = ffi.new("uintptr_t *")
             samples: list[Sample[T]] = []
             for i in range(count):
                 check_ret(lib.int2dds_sample_seq_get_info(seq, i, info))
@@ -574,7 +574,7 @@ class DataReader(Generic[T]):
         try:
             count = lib.int2dds_sample_seq_length(seq)
             info = ffi.new("Int2DdsSampleInfo *")
-            actual_size = ffi.new("size_t *")
+            actual_size = ffi.new("uintptr_t *")
             samples: list[Sample[T]] = []
             for i in range(count):
                 check_ret(lib.int2dds_sample_seq_get_info(seq, i, info))
@@ -625,7 +625,7 @@ class DataReader(Generic[T]):
         try:
             count = lib.int2dds_sample_seq_length(seq)
             info = ffi.new("Int2DdsSampleInfo *")
-            actual_size = ffi.new("size_t *")
+            actual_size = ffi.new("uintptr_t *")
             samples: list[Sample[T]] = []
             for i in range(count):
                 check_ret(lib.int2dds_sample_seq_get_info(seq, i, info))
@@ -689,7 +689,9 @@ class DataReader(Generic[T]):
         key_ptr = ffi.from_buffer(key)
         handle_out = ffi.new("uint8_t[16]")
         check_ret(
-            lib.int2dds_datareader_lookup_instance(self._handle, key_ptr, len(key), handle_out)
+            lib.int2dds_datareader_lookup_instance(
+                self._handle, key_ptr, len(key), ffi.cast("uint8_t(*)[16]", handle_out)
+            )
         )
         return bytes(ffi.buffer(handle_out))
 
@@ -712,9 +714,13 @@ class DataReader(Generic[T]):
         capacity = 64
         while True:
             key_buf = ffi.new(f"uint8_t[{capacity}]")
-            size_out = ffi.new("size_t *")
+            size_out = ffi.new("uintptr_t *")
             ret = lib.int2dds_datareader_get_key_value(
-                self._handle, handle_ptr, key_buf, capacity, size_out
+                self._handle,
+                ffi.cast("const uint8_t(*)[16]", handle_ptr),
+                key_buf,
+                capacity,
+                size_out,
             )
             if ret == INT2DDS_RET_OK:
                 return bytes(ffi.buffer(key_buf, size_out[0]))
@@ -890,7 +896,7 @@ class DataReader(Generic[T]):
         if no data is available.
         """
         data_out = ffi.new("const uint8_t **")
-        size_out = ffi.new("size_t *")
+        size_out = ffi.new("uintptr_t *")
         valid_out = ffi.new("bool *")
         loan_out = ffi.new("Int2DdsSerializedLoan **")
         ret = lib.int2dds_datareader_take_serialized_loaned(

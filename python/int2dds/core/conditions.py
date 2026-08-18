@@ -414,7 +414,7 @@ class WaitSet:
 
         seq = seq_ptr[0]
         try:
-            count_out = ffi.new("size_t *")
+            count_out = ffi.new("uintptr_t *")
             check_ret(lib.int2dds_condition_seq_length(seq, count_out))
             conditions: list[Condition] = []
             for i in range(count_out[0]):
