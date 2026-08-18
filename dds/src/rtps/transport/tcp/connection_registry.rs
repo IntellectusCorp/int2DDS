@@ -9,7 +9,8 @@
 //! `CancellationToken`.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::io;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -297,14 +298,19 @@ impl ConnectionRegistry {
     }
 
     /// Record a failed outbound connect: grow the backoff (exponential, capped).
-    pub(crate) fn note_connect_failure(&self, addr: SocketAddr) {
+    pub(crate) fn note_connect_failure(&self, addr: SocketAddr, err: &io::Error) {
         let now = Instant::now();
         let mut entry = self
             .backoff
             .entry(addr)
             .or_insert(BackoffState { next_attempt: now, delay: Duration::ZERO });
-        let delay =
-            if entry.delay.is_zero() { BACKOFF_BASE } else { (entry.delay * 2).min(BACKOFF_MAX) };
+        let delay = if err.kind() == io::ErrorKind::ConnectionRefused {
+            BACKOFF_BASE
+        } else if entry.delay.is_zero() {
+            BACKOFF_BASE
+        } else {
+            (entry.delay * 2).min(BACKOFF_MAX)
+        };
         entry.delay = delay;
         entry.next_attempt = now + delay;
     }
@@ -312,6 +318,26 @@ impl ConnectionRegistry {
     /// Clear a peer's backoff.
     pub(crate) fn clear_backoff(&self, addr: SocketAddr) {
         self.backoff.remove(&addr);
+    }
+
+    /// Drop any outbound backoff held against the peer on `conn_id`.
+    ///
+    /// A frame arriving from a peer proves it is up just as its PEER_HELLO did.
+    /// Without this the evidence only counts at the moment the peer first
+    /// reaches us: a peer we keep hearing from all along can still be held off
+    /// by a window our own failed dials grew after that.
+    pub(crate) fn note_peer_alive(&self, conn_id: ConnectionId) {
+        let Some(prefix) = self.connections.get(&conn_id).and_then(|c| c.remote_guid_prefix) else {
+            return;
+        };
+        // The prefix of a peer connection is its advertised address packed by
+        // `addr_to_guid`, so the address reads straight back out of it.
+        let ip = Ipv4Addr::new(prefix[0], prefix[1], prefix[2], prefix[3]);
+        let port = u16::from_be_bytes([prefix[4], prefix[5]]);
+        if ip.is_unspecified() || port == 0 {
+            return;
+        }
+        self.clear_backoff(SocketAddr::new(IpAddr::V4(ip), port));
     }
 
     /// Hand a frame addressed to this participant's own user-traffic port
@@ -607,6 +633,27 @@ fn send_control(writer_tx: &mpsc::Sender<Vec<u8>>, msg: &ControlMsg) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Traffic from a peer clears the window our failed dials opened, so the
+    /// next dial to a peer that is plainly up is not held back.
+    #[test]
+    fn traffic_from_a_peer_clears_its_backoff() {
+        let registry = test_registry(0);
+        let peer: SocketAddr = "127.0.0.1:7411".parse().unwrap();
+
+        registry.note_connect_failure(peer, &io::Error::from(io::ErrorKind::TimedOut));
+        assert!(registry.backoff_remaining(peer).is_some(), "backoff after a failed dial");
+
+        let conn_id = registry.register_inbound_connection(peer, CancellationToken::new());
+        registry
+            .connections
+            .get_mut(&conn_id)
+            .expect("connection just registered")
+            .remote_guid_prefix = Some(addr_to_guid(peer));
+
+        registry.note_peer_alive(conn_id);
+        assert!(registry.backoff_remaining(peer).is_none(), "traffic must clear the backoff");
+    }
 
     fn test_registry(domain_id: u32) -> ConnectionRegistry {
         let (d_tx, _d_rx) = flume::bounded(8);

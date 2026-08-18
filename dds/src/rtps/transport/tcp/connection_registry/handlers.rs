@@ -286,6 +286,8 @@ impl ConnectionRegistry {
             None => return,
         };
 
+        self.note_peer_alive(conn_id);
+
         let msg = IncomingMessage { data: payload, source: remote_addr };
 
         // discovery & user-data: Backpressure instead of dropping.
