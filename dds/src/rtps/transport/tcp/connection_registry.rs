@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -244,7 +244,7 @@ pub(crate) struct ConnectionRegistry {
     /// Cookie issued at PORT_RESERVE → consumed at PORT_BIND.
     cookie_to_port: DashMap<[u8; 16], u16>,
     cookie_to_guid: DashMap<[u8; 16], GuidPrefix>,
-    next_cookie: AtomicU8,
+    next_cookie: AtomicU64,
 
     pub(crate) next_conn_id: AtomicUsize,
 
@@ -271,7 +271,7 @@ impl ConnectionRegistry {
             backoff: DashMap::new(),
             cookie_to_port: DashMap::new(),
             cookie_to_guid: DashMap::new(),
-            next_cookie: AtomicU8::new(0x31),
+            next_cookie: AtomicU64::new(0x31),
             next_conn_id: AtomicUsize::new(0),
             discovery_tx,
             user_data_tx,

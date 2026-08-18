@@ -196,9 +196,7 @@ impl ConnectionRegistry {
                 }
 
                 // Generate cookie atomically.
-                let counter_val = self.next_cookie.fetch_add(1, Ordering::SeqCst);
-                let mut c = counter_val;
-                let cookie = generate_cookie(&mut c);
+                let cookie = generate_cookie(self.next_cookie.fetch_add(1, Ordering::SeqCst));
 
                 self.cookie_to_port.insert(cookie, logical_port);
                 if let Some(ctrl_guid) =
