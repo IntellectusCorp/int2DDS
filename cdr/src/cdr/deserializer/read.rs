@@ -387,6 +387,7 @@ pub(crate) trait CdrRead: DeserializerReader<Error = CdrError> + Sized {
 
     /// Deserialize fixed-size string array (no length prefix)
     fn deserialize_string_array(&mut self, size: usize) -> Result<Vec<String>, CdrError> {
+        self.read_collection_dheader()?;
         let mut result = Vec::with_capacity(self.checked_capacity(size, 4)?);
         for _ in 0..size {
             result.push(self.deserialize_string()?);

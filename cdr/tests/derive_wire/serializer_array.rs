@@ -79,6 +79,174 @@ mod cdr_array_tests {
         assert_eq!(payload, expected);
     }
 
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "int2dds", extensibility = "Final")]
+    struct StringArrayHolder {
+        names: [String; 2],
+    }
+
+    fn string_array_value() -> StringArrayHolder {
+        StringArrayHolder { names: ["ab".to_string(), "cd".to_string()] }
+    }
+
+    /// `string a[2]` has non-primitive elements, so XCDR2 frames it with a DHEADER of the
+    /// element payload size and **no** element count (DDS-XTypes 7.4.3.5.3). A round-trip
+    /// test cannot see this: assert the exact bytes.
+    #[test]
+    fn test_xcdr2_string_array_dheader_without_count() {
+        let value = string_array_value();
+
+        let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Final);
+        serializer.write_encapsulation_header().unwrap();
+        value.serialize_xcdr(&mut serializer).unwrap();
+
+        let bytes = serializer.into_bytes();
+        let expected: &[u8] = &[
+            0x0F, 0x00, 0x00, 0x00, // DHEADER = 15 element payload bytes, no count follows
+            0x03, 0x00, 0x00, 0x00, b'a', b'b', 0x00, // "ab"
+            0x00, // pad to 4
+            0x03, 0x00, 0x00, 0x00, b'c', b'd', 0x00, // "cd"
+        ];
+        assert_eq!(&bytes[4..], expected);
+
+        let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
+        let result = StringArrayHolder::deserialize_xcdr(&mut deserializer).unwrap();
+        assert_eq!(result.names, value.names);
+    }
+
+    /// The derive-routed `serialize_string_array` path and the generic `[T; N]` impl must
+    /// agree byte for byte; they framed differently before.
+    #[test]
+    fn test_xcdr2_string_array_matches_generic_impl() {
+        let value = string_array_value();
+
+        let mut derived = XcdrSerializer::new(true, ExtensibilityKind::Final);
+        value.serialize_xcdr(&mut derived).unwrap();
+
+        let mut generic = XcdrSerializer::new(true, ExtensibilityKind::Final);
+        value.names.serialize_xcdr(&mut generic).unwrap();
+
+        assert_eq!(derived.into_bytes(), generic.into_bytes());
+    }
+
+    /// `serialize_string_array` / `deserialize_string_array` are the derive macro's per-field
+    /// helpers — `deserialize_string_array` is what the XCDR2 interop fallback decoder uses.
+    /// They must frame the array exactly like the generic `[T; N]` impls above.
+    #[test]
+    fn test_xcdr2_string_array_helpers_frame_like_generic_impl() {
+        use int2dds::serialize::cdr::ArraySerialize;
+
+        let names = ["ab".to_string(), "cd".to_string()];
+
+        let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Final);
+        serializer.write_encapsulation_header().unwrap();
+        serializer.serialize_string_array(&names).unwrap();
+
+        let bytes = serializer.into_bytes();
+        let expected: &[u8] = &[
+            0x0F, 0x00, 0x00, 0x00, // DHEADER = 15 element payload bytes, no count follows
+            0x03, 0x00, 0x00, 0x00, b'a', b'b', 0x00, // "ab"
+            0x00, // pad to 4
+            0x03, 0x00, 0x00, 0x00, b'c', b'd', 0x00, // "cd"
+        ];
+        assert_eq!(&bytes[4..], expected);
+
+        let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
+        assert_eq!(deserializer.deserialize_string_array(2).unwrap(), names);
+    }
+
+    /// The same helpers under XCDR1, where no collection frames.
+    #[test]
+    fn test_cdr_string_array_helpers_have_no_dheader() {
+        use int2dds::serialize::cdr::ArraySerialize;
+
+        let names = ["ab".to_string(), "cd".to_string()];
+
+        let mut serializer = CdrSerializer::new(true);
+        serializer.write_encapsulation_header().unwrap();
+        serializer.serialize_string_array(&names).unwrap();
+
+        let bytes = serializer.into_bytes();
+        let expected: &[u8] = &[
+            0x03, 0x00, 0x00, 0x00, b'a', b'b', 0x00, //
+            0x00, //
+            0x03, 0x00, 0x00, 0x00, b'c', b'd', 0x00,
+        ];
+        assert_eq!(&bytes[4..], expected);
+
+        let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+        assert_eq!(deserializer.deserialize_string_array(2).unwrap(), names);
+    }
+
+    /// `TypeSupport::deserialize` reads fields through `deserialize_string_array`, while
+    /// `serialize` goes through the generic `[T; N]` impl. The two framed the array
+    /// differently, so this is the pair that actually breaks.
+    #[test]
+    fn test_xcdr2_string_array_type_support_round_trip() {
+        use int2dds::dcps::topic::type_support::TypeSupport;
+
+        let value = string_array_value();
+        let ts = StringArrayHolder::get_type_support();
+        let fmt = xcdr2_format(ExtensibilityKind::Final);
+
+        let serialized = ts.serialize(&value, Some(&fmt)).unwrap();
+        let expected: &[u8] = &[
+            0x0F, 0x00, 0x00, 0x00, // DHEADER = 15 element payload bytes, no count follows
+            0x03, 0x00, 0x00, 0x00, b'a', b'b', 0x00, // "ab"
+            0x00, // pad to 4
+            0x03, 0x00, 0x00, 0x00, b'c', b'd', 0x00, // "cd"
+        ];
+        assert_eq!(&serialized[4..], expected);
+
+        let got = ts.deserialize(&serialized, Some(&fmt)).unwrap();
+        let got = got.downcast_ref::<StringArrayHolder>().unwrap();
+        assert_eq!(got.names, value.names);
+    }
+
+    /// Same pairing under XCDR1, where neither side frames.
+    #[test]
+    fn test_cdr_string_array_type_support_round_trip() {
+        use int2dds::dcps::topic::type_support::TypeSupport;
+
+        let value = string_array_value();
+        let ts = StringArrayHolder::get_type_support();
+        let fmt = xcdr1_format();
+
+        let serialized = ts.serialize(&value, Some(&fmt)).unwrap();
+        let expected: &[u8] = &[
+            0x03, 0x00, 0x00, 0x00, b'a', b'b', 0x00, //
+            0x00, //
+            0x03, 0x00, 0x00, 0x00, b'c', b'd', 0x00,
+        ];
+        assert_eq!(&serialized[4..], expected);
+
+        let got = ts.deserialize(&serialized, Some(&fmt)).unwrap();
+        let got = got.downcast_ref::<StringArrayHolder>().unwrap();
+        assert_eq!(got.names, value.names);
+    }
+
+    /// XCDR1 has no DHEADER for any collection.
+    #[test]
+    fn test_cdr_string_array_has_no_dheader() {
+        let value = string_array_value();
+
+        let mut serializer = CdrSerializer::new(true);
+        serializer.write_encapsulation_header().unwrap();
+        value.serialize_cdr(&mut serializer).unwrap();
+
+        let bytes = serializer.into_bytes();
+        let expected: &[u8] = &[
+            0x03, 0x00, 0x00, 0x00, b'a', b'b', 0x00, //
+            0x00, //
+            0x03, 0x00, 0x00, 0x00, b'c', b'd', 0x00,
+        ];
+        assert_eq!(&bytes[4..], expected);
+
+        let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+        let result = StringArrayHolder::deserialize_cdr(&mut deserializer).unwrap();
+        assert_eq!(result.names, value.names);
+    }
+
     // HashMap Tests - CDR
 
     #[derive(DdsType)]

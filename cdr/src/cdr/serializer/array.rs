@@ -102,4 +102,20 @@ pub trait ArraySerialize: CdrSerializerCommon + StringSerialize {
 
 // Implement ArraySerialize for both serializer types
 impl ArraySerialize for CdrSerializer {}
-impl ArraySerialize for Xcdr2Serializer {}
+impl ArraySerialize for Xcdr2Serializer {
+    /// String is non-primitive, so `string a[N]` carries a DHEADER of the element payload
+    /// byte size and no element count (DDS-XTypes 7.4.3.5.3), matching the generic
+    /// `XcdrSerialize for [T; N]` impl and the generated C/C#/Python codecs.
+    fn serialize_string_array(&mut self, data: &[String]) -> Result<(), CdrError> {
+        let dheader_pos = self.reserve_dheader();
+        let content_start = self.position();
+
+        for value in data {
+            self.serialize_string(value)?;
+        }
+
+        let content_size = (self.position() - content_start) as u32;
+        self.write_dheader_at(dheader_pos, content_size);
+        Ok(())
+    }
+}
