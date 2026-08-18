@@ -108,6 +108,14 @@ pub(crate) trait TransportPlugin: Send + Sync {
     /// participants. Populated into the SPDP announcement.
     fn advertised_default_unicast_locators(&self) -> Vec<Locator>;
 
+    /// This participant's own UDP receive-buffer size as granted by the kernel
+    /// (`getsockopt`, post-bind), for advertising in SPDP under the vendor PID.
+    /// `None` when the transport has no such notion (e.g. TCP) - a peer must
+    /// then treat us as non-advertising, not as advertising zero.
+    fn advertised_receive_buffer_size(&self) -> Option<usize> {
+        None
+    }
+
     /// Take ownership of the discovery multicast message source.
     ///
     /// Returns `None` if the transport does not support multicast (e.g., TCP).
