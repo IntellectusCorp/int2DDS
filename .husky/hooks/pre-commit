@@ -1,10 +1,19 @@
 #!/bin/sh
 set -e
 
-STAGED_FILES=$(git diff --cached --name-only)
+# core.quotePath defaults on, so a non-ASCII staged path comes back octal-quoted and would
+# never match a real path below; -c core.quotePath=false fixes that one case. It does not
+# help a path containing a literal quote or backslash (git C-quotes those regardless) or a
+# literal newline (the `read -r` loop below cannot parse that as one path either way).
+STAGED_FILES=$(git -c core.quotePath=false diff --cached --name-only)
 
 cargo fmt --all
 
 printf '%s\n' "$STAGED_FILES" | while IFS= read -r f; do
-  [ -n "$f" ] && [ -e "$f" ] && git add "$f"
+  # This loop is the script's last command, so its final exit status becomes the whole
+  # script's exit status. A staged deletion has no file to re-add: skip it via `if`, whose
+  # own exit status is 0 on a false condition, rather than via a trailing `&&`, whose exit
+  # status is the failing test itself. Unlike `|| true`, this does not swallow a real
+  # `git add` failure (e.g. index.lock contention).
+  if [ -n "$f" ] && [ -e "$f" ]; then git add "$f"; fi
 done

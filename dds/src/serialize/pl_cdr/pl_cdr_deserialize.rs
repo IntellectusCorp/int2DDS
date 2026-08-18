@@ -637,6 +637,11 @@ impl PlCdrParser {
                 let max_size = reader.read_u32()?;
                 ParameterValue::MaxSerializedSize(max_size)
             }
+            ParameterId::PidReceiveBufferSize => {
+                let mut reader = PlCdrReader::new(data, self.endianness);
+                let size = reader.read_u32()?;
+                ParameterValue::ReceiveBufferSize(size)
+            }
             ParameterId::PidDataRepresentation => {
                 let mut reader = PlCdrReader::new(data, self.endianness);
                 let sequence_length = reader.read_u32()? as usize;

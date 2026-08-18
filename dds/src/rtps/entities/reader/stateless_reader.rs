@@ -58,6 +58,9 @@ pub(crate) struct StatelessReader {
     expects_inline_qos: bool,
     heartbeat_response_delay: RtpsDuration,
     heartbeat_suppression_duration: RtpsDuration,
+    nack_frag_response_delay: RtpsDuration,
+    nack_frag_retry_delay: RtpsDuration,
+    nack_frag_max_retries: u32,
     reader_cache: Arc<Mutex<ReaderHistoryCache>>,
     matched_writers: Arc<Mutex<Vec<RemoteWriterInfo>>>,
     #[allow(clippy::type_complexity)]
@@ -97,6 +100,9 @@ impl StatelessReader {
             expects_inline_qos,
             heartbeat_response_delay: RtpsDuration::new(0, 500 * 1000 * 1000),
             heartbeat_suppression_duration: RtpsDuration::new(0, 0),
+            nack_frag_response_delay: RtpsDuration::from_millis(80),
+            nack_frag_retry_delay: RtpsDuration::from_millis(200),
+            nack_frag_max_retries: 10,
             reader_cache: Arc::new(Mutex::new(ReaderHistoryCache::new(endpoint_id, None))),
             matched_writers: Arc::new(Mutex::new(Vec::new())),
             change_callback: Arc::new(Mutex::new(change_callback)),
@@ -361,6 +367,18 @@ impl Reader for StatelessReader {
 
     fn heartbeat_suppression_duration(&self) -> RtpsDuration {
         self.heartbeat_suppression_duration
+    }
+
+    fn nack_frag_response_delay(&self) -> RtpsDuration {
+        self.nack_frag_response_delay
+    }
+
+    fn nack_frag_retry_delay(&self) -> RtpsDuration {
+        self.nack_frag_retry_delay
+    }
+
+    fn nack_frag_max_retries(&self) -> u32 {
+        self.nack_frag_max_retries
     }
 
     fn matched_writer_is_matched(&self, writer_guid: Guid) -> bool {
