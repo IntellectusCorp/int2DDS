@@ -16,10 +16,6 @@ use crate::rtps::transport::udp::udp_listener::UdpListener;
 use crate::rtps::transport::udp::udp_sender::UdpSender;
 use crate::rtps::transport::HybridConfig;
 
-/// Channel buffer size for merged sources.
-#[allow(dead_code)]
-const CHANNEL_BUFFER_SIZE: usize = 256;
-
 /// Hybrid transport plugin — UDP multicast discovery + TCP/UDP unicast.
 ///
 /// Discovery multicast always uses UDP.
