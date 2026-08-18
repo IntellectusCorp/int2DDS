@@ -66,7 +66,8 @@ def _apply_datareader_qos(handle: CData, qos: "DataReaderQos") -> None:
     value (the native default at creation, or the current QoS on set_qos merge).
     """
     if qos.reliability is not None:
-        check_ret(lib.int2dds_datareader_qos_set_reliability(handle, qos.reliability._kind_int))
+        check_ret(lib.int2dds_datareader_qos_set_reliability(
+            handle, qos.reliability._kind_int, qos.reliability._max_blocking_time_ns))
     if qos.durability is not None:
         check_ret(lib.int2dds_datareader_qos_set_durability(handle, qos.durability._kind_int))
     if qos.history is not None:
