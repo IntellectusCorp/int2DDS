@@ -702,6 +702,11 @@ impl SedpLogic {
                             endpoint_guid
                         };
 
+                    participant.fire_endpoint_discovery(
+                        &crate::rtps::entities::participant::EndpointDiscoveryEvent::ReaderDisposed(
+                            terminated_reader_guid,
+                        ),
+                    );
                     participant
                         .cleanup_resources_for_remote_reader(terminated_reader_guid, &topic_name)?;
                     return Ok(());
@@ -726,6 +731,12 @@ impl SedpLogic {
             .entry(topic_name.clone())
             .or_default()
             .insert(endpoint_guid, subscription_builtin_topic_data.clone());
+
+        participant.fire_endpoint_discovery(
+            &crate::rtps::entities::participant::EndpointDiscoveryEvent::ReaderAlive(
+                subscription_builtin_topic_data.clone(),
+            ),
+        );
 
         // First try to find local writer using exact match (find_writer_from_entry)
         // If no exact match, try finding writer using domain ID and topic name only
@@ -1180,6 +1191,11 @@ impl SedpLogic {
                             endpoint_guid
                         };
 
+                    participant.fire_endpoint_discovery(
+                        &crate::rtps::entities::participant::EndpointDiscoveryEvent::WriterDisposed(
+                            terminated_writer_guid,
+                        ),
+                    );
                     participant
                         .cleanup_resources_for_remote_writer(terminated_writer_guid, &topic_name)?;
                     return Ok(());
@@ -1204,6 +1220,12 @@ impl SedpLogic {
             .entry(topic_name.clone())
             .or_default()
             .insert(endpoint_guid, publication_builtin_topic_data.clone());
+
+        participant.fire_endpoint_discovery(
+            &crate::rtps::entities::participant::EndpointDiscoveryEvent::WriterAlive(
+                publication_builtin_topic_data.clone(),
+            ),
+        );
 
         // First try to find local reader using exact match (find_reader_from_entry)
         let readers = participant.find_readers_from_topic_name(&topic_name);
@@ -2389,6 +2411,11 @@ impl UnicastMessageProcessor for SedpLogic {
                         InstanceHandle::to_guid(&terminated_writer_guid),
                         ChangeKind::NotAliveDisposed,
                     );
+                    participant.fire_endpoint_discovery(
+                        &crate::rtps::entities::participant::EndpointDiscoveryEvent::WriterDisposed(
+                            InstanceHandle::to_guid(&terminated_writer_guid),
+                        ),
+                    );
                     participant
                         .cleanup_remote_writer_by_guid(InstanceHandle::to_guid(
                             &terminated_writer_guid,
@@ -2449,6 +2476,11 @@ impl UnicastMessageProcessor for SedpLogic {
                     store_wire_in_cache(
                         InstanceHandle::to_guid(&terminated_reader_guid),
                         ChangeKind::NotAliveDisposed,
+                    );
+                    participant.fire_endpoint_discovery(
+                        &crate::rtps::entities::participant::EndpointDiscoveryEvent::ReaderDisposed(
+                            InstanceHandle::to_guid(&terminated_reader_guid),
+                        ),
                     );
                     participant
                         .cleanup_remote_reader_by_guid(InstanceHandle::to_guid(
