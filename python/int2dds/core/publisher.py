@@ -394,7 +394,7 @@ class DataWriter(Generic[T]):
 
         check_ret(
             lib.int2dds_datawriter_register_instance(
-                self._handle, key_ptr, len(key), handle_out
+                self._handle, key_ptr, len(key), ffi.cast("uint8_t(*)[16]", handle_out)
             )
         )
 
@@ -423,7 +423,7 @@ class DataWriter(Generic[T]):
 
         check_ret(
             lib.int2dds_datawriter_unregister_instance(
-                self._handle, key_ptr, len(key), handle_ptr
+                self._handle, key_ptr, len(key), ffi.cast("const uint8_t(*)[16]", handle_ptr)
             )
         )
 
@@ -450,7 +450,7 @@ class DataWriter(Generic[T]):
 
         check_ret(
             lib.int2dds_datawriter_dispose(
-                self._handle, key_ptr, len(key), handle_ptr
+                self._handle, key_ptr, len(key), ffi.cast("const uint8_t(*)[16]", handle_ptr)
             )
         )
 
@@ -480,7 +480,7 @@ class DataWriter(Generic[T]):
 
         check_ret(
             lib.int2dds_datawriter_lookup_instance(
-                self._handle, key_ptr, len(key), handle_out
+                self._handle, key_ptr, len(key), ffi.cast("uint8_t(*)[16]", handle_out)
             )
         )
 
@@ -583,7 +583,7 @@ class DataWriter(Generic[T]):
         error).
         """
         data_out = ffi.new("uint8_t **")
-        cap_out = ffi.new("size_t *")
+        cap_out = ffi.new("uintptr_t *")
         loan_out = ffi.new("Int2DdsSerializedWriteLoan **")
         check_ret(lib.int2dds_datawriter_prepare_serialized_write(
             self._handle, len(data), data_out, cap_out, loan_out))
