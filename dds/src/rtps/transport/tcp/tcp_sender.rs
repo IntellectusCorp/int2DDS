@@ -503,8 +503,8 @@ impl TcpSender {
         self.shared.backoff_remaining(addr)
     }
 
-    fn note_connect_failure(&self, addr: SocketAddr) {
-        self.shared.note_connect_failure(addr);
+    fn note_connect_failure(&self, addr: SocketAddr, err: &io::Error) {
+        self.shared.note_connect_failure(addr, err);
     }
 
     fn note_connect_success(&self, addr: SocketAddr) {
@@ -859,7 +859,7 @@ async fn background_connect(
                 addr, logical_port, e
             );
             sender.evict_connection(addr, logical_port);
-            sender.note_connect_failure(addr);
+            sender.note_connect_failure(addr, &e);
         }
     }
 }
@@ -1362,17 +1362,36 @@ mod tests {
 
         assert!(sender.backoff_remaining(addr).is_none(), "no backoff initially");
 
-        sender.note_connect_failure(addr);
+        let unreachable = io::Error::new(io::ErrorKind::TimedOut, "unreachable");
+
+        sender.note_connect_failure(addr, &unreachable);
         let first = sender.backoff_remaining(addr).expect("backoff after first failure");
         assert!(first > Duration::ZERO && first <= BACKOFF_BASE);
 
-        sender.note_connect_failure(addr);
+        sender.note_connect_failure(addr, &unreachable);
         let second = sender.backoff_remaining(addr).expect("backoff after second failure");
         assert!(second > BACKOFF_BASE, "delay must grow on a repeat failure");
         assert!(second <= BACKOFF_BASE * 2);
 
         sender.note_connect_success(addr);
         assert!(sender.backoff_remaining(addr).is_none(), "success clears backoff");
+
+        sender.shutdown().await;
+    }
+
+    /// A refused connect is a peer that has not opened its socket yet, so its
+    /// delay stays at the base however many times it happens.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refused_connect_never_grows_the_backoff() {
+        let (sender, _) = make_sender(0, [0xAB; 12], 12346);
+        let addr: SocketAddr = "192.0.2.2:7400".parse().unwrap();
+        let refused = io::Error::from(io::ErrorKind::ConnectionRefused);
+
+        for _ in 0..8 {
+            sender.note_connect_failure(addr, &refused);
+            let remaining = sender.backoff_remaining(addr).expect("backoff after a refusal");
+            assert!(remaining <= BACKOFF_BASE, "a refusal must not grow the delay");
+        }
 
         sender.shutdown().await;
     }
@@ -2152,7 +2171,7 @@ mod tests {
         );
 
         // Seed a backoff entry so its clearing is observable.
-        sender.note_connect_failure(target);
+        sender.note_connect_failure(target, &io::Error::from(io::ErrorKind::TimedOut));
         assert!(sender.backoff_remaining(target).is_some());
 
         sender.disconnect_peer(target);
