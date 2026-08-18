@@ -44,11 +44,11 @@ pub fn init_from_env() {
     // - INT2DDS_MAX_MESSAGE_SIZE: Set max UDP message size (1-65000), header-inclusive datagram budget bounding fragments packed per message - Default: 65000
     // - INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT: Set the default for the disable_piggyback_heartbeat writer QoS (true, false) - Default: false
     // - INT2DDS_DISABLE_PREEMPTIVE: Disable preemptive ACKNACK and preemptive HEARTBEAT on new endpoint matches (true, false) - Default: false
-    // - INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS: Reader delay before the first NACK_FRAG for missing fragments (ms) - Default: 0
+    // - INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS: Reader delay before the first NACK_FRAG for missing fragments (ms) - Default: 5
     // - INT2DDS_NACK_FRAG_RETRY_MS: Reader retry interval when a NACK_FRAG got no reply (ms) - Default: 200
     // - INT2DDS_NACK_FRAG_MAX_RETRIES: Reader retries before yielding to the periodic heartbeat - Default: 10
     // - INT2DDS_NACK_RESPONSE_DELAY_MS: Writer delay before answering an ACKNACK or NACK_FRAG (ms) - Default: 0
-    // - INT2DDS_SEND_CREDIT_BACKSTOP_MS: Writer age at which a send charge toward a silent peer stops counting (ms) - Default: 500
+    // - INT2DDS_SEND_CREDIT_BACKSTOP_MS: Writer age at which a send charge toward a silent peer stops counting (ms) - Default: 250
 
     // - INT2DDS_INITIAL_PEERS: Set initial peers for SPDP unicast discovery (comma-separated, e.g., "192.168.1.10:7400,192.168.1.11:7400") - Default: none
 

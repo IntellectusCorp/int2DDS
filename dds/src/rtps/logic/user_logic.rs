@@ -318,10 +318,12 @@ fn bound_fragment_plan(
 
 /// How long a charge keeps counting against a peer's window with nothing heard back from it.
 ///
-/// Well clear of both 200 ms constants a repair round already turns on -- the reader's
-/// `nack_frag_retry_delay` and `COUNT_RESET_ACCEPT_AFTER` -- so this cannot race the reader's own
-/// re-ask and add load to a peer that is already behind.
-const SEND_CREDIT_BACKSTOP: Duration = Duration::from_millis(500);
+/// Longer than one whole reader retry cycle -- `nack_frag_response_delay` then
+/// `nack_frag_retry_delay`, 205ms at their defaults -- so a reader whose first NACK_FRAG was lost
+/// still gets to release this charge by answering. Expiring any sooner would make the timeout,
+/// rather than the answer, the usual way a lost round recovers, and leave this a primary path
+/// instead of the safety net it is.
+const SEND_CREDIT_BACKSTOP: Duration = Duration::from_millis(250);
 
 /// Wire bytes charged toward one remote participant that have not been shown to have drained.
 struct SendCredit {
