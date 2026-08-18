@@ -82,6 +82,10 @@ pub struct Participant {
     callback:
         Arc<ArcSwap<Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>>>,
 
+    // Callback for remote reader/writer discovery events.
+    #[allow(clippy::type_complexity)]
+    endpoint_discovery_cb: Arc<ArcSwap<Option<Arc<dyn Fn(&EndpointDiscoveryEvent) + Send + Sync>>>>,
+
     // RTPS data reader/writer matched with DCPS r/w
     rtps_reader_store: Arc<ReaderStore>,
     rtps_writer_store: Arc<WriterStore>,
@@ -133,6 +137,15 @@ impl Entity for Participant {
     }
 }
 
+/// A remote endpoint (SEDP) discovery event.
+/// `*Alive` carries the endpoint's builtin-topic data; `*Disposed` carries only its GUID.
+pub enum EndpointDiscoveryEvent {
+    WriterAlive(PublicationBuiltinTopicData),
+    WriterDisposed(Guid),
+    ReaderAlive(SubscriptionBuiltinTopicData),
+    ReaderDisposed(Guid),
+}
+
 impl Participant {
     /// Create a new Participant.
     ///
@@ -174,6 +187,7 @@ impl Participant {
             local_participant_proxy_data,
             remote_participant_proxy_datas: Arc::new(Mutex::new(vec![])),
             callback: Arc::new(ArcSwap::new(Arc::new(None))),
+            endpoint_discovery_cb: Arc::new(ArcSwap::new(Arc::new(None))),
             rtps_reader_store: Arc::new(ReaderStore::new()),
             rtps_writer_store: Arc::new(WriterStore::new()),
             spdp_logic: OnceLock::new(),
@@ -240,6 +254,20 @@ impl Participant {
         &self,
     ) -> Arc<DashMap<String, HashMap<Guid, PublicationBuiltinTopicData>>> {
         self.remote_publications.clone()
+    }
+
+    pub(crate) fn set_endpoint_discovery_cb(
+        &self,
+        f: Arc<dyn Fn(&EndpointDiscoveryEvent) + Send + Sync>,
+    ) {
+        self.endpoint_discovery_cb.store(Arc::new(Some(f)));
+    }
+
+    pub(crate) fn fire_endpoint_discovery(&self, event: &EndpointDiscoveryEvent) {
+        let cb = self.endpoint_discovery_cb.load();
+        if let Some(cb) = cb.as_ref() {
+            cb(event);
+        }
     }
 
     pub(crate) fn remote_subscriptions(
