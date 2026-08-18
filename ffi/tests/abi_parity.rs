@@ -1,0 +1,321 @@
+//! The C header against the two hand-maintained bindings.
+//!
+//! `include/int2dds-ffi.h` is the ABI. Measured once with
+//! `llvm-readobj --coff-exports` on the built cdylib: the committed header's function
+//! set and the export table are equal, 453 either way, nothing exported but undeclared
+//! and nothing declared but unexported. That includes the block `build.rs` appends by
+//! hand for the macro-generated entry points cbindgen cannot see. `build.rs`
+//! regenerates the header when this crate's sources change, which is what keeps the
+//! two equal — note that a change to `csharp/` or `python/` alone does not trigger it,
+//! so what this test reads on such a branch is the committed file. Keeping that file
+//! honest is `build.rs`'s job, not this test's.
+//!
+//! What the bindings do not have is any such check. C# `[DllImport]` and Python
+//! `cdef` are written by hand against the header, and nothing noticed when an
+//! export landed in one and not the other: 12 exports have no C# declaration and 48
+//! have no Python one. Two directions to pin, and they fail differently. A
+//! declaration naming an export that does not exist is a runtime fault in the
+//! binding's own language (`EntryPointNotFoundException`, cffi `AttributeError`) at
+//! whatever moment the call is first made, so that is a hard failure here with no
+//! way to record an exception. An export with no declaration is only a gap, so
+//! those are listed below and the list is checked in both directions — a new export
+//! left unbound fails, and so does one that gets bound without being struck off.
+//!
+//! Both extractors count what they matched and fail if a construct went unparsed,
+//! because the failure mode of a loose pattern is a silent undercount that reads as
+//! a clean sweep. Writing this test, `static extern` missed every
+//! `static unsafe extern` declaration and reported 273 of 441.
+//!
+//! What this cannot catch: it compares names, so a declaration with the wrong arity
+//! or the wrong parameter types passes every check here and then corrupts the stack
+//! at the call. That is the widest gap between this being green and the bindings
+//! being right, and closing it needs the header's signatures parsed and matched
+//! against each binding's, not just its identifiers.
+
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+
+/// Exports with no C# `[DllImport]`. The content-filtered-topic entries are
+/// deliberate — C# has no ContentFilteredTopic class, so the three constructors and
+/// the field-descriptor topic they need have nothing to bind to. The rest are
+/// exports that were added after the C# surface was last swept.
+const UNBOUND_CSHARP: &[&str] = &[
+    "int2dds_create_contentfilteredtopic",
+    "int2dds_create_datareader_cft",
+    "int2dds_create_topic_with_field_descriptors",
+    "int2dds_delete_contentfilteredtopic",
+    "int2dds_participant_take_discovered_publications_snapshot_filtered",
+    "int2dds_participant_take_discovered_subscriptions_snapshot_filtered",
+    "int2dds_publication_builtin_topic_data_seq_get_instance_handle",
+    "int2dds_publication_builtin_topic_data_seq_get_instance_state",
+    "int2dds_subscription_builtin_topic_data_seq_get_instance_handle",
+    "int2dds_subscription_builtin_topic_data_seq_get_instance_state",
+    "int2dds_type_info_add_bitmask_flag",
+    "int2dds_type_info_create_bitmask",
+];
+
+/// Exports with no Python `cdef`. No deliberate omissions here — these are QoS
+/// getters, listener and matched-endpoint accessors, the state-filtered serialized
+/// read/take pair, and the discovered-participant surface, none of which the Python
+/// binding has caught up to.
+const UNBOUND_PYTHON: &[&str] = &[
+    "int2dds_create_participant_with_profile",
+    "int2dds_datareader_get_listener",
+    "int2dds_datareader_get_matched_publication_data",
+    "int2dds_datareader_get_matched_publications",
+    "int2dds_datareader_qos_get_data_representation",
+    "int2dds_datareader_qos_get_deadline",
+    "int2dds_datareader_qos_get_destination_order",
+    "int2dds_datareader_qos_get_latency_budget",
+    "int2dds_datareader_qos_get_liveliness",
+    "int2dds_datareader_qos_get_ownership",
+    "int2dds_datareader_qos_get_reader_data_lifecycle",
+    "int2dds_datareader_qos_get_time_based_filter",
+    "int2dds_datareader_read_serialized_batch_w_states",
+    "int2dds_datareader_read_serialized_w_states",
+    "int2dds_datareader_take_serialized_batch_w_states",
+    "int2dds_datareader_take_serialized_w_states",
+    "int2dds_datareader_wait_for_historical_data",
+    "int2dds_datawriter_assert_liveliness",
+    "int2dds_datawriter_get_key_value",
+    "int2dds_datawriter_get_listener",
+    "int2dds_datawriter_get_matched_subscription_data",
+    "int2dds_datawriter_get_matched_subscriptions",
+    "int2dds_datawriter_qos_get_deadline",
+    "int2dds_datawriter_qos_get_destination_order",
+    "int2dds_datawriter_qos_get_latency_budget",
+    "int2dds_datawriter_qos_get_liveliness",
+    "int2dds_datawriter_qos_get_ownership",
+    "int2dds_datawriter_qos_get_ownership_strength",
+    "int2dds_datawriter_qos_get_transport_priority",
+    "int2dds_datawriter_qos_get_writer_data_lifecycle",
+    "int2dds_datawriter_wait_for_acknowledgments",
+    "int2dds_datawriter_write_serialized_w_timestamp",
+    "int2dds_dynamic_reader_get_qos",
+    "int2dds_dynamic_writer_get_qos",
+    "int2dds_participant_builtin_topic_data_destroy",
+    "int2dds_participant_builtin_topic_data_get_key",
+    "int2dds_participant_builtin_topic_data_get_user_data",
+    "int2dds_participant_get_discovered_participant_data",
+    "int2dds_participant_get_discovered_participants",
+    "int2dds_participant_take_discovered_publications_snapshot_filtered",
+    "int2dds_participant_take_discovered_subscriptions_snapshot_filtered",
+    "int2dds_publication_builtin_topic_data_seq_get_instance_handle",
+    "int2dds_publication_builtin_topic_data_seq_get_instance_state",
+    "int2dds_publisher_wait_for_acknowledgments",
+    "int2dds_subscription_builtin_topic_data_seq_get_instance_handle",
+    "int2dds_subscription_builtin_topic_data_seq_get_instance_state",
+    "int2dds_type_info_add_bitmask_flag",
+    "int2dds_type_info_create_bitmask",
+];
+
+const PREFIX: &[u8] = b"int2dds_";
+
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("the ffi crate sits in the repo").into()
+}
+
+fn read(path: &Path) -> Vec<u8> {
+    std::fs::read(path).unwrap_or_else(|e| {
+        panic!("{} carries part of the ABI surface this test compares: {e}", path.display())
+    })
+}
+
+fn is_ident(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+fn find_from(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    haystack
+        .get(from..)?
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .map(|offset| from + offset)
+}
+
+/// Drops `//` and `/* */` so that a name mentioned in prose is not read as a
+/// declaration. Byte-wise is safe for non-ASCII source: a UTF-8 continuation byte
+/// never equals `/`, `*`, or `\n`.
+fn without_comments(src: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(src.len());
+    let mut i = 0;
+    while i < src.len() {
+        if src[i..].starts_with(b"/*") {
+            match find_from(src, b"*/", i + 2) {
+                Some(end) => i = end + 2,
+                None => break,
+            }
+        } else if src[i..].starts_with(b"//") {
+            match find_from(src, b"\n", i + 2) {
+                Some(end) => i = end,
+                None => break,
+            }
+        } else {
+            out.push(src[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Every `int2dds_*` that is applied to an argument list, which in a C header or a
+/// `cdef` block means every declaration and in C# means the declaration plus its
+/// call sites — so C# is scanned by declaration span, never whole-file.
+fn names_in(src: &[u8]) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    let mut i = 0;
+    while let Some(start) = find_from(src, PREFIX, i) {
+        i = start + PREFIX.len();
+        if start > 0 && is_ident(src[start - 1]) {
+            continue;
+        }
+        let mut end = i;
+        while end < src.len() && is_ident(src[end]) {
+            end += 1;
+        }
+        let mut paren = end;
+        while paren < src.len() && src[paren].is_ascii_whitespace() {
+            paren += 1;
+        }
+        if src.get(paren) == Some(&b'(') {
+            names.insert(String::from_utf8_lossy(&src[start..end]).into_owned());
+        }
+        i = end;
+    }
+    names
+}
+
+fn header_exports() -> BTreeSet<String> {
+    names_in(&without_comments(&read(&repo_root().join("ffi/include/int2dds-ffi.h"))))
+}
+
+fn cs_sources(dir: &Path, into: &mut Vec<PathBuf>) {
+    let entries = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("the C# binding lives at {}: {e}", dir.display()));
+    for entry in entries {
+        let path = entry.expect("directory entry").path();
+        if path.is_dir() {
+            cs_sources(&path, into);
+        } else if path.extension().is_some_and(|e| e == "cs") {
+            into.push(path);
+        }
+    }
+}
+
+/// Each `[DllImport]`/`[LibraryImport]` up to the `;` that ends the declaration it
+/// decorates. One name per attribute, or the attribute went unparsed.
+fn csharp_declarations() -> BTreeSet<String> {
+    let mut sources = Vec::new();
+    cs_sources(&repo_root().join("csharp/src/Int2Dds"), &mut sources);
+    sources.sort();
+    assert!(!sources.is_empty(), "no C# sources found to check");
+
+    let mut names = BTreeSet::new();
+    let mut attributes = 0;
+    for path in &sources {
+        let src = without_comments(&read(path));
+        let mut i = 0;
+        while let Some(start) = [b"[DllImport".as_slice(), b"[LibraryImport".as_slice()]
+            .iter()
+            .filter_map(|needle| find_from(&src, needle, i))
+            .min()
+        {
+            let end = find_from(&src, b";", start).unwrap_or(src.len());
+            let declared = names_in(&src[start..end]);
+            assert_eq!(
+                declared.len(),
+                1,
+                "{}: the declaration at byte {start} does not name its entry point where this \
+                 test looks for it, and was read as {declared:?}. `EntryPoint = \"...\"` puts the \
+                 name in the attribute instead; teach the extractor that form rather than \
+                 leaving the declaration uncounted",
+                path.display()
+            );
+            names.extend(declared);
+            attributes += 1;
+            i = end;
+        }
+    }
+    assert_eq!(
+        names.len(),
+        attributes,
+        "an export has more than one C# declaration. That is legitimate when the overloads \
+         marshal differently — widen this check rather than deleting one"
+    );
+    names
+}
+
+/// The `ffi.cdef("""...""")` blocks, plus a check that no declaration sits outside
+/// one — cffi ignores anything that does, so it would bind nothing.
+fn python_declarations() -> BTreeSet<String> {
+    let path = repo_root().join("python/int2dds/_ffi/_bindings.py");
+    let src = read(&path);
+    let mut names = BTreeSet::new();
+    let mut outside = Vec::new();
+    let mut blocks = 0;
+    let mut i = 0;
+    loop {
+        let Some(open) = find_from(&src, b"ffi.cdef(\"\"\"", i) else {
+            outside.extend_from_slice(&src[i..]);
+            break;
+        };
+        outside.extend_from_slice(&src[i..open]);
+        let body = open + b"ffi.cdef(\"\"\"".len();
+        let close = find_from(&src, b"\"\"\"", body).expect("cdef block is closed");
+        names.extend(names_in(&without_comments(&src[body..close])));
+        blocks += 1;
+        i = close + 3;
+    }
+    assert!(blocks > 0, "{} declares nothing to cffi", path.display());
+    let stray = names_in(&without_comments(&outside));
+    assert!(stray.is_empty(), "{}: declared outside any cdef block: {stray:?}", path.display());
+    names
+}
+
+fn assert_no_phantoms(binding: &str, declared: &BTreeSet<String>, exports: &BTreeSet<String>) {
+    let phantoms: Vec<_> = declared.difference(exports).collect();
+    assert!(
+        phantoms.is_empty(),
+        "{binding} declares entry points the library does not export, which faults at the \
+         first call rather than at build time: {phantoms:#?}"
+    );
+}
+
+fn assert_unbound_is(binding: &str, declared: &BTreeSet<String>, recorded: &[&str]) {
+    let exports = header_exports();
+    let unbound: BTreeSet<&str> = exports.difference(declared).map(String::as_str).collect();
+    let recorded: BTreeSet<&str> = recorded.iter().copied().collect();
+
+    let unrecorded: Vec<_> = unbound.difference(&recorded).collect();
+    assert!(
+        unrecorded.is_empty(),
+        "these exports have no {binding} declaration. Bind them, or record them in the \
+         list at the top of this file: {unrecorded:#?}"
+    );
+    let stale: Vec<_> = recorded.difference(&unbound).collect();
+    assert!(
+        stale.is_empty(),
+        "these are recorded as unbound, but {binding} declares them now — or the export is \
+         gone. Either way, strike them off the list at the top of this file: {stale:#?}"
+    );
+}
+
+#[test]
+fn csharp_declares_only_real_exports() {
+    assert_no_phantoms("The C# binding", &csharp_declarations(), &header_exports());
+}
+
+#[test]
+fn python_declares_only_real_exports() {
+    assert_no_phantoms("The Python binding", &python_declarations(), &header_exports());
+}
+
+#[test]
+fn the_csharp_binding_leaves_exactly_the_recorded_exports_unbound() {
+    assert_unbound_is("C#", &csharp_declarations(), UNBOUND_CSHARP);
+}
+
+#[test]
+fn the_python_binding_leaves_exactly_the_recorded_exports_unbound() {
+    assert_unbound_is("Python", &python_declarations(), UNBOUND_PYTHON);
+}
