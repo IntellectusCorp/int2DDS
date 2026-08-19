@@ -43,6 +43,7 @@
 //! let msg: String = data.get("message")?;
 //! ```
 
+mod codec_plan;
 mod dynamic_data;
 mod dynamic_serialization;
 mod dynamic_type;
@@ -64,6 +65,7 @@ pub use type_object_v1::TypeObjectV1;
 pub use type_object_xcdr::{deserialize_type_object, serialize_type_object, spec_hash};
 
 // Dynamic type support
+pub use codec_plan::TypePlans;
 pub use dynamic_data::{DynamicData, DynamicValue, FromDynamicValue, IntoDynamicValue};
 pub use dynamic_serialization::{deserialize_dynamic_data, serialize_dynamic_data};
 pub use dynamic_type::{

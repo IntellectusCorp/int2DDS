@@ -80,24 +80,21 @@ pub(crate) fn resolve_extensibility(code: i32) -> Option<ExtensibilityKind> {
 }
 
 /// Map a `create_topic_with_field_descriptors` field-type code (scalar-only, and a
-/// distinct encoding from the `INT2DDS_FIELD_*` constants) to its CDR descriptor type
-/// and XTypes `TypeIdentifier`. Returns `None` for unsupported codes.
-fn field_descriptor_type(
-    code: u32,
-) -> Option<(crate::data::CdrFieldType, int2dds::xtypes::TypeIdentifier)> {
-    use crate::data::CdrFieldType;
+/// distinct encoding from the `INT2DDS_FIELD_*` constants) to its XTypes
+/// `TypeIdentifier`. Returns `None` for unsupported codes.
+fn field_descriptor_type(code: u32) -> Option<int2dds::xtypes::TypeIdentifier> {
     use int2dds::xtypes::TypeIdentifier;
     Some(match code {
-        0 => (CdrFieldType::String, TypeIdentifier::String8),
-        1 => (CdrFieldType::Int32, TypeIdentifier::Int32),
-        2 => (CdrFieldType::UInt32, TypeIdentifier::Uint32),
-        3 => (CdrFieldType::Int16, TypeIdentifier::Int16),
-        4 => (CdrFieldType::UInt16, TypeIdentifier::Uint16),
-        5 => (CdrFieldType::Int64, TypeIdentifier::Int64),
-        6 => (CdrFieldType::UInt64, TypeIdentifier::Uint64),
-        7 => (CdrFieldType::Int8, TypeIdentifier::Int8),
-        8 => (CdrFieldType::UInt8, TypeIdentifier::Uint8),
-        9 => (CdrFieldType::Bool, TypeIdentifier::Boolean),
+        0 => TypeIdentifier::String8,
+        1 => TypeIdentifier::Int32,
+        2 => TypeIdentifier::Uint32,
+        3 => TypeIdentifier::Int16,
+        4 => TypeIdentifier::Uint16,
+        5 => TypeIdentifier::Int64,
+        6 => TypeIdentifier::Uint64,
+        7 => TypeIdentifier::Int8,
+        8 => TypeIdentifier::Uint8,
+        9 => TypeIdentifier::Boolean,
         _ => return None,
     })
 }
@@ -277,9 +274,9 @@ pub unsafe extern "C" fn int2dds_create_topic_with_type_info(
     let type_identifier = ti.build_type_identifier();
     let type_object = ti.build_type_object();
 
-    // Create RawTypeSupport with type info for discovery. Keyed types compute instance
-    // keys through the canonical DynamicData path built from the full TypeObject.
-    let mut raw_type_support = RawTypeSupport::with_type_info_and_deps(
+    // Create RawTypeSupport with type info for discovery. The same TypeObject also
+    // drives the canonical key projection and reader-side filter field access.
+    let raw_type_support = RawTypeSupport::with_type_info_and_deps(
         dds_type_name.clone(),
         ti.extensibility,
         ti.has_key_field(),
@@ -287,13 +284,6 @@ pub unsafe extern "C" fn int2dds_create_topic_with_type_info(
         type_object,
         ti.dependency_closure(),
     );
-
-    // Flat CDR field descriptors so ContentFilteredTopic / QueryCondition filters work on
-    // generated (type_info) topics. None when any member is non-flat (nested/collection/
-    // enum/float/wide-string) — filtering then stays unavailable, as before.
-    if let Some(descriptors) = ti.cdr_field_descriptors() {
-        raw_type_support.set_all_fields(descriptors);
-    }
 
     finalize_topic(
         participant_ref,
@@ -763,12 +753,11 @@ pub unsafe extern "C" fn int2dds_create_topic_with_field_descriptors(
     check_null!(field_types);
     check_null!(field_is_key);
 
-    // Build XTypes type info (for discovery) and CDR field descriptors (for
-    // ContentFilteredTopic get_field_value) from the same flat fields.
-    use crate::data::CdrFieldDescriptor;
-
-    let mut all_fields = Vec::new();
+    // Build XTypes type info from the flat fields. It is the single source for both
+    // discovery and the compiled layout the key projection and ContentFilteredTopic
+    // field access read the wire through.
     let mut ti = Int2DdsTypeInfo::new(dds_type_name_str.to_string(), ext_kind);
+    let mut has_key = false;
 
     for i in 0..field_count {
         let name_ptr = *field_names.add(i);
@@ -781,29 +770,24 @@ pub unsafe extern "C" fn int2dds_create_topic_with_field_descriptors(
         };
 
         let is_key = *field_is_key.add(i);
-        let (cdr_type, xtypes_id) = match field_descriptor_type(*field_types.add(i)) {
+        has_key |= is_key;
+        let xtypes_id = match field_descriptor_type(*field_types.add(i)) {
             Some(t) => t,
             None => return INT2DDS_RET_INVALID_ARGUMENT,
         };
-
-        all_fields.push(CdrFieldDescriptor { name: name.clone(), field_type: cdr_type, is_key });
 
         let flags = if is_key { crate::type_info::INT2DDS_MEMBER_KEY } else { 0 };
         ti.push_field(name, xtypes_id, flags);
     }
 
-    // Advertise TypeIdentifier/TypeObject (0x0075) like the derive macro, while keeping
-    // CDR field descriptors for ContentFilteredTopic. Instance keys are computed from the
-    // full TypeObject via the canonical DynamicData path.
-    let has_key = all_fields.iter().any(|f| f.is_key);
-    let mut type_support = RawTypeSupport::with_type_info(
+    // Advertise TypeIdentifier/TypeObject (0x0075) like the derive macro.
+    let type_support = RawTypeSupport::with_type_info(
         dds_type_name_str.to_string(),
         ext_kind,
         has_key,
         ti.build_type_identifier(),
         ti.build_type_object(),
     );
-    type_support.set_all_fields(all_fields);
 
     finalize_topic(
         participant_ref,
@@ -835,7 +819,7 @@ mod tests {
             (9, TypeIdentifier::Boolean),
         ];
         for (code, tid) in expected {
-            let (_, got) = field_descriptor_type(code).expect("scalar code must map");
+            let got = field_descriptor_type(code).expect("scalar code must map");
             assert_eq!(got, tid, "field_descriptor code {code} maps to wrong TypeIdentifier");
         }
         assert!(field_descriptor_type(10).is_none(), "code 10 must be rejected");

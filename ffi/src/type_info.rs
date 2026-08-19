@@ -346,34 +346,6 @@ impl Int2DdsTypeInfo {
         self.fields.iter().any(|f| f.is_key())
     }
 
-    /// Flat CDR field descriptors for the raw ContentFilteredTopic / QueryCondition
-    /// parser, so filters work on generated (type_info) topics — not just the explicit
-    /// `create_topic_with_field_descriptors` path. Returns `None` if this is not a struct
-    /// or any member is non-flat (nested/collection/enum/float/wide-string/char): the
-    /// parser skips members sequentially, so a partial set would misalign every field after
-    /// the gap. `None` preserves the prior no-filtering behavior for those types.
-    pub(crate) fn cdr_field_descriptors(&self) -> Option<Vec<crate::data::CdrFieldDescriptor>> {
-        if !matches!(self.body, TypeInfoBody::Struct) {
-            return None;
-        }
-        // The flat sequential-skip parser handles Final (no header) and Appendable
-        // (leading DHEADER) layouts, but not Mutable EMHEADER-per-member framing — so
-        // leave Mutable topics without descriptors (filter unavailable) rather than
-        // mis-parsing them.
-        if matches!(self.extensibility, ExtensibilityKind::Mutable) {
-            return None;
-        }
-        let mut descriptors = Vec::with_capacity(self.fields.len());
-        for field in &self.fields {
-            descriptors.push(crate::data::CdrFieldDescriptor {
-                name: field.name.clone(),
-                field_type: type_identifier_to_cdr_field_type(&field.type_id)?,
-                is_key: field.is_key(),
-            });
-        }
-        Some(descriptors)
-    }
-
     /// Build TypeIdentifier (CompleteTypeId hash) from the collected fields.
     pub(crate) fn build_type_identifier(&self) -> TypeIdentifier {
         let type_obj = self.build_type_object();
@@ -402,30 +374,6 @@ fn field_type_to_type_identifier(field_type: i32) -> Option<TypeIdentifier> {
         INT2DDS_FIELD_WSTRING => Some(TypeIdentifier::String16),
         _ => None,
     }
-}
-
-/// Map a resolved member `TypeIdentifier` to the flat `CdrFieldType` the raw
-/// ContentFilteredTopic / QueryCondition parser understands. Returns `None` for any
-/// type the parser cannot skip or read (nested structs, collections, maps, enums,
-/// bitmasks, wide strings, floats, chars) — a single non-flat member makes the whole
-/// descriptor set unusable, since the parser walks members sequentially.
-fn type_identifier_to_cdr_field_type(id: &TypeIdentifier) -> Option<crate::data::CdrFieldType> {
-    use crate::data::CdrFieldType;
-    Some(match id {
-        TypeIdentifier::Boolean => CdrFieldType::Bool,
-        TypeIdentifier::Byte | TypeIdentifier::Uint8 => CdrFieldType::UInt8,
-        TypeIdentifier::Int8 => CdrFieldType::Int8,
-        TypeIdentifier::Int16 => CdrFieldType::Int16,
-        TypeIdentifier::Int32 => CdrFieldType::Int32,
-        TypeIdentifier::Int64 => CdrFieldType::Int64,
-        TypeIdentifier::Uint16 => CdrFieldType::UInt16,
-        TypeIdentifier::Uint32 => CdrFieldType::UInt32,
-        TypeIdentifier::Uint64 => CdrFieldType::UInt64,
-        TypeIdentifier::String8
-        | TypeIdentifier::String8Small { .. }
-        | TypeIdentifier::String8Large { .. } => CdrFieldType::String,
-        _ => return None,
-    })
 }
 
 fn named_type_identifier(hash_name: &str) -> TypeIdentifier {

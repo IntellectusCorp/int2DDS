@@ -118,3 +118,7 @@ harness = false   # Set to false to disable the default benchmark functionality 
 [[bench]]
 name = "besteffort"
 harness = false
+
+[[bench]]
+name = "key_projection"
+harness = false

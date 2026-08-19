@@ -17,7 +17,8 @@ use int2dds::{
     topic::sql::ast::Parameter,
     topic::type_support::{FieldAccessor, SerializationFormat, TypeSupport},
     xtypes::{
-        deserialize_dynamic_data, DynamicTypeSupport, TypeIdentifier, TypeObject, TypeRegistry,
+        deserialize_dynamic_data, DynamicTypeSupport, TypeIdentifier, TypeObject, TypePlans,
+        TypeRegistry,
     },
 };
 
@@ -31,7 +32,10 @@ pub struct RawTypeSupport {
     has_key: bool,
     type_identifier: Option<TypeIdentifier>,
     type_object: Option<TypeObject>,
-    all_fields: Option<Arc<Vec<crate::data::CdrFieldDescriptor>>>,
+    /// Compiled layout of the type, when the shape is one a plan covers. Answers
+    /// the key projection and filter field access straight from the sample bytes;
+    /// anything it does not cover falls through to `dynamic_key_support`.
+    plans: Option<Arc<TypePlans>>,
     /// Canonical key machinery derived from a full TypeObject. When present,
     /// `compute_key` deserializes the sample into a `DynamicData` and delegates to
     /// the shared Rust key path (`serialize_key_cdr`), matching native-Rust/derive
@@ -49,7 +53,7 @@ impl RawTypeSupport {
             has_key: false,
             type_identifier: None,
             type_object: None,
-            all_fields: None,
+            plans: None,
             dynamic_key_support: None,
         }
     }
@@ -65,7 +69,7 @@ impl RawTypeSupport {
             has_key,
             type_identifier: None,
             type_object: None,
-            all_fields: None,
+            plans: None,
             dynamic_key_support: None,
         }
     }
@@ -105,38 +109,34 @@ impl RawTypeSupport {
         type_object: TypeObject,
         dependencies: Vec<(TypeIdentifier, TypeObject)>,
     ) -> Self {
-        // Build the canonical key machinery from the full TypeObject so keyed
-        // topics created via the type_info path (C# generated types, Python
-        // `_dds_type_info_fields`) compute the same InstanceHandle as native Rust.
-        let dynamic_key_support = if has_key {
-            if dependencies.is_empty() {
-                DynamicTypeSupport::from_type_object(type_object.clone()).ok().map(Arc::new)
-            } else {
-                let mut registry = TypeRegistry::new();
-                for (id, obj) in &dependencies {
-                    registry.register_type_object_with_id(id, obj.clone());
-                }
-                DynamicTypeSupport::from_type_object_with_registry(type_object.clone(), &registry)
-                    .ok()
-                    .map(Arc::new)
-            }
+        // Build the canonical type machinery from the full TypeObject so topics
+        // created via the type_info path (C# generated types, Python
+        // `_dds_type_info_fields`) compute the same InstanceHandle as native Rust
+        // and can read fields for reader-side filtering. Built for keyless topics
+        // too, which have no key to compute but may still carry a filter.
+        let dynamic_support = if dependencies.is_empty() {
+            DynamicTypeSupport::from_type_object(type_object.clone()).ok().map(Arc::new)
         } else {
-            None
+            let mut registry = TypeRegistry::new();
+            for (id, obj) in &dependencies {
+                registry.register_type_object_with_id(id, obj.clone());
+            }
+            DynamicTypeSupport::from_type_object_with_registry(type_object.clone(), &registry)
+                .ok()
+                .map(Arc::new)
         };
+        let plans = dynamic_support
+            .as_ref()
+            .map(|support| Arc::new(TypePlans::compile(support.dynamic_type())));
         Self {
             type_name,
             extensibility,
             has_key,
             type_identifier: Some(type_identifier),
             type_object: Some(type_object),
-            all_fields: None,
-            dynamic_key_support,
+            plans,
+            dynamic_key_support: if has_key { dynamic_support } else { None },
         }
-    }
-
-    /// Set all field descriptors for get_field_value() / has_field() support.
-    pub fn set_all_fields(&mut self, fields: Vec<crate::data::CdrFieldDescriptor>) {
-        self.all_fields = Some(Arc::new(fields));
     }
 }
 
@@ -174,21 +174,22 @@ impl TypeSupport for RawTypeSupport {
         data: &[u8],
         _format: Option<&SerializationFormat>,
     ) -> DdsResult<Box<dyn Any>> {
-        // Store CDR bytes and field metadata when configured (Python binding).
-        // Otherwise return empty Int2DdsData (existing behavior for C/C# bindings).
-        let need_bytes = self.all_fields.is_some() || self.dynamic_key_support.is_some();
+        // Keep the CDR bytes only when something will read them back: the key
+        // projection, or a reader-side filter. A raw topic created without type
+        // information carries neither, and gets an empty `Int2DdsData`.
+        let need_bytes = self.plans.is_some() || self.dynamic_key_support.is_some();
         Ok(Box::new(crate::data::Int2DdsData {
             cdr_bytes: if need_bytes { Some(data.to_vec()) } else { None },
-            field_descriptors: self.all_fields.clone(),
-            extensibility: self.extensibility,
+            plans: self.plans.clone(),
         }))
     }
 
     fn serialize_key(&self, data: &dyn Any) -> DdsResult<SerializedData> {
-        // Canonical RTPS KeyHash CDR (headerless, big-endian, §9.6.4.8) derived
-        // from the full sample bytes via the shared DynamicData key machinery —
-        // the same projection `compute_key` hashes and native Rust/derive emit.
-        // No full TypeObject (name-only keyed topic) => empty key.
+        // Canonical RTPS KeyHash CDR (headerless, big-endian, §9.6.4.8) projected
+        // out of the full sample bytes — the same projection `compute_key` hashes
+        // and native Rust/derive emit. The compiled plan reads it straight off the
+        // wire; shapes it does not cover go through the DynamicData machinery, and
+        // a topic with no full TypeObject (name-only keyed topic) yields an empty key.
         let int2dds_data = match data.downcast_ref::<crate::data::Int2DdsData>() {
             Some(d) => d,
             None => return Ok(Arc::from(Vec::new())),
@@ -197,6 +198,11 @@ impl TypeSupport for RawTypeSupport {
             Some(b) => b,
             None => return Ok(Arc::from(Vec::new())),
         };
+        if self.has_key {
+            if let Some(Ok(key)) = self.plans.as_ref().and_then(|p| p.serialize_key(cdr_bytes)) {
+                return Ok(Arc::from(key));
+            }
+        }
         if let Some(dts) = &self.dynamic_key_support {
             if let Ok(dyn_data) = deserialize_dynamic_data(cdr_bytes, dts.dynamic_type()) {
                 return dts.serialize_key(&dyn_data);
@@ -239,11 +245,16 @@ impl TypeSupport for RawTypeSupport {
             None => return InstanceHandle::NIL,
         };
 
-        // Raw FFI path key computation goes exclusively through the shared
-        // DynamicData key machinery — the spec-compliant RTPS KeyHash projection
-        // (§9.6.4.8) that native Rust/derive and the dynamic path also use. When no
-        // full TypeObject is available (name-only keyed topic) the handle is NIL
-        // rather than a non-conformant flat-parser approximation.
+        // Raw FFI path key computation goes exclusively through the spec-compliant
+        // RTPS KeyHash projection (§9.6.4.8) that native Rust/derive and the dynamic
+        // path also use, whether the compiled plan or the DynamicData machinery
+        // performs it. When no full TypeObject is available (name-only keyed topic)
+        // the handle is NIL rather than a non-conformant flat-parser approximation.
+        if self.has_key {
+            if let Some(handle) = self.plans.as_ref().and_then(|p| p.compute_key(cdr_bytes)) {
+                return handle;
+            }
+        }
         if let Some(dts) = &self.dynamic_key_support {
             if let Ok(dyn_data) = deserialize_dynamic_data(cdr_bytes, dts.dynamic_type()) {
                 return dts.compute_key(&dyn_data);

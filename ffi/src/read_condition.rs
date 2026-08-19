@@ -18,8 +18,8 @@
 //!
 //! `QueryCondition` content filtering evaluates the SQL expression against the
 //! sample's CDR bytes. Like `ContentFilteredTopic`, this requires the topic to
-//! have been created with field descriptors
-//! (`int2dds_create_topic_with_field_descriptors`); on a plain raw topic the
+//! carry type information (`int2dds_create_topic_with_type_info` or
+//! `int2dds_create_topic_with_field_descriptors`); on a plain raw topic the
 //! expression cannot be evaluated and the read returns an error. `ReadCondition`
 //! state filtering has no such requirement and always applies.
 
