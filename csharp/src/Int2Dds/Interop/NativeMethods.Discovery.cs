@@ -150,5 +150,15 @@ namespace Int2Dds.Interop
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_subscription_builtin_topic_data_destroy(IntPtr data);
+
+        // pub_data/sub_data are the opaque handles above, one of them null per the
+        // is_alive/is_writer pair; guid points to 16 bytes. All borrowed for the call.
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        internal unsafe delegate void EndpointDiscoveryCallback(
+            IntPtr ctx, int isWriter, int isAlive, IntPtr pubData, IntPtr subData, byte* guid);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_participant_set_endpoint_discovery_callback(
+            IntPtr participant, EndpointDiscoveryCallback callback, IntPtr ctx);
     }
 }
