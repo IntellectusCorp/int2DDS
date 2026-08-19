@@ -776,6 +776,7 @@ impl Participant {
         // out the ones already past the shard lock. A reentrant delete from inside a callback is
         // refused earlier, but guard the wait too: blocking on our own count would deadlock.
         if let Some(reader) = reader_arc.as_ref() {
+            reader.mark_deleted();
             if !crate::utils::notify::in_listener_callback() {
                 while reader.in_flight_callbacks() > 0 {
                     std::thread::sleep(std::time::Duration::from_micros(50));

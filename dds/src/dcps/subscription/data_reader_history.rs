@@ -1081,27 +1081,38 @@ fn deliver_held_sample<Foo: 'static + Clone + Debug>(
     let Ok(rtps_reader) = data_reader.get_rtps_reader() else { return };
     let Ok(cache_arc) = data_reader.get_datareader_cache() else { return };
 
-    let pending = match cache_arc.lock() {
-        Ok(cache) => {
-            cache.time_based_filter.take_pending_on_timer(instance_handle, RtpsTime::now())
-        }
-        Err(_) => return,
-    };
-    let Some(change) = pending else { return };
+    // Raise the in-flight count, then deliver only if the reader is not being deleted. A late
+    // timer that starts after remove_reader drained sees the mark and skips. A live one keeps the
+    // count raised across the delivery so the delete drains it. enter/exit bracket the whole
+    // section with no early return between them.
+    rtps_reader.enter_callback();
 
-    match rtps_reader.reader_cache().lock() {
-        // Re-deliver without the filter (already decided) so it stores and notifies.
-        Ok(mut reader_cache) => match reader_cache.add_change((*change).clone(), false) {
-            Ok(delivered) => {
-                drop(reader_cache);
-                for change in delivered {
-                    rtps_reader.on_change(change);
-                }
+    if !rtps_reader.is_deleted() {
+        let pending = match cache_arc.lock() {
+            Ok(cache) => {
+                cache.time_based_filter.take_pending_on_timer(instance_handle, RtpsTime::now())
             }
-            Err(e) => debug!("[TimeBasedFilter] Failed to deliver held sample: {:?}", e),
-        },
-        Err(e) => debug!("[TimeBasedFilter] Failed to lock reader cache: {:?}", e),
+            Err(_) => None,
+        };
+
+        if let Some(change) = pending {
+            match rtps_reader.reader_cache().lock() {
+                // Re-deliver without the filter (already decided) so it stores and notifies.
+                Ok(mut reader_cache) => match reader_cache.add_change((*change).clone(), false) {
+                    Ok(delivered) => {
+                        drop(reader_cache);
+                        for change in delivered {
+                            rtps_reader.on_change(change);
+                        }
+                    }
+                    Err(e) => debug!("[TimeBasedFilter] Failed to deliver held sample: {:?}", e),
+                },
+                Err(e) => debug!("[TimeBasedFilter] Failed to lock reader cache: {:?}", e),
+            }
+        }
     }
+
+    rtps_reader.exit_callback();
 }
 
 #[cfg(test)]
@@ -1618,6 +1629,56 @@ mod tests {
         assert!(!cache_arc.lock().unwrap().contains_instance(handle).unwrap());
         assert!(!reader.get_instance_infos().unwrap().contains_key(&handle));
         assert!(!cache_arc.lock().unwrap().time_based_filter.tracks_instance(handle));
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
+    }
+
+    // The TIME_BASED_FILTER timer is the one entity-owned timer that reaches a user listener. Once
+    // the reader is marked deleted, deliver_held_sample must skip so on_data_available cannot fire
+    // after the delete drains.
+    #[test]
+    fn deliver_held_sample_skips_a_deleted_reader() {
+        let (participant, reader) = create_with_key_datareader(DataReaderQos::default());
+        let handle = InstanceHandle::new([9; 16]);
+        let now = RtpsTime::now();
+        let min_separation_nanos = 10_000_000_000u64;
+
+        let cache_arc = reader.get_datareader_cache().unwrap();
+        {
+            let cache = cache_arc.lock().unwrap();
+            assert!(matches!(
+                cache.time_based_filter.on_alive_sample(
+                    &create_change_with_key(1, handle),
+                    min_separation_nanos,
+                    now
+                ),
+                FilterOutcome::Deliver
+            ));
+            assert!(matches!(
+                cache.time_based_filter.on_alive_sample(
+                    &create_change_with_key(2, handle),
+                    min_separation_nanos,
+                    now
+                ),
+                FilterOutcome::Held { .. }
+            ));
+        }
+
+        reader.get_rtps_reader().unwrap().mark_deleted();
+
+        let reader_arc = Arc::new(reader.clone());
+        deliver_held_sample(&Arc::downgrade(&reader_arc), handle);
+
+        assert!(
+            cache_arc
+                .lock()
+                .unwrap()
+                .time_based_filter
+                .take_pending_on_timer(handle, now)
+                .is_some(),
+            "deliver_held_sample delivered on a deleted reader instead of skipping"
+        );
 
         participant.delete_contained_entities().unwrap();
         DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
