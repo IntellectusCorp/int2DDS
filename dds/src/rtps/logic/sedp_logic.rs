@@ -332,7 +332,12 @@ impl SedpLogic {
             .collect();
         for (topic, data) in subs {
             for writer in participant.find_writers_from_topic_name(&topic) {
-                let _ = self.match_writer_with_subscription(writer, data.clone());
+                let Some(lease) = participant
+                    .find_writer_callback_lease_from_entity_id(writer.guid().entity_id())
+                else {
+                    continue;
+                };
+                let _ = self.match_writer_with_subscription((*lease).clone(), data.clone());
             }
         }
     }
@@ -689,8 +694,8 @@ impl SedpLogic {
         } else if let BuiltinTopicData::Subscription(subscription_builtin_topic_data) =
             builtin_topic_data
         {
-            let local_writer = participant
-                .find_writer_from_entity_id(endpoint_guid.entity_id())
+            let local_writer_lease = participant
+                .find_writer_callback_lease_from_entity_id(endpoint_guid.entity_id())
                 .ok_or_else(|| {
                     RtpsError::new(
                         RtpsErrorCode::RtpsEntityNotFound,
@@ -700,7 +705,7 @@ impl SedpLogic {
 
             self.match_endpoint(
                 MatchType::WriterSubscription,
-                local_writer.as_any(),
+                local_writer_lease.as_any(),
                 BuiltinTopicData::Subscription(subscription_builtin_topic_data),
                 true,
             )?;
@@ -779,6 +784,13 @@ impl SedpLogic {
 
         if !writers.is_empty() {
             for writer in writers {
+                let Some(writer_lease) = participant
+                    .find_writer_callback_lease_from_entity_id(writer.guid().entity_id())
+                else {
+                    continue;
+                };
+                let writer = &*writer_lease;
+
                 let subscription_result = self.match_writer_with_subscription(
                     writer.clone(),
                     subscription_builtin_topic_data.clone(),

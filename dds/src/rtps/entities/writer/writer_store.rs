@@ -1,3 +1,4 @@
+use std::ops::Deref;
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -5,6 +6,35 @@ use dashmap::DashMap;
 use crate::rtps::common::entity_id::EntityId;
 
 use super::Writer;
+
+// A writer leased for callback-producing work (discovery, liveliness). Holding it keeps the
+// writer's in-flight-callback count raised, and dropping it lowers the count. Deletion drains
+// that count to zero, so no callback outlives the delete call. The count is raised while the
+// store's shard lock is held (see `get_writer_callback_lease`), serializing it against `remove`.
+pub(crate) struct WriterCallbackLease {
+    writer: Arc<dyn Writer + Send + Sync>,
+}
+
+impl WriterCallbackLease {
+    fn new(writer: Arc<dyn Writer + Send + Sync>) -> Self {
+        writer.enter_callback();
+        Self { writer }
+    }
+}
+
+impl Deref for WriterCallbackLease {
+    type Target = Arc<dyn Writer + Send + Sync>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.writer
+    }
+}
+
+impl Drop for WriterCallbackLease {
+    fn drop(&mut self) {
+        self.writer.exit_callback();
+    }
+}
 
 // Dual-indexed writer storage for O(1) lookup by both EntityId and topic name.
 // Reads far outnumber writes, so we maintain two maps to avoid DashMap iteration overhead
@@ -46,6 +76,16 @@ impl WriterStore {
         self.by_id.get(&entity_id).map(|w| w.clone())
     }
 
+    // Lease a writer for callback-producing work, raising its in-flight count while the shard
+    // lock is held. `remove` takes the same shard's write lock, so either this raises the count
+    // before removal (deletion then drains it) or removal wins and this returns None.
+    pub(crate) fn get_writer_callback_lease(
+        &self,
+        entity_id: EntityId,
+    ) -> Option<WriterCallbackLease> {
+        self.by_id.get(&entity_id).map(|w| WriterCallbackLease::new(w.value().clone()))
+    }
+
     // Get all writers associated with a given topic name
     pub(crate) fn get_by_topic(&self, topic: &str) -> Vec<Arc<dyn Writer + Send + Sync>> {
         self.by_topic.get(topic).map(|writers| writers.clone()).unwrap_or_default()
@@ -54,5 +94,11 @@ impl WriterStore {
     // Iterate over all writers in the store
     pub(crate) fn iter_all(&self) -> Vec<Arc<dyn Writer + Send + Sync>> {
         self.by_id.iter().map(|w| w.value().clone()).collect()
+    }
+
+    // Iterate over all writers as callback leases, each raised under the shard lock (see
+    // `get_writer_callback_lease`). Holding a lease keeps its writer out of a completing delete.
+    pub(crate) fn iter_all_callback_leases(&self) -> Vec<WriterCallbackLease> {
+        self.by_id.iter().map(|w| WriterCallbackLease::new(w.value().clone())).collect()
     }
 }

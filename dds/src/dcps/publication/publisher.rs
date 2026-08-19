@@ -518,6 +518,13 @@ impl Publisher {
         &self,
         datawriter: &Arc<dyn DataWriterInternal<Qos = DataWriterQos>>,
     ) -> DdsResult<()> {
+        // Deleting from inside a listener callback would block on the writer's in-flight-callback
+        // drain, which only this thread can release. Refuse instead of deadlocking. The caller must
+        // delete from another thread or after the callback returns.
+        if crate::utils::notify::in_listener_callback() {
+            return Err(DdsError::IllegalOperation);
+        }
+
         self.remove_orphaned_writer(datawriter);
         if datawriter.get_publisher()?.get_instance_handle()? != self.get_instance_handle()? {
             return Err(DdsError::PreconditionNotMet);
@@ -1281,6 +1288,130 @@ mod tests {
     pub struct HelloWorld {
         pub index: u32,
         pub message: String,
+    }
+
+    use std::sync::mpsc::SyncSender;
+    use std::sync::Arc;
+
+    const DRAIN_CALLBACK_SLEEP: std::time::Duration = std::time::Duration::from_millis(400);
+    const DRAIN_MIN_BLOCK: std::time::Duration = std::time::Duration::from_millis(250);
+    const DRAIN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
+
+    struct MatchSleepWriterListener {
+        entered: SyncSender<()>,
+    }
+
+    impl DataWriterListener for MatchSleepWriterListener {
+        type Foo = HelloWorld;
+
+        fn on_publication_matched(
+            &self,
+            _writer: &DataWriter<Self::Foo>,
+            _status: &crate::infrastructure::status::PublicationMatchedStatus,
+        ) {
+            let _ = self.entered.try_send(());
+            std::thread::sleep(DRAIN_CALLBACK_SLEEP);
+        }
+    }
+
+    #[test]
+    fn deleting_a_writer_waits_for_its_in_flight_publication_matched_callback() {
+        use crate::{
+            core::time::Duration,
+            infrastructure::qos_policy::{ReliabilityQosPolicy, ReliabilityQosPolicyKind},
+            subscription::qos::{DataReaderQos, SubscriberQos},
+            test_utils::unique_domain_id,
+            topic::qos::TopicQos,
+        };
+        use std::time::Instant;
+
+        let reliable = ReliabilityQosPolicy {
+            kind: ReliabilityQosPolicyKind::Reliable,
+            max_blocking_time: Duration::from_millis(100),
+        };
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel::<()>(1);
+
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+
+        // Publisher side: the writer whose PUBLICATION_MATCHED callback we make in-flight.
+        let pub_participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let pub_topic = pub_participant
+            .create_topic::<HelloWorld>(
+                "PubMatchDrainTopic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher = pub_participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &pub_topic,
+                DataWriterQos { reliability: reliable.clone(), ..Default::default() },
+                Some(Arc::new(MatchSleepWriterListener { entered: entered_tx })),
+                StatusMask::PUBLICATION_MATCHED,
+            )
+            .unwrap();
+
+        // Subscriber side: a remote reader whose discovery matches the writer, firing
+        // PUBLICATION_MATCHED on the publisher participant's discovery thread.
+        let sub_participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let sub_topic = sub_participant
+            .create_topic::<HelloWorld>(
+                "PubMatchDrainTopic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber = sub_participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let _reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &sub_topic,
+                DataReaderQos { reliability: reliable, ..Default::default() },
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        // on_publication_matched has started on the discovery thread and is now sleeping.
+        entered_rx.recv_timeout(DRAIN_DEADLINE).expect("on_publication_matched never ran");
+
+        let start = Instant::now();
+        publisher.delete_datawriter(writer).unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed >= DRAIN_MIN_BLOCK,
+            "delete returned in {elapsed:?}, so it did not wait for the in-flight publication-matched callback"
+        );
+
+        pub_participant.delete_contained_entities().unwrap();
+        factory.delete_participant(pub_participant).unwrap();
+        sub_participant.delete_contained_entities().unwrap();
+        factory.delete_participant(sub_participant).unwrap();
     }
 
     #[test]

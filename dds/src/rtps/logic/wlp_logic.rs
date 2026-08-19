@@ -1128,12 +1128,14 @@ impl WlpLogic {
             writer_info.set_not_alive();
             debug!("[WLP] Writer {} set to NOT_ALIVE (participant kept for recovery)", guid);
 
-            if let Some(writer) = participant.find_writer_from_entity_id(guid.entity_id()) {
+            if let Some(writer_lease) =
+                participant.find_writer_callback_lease_from_entity_id(guid.entity_id())
+            {
                 log::info!(
                     "[WLP] mark_asserting_writer_lost: Found LOCAL writer for guid={}",
                     guid
                 );
-                writer.update_status(StatusKind::LIVELINESS_LOST, None);
+                writer_lease.update_status(StatusKind::LIVELINESS_LOST, None);
             }
         }
     }

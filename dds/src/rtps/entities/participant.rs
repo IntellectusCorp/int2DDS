@@ -55,7 +55,7 @@ use crate::{
             history::{cache_change::CacheChange, history_cache::HistoryCache},
             reader::{Reader, ReaderCallbackLease, ReaderStore, StatefulReader, StatelessReader},
             wire_buffer_pool::WireBufferPool,
-            writer::{StatefulWriter, StatelessWriter, Writer, WriterStore},
+            writer::{StatefulWriter, StatelessWriter, Writer, WriterCallbackLease, WriterStore},
         },
         logic::{
             sedp_logic::SedpLogic, spdp_logic::SpdpLogic, user_logic::UserLogic,
@@ -491,6 +491,15 @@ impl Participant {
         self.rtps_writer_store.get(entity_id)
     }
 
+    // Callback-producing lookup: the returned lease keeps the writer's in-flight count raised
+    // until dropped, so deletion drains it instead of racing the callback.
+    pub(crate) fn find_writer_callback_lease_from_entity_id(
+        &self,
+        entity_id: EntityId,
+    ) -> Option<WriterCallbackLease> {
+        self.rtps_writer_store.get_writer_callback_lease(entity_id)
+    }
+
     pub(crate) fn find_readers_from_topic_name(
         &self,
         topic_name: &str,
@@ -581,7 +590,7 @@ impl Participant {
         // Send Data[w(UD)]
         let writer_arc = self.rtps_writer_store.get(entity_id);
 
-        if let Some(writer) = writer_arc {
+        if let Some(writer) = writer_arc.as_ref() {
             if writer.guid().entity_id().entity_kind().is_user_defined() {
                 if let Some(wlp_logic) = self.wlp_logic.get() {
                     let _ = wlp_logic.deregister_asserting_writer(writer.guid());
@@ -668,6 +677,18 @@ impl Participant {
         // lets the delivery path deliver the already-accepted sample instead of dropping it.
         // No duplicate can result: the writer is gone, so no reliable retransmit can occur.
         self.rtps_writer_store.remove(&topic_name, entity_id);
+
+        // Drain in-flight discovery/liveliness callbacks so none runs against this writer after the
+        // delete returns. Store removal above stops new callbacks from starting; this waits out the
+        // ones already past the shard lock. A reentrant delete from inside a callback is refused
+        // earlier, but guard the wait too: blocking on our own count would deadlock.
+        if let Some(writer) = writer_arc.as_ref() {
+            if !crate::utils::notify::in_listener_callback() {
+                while writer.in_flight_callbacks() > 0 {
+                    std::thread::sleep(std::time::Duration::from_micros(50));
+                }
+            }
+        }
 
         // Unmatch with intra participant readers
         self.cleanup_resources_for_remote_writer(
@@ -756,16 +777,7 @@ impl Participant {
         // refused earlier, but guard the wait too: blocking on our own count would deadlock.
         if let Some(reader) = reader_arc.as_ref() {
             if !crate::utils::notify::in_listener_callback() {
-                let drain_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
                 while reader.in_flight_callbacks() > 0 {
-                    if std::time::Instant::now() >= drain_deadline {
-                        log::warn!(
-                            "remove_reader: {} callback(s) still in flight for {} after drain timeout",
-                            reader.in_flight_callbacks(),
-                            entity_id
-                        );
-                        break;
-                    }
                     std::thread::sleep(std::time::Duration::from_micros(50));
                 }
             }
@@ -900,10 +912,12 @@ impl Participant {
 
     /// Iterate through all Writers in the Participant to find Writers matched with the Reader, then remove Reader Locator or Reader Proxy
     fn remove_unmatched_reader_from_writer(&self, reader_guid: Guid) -> RtpsResult<()> {
-        for writer in self.rtps_writer_store.iter_all() {
-            if let Some(stateful_writer) = writer.as_any().downcast_ref::<StatefulWriter>() {
+        // Each lease keeps its writer's in-flight count raised across the PUBLICATION_MATCHED(-1)
+        // update below, so a concurrent writer delete drains that callback.
+        for lease in self.rtps_writer_store.iter_all_callback_leases() {
+            if let Some(stateful_writer) = lease.as_any().downcast_ref::<StatefulWriter>() {
                 stateful_writer.remove_matched_reader_and_update_status(reader_guid)?;
-            } else if let Some(stateless_writer) = writer.as_any().downcast_ref::<StatelessWriter>()
+            } else if let Some(stateless_writer) = lease.as_any().downcast_ref::<StatelessWriter>()
             {
                 stateless_writer.remove_matched_reader_and_update_status(reader_guid)?;
             }

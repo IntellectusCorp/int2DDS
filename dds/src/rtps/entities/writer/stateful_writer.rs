@@ -5,7 +5,7 @@ use crate::utils::notify::{callback_handle, notify_user};
 use std::{
     fmt::Debug,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex, Weak,
     },
     thread,
@@ -87,6 +87,9 @@ pub(crate) struct StatefulWriter {
     offered_incompatible_qos_status: Arc<Mutex<OfferedIncompatibleQosStatus>>,
     offered_incompatible_type_status: Arc<Mutex<OfferedIncompatibleTypeStatus>>,
     writer_reliability_extension: WriterReliabilityExtensionQosPolicy,
+    // Callback-producing accesses currently in flight against this writer. `remove_writer`
+    // drains this to zero before returning.
+    in_flight_callbacks: AtomicUsize,
 }
 
 impl StatefulWriter {
@@ -134,6 +137,7 @@ impl StatefulWriter {
                 OfferedIncompatibleTypeStatus::default(),
             )),
             writer_reliability_extension,
+            in_flight_callbacks: AtomicUsize::new(0),
         }
     }
 
@@ -608,6 +612,18 @@ impl Debug for StatefulWriter {
 }
 
 impl Writer for StatefulWriter {
+    fn enter_callback(&self) {
+        self.in_flight_callbacks.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn exit_callback(&self) {
+        self.in_flight_callbacks.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    fn in_flight_callbacks(&self) -> usize {
+        self.in_flight_callbacks.load(Ordering::SeqCst)
+    }
+
     fn writer_cache(&self) -> Arc<Mutex<WriterHistoryCache>> {
         Arc::clone(&self.writer_cache)
     }
