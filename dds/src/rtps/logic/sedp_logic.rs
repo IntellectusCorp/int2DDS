@@ -2762,6 +2762,13 @@ impl UnicastMessageProcessor for SedpLogic {
         }
         reader_proxy.set_last_acknack_count(acknack.count);
         reader_proxy.set_last_acknack_at(now);
+
+        // RTPS 2.5 8.3.8.1.2: everything below readerSNState.base is confirmed received. Without
+        // this, max_acked_sn never moves and send_sedp_periodic_heartbeat_message never stops.
+        reader_proxy.acked_changes_set(SequenceNumber::from_i64(
+            acknack.reader_sn_state.bitmap_base().to_i64() - 1,
+        ));
+
         drop(reader_proxies_guard);
 
         let missing_sequence_numbers = acknack.reader_sn_state.extract_numbers();
