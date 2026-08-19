@@ -3,8 +3,12 @@
 //! `include/int2dds-ffi.h` is the ABI. Measured with `llvm-readobj --coff-exports` on
 //! the built cdylib: the committed header's function set and the export table are
 //! equal in both directions, nothing exported but undeclared and nothing declared but
-//! unexported (453 either way when measured, at `36e317ce`). That includes the block
-//! `build.rs` appends by hand for the macro-generated entry points cbindgen cannot see.
+//! unexported (456 either way when last measured). That includes the block `build.rs`
+//! adds for the macro-generated entry points cbindgen cannot see, which it builds from
+//! the invocation list in `src/dynamic.rs` and `src/dynamic_value.rs` rather than
+//! holding a copy of the declarations — while it did hold one, an invocation added
+//! there was exported by the library, absent from the header, and green here, because
+//! an export the header does not mention is not an export this test can see.
 //! `build.rs` regenerates the header when this crate's sources change, which is what
 //! keeps the two equal — note that a change to `csharp/` or `python/` alone does not
 //! trigger it, so what this test reads on such a branch is the committed file. Keeping
