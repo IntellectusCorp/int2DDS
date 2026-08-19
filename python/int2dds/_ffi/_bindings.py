@@ -133,6 +133,13 @@ typedef struct Int2DdsXmlTypeRegistry Int2DdsXmlTypeRegistry;
 
 typedef int32_t Int2DdsRet;
 
+typedef void (*Int2DdsEndpointDiscoveryCallback)(void *ctx,
+                                                 int32_t is_writer,
+                                                 int32_t is_alive,
+                                                 const struct Int2DdsPublicationBuiltinTopicData *pub_data,
+                                                 const struct Int2DdsSubscriptionBuiltinTopicData *sub_data,
+                                                 const uint8_t (*guid)[16]);
+
 typedef struct Int2DdsMemberInfo {
   uint32_t member_id;
   int32_t kind;
@@ -578,6 +585,10 @@ Int2DdsRet int2dds_subscription_builtin_topic_data_get_user_data(const struct In
                                                                  uintptr_t *size_out);
 
 Int2DdsRet int2dds_subscription_builtin_topic_data_destroy(struct Int2DdsSubscriptionBuiltinTopicData *data);
+
+Int2DdsRet int2dds_participant_set_endpoint_discovery_callback(const struct Int2DdsParticipant *participant,
+                                                               Int2DdsEndpointDiscoveryCallback callback,
+                                                               void *ctx);
 
 Int2DdsRet int2dds_participant_get_builtin_subscriber(const struct Int2DdsParticipant *participant,
                                                       struct Int2DdsSubscriber **out);
@@ -1780,18 +1791,18 @@ Int2DdsRet int2dds_xml_type_registry_type_name(const struct Int2DdsXmlTypeRegist
 
 void int2dds_xml_type_registry_destroy(struct Int2DdsXmlTypeRegistry *registry);
 
-Int2DdsRet int2dds_dynamic_sample_get_bool  (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, bool     *out);
-Int2DdsRet int2dds_dynamic_sample_get_i8    (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, int8_t   *out);
-Int2DdsRet int2dds_dynamic_sample_get_u8    (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, uint8_t  *out);
-Int2DdsRet int2dds_dynamic_sample_get_byte  (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, uint8_t  *out);
-Int2DdsRet int2dds_dynamic_sample_get_i16   (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, int16_t  *out);
-Int2DdsRet int2dds_dynamic_sample_get_u16   (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, uint16_t *out);
-Int2DdsRet int2dds_dynamic_sample_get_i32   (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, int32_t  *out);
-Int2DdsRet int2dds_dynamic_sample_get_u32   (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, uint32_t *out);
-Int2DdsRet int2dds_dynamic_sample_get_i64   (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, int64_t  *out);
-Int2DdsRet int2dds_dynamic_sample_get_u64   (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, uint64_t *out);
-Int2DdsRet int2dds_dynamic_sample_get_f32   (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, float    *out);
-Int2DdsRet int2dds_dynamic_sample_get_f64   (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, double   *out);
+Int2DdsRet int2dds_dynamic_sample_get_bool (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, bool     *out);
+Int2DdsRet int2dds_dynamic_sample_get_i8   (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, int8_t   *out);
+Int2DdsRet int2dds_dynamic_sample_get_u8   (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, uint8_t  *out);
+Int2DdsRet int2dds_dynamic_sample_get_byte (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, uint8_t  *out);
+Int2DdsRet int2dds_dynamic_sample_get_i16  (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, int16_t  *out);
+Int2DdsRet int2dds_dynamic_sample_get_u16  (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, uint16_t *out);
+Int2DdsRet int2dds_dynamic_sample_get_i32  (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, int32_t  *out);
+Int2DdsRet int2dds_dynamic_sample_get_u32  (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, uint32_t *out);
+Int2DdsRet int2dds_dynamic_sample_get_i64  (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, int64_t  *out);
+Int2DdsRet int2dds_dynamic_sample_get_u64  (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, uint64_t *out);
+Int2DdsRet int2dds_dynamic_sample_get_f32  (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, float    *out);
+Int2DdsRet int2dds_dynamic_sample_get_f64  (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, double   *out);
 
 Int2DdsRet int2dds_dynamic_data_get_bool (const struct Int2DdsDynamicData *data, const char *field_path, bool     *out);
 Int2DdsRet int2dds_dynamic_data_get_i8   (const struct Int2DdsDynamicData *data, const char *field_path, int8_t   *out);
