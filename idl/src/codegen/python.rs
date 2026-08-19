@@ -2,6 +2,7 @@
 ///
 /// Generates Python dataclasses with CDR serialization methods
 /// that use the int2dds Python CDR library.
+use crate::codegen::flatten_array;
 use crate::naming;
 use crate::types::*;
 
@@ -798,6 +799,41 @@ impl<'a> PyGen<'a> {
         }
     }
 
+    /// A plain value expression, with no `field(...)` wrapper. `default_value` may only
+    /// wrap the outermost one: nesting the wrapper put `dataclasses.Field` objects into
+    /// the list at runtime instead of values.
+    fn default_expr(&self, ty: &ResolvedType) -> String {
+        match ty {
+            ResolvedType::Sequence { .. } => "[]".to_string(),
+            ResolvedType::Map { .. } => "{}".to_string(),
+            ResolvedType::Struct(name) => {
+                format!("{}()", name.rsplit("::").next().unwrap_or(name))
+            }
+            ResolvedType::Array { .. } => {
+                let (dims, base) = flatten_array(ty);
+                let mut expr = self.default_expr(base);
+                // `[x] * n` repeats one object, so every row of a multidimensional array
+                // would alias the same list. Only an immutable element may be repeated.
+                let mut repeatable = !matches!(
+                    base,
+                    ResolvedType::Struct(_)
+                        | ResolvedType::Sequence { .. }
+                        | ResolvedType::Map { .. }
+                );
+                for n in dims.iter().rev() {
+                    expr = if repeatable {
+                        format!("[{}] * {}", expr, n)
+                    } else {
+                        format!("[{} for _ in range({})]", expr, n)
+                    };
+                    repeatable = false;
+                }
+                expr
+            }
+            _ => self.default_value(ty),
+        }
+    }
+
     fn default_value(&self, ty: &ResolvedType) -> String {
         match ty {
             ResolvedType::Bool => "False".to_string(),
@@ -809,9 +845,8 @@ impl<'a> PyGen<'a> {
             ResolvedType::Char => "\"\"".to_string(),
             ResolvedType::String { .. } => "\"\"".to_string(),
             ResolvedType::Sequence { .. } => "field(default_factory=list)".to_string(),
-            ResolvedType::Array { element, size } => {
-                let elem_default = self.default_value(element);
-                format!("field(default_factory=lambda: [{}] * {})", elem_default, size)
+            ResolvedType::Array { .. } => {
+                format!("field(default_factory=lambda: {})", self.default_expr(ty))
             }
             ResolvedType::Struct(name) => {
                 let cls = name.rsplit("::").next().unwrap_or(name);
@@ -1200,25 +1235,28 @@ impl<'a> PyGen<'a> {
                     self.indent -= 1;
                 }
             }
-            ResolvedType::Array { element, size } => {
-                self.line(&format!(
-                    "assert len({}) == {}, \"Array size mismatch\"",
-                    accessor, size
-                ));
-                if Self::array_needs_dheader(element) {
+            ResolvedType::Array { .. } => {
+                // One array of the base type (7.4.3.4): frame once above every dimension.
+                // Recursing per dimension nested the DHEADERs and, worse, rebound
+                // `_arr_token`, so the outer finalize closed the innermost frame.
+                let (dims, base) = flatten_array(ty);
+                let framed = Self::array_needs_dheader(base);
+                if framed {
                     self.line("_arr_token = w.write_dheader_begin() if w._xcdr2 else None");
-                    self.line(&format!("for _item in {}:", accessor));
+                }
+                let mut acc = accessor.to_string();
+                for (d, n) in dims.iter().enumerate() {
+                    self.line(&format!("assert len({}) == {}, \"Array size mismatch\"", acc, n));
+                    self.line(&format!("for _item{} in {}:", d, acc));
                     self.indent += 1;
-                    self.emit_write_field(element, "_item");
-                    self.indent -= 1;
+                    acc = format!("_item{}", d);
+                }
+                self.emit_write_field(base, &acc);
+                self.indent -= dims.len();
+                if framed {
                     self.line("if _arr_token is not None:");
                     self.indent += 1;
                     self.line("w.write_dheader_finalize(_arr_token)");
-                    self.indent -= 1;
-                } else {
-                    self.line(&format!("for _item in {}:", accessor));
-                    self.indent += 1;
-                    self.emit_write_field(element, "_item");
                     self.indent -= 1;
                 }
             }
@@ -1518,20 +1556,37 @@ impl<'a> PyGen<'a> {
                     self.indent -= 1;
                 }
             }
-            ResolvedType::Array { element, size } => {
-                let needs_dh = Self::array_needs_dheader(element);
+            ResolvedType::Array { .. } => {
+                // Mirrors the write path: one frame over every dimension. Recursing per
+                // dimension also rebound `_arr_dsize`, so the outer frame ended on the
+                // inner one's bounds.
+                let (dims, base) = flatten_array(ty);
+                let needs_dh = Self::array_needs_dheader(base);
                 if needs_dh {
                     self.line("if r._xcdr2:");
                     self.indent += 1;
                     self.line("_arr_dsize, _arr_dstart = r.read_dheader()");
                     self.indent -= 1;
                 }
+                // One accumulator per rank; each is appended to its parent as its loop ends.
                 self.line(&format!("{} = []", name));
-                self.line(&format!("for _ in range({}):", size));
-                self.indent += 1;
+                let mut lists = vec![name.to_string()];
+                for (d, n) in dims.iter().enumerate() {
+                    self.line(&format!("for _{}_i{} in range({}):", name, d, n));
+                    self.indent += 1;
+                    if d + 1 < dims.len() {
+                        let inner = format!("_{}_l{}", name, d + 1);
+                        self.line(&format!("{} = []", inner));
+                        lists.push(inner);
+                    }
+                }
                 let item_name = format!("_{}_item", name);
-                self.emit_read_field(element, &item_name);
-                self.line(&format!("{}.append({})", name, item_name));
+                self.emit_read_field(base, &item_name);
+                self.line(&format!("{}.append({})", lists[dims.len() - 1], item_name));
+                for d in (0..dims.len() - 1).rev() {
+                    self.indent -= 1;
+                    self.line(&format!("{}.append({})", lists[d], lists[d + 1]));
+                }
                 self.indent -= 1;
                 if needs_dh {
                     self.line("if r._xcdr2:");
@@ -1842,7 +1897,48 @@ mod tests {
         assert!(code.contains("w.write_dheader_finalize(_arr_token)"), "{}", code);
         assert!(code.contains("_arr_dsize, _arr_dstart = r.read_dheader()"), "{}", code);
         assert!(code.contains("r.read_dheader_end(_arr_dsize, _arr_dstart)"), "{}", code);
-        // The primitive array iterates unframed.
-        assert!(code.contains("for _item in self.nums:"), "{}", code);
+        // The primitive array iterates unframed. The index carries the dimension so that
+        // nesting cannot shadow it.
+        assert!(code.contains("for _item0 in self.nums:"), "{}", code);
+    }
+
+    #[test]
+    fn test_multidim_array_python() {
+        let defs = parse_idl(
+            r#"
+            struct Pt { long x; };
+            struct Holder {
+                long nums[2][3];
+                string words[2][3];
+                Pt pts[2];
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Holder.idl", &PythonOptions::new());
+
+        // Plain value expressions: a nested `field(...)` puts `dataclasses.Field` objects
+        // in the list, and `[x] * n` would alias one row across all of them.
+        assert!(code.contains("lambda: [[0] * 3 for _ in range(2)])"), "{}", code);
+        assert!(code.contains("lambda: [Pt() for _ in range(2)])"), "{}", code);
+
+        // One frame over both dimensions: `string words[2][3]` frames exactly as often as
+        // the flat `string words[6]`. Reusing `_arr_token` per dimension also made the
+        // outer finalize close the inner frame instead.
+        let flat = parse_idl("struct Flat { string words[6]; };").unwrap();
+        let flat = generate(&resolve(flat).unwrap(), "Flat.idl", &PythonOptions::new());
+        let words_only = parse_idl("struct Holder { string words[2][3]; };").unwrap();
+        let words_only =
+            generate(&resolve(words_only).unwrap(), "Holder.idl", &PythonOptions::new());
+        assert_eq!(
+            words_only.matches("_arr_token = w.write_dheader_begin()").count(),
+            flat.matches("_arr_token = w.write_dheader_begin()").count(),
+            "multidimensional array frames once: {}",
+            words_only
+        );
+
+        assert!(code.contains("for _item1 in _item0:"), "{}", code);
+        assert!(code.contains("_words_l1.append(_words_item)"), "{}", code);
     }
 }
