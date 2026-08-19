@@ -22,7 +22,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::rtps::common::guid::GuidPrefix;
-use crate::rtps::transport::error::TransportErrorCode;
+use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::plugin::IncomingMessage;
 use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::tcp::protocol::ControlMsg;
@@ -396,21 +396,22 @@ impl ConnectionRegistry {
     /// task pair to arrive where the frame already is. Discovery traffic is not
     /// delivered this way: the discovery listener discards messages carrying our
     /// own GUID prefix, so intra-participant matching is resolved locally
-    /// instead. Returns `false` when `logical_port` is not that port, leaving
-    /// the caller to decide what the frame was.
+    /// instead. `Ok(false)` means `logical_port` is not that port, leaving the
+    /// caller to decide what the frame was.
     ///
-    /// Blocks while the channel is full: the consumer is a separate thread, and
-    /// waiting reproduces the pacing the TCP window would otherwise impose.
+    /// Only a frame the queue refused is an error. A closed receive side is not:
+    /// the participant is already on its way down, and the caller has nothing
+    /// left to do about it.
     pub(crate) fn deliver_to_self(
         &self,
         source: SocketAddr,
         logical_port: u16,
         data: &[u8],
-    ) -> bool {
+    ) -> io::Result<bool> {
         if logical_port
             != PortManager::get_user_traffic_unicast_port(self.domain_id, self.participant_id)
         {
-            return false;
+            return Ok(false);
         }
 
         let msg = IncomingMessage { data: data.to_vec(), source };
@@ -422,28 +423,23 @@ impl ConnectionRegistry {
         // seconds at a time.
         let len = msg.data.len();
         if self.self_delivery_bytes.load(Ordering::Acquire) + len > SELF_DELIVERY_BYTE_CAP {
-            warn!(
-                "TcpSender [{}]: intra-participant queue over byte cap, dropping a {} byte frame",
+            return Err(transport_io_error(
                 TransportErrorCode::TcpChannelFull,
-                len
-            );
-            return true;
+                format!("intra-participant queue over byte cap, dropped a {len} byte frame"),
+            ));
         }
 
         match self.self_delivery_tx.try_send(msg) {
             Ok(()) => {
                 self.self_delivery_bytes.fetch_add(len, Ordering::AcqRel);
+                Ok(true)
             }
-            Err(TrySendError::Full(_)) => {
-                warn!(
-                    "TcpSender [{}]: intra-participant queue over count backstop, dropping a {} byte frame",
-                    TransportErrorCode::TcpChannelFull,
-                    len
-                );
-            }
-            Err(TrySendError::Disconnected(_)) => {}
+            Err(TrySendError::Full(_)) => Err(transport_io_error(
+                TransportErrorCode::TcpChannelFull,
+                format!("intra-participant queue over count backstop, dropped a {len} byte frame"),
+            )),
+            Err(TrySendError::Disconnected(_)) => Ok(true),
         }
-        true
     }
 
     /// Register a freshly-accepted inbound connection.
@@ -763,7 +759,9 @@ mod tests {
         let caller = Arc::clone(&registry);
         std::thread::spawn(move || {
             for i in 0..RESPONSES {
-                assert!(caller.deliver_to_self(source, logical_port, &[i as u8]));
+                assert!(caller
+                    .deliver_to_self(source, logical_port, &[i as u8])
+                    .expect("the queue refused a frame"));
             }
             let _ = done_tx.send(());
         });
