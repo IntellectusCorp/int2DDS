@@ -1031,6 +1031,15 @@ impl Participant {
             }
         }
 
+        // The peer is gone, so it will never answer to release what is charged against it, and
+        // the entry would sit there until the backstop -- or for good, since a peer that
+        // reconnects comes back under a new prefix.
+        if let Some(user_logic_arc) = self.user_logic_if_set() {
+            if let Some(user_logic) = user_logic_arc.as_ref() {
+                user_logic.forget_send_credit_for_participant(remote_prefix);
+            }
+        }
+
         // Close transport connections to the now-unmatched peer so its per-peer
         // resources are released promptly, rather than lingering until OS keepalive.
         if let (Some(transport), Some(locators)) = (self.transport.get(), peer_locators) {
