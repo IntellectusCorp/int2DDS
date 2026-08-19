@@ -27,17 +27,38 @@
 //! a clean sweep. Writing this test, `static extern` missed every
 //! `static unsafe extern` declaration and reported 273 of 441.
 //!
-//! What this cannot catch: it compares names, so a declaration with the wrong arity
-//! or the wrong parameter types passes every check here and then corrupts the stack
-//! at the call. That is the widest gap between this being green and a binding being
-//! right, and closing it needs the header's signatures parsed and matched against the
-//! binding's, not just its identifiers. Python no longer sits in that gap — its `cdef`
-//! is generated from this header by `python/tools/generate_bindings.py`, so every
-//! signature is the header's, and the empty unbound list below is what fails when the
-//! generated file goes stale. C# still does: a `[DllImport]` is a marshalling decision
-//! the header does not carry, so it stays hand-written and name-checked only.
+//! What the function comparison cannot catch: it compares names, so a declaration
+//! with the wrong arity or the wrong parameter types passes every check here and then
+//! corrupts the stack at the call. That is the widest gap between this being green and
+//! a binding being right, and closing it needs the header's signatures parsed and
+//! matched against the binding's, not just its identifiers. Python no longer sits in
+//! that gap — its `cdef` is generated from this header by
+//! `python/tools/generate_bindings.py`, so every signature is the header's, and the
+//! empty unbound list below is what fails when the generated file goes stale. C# still
+//! does: a `[DllImport]` is a marshalling decision the header does not carry, so it
+//! stays hand-written and name-checked only.
+//!
+//! The header's structs and enums are compared field by field instead, and only
+//! against C#, for the same reason: Python's are the header's, so comparing them
+//! would only restate that the generator ran. A struct is the harder half to get
+//! right by hand, because nothing about a wrong field is visible at the call — every
+//! field's position depends on the width of the ones before it, so one type off by a
+//! byte moves the rest, and the caller reads or writes a neighbour with no fault to
+//! show for it. Two ways to be wrong that compile cleanly and are checked here: a
+//! C# array field without `fixed`, which marshals as a reference rather than as the
+//! inline storage the header declares, and a `bool` without
+//! `[MarshalAs(UnmanagedType.U1)]`, which marshals as the 4-byte Win32 `BOOL`. The
+//! enum comparison is what found `QosPolicyId` missing its last enumerator, a value
+//! the library can return and C# could not name.
+//!
+//! What that comparison cannot catch, and it is the same shape of gap as the
+//! function names: it reads declaration text through the mapping table below, so the
+//! table is the oracle. A wrong entry in it would make this test confidently wrong,
+//! and nothing here would notice — C#'s marshalled layout is never measured, only
+//! predicted. The header's own layout does have an independent oracle, a C compiler,
+//! which is how the enum widths were checked; C# has none.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// Exports with no C# `[DllImport]`, and every one of them is deliberate: C# has no
@@ -246,6 +267,337 @@ fn assert_unbound_is(binding: &str, declared: &BTreeSet<String>, recorded: &[&st
         "these are recorded as unbound, but {binding} declares them now — or the export is \
          gone. Either way, strike them off the list at the top of this file: {stale:#?}"
     );
+}
+
+// ── The header's composite types against the C# binding ─────────────────────
+
+/// Header composites with no C# declaration, and there are none: all 17 are
+/// declared, 16 prefixed `Native` and `Int2DdsMemberInfo` under the header's own
+/// name. An entry here would be a struct the ABI passes that C# cannot see.
+const UNDECLARED_CSHARP: &[&str] = &[];
+
+/// What each header scalar has to be spelled as in C#. Absent means fail, not
+/// skip: how wide a field marshals is the decision `[StructLayout]` exists to
+/// make, and this test cannot infer it from the header. A new field of an unlisted
+/// type should stop here rather than pass unchecked.
+const CSHARP_SCALARS: &[(&str, &str)] =
+    &[("bool", "bool"), ("int32_t", "int"), ("uint8_t", "byte"), ("uint32_t", "uint")];
+
+/// The C# names a header type may appear under. Three spellings are in use and
+/// there is no rule that picks one, so all three are accepted.
+fn csharp_names(header_name: &str) -> Vec<String> {
+    let bare = header_name.strip_prefix("Int2Dds").unwrap_or(header_name);
+    vec![format!("Native{bare}"), header_name.to_owned(), bare.to_owned()]
+}
+
+fn pascal(snake: &str) -> String {
+    snake
+        .split('_')
+        .map(|word| match word.chars().next() {
+            Some(first) => first.to_ascii_uppercase().to_string() + &word[first.len_utf8()..],
+            None => String::new(),
+        })
+        .collect()
+}
+
+/// One `keyword NAME [: underlying] { body }`, as the underlying type it names --
+/// which is the whole point for an enum -- and its body.
+struct Composite {
+    underlying: Option<String>,
+    body: String,
+}
+
+/// Composites by name. A declaration with no body is skipped: that is an opaque
+/// handle, and having no layout to compare is the point of one.
+///
+/// The scan steps over preprocessor lines between the name and the body, because
+/// that is where an explicitly sized enum puts its width: cbindgen guards the
+/// `: int32_t` form for the languages that have it and emits a `typedef` of the
+/// same width for the ones that do not.
+fn composites(src: &[u8], keyword: &[u8]) -> BTreeMap<String, Composite> {
+    let mut out = BTreeMap::new();
+    let mut i = 0;
+    while let Some(start) = find_from(src, keyword, i) {
+        i = start + keyword.len();
+        if start > 0 && is_ident(src[start - 1]) {
+            continue;
+        }
+        let mut cursor = i;
+        while cursor < src.len() && src[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        let name_start = cursor;
+        while cursor < src.len() && is_ident(src[cursor]) {
+            cursor += 1;
+        }
+        let name = String::from_utf8_lossy(&src[name_start..cursor]).into_owned();
+
+        let mut underlying = None;
+        loop {
+            while cursor < src.len() && src[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            match src.get(cursor) {
+                Some(b'#') => cursor = find_from(src, b"\n", cursor).unwrap_or(src.len()),
+                Some(b':') if underlying.is_none() => {
+                    cursor += 1;
+                    while cursor < src.len() && src[cursor].is_ascii_whitespace() {
+                        cursor += 1;
+                    }
+                    let from = cursor;
+                    while cursor < src.len() && is_ident(src[cursor]) {
+                        cursor += 1;
+                    }
+                    underlying = Some(String::from_utf8_lossy(&src[from..cursor]).into_owned());
+                }
+                _ => break,
+            }
+        }
+        if src.get(cursor) != Some(&b'{') {
+            continue;
+        }
+
+        let open = cursor;
+        let mut depth = 0;
+        while cursor < src.len() {
+            match src[cursor] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            cursor += 1;
+        }
+        let body = String::from_utf8_lossy(&src[open + 1..cursor]).into_owned();
+        out.insert(name, Composite { underlying, body });
+        i = cursor;
+    }
+    out
+}
+
+/// A declaration split into its type, its name and any array extent, with runs of
+/// whitespace collapsed. `None` for the empty tail after the last separator.
+fn declaration_parts(decl: &str) -> Option<(String, String, Option<String>)> {
+    let decl = decl.trim();
+    if decl.is_empty() {
+        return None;
+    }
+    let (head, extent) = match decl.split_once('[') {
+        Some((head, rest)) => (head, Some(rest.trim_end_matches(']').trim().to_owned())),
+        None => (decl, None),
+    };
+    let mut words: Vec<&str> = head.split_whitespace().collect();
+    let name = words.pop()?.to_owned();
+    Some((words.join(" "), name, extent))
+}
+
+/// The C# declaration a header member requires, as a string to compare against
+/// the one C# actually has. `enums` resolves a field whose type is one of the
+/// header's enums; it is passed in rather than looked up here so that both tests
+/// resolve an enum's C# name from the same reading of the sources.
+fn required_csharp(
+    ty: &str,
+    name: &str,
+    extent: Option<&str>,
+    enums: &BTreeMap<String, Composite>,
+) -> String {
+    let name = pascal(name);
+    // A pointer is a pointer: C# marshals every one as `IntPtr`, and what it
+    // points at is no part of the struct's layout.
+    if ty == "Int2DdsUserContext" || (ty.starts_with("Int2DdsOn") && ty.ends_with("Callback")) {
+        return format!("IntPtr {name}");
+    }
+    let Some(cs) = CSHARP_SCALARS.iter().find(|(c, _)| *c == ty).map(|(_, cs)| *cs) else {
+        // Not a scalar and not a pointer, so it is a composite named in a field --
+        // an enum -- and it is spelled with whichever of its accepted names C#
+        // declares. Whether that declaration agrees with the header is the enum
+        // test's job; all this needs is the name.
+        let Some(cs) = csharp_name_of(ty, enums) else {
+            panic!(
+                "{ty} is a field of a header struct, and is neither a scalar this test knows how \
+                 to require a width for nor an enum C# declares. Add it to CSHARP_SCALARS with \
+                 the C# type it marshals as -- leaving it unchecked would let the field's width \
+                 drift, and every field after it moves when it does"
+            )
+        };
+        return format!("{cs} {name}");
+    };
+    match extent {
+        // Inline storage, which in C# is `fixed` and nothing else -- a plain
+        // `byte[]` field marshals as a reference and moves every field after it.
+        Some(extent) => format!("fixed {cs} {name}[{extent}]"),
+        // C# marshals a bare `bool` in a struct as the 4-byte Win32 `BOOL`, so the
+        // attribute is not decoration: without it the field is 3 bytes too wide.
+        None if ty == "bool" => format!("[MarshalAs(UnmanagedType.U1)] {cs} {name}"),
+        None => format!("{cs} {name}"),
+    }
+}
+
+/// The C# side of the same comparison: members with their C#-only modifiers
+/// dropped, but `fixed` and any attribute kept, because both change the layout.
+fn declared_csharp(body: &str) -> Vec<String> {
+    body.split(';')
+        .filter_map(|member| {
+            let mut attributes = String::new();
+            let mut rest = member.trim();
+            while let Some(after) = rest.strip_prefix('[') {
+                let (attribute, tail) = after.split_once(']')?;
+                attributes.push_str(&format!(
+                    "[{}] ",
+                    attribute.split_whitespace().collect::<Vec<_>>().join("")
+                ));
+                rest = tail.trim();
+            }
+            let kept: Vec<&str> = rest
+                .split_whitespace()
+                .filter(|word| {
+                    !matches!(*word, "public" | "internal" | "private" | "unsafe" | "readonly")
+                })
+                .collect();
+            let (ty, name, extent) = declaration_parts(&kept.join(" "))?;
+            Some(match extent {
+                Some(extent) => format!("{attributes}{ty} {name}[{extent}]"),
+                None => format!("{attributes}{ty} {name}"),
+            })
+        })
+        .collect()
+}
+
+/// Every `enum` body reduced to `(name, value)`, with C's implicit numbering
+/// applied so that an enumerator without `=` is still compared.
+fn enumerators(body: &str) -> Vec<(String, i64)> {
+    let mut next = 0;
+    body.split(',')
+        .filter_map(|entry| {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                return None;
+            }
+            let (name, value) = match entry.split_once('=') {
+                Some((name, value)) => (
+                    name.trim(),
+                    value.trim().parse().unwrap_or_else(|e| {
+                        panic!("`{entry}` does not give a decimal value this test can read: {e}")
+                    }),
+                ),
+                None => (entry, next),
+            };
+            next = value + 1;
+            Some((name.to_owned(), value))
+        })
+        .collect()
+}
+
+fn header_composites(keyword: &[u8]) -> BTreeMap<String, Composite> {
+    composites(&without_comments(&read(&repo_root().join("ffi/include/int2dds-ffi.h"))), keyword)
+}
+
+fn csharp_composites(keyword: &[u8]) -> BTreeMap<String, Composite> {
+    let mut sources = Vec::new();
+    cs_sources(&repo_root().join("csharp/src/Int2Dds"), &mut sources);
+    sources.sort();
+    let mut out = BTreeMap::new();
+    for path in &sources {
+        out.extend(composites(&without_comments(&read(path)), keyword));
+    }
+    out
+}
+
+/// Which of a header composite's accepted names C# declares it under.
+fn csharp_name_of<'a>(
+    header_name: &str,
+    declared: &'a BTreeMap<String, Composite>,
+) -> Option<&'a String> {
+    csharp_names(header_name).iter().find_map(|name| declared.get_key_value(name)).map(|(k, _)| k)
+}
+
+fn assert_declared_or_recorded(
+    header: &BTreeMap<String, Composite>,
+    declared: &BTreeMap<String, Composite>,
+) {
+    let missing: Vec<&str> = header
+        .keys()
+        .filter(|name| csharp_name_of(name, declared).is_none())
+        .map(String::as_str)
+        .filter(|name| !UNDECLARED_CSHARP.contains(name))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "the C# binding declares no counterpart for these header composites. Declare them, \
+         or record them in the list at the top of this file: {missing:#?}"
+    );
+}
+
+#[test]
+fn the_csharp_structs_have_the_header_layout() {
+    let header = header_composites(b"typedef struct");
+    let declared = csharp_composites(b"struct");
+    let enums = csharp_composites(b"enum");
+    assert_eq!(
+        header.len(),
+        17,
+        "the header's field-bearing struct count moved. That is not a failure by itself, but \
+         a struct this test never saw is one it never checked"
+    );
+    assert_declared_or_recorded(&header, &declared);
+
+    for (name, composite) in &header {
+        let Some(csharp) = csharp_name_of(name, &declared).map(|name| &declared[name]) else {
+            continue;
+        };
+        let required: Vec<String> = composite
+            .body
+            .split(';')
+            .filter_map(declaration_parts)
+            .map(|(ty, field, extent)| required_csharp(&ty, &field, extent.as_deref(), &enums))
+            .collect();
+        assert_eq!(
+            declared_csharp(&csharp.body),
+            required,
+            "the C# declaration of {name} does not have the header's layout. Every field's \
+             position depends on the width of the ones before it, so one wrong type silently \
+             moves the rest -- the C# side is the left column"
+        );
+    }
+}
+
+#[test]
+fn the_csharp_enums_have_the_header_enumerators() {
+    let header = header_composites(b"enum");
+    let declared = csharp_composites(b"enum");
+    assert_eq!(
+        header.len(),
+        2,
+        "the header's enum count moved. That is not a failure by itself, but an enum this test \
+         never saw is one it never checked"
+    );
+    assert_declared_or_recorded(&header, &declared);
+
+    for (name, composite) in &header {
+        let Some(csharp) = csharp_name_of(name, &declared).map(|name| &declared[name]) else {
+            continue;
+        };
+        // C# spells an unstated underlying type `int`; the header states its own,
+        // because these enums are struct fields and their width is part of a layout.
+        let header_width = composite.underlying.as_deref().unwrap_or("int");
+        let width = csharp.underlying.as_deref().unwrap_or("int");
+        assert_eq!(
+            Some(width),
+            CSHARP_SCALARS.iter().find(|(c, _)| *c == header_width).map(|(_, cs)| *cs),
+            "the C# declaration of {name} is {width}-wide where the header says {header_width}"
+        );
+        assert_eq!(
+            enumerators(&csharp.body),
+            enumerators(&composite.body),
+            "the C# declaration of {name} does not have the header's enumerators. A value the \
+             library returns and C# cannot name arrives in managed code as a number no `switch` \
+             matches -- the C# side is the left column"
+        );
+    }
 }
 
 #[test]

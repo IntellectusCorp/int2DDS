@@ -210,8 +210,24 @@
 
 /**
  * C-compatible QoS policy ID enum
+ *
+ * `i32` rather than `C` because this enum is a *field* of two structs the caller
+ * allocates, so its width is part of their layout. The two reprs are the same on
+ * the Rust side -- rustc has no `-fshort-enums` and lays a `repr(C)` enum out as
+ * `i32` on every supported target -- but they are not the same in the header.
+ * `repr(C)` emits a bare C `enum`, whose width a C compiler may shrink to the
+ * values present: compiled for `armv7a-none-eabi` with `-fshort-enums`, the
+ * header this used to generate made it one byte, which moved
+ * `Int2DdsSampleRejectedStatus::last_instance_handle` off the offset the library
+ * writes it at. `repr(i32)` makes cbindgen state the width instead (`enum ... :
+ * int32_t` where the language has that, `typedef int32_t` where it does not), and
+ * that same compile then agrees.
  */
-typedef enum Int2DdsQosPolicyId {
+enum Int2DdsQosPolicyId
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : int32_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
   Invalid = 0,
   UserData = 1,
   Durability = 2,
@@ -238,17 +254,37 @@ typedef enum Int2DdsQosPolicyId {
   DataRepresentation = 23,
   TypeConsistencyEnforcement = 24,
   Property = 25,
-} Int2DdsQosPolicyId;
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum Int2DdsQosPolicyId Int2DdsQosPolicyId;
+#else
+typedef int32_t Int2DdsQosPolicyId;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
 
 /**
  * C-compatible sample rejected status kind
+ *
+ * `i32` rather than `C` for the same reason as [`Int2DdsQosPolicyId`].
  */
-typedef enum Int2DdsSampleRejectedStatusKind {
+enum Int2DdsSampleRejectedStatusKind
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : int32_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
   NotRejected = 0,
   RejectedByInstancesLimit = 1,
   RejectedBySamplesLimit = 2,
   RejectedBySamplesPerInstanceLimit = 3,
-} Int2DdsSampleRejectedStatusKind;
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum Int2DdsSampleRejectedStatusKind Int2DdsSampleRejectedStatusKind;
+#else
+typedef int32_t Int2DdsSampleRejectedStatusKind;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
 
 /**
  * Generic condition handle for use with WaitSet
@@ -525,7 +561,7 @@ typedef struct Int2DdsOfferedIncompatibleQosStatus {
   /**
    * ID of the last incompatible policy
    */
-  enum Int2DdsQosPolicyId last_policy_id;
+  Int2DdsQosPolicyId last_policy_id;
   /**
    * Count of policies (always 0 for now, policies list not exposed)
    */
@@ -627,7 +663,7 @@ typedef struct Int2DdsSampleRejectedStatus {
   /**
    * Reason for last sample rejection
    */
-  enum Int2DdsSampleRejectedStatusKind last_reason;
+  Int2DdsSampleRejectedStatusKind last_reason;
   /**
    * Handle of the instance for the last rejected sample
    */
@@ -705,7 +741,7 @@ typedef struct Int2DdsRequestedIncompatibleQosStatus {
   /**
    * ID of the last incompatible policy
    */
-  enum Int2DdsQosPolicyId last_policy_id;
+  Int2DdsQosPolicyId last_policy_id;
   /**
    * Count of policies (always 0 for now, policies list not exposed)
    */
