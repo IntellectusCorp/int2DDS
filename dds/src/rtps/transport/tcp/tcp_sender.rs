@@ -570,7 +570,7 @@ impl TcpSender {
         // Our own listener: user data goes to the receive side in-process, and
         // anything else (an SPDP announcement that came back to us) is dropped.
         if self.is_self_connection(&addr) {
-            self.shared.deliver_to_self(addr, logical_port, data);
+            self.shared.deliver_to_self(addr, logical_port, data)?;
             return Ok(());
         }
 
