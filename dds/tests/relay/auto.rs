@@ -3,11 +3,9 @@
 //! AutoRelay polls SEDP discovery on both LocalNode and RemoteNode and
 //! creates TopicRelays on the fly when a non-builtin publication appears.
 
-mod common;
-
 use std::{sync::Arc, thread::sleep};
 
-use common::*;
+use crate::common::*;
 use int2dds::{
     common::instance_handle::InstanceHandle,
     core::time::Duration,
