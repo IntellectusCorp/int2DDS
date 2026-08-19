@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-use flume::Sender;
+use flume::{Receiver, Sender, TrySendError};
 use log::{debug, warn};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -26,7 +26,6 @@ use crate::rtps::transport::error::TransportErrorCode;
 use crate::rtps::transport::plugin::IncomingMessage;
 use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::tcp::protocol::ControlMsg;
-use crate::rtps::transport::tcp::self_delivery;
 
 mod handlers;
 
@@ -206,11 +205,12 @@ pub(crate) fn apply_socket_tuning(tcp: &tokio::net::TcpStream, tuning: &TcpSocke
     apply_keepalive(tcp, tuning.keepalive);
 }
 
-/// How long an intra-participant frame waits for room on the inbound channel
-/// before it is refused. A liveness backstop, not a pacing knob: the wait is
-/// what paces the caller, and a healthy consumer clears the channel orders of
-/// magnitude faster than this.
-const SELF_DELIVERY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Bounds on the queue holding self-addressed frames until the self-deliver-task moves them
+/// onto the inbound channel. The byte cap is the one that bounds memory: a
+/// count alone lets a queue of large frames grow without limit. Reaching either
+/// means the decoding thread has stopped, and dropping is the right answer.
+const SELF_DELIVERY_BYTE_CAP: usize = 64 * 1024 * 1024;
+const SELF_DELIVERY_COUNT_BACKSTOP: usize = 65_536;
 
 /// First reconnect-backoff delay after a failed outbound connect.
 pub(crate) const BACKOFF_BASE: Duration = Duration::from_millis(500);
@@ -250,6 +250,15 @@ pub(crate) struct ConnectionRegistry {
 
     discovery_tx: Sender<IncomingMessage>,
     user_data_tx: Sender<IncomingMessage>,
+
+    /// Self-addressed frames raised on a thread other than the one decoding
+    /// RTPS messages. They cannot go straight onto `user_data_tx`: its single
+    /// slot is cleared only by that decoding thread, so a sender waiting there
+    /// pays out a whole decode — and the thread creating entities pays it
+    /// inline, once per local endpoint it matches.
+    self_delivery_tx: Sender<IncomingMessage>,
+    self_delivery_rx: Mutex<Option<Receiver<IncomingMessage>>>,
+    self_delivery_bytes: Arc<AtomicUsize>,
 }
 
 impl ConnectionRegistry {
@@ -261,6 +270,8 @@ impl ConnectionRegistry {
         discovery_tx: Sender<IncomingMessage>,
         user_data_tx: Sender<IncomingMessage>,
     ) -> Self {
+        let (self_delivery_tx, self_delivery_rx) = flume::bounded(SELF_DELIVERY_COUNT_BACKSTOP);
+
         Self {
             domain_id,
             participant_id,
@@ -275,7 +286,43 @@ impl ConnectionRegistry {
             next_conn_id: AtomicUsize::new(0),
             discovery_tx,
             user_data_tx,
+            self_delivery_tx,
+            self_delivery_rx: Mutex::new(Some(self_delivery_rx)),
+            self_delivery_bytes: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// Move self-addressed frames onto the inbound channel from a task of their
+    /// own, so no sender thread ever waits for that channel's single slot. The
+    /// wait still happens — it is what paces a writer against a busy reader —
+    /// but it happens here, where nothing else is held up by it.
+    ///
+    /// Returns immediately after the first call: the receiver is taken.
+    pub(crate) fn spawn_self_delivery_task(
+        self: &Arc<Self>,
+        cancel: CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
+        let shared = Arc::clone(self);
+        let receiver = shared.self_delivery_rx.lock().expect("self_delivery_rx lock").take();
+
+        tokio::spawn(async move {
+            let Some(receiver) = receiver else { return };
+
+            loop {
+                let msg = tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    received = receiver.recv_async() => match received {
+                        Ok(msg) => msg,
+                        Err(_) => break,
+                    },
+                };
+
+                shared.self_delivery_bytes.fetch_sub(msg.data.len(), Ordering::AcqRel);
+                if shared.user_data_tx.send_async(msg).await.is_err() {
+                    break;
+                }
+            }
+        })
     }
 
     // ── basic counters ───────────────────────────────────────────────────────
@@ -368,22 +415,33 @@ impl ConnectionRegistry {
 
         let msg = IncomingMessage { data: data.to_vec(), source };
 
-        // Raised on the thread that decodes RTPS messages, this frame goes to
-        // that thread's own queue. It is the channel's only consumer, so putting
-        // the frame on the channel here would be waiting on itself.
-        let Some(msg) = self_delivery::push(msg) else {
-            return true;
-        };
-
-        // Every other thread keeps the channel's backpressure — pacing the
-        // application's write path is what it is for — bounded only so a wedged
-        // consumer surfaces as a refused frame instead of a stopped thread.
-        if let Err(e) = self.user_data_tx.send_timeout(msg, SELF_DELIVERY_TIMEOUT) {
+        // Hand the frame to the self-deliver-task and return. Waiting for the inbound
+        // channel here would put a decode on the caller's critical path — and
+        // the thread that decodes is itself a caller, so it would be waiting on
+        // itself. Either way it is how entity creation came to stall for
+        // seconds at a time.
+        let len = msg.data.len();
+        if self.self_delivery_bytes.load(Ordering::Acquire) + len > SELF_DELIVERY_BYTE_CAP {
             warn!(
-                "TcpSender [{}]: Failed to route intra-participant user data: {:?}",
+                "TcpSender [{}]: intra-participant queue over byte cap, dropping a {} byte frame",
                 TransportErrorCode::TcpChannelFull,
-                e
+                len
             );
+            return true;
+        }
+
+        match self.self_delivery_tx.try_send(msg) {
+            Ok(()) => {
+                self.self_delivery_bytes.fetch_add(len, Ordering::AcqRel);
+            }
+            Err(TrySendError::Full(_)) => {
+                warn!(
+                    "TcpSender [{}]: intra-participant queue over count backstop, dropping a {} byte frame",
+                    TransportErrorCode::TcpChannelFull,
+                    len
+                );
+            }
+            Err(TrySendError::Disconnected(_)) => {}
         }
         true
     }
@@ -681,56 +739,49 @@ mod tests {
 
     /// One handled message owes the local endpoints more than one response --
     /// two matched readers, or a repair round -- and the thread that handles it
-    /// is the inbound channel's only consumer. Routing those responses through
-    /// the channel parks that thread on a queue nobody else can drain, so they
-    /// are queued aside and settled in order once the message is done.
-    #[test]
-    fn responses_a_handled_message_owes_never_reach_the_inbound_channel() {
+    /// is the inbound channel's only consumer. None of those responses may make
+    /// any caller wait: the channel starts full here, so a caller that queued
+    /// through it would not come back. The deliver-task does the waiting, and the
+    /// frames arrive in the order they were raised once the slot frees.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn self_addressed_frames_never_park_the_thread_that_raises_them() {
         const DOMAIN_ID: u32 = 951;
         const RESPONSES: usize = 8;
 
         let (registry, u_rx) = registry_with_a_stalled_inbound_channel(DOMAIN_ID);
         let logical_port = PortManager::get_user_traffic_unicast_port(DOMAIN_ID, 0);
         let source: SocketAddr = "127.0.0.1:7400".parse().unwrap();
+
+        registry
+            .user_data_tx
+            .send(IncomingMessage { data: b"remote".to_vec(), source })
+            .expect("occupy the only slot");
+
+        let _task = registry.spawn_self_delivery_task(CancellationToken::new());
+
         let (done_tx, done_rx) = flume::bounded(1);
-
+        let caller = Arc::clone(&registry);
         std::thread::spawn(move || {
-            self_delivery::install();
             for i in 0..RESPONSES {
-                assert!(registry.deliver_to_self(source, logical_port, &[i as u8]));
+                assert!(caller.deliver_to_self(source, logical_port, &[i as u8]));
             }
-
-            let mut settled = Vec::new();
-            self_delivery::drain(|msg| settled.push(msg.data));
-            let _ = done_tx.send(settled);
+            let _ = done_tx.send(());
         });
 
-        let settled = done_rx
+        done_rx
             .recv_timeout(Duration::from_secs(5))
-            .expect("the handling thread never finished: it parked on its own inbound channel");
+            .expect("the caller parked on the inbound channel instead of handing off");
+
+        assert_eq!(u_rx.recv().expect("remote frame").data, b"remote");
+
+        let mut settled = Vec::with_capacity(RESPONSES);
+        for _ in 0..RESPONSES {
+            let msg = u_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the deliver-task never delivered the frame");
+            settled.push(msg.data);
+        }
         assert_eq!(settled, (0..RESPONSES).map(|i| vec![i as u8]).collect::<Vec<_>>());
-        assert!(u_rx.is_empty());
-    }
-
-    /// The channel keeps its backpressure for every other thread: a frame raised
-    /// outside message handling still goes through it, which is what paces the
-    /// application's write path.
-    #[test]
-    fn a_frame_raised_outside_message_handling_still_uses_the_channel() {
-        const DOMAIN_ID: u32 = 952;
-
-        let (registry, u_rx) = registry_with_a_stalled_inbound_channel(DOMAIN_ID);
-        let logical_port = PortManager::get_user_traffic_unicast_port(DOMAIN_ID, 0);
-        let source: SocketAddr = "127.0.0.1:7400".parse().unwrap();
-
-        std::thread::spawn(move || {
-            assert!(registry.deliver_to_self(source, logical_port, b"rtps"));
-        })
-        .join()
-        .expect("delivery thread panicked");
-
-        let msg = u_rx.try_recv().expect("the frame should have gone through the channel");
-        assert_eq!(msg.data, b"rtps");
     }
 
     /// `PeerConnectionGroup` tracks occupied roles and reports `has_data_conns`.
