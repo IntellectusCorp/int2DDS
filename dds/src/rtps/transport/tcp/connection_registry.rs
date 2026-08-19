@@ -330,6 +330,13 @@ impl ConnectionRegistry {
                     break;
                 }
             }
+
+            // Nothing still queued will ever be delivered, so the budget it
+            // holds is released here rather than left claimed for a queue no
+            // one reads.
+            for msg in receiver.drain() {
+                shared.self_delivery_bytes.fetch_sub(msg.data.len(), Ordering::AcqRel);
+            }
         })
     }
 
@@ -805,6 +812,121 @@ mod tests {
             settled.push(msg.data);
         }
         assert_eq!(settled, (0..RESPONSES).map(|i| vec![i as u8]).collect::<Vec<_>>());
+    }
+
+    /// The byte cap is one budget shared by every sender, so what the queue
+    /// accepts stays under it however many senders claim at the same moment.
+    #[test]
+    fn concurrent_senders_never_claim_past_the_byte_cap() {
+        const DOMAIN_ID: u32 = 953;
+        const SENDERS: usize = 8;
+        const FRAME_LEN: usize = 4 * 1024 * 1024;
+        const FRAMES_EACH: usize = 4;
+
+        let (registry, _u_rx) = registry_with_a_stalled_inbound_channel(DOMAIN_ID);
+        let logical_port = PortManager::get_user_traffic_unicast_port(DOMAIN_ID, 0);
+        let source: SocketAddr = "127.0.0.1:7400".parse().unwrap();
+
+        // Nothing drains the queue: no deliver-task is spawned, so every claim
+        // that succeeds stays claimed and the total is the accepted total.
+        let accepted: usize = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..SENDERS)
+                .map(|_| {
+                    let registry = Arc::clone(&registry);
+                    scope.spawn(move || {
+                        let frame = vec![0u8; FRAME_LEN];
+                        (0..FRAMES_EACH)
+                            .filter(|_| {
+                                registry.deliver_to_self(source, logical_port, &frame).is_ok()
+                            })
+                            .count()
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().expect("sender panicked")).sum()
+        });
+
+        assert_eq!(
+            accepted * FRAME_LEN,
+            SELF_DELIVERY_BYTE_CAP,
+            "senders together claimed past the cap"
+        );
+        assert_eq!(registry.self_delivery_bytes.load(Ordering::Acquire), SELF_DELIVERY_BYTE_CAP);
+    }
+
+    /// The wait for the inbound channel has no bound of its own, and shutdown
+    /// waits on this task -- so cancelling has to break the wait itself.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancelling_ends_the_task_parked_on_a_full_inbound_channel() {
+        const DOMAIN_ID: u32 = 954;
+
+        let (registry, _u_rx) = registry_with_a_stalled_inbound_channel(DOMAIN_ID);
+        let logical_port = PortManager::get_user_traffic_unicast_port(DOMAIN_ID, 0);
+        let source: SocketAddr = "127.0.0.1:7400".parse().unwrap();
+
+        registry
+            .user_data_tx
+            .send(IncomingMessage { data: b"remote".to_vec(), source })
+            .expect("occupy the only slot");
+
+        let cancel = CancellationToken::new();
+        let task = registry.spawn_self_delivery_task(cancel.clone());
+        registry.deliver_to_self(source, logical_port, b"parked").expect("the queue refused it");
+
+        // The budget clears when the task takes the frame off the queue, which
+        // is the moment it is parked on the channel with nowhere to put it.
+        while registry.self_delivery_bytes.load(Ordering::Acquire) != 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("the task stayed parked on the channel after being cancelled")
+            .expect("the task panicked");
+    }
+
+    /// A cancelled task leaves frames behind. Their bytes go back to the budget
+    /// rather than staying claimed for a queue nobody will read again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancelled_task_releases_the_budget_its_backlog_held() {
+        const DOMAIN_ID: u32 = 955;
+        const BACKLOG: usize = 5;
+
+        let (registry, _u_rx) = registry_with_a_stalled_inbound_channel(DOMAIN_ID);
+        let logical_port = PortManager::get_user_traffic_unicast_port(DOMAIN_ID, 0);
+        let source: SocketAddr = "127.0.0.1:7400".parse().unwrap();
+
+        registry
+            .user_data_tx
+            .send(IncomingMessage { data: b"remote".to_vec(), source })
+            .expect("occupy the only slot");
+
+        let cancel = CancellationToken::new();
+        let task = registry.spawn_self_delivery_task(cancel.clone());
+        for i in 0..BACKLOG {
+            registry
+                .deliver_to_self(source, logical_port, &[i as u8])
+                .expect("the queue refused a frame");
+        }
+
+        // Wait until the task is parked on the channel, so the frames still
+        // queued behind it are a real backlog when the cancel lands.
+        while registry.self_delivery_bytes.load(Ordering::Acquire) > BACKLOG - 1 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("the task did not end")
+            .expect("the task panicked");
+
+        assert_eq!(
+            registry.self_delivery_bytes.load(Ordering::Acquire),
+            0,
+            "the backlog kept its claim on the budget"
+        );
     }
 
     /// `PeerConnectionGroup` tracks occupied roles and reports `has_data_conns`.
