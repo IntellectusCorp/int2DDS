@@ -5,7 +5,10 @@ use crate::utils::notify::{callback_handle, notify_user};
 use std::{
     any::Any,
     fmt::Debug,
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, Weak,
+    },
 };
 
 use log::{debug, error};
@@ -68,6 +71,9 @@ pub(crate) struct StatefulReader {
     subscription_matched_status: Arc<Mutex<SubscriptionMatchedStatus>>,
     requested_incompatible_qos_status: Arc<Mutex<RequestedIncompatibleQosStatus>>,
     requested_incompatible_type_status: Arc<Mutex<RequestedIncompatibleTypeStatus>>,
+    // Callback-producing accesses currently in flight against this reader. `remove_reader`
+    // drains this to zero before returning.
+    in_flight_callbacks: AtomicUsize,
 }
 
 impl StatefulReader {
@@ -110,6 +116,7 @@ impl StatefulReader {
             requested_incompatible_type_status: Arc::new(Mutex::new(
                 RequestedIncompatibleTypeStatus::default(),
             )),
+            in_flight_callbacks: AtomicUsize::new(0),
         }
     }
 
@@ -325,6 +332,18 @@ impl Debug for StatefulReader {
 }
 
 impl Reader for StatefulReader {
+    fn enter_callback(&self) {
+        self.in_flight_callbacks.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn exit_callback(&self) {
+        self.in_flight_callbacks.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    fn in_flight_callbacks(&self) -> usize {
+        self.in_flight_callbacks.load(Ordering::SeqCst)
+    }
+
     fn reader_cache(&self) -> Arc<Mutex<ReaderHistoryCache>> {
         // self.reader_cache.clone()
         Arc::clone(&self.reader_cache)

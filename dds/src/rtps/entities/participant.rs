@@ -53,7 +53,7 @@ use crate::{
         entities::{
             entity::Entity,
             history::{cache_change::CacheChange, history_cache::HistoryCache},
-            reader::{Reader, ReaderStore, StatefulReader, StatelessReader},
+            reader::{Reader, ReaderCallbackLease, ReaderStore, StatefulReader, StatelessReader},
             wire_buffer_pool::WireBufferPool,
             writer::{StatefulWriter, StatelessWriter, Writer, WriterStore},
         },
@@ -517,7 +517,37 @@ impl Participant {
         &self,
         entity_id: EntityId,
     ) -> Option<Arc<dyn Reader + Send + Sync>> {
-        self.rtps_reader_store.get(entity_id)
+        self.rtps_reader_store.get_reader(entity_id)
+    }
+
+    // Callback-producing lookup: the returned lease keeps the reader's in-flight count raised
+    // until dropped, so deletion drains it instead of racing the delivery.
+    pub(crate) fn find_reader_callback_lease_from_entity_id(
+        &self,
+        entity_id: EntityId,
+    ) -> Option<ReaderCallbackLease> {
+        self.rtps_reader_store.get_reader_callback_lease(entity_id)
+    }
+
+    // Callback-producing variant of `find_readers_matched_with_remote_writer`. Matching reuses the
+    // plain lookup, then each match is re-fetched through the shard lock to raise its in-flight
+    // count. A reader removed in between is dropped from the result.
+    pub(crate) fn find_reader_callback_leases_matched_with_remote_writer(
+        &self,
+        writer_guid: Guid,
+    ) -> RtpsResult<Vec<ReaderCallbackLease>> {
+        let matched = self.find_readers_matched_with_remote_writer(writer_guid)?;
+        let mut leases = Vec::with_capacity(matched.len());
+
+        for reader in matched {
+            if let Some(lease) =
+                self.rtps_reader_store.get_reader_callback_lease(reader.guid().entity_id())
+            {
+                leases.push(lease);
+            }
+        }
+
+        Ok(leases)
     }
 
     /// Function to increment entity_key by 1
@@ -651,9 +681,9 @@ impl Participant {
     /// Method to remove RTPS Reader
     pub(crate) fn remove_reader(&self, topic_name: String, entity_id: EntityId) -> RtpsResult<()> {
         // Send Data[r(UD)]
-        let reader_arc = self.rtps_reader_store.get(entity_id);
+        let reader_arc = self.rtps_reader_store.get_reader(entity_id);
 
-        if let Some(reader) = reader_arc {
+        if let Some(reader) = reader_arc.as_ref() {
             // Remove all timers for this reader (acknack, nackfrag)
             if let Ok(handler) = TimerHandler::get_instance(self.guid().prefix()).lock() {
                 handler.remove_timers_by_entity(entity_id);
@@ -719,6 +749,27 @@ impl Participant {
 
         // Remove from store
         self.rtps_reader_store.remove(&topic_name, entity_id);
+
+        // Drain in-flight delivery/listener callbacks so none runs against this reader after the
+        // delete call returns. Store removal above stops new callbacks from starting; this waits
+        // out the ones already past the shard lock. A reentrant delete from inside a callback is
+        // refused earlier, but guard the wait too: blocking on our own count would deadlock.
+        if let Some(reader) = reader_arc.as_ref() {
+            if !crate::utils::notify::in_listener_callback() {
+                let drain_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while reader.in_flight_callbacks() > 0 {
+                    if std::time::Instant::now() >= drain_deadline {
+                        log::warn!(
+                            "remove_reader: {} callback(s) still in flight for {} after drain timeout",
+                            reader.in_flight_callbacks(),
+                            entity_id
+                        );
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_micros(50));
+                }
+            }
+        }
 
         // The reader is gone, so any reassembly still addressed to it can never complete and
         // will not be reached by the normal completion path -- only by cap-driven eviction,
