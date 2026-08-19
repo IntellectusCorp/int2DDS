@@ -22,7 +22,7 @@ use super::dynamic_type::{
     StructDescriptor, UnionDescriptor,
 };
 
-trait ValueDeserializer {
+pub(super) trait ValueDeserializer {
     fn deserialize_bool(&mut self) -> Result<bool, CdrError>;
     fn deserialize_i8(&mut self) -> Result<i8, CdrError>;
     fn deserialize_i16(&mut self) -> Result<i16, CdrError>;
@@ -185,7 +185,7 @@ fn member_value_or_default<'a>(
     }
 }
 
-fn is_primitive_kind(kind: &DynamicTypeKind) -> bool {
+pub(super) fn is_primitive_kind(kind: &DynamicTypeKind) -> bool {
     // Enum and bitmask are constructed types, not primitives, so collections of them are
     // framed (DDS-XTypes 7.4.3.5.3/7.4.3.5.4). OMG issue DDSXTY14-56 proposes exempting
     // them; it is unresolved, so this follows the spec as written.
@@ -221,7 +221,7 @@ fn as_union_kind(kind: &DynamicTypeKind) -> Option<(&UnionDescriptor, Extensibil
 }
 
 /// Wire width in bytes for a packed integer (bitmask/bitset) of `bits` bits.
-fn packed_wire_width(bits: u16) -> u8 {
+pub(super) fn packed_wire_width(bits: u16) -> u8 {
     if bits <= 8 {
         1
     } else if bits <= 16 {
@@ -291,7 +291,7 @@ fn select_union_member<'a>(
     })
 }
 
-fn enum_wire_width(bit_bound: u16) -> u8 {
+pub(super) fn enum_wire_width(bit_bound: u16) -> u8 {
     if bit_bound <= 8 {
         1
     } else if bit_bound <= 16 {
