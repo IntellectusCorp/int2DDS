@@ -18,7 +18,7 @@ namespace Int2Dds.Types
         public const int Float32 = 11;
         public const int Float64 = 12;
         public const int String = 13;
-        public const int Enum = 14;
+        public const int Char16 = 14;
         public const int WString = 15;
         public const int Nested = 16;
         public const int Sequence = 17;
