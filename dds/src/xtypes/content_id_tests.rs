@@ -179,3 +179,34 @@ fn nested_composite_collection_minimal_matches_registry() {
         "derive-side minimal hash must equal registry-derived minimal hash for Vec<Vec<Inner>>"
     );
 }
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "crate", type_name = "sensors::Thing")]
+struct ScopedThing {
+    value: i32,
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "crate")]
+struct HolderOfScoped {
+    thing: ScopedThing,
+}
+
+#[test]
+fn nested_member_ref_matches_registered_id() {
+    // A type_name override must NOT desync the name-based nested id scheme: a referencing
+    // struct's member id (derived from the Rust type ident) must equal the id under which
+    // the referenced type registers itself in the nested set.
+    let mut scoped_set = Vec::new();
+    ScopedThing::collect_nested_type_objects(&mut scoped_set);
+    let scoped_reg_id = scoped_set[0].0.clone();
+
+    let member_id = match HolderOfScoped::complete_type_object() {
+        CompleteTypeObject::Struct(s) => s.member_seq[0].common.member_type_id.clone(),
+        other => panic!("expected struct, got {other:?}"),
+    };
+    assert_eq!(
+        member_id, scoped_reg_id,
+        "nested member ref must resolve to the referenced type's registered nested id"
+    );
+}
