@@ -318,7 +318,15 @@ impl ConnectionRegistry {
                 };
 
                 shared.self_delivery_bytes.fetch_sub(msg.data.len(), Ordering::AcqRel);
-                if shared.user_data_tx.send_async(msg).await.is_err() {
+
+                // The wait for the inbound channel's slot has no bound of its
+                // own: a receiver that is alive but no longer draining holds it
+                // forever, and shutdown waits on this task.
+                let sent = tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    sent = shared.user_data_tx.send_async(msg) => sent,
+                };
+                if sent.is_err() {
                     break;
                 }
             }
@@ -414,31 +422,48 @@ impl ConnectionRegistry {
             return Ok(false);
         }
 
-        let msg = IncomingMessage { data: data.to_vec(), source };
-
         // Hand the frame to the self-deliver-task and return. Waiting for the inbound
         // channel here would put a decode on the caller's critical path — and
         // the thread that decodes is itself a caller, so it would be waiting on
         // itself. Either way it is how entity creation came to stall for
         // seconds at a time.
-        let len = msg.data.len();
-        if self.self_delivery_bytes.load(Ordering::Acquire) + len > SELF_DELIVERY_BYTE_CAP {
+        //
+        // The bytes are claimed before the frame is queued, and released only by
+        // whoever fails to queue it. Claiming afterwards would let the
+        // deliver-task release a frame's bytes before they were ever counted,
+        // wrapping the total past zero, and would let two senders each read a
+        // total that leaves room for a frame the other has already taken. A
+        // refused frame is never copied.
+        let len = data.len();
+        if self
+            .self_delivery_bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                used.checked_add(len).filter(|total| *total <= SELF_DELIVERY_BYTE_CAP)
+            })
+            .is_err()
+        {
             return Err(transport_io_error(
                 TransportErrorCode::TcpChannelFull,
                 format!("intra-participant queue over byte cap, dropped a {len} byte frame"),
             ));
         }
 
+        let msg = IncomingMessage { data: data.to_vec(), source };
         match self.self_delivery_tx.try_send(msg) {
-            Ok(()) => {
-                self.self_delivery_bytes.fetch_add(len, Ordering::AcqRel);
+            Ok(()) => Ok(true),
+            Err(TrySendError::Full(_)) => {
+                self.self_delivery_bytes.fetch_sub(len, Ordering::AcqRel);
+                Err(transport_io_error(
+                    TransportErrorCode::TcpChannelFull,
+                    format!(
+                        "intra-participant queue over count backstop, dropped a {len} byte frame"
+                    ),
+                ))
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.self_delivery_bytes.fetch_sub(len, Ordering::AcqRel);
                 Ok(true)
             }
-            Err(TrySendError::Full(_)) => Err(transport_io_error(
-                TransportErrorCode::TcpChannelFull,
-                format!("intra-participant queue over count backstop, dropped a {len} byte frame"),
-            )),
-            Err(TrySendError::Disconnected(_)) => Ok(true),
         }
     }
 
