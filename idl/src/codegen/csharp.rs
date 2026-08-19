@@ -2,6 +2,7 @@
 ///
 /// Generates C# classes with CDR serialization methods
 /// that use the Int2Dds C# CDR library.
+use crate::codegen::flatten_array;
 use crate::naming;
 use crate::types::*;
 
@@ -948,6 +949,18 @@ impl<'a> CsGen<'a> {
         }
     }
 
+    /// Allocate one rank of a jagged array: `long a[2][3]` maps to `int[][]`, whose
+    /// outer rank is `new int[2][]` and whose rows are `new int[3]`. Only the rank
+    /// being allocated carries a length; the ranks below it are empty brackets.
+    fn jagged_alloc(base: &ResolvedType, dims: &[u32], depth: usize) -> String {
+        format!(
+            "new {}[{}]{}",
+            Self::type_to_csharp(base),
+            dims[depth],
+            "[]".repeat(dims.len() - depth - 1)
+        )
+    }
+
     fn default_value(&self, ty: &ResolvedType) -> String {
         match ty {
             ResolvedType::Bool => "false".to_string(),
@@ -964,8 +977,9 @@ impl<'a> CsGen<'a> {
             ResolvedType::Sequence { element, .. } => {
                 format!("new List<{}>()", Self::type_to_csharp(element))
             }
-            ResolvedType::Array { element, size } => {
-                format!("new {}[{}]", Self::type_to_csharp(element), size)
+            ResolvedType::Array { .. } => {
+                let (dims, base) = flatten_array(ty);
+                Self::jagged_alloc(base, &dims, 0)
             }
             ResolvedType::Map { key, value, .. } => {
                 format!(
@@ -1101,19 +1115,29 @@ impl<'a> CsGen<'a> {
                     self.line("}");
                 }
             }
-            ResolvedType::Array { element, .. } => {
-                let non_prim = Self::array_needs_dheader(element);
+            ResolvedType::Array { .. } => {
+                // One array of the base type (7.4.3.4): frame once above every dimension.
+                // Recursing per dimension would nest DHEADERs and redeclare `_item`, which
+                // C# rejects outright (CS0136).
+                let (dims, base) = flatten_array(ty);
+                let non_prim = Self::array_needs_dheader(base);
                 if non_prim {
                     self.line("{");
                     self.indent += 1;
                     self.line("var _arrDt = w.DheaderBegin();");
                 }
-                self.line(&format!("foreach (var _item in {})", accessor));
-                self.line("{");
-                self.indent += 1;
-                self.emit_write_field(element, "_item");
-                self.indent -= 1;
-                self.line("}");
+                let mut acc = accessor.to_string();
+                for d in 0..dims.len() {
+                    self.line(&format!("foreach (var _item{} in {})", d, acc));
+                    self.line("{");
+                    self.indent += 1;
+                    acc = format!("_item{}", d);
+                }
+                self.emit_write_field(base, &acc);
+                for _ in 0..dims.len() {
+                    self.indent -= 1;
+                    self.line("}");
+                }
                 if non_prim {
                     self.line("w.DheaderFinalize(_arrDt);");
                     self.indent -= 1;
@@ -1461,25 +1485,8 @@ impl<'a> CsGen<'a> {
                     self.line(&format!("r.ReadDheaderEnd({}, {});", size_var, start_var));
                 }
             }
-            ResolvedType::Array { element, size } => {
-                let cs_elem = Self::type_to_csharp(element);
-                let non_prim = Self::array_needs_dheader(element);
-                let size_var = format!("_{name}ArrSize");
-                let start_var = format!("_{name}ArrStart");
-                if non_prim {
-                    self.line(&format!("var ({}, {}) = r.ReadDheader();", size_var, start_var));
-                }
-                self.line(&format!("{}.{} = new {}[{}];", obj, name, cs_elem, size));
-                self.line(&format!("for (var _i = 0; _i < {}; _i++)", size));
-                self.line("{");
-                self.indent += 1;
-                self.emit_read_field_into_var(element, "_item");
-                self.line(&format!("{}.{}[_i] = _item;", obj, name));
-                self.indent -= 1;
-                self.line("}");
-                if non_prim {
-                    self.line(&format!("r.ReadDheaderEnd({}, {});", size_var, start_var));
-                }
+            ResolvedType::Array { .. } => {
+                self.emit_array_read_into(ty, &format!("{}.{}", obj, name), &format!("_{}", name));
             }
             ResolvedType::Map { key, value, .. } => {
                 let count_var = format!("_{name}Count");
@@ -1513,6 +1520,38 @@ impl<'a> CsGen<'a> {
     }
 
     /// Emit a read expression that assigns to a local variable.
+    /// Read a possibly multidimensional array into `target`, which must already be
+    /// assignable. `prefix` keeps the locals unique per field: recursing a dimension at
+    /// a time reused `_j`/`_inner`, which collides from three dimensions on.
+    fn emit_array_read_into(&mut self, ty: &ResolvedType, target: &str, prefix: &str) {
+        let (dims, base) = flatten_array(ty);
+        let non_prim = Self::array_needs_dheader(base);
+        let size_var = format!("{prefix}ArrSize");
+        let start_var = format!("{prefix}ArrStart");
+        if non_prim {
+            self.line(&format!("var ({}, {}) = r.ReadDheader();", size_var, start_var));
+        }
+        let mut acc = target.to_string();
+        for d in 0..dims.len() {
+            self.line(&format!("{} = {};", acc, Self::jagged_alloc(base, &dims, d)));
+            let idx = format!("{}I{}", prefix, d);
+            self.line(&format!("for (var {} = 0; {} < {}; {}++)", idx, idx, dims[d], idx));
+            self.line("{");
+            self.indent += 1;
+            acc = format!("{}[{}]", acc, idx);
+        }
+        let elem = format!("{prefix}Elem");
+        self.emit_read_field_into_var(base, &elem);
+        self.line(&format!("{} = {};", acc, elem));
+        for _ in 0..dims.len() {
+            self.indent -= 1;
+            self.line("}");
+        }
+        if non_prim {
+            self.line(&format!("r.ReadDheaderEnd({}, {});", size_var, start_var));
+        }
+    }
+
     fn emit_read_field_into_var(&mut self, ty: &ResolvedType, var_name: &str) {
         match ty {
             ResolvedType::Bool => {
@@ -1599,25 +1638,9 @@ impl<'a> CsGen<'a> {
                     self.line(&format!("r.ReadDheaderEnd({}, {});", size_var, start_var));
                 }
             }
-            ResolvedType::Array { element, size } => {
-                let cs_elem = Self::type_to_csharp(element);
-                let non_prim = Self::array_needs_dheader(element);
-                let size_var = format!("{var_name}ArrSize");
-                let start_var = format!("{var_name}ArrStart");
-                if non_prim {
-                    self.line(&format!("var ({}, {}) = r.ReadDheader();", size_var, start_var));
-                }
-                self.line(&format!("var {} = new {}[{}];", var_name, cs_elem, size));
-                self.line(&format!("for (var _j = 0; _j < {}; _j++)", size));
-                self.line("{");
-                self.indent += 1;
-                self.emit_read_field_into_var(element, "_inner");
-                self.line(&format!("{}[_j] = _inner;", var_name));
-                self.indent -= 1;
-                self.line("}");
-                if non_prim {
-                    self.line(&format!("r.ReadDheaderEnd({}, {});", size_var, start_var));
-                }
+            ResolvedType::Array { .. } => {
+                self.line(&format!("{} {};", Self::type_to_csharp(ty), var_name));
+                self.emit_array_read_into(ty, var_name, var_name);
             }
             ResolvedType::Map { key, value, .. } => {
                 let count_var = format!("{var_name}Count");
@@ -1943,5 +1966,38 @@ mod tests {
         assert!(code.contains("var (_RowArrSize, _RowArrStart) = r.ReadDheader();"), "{}", code);
         assert!(code.contains("r.ReadDheaderEnd(_RowArrSize, _RowArrStart);"), "{}", code);
         assert!(!code.contains("_NumsArrSize"), "primitive array stays unframed: {}", code);
+    }
+
+    #[test]
+    fn test_multidim_array_csharp() {
+        let defs = parse_idl(
+            r#"
+            struct Holder {
+                long nums[2][3];
+                string words[2][3];
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Holder.idl", &CSharpOptions::default());
+
+        // A jagged rank takes its length in its own brackets; `new int[][2]` does not parse.
+        assert!(code.contains("public int[][] Nums { get; set; } = new int[2][];"), "{}", code);
+        assert!(code.contains("obj.Nums[_NumsI0] = new int[3];"), "{}", code);
+
+        // One frame over both dimensions: `string words[2][3]` frames exactly as often as
+        // the flat `string words[6]`, rather than once per row.
+        let flat = parse_idl("struct Flat { string words[6]; };").unwrap();
+        let flat = generate(&resolve(flat).unwrap(), "Flat.idl", &CSharpOptions::default());
+        assert_eq!(
+            code.matches("w.DheaderBegin();").count(),
+            flat.matches("w.DheaderBegin();").count(),
+            "multidimensional array frames once: {}",
+            code
+        );
+
+        // Distinct names per dimension: C# rejects the redeclaration outright (CS0136).
+        assert!(code.contains("foreach (var _item1 in _item0)"), "{}", code);
     }
 }

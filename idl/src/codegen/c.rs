@@ -2,6 +2,7 @@
 ///
 /// Generates .h files with struct definitions and inline CDR serialization functions
 /// that use the int2dds_cdr.h utility library.
+use crate::codegen::flatten_array;
 use crate::naming;
 use crate::types::*;
 
@@ -589,8 +590,11 @@ impl<'a> CGen<'a> {
                 }
             }
             ResolvedType::Array { element, size } => {
-                let elem_c = self.type_to_c_base(element);
-                format!("{} {}[{}]", elem_c, name, size)
+                // Declare through the element rather than off `type_to_c_base`: the element
+                // may itself need the declarator (a nested array wants another `[n]`, a string
+                // its char buffer, a sequence its struct wrapper), and only this function
+                // knows where each of those puts the name.
+                self.type_to_c_declaration(element, &format!("{}[{}]", name, size))
             }
             ResolvedType::Map { key, value, bound } => {
                 let key_decl = self.map_member_decl(key, "keys", bound);
@@ -948,8 +952,12 @@ impl<'a> CGen<'a> {
                     self.raw(&format!("{}}}\n", indent));
                 }
             }
-            ResolvedType::Array { element, size } => {
-                let needs_dh = Self::array_needs_dheader(element);
+            ResolvedType::Array { .. } => {
+                // One array of the base type (7.4.3.4): frame once above every dimension,
+                // then walk them with distinct indices. Recursing per dimension instead
+                // would emit a DHEADER per row and reuse `_i` at every level.
+                let (dims, base) = flatten_array(ty);
+                let needs_dh = Self::array_needs_dheader(base);
                 if needs_dh {
                     self.raw(&format!("{}{{ size_t _arr_dh = 0;\n", indent));
                     self.raw(&format!(
@@ -957,17 +965,28 @@ impl<'a> CGen<'a> {
                         indent
                     ));
                 }
-                if let Some(kind) = self.bulk_element(element) {
-                    self.emit_bulk_write(kind, accessor, &size.to_string(), indent);
-                } else {
-                    self.raw(&format!("{}for (uint32_t _i = 0; _i < {}; _i++) {{\n", indent, size));
-                    let elem_accessor = format!("{}[_i]", accessor);
-                    self.emit_write_field_indented(
-                        element,
-                        &elem_accessor,
-                        &format!("{}    ", indent),
-                    );
-                    self.raw(&format!("{}}}\n", indent));
+                // A bulk write covers the innermost dimension, so only the outer ones loop.
+                let bulk = self.bulk_element(base);
+                let loops = if bulk.is_some() { dims.len() - 1 } else { dims.len() };
+                let mut acc = accessor.to_string();
+                let mut ind = indent.to_string();
+                for (d, n) in dims.iter().take(loops).enumerate() {
+                    self.raw(&format!(
+                        "{}for (uint32_t _i{} = 0; _i{} < {}; _i{}++) {{\n",
+                        ind, d, d, n, d
+                    ));
+                    acc = format!("{}[_i{}]", acc, d);
+                    ind.push_str("    ");
+                }
+                match bulk {
+                    Some(kind) => {
+                        self.emit_bulk_write(kind, &acc, &dims[dims.len() - 1].to_string(), &ind)
+                    }
+                    None => self.emit_write_field_indented(base, &acc, &ind),
+                }
+                for _ in 0..loops {
+                    ind.truncate(ind.len() - 4);
+                    self.raw(&format!("{}}}\n", ind));
                 }
                 if needs_dh {
                     self.raw(&format!(
@@ -1301,8 +1320,10 @@ impl<'a> CGen<'a> {
                     self.raw(&format!("{}}}\n", indent));
                 }
             }
-            ResolvedType::Array { element, size } => {
-                let needs_dh = Self::array_needs_dheader(element);
+            ResolvedType::Array { .. } => {
+                // Mirrors the write path: one frame over every dimension, distinct indices.
+                let (dims, base) = flatten_array(ty);
+                let needs_dh = Self::array_needs_dheader(base);
                 if needs_dh {
                     self.raw(&format!("{}{{ uint32_t _arr_sz = 0; size_t _arr_sp = 0;\n", indent));
                     self.raw(&format!(
@@ -1310,17 +1331,27 @@ impl<'a> CGen<'a> {
                         indent
                     ));
                 }
-                if let Some(kind) = self.bulk_element(element) {
-                    self.emit_bulk_read(kind, accessor, &size.to_string(), indent);
-                } else {
-                    self.raw(&format!("{}for (uint32_t _i = 0; _i < {}; _i++) {{\n", indent, size));
-                    let elem_accessor = format!("{}[_i]", accessor);
-                    self.emit_read_field_indented(
-                        element,
-                        &elem_accessor,
-                        &format!("{}    ", indent),
-                    );
-                    self.raw(&format!("{}}}\n", indent));
+                let bulk = self.bulk_element(base);
+                let loops = if bulk.is_some() { dims.len() - 1 } else { dims.len() };
+                let mut acc = accessor.to_string();
+                let mut ind = indent.to_string();
+                for (d, n) in dims.iter().take(loops).enumerate() {
+                    self.raw(&format!(
+                        "{}for (uint32_t _i{} = 0; _i{} < {}; _i{}++) {{\n",
+                        ind, d, d, n, d
+                    ));
+                    acc = format!("{}[_i{}]", acc, d);
+                    ind.push_str("    ");
+                }
+                match bulk {
+                    Some(kind) => {
+                        self.emit_bulk_read(kind, &acc, &dims[dims.len() - 1].to_string(), &ind)
+                    }
+                    None => self.emit_read_field_indented(base, &acc, &ind),
+                }
+                for _ in 0..loops {
+                    ind.truncate(ind.len() - 4);
+                    self.raw(&format!("{}}}\n", ind));
                 }
                 if needs_dh {
                     self.raw(&format!(
@@ -1645,7 +1676,15 @@ impl<'a> CGen<'a> {
             | ResolvedType::Struct(_)
             | ResolvedType::Map { .. } => true,
             ResolvedType::Sequence { element, .. } | ResolvedType::Array { element, .. } => {
-                Self::type_uses_fallback_hash(element)
+                // `add_{sequence,array}_field` carries one element kind and one bound, so a
+                // collection directly inside a collection has no spelling there. Without
+                // this the member was dropped from the advertised type entirely.
+                matches!(
+                    element.as_ref(),
+                    ResolvedType::Sequence { .. }
+                        | ResolvedType::Array { .. }
+                        | ResolvedType::Map { .. }
+                ) || Self::type_uses_fallback_hash(element)
             }
             _ => false,
         }
@@ -2690,5 +2729,51 @@ mod tests {
         // The primitive array is written in bulk with no framing of its own.
         assert!(code.contains("int2dds_cdr_write_prim_array(&w, val->nums, 3, 4)"), "{}", code);
         assert_eq!(code.matches("_arr_dh = 0").count(), 2, "one framed array per writer: {}", code);
+    }
+
+    #[test]
+    fn test_multidim_array_c() {
+        let defs = parse_idl(
+            r#"
+            struct Holder {
+                long nums[2][3];
+                string words[2][3];
+                sequence<long> lists[2];
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Holder.idl", &COptions::default());
+
+        // Every dimension reaches the declarator; the element decides what follows the
+        // name, so a string keeps its buffer and a sequence its struct wrapper.
+        assert!(code.contains("int32_t nums[2][3];"), "{}", code);
+        // Both dimensions, then whatever the element appends -- the buffer length is
+        // `default_string_bound`'s business, not this test's.
+        assert!(code.contains("char words[2][3]["), "{}", code);
+        assert!(code.contains("uint32_t length; } lists[2];"), "{}", code);
+
+        // One array of the base type (7.4.3.4): `string words[2][3]` frames exactly as
+        // often as the flat `string words[6]` does, rather than once per row.
+        let flat = parse_idl("struct Flat { string words[6]; };").unwrap();
+        let flat = generate(&resolve(flat).unwrap(), "Flat.idl", &COptions::default());
+        let words_only = parse_idl("struct Holder { string words[2][3]; };").unwrap();
+        let words_only =
+            generate(&resolve(words_only).unwrap(), "Holder.idl", &COptions::default());
+        assert_eq!(
+            words_only.matches("_arr_dh = 0").count(),
+            flat.matches("_arr_dh = 0").count(),
+            "multidimensional array frames once: {}",
+            words_only
+        );
+
+        // Indices carry the dimension, so nesting cannot shadow them into a diagonal.
+        assert!(code.contains("int2dds_cdr_write_string(&w, val->words[_i0][_i1])"), "{}", code);
+        assert!(
+            code.contains("int2dds_cdr_write_prim_array(&w, val->nums[_i0], 3, 4)"),
+            "{}",
+            code
+        );
     }
 }

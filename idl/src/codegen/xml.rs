@@ -5,6 +5,7 @@
 /// IDL -> Rust -> derive path.
 use std::collections::HashMap;
 
+use crate::codegen::flatten_array;
 use crate::naming;
 use crate::types::*;
 
@@ -356,16 +357,6 @@ impl<'a> XmlGen<'a> {
         self.out.push_str(text);
         self.out.push('\n');
     }
-}
-
-fn flatten_array(ty: &ResolvedType) -> (Vec<u32>, &ResolvedType) {
-    let mut dims = Vec::new();
-    let mut cur = ty;
-    while let ResolvedType::Array { element, size } = cur {
-        dims.push(*size);
-        cur = element;
-    }
-    (dims, cur)
 }
 
 fn join_dims(dims: &[u32]) -> String {
