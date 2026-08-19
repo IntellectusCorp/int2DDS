@@ -106,7 +106,9 @@ impl StatelessReader {
             expects_inline_qos,
             heartbeat_response_delay: RtpsDuration::new(0, 500 * 1000 * 1000),
             heartbeat_suppression_duration: RtpsDuration::new(0, 0),
-            nack_frag_response_delay: RtpsDuration::from_millis(80),
+            // Tracks `ReaderReliabilityExtensionQosPolicy::DEFAULT`, which a stateless reader
+            // has no QoS path to read.
+            nack_frag_response_delay: RtpsDuration::from_millis(5),
             nack_frag_retry_delay: RtpsDuration::from_millis(200),
             nack_frag_max_retries: 10,
             reader_cache: Arc::new(Mutex::new(ReaderHistoryCache::new(endpoint_id, None))),

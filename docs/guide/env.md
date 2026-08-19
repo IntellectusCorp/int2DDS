@@ -20,9 +20,13 @@ This document describes the environment variables available in int2dds.
 | `INT2DDS_MAX_MESSAGE_SIZE`           | Max RTPS message size (bytes)              | 65000                   |
 | `INT2DDS_MULTICAST_TTL`              | IPv4 multicast TTL fallback (0-255)        | 1                       |
 | `INT2DDS_DISABLE_PREEMPTIVE`         | Disable preemptive ACKNACK/HEARTBEAT       | false                   |
-| `INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS` | Reader delay before first NACK_FRAG (ms)  | 80                      |
+| `INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS` | Reader delay before first NACK_FRAG (ms)  | 5                       |
 | `INT2DDS_NACK_FRAG_RETRY_MS`         | Reader NACK_FRAG retry interval (ms)       | 200                     |
 | `INT2DDS_NACK_FRAG_MAX_RETRIES`      | Reader NACK_FRAG retries before yielding   | 10                      |
+| `INT2DDS_SEND_CREDIT_BACKSTOP_MS`    | Writer send-credit backstop (ms)           | 250                     |
+| `INT2DDS_NACK_RESPONSE_DELAY_MS`     | Writer delay before repair reply (ms)      | 0                       |
+| `INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT` | Writer piggyback HEARTBEAT off    | false                   |
+| `INT2DDS_SEDP_HEARTBEAT_MS`          | SEDP heartbeat period (ms)                 | heartbeat_period (2000) |
 | `INT2DDS_EXTENDED_DISCOVERY`         | Enable extended discovery                  | false                   |
 | `INT2DDS_INITIAL_PEERS`              | Initial peer list                          | none                    |
 | `INT2DDS_THREAD_MONITORING`          | Enable thread monitoring                   | false                   |
@@ -447,6 +451,34 @@ cargo run --example hello_world_sub
 The Rust core reads the env var when an endpoint match is made, so the value must
 be set **before** the DataReader/DataWriter that should skip it is matched.
 
+### INT2DDS_SEDP_HEARTBEAT_MS
+
+Period of the SEDP heartbeat sent to each discovered participant. A lost
+endpoint announcement waits one period before the peer's reader NACKs for it,
+so a shorter period shortens the worst-case discovery stall at the cost of
+more metatraffic. SPDP keeps its own repeat interval either way.
+
+- Default: the writer's `heartbeat_period` (2000 milliseconds)
+- Values that are not a positive integer are ignored
+- Read once per process, so it must be set before the first participant is
+  created
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_SEDP_HEARTBEAT_MS = "500"
+
+cargo run --example hello_world_pub
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_SEDP_HEARTBEAT_MS=500
+
+cargo run --example hello_world_pub
+```
+
 ### INT2DDS_EXTENDED_DISCOVERY
 
 Controls the ability to send DDS discovery messages via extended discovery.
@@ -514,18 +546,23 @@ cargo run --example hello_world_pub
 
 ## Reliability Tuning
 
-These control a reliable reader's NACK_FRAG repair loop: the request sent to
-ask a matched writer to resend a sample's missing fragments. Each maps to a
-`ReaderReliabilityExtensionQosPolicy` field; an explicit QoS setting always
-wins over the env fallback, and an invalid or out-of-range value is ignored
-in favor of the default rather than propagating.
+These control how a reliable pair recovers what was lost. The reader-side
+three tune its NACK_FRAG loop: the request sent to ask a matched writer to
+resend a sample's missing fragments. The writer-side three tune how it
+answers and how hard it pushes.
+
+All but `INT2DDS_SEND_CREDIT_BACKSTOP_MS` map to a
+`ReaderReliabilityExtensionQosPolicy` or `WriterReliabilityExtensionQosPolicy`
+field; an explicit QoS setting always wins over the env fallback, and an
+invalid or out-of-range value is ignored in favor of the default rather than
+propagating.
 
 ### INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS
 
 Delay before the reader sends its first NACK_FRAG for a sample reported
 incomplete by a HEARTBEAT. Maps to `nack_frag_response_delay`.
 
-- Default: `80` (milliseconds)
+- Default: `5` (milliseconds)
 
 #### Configuration
 
@@ -588,6 +625,84 @@ cargo run --example hello_world_sub
 export INT2DDS_NACK_FRAG_MAX_RETRIES=5
 
 cargo run --example hello_world_sub
+```
+
+### INT2DDS_SEND_CREDIT_BACKSTOP_MS
+
+How long wire bytes sent toward a remote participant keep counting against
+that participant's send window when it never answers. A reliable reader's
+ACKNACK or NACK_FRAG hands the window back at once; this covers the peer
+that goes silent. Writer-side, with no QoS field.
+
+Keep it above one whole reader retry cycle -- `INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS`
+plus `INT2DDS_NACK_FRAG_RETRY_MS`, 205 ms at their defaults. Below that, a
+lost round is recovered by this timeout rather than by the reader's answer.
+
+- Default: `250` (milliseconds)
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_SEND_CREDIT_BACKSTOP_MS = "300"
+
+cargo run --example hello_world_pub
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_SEND_CREDIT_BACKSTOP_MS=300
+
+cargo run --example hello_world_pub
+```
+
+### INT2DDS_NACK_RESPONSE_DELAY_MS
+
+Delay before the writer answers a reader's ACKNACK or NACK_FRAG with the
+resend it asked for. Maps to `nack_response_delay`.
+
+- Default: `0` (milliseconds)
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_NACK_RESPONSE_DELAY_MS = "20"
+
+cargo run --example hello_world_pub
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_NACK_RESPONSE_DELAY_MS=20
+
+cargo run --example hello_world_pub
+```
+
+### INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT
+
+Sets the default for the `disable_piggyback_heartbeat` writer QoS. When true,
+a HEARTBEAT no longer rides along with DATA and only the periodic heartbeat
+timer sends one: less traffic, but a reader waits longer to learn what it is
+missing. Must be set before the DataWriter QoS is constructed to take effect.
+
+- Default: `false`
+- Accepts `true`, `false`, `1`, `0` (case-insensitive)
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT = "true"
+
+cargo run --example hello_world_pub
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT=true
+
+cargo run --example hello_world_pub
 ```
 
 ---
