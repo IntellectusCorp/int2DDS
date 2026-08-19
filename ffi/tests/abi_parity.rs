@@ -484,8 +484,8 @@ fn enumerators(body: &str) -> Vec<(String, i64)> {
             let (name, value) = match entry.split_once('=') {
                 Some((name, value)) => (
                     name.trim(),
-                    value.trim().parse().unwrap_or_else(|e| {
-                        panic!("`{entry}` does not give a decimal value this test can read: {e}")
+                    parse_value(value).unwrap_or_else(|| {
+                        panic!("`{entry}` does not give a value this test can read")
                     }),
                 ),
                 None => (entry, next),
@@ -600,6 +600,404 @@ fn the_csharp_enums_have_the_header_enumerators() {
             "the C# declaration of {name} does not have the header's enumerators. A value the \
              library returns and C# cannot name arrives in managed code as a number no `switch` \
              matches -- the C# side is the left column"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The header's `#define` constants against the two bindings.
+//
+// This is the axis the comparisons above do not reach. cbindgen writes these
+// constants as `#define`, and `generate_bindings.py` drops every `#define` line,
+// so unlike the functions and the structs there is no generated copy anywhere:
+// both bindings write the values out by hand and nothing read them back. The
+// survey that added this found the status bits in four hand-written copies -- two
+// in C#, two in Python -- each missing a different subset of the header, and
+// `FieldType.Enum = 14` in C# where the header's 14 is `CHAR16`, a public
+// constant that gave a char16 field to anyone who named it.
+//
+// Two comparisons, because they fail differently. Values are compared for every
+// name both sides have, which cannot false-fire. Names are compared as sets,
+// which is what catches a constant a binding never learned, and needs the two
+// lists below wherever a binding deliberately names fewer or more than the
+// header. Both lists are folded into the expected set rather than filtered out
+// of the actual one, so recording a name that turns out to be present fails just
+// as loudly as omitting one that is missing -- neither list can go stale.
+//
+// What this cannot catch is a wrong entry in the table below, the same shape of
+// gap as the struct comparison's: the table says where a family is mirrored, and
+// a family pointed at the wrong type would compare something real against
+// something else real and pass.
+// ---------------------------------------------------------------------------
+
+/// How C# spells a family: an `enum`, or a `static class` of `const` fields.
+#[derive(Clone, Copy)]
+enum CsKind {
+    Enum,
+    Class,
+}
+
+/// How Python spells one header suffix: at module level under a pattern, where
+/// `{}` stands for the suffix, or as a member of a class named exactly it.
+#[derive(Clone, Copy)]
+enum PyScope {
+    Module(&'static str),
+    Class(&'static str),
+}
+
+/// One `#define` family and the single place each binding mirrors it. Both
+/// bindings are required to have one: the family that had no C# mirror when this
+/// was written turned out to be a gap rather than a decision -- C# handed the
+/// member flags back as a bare `int` and named the bits only in a doc comment,
+/// where nothing could compare them.
+struct Family {
+    prefix: &'static str,
+    csharp: (&'static str, CsKind),
+    python: (&'static str, PyScope),
+}
+
+/// Every family the header defines. A constant whose name matches none of these
+/// fails: an unmapped family is one nothing compares, which is the state this
+/// whole section exists to end.
+const FAMILIES: &[Family] = &[
+    Family {
+        prefix: "INT2DDS_RET_",
+        csharp: ("ReturnCode", CsKind::Class),
+        python: ("python/int2dds/exceptions.py", PyScope::Module("INT2DDS_RET_{}")),
+    },
+    Family {
+        prefix: "INT2DDS_STATUS_",
+        csharp: ("StatusMask", CsKind::Enum),
+        python: ("python/int2dds/core/conditions.py", PyScope::Module("STATUS_{}")),
+    },
+    Family {
+        prefix: "INT2DDS_SAMPLE_STATE_",
+        csharp: ("SampleState", CsKind::Class),
+        python: ("python/int2dds/core/conditions.py", PyScope::Module("{}_SAMPLE_STATE")),
+    },
+    Family {
+        prefix: "INT2DDS_VIEW_STATE_",
+        csharp: ("ViewState", CsKind::Class),
+        python: ("python/int2dds/core/conditions.py", PyScope::Module("{}_VIEW_STATE")),
+    },
+    Family {
+        prefix: "INT2DDS_INSTANCE_STATE_",
+        csharp: ("InstanceState", CsKind::Class),
+        python: ("python/int2dds/core/conditions.py", PyScope::Module("{}_INSTANCE_STATE")),
+    },
+    Family {
+        prefix: "INT2DDS_FIELD_",
+        csharp: ("FieldType", CsKind::Class),
+        python: ("python/int2dds/types/dynamic.py", PyScope::Module("FIELD_{}")),
+    },
+    Family {
+        prefix: "INT2DDS_VALUE_KIND_",
+        csharp: ("DynamicValueKind", CsKind::Enum),
+        python: ("python/int2dds/types/dynamic.py", PyScope::Module("VALUE_KIND_{}")),
+    },
+    Family {
+        prefix: "INT2DDS_MEMBER_",
+        csharp: ("MemberFlags", CsKind::Class),
+        python: ("python/int2dds/types/dynamic.py", PyScope::Module("MEMBER_{}")),
+    },
+    Family {
+        prefix: "INT2DDS_QOS_RELIABILITY_",
+        csharp: ("ReliabilityKind", CsKind::Enum),
+        python: ("python/int2dds/core/qos.py", PyScope::Class("ReliabilityKind")),
+    },
+    Family {
+        prefix: "INT2DDS_QOS_DURABILITY_",
+        csharp: ("DurabilityKind", CsKind::Enum),
+        python: ("python/int2dds/core/qos.py", PyScope::Class("DurabilityKind")),
+    },
+    Family {
+        prefix: "INT2DDS_QOS_HISTORY_",
+        csharp: ("HistoryKind", CsKind::Enum),
+        python: ("python/int2dds/core/qos.py", PyScope::Class("HistoryKind")),
+    },
+    Family {
+        prefix: "INT2DDS_QOS_DATA_REPR_",
+        csharp: ("DataRepresentationKind", CsKind::Enum),
+        python: ("python/int2dds/core/qos.py", PyScope::Class("DataRepresentationKind")),
+    },
+    Family {
+        prefix: "INT2DDS_QOS_LIVELINESS_",
+        csharp: ("LivelinessKind", CsKind::Enum),
+        python: ("python/int2dds/core/qos.py", PyScope::Class("LivelinessKind")),
+    },
+    Family {
+        prefix: "INT2DDS_QOS_OWNERSHIP_",
+        csharp: ("OwnershipKind", CsKind::Enum),
+        python: ("python/int2dds/core/qos.py", PyScope::Class("OwnershipKind")),
+    },
+    Family {
+        prefix: "INT2DDS_QOS_DEST_ORDER_",
+        csharp: ("DestinationOrderKind", CsKind::Enum),
+        python: ("python/int2dds/core/qos.py", PyScope::Class("DestinationOrderKind")),
+    },
+    Family {
+        prefix: "INT2DDS_QOS_LIFESPAN_REF_",
+        csharp: ("LifespanReferenceKind", CsKind::Enum),
+        python: ("python/int2dds/core/qos.py", PyScope::Class("LifespanReferenceKind")),
+    },
+];
+
+/// Header constants a binding names nowhere, as `(language, header name)`.
+///
+/// The dynamic return codes are the whole list, and both bindings leave them out
+/// for the same stated reason: an unrecognised code falls through to the generic
+/// error carrying its own number (`check_ret` in `exceptions.py`, the `_` arm of
+/// `ReturnCodeHelper` in `DdsException.cs`), so a caller can still tell 202 from
+/// 204 without either binding having a name for it.
+const UNNAMED: &[(&str, &str)] = &[
+    ("C#", "INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND"),
+    ("C#", "INT2DDS_RET_DYNAMIC_TYPE_MISMATCH"),
+    ("C#", "INT2DDS_RET_DYNAMIC_UNSUPPORTED_TYPE"),
+    ("C#", "INT2DDS_RET_DYNAMIC_TIMEOUT"),
+    ("C#", "INT2DDS_RET_DYNAMIC_DECODE_ERROR"),
+    ("Python", "INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND"),
+    ("Python", "INT2DDS_RET_DYNAMIC_TYPE_MISMATCH"),
+    ("Python", "INT2DDS_RET_DYNAMIC_UNSUPPORTED_TYPE"),
+    ("Python", "INT2DDS_RET_DYNAMIC_TIMEOUT"),
+    ("Python", "INT2DDS_RET_DYNAMIC_DECODE_ERROR"),
+];
+
+/// Members a binding has that the header does not define, as `(language,
+/// family prefix, member name, value)`. The empty and full masks are not status
+/// bits, so the header has nothing to say about them, but their values are still
+/// worth pinning here rather than nowhere.
+const EXTRA: &[(&str, &str, &str, i64)] =
+    &[("C#", "INT2DDS_STATUS_", "None", 0), ("C#", "INT2DDS_STATUS_", "All", 0xFFFF_FFFF)];
+
+/// A C or C# or Python integer literal: decimal, hex, or a shift, with the
+/// parentheses and any width suffix the three languages spell differently.
+fn parse_value(text: &str) -> Option<i64> {
+    let text = text.trim();
+    let text = match text.strip_prefix('(').and_then(|inner| inner.strip_suffix(')')) {
+        Some(inner) => inner.trim(),
+        None => text,
+    };
+    if let Some((lhs, rhs)) = text.split_once("<<") {
+        return Some(parse_value(lhs)? << parse_value(rhs)?);
+    }
+    let text = text.trim_end_matches(['u', 'U', 'l', 'L']);
+    match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        Some(hex) => i64::from_str_radix(hex, 16).ok(),
+        None => text.parse().ok(),
+    }
+}
+
+/// `#define NAME value` for every name that has a value this can read. The
+/// include guard has no value and `INT2DDS_DEPRECATED` is function-like, so both
+/// fall out here without needing to be named.
+fn header_defines() -> BTreeMap<String, i64> {
+    let src = read(&repo_root().join("ffi/include/int2dds-ffi.h"));
+    String::from_utf8_lossy(&src)
+        .lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix("#define ")?;
+            let (name, value) = rest.split_once(' ')?;
+            if !name.starts_with("INT2DDS_") || name.contains('(') {
+                return None;
+            }
+            Some((name.to_owned(), parse_value(value)?))
+        })
+        .collect()
+}
+
+/// The family a header constant belongs to, by longest matching prefix so that
+/// one family's prefix cannot swallow another's.
+fn family_of(name: &str) -> Option<&'static Family> {
+    FAMILIES
+        .iter()
+        .filter(|family| name.starts_with(family.prefix))
+        .max_by_key(|family| family.prefix.len())
+}
+
+/// Underscores dropped and lowercased, which is how a header's `UINT8` and C#'s
+/// `UInt8` are recognised as the same name. Python keeps the header's spelling
+/// and is compared as written.
+fn squashed(name: &str) -> String {
+    name.chars().filter(|c| *c != '_').flat_map(char::to_lowercase).collect()
+}
+
+/// `(name, value)` for one C# mirror.
+fn csharp_members(kind: CsKind, body: &str) -> Vec<(String, i64)> {
+    match kind {
+        CsKind::Enum => enumerators(body),
+        CsKind::Class => body
+            .split(';')
+            .filter_map(|member| {
+                let (declaration, value) = member.split_once('=')?;
+                Some((declaration.split_whitespace().last()?.to_owned(), parse_value(value)?))
+            })
+            .collect(),
+    }
+}
+
+/// Module-level and class-scoped `NAME = value` from one Python module, the
+/// latter keyed `Class::NAME`. A class body runs until the next line that starts
+/// at column zero, which is what separates `qos.py`'s enums from each other.
+///
+/// This reads lines, not syntax: a docstring containing `NAME = 5` at a matching
+/// indent is read as a constant. Harmless only because a stray name has to match
+/// a family's pattern to reach a comparison at all -- if one ever does, the fix
+/// is a real parse here, not a wider pattern.
+fn python_constants(path: &Path) -> BTreeMap<String, i64> {
+    let src = read(path);
+    let mut out = BTreeMap::new();
+    let mut class = None;
+    for line in String::from_utf8_lossy(&src).lines() {
+        let indented = line.starts_with([' ', '\t']);
+        if !indented && !line.trim().is_empty() {
+            class = line
+                .strip_prefix("class ")
+                .map(|rest| rest.split([':', '(']).next().unwrap_or(rest).trim().to_owned());
+        }
+        let Some((name, value)) = line.trim().split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        if name.is_empty()
+            || !name.chars().all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+        {
+            continue;
+        }
+        let Some(value) = parse_value(value) else {
+            continue;
+        };
+        match (indented, &class) {
+            (true, Some(class)) => out.insert(format!("{class}::{name}"), value),
+            (false, _) => out.insert(name.to_owned(), value),
+            (true, None) => continue,
+        };
+    }
+    out
+}
+
+/// The name a header suffix is expected to have in each binding.
+fn expected_names(family: &Family, suffix: &str) -> (String, String) {
+    let csharp = squashed(suffix);
+    let python = match family.python.1 {
+        PyScope::Module(pattern) => pattern.replace("{}", suffix),
+        PyScope::Class(class) => format!("{class}::{suffix}"),
+    };
+    (csharp, python)
+}
+
+/// Every header constant, grouped by the family it belongs to.
+fn defines_by_family() -> BTreeMap<&'static str, Vec<(String, i64)>> {
+    let mut out: BTreeMap<&'static str, Vec<(String, i64)>> = BTreeMap::new();
+    for (name, value) in header_defines() {
+        let family = family_of(&name).unwrap_or_else(|| {
+            panic!(
+                "{name} is a header constant belonging to no family in FAMILIES, so nothing \
+                 compares it against either binding. Add its family with the C# type and the \
+                 Python module that mirror it"
+            )
+        });
+        out.entry(family.prefix).or_default().push((name, value));
+    }
+    out
+}
+
+#[test]
+fn every_header_constant_belongs_to_a_mapped_family() {
+    let by_family = defines_by_family();
+    assert_eq!(
+        by_family.values().map(Vec::len).sum::<usize>(),
+        113,
+        "the header's constant count moved. That is not a failure by itself, but it is worth \
+         knowing which way it went before trusting the comparisons below"
+    );
+    let unmapped: Vec<&str> =
+        FAMILIES.iter().map(|f| f.prefix).filter(|p| !by_family.contains_key(p)).collect();
+    assert!(
+        unmapped.is_empty(),
+        "these families are mapped to a binding but the header defines nothing under them, so \
+         the mapping is describing something that no longer exists: {unmapped:#?}"
+    );
+}
+
+#[test]
+fn the_csharp_constants_have_the_header_values() {
+    let declared_enums = csharp_composites(b"enum");
+    let declared_classes = csharp_composites(b"class");
+
+    for (prefix, defines) in defines_by_family() {
+        let family = FAMILIES.iter().find(|f| f.prefix == prefix).expect("grouped by prefix");
+        let (type_name, kind) = family.csharp;
+        let declared = match kind {
+            CsKind::Enum => &declared_enums,
+            CsKind::Class => &declared_classes,
+        };
+        let composite = declared.get(type_name).unwrap_or_else(|| {
+            panic!(
+                "FAMILIES maps {prefix} to the C# {type_name}, which the binding does not \
+                 declare. Either it moved and the table needs the new name, or the mirror is \
+                 gone and every constant in the family is now unchecked"
+            )
+        });
+
+        let mut expected: BTreeMap<String, i64> = defines
+            .iter()
+            .filter(|(name, _)| !UNNAMED.contains(&("C#", name.as_str())))
+            .map(|(name, value)| (expected_names(family, &name[prefix.len()..]).0, *value))
+            .collect();
+        for (language, family_prefix, name, value) in EXTRA {
+            if *language == "C#" && *family_prefix == prefix {
+                expected.insert(squashed(name), *value);
+            }
+        }
+        let actual: BTreeMap<String, i64> = csharp_members(kind, &composite.body)
+            .into_iter()
+            .map(|(name, value)| (squashed(&name), value))
+            .collect();
+        assert_eq!(
+            actual, expected,
+            "the C# {type_name} does not mirror the header's {prefix} constants. A missing name \
+             is one the library can return and C# cannot spell; a wrong value is one it spells \
+             and means something else by -- the C# side is the left column"
+        );
+    }
+}
+
+#[test]
+fn the_python_constants_have_the_header_values() {
+    let root = repo_root();
+    let mut modules: BTreeMap<&str, BTreeMap<String, i64>> = BTreeMap::new();
+
+    for (prefix, defines) in defines_by_family() {
+        let family = FAMILIES.iter().find(|f| f.prefix == prefix).expect("grouped by prefix");
+        let (module, scope) = family.python;
+        let constants =
+            modules.entry(module).or_insert_with(|| python_constants(&root.join(module))).clone();
+
+        let expected: BTreeMap<String, i64> = defines
+            .iter()
+            .filter(|(name, _)| !UNNAMED.contains(&("Python", name.as_str())))
+            .map(|(name, value)| (expected_names(family, &name[prefix.len()..]).1, *value))
+            .collect();
+        // Only the names this family owns: one module holds several families,
+        // and the states share `conditions.py` with the status bits.
+        let actual: BTreeMap<String, i64> = constants
+            .into_iter()
+            .filter(|(name, _)| match scope {
+                PyScope::Module(pattern) => match pattern.split_once("{}") {
+                    Some((head, tail)) => {
+                        name.starts_with(head)
+                            && name.ends_with(tail)
+                            && name.len() > head.len() + tail.len()
+                    }
+                    None => false,
+                },
+                PyScope::Class(class) => name.starts_with(&format!("{class}::")),
+            })
+            .collect();
+        assert_eq!(
+            actual, expected,
+            "{module} does not mirror the header's {prefix} constants -- the Python side is the \
+             left column"
         );
     }
 }

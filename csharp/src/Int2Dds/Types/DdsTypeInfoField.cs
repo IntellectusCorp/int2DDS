@@ -23,7 +23,7 @@ namespace Int2Dds.Types
         /// <summary>String/sequence bound or array size (0 = unbounded).</summary>
         public uint Size { get; }
 
-        /// <summary>INT2DDS_MEMBER_* flag bitmask (KEY=1, OPTIONAL=2, MUST_UNDERSTAND=4, EXTERNAL=8).</summary>
+        /// <summary>Bitmask of <see cref="MemberFlags"/>.</summary>
         public int Flags { get; }
 
         /// <summary>

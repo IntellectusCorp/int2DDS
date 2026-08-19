@@ -12,6 +12,8 @@ namespace Int2Dds.Conditions
         InconsistentTopic = 1 << 0,
         OfferedDeadlineMissed = 1 << 1,
         RequestedDeadlineMissed = 1 << 2,
+        OfferedIncompatibleType = 1 << 3,
+        RequestedIncompatibleType = 1 << 4,
         OfferedIncompatibleQos = 1 << 5,
         RequestedIncompatibleQos = 1 << 6,
         SampleLost = 1 << 7,

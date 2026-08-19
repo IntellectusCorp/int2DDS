@@ -11,7 +11,11 @@ namespace Int2Dds.Xtypes
     {
         public string Name { get; }
         public uint MemberId { get; }
+
+        /// <summary>One of <see cref="Int2Dds.Types.FieldType"/>.</summary>
         public int Kind { get; }
+
+        /// <summary>Bitmask of <see cref="Int2Dds.Types.MemberFlags"/>.</summary>
         public int Flags { get; }
 
         public MemberInfo(string name, uint memberId, int kind, int flags)

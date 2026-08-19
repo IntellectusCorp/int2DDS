@@ -14,10 +14,13 @@ if TYPE_CHECKING:
     from int2dds.core.subscriber import DataReader
 
 
-# Status mask constants (matching int2dds Rust library StatusKind bit positions)
+# Status mask constants, the whole of `INT2DDS_STATUS_*` in int2dds-ffi.h.
+# `ffi/tests/abi_parity.rs` pins these against the header; this is the only copy.
 STATUS_INCONSISTENT_TOPIC = 1 << 0
 STATUS_OFFERED_DEADLINE_MISSED = 1 << 1
 STATUS_REQUESTED_DEADLINE_MISSED = 1 << 2
+STATUS_OFFERED_INCOMPATIBLE_TYPE = 1 << 3
+STATUS_REQUESTED_INCOMPATIBLE_TYPE = 1 << 4
 STATUS_OFFERED_INCOMPATIBLE_QOS = 1 << 5
 STATUS_REQUESTED_INCOMPATIBLE_QOS = 1 << 6
 STATUS_SAMPLE_LOST = 1 << 7
