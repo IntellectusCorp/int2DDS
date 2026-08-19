@@ -96,3 +96,75 @@ impl ReaderStore {
         self.by_id.iter().map(|r| r.value().clone()).collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        common::builtin::topic::subscription_builtin_topic_data::SubscriptionBuiltinTopicData,
+        infrastructure::qos_policy::ReliabilityQosPolicyKind,
+        rtps::{
+            common::{entity_id::EntityId, entity_kind::EntityKind, guid::Guid, types::TopicKind},
+            entities::reader::StatefulReader,
+        },
+        subscription::qos::{DataReaderQos, SubscriberQos},
+        topic::qos::TopicQos,
+    };
+
+    fn stateful_reader(entity_id: EntityId) -> Arc<dyn Reader + Send + Sync> {
+        let guid = Guid::new([7; 12], entity_id);
+        let subscription_data = SubscriptionBuiltinTopicData::new(
+            &DataReaderQos::default(),
+            &SubscriberQos::default(),
+            &TopicQos::default(),
+        );
+
+        Arc::new(StatefulReader::new(
+            guid,
+            TopicKind::WithKey,
+            ReliabilityQosPolicyKind::Reliable,
+            Vec::new(),
+            Vec::new(),
+            entity_id,
+            false,
+            None,
+            None,
+            subscription_data,
+            guid,
+        ))
+    }
+
+    #[test]
+    fn a_callback_lease_raises_and_lowers_the_in_flight_count() {
+        let entity_id = EntityId::new([0, 0, 1], EntityKind::USER_DEFINED_READER_WITH_KEY);
+        let store = ReaderStore::new();
+        store.add("topic", stateful_reader(entity_id));
+
+        let reader = store.get_reader(entity_id).expect("reader present");
+        assert_eq!(reader.in_flight_callbacks(), 0);
+
+        let first = store.get_reader_callback_lease(entity_id).expect("reader present");
+        assert_eq!(reader.in_flight_callbacks(), 1);
+
+        let second = store.get_reader_callback_lease(entity_id).expect("reader present");
+        assert_eq!(reader.in_flight_callbacks(), 2, "concurrent leases must stack");
+
+        drop(second);
+        assert_eq!(reader.in_flight_callbacks(), 1);
+
+        drop(first);
+        assert_eq!(reader.in_flight_callbacks(), 0);
+    }
+
+    #[test]
+    fn a_callback_lease_for_an_unknown_reader_is_none() {
+        let store = ReaderStore::new();
+        store.add(
+            "topic",
+            stateful_reader(EntityId::new([0, 0, 1], EntityKind::USER_DEFINED_READER_WITH_KEY)),
+        );
+
+        let missing = EntityId::new([9, 9, 9], EntityKind::USER_DEFINED_READER_WITH_KEY);
+        assert!(store.get_reader_callback_lease(missing).is_none());
+    }
+}
