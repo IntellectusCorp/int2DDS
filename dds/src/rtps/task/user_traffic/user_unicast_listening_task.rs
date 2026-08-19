@@ -9,7 +9,6 @@ use crate::rtps::messages::message_receiver::MessageReceiver;
 use crate::rtps::transport::plugin::MessageSource;
 use crate::rtps::transport::shm::shm_listener::ShmListener;
 use crate::rtps::transport::socket::MAX_EVENTS;
-use crate::rtps::transport::tcp::self_delivery;
 use crate::rtps::transport::tokens::ListenerToken;
 use log::{debug, error, info, warn};
 use mio::{Events, Interest, Poll, Waker};
@@ -186,10 +185,6 @@ impl UserUnicastListeningTask {
             .upgrade()
             .ok_or_else(|| std::io::Error::other("Participant already dropped"))?;
 
-        // This thread is the channel's only consumer, so a frame it addresses to
-        // itself while handling a message cannot go back onto the channel.
-        self_delivery::install();
-
         loop {
             match rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(msg) => {
@@ -198,12 +193,6 @@ impl UserUnicastListeningTask {
                         return Ok(());
                     }
                     self.process_rtps_message(Bytes::from(msg.data), msg.source);
-                    // Settled before the next inbound frame: the responses owed
-                    // for the message just handled are what the local endpoints
-                    // are waiting on, and nothing else can refill this queue.
-                    self_delivery::drain(|pending| {
-                        self.process_rtps_message(Bytes::from(pending.data), pending.source);
-                    });
                 }
                 Err(flume::RecvTimeoutError::Timeout) => {
                     if participant.is_terminated() {
