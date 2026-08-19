@@ -600,6 +600,12 @@ impl Subscriber {
         if datareader.get_subscriber()?.get_instance_handle()? != self.get_instance_handle()? {
             return Err(DdsError::PreconditionNotMet);
         }
+
+        // An attached ReadCondition or QueryCondition must be deleted before its reader.
+        if !datareader.get_readconditions()?.is_empty() {
+            return Err(DdsError::PreconditionNotMet);
+        }
+
         let handle = datareader.get_instance_handle()?;
         let topic_description = datareader.get_topicdescription()?;
         let topic_name = effective_topic_name(topic_description.as_ref())?;
@@ -1518,6 +1524,61 @@ mod tests {
             elapsed >= DRAIN_MIN_BLOCK,
             "delete returned in {elapsed:?}, so it did not wait for the in-flight callback"
         );
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    // Deleting a DataReader that still has an attached ReadCondition must be refused with
+    // PreconditionNotMet. Deleting the condition first lets the reader be deleted.
+    #[test]
+    fn deleting_a_reader_with_an_outstanding_readcondition_is_refused() {
+        use crate::test_utils::unique_domain_id;
+
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "PreconditionTopic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &topic,
+                DataReaderQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let read_condition = reader
+            .create_readcondition(
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+            .unwrap();
+
+        let refused = subscriber.delete_datareader(reader.clone());
+        assert_eq!(refused.unwrap_err(), DdsError::PreconditionNotMet);
+
+        reader.delete_readcondition(read_condition).unwrap();
+        subscriber.delete_datareader(reader).unwrap();
 
         participant.delete_contained_entities().unwrap();
         factory.delete_participant(participant).unwrap();
