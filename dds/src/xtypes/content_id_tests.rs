@@ -1,24 +1,22 @@
-//! Derive-generated TypeObjects reference nested composites by their
-//! content-based hash ids (EK_COMPLETE inside complete objects, EK_MINIMAL inside
-//! minimal objects), plain collections carry the matching-EK element id and a
-//! spec-correct `equiv_kind`, and the derive-side minimal object is byte-identical
-//! to the registry-derived one for the same closure.
+// Derive-generated TypeObjects reference nested composites by their content-based
+// hash ids, and the derive-side minimal object matches the registry-derived one.
 
-use int2dds::dcps::topic::type_support::DdsType;
-use int2dds::xtypes::{
-    build_minimal_closure, CompleteTypeObject, EquivalenceKind, HasTypeObject, MinimalTypeObject,
-    PlainCollectionHeader, TypeIdentifier, TypeObject,
+use crate::dcps::topic::type_support::DdsType;
+use crate::xtypes::{
+    build_minimal_closure, CompleteStructMember, CompleteTypeObject, EquivalenceKind,
+    HasTypeObject, MinimalStructMember, MinimalTypeObject, PlainCollectionHeader, TypeIdentifier,
+    TypeObject,
 };
 
 #[derive(DdsType)]
-#[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+#[dds_type(crate_path = "crate", extensibility = "Appendable")]
 struct Inner {
     a: i32,
     b: String,
 }
 
 #[derive(DdsType)]
-#[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+#[dds_type(crate_path = "crate", extensibility = "Appendable")]
 struct Outer {
     inner: Inner,
     many: Vec<Inner>,
@@ -26,19 +24,19 @@ struct Outer {
 }
 
 #[derive(DdsType)]
-#[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+#[dds_type(crate_path = "crate", extensibility = "Appendable")]
 struct NestedColl {
     grid: Vec<Vec<Inner>>,
 }
 
-fn complete_members(o: &CompleteTypeObject) -> &Vec<int2dds::xtypes::CompleteStructMember> {
+fn complete_members(o: &CompleteTypeObject) -> &Vec<CompleteStructMember> {
     match o {
         CompleteTypeObject::Struct(s) => &s.member_seq,
         _ => panic!("expected struct"),
     }
 }
 
-fn minimal_members(o: &MinimalTypeObject) -> &Vec<int2dds::xtypes::MinimalStructMember> {
+fn minimal_members(o: &MinimalTypeObject) -> &Vec<MinimalStructMember> {
     match o {
         MinimalTypeObject::Struct(s) => &s.member_seq,
         _ => panic!("expected struct"),
