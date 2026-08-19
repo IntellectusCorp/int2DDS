@@ -310,7 +310,12 @@ impl SedpLogic {
             .collect();
         for (topic, data) in pubs {
             for reader in participant.find_readers_from_topic_name(&topic) {
-                self.match_reader_with_publication(reader, data.clone());
+                let Some(lease) = participant
+                    .find_reader_callback_lease_from_entity_id(reader.guid().entity_id())
+                else {
+                    continue;
+                };
+                self.match_reader_with_publication((*lease).clone(), data.clone());
             }
         }
 
@@ -666,8 +671,8 @@ impl SedpLogic {
 
         debug!("Local endpoint detected, proceeding to match for GUID: {}", endpoint_guid);
         if let BuiltinTopicData::Publication(publication_builtin_topic_data) = builtin_topic_data {
-            let local_reader = participant
-                .find_reader_from_entity_id(endpoint_guid.entity_id())
+            let local_reader_lease = participant
+                .find_reader_callback_lease_from_entity_id(endpoint_guid.entity_id())
                 .ok_or_else(|| {
                     RtpsError::new(
                         RtpsErrorCode::RtpsEntityNotFound,
@@ -677,7 +682,7 @@ impl SedpLogic {
 
             self.match_endpoint(
                 MatchType::ReaderPublication,
-                local_reader.as_any(),
+                local_reader_lease.as_any(),
                 BuiltinTopicData::Publication(publication_builtin_topic_data),
                 true,
             )?;
@@ -1262,7 +1267,15 @@ impl SedpLogic {
 
         if !readers.is_empty() {
             for reader in readers {
-                self.match_reader_with_publication(reader, publication_builtin_topic_data.clone());
+                let Some(lease) = participant
+                    .find_reader_callback_lease_from_entity_id(reader.guid().entity_id())
+                else {
+                    continue;
+                };
+                self.match_reader_with_publication(
+                    (*lease).clone(),
+                    publication_builtin_topic_data.clone(),
+                );
             }
         } else {
             // add to pending remote publications

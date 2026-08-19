@@ -1617,6 +1617,122 @@ mod tests {
         factory.delete_participant(participant).unwrap();
     }
 
+    struct MatchSleepListener {
+        entered: SyncSender<()>,
+    }
+
+    impl DataReaderListener for MatchSleepListener {
+        type Foo = HelloWorld;
+
+        fn on_subscription_matched(
+            &self,
+            _reader: &DataReader<Self::Foo>,
+            _status: &crate::infrastructure::status::SubscriptionMatchedStatus,
+        ) {
+            let _ = self.entered.try_send(());
+            std::thread::sleep(DRAIN_CALLBACK_SLEEP);
+        }
+    }
+
+    #[test]
+    fn deleting_a_reader_waits_for_its_in_flight_subscription_matched_callback() {
+        use crate::{
+            core::time::Duration,
+            infrastructure::qos_policy::{ReliabilityQosPolicy, ReliabilityQosPolicyKind},
+            publication::qos::{DataWriterQos, PublisherQos},
+            test_utils::unique_domain_id,
+        };
+        use std::time::Instant;
+
+        let reliable = ReliabilityQosPolicy {
+            kind: ReliabilityQosPolicyKind::Reliable,
+            max_blocking_time: Duration::from_millis(100),
+        };
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel::<()>(1);
+
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+
+        // Subscriber side: the reader whose SUBSCRIPTION_MATCHED callback we make in-flight.
+        let sub_participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let sub_topic = sub_participant
+            .create_topic::<HelloWorld>(
+                "SubMatchDrainTopic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber = sub_participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &sub_topic,
+                DataReaderQos { reliability: reliable.clone(), ..Default::default() },
+                Some(Arc::new(MatchSleepListener { entered: entered_tx })),
+                StatusMask::SUBSCRIPTION_MATCHED,
+            )
+            .unwrap();
+
+        // Publisher side: a remote writer whose discovery matches the reader, firing
+        // SUBSCRIPTION_MATCHED on the subscriber participant's discovery thread.
+        let pub_participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let pub_topic = pub_participant
+            .create_topic::<HelloWorld>(
+                "SubMatchDrainTopic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher = pub_participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let _writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &pub_topic,
+                DataWriterQos { reliability: reliable, ..Default::default() },
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        // on_subscription_matched has started on the discovery thread and is now sleeping.
+        entered_rx.recv_timeout(DRAIN_DEADLINE).expect("on_subscription_matched never ran");
+
+        let start = Instant::now();
+        subscriber.delete_datareader(reader).unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed >= DRAIN_MIN_BLOCK,
+            "delete returned in {elapsed:?}, so it did not wait for the in-flight subscription-matched callback"
+        );
+
+        sub_participant.delete_contained_entities().unwrap();
+        factory.delete_participant(sub_participant).unwrap();
+        pub_participant.delete_contained_entities().unwrap();
+        factory.delete_participant(pub_participant).unwrap();
+    }
+
     #[test]
     fn test_subscriber_drop_without_delete() {
         let domain_participant_factory = DomainParticipantFactory::get_instance();

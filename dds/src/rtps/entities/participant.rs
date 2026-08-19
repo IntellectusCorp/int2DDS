@@ -884,10 +884,12 @@ impl Participant {
 
     /// Iterate through all Readers in the Participant to find Readers matched with the Writer, then remove Writer Proxy
     fn remove_unmatched_writer_from_reader(&self, writer_guid: Guid) -> RtpsResult<()> {
-        for reader in self.rtps_reader_store.iter_all() {
-            if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
+        // Each lease keeps its reader's in-flight count raised across the SUBSCRIPTION_MATCHED(-1)
+        // update below, so a concurrent reader delete drains that callback.
+        for lease in self.rtps_reader_store.iter_all_callback_leases() {
+            if let Some(stateful_reader) = lease.as_any().downcast_ref::<StatefulReader>() {
                 stateful_reader.remove_matched_writer_and_update_status(writer_guid)?;
-            } else if let Some(stateless_reader) = reader.as_any().downcast_ref::<StatelessReader>()
+            } else if let Some(stateless_reader) = lease.as_any().downcast_ref::<StatelessReader>()
             {
                 stateless_reader.remove_matched_writer_and_update_status(writer_guid)?;
             }
