@@ -91,6 +91,37 @@ mod tests {
     }
 
     #[test]
+    fn in_listener_callback_is_true_only_inside_notify_user() {
+        assert!(!in_listener_callback(), "must be false before any callback");
+
+        let mut inside = false;
+        notify_user("test", || inside = in_listener_callback());
+
+        assert!(inside, "must be true while the callback runs");
+        assert!(!in_listener_callback(), "must be false after the callback returns");
+    }
+
+    #[test]
+    fn nested_notify_user_stays_flagged_until_the_outer_returns() {
+        let mut after_inner = false;
+
+        notify_user("outer", || {
+            notify_user("inner", || {});
+            // The inner callback returned, but the outer one is still running.
+            after_inner = in_listener_callback();
+        });
+
+        assert!(after_inner, "flag was cleared when the inner callback returned");
+        assert!(!in_listener_callback(), "flag not cleared after the outer callback returned");
+    }
+
+    #[test]
+    fn in_listener_callback_is_cleared_after_a_panicking_callback() {
+        notify_user("test", || panic!("boom"));
+        assert!(!in_listener_callback(), "a panicking callback must not leak the flag");
+    }
+
+    #[test]
     fn callback_handle_recovers_a_poisoned_slot() {
         let slot: Arc<Mutex<Option<Arc<u32>>>> = Arc::new(Mutex::new(Some(Arc::new(7))));
 
