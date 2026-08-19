@@ -25,6 +25,9 @@ pub mod common;
 pub mod config;
 pub mod route_gateway;
 pub mod rtps;
+// Re-export so the ffi crate can name the SEDP discovery event type
+// (rtps::entities::participant are pub(crate)).
+pub use crate::rtps::entities::participant::EndpointDiscoveryEvent;
 #[doc(hidden)]
 pub mod serialize;
 pub mod xtypes;
