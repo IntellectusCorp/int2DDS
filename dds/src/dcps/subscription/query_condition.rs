@@ -51,6 +51,9 @@ pub struct QueryCondition {
     datareader: Option<Weak<dyn DataReaderInternal<Qos = DataReaderQos>>>,
     #[allow(clippy::type_complexity)]
     waitset_callback: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
+    // Set true when the owning reader is deleted, so a WaitSet reports this condition as
+    // triggered and drops it instead of leaving a waiter hung.
+    is_dead: Arc<AtomicBool>,
 }
 
 impl Debug for QueryCondition {
@@ -118,6 +121,7 @@ impl QueryCondition {
             parsed_expression: expression,
             datareader: Some(Arc::downgrade(datareader)),
             waitset_callback: Arc::new(Mutex::new(None)),
+            is_dead: Arc::new(AtomicBool::new(false)),
         })
     }
     pub fn get_query_expression(&self) -> &str {

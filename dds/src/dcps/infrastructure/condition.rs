@@ -30,6 +30,12 @@ pub(crate) trait ConditionInternal: Debug {
     /// `Arc` fields instead, so the address of `waitset_callback` identifies
     /// the condition across handles, and does so without allocating.
     fn identity(&self) -> *const ();
+
+    // Whether the condition's owning entity has been deleted. A dead condition is reported as
+    // triggered so a parked waiter wakes, then dropped from the WaitSet.
+    fn is_dead(&self) -> bool;
+    // Mark the condition dead and wake any WaitSet parked on it.
+    fn mark_dead(&self);
 }
 
 macro_rules! impl_dds_condition_impl {
@@ -56,6 +62,19 @@ macro_rules! impl_dds_condition_impl {
             fn identity(&self) -> *const () {
                 ::std::sync::Arc::as_ptr(&self.waitset_callback) as *const ()
             }
+
+            fn is_dead(&self) -> bool {
+                self.is_dead.load(::std::sync::atomic::Ordering::Acquire)
+            }
+
+            fn mark_dead(&self) {
+                self.is_dead.store(true, ::std::sync::atomic::Ordering::Release);
+                if let Ok(callback) = self.waitset_callback.lock() {
+                    if let Some(callback) = callback.as_ref() {
+                        callback();
+                    }
+                }
+            }
         }
         impl<$($impl_generics)*> $type
         where
@@ -65,6 +84,12 @@ macro_rules! impl_dds_condition_impl {
             #[inline]
             pub fn get_trigger_value(&self) -> DdsResult<bool> {
                 <Self as Condition>::get_trigger_value(self)
+            }
+
+            /// Wrapper for ConditionInternal::mark_dead()
+            #[inline]
+            pub fn mark_dead(&self) {
+                <Self as ConditionInternal>::mark_dead(self)
             }
         }
     };

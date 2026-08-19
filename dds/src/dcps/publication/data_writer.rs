@@ -2514,6 +2514,11 @@ impl<Foo: 'static + Clone> DataWriterInternal for DataWriter<Foo> {
         let value_to_drop = self.self_ref.lock().ok().and_then(|mut guard| guard.take());
         drop(value_to_drop);
 
+        // Wake any WaitSet parked on this writer's status condition and let it drop it.
+        if let Ok(status_condition) = self.status_condition.lock() {
+            status_condition.mark_dead();
+        }
+
         self.deleted.store(true, Ordering::SeqCst);
     }
 

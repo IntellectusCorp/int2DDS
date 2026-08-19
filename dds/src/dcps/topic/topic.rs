@@ -264,6 +264,12 @@ impl Topic {
 
     pub(crate) fn delete(&mut self) {
         self.self_ref = None;
+
+        // Wake any WaitSet parked on this topic's status condition and let it drop it.
+        if let Ok(status_condition) = self.status_condition.lock() {
+            status_condition.mark_dead();
+        }
+
         self.deleted.store(true, Ordering::SeqCst);
     }
 
