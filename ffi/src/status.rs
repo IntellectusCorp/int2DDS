@@ -18,7 +18,19 @@ use int2dds::infrastructure::status::{
 // ============================================================================
 
 /// C-compatible QoS policy ID enum
-#[repr(C)]
+///
+/// `i32` rather than `C` because this enum is a *field* of two structs the caller
+/// allocates, so its width is part of their layout. The two reprs are the same on
+/// the Rust side -- rustc has no `-fshort-enums` and lays a `repr(C)` enum out as
+/// `i32` on every supported target -- but they are not the same in the header.
+/// `repr(C)` emits a bare C `enum`, whose width a C compiler may shrink to the
+/// values present: compiled for `armv7a-none-eabi` with `-fshort-enums`, the
+/// header this used to generate made it one byte, which moved
+/// `Int2DdsSampleRejectedStatus::last_instance_handle` off the offset the library
+/// writes it at. `repr(i32)` makes cbindgen state the width instead (`enum ... :
+/// int32_t` where the language has that, `typedef int32_t` where it does not), and
+/// that same compile then agrees.
+#[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Int2DdsQosPolicyId {
     Invalid = 0,
@@ -151,7 +163,9 @@ impl From<&SubscriptionMatchedStatus> for Int2DdsSubscriptionMatchedStatus {
 // ============================================================================
 
 /// C-compatible sample rejected status kind
-#[repr(C)]
+///
+/// `i32` rather than `C` for the same reason as [`Int2DdsQosPolicyId`].
+#[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Int2DdsSampleRejectedStatusKind {
     NotRejected = 0,

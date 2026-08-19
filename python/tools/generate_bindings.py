@@ -3,12 +3,20 @@
 The header is the ABI. Every declaration cffi is given is copied from it verbatim,
 so a signature cannot drift the way a hand-written `cdef` could: an argument the
 header added, a width it changed, a pointer it made an array pointer, all arrive
-here unedited. What is dropped is only what cffi cannot parse -- comments,
-preprocessor lines, and the `extern "C"` wrapper.
+here unedited. What is dropped is only what cffi cannot parse -- comments and
+preprocessor lines.
 
 Dropping the `#define` lines drops the constants with them. Nothing reads them
 through the library object: every attribute the binding takes off `lib` is a
 function, and the return codes the package uses are declared in `int2dds/exceptions.py`.
+
+The `#if` lines are not merely dropped, because what they guard differs per branch:
+an explicitly sized enum is `enum E : int32_t` to a C23 or C++ compiler and
+`typedef int32_t E` to anything older, and only the second is something cffi can
+read. So the conditionals are evaluated for the translation unit cffi actually is
+-- plain C, pre-C23, no compiler macros -- which is the branch whose types are the
+ABI ones. Selecting a branch is why `extern "C" {` needs no special case: it sits
+under `#ifdef __cplusplus`, and that is false here.
 
     python python/tools/generate_bindings.py            # rewrite the binding
     python python/tools/generate_bindings.py --check    # fail if it is stale
@@ -32,8 +40,8 @@ BINDING = ROOT / "python" / "int2dds" / "_ffi" / "_bindings.py"
 PREAMBLE = '''"""cffi bindings for the int2dds-ffi library.
 
 GENERATED FILE -- edits are overwritten. The declarations below are
-`ffi/include/int2dds-ffi.h` with its comments, preprocessor lines and `extern "C"`
-wrapper removed; regenerate with
+`ffi/include/int2dds-ffi.h` with its comments removed and its preprocessor
+conditionals resolved for plain pre-C23 C; regenerate with
 
     python python/tools/generate_bindings.py
 
@@ -70,6 +78,36 @@ except OSError as e:
 '''
 
 
+# A `#if` expression once `defined(...)` is false everywhere and every remaining
+# identifier is the 0 the C preprocessor substitutes for an undefined one. What is
+# left has to be arithmetic on literals, so anything outside this is a construct
+# whose branch we would be guessing at -- and guessing picks types.
+RESOLVED = re.compile(r"[\s0-9()]|and|or|not|[<>=!]=|[<>+*/&|^-]")
+
+
+def condition_holds(expr: str) -> bool:
+    """Is `expr` true where nothing is defined? That is the translation unit cffi is.
+
+    Undefined identifiers evaluate to 0 (C17 6.10.1p4), so `__STDC_VERSION__ >=
+    202311L` is false and the pre-C23 branch is the one taken -- which is the branch
+    that spells an enum's width as a type cffi can parse.
+    """
+    reduced = re.sub(r"\bdefined\s*\(\s*\w+\s*\)|\bdefined\s+\w+", "0", expr)
+    reduced = re.sub(r"\b\d+[uUlL]+\b", lambda m: m.group().rstrip("uUlL"), reduced)
+    reduced = re.sub(r"\b[A-Za-z_]\w*\b", "0", reduced)
+    reduced = reduced.replace("&&", " and ").replace("||", " or ")
+    reduced = re.sub(r"!(?!=)", " not ", reduced)
+
+    if RESOLVED.sub("", reduced).strip():
+        raise SystemExit(
+            f"{HEADER}: `#if {expr.strip()}` uses a construct this generator cannot\n"
+            f"reduce, so which branch cffi should see is a guess. Teach the reduction\n"
+            f"that form -- the branches of a conditional in this header hold different\n"
+            f"types for the same name, and picking the wrong one is silent."
+        )
+    return bool(eval(reduced, {"__builtins__": {}}, {}))  # noqa: S307 - whitelisted above
+
+
 def cdef_body(header: str) -> str:
     """The header reduced to declarations, each one unedited."""
     header = re.sub(r"/\*.*?\*/", "", header, flags=re.S)
@@ -77,15 +115,45 @@ def cdef_body(header: str) -> str:
 
     kept: list[str] = []
     depth = 0
+    # One entry per open conditional: whether its lines are being kept, and whether
+    # any branch of it has been taken yet (which is what `#elif`/`#else` need).
+    conditionals: list[tuple[bool, bool]] = []
     for line in header.splitlines():
         stripped = line.strip()
         if stripped.startswith("#"):
+            parts = stripped[1:].strip().split(None, 1)
+            directive = parts[0] if parts else ""
+            rest = parts[1] if len(parts) > 1 else ""
+            if directive in ("if", "ifdef", "ifndef"):
+                expr = {
+                    "if": rest,
+                    "ifdef": f"defined({rest.strip()})",
+                    "ifndef": f"!defined({rest.strip()})",
+                }[directive]
+                live = all(live for live, _ in conditionals) and condition_holds(expr)
+                conditionals.append((live, live))
+            elif directive in ("elif", "else"):
+                if not conditionals:
+                    raise SystemExit(f"{HEADER}: `#{directive}` outside any conditional")
+                _, exhausted = conditionals[-1]
+                live = (
+                    not exhausted
+                    and all(live for live, _ in conditionals[:-1])
+                    and (directive == "else" or condition_holds(rest))
+                )
+                conditionals[-1] = (live, exhausted or live)
+            elif directive == "endif":
+                if not conditionals:
+                    raise SystemExit(f"{HEADER}: `#endif` outside any conditional")
+                conditionals.pop()
             continue
-        if depth == 0 and stripped in ('extern "C" {', "}"):
+        if not all(live for live, _ in conditionals):
             continue
         depth += line.count("{") - line.count("}")
         kept.append(line.rstrip())
 
+    if conditionals:
+        raise SystemExit(f"{HEADER}: {len(conditionals)} conditional(s) left unclosed")
     if depth != 0:
         raise SystemExit(f"{HEADER}: unbalanced braces after stripping ({depth:+})")
 

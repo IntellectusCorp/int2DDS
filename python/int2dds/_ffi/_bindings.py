@@ -1,8 +1,8 @@
 """cffi bindings for the int2dds-ffi library.
 
 GENERATED FILE -- edits are overwritten. The declarations below are
-`ffi/include/int2dds-ffi.h` with its comments, preprocessor lines and `extern "C"`
-wrapper removed; regenerate with
+`ffi/include/int2dds-ffi.h` with its comments removed and its preprocessor
+conditionals resolved for plain pre-C23 C; regenerate with
 
     python python/tools/generate_bindings.py
 
@@ -17,7 +17,8 @@ import cffi
 ffi = cffi.FFI()
 
 ffi.cdef("""
-typedef enum Int2DdsQosPolicyId {
+enum Int2DdsQosPolicyId
+ {
   Invalid = 0,
   UserData = 1,
   Durability = 2,
@@ -44,14 +45,17 @@ typedef enum Int2DdsQosPolicyId {
   DataRepresentation = 23,
   TypeConsistencyEnforcement = 24,
   Property = 25,
-} Int2DdsQosPolicyId;
+};
+typedef int32_t Int2DdsQosPolicyId;
 
-typedef enum Int2DdsSampleRejectedStatusKind {
+enum Int2DdsSampleRejectedStatusKind
+ {
   NotRejected = 0,
   RejectedByInstancesLimit = 1,
   RejectedBySamplesLimit = 2,
   RejectedBySamplesPerInstanceLimit = 3,
-} Int2DdsSampleRejectedStatusKind;
+};
+typedef int32_t Int2DdsSampleRejectedStatusKind;
 
 typedef struct Int2DdsCondition Int2DdsCondition;
 
@@ -189,7 +193,7 @@ typedef struct Int2DdsOfferedIncompatibleQosStatus {
 
   int32_t total_count_change;
 
-  enum Int2DdsQosPolicyId last_policy_id;
+  Int2DdsQosPolicyId last_policy_id;
 
   uint32_t policies_count;
 } Int2DdsOfferedIncompatibleQosStatus;
@@ -250,7 +254,7 @@ typedef struct Int2DdsSampleRejectedStatus {
 
   int32_t total_count_change;
 
-  enum Int2DdsSampleRejectedStatusKind last_reason;
+  Int2DdsSampleRejectedStatusKind last_reason;
 
   uint8_t last_instance_handle[16];
 } Int2DdsSampleRejectedStatus;
@@ -295,7 +299,7 @@ typedef struct Int2DdsRequestedIncompatibleQosStatus {
 
   int32_t total_count_change;
 
-  enum Int2DdsQosPolicyId last_policy_id;
+  Int2DdsQosPolicyId last_policy_id;
 
   uint32_t policies_count;
 } Int2DdsRequestedIncompatibleQosStatus;

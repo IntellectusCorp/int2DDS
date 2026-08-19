@@ -166,9 +166,10 @@ namespace Int2Dds.Interop
     }
 
     /// <summary>
-    /// QoS Policy ID enum (for incompatible QoS status)
+    /// QoS Policy ID enum (for incompatible QoS status).
+    /// A field of two native structs, so the width is stated rather than defaulted.
     /// </summary>
-    internal enum QosPolicyId
+    internal enum QosPolicyId : int
     {
         Invalid = 0,
         UserData = 1,
@@ -195,12 +196,13 @@ namespace Int2Dds.Interop
         DurabilityService = 22,
         DataRepresentation = 23,
         TypeConsistencyEnforcement = 24,
+        Property = 25,
     }
 
     /// <summary>
-    /// Sample rejected status kind
+    /// Sample rejected status kind. A field of a native struct, as above.
     /// </summary>
-    internal enum SampleRejectedStatusKind
+    internal enum SampleRejectedStatusKind : int
     {
         NotRejected = 0,
         RejectedByInstancesLimit = 1,
