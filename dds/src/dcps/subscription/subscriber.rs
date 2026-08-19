@@ -589,6 +589,13 @@ impl Subscriber {
         &self,
         datareader: &Arc<dyn DataReaderInternal<Qos = DataReaderQos>>,
     ) -> DdsResult<()> {
+        // Deleting from inside a listener callback would block on the reader's in-flight-callback
+        // drain, which only this thread can release. Refuse instead of deadlocking. The caller must
+        // delete from another thread or after the callback returns.
+        if crate::utils::notify::in_listener_callback() {
+            return Err(DdsError::IllegalOperation);
+        }
+
         self.remove_orphaned_reader(datareader);
         if datareader.get_subscriber()?.get_instance_handle()? != self.get_instance_handle()? {
             return Err(DdsError::PreconditionNotMet);

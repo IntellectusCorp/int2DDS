@@ -17,6 +17,18 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex};
 
+thread_local! {
+    // True while this thread is running a user listener callback. Deleting an entity from inside
+    // its own callback would block on an in-flight count only this thread can release, so the
+    // delete path reads this and refuses rather than deadlocking.
+    static IN_LISTENER: std::cell::Cell<bool> = std::cell::Cell::new(false);
+}
+
+// Whether the current thread is executing a user listener callback.
+pub(crate) fn in_listener_callback() -> bool {
+    IN_LISTENER.with(|flag| flag.get())
+}
+
 /// Clones a registered callback out from behind its mutex, so the caller can invoke it with
 /// the lock released.
 ///
@@ -36,7 +48,11 @@ pub(crate) fn callback_handle<T: ?Sized>(slot: &Mutex<Option<Arc<T>>>) -> Option
 /// visible than the current behaviour of killing a background thread the application cannot
 /// observe. The callback's own work is still lost -- only the thread is saved.
 pub(crate) fn notify_user<F: FnOnce()>(context: &str, notify: F) {
-    if let Err(payload) = catch_unwind(AssertUnwindSafe(notify)) {
+    let was_in_listener = IN_LISTENER.with(|flag| flag.replace(true));
+    let result = catch_unwind(AssertUnwindSafe(notify));
+    IN_LISTENER.with(|flag| flag.set(was_in_listener));
+
+    if let Err(payload) = result {
         let reason = panic_message(&payload);
         log::error!(
             "{context}: user listener panicked ({reason}). The panic was contained so the DDS \

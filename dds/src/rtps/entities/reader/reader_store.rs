@@ -1,3 +1,4 @@
+use std::ops::Deref;
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -5,6 +6,35 @@ use dashmap::DashMap;
 use crate::rtps::common::entity_id::EntityId;
 
 use super::Reader;
+
+// A reader leased for callback-producing work (delivery, discovery, liveliness). Holding it
+// keeps the reader's in-flight-callback count raised, and dropping it lowers the count. Deletion
+// drains that count to zero, so no callback outlives the delete call. The count is raised while
+// the store's shard lock is held (see `get_reader_callback_lease`), serializing it against `remove`.
+pub(crate) struct ReaderCallbackLease {
+    reader: Arc<dyn Reader + Send + Sync>,
+}
+
+impl ReaderCallbackLease {
+    fn new(reader: Arc<dyn Reader + Send + Sync>) -> Self {
+        reader.enter_callback();
+        Self { reader }
+    }
+}
+
+impl Deref for ReaderCallbackLease {
+    type Target = Arc<dyn Reader + Send + Sync>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.reader
+    }
+}
+
+impl Drop for ReaderCallbackLease {
+    fn drop(&mut self) {
+        self.reader.exit_callback();
+    }
+}
 
 // Dual-indexed reader storage for O(1) lookup by both EntityId and topic name.
 // Reads far outnumber writes, so we maintain two maps to avoid DashMap iteration overhead
@@ -42,8 +72,18 @@ impl ReaderStore {
     }
 
     // Get a reader by its EntityId
-    pub(crate) fn get(&self, entity_id: EntityId) -> Option<Arc<dyn Reader + Send + Sync>> {
+    pub(crate) fn get_reader(&self, entity_id: EntityId) -> Option<Arc<dyn Reader + Send + Sync>> {
         self.by_id.get(&entity_id).map(|r| r.clone())
+    }
+
+    // Lease a reader for callback-producing work, raising its in-flight count while the shard lock
+    // is held. `remove` takes the same shard's write lock, so either this raises the count before
+    // removal (deletion then drains it) or removal wins and this returns None (no callback runs).
+    pub(crate) fn get_reader_callback_lease(
+        &self,
+        entity_id: EntityId,
+    ) -> Option<ReaderCallbackLease> {
+        self.by_id.get(&entity_id).map(|r| ReaderCallbackLease::new(r.value().clone()))
     }
 
     // Get all readers associated with a given topic name
