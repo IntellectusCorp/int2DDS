@@ -10,20 +10,22 @@
 //! type differently. Endianness is *not* part of the plan: it changes how bytes
 //! are read, never where they sit, and it varies per sample.
 //!
-//! Coverage is the subset the raw FFI path uses: Final/Appendable structs of
-//! primitives, strings, enums, bitmask/bitset, nested structs, arrays and
-//! sequences. Mutable framing, unions, maps, optional members, `char16` and
-//! `float128` compile to `None` and the caller keeps the dynamic path — the last
-//! two because the dynamic codec reads them asymmetrically, and matching it here
-//! would mean reproducing that rather than a wire rule.
+//! Coverage is structs of every extensibility — Final, Appendable and Mutable,
+//! the last in both its XCDR2 EMHEADER and XCDR1 PL_CDR framings — holding
+//! primitives, strings, enums, bitmask/bitset, optional members, nested structs,
+//! arrays and sequences. Unions, maps, `char16` and `float128` compile to `None`
+//! and the caller keeps the dynamic path: the last two because the dynamic codec
+//! reads them asymmetrically, so matching it here would mean reproducing that
+//! rather than a wire rule, and maps because their count field is an open spec
+//! question (OMG DDSXTY14-72) that should not be answered twice.
 
 use std::sync::Arc;
 
 use crate::common::instance_handle::InstanceHandle;
 use crate::dcps::core::error::{DdsError, DdsResult};
 use crate::serialize::cdr::{
-    CdrDeserializer, CdrError, ExtensibilityKind, PrimitiveSerialize, StringSerialize,
-    Xcdr2Deserializer, Xcdr2Serializer,
+    CdrDeserializer, CdrError, ExtensibilityKind, PlCdrMemberHeader, PrimitiveSerialize,
+    StringSerialize, Xcdr2Deserializer, Xcdr2Serializer,
 };
 use crate::serialize::{BufferManager, DeserializerReader};
 use crate::topic::sql::ast::Parameter;
@@ -66,19 +68,51 @@ enum Node {
 #[derive(Debug)]
 struct MemberNode {
     name: Arc<str>,
+    member_id: u32,
+    /// Only meaningful under `Framing::Plain`/`Delimited`, where an optional member
+    /// spends a presence marker. Tagged framings express absence by omitting the
+    /// member's header entirely.
+    optional: bool,
     node: Node,
+}
+
+/// How a struct's members are laid out, which is the one place representation and
+/// extensibility meet.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Framing {
+    /// Members inline in declaration order: XCDR1 Final/Appendable, XCDR2 Final.
+    Plain,
+    /// XCDR2 Appendable: a DHEADER, then members inline.
+    Delimited,
+    /// XCDR2 Mutable: a DHEADER, then EMHEADER-tagged members in any order.
+    TaggedDelimited,
+    /// XCDR1 Mutable (XTypes PL_CDR): PID-tagged members closed by PID_SENTINEL.
+    TaggedSentinel,
 }
 
 #[derive(Debug)]
 struct StructNode {
-    /// Members in wire (declaration) order.
+    /// Members in declaration order, which is also wire order unless `framing` is
+    /// tagged.
     members: Vec<MemberNode>,
     /// Indices to project into the key holder. The `@key` members in member_id
     /// order, or — when the struct has none — every member in declaration order,
     /// which is the RTPS key-holder rule for a nested aggregate (DDSI-RTPS 9.6.4.8).
     key_order: Vec<usize>,
-    /// The sample precedes this struct's members with a DHEADER.
-    framed: bool,
+    framing: Framing,
+}
+
+impl StructNode {
+    fn index_of_id(&self, member_id: u32) -> Option<usize> {
+        self.members.iter().position(|member| member.member_id == member_id)
+    }
+}
+
+/// One tagged member's header.
+struct MemberTag {
+    id: u32,
+    length: u32,
+    must_understand: bool,
 }
 
 /// One type's layout for one representation.
@@ -150,13 +184,20 @@ impl TypePlans {
         }
         let plan = self.plan_for(bytes)?;
         let (key, _) = plan.project_key(bytes).ok()?;
-        if key.is_empty() {
-            return Some(InstanceHandle::NIL);
+        Some(plan.handle_for(&key))
+    }
+
+    /// Both key answers from a single projection, for the write path that needs
+    /// the key CDR and its handle together.
+    pub fn key_info(&self, bytes: &[u8]) -> Option<DdsResult<(Vec<u8>, InstanceHandle)>> {
+        if !self.has_key {
+            return Some(Ok((Vec::new(), InstanceHandle::NIL)));
         }
-        Some(match plan.key_holder_max {
-            Some(n) if n <= 16 => InstanceHandle::from_key_cdr(&key),
-            _ => InstanceHandle::from_key_cdr_hashed(&key),
-        })
+        let plan = self.plan_for(bytes)?;
+        Some(plan.project_key(bytes).map(|(key, _)| {
+            let handle = plan.handle_for(&key);
+            (key, handle)
+        }))
     }
 
     /// Read one field of `bytes` by name, `.`-separated for nested structs.
@@ -196,23 +237,40 @@ impl CodecPlan {
             && matches!(root.members[root.key_order[0]].node, Node::Str);
         Some(Self { root, key_holder_max: key_holder_max_size(dynamic_type), single_string_key })
     }
+
+    /// XTypes 7.6.8 step 5: the key holder goes in raw when its *maximum* size
+    /// fits a KeyHash, else MD5.
+    fn handle_for(&self, key: &[u8]) -> InstanceHandle {
+        if key.is_empty() {
+            return InstanceHandle::NIL;
+        }
+        match self.key_holder_max {
+            Some(n) if n <= 16 => InstanceHandle::from_key_cdr(key),
+            _ => InstanceHandle::from_key_cdr_hashed(key),
+        }
+    }
 }
 
 fn compile_struct(dynamic_type: &DynamicType, xcdr2: bool) -> Option<Arc<StructNode>> {
-    let extensibility = dynamic_type.extensibility();
-    if matches!(extensibility, ExtensibilityKind::Mutable) {
-        return None;
-    }
     let struct_desc = dynamic_type.as_struct()?;
+
+    // Whether a shape compiles must not depend on the representation: `has_field`
+    // answers from whichever plan exists, so a member present in one and absent in
+    // the other would make a filter claim a field it then cannot read.
+    let framing = match (dynamic_type.extensibility(), xcdr2) {
+        (ExtensibilityKind::Mutable, true) => Framing::TaggedDelimited,
+        (ExtensibilityKind::Mutable, false) => Framing::TaggedSentinel,
+        (ExtensibilityKind::Appendable, true) => Framing::Delimited,
+        _ => Framing::Plain,
+    };
 
     let mut members = Vec::with_capacity(struct_desc.member_count());
     let mut keys: Vec<(u32, usize)> = Vec::new();
     for (index, member) in struct_desc.members().iter().enumerate() {
-        if member.is_optional {
-            return None;
-        }
         members.push(MemberNode {
             name: member.name.clone(),
+            member_id: member.member_id,
+            optional: member.is_optional,
             node: compile_node(&member.member_type, xcdr2)?,
         });
         if member.is_key {
@@ -227,11 +285,7 @@ fn compile_struct(dynamic_type: &DynamicType, xcdr2: bool) -> Option<Arc<StructN
         keys.into_iter().map(|(_, index)| index).collect()
     };
 
-    Some(Arc::new(StructNode {
-        members,
-        key_order,
-        framed: xcdr2 && !matches!(extensibility, ExtensibilityKind::Final),
-    }))
+    Some(Arc::new(StructNode { members, key_order, framing }))
 }
 
 fn compile_node(kind: &DynamicTypeKind, xcdr2: bool) -> Option<Node> {
@@ -286,22 +340,62 @@ fn compile_node(kind: &DynamicTypeKind, xcdr2: bool) -> Option<Node> {
 // Reading
 // ============================================================================
 
-/// The two deserializers, unified for the plan walk. `read_dheader` is the only
-/// place they genuinely differ; XCDR1 never reaches it, because no XCDR1 plan
-/// sets a `framed` flag.
+/// The two deserializers, unified for the plan walk. Each method is reached only
+/// from the framing that uses it, so the other side's arm is unreachable rather
+/// than approximate.
 trait PlanReader: ValueDeserializer + DeserializerReader<Error = CdrError> {
     fn read_dheader(&mut self) -> Result<u32, CdrError>;
+
+    /// The next tagged member, or `None` at a terminator the framing carries
+    /// itself — the PL_CDR sentinel. XCDR2 is bounded by its DHEADER instead and
+    /// always yields a member.
+    fn read_member_tag(&mut self) -> Result<Option<MemberTag>, CdrError>;
+
+    /// The presence marker an optional member spends in a non-tagged struct.
+    fn read_optional_presence(&mut self) -> Result<bool, CdrError>;
 }
 
 impl PlanReader for CdrDeserializer<'_> {
     fn read_dheader(&mut self) -> Result<u32, CdrError> {
         Err(CdrError::DeserializationError("XCDR1 has no DHEADER".to_string()))
     }
+
+    fn read_member_tag(&mut self) -> Result<Option<MemberTag>, CdrError> {
+        Ok(match self.read_parameter_header()? {
+            PlCdrMemberHeader::Sentinel => None,
+            PlCdrMemberHeader::Short { pid, length, must_understand } => {
+                Some(MemberTag { id: pid as u32, length: length as u32, must_understand })
+            }
+            PlCdrMemberHeader::Long { member_id, length, must_understand } => {
+                Some(MemberTag { id: member_id, length, must_understand })
+            }
+        })
+    }
+
+    fn read_optional_presence(&mut self) -> Result<bool, CdrError> {
+        match self.read_parameter_header()? {
+            PlCdrMemberHeader::Short { length: 0, .. }
+            | PlCdrMemberHeader::Long { length: 0, .. } => Ok(false),
+            PlCdrMemberHeader::Short { .. } | PlCdrMemberHeader::Long { .. } => Ok(true),
+            PlCdrMemberHeader::Sentinel => Err(CdrError::DeserializationError(
+                "PID_SENTINEL where an optional member header was expected".to_string(),
+            )),
+        }
+    }
 }
 
 impl PlanReader for Xcdr2Deserializer<'_> {
     fn read_dheader(&mut self) -> Result<u32, CdrError> {
         Xcdr2Deserializer::read_dheader(self)
+    }
+
+    fn read_member_tag(&mut self) -> Result<Option<MemberTag>, CdrError> {
+        let (id, length, must_understand) = self.read_member_header_full()?;
+        Ok(Some(MemberTag { id, length, must_understand }))
+    }
+
+    fn read_optional_presence(&mut self) -> Result<bool, CdrError> {
+        self.deserialize_bool()
     }
 }
 
@@ -381,14 +475,118 @@ fn scalar_width(node: &Node) -> Option<usize> {
 }
 
 fn skip_struct<R: PlanReader>(reader: &mut R, node: &StructNode) -> DdsResult<()> {
-    if node.framed {
-        let size = reader.read_dheader().map_err(cdr_error)? as usize;
-        return advance(reader, size);
+    match node.framing {
+        // The DHEADER states the whole extent, and an Appendable struct has no
+        // member that could object to being skipped.
+        Framing::Delimited => {
+            let size = reader.read_dheader().map_err(cdr_error)? as usize;
+            advance(reader, size)
+        }
+        Framing::Plain => {
+            for member in &node.members {
+                skip_member(reader, member)?;
+            }
+            Ok(())
+        }
+        // Tagged framings are walked rather than jumped even here: a member that
+        // demands to be understood has to be refused inside a struct nothing
+        // reads, which is what the dynamic path does. (`TaggedSentinel` has no
+        // extent to jump either way.)
+        Framing::TaggedSentinel | Framing::TaggedDelimited => {
+            let (_, end) = locate_members(reader, node)?;
+            reader.set_position(end);
+            Ok(())
+        }
     }
-    for member in &node.members {
-        skip_node(reader, &member.node)?;
+}
+
+fn skip_member<R: PlanReader>(reader: &mut R, member: &MemberNode) -> DdsResult<()> {
+    if member.optional && !reader.read_optional_presence().map_err(cdr_error)? {
+        return Ok(());
     }
-    Ok(())
+    skip_node(reader, &member.node)
+}
+
+/// Where each member's value begins in this sample, `None` for one the sample
+/// omits, plus the position just past the struct.
+///
+/// This is the single wire walk every consumer shares: key projection seeks back
+/// into it in member_id order, field access seeks to one entry.
+fn locate_members<R: PlanReader>(
+    reader: &mut R,
+    node: &StructNode,
+) -> DdsResult<(Vec<Option<usize>>, usize)> {
+    let mut starts = vec![None; node.members.len()];
+
+    let declared_end = match node.framing {
+        Framing::Delimited | Framing::TaggedDelimited => {
+            let size = reader.read_dheader().map_err(cdr_error)? as usize;
+            Some(reader.get_position() + size)
+        }
+        _ => None,
+    };
+
+    match node.framing {
+        Framing::Plain | Framing::Delimited => {
+            for (index, member) in node.members.iter().enumerate() {
+                if member.optional && !reader.read_optional_presence().map_err(cdr_error)? {
+                    continue;
+                }
+                starts[index] = Some(reader.get_position());
+                skip_node(reader, &member.node)?;
+            }
+        }
+        Framing::TaggedDelimited | Framing::TaggedSentinel => {
+            let end = declared_end.unwrap_or(usize::MAX);
+            while reader.get_position() < end {
+                let Some(tag) = reader.read_member_tag().map_err(cdr_error)? else {
+                    break;
+                };
+                let start = reader.get_position();
+                match node.index_of_id(tag.id) {
+                    Some(index) => {
+                        starts[index] = Some(start);
+                        skip_node(reader, &node.members[index].node)?;
+                    }
+                    // Refusing an unknown must-understand member is what the
+                    // dynamic path does, and a plan that silently skipped one
+                    // would hand back a key the fallback would have refused.
+                    None if tag.must_understand => {
+                        return Err(DdsError::Error(format!(
+                            "Unknown required member with id {}",
+                            tag.id
+                        )))
+                    }
+                    None => advance(reader, tag.length as usize)?,
+                }
+                // A PL_CDR parameter's declared length includes padding the value
+                // itself does not read. An EMHEADER's does not, and the dynamic
+                // path reconciles only the former — following it matters more
+                // than the rule, since a divergence here moves every key.
+                if node.framing == Framing::TaggedSentinel {
+                    let consumed = reader.get_position() - start;
+                    if consumed < tag.length as usize {
+                        advance(reader, tag.length as usize - consumed)?;
+                    }
+                }
+            }
+        }
+    }
+
+    // An Appendable or Mutable sample may carry members this plan does not know;
+    // the DHEADER says where they end.
+    let end = match declared_end {
+        Some(declared_end) => {
+            if reader.get_position() > declared_end {
+                return Err(DdsError::Error(
+                    "struct DHEADER is shorter than its known members".to_string(),
+                ));
+            }
+            declared_end
+        }
+        None => reader.get_position(),
+    };
+    Ok((starts, end))
 }
 
 // ============================================================================
@@ -425,45 +623,28 @@ impl CodecPlan {
     }
 }
 
-/// Walk a struct in wire order, then re-emit its projected members in key order.
+/// Locate the struct's members, then re-emit the projected ones in key order.
 ///
-/// The two orders differ whenever member ids are not declaration order, so the
-/// first pass records where each member starts and the second seeks back to the
-/// ones the key holder wants.
+/// Wire order and key order differ whenever member ids are not declaration order
+/// — and under a tagged framing the wire order is the writer's choice entirely —
+/// so the walk records where each member starts and this seeks back to the ones
+/// the key holder wants.
 fn project_struct<R: PlanReader>(
     reader: &mut R,
     node: &StructNode,
     out: &mut Xcdr2Serializer,
 ) -> DdsResult<()> {
-    let framed_end = if node.framed {
-        let size = reader.read_dheader().map_err(cdr_error)? as usize;
-        Some(reader.get_position() + size)
-    } else {
-        None
-    };
-
-    let mut starts = Vec::with_capacity(node.members.len());
-    for member in &node.members {
-        starts.push(reader.get_position());
-        skip_node(reader, &member.node)?;
-    }
-
-    // An Appendable sample may carry members this plan does not know; the DHEADER
-    // says where they end.
-    let end = match framed_end {
-        Some(framed_end) => {
-            if reader.get_position() > framed_end {
-                return Err(DdsError::Error(
-                    "struct DHEADER is shorter than its known members".to_string(),
-                ));
-            }
-            framed_end
-        }
-        None => reader.get_position(),
-    };
+    let (starts, end) = locate_members(reader, node)?;
 
     for &index in &node.key_order {
-        reader.set_position(starts[index]);
+        // The dynamic path substitutes the type's default for an absent non-optional
+        // member and refuses an absent optional one. Refusing both sends the caller
+        // back to it, which is where those two answers already live — reproducing
+        // default emission here would be a second copy of them.
+        let start = starts[index].ok_or_else(|| {
+            DdsError::Error(format!("Missing key member value for '{}'", node.members[index].name))
+        })?;
+        reader.set_position(start);
         emit_node(reader, &node.members[index].node, out)?;
     }
     reader.set_position(end);
@@ -614,18 +795,20 @@ fn read_field<R: PlanReader>(
     node: &StructNode,
     path: &[&str],
 ) -> DdsResult<Parameter> {
-    if node.framed {
-        let _ = reader.read_dheader().map_err(cdr_error)?;
-    }
     let target = node
         .members
         .iter()
         .position(|member| &*member.name == path[0])
         .ok_or_else(|| DdsError::Error(format!("Field '{}' not found", path[0])))?;
 
-    for member in &node.members[..target] {
-        skip_node(reader, &member.node)?;
-    }
+    // The same walk the key projection uses: under a tagged framing the target's
+    // offset is not derivable from the members before it, and an optional member
+    // may not be in the sample at all.
+    let (starts, _) = locate_members(reader, node)?;
+    let start = starts[target].ok_or_else(|| {
+        DdsError::Error(format!("Field '{}' is not present in this sample", path[0]))
+    })?;
+    reader.set_position(start);
 
     let member = &node.members[target];
     if path.len() == 1 {
@@ -716,7 +899,18 @@ mod tests {
     };
 
     fn member_flag(is_optional: bool, is_key: bool) -> MemberFlag {
-        MemberFlag::new(TryConstructKind::Discard, false, is_optional, false, is_key, false)
+        member_flag_mu(is_optional, is_key, false)
+    }
+
+    fn member_flag_mu(is_optional: bool, is_key: bool, must_understand: bool) -> MemberFlag {
+        MemberFlag::new(
+            TryConstructKind::Discard,
+            false,
+            is_optional,
+            must_understand,
+            is_key,
+            false,
+        )
     }
 
     fn tf(ext: ExtensibilityKind) -> TypeFlag {
@@ -734,14 +928,19 @@ mod tests {
         type_id: TypeIdentifier,
         is_key: bool,
         is_optional: bool,
+        must_understand: bool,
     }
 
     fn field(name: &'static str, id: u32, type_id: TypeIdentifier) -> Field {
-        Field { name, id, type_id, is_key: false, is_optional: false }
+        Field { name, id, type_id, is_key: false, is_optional: false, must_understand: false }
     }
 
     fn key(name: &'static str, id: u32, type_id: TypeIdentifier) -> Field {
-        Field { name, id, type_id, is_key: true, is_optional: false }
+        Field { is_key: true, ..field(name, id, type_id) }
+    }
+
+    fn optional(name: &'static str, id: u32, type_id: TypeIdentifier) -> Field {
+        Field { is_optional: true, ..field(name, id, type_id) }
     }
 
     fn struct_object(name: &str, ext: ExtensibilityKind, fields: Vec<Field>) -> CompleteTypeObject {
@@ -749,7 +948,7 @@ mod tests {
         for f in fields {
             desc.add_member(CompleteStructMember::new(
                 f.id,
-                member_flag(f.is_optional, f.is_key),
+                member_flag_mu(f.is_optional, f.is_key, f.must_understand),
                 f.type_id,
                 f.name.to_string(),
             ));
@@ -932,13 +1131,7 @@ mod tests {
             "Inner",
             inner_ext,
             vec![
-                Field {
-                    name: "a",
-                    id: 0,
-                    type_id: TypeIdentifier::Int32,
-                    is_key: inner_has_key,
-                    is_optional: false,
-                },
+                Field { is_key: inner_has_key, ..field("a", 0, TypeIdentifier::Int32) },
                 field("b", 1, TypeIdentifier::Int32),
             ],
         );
@@ -953,7 +1146,11 @@ mod tests {
     #[test]
     fn nested_struct_key_matches_dynamic_path() {
         for inner_has_key in [true, false] {
-            for ext in [ExtensibilityKind::Final, ExtensibilityKind::Appendable] {
+            for ext in [
+                ExtensibilityKind::Final,
+                ExtensibilityKind::Appendable,
+                ExtensibilityKind::Mutable,
+            ] {
                 let (registry, hash) = nested_registry(ext, inner_has_key);
                 let dynamic_type = build_with(
                     struct_object(
@@ -1040,13 +1237,7 @@ mod tests {
             "SeqKey",
             ExtensibilityKind::Final,
             vec![
-                Field {
-                    name: "names",
-                    id: 0,
-                    type_id: sequence_of(TypeIdentifier::String8Small { bound: 0 }),
-                    is_key: true,
-                    is_optional: false,
-                },
+                key("names", 0, sequence_of(TypeIdentifier::String8Small { bound: 0 })),
                 field("filler", 1, TypeIdentifier::Int32),
             ],
         ));
@@ -1118,30 +1309,6 @@ mod tests {
 
     #[test]
     fn shapes_outside_the_subset_compile_to_no_plan() {
-        let mutable = build(struct_object(
-            "Mutable",
-            ExtensibilityKind::Mutable,
-            vec![key("id", 0, TypeIdentifier::Int32)],
-        ));
-        assert!(TypePlans::compile(&mutable).xcdr2.is_none());
-        assert!(TypePlans::compile(&mutable).xcdr1.is_none());
-
-        let optional = build(struct_object(
-            "Optional",
-            ExtensibilityKind::Final,
-            vec![
-                key("id", 0, TypeIdentifier::Int32),
-                Field {
-                    name: "maybe",
-                    id: 1,
-                    type_id: TypeIdentifier::Int32,
-                    is_key: false,
-                    is_optional: true,
-                },
-            ],
-        ));
-        assert!(TypePlans::compile(&optional).xcdr2.is_none());
-
         let wide = build(struct_object(
             "Wide",
             ExtensibilityKind::Final,
@@ -1178,6 +1345,237 @@ mod tests {
             &registry,
         );
         assert!(TypePlans::compile(&with_union).xcdr2.is_none());
+    }
+
+    fn mutable_type(fields: Vec<Field>) -> Arc<DynamicType> {
+        build(struct_object("Mut", ExtensibilityKind::Mutable, fields))
+    }
+
+    /// Mutable members carry their own id and length, so wire order is the
+    /// writer's choice and the projection has to find its keys by id.
+    #[test]
+    fn mutable_struct_key_matches_dynamic_path() {
+        let dynamic_type = mutable_type(vec![
+            key("second", 5, TypeIdentifier::Int32),
+            field("name", 6, TypeIdentifier::String8Small { bound: 0 }),
+            key("first", 1, TypeIdentifier::Int32),
+            field("ratio", 7, TypeIdentifier::Float64),
+        ]);
+        let mut data = DynamicData::new(dynamic_type.clone());
+        data.set("second", 0x2222_2222i32).unwrap();
+        data.set("name", "hello".to_string()).unwrap();
+        data.set("first", 0x1111_1111i32).unwrap();
+        data.set("ratio", 1.5f64).unwrap();
+        check_all_formats("mutable", &data, &dynamic_type);
+
+        // Member id order, not the order the writer chose.
+        let bytes = serialize_dynamic_data(&data, &SerializationFormat::Cdr).unwrap();
+        let projected = TypePlans::compile(&dynamic_type).serialize_key(&bytes).unwrap().unwrap();
+        assert_eq!(projected, vec![0x11, 0x11, 0x11, 0x11, 0x22, 0x22, 0x22, 0x22]);
+    }
+
+    /// A member the reader's type does not declare is stepped over by the length
+    /// its own header states — unless it demands to be understood, which the
+    /// dynamic path refuses and so must this.
+    #[test]
+    fn mutable_sample_with_members_the_plan_cannot_name() {
+        let reader_type = mutable_type(vec![
+            key("id", 1, TypeIdentifier::Int32),
+            field("name", 6, TypeIdentifier::String8Small { bound: 0 }),
+        ]);
+
+        for must_understand in [false, true] {
+            let writer_type = mutable_type(vec![
+                key("id", 1, TypeIdentifier::Int32),
+                Field { must_understand, ..field("extra", 4, TypeIdentifier::Float64) },
+                field("name", 6, TypeIdentifier::String8Small { bound: 0 }),
+            ]);
+            let mut data = DynamicData::new(writer_type.clone());
+            data.set("id", 7i32).unwrap();
+            data.set("extra", 2.5f64).unwrap();
+            data.set("name", "hello".to_string()).unwrap();
+
+            for (format_name, format) in formats(ExtensibilityKind::Mutable) {
+                let label = format!("mutable-unknown/mu={must_understand}/{format_name}");
+                let bytes = serialize_dynamic_data(&data, &format).unwrap();
+                if must_understand {
+                    let plans = TypePlans::compile(&reader_type);
+                    assert!(plans.serialize_key(&bytes).unwrap().is_err(), "{label}");
+                    assert!(deserialize_dynamic_data(&bytes, &reader_type).is_err(), "{label}");
+                } else {
+                    assert_matches_dynamic(&label, &bytes, &reader_type);
+                }
+            }
+        }
+    }
+
+    /// A tagged struct nobody reads still has to refuse a member that demands to
+    /// be understood: the dynamic path refuses it wherever it sits, so skipping
+    /// past one would hand back a key the fallback would never have produced.
+    #[test]
+    fn unknown_must_understand_member_inside_a_skipped_nested_struct() {
+        fn outer_with(inner: CompleteTypeObject) -> Arc<DynamicType> {
+            let hash = EquivalenceHash::compute(&inner.serialize());
+            let mut registry = TypeRegistry::new();
+            registry.register_complete(hash, "Inner".into(), inner);
+            build_with(
+                struct_object(
+                    "Outer",
+                    ExtensibilityKind::Final,
+                    vec![
+                        field("child", 0, TypeIdentifier::CompleteTypeId(hash)),
+                        key("id", 1, TypeIdentifier::Int32),
+                    ],
+                ),
+                &registry,
+            )
+        }
+
+        let writer_type = outer_with(struct_object(
+            "Inner",
+            ExtensibilityKind::Mutable,
+            vec![
+                field("a", 0, TypeIdentifier::Int32),
+                Field { must_understand: true, ..field("secret", 9, TypeIdentifier::Int32) },
+            ],
+        ));
+        let reader_type = outer_with(struct_object(
+            "Inner",
+            ExtensibilityKind::Mutable,
+            vec![field("a", 0, TypeIdentifier::Int32)],
+        ));
+
+        let inner_type = match &writer_type.get_member("child").unwrap().member_type {
+            DynamicTypeKind::TypeRef(inner) => inner.clone(),
+            other => panic!("nested member did not resolve: {other:?}"),
+        };
+        let mut inner = DynamicData::new(inner_type);
+        inner.set("a", 11i32).unwrap();
+        inner.set("secret", 99i32).unwrap();
+        let mut data = DynamicData::new(writer_type.clone());
+        data.set_value("child", DynamicValue::Struct(Box::new(inner))).unwrap();
+        data.set("id", 7i32).unwrap();
+
+        for (format_name, format) in formats(ExtensibilityKind::Final) {
+            let bytes = serialize_dynamic_data(&data, &format).unwrap();
+            let plans = TypePlans::compile(&reader_type);
+            assert!(plans.serialize_key(&bytes).unwrap().is_err(), "{format_name}");
+            assert!(deserialize_dynamic_data(&bytes, &reader_type).is_err(), "{format_name}");
+        }
+    }
+
+    /// A Mutable sample can omit a member its type declares. The dynamic path
+    /// substitutes the type's default there; the plan declines the sample, which
+    /// sends the caller back to exactly that answer rather than copying it.
+    #[test]
+    fn mutable_sample_missing_a_key_member_defers_to_the_dynamic_path() {
+        let reader_type = mutable_type(vec![
+            key("id", 1, TypeIdentifier::Int32),
+            field("name", 6, TypeIdentifier::String8Small { bound: 0 }),
+        ]);
+        let writer_type =
+            mutable_type(vec![field("name", 6, TypeIdentifier::String8Small { bound: 0 })]);
+        let mut data = DynamicData::new(writer_type.clone());
+        data.set("name", "hello".to_string()).unwrap();
+
+        for (format_name, format) in formats(ExtensibilityKind::Mutable) {
+            let bytes = serialize_dynamic_data(&data, &format).unwrap();
+            let plans = TypePlans::compile(&reader_type);
+            assert!(plans.serialize_key(&bytes).unwrap().is_err(), "{format_name}");
+            assert!(plans.compute_key(&bytes).is_none(), "{format_name}");
+            assert!(plans.key_info(&bytes).unwrap().is_err(), "{format_name}");
+
+            let (key, _) = oracle(&bytes, &reader_type);
+            assert_eq!(key, vec![0, 0, 0, 0], "{format_name}: default int32 key");
+        }
+    }
+
+    /// An optional member spends a presence marker in a non-tagged struct — an
+    /// XCDR2 bool, an XCDR1 PL_CDR header whose zero length means absent — and
+    /// simply omits its header when the struct is Mutable.
+    #[test]
+    fn optional_members_match_dynamic_path() {
+        for ext in
+            [ExtensibilityKind::Final, ExtensibilityKind::Appendable, ExtensibilityKind::Mutable]
+        {
+            let dynamic_type = build(struct_object(
+                "WithOptional",
+                ext,
+                vec![
+                    optional("maybe", 0, TypeIdentifier::Int64),
+                    key("id", 1, TypeIdentifier::Int32),
+                    optional("note", 2, TypeIdentifier::String8Small { bound: 0 }),
+                ],
+            ));
+
+            let mut present = DynamicData::new(dynamic_type.clone());
+            present.set("maybe", 5i64).unwrap();
+            present.set("id", 7i32).unwrap();
+            present.set("note", "hi".to_string()).unwrap();
+            check_all_formats(&format!("optional-present/{ext:?}"), &present, &dynamic_type);
+
+            let mut absent = DynamicData::new(dynamic_type.clone());
+            absent.set("id", 7i32).unwrap();
+            check_all_formats(&format!("optional-absent/{ext:?}"), &absent, &dynamic_type);
+        }
+    }
+
+    #[test]
+    fn field_values_read_from_tagged_and_optional_members() {
+        let dynamic_type = build(struct_object(
+            "MutFields",
+            ExtensibilityKind::Mutable,
+            vec![
+                key("id", 3, TypeIdentifier::Int32),
+                optional("note", 1, TypeIdentifier::String8Small { bound: 0 }),
+                field("ratio", 2, TypeIdentifier::Float64),
+            ],
+        ));
+        let plans = TypePlans::compile(&dynamic_type);
+        assert!(plans.has_field("note"));
+
+        let mut data = DynamicData::new(dynamic_type.clone());
+        data.set("id", 7i32).unwrap();
+        data.set("note", "hi".to_string()).unwrap();
+        data.set("ratio", 1.5f64).unwrap();
+
+        let mut absent = DynamicData::new(dynamic_type.clone());
+        absent.set("id", 7i32).unwrap();
+        absent.set("ratio", 1.5f64).unwrap();
+
+        for (format_name, format) in formats(ExtensibilityKind::Mutable) {
+            let bytes = serialize_dynamic_data(&data, &format).unwrap();
+            let read = |name: &str| plans.field_value(&bytes, name).unwrap().unwrap();
+            assert_eq!(read("id"), Parameter::IntegerValue(7), "{format_name}");
+            assert_eq!(read("note"), Parameter::String("hi".into()), "{format_name}");
+            assert_eq!(read("ratio"), Parameter::FloatValue(1.5), "{format_name}");
+
+            // An absent optional is not a value, and the members after it are
+            // still reachable.
+            let bytes = serialize_dynamic_data(&absent, &format).unwrap();
+            assert!(plans.field_value(&bytes, "note").unwrap().is_err(), "{format_name}");
+            assert_eq!(
+                plans.field_value(&bytes, "ratio").unwrap().unwrap(),
+                Parameter::FloatValue(1.5),
+                "{format_name}"
+            );
+        }
+    }
+
+    /// `key_info` is the one-walk form of `serialize_key` followed by
+    /// `compute_key`, and must not drift from either.
+    #[test]
+    fn key_info_agrees_with_the_separate_entry_points() {
+        let dynamic_type = flat_type(ExtensibilityKind::Appendable);
+        let data = flat_data(&dynamic_type);
+        let plans = TypePlans::compile(&dynamic_type);
+
+        for (format_name, format) in formats(ExtensibilityKind::Appendable) {
+            let bytes = serialize_dynamic_data(&data, &format).unwrap();
+            let (key, handle) = plans.key_info(&bytes).unwrap().unwrap();
+            assert_eq!(key, plans.serialize_key(&bytes).unwrap().unwrap(), "{format_name}");
+            assert_eq!(handle, plans.compute_key(&bytes).unwrap(), "{format_name}");
+        }
     }
 
     #[test]

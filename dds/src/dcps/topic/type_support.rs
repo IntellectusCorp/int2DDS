@@ -172,6 +172,15 @@ pub trait TypeSupport: Send + Sync + 'static {
     }
     fn compute_key(&self, data: &dyn Any) -> InstanceHandle;
     fn is_compute_key_provided(&self) -> bool;
+
+    /// Canonical serialized key CDR and InstanceHandle of a full serialized sample.
+    /// Default materializes the sample and asks the two key entry points; an
+    /// implementation that reads the wire directly overrides this to project once.
+    fn key_info_from_bytes(&self, sample: &[u8]) -> DdsResult<(SerializedData, InstanceHandle)> {
+        let boxed = self.deserialize(sample, None)?;
+        Ok((self.serialize_key(&*boxed)?, self.compute_key(&*boxed)))
+    }
+
     fn get_extensibility_kind(&self) -> crate::serialize::xcdr::ExtensibilityKind;
 
     fn serialize_key_and_non_key(
