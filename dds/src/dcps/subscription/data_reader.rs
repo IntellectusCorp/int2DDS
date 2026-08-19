@@ -4322,30 +4322,50 @@ pub(crate) mod tests {
         let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
+        // `on_data_available` is what the loop below synchronises on. `write` hands the sample
+        // to the send path and returns while delivery lands on the receive thread afterwards,
+        // so reading straight after `write` times the loopback rather than the bound under test.
+        let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let data_reader = subscriber
             .create_datareader::<HelloWorld>(
                 &topic,
                 DataReaderQos { history, reliability, ..Default::default() },
-                None,
-                StatusMask::default(),
+                Some(Arc::new(SubListener { counter_sender })),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
         let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
-        wait_set.attach_condition(condition).unwrap();
+        wait_set.attach_condition(condition.clone()).unwrap();
         // Bounded: `Duration::infinite()` here would wedge the whole test binary if matching
         // ever regressed, and `cargo test` has no per-test timeout to save it.
         wait_set.wait(Duration::from_seconds(10)).expect("writer never matched the reader");
+        wait_set.detach_condition(condition).unwrap();
 
-        // Read until a sample is actually observed, so the redelivery guard below is never
-        // skipped for want of data.
-        let mut ever_read = false;
+        // The reader's side of the match too, not just the writer's: a sample from a writer the
+        // reader has not matched yet is dropped on arrival, which would leave the loop below
+        // reading an empty cache for a reason that has nothing to do with the bound.
+        let condition = data_reader.get_statuscondition().unwrap().clone();
+        condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
+        wait_set.attach_condition(condition.clone()).unwrap();
+        wait_set.wait(Duration::from_seconds(10)).expect("reader never matched the writer");
+        wait_set.detach_condition(condition).unwrap();
+
+        // Each iteration waits for its own sample to land before reading, so the loop performs
+        // `SAMPLES` real reads instead of however many happen to win a race against delivery.
+        // That is what keeps the bound below meaningful: the defect this test guards grew
+        // `read_samples` once per sample *read*, so a run whose reads mostly returned `NoData`
+        // would satisfy the bound with the defect fully present.
+        let mut reads = 0usize;
         for index in 0..SAMPLES as u32 {
             writer
                 .write(&HelloWorld { index, message: "growth".to_string() }, InstanceHandle::NIL)
                 .unwrap();
+            // A missed signal is not a failure by itself -- the listener is a synchronisation
+            // aid, and the floor asserted after the loop is what decides whether enough was read.
+            let _ = counter_receiver.recv_timeout(std::time::Duration::from_secs(10));
             // `read` is the non-consuming path, and the only one that records read state.
             let read = data_reader.read(
                 1,
@@ -4353,16 +4373,23 @@ pub(crate) mod tests {
                 &[ViewStateKind::ANY_VIEW_STATE],
                 &[InstanceStateKind::ANY_INSTANCE_STATE],
             );
-            ever_read |= read.is_ok();
+            if read.is_ok() {
+                reads += 1;
+            }
         }
-        assert!(ever_read, "no sample was ever read, so this test proves nothing");
+        // Well clear of the bound asserted below, so the two cannot both hold unless
+        // `read_samples` is bounded by what the cache retains rather than by the read count.
+        assert!(
+            reads >= SAMPLES / 2,
+            "only {reads} of {SAMPLES} reads handed out a sample, too few for the bound below \
+             to mean anything"
+        );
 
-        // The last write is still in flight when the loop ends: `write` hands the sample to the
-        // send path and returns, while delivery lands on the receive thread afterwards. A sample
-        // that reads NOT_READ because it has only just arrived is not the defect under test, so
-        // asserting before the final sample settles is a race -- one that fast loopback wins and
-        // slower stacks lose. Read until the last written index has been handed out, which
-        // leaves every cached sample genuinely already read.
+        // Backstop for a missed listener signal, which the loop above deliberately tolerates:
+        // without one, the final sample can still be in flight here. A sample that reads
+        // NOT_READ because it has only just arrived is not the defect under test, so the guards
+        // below must not run against a cache that is still filling. With every signal seen this
+        // succeeds on its first read and costs nothing.
         let settle_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut read_last = false;
         while !read_last && std::time::Instant::now() < settle_deadline {

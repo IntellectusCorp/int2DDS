@@ -316,37 +316,141 @@ fn bound_fragment_plan(
     (bounded, charged)
 }
 
-/// Wire bytes already spent toward each remote participant in one send call.
+/// How long a charge keeps counting against a peer's window with nothing heard back from it.
+///
+/// Longer than one whole reader retry cycle -- `nack_frag_response_delay` then
+/// `nack_frag_retry_delay`, 205ms at their defaults -- so a reader whose first NACK_FRAG was lost
+/// still gets to release this charge by answering. Expiring any sooner would make the timeout,
+/// rather than the answer, the usual way a lost round recovers, and leave this a primary path
+/// instead of the safety net it is.
+const SEND_CREDIT_BACKSTOP: Duration = Duration::from_millis(250);
+
+/// Wire bytes charged toward one remote participant that have not been shown to have drained.
+struct SendCredit {
+    spent: usize,
+    /// When this accumulation started. Not the last charge: the backstop measures the age of the
+    /// oldest byte still counted, so refreshing it on every charge would stop it firing.
+    since: Instant,
+}
+
+/// Bytes of `spent` that still count against the window at `now`.
+///
+/// Zero once `backstop` has elapsed. Only the peer's own ACKNACK or NACK_FRAG proves the bytes
+/// left its socket, and a peer that has gone silent never sends one -- without this the writer
+/// would hold a spent window against it for good.
+///
+/// Takes `now` rather than reading the clock so the boundary is testable with no elapsed time,
+/// the same shape as `should_accept_count`.
+fn carried_spend(spent: usize, since: Instant, now: Instant, backstop: Duration) -> usize {
+    if now.duration_since(since) >= backstop {
+        0
+    } else {
+        spent
+    }
+}
+
+/// Wire bytes already spent toward each remote participant.
 ///
 /// Keyed by participant, not by reader: the receive buffer belongs to the participant's socket,
 /// and several readers behind one participant share it. A first transmission addressed to
 /// `ENTITYID_UNKNOWN` is also one datagram serving all of them.
+///
+/// The window itself is resolved per call, but the spend is carried in `credit`, which the
+/// participant owns. Without that, every send call opened a fresh full window, and the peer's
+/// socket -- which drains at the peer's pace, not ours -- saw the sum of them.
 struct SendWindows {
     /// This participant's own receive buffer, the fallback for a peer that does not advertise.
     own: Option<usize>,
-    /// (window, bytes charged) per destination participant, resolved on first use.
+    /// (window, bytes charged in this call) per destination, resolved on first use. The second
+    /// element feeds `at_least_one` only; the window arithmetic reads `credit`.
     state: HashMap<GuidPrefix, (usize, usize)>,
+    /// Shared with every other send call in this participant. `None` for a builtin writer, which
+    /// spends outside the shared budget so a user writer's burst cannot delay discovery.
+    credit: Option<Arc<DashMap<GuidPrefix, SendCredit>>>,
+    backstop: Duration,
 }
 
 impl SendWindows {
-    fn new(transport: &dyn TransportPlugin) -> Self {
-        Self { own: transport.advertised_receive_buffer_size(), state: HashMap::new() }
+    fn new(
+        transport: &dyn TransportPlugin,
+        credit: Option<Arc<DashMap<GuidPrefix, SendCredit>>>,
+    ) -> Self {
+        Self {
+            own: transport.advertised_receive_buffer_size(),
+            state: HashMap::new(),
+            credit,
+            backstop: send_credit_backstop(),
+        }
+    }
+
+    /// The shared budget, if this send is one whose charge can ever be released.
+    ///
+    /// Only a reliable reader answers, and only its answer releases the charge: a writer skips
+    /// the heartbeat for a non-reliable proxy entirely, so a best-effort burst would leave its
+    /// charge standing until the backstop and throttle itself to one datagram per backstop
+    /// period. Best-effort therefore keeps the per-call accounting this window has always used.
+    fn shared(&self, reliable: bool) -> Option<&Arc<DashMap<GuidPrefix, SendCredit>>> {
+        if reliable {
+            self.credit.as_ref()
+        } else {
+            None
+        }
     }
 
     /// Bytes still allowed toward `dst`, and whether nothing has gone out to it yet in this send.
-    fn remaining(&mut self, participant: &Participant, dst: GuidPrefix) -> (usize, bool) {
+    ///
+    /// The window is resolved before `credit` is touched: `remote_receive_buffer_size` locks the
+    /// participant's proxy list, and `credit` has to stay a leaf.
+    fn remaining(
+        &mut self,
+        participant: &Participant,
+        dst: GuidPrefix,
+        reliable: bool,
+    ) -> (usize, bool) {
         let own = self.own;
         let (window, charged) = *self.state.entry(dst).or_insert_with(|| {
             (receive_window_bytes(participant.remote_receive_buffer_size(dst), own), 0)
         });
-        (window.saturating_sub(charged), charged == 0)
+        let carried = match self.shared(reliable) {
+            Some(credit) => credit
+                .get(&dst)
+                .map(|c| carried_spend(c.spent, c.since, Instant::now(), self.backstop))
+                .unwrap_or(0),
+            None => charged,
+        };
+        (window.saturating_sub(carried), charged == 0)
     }
 
-    fn charge(&mut self, dst: GuidPrefix, bytes: usize) {
+    fn charge(&mut self, dst: GuidPrefix, bytes: usize, reliable: bool) {
         if let Some((_, charged)) = self.state.get_mut(&dst) {
             *charged += bytes;
         }
+        let Some(credit) = self.shared(reliable) else {
+            return;
+        };
+        let now = Instant::now();
+        let backstop = self.backstop;
+        // `entry` and not get-then-insert: two application threads can be in
+        // `send_unsent_changes_of_stateful_writer` for different writers at once, and a split
+        // read-modify-write would let both charge against the same starting value.
+        credit
+            .entry(dst)
+            .and_modify(|c| {
+                let carried = carried_spend(c.spent, c.since, now, backstop);
+                if carried == 0 {
+                    c.since = now;
+                }
+                c.spent = carried.saturating_add(bytes);
+            })
+            .or_insert(SendCredit { spent: bytes, since: now });
     }
+}
+
+/// The backstop from `INT2DDS_SEND_CREDIT_BACKSTOP_MS`, or `SEND_CREDIT_BACKSTOP`.
+fn send_credit_backstop() -> Duration {
+    crate::common::env::get_send_credit_backstop_ms_override()
+        .map(|ms| Duration::from_millis(u64::from(ms)))
+        .unwrap_or(SEND_CREDIT_BACKSTOP)
 }
 
 /// `exclude` must hold every key this call is about to write -- one DATA_FRAG fans out to one
@@ -396,6 +500,10 @@ pub(crate) struct UserLogic {
     /// Keyed by the reader the DATA_FRAG was addressed to as well: the writer sends one copy
     /// per reader, and merging those streams completes a buffer only one of them is given.
     fragment_buffers: Arc<DashMap<(Guid, EntityId, SequenceNumber), FragmentBuffer>>,
+    /// Wire bytes charged toward each remote participant, shared by every send call so that
+    /// consecutive and concurrent sends draw on one budget per peer instead of each opening a
+    /// fresh window. Released when that peer answers, aged out by `SEND_CREDIT_BACKSTOP`.
+    send_credit: Arc<DashMap<GuidPrefix, SendCredit>>,
     unicast_listening_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     unicast_listening_waker: Arc<OnceLock<Arc<Waker>>>,
 }
@@ -407,6 +515,7 @@ impl UserLogic {
             participant: Arc::downgrade(&participant),
             transport,
             fragment_buffers: Arc::new(DashMap::new()),
+            send_credit: Arc::new(DashMap::new()),
             unicast_listening_handle: Arc::new(Mutex::new(None)),
             unicast_listening_waker: Arc::new(OnceLock::new()),
         }
@@ -585,7 +694,8 @@ impl UserLogic {
             })?
             .acquire();
         let mut gap_list: Vec<SequenceNumber> = Vec::new();
-        let mut windows = SendWindows::new(self.transport.as_ref());
+        let mut windows =
+            SendWindows::new(self.transport.as_ref(), self.shared_send_credit(stateful_writer));
         let dst_prefix = remote_reader_guid.prefix();
 
         for change_type in requested_change_types {
@@ -613,7 +723,7 @@ impl UserLogic {
                 let plan = fragment_send_plan(&[(1, total_fragments)], frags_per_msg);
 
                 // Bound the resend by what this participant's receive buffer still allows.
-                let (remaining, untouched) = windows.remaining(&participant, dst_prefix);
+                let (remaining, untouched) = windows.remaining(&participant, dst_prefix, reliable);
                 let (plan, charged) = bound_fragment_plan(
                     &plan,
                     a_change.fragment_size() as usize,
@@ -623,7 +733,7 @@ impl UserLogic {
                     untouched,
                     piggyback,
                 );
-                windows.charge(dst_prefix, charged);
+                windows.charge(dst_prefix, charged, reliable);
 
                 for (fragment_num, count, is_last) in plan {
                     let Some(fragment_data) =
@@ -761,15 +871,18 @@ impl UserLogic {
             )
         })?;
 
-        let piggyback =
-            reader_proxy.is_reliable() && !stateful_writer.disable_piggyback_heartbeat();
+        // Kept apart from `piggyback`: a reliable reader with piggyback disabled still answers
+        // off the periodic heartbeat, so its charge is still releasable.
+        let reliable = reader_proxy.is_reliable();
+        let piggyback = reliable && !stateful_writer.disable_piggyback_heartbeat();
         // Same for every change below, and one datagram is written once per locator.
         let locator_count = self.locators_to_send_to(reader_proxy.unicast_locator_list()).len();
         let dst_prefix = remote_reader_guid.prefix();
 
         let timestamp = Utc::now();
         let participant = self.get_upgraded_participant()?;
-        let mut windows = SendWindows::new(self.transport.as_ref());
+        let mut windows =
+            SendWindows::new(self.transport.as_ref(), self.shared_send_credit(stateful_writer));
 
         let mut send_buffer = participant
             .wire_buffer_pool()
@@ -806,7 +919,7 @@ impl UserLogic {
 
             // A request larger than one window is served as far as the window reaches; the rest
             // is dropped, and the reader re-asks once this window's heartbeat arrives.
-            let (remaining, untouched) = windows.remaining(&participant, dst_prefix);
+            let (remaining, untouched) = windows.remaining(&participant, dst_prefix, reliable);
             let (plan, charged) = bound_fragment_plan(
                 &plan,
                 change.fragment_size() as usize,
@@ -816,7 +929,7 @@ impl UserLogic {
                 untouched,
                 piggyback,
             );
-            windows.charge(dst_prefix, charged);
+            windows.charge(dst_prefix, charged, reliable);
 
             for (fragment_num, count, is_last) in plan {
                 // The heartbeat rides the last datagram of the window, so the reader always has
@@ -883,7 +996,8 @@ impl UserLogic {
 
         // Shared by the batched and the per-reader path below, so two readers behind one
         // participant draw on that participant's one receive buffer rather than one each.
-        let mut windows = SendWindows::new(self.transport.as_ref());
+        let mut windows =
+            SendWindows::new(self.transport.as_ref(), self.shared_send_credit(writer));
 
         let mut send_buffer = participant
             .wire_buffer_pool()
@@ -1057,7 +1171,9 @@ impl UserLogic {
 
                 // Bound the burst by this participant's receive buffer; the fragments beyond
                 // the window are dropped, and the reader asks for them off the heartbeat below.
-                let (remaining, untouched) = windows.remaining(&participant, dst_prefix);
+                let is_reliable_batch = members.iter().any(|(_, plan)| plan.reliable);
+                let (remaining, untouched) =
+                    windows.remaining(&participant, dst_prefix, is_reliable_batch);
                 let (plan, charged) = bound_fragment_plan(
                     &plan,
                     a_change.fragment_size() as usize,
@@ -1067,7 +1183,7 @@ impl UserLogic {
                     untouched,
                     is_piggyback_wanted,
                 );
-                windows.charge(dst_prefix, charged);
+                windows.charge(dst_prefix, charged, is_reliable_batch);
 
                 for (fragment_num, count, is_last) in plan {
                     let Some(fragment_data) =
@@ -1223,7 +1339,7 @@ impl UserLogic {
                             // Bound the burst by this participant's receive buffer; what is left
                             // over is dropped and re-requested off the window's heartbeat.
                             let (remaining, untouched) =
-                                windows.remaining(&participant, reader_guid.prefix());
+                                windows.remaining(&participant, reader_guid.prefix(), reliable);
                             let (plan, charged) = bound_fragment_plan(
                                 &plan,
                                 a_change.fragment_size() as usize,
@@ -1233,7 +1349,7 @@ impl UserLogic {
                                 untouched,
                                 reliable && piggyback,
                             );
-                            windows.charge(reader_guid.prefix(), charged);
+                            windows.charge(reader_guid.prefix(), charged, reliable);
 
                             for (fragment_num, count, is_last) in plan {
                                 let Some(fragment_data) =
@@ -2189,6 +2305,39 @@ impl UserLogic {
         evicted
     }
 
+    /// The budget `stateful_writer`'s sends draw on, or `None` for a builtin writer.
+    ///
+    /// SPDP already sends outside the window entirely. Keeping the rest of discovery out of the
+    /// shared budget too means a user writer's burst cannot leave a fragmented SEDP or
+    /// TypeLookup change waiting on it.
+    fn shared_send_credit(
+        &self,
+        stateful_writer: &StatefulWriter,
+    ) -> Option<Arc<DashMap<GuidPrefix, SendCredit>>> {
+        (!stateful_writer.guid().entity_id().entity_kind.is_built_in())
+            .then(|| self.send_credit.clone())
+    }
+
+    /// Drop what is charged against `dst`, because `dst` just answered.
+    ///
+    /// An ACKNACK or NACK_FRAG can only be built after the peer read the heartbeat the window
+    /// ended with, so the datagrams charged for that window have left its socket.
+    ///
+    /// The counter is per destination and shared, so this hands back one window in total, not one
+    /// per writer -- a NACK_FRAG is loss evidence as much as drain evidence, and re-arming a full
+    /// burst per writer on loss is what this whole budget exists to stop.
+    fn release_send_credit(&self, dst: GuidPrefix) {
+        self.send_credit.remove(&dst);
+    }
+
+    /// Drop the budget held for a participant that is gone.
+    ///
+    /// Single key and not `retain`: `retain` takes every shard's write lock, and peer loss must
+    /// not stall sends toward everyone else.
+    pub(crate) fn forget_send_credit_for_participant(&self, prefix: GuidPrefix) {
+        self.send_credit.remove(&prefix);
+    }
+
     /// Drop every reassembly buffer addressed to `reader_id`. Called when that reader is
     /// removed: it can never complete these, and `get_matched_readers` will not find it again,
     /// so nothing but this would ever reclaim them.
@@ -2799,6 +2948,12 @@ impl UnicastMessageProcessor for UserLogic {
         submessage_header: &SubmessageHeader,
         acknack: &AckNack,
     ) -> RtpsResult<()> {
+        // Before the lookups, not after: an unmatched writer, a missing reader proxy, a stale
+        // count and the preemptive branch all return early below, and every one of them would
+        // otherwise leave the charge standing until the backstop. The peer answered, which is all
+        // this needs to know, and its prefix is already in hand.
+        self.release_send_credit(rtps_header.guid_prefix());
+
         let remote_reader_guid = Guid::new(rtps_header.guid_prefix(), acknack.reader_id);
 
         let writer = self.find_stateful_writer(acknack.writer_id)?;
@@ -3197,6 +3352,11 @@ impl UnicastMessageProcessor for UserLogic {
         rtps_header: &Header,
         nack_frag: &NackFrag,
     ) -> RtpsResult<()> {
+        // Same reasoning as in `handle_acknack_message`: released before the early returns, and
+        // before `handle_rtps_message` can drop the rest of this datagram's submessages on one
+        // handler error.
+        self.release_send_credit(rtps_header.guid_prefix());
+
         let remote_reader_guid = Guid::new(rtps_header.guid_prefix(), nack_frag.reader_id);
         let writer_id = nack_frag.writer_id;
         let writer_sn = nack_frag.writer_sn;
@@ -5308,5 +5468,193 @@ mod tests {
         if let Ok(handler) = TimerHandler::get_instance(prefix).lock() {
             handler.terminate();
         }
+    }
+
+    //-------------------------------------------------------------------------------------
+    // The window carried across send calls, so a peer's one receive buffer is not committed
+    // once per call.
+    //-------------------------------------------------------------------------------------
+
+    #[test]
+    fn a_charge_still_counts_just_before_the_backstop() {
+        let now = Instant::now();
+        let since = now - (SEND_CREDIT_BACKSTOP - Duration::from_millis(1));
+        assert_eq!(carried_spend(4096, since, now, SEND_CREDIT_BACKSTOP), 4096);
+    }
+
+    #[test]
+    fn a_charge_stops_counting_once_the_backstop_has_passed() {
+        let now = Instant::now();
+        let since = now - SEND_CREDIT_BACKSTOP;
+        assert_eq!(
+            carried_spend(4096, since, now, SEND_CREDIT_BACKSTOP),
+            0,
+            "a peer that never answers would hold the window shut for good"
+        );
+    }
+
+    /// A second writer on the same participant, matched to the same remote participant as
+    /// `windowed_writer`'s. Both therefore aim at one peer socket, which is the whole point.
+    fn second_writer_to_the_same_peer(
+        participant: &Arc<Participant>,
+        remote_prefix: GuidPrefix,
+    ) -> Arc<StatefulWriter> {
+        second_writer_with_reliability(participant, remote_prefix, true)
+    }
+
+    fn second_writer_with_reliability(
+        participant: &Arc<Participant>,
+        remote_prefix: GuidPrefix,
+        reliable: bool,
+    ) -> Arc<StatefulWriter> {
+        let writer_entity_id =
+            EntityId::new([0x11, 0x00, 0x00], EntityKind::USER_DEFINED_WRITER_NO_KEY);
+        let writer = Arc::new(StatefulWriter::new(
+            Guid::new(participant.guid().prefix(), writer_entity_id),
+            Vec::new(),
+            Vec::new(),
+            ReliabilityQosPolicyKind::Reliable,
+            TopicKind::NoKey,
+            writer_entity_id,
+            -1,
+            None,
+            PublicationBuiltinTopicData::default(),
+            Weak::new(),
+        ));
+        writer.matched_reader_add(ReaderProxy::new(
+            Guid::new(
+                remote_prefix,
+                EntityId::new([0x21, 0x00, 0x00], EntityKind::USER_DEFINED_READER_NO_KEY),
+            ),
+            EntityId::UNKNOWN,
+            vec![Locator::from_ip(Ipv4Addr::new(127, 0, 0, 1), 7411)],
+            Vec::new(),
+            SequenceNumber::new(0, 0),
+            SequenceNumber::new(0, 0),
+            false,
+            true,
+            if reliable {
+                SubscriptionBuiltinTopicData::builtin_reliable()
+            } else {
+                SubscriptionBuiltinTopicData::default()
+            },
+            SequenceNumber::new(0, 0),
+        ));
+        participant.add_writer("window_test_topic_b", writer.clone()).unwrap();
+        writer
+    }
+
+    #[test]
+    fn two_writers_aiming_at_one_peer_share_that_peer_s_window() {
+        const ADVERTISED: usize = 300_000;
+        let window = receive_window_bytes(Some(ADVERTISED), None);
+        let (participant, user_logic, recorder, writer_a, remote_prefix) =
+            windowed_writer(1, 1, Some(ADVERTISED));
+        let writer_b = second_writer_to_the_same_peer(&participant, remote_prefix);
+
+        // Large enough that either writer alone would fill the window.
+        stage_fragmented_sample(&writer_a, ADVERTISED);
+        stage_fragmented_sample(&writer_b, ADVERTISED);
+
+        let round_a = first_transmission(&user_logic, &writer_a, &recorder);
+        let round_b = first_transmission(&user_logic, &writer_b, &recorder);
+
+        assert_one_window(&round_a, window, "writer A");
+        assert!(
+            !round_b.is_empty(),
+            "writer B sent nothing; at_least_one must still let a datagram through"
+        );
+
+        let charged: usize =
+            round_a.iter().chain(round_b.iter()).map(|d| d.wire_bytes).sum::<usize>();
+        let floor: usize = round_b.first().map(|d| d.wire_bytes).unwrap_or(0);
+        assert!(
+            charged <= window + floor,
+            "two writers charged {charged} bytes into one {window}-byte window; the peer's \
+             socket sees the sum, so each send call opening a fresh window overruns it"
+        );
+    }
+
+    #[test]
+    fn a_peer_that_answers_gets_its_window_back() {
+        const ADVERTISED: usize = 300_000;
+        let window = receive_window_bytes(Some(ADVERTISED), None);
+        let (participant, user_logic, recorder, writer_a, remote_prefix) =
+            windowed_writer(1, 1, Some(ADVERTISED));
+        let writer_b = second_writer_to_the_same_peer(&participant, remote_prefix);
+
+        stage_fragmented_sample(&writer_a, ADVERTISED);
+        stage_fragmented_sample(&writer_b, ADVERTISED);
+
+        let _ = first_transmission(&user_logic, &writer_a, &recorder);
+        user_logic.release_send_credit(remote_prefix);
+        let round_b = first_transmission(&user_logic, &writer_b, &recorder);
+
+        assert_one_window(&round_b, window, "writer B after the peer answered");
+        let charged: usize = round_b.iter().map(|d| d.wire_bytes).sum();
+        assert!(
+            charged > window / 2,
+            "writer B got only {charged} of {window} bytes back; an answered peer has drained \
+             what was charged and the next writer must see a whole window"
+        );
+    }
+
+    /// A best-effort reader never answers, and the writer never heartbeats at it, so nothing
+    /// would ever release a charge made on its behalf. Carrying one would throttle every later
+    /// best-effort send to a single datagram until the backstop, turning a stream that used to
+    /// deliver every sample into one sample per backstop period -- and best-effort has no repair
+    /// path to recover the rest.
+    #[test]
+    fn a_best_effort_burst_is_not_throttled_by_an_earlier_one() {
+        const ADVERTISED: usize = 300_000;
+        let window = receive_window_bytes(Some(ADVERTISED), None);
+        let (participant, user_logic, recorder, writer_a, remote_prefix) =
+            windowed_writer(1, 1, Some(ADVERTISED));
+        let writer_b = second_writer_with_reliability(&participant, remote_prefix, false);
+
+        stage_fragmented_sample(&writer_a, ADVERTISED);
+        stage_fragmented_sample(&writer_b, ADVERTISED);
+
+        let _ = first_transmission(&user_logic, &writer_a, &recorder);
+        let round_b = first_transmission(&user_logic, &writer_b, &recorder);
+
+        let charged: usize = round_b.iter().map(|d| d.wire_bytes).sum();
+        assert!(
+            charged > window / 2,
+            "a best-effort burst got only {charged} of {window} bytes; nothing will ever release \
+             the charge that took the rest, so this sample is silently truncated"
+        );
+    }
+
+    #[test]
+    fn a_builtin_writer_does_not_draw_on_the_shared_budget() {
+        let (participant, user_logic, _recorder, _writer, remote_prefix) =
+            windowed_writer(1, 1, Some(300_000));
+        let builtin_entity_id = EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER;
+        let builtin = Arc::new(StatefulWriter::new(
+            Guid::new(participant.guid().prefix(), builtin_entity_id),
+            Vec::new(),
+            Vec::new(),
+            ReliabilityQosPolicyKind::Reliable,
+            TopicKind::NoKey,
+            builtin_entity_id,
+            -1,
+            None,
+            PublicationBuiltinTopicData::default(),
+            Weak::new(),
+        ));
+
+        assert!(
+            user_logic.shared_send_credit(&builtin).is_none(),
+            "discovery must not queue behind a user writer's burst"
+        );
+
+        let mut windows = SendWindows::new(&NullTransport, user_logic.shared_send_credit(&builtin));
+        windows.remaining(&participant, remote_prefix, true);
+        windows.charge(remote_prefix, 100_000, true);
+        assert!(
+            user_logic.send_credit.get(&remote_prefix).is_none(),
+            "a builtin writer's send left a charge on the shared budget"
+        );
     }
 }
