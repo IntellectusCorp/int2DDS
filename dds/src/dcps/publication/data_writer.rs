@@ -1023,28 +1023,13 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         Ok(())
     }
 
-    /// Compute an InstanceHandle from raw key bytes.
-    /// If key_bytes fits in 16 bytes, it is used directly as the KeyHash.
-    /// Otherwise, MD5 hash is computed.
-    /// Derive the canonical serialized key CDR and InstanceHandle from a full
-    /// serialized sample via the type support — the spec RTPS KeyHash projection
-    /// (§9.6.4.8, member-id order, nested @key recursion, max-size raw/MD5
-    /// threshold) that native-Rust/derive and the dynamic path also produce. A
-    /// no-key type (or a raw topic without a full TypeObject) yields an empty key
-    /// and NIL handle. This replaces the former flat actual-length hashing so the
-    /// serialized write/register/lookup handles match the wire KeyHash.
-    fn key_info_from_serialized_sample(
-        &self,
-        sample: &[u8],
-    ) -> DdsResult<(SerializedData, InstanceHandle)> {
-        let boxed = self.type_support.deserialize(sample, None)?;
-        let key = self.type_support.serialize_key(&*boxed)?;
-        let handle = self.type_support.compute_key(&*boxed);
-        Ok((key, handle))
-    }
-
     /// `Some((canonical key CDR, handle))` when this sample carries a key, else
     /// `None` (no-key topic, or no full TypeObject on a raw keyed topic).
+    ///
+    /// The key comes from the spec RTPS KeyHash projection (§9.6.4.8, member-id
+    /// order, nested @key recursion, max-size raw/MD5 threshold) that
+    /// native-Rust/derive and the dynamic path also produce, so serialized
+    /// write/register/lookup handles match the wire KeyHash.
     fn serialized_key_info(
         &self,
         sample: &[u8],
@@ -1052,7 +1037,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         if sample.is_empty() || !self.type_support.is_compute_key_provided() {
             return Ok(None);
         }
-        let (key, handle) = self.key_info_from_serialized_sample(sample)?;
+        let (key, handle) = self.type_support.key_info_from_bytes(sample)?;
         if key.is_empty() {
             // is_compute_key_provided() is true but the key machinery produced nothing —
             // a keyed topic whose key cannot be computed (e.g. a raw topic without a full

@@ -32,9 +32,9 @@ pub struct RawTypeSupport {
     has_key: bool,
     type_identifier: Option<TypeIdentifier>,
     type_object: Option<TypeObject>,
-    /// Compiled layout of the type, when the shape is one a plan covers. Answers
-    /// the key projection and filter field access straight from the sample bytes;
-    /// anything it does not cover falls through to `dynamic_key_support`.
+    /// Compiled layout of the type. Answers the key projection and filter field
+    /// access straight from the sample bytes; the shapes it declines — listed on
+    /// `int2dds::xtypes::codec_plan` — fall through to `dynamic_key_support`.
     plans: Option<Arc<TypePlans>>,
     /// Canonical key machinery derived from a full TypeObject. When present,
     /// `compute_key` deserializes the sample into a `DynamicData` and delegates to
@@ -262,6 +262,24 @@ impl TypeSupport for RawTypeSupport {
         }
 
         InstanceHandle::NIL
+    }
+
+    fn key_info_from_bytes(&self, sample: &[u8]) -> DdsResult<(SerializedData, InstanceHandle)> {
+        // The default asks `serialize_key` and `compute_key` in turn, which would
+        // walk the sample twice. Both answers come out of one projection here, and
+        // the sample never has to be copied into an `Int2DdsData` to be asked.
+        if !self.has_key {
+            return Ok((Arc::from(Vec::new()), InstanceHandle::NIL));
+        }
+        if let Some(Ok((key, handle))) = self.plans.as_ref().and_then(|p| p.key_info(sample)) {
+            return Ok((Arc::from(key), handle));
+        }
+        if let Some(dts) = &self.dynamic_key_support {
+            if let Ok(dyn_data) = deserialize_dynamic_data(sample, dts.dynamic_type()) {
+                return Ok((dts.serialize_key(&dyn_data)?, dts.compute_key(&dyn_data)));
+            }
+        }
+        Ok((Arc::from(Vec::new()), InstanceHandle::NIL))
     }
 
     fn is_compute_key_provided(&self) -> bool {
