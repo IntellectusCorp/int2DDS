@@ -8,7 +8,6 @@ import com.intellectus.int2dds.internal.QosMarshal;
 import com.intellectus.int2dds.internal.ReturnCodes;
 import com.intellectus.int2dds.internal.ffi.FfiAccess;
 import com.intellectus.int2dds.qos.DataReaderQos;
-import com.intellectus.int2dds.qos.DataRepresentationKind;
 import com.intellectus.int2dds.types.IDdsType;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -30,13 +29,13 @@ import java.util.function.Supplier;
  */
 public final class DataReader<T extends IDdsType> extends NativeEntity {
 
-    private static final boolean LITTLE_ENDIAN_HOST =
-            ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN;
     private static final int DEFAULT_CAPACITY = 4096;
+
+    /** Largest serialized-sample size this reader will grow its payload buffer to. */
+    private static final long MAX_SAMPLE_BYTES = Integer.MAX_VALUE - 8;
 
     private final Topic<T> topic;
     private final Supplier<T> factory;
-    private final boolean xcdr2;
 
     // Reused across take/read on this reader. Not thread-safe by design: a
     // DataReader is used from one consumer thread at a time, as in the C#
@@ -54,7 +53,6 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
                 FfiAccess::deleteDataReader);
         this.topic = topic;
         this.factory = Objects.requireNonNull(factory, "factory");
-        this.xcdr2 = resolveXcdr2(qos);
     }
 
     /** The topic this reader receives from — the same instance passed to {@code createDataReader}. */
@@ -89,7 +87,7 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
             NativeKeepAlive.keepAlive(sizeSlot);
             NativeKeepAlive.keepAlive(infoSlot);
             if (rc == DdsException.RET_BUFFER_TOO_SMALL) {
-                growPayload((int) sizeSlot.getLong(0));
+                growPayload(sizeSlot.getLong(0));
                 continue;
             }
             if (!ReturnCodes.checkOrNoData(rc)) {
@@ -107,31 +105,26 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
         int n = (int) sizeSlot.getLong(0);
         ((java.nio.Buffer) payload).position(0);
         ((java.nio.Buffer) payload).limit(n);
-        CdrReader reader = CdrReader.ofRaw(payload, LITTLE_ENDIAN_HOST, xcdr2);
+        CdrReader reader = CdrReader.of(payload);
         T data = factory.get();
         data.deserializeCdr(reader);
         ((java.nio.Buffer) payload).clear();
         return new Sample<T>(data, info);
     }
 
-    private void growPayload(int required) {
-        int cap = payload.capacity();
+    private void growPayload(long required) {
+        if (required > MAX_SAMPLE_BYTES) {
+            throw new DdsErrorException("serialized sample too large: " + required + " bytes");
+        }
+        long cap = payload.capacity();
         while (cap < required) {
             cap <<= 1;
         }
-        payload = ByteBuffer.allocateDirect(cap).order(ByteOrder.nativeOrder());
+        payload = ByteBuffer.allocateDirect((int) cap).order(ByteOrder.nativeOrder());
     }
 
     private static long addr(ByteBuffer b) {
         return FfiAccess.directBufferAddress(b);
-    }
-
-    /** {@code true} for XCDR2. Mirrors DataWriter.resolveXcdr2 on the reader QoS. */
-    private static boolean resolveXcdr2(DataReaderQos qos) {
-        DataRepresentationKind kind = (qos != null && qos.getDataRepresentation() != null)
-                ? qos.getDataRepresentation().getKind()
-                : DataRepresentationKind.fromValue(FfiAccess.defaultDataRepresentation());
-        return kind == DataRepresentationKind.XCDR2;
     }
 
     private static long create(Subscriber subscriber, Topic<?> topic, DataReaderQos qos) {
