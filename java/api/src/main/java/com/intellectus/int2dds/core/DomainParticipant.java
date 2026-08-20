@@ -14,6 +14,10 @@ import com.intellectus.int2dds.qos.PublisherQos;
 import com.intellectus.int2dds.qos.SubscriberQos;
 import com.intellectus.int2dds.qos.TopicQos;
 import com.intellectus.int2dds.types.IDdsType;
+import com.intellectus.int2dds.xtypes.DynamicData;
+import com.intellectus.int2dds.xtypes.TypeObject;
+import java.nio.Buffer;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -252,6 +256,31 @@ public final class DomainParticipant extends NativeEntity {
             }
         }
         return out;
+    }
+
+    /**
+     * Decodes {@code serialized} (a full serialized sample, encapsulation
+     * header included, e.g. {@link com.intellectus.int2dds.cdr.CdrWriter}'s
+     * output) against {@code type} into a live {@link DynamicData}. {@code
+     * serialized} is copied into a direct buffer so its address can cross the
+     * FFI boundary the same way {@code writer.write(sample)} does.
+     */
+    public DynamicData dynamicDataFromSample(byte[] serialized, TypeObject type) {
+        long h = handle();
+        ByteBuffer buf = ByteBuffer.allocateDirect(serialized.length);
+        buf.put(serialized);
+        ((Buffer) buf).position(0);
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicDataFromSample(
+                h, FfiAccess.directBufferAddress(buf), serialized.length, type.handle(), out);
+        // buf is read by the native call only through the address handed to
+        // it above; without this fence the JIT could treat buf as dead before
+        // that call finishes using it. Same hazard FfiAccess's own bridges
+        // guard against -- see NativeKeepAlive's doc for the full argument.
+        NativeKeepAlive.keepAlive(buf);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return DynamicData.fromHandle(out[0]);
     }
 
     /**

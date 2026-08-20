@@ -729,6 +729,96 @@ public final class FfiAccess {
         return Ffi.int2dds_dynamic_sample_get_f64(bytes, len, typeObj, fieldName, out);
     }
 
+    // --- DynamicData (handle-based, xtypes read path) ---
+
+    /**
+     * Decodes {@code bytesAddr}/{@code len} (a serialized sample, encapsulation
+     * header included) against {@code typeObj} into a live DynamicData handle,
+     * writing it to {@code out[0]} only on success. {@code bytesAddr} is a
+     * direct-buffer address, the same shape as {@link #dynamicSampleGetI32}'s
+     * {@code bytes}.
+     */
+    public static int dynamicDataFromSample(
+            long participant, long bytesAddr, long len, long typeObj, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_data_from_sample(
+                participant, bytesAddr, len, typeObj, directBufferAddress(slot));
+        // Same hazard as participantFactoryGetInstance's fence above -- see
+        // NativeKeepAlive's own doc for the full argument.
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Releases a DynamicData handle. */
+    public static void dynamicDataDestroy(long d) {
+        Ffi.int2dds_dynamic_data_destroy(d);
+    }
+
+    /** Reads an i32 field at {@code path}, writing it to {@code out[0]} on success. */
+    public static int dynamicDataGetI32(long d, byte[] path, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_data_get_i32(d, path, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getInt(0); // native writes an i32 (4 bytes), not 8
+        }
+        return rc;
+    }
+
+    /** Reads an f64 field at {@code path}, writing it to {@code out[0]} on success. */
+    public static int dynamicDataGetF64(long d, byte[] path, double[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_data_get_f64(d, path, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getDouble(0); // native writes a full 8-byte f64
+        }
+        return rc;
+    }
+
+    /**
+     * Grow-and-retry driver for a string field at {@code path}, mirroring {@link
+     * #readGrowableString} but for a different native contract: {@code
+     * int2dds_dynamic_data_get_string} (ffi/src/dynamic.rs {@code copy_str_to_c})
+     * reports the required size WITHOUT the trailing NUL -- both on {@code
+     * RET_BUFFER_TOO_SMALL} and on success -- unlike {@code copy_string_to_c}
+     * (discovery.rs), which {@link #readGrowableString} was written for and which
+     * includes the NUL in its size. Regrowing to {@code outLen} (not {@code
+     * outLen + 1}) here would repeat the same too-small capacity forever, so this
+     * regrows to {@code outLen + 1} and does not subtract 1 from the length on
+     * the success path. {@code out_buf} crosses as a plain {@code byte[]} here,
+     * not a direct-buffer address -- the generated shim marshals it as a JNI
+     * array (see {@code Java_..._int2dds_1dynamic_1data_1get_1string} in
+     * generated.rs) -- so only {@code sizeSlot}, the one direct buffer, needs
+     * the keepAlive fence. Never throws -- policy-free like every other bridge
+     * here -- it just returns the final status code and, only on {@code RET_OK},
+     * writes the decoded UTF-8 bytes to {@code bytesOut[0]}.
+     */
+    public static int dynamicDataGetString(long d, byte[] path, byte[][] bytesOut) {
+        int cap = 64;
+        while (true) {
+            byte[] buf = new byte[cap];
+            ByteBuffer sizeSlot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+            int rc = Ffi.int2dds_dynamic_data_get_string(
+                    d, path, buf, cap, directBufferAddress(sizeSlot));
+            NativeKeepAlive.keepAlive(sizeSlot);
+            if (rc == DdsException.RET_BUFFER_TOO_SMALL) {
+                cap = (int) sizeSlot.getLong(0) + 1; // out_len excludes the NUL here
+                continue;
+            }
+            if (rc == 0) {
+                int n = (int) sizeSlot.getLong(0); // excludes the NUL -- no -1 needed
+                byte[] out = new byte[n];
+                System.arraycopy(buf, 0, out, 0, n);
+                bytesOut[0] = out;
+            }
+            return rc;
+        }
+    }
+
     // --- Subscriber / DataReader (raw receive side, for WritePathEndToEndTest only) ---
     //
     // No Subscriber or DataReader Java entity exists yet -- the read branch
