@@ -31,8 +31,8 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
 
     private static final int DEFAULT_CAPACITY = 4096;
 
-    /** Largest serialized-sample size this reader will grow its payload buffer to. */
-    private static final long MAX_SAMPLE_BYTES = Integer.MAX_VALUE - 8;
+    /** Largest power-of-two direct buffer size an int capacity can hold (2^30). */
+    private static final long MAX_SAMPLE_BYTES = 1 << 30;
 
     private final Topic<T> topic;
     private final Supplier<T> factory;
