@@ -1,6 +1,7 @@
 package com.intellectus.int2dds.core;
 
 import com.intellectus.int2dds.cdr.CdrReader;
+import com.intellectus.int2dds.conditions.StatusCondition;
 import com.intellectus.int2dds.exceptions.DdsErrorException;
 import com.intellectus.int2dds.exceptions.DdsException;
 import com.intellectus.int2dds.internal.NativeKeepAlive;
@@ -98,6 +99,16 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
             }
             listenerCtx = ctx;
         }
+    }
+
+    /** A fresh {@link StatusCondition} for this reader's status changes. */
+    public StatusCondition getStatusCondition() {
+        long h = handle();
+        long[] out = new long[1];
+        int rc = FfiAccess.datareaderGetStatusCondition(h, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return new StatusCondition(out[0]);
     }
 
     /** Takes (removes) the next sample, or null if the cache is empty. */

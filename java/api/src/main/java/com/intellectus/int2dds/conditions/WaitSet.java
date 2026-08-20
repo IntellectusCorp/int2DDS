@@ -48,9 +48,12 @@ public final class WaitSet implements AutoCloseable {
     }
 
     private int attachNative(Condition c) {
-        // Task 2/3 extend this dispatch for StatusCondition/ReadCondition.
+        // Task 3 extends this dispatch for ReadCondition.
         if (c instanceof GuardCondition) {
             return FfiAccess.waitsetAttachGuard(handle.value(), c.handle());
+        }
+        if (c instanceof StatusCondition) {
+            return FfiAccess.waitsetAttachStatus(handle.value(), c.handle());
         }
         throw new IllegalArgumentException("unsupported condition type: " + c.getClass());
     }
@@ -58,6 +61,9 @@ public final class WaitSet implements AutoCloseable {
     private int detachNative(Condition c) {
         if (c instanceof GuardCondition) {
             return FfiAccess.waitsetDetachGuard(handle.value(), c.handle());
+        }
+        if (c instanceof StatusCondition) {
+            return FfiAccess.waitsetDetachStatus(handle.value(), c.handle());
         }
         throw new IllegalArgumentException("unsupported condition type: " + c.getClass());
     }

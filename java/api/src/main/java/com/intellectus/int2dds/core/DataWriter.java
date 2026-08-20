@@ -1,6 +1,7 @@
 package com.intellectus.int2dds.core;
 
 import com.intellectus.int2dds.cdr.CdrWriter;
+import com.intellectus.int2dds.conditions.StatusCondition;
 import com.intellectus.int2dds.exceptions.DdsErrorException;
 import com.intellectus.int2dds.internal.NativeCleaner;
 import com.intellectus.int2dds.internal.NativeKeepAlive;
@@ -140,6 +141,16 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
             }
             listenerCtx = ctx;
         }
+    }
+
+    /** A fresh {@link StatusCondition} for this writer's status changes. */
+    public StatusCondition getStatusCondition() {
+        long h = handle();
+        long[] out = new long[1];
+        int rc = FfiAccess.datawriterGetStatusCondition(h, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return new StatusCondition(out[0]);
     }
 
     /**

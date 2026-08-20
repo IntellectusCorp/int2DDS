@@ -935,4 +935,79 @@ public final class FfiAccess {
     public static void conditionSeqDelete(long seq) {
         Ffi.int2dds_condition_seq_delete(seq);
     }
+
+    /**
+     * Mints a fresh status condition for {@code reader}, writing its handle to
+     * {@code handleOut[0]} on success. Each call returns a new native box the
+     * caller owns and must release through {@link #statusConditionDelete}.
+     */
+    public static int datareaderGetStatusCondition(long reader, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_datareader_get_statuscondition(reader, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Mints a fresh status condition for {@code writer}, writing its handle to
+     * {@code handleOut[0]} on success. Each call returns a new native box the
+     * caller owns and must release through {@link #statusConditionDelete}.
+     */
+    public static int datawriterGetStatusCondition(long writer, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_datawriter_get_statuscondition(writer, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Reads a status condition's own trigger value (its own handle, not a seq
+     * entry), writing it to {@code out[0]} on success.
+     */
+    public static int statusConditionGetTriggerValue(long condition, boolean[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_statuscondition_get_trigger_value(condition, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.get(0) != 0; // bool out is 1 byte, not 4
+        }
+        return rc;
+    }
+
+    /** Reads a status condition's enabled-statuses mask, writing it to {@code outMask[0]} on success. */
+    public static int statusConditionGetEnabledStatuses(long condition, int[] outMask) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_statuscondition_get_enabled_statuses(condition, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            outMask[0] = slot.getInt(0); // mask out is a u32
+        }
+        return rc;
+    }
+
+    /** Sets a status condition's enabled-statuses mask. Returns the C ABI status code. */
+    public static int statusConditionSetEnabledStatuses(long condition, int mask) {
+        return Ffi.int2dds_statuscondition_set_enabled_statuses(condition, mask);
+    }
+
+    /** Releases a status condition. Returns the C ABI status code. */
+    public static int statusConditionDelete(long condition) {
+        return Ffi.int2dds_statuscondition_delete(condition);
+    }
+
+    /** Attaches a status condition to a WaitSet. Returns the C ABI status code. */
+    public static int waitsetAttachStatus(long waitset, long condition) {
+        return Ffi.int2dds_waitset_attach_statuscondition(waitset, condition);
+    }
+
+    /** Detaches a status condition from a WaitSet. Returns the C ABI status code. */
+    public static int waitsetDetachStatus(long waitset, long condition) {
+        return Ffi.int2dds_waitset_detach_statuscondition(waitset, condition);
+    }
 }
