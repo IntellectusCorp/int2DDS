@@ -38,13 +38,19 @@ class SampleInfoTest {
         assertEquals(2, info.viewState());
         assertEquals(4, info.instanceState());
         assertEquals(5, info.disposedGenerationCount());
+        assertEquals(6, info.noWritersGenerationCount());
+        assertEquals(7, info.sampleRank());
+        assertEquals(8, info.generationRank());
         assertEquals(9, info.absoluteGenerationRank());
         assertTrue(info.validData());
         byte[] expInst = new byte[16];
+        byte[] expPub = new byte[16];
         for (int i = 0; i < 16; i++) {
             expInst[i] = (byte) (i + 1);
+            expPub[i] = (byte) (i + 100);
         }
         assertArrayEquals(expInst, info.instanceHandle());
+        assertArrayEquals(expPub, info.publicationHandle());
     }
 
     @Test
