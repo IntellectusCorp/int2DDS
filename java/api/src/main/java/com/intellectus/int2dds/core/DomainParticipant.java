@@ -1,7 +1,9 @@
 package com.intellectus.int2dds.core;
 
+import com.intellectus.int2dds.discovery.PublicationBuiltinTopicData;
 import com.intellectus.int2dds.exceptions.DdsErrorException;
 import com.intellectus.int2dds.internal.NativeCleaner;
+import com.intellectus.int2dds.internal.NativeKeepAlive;
 import com.intellectus.int2dds.internal.QosMarshal;
 import com.intellectus.int2dds.internal.ReturnCodes;
 import com.intellectus.int2dds.internal.ffi.FfiAccess;
@@ -10,6 +12,8 @@ import com.intellectus.int2dds.qos.PublisherQos;
 import com.intellectus.int2dds.qos.SubscriberQos;
 import com.intellectus.int2dds.qos.TopicQos;
 import com.intellectus.int2dds.types.IDdsType;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -109,6 +113,47 @@ public final class DomainParticipant extends NativeEntity {
     /** Creates a subscriber with an explicit QoS. */
     public Subscriber createSubscriber(SubscriberQos qos) {
         return new Subscriber(this, Objects.requireNonNull(qos, "qos"));
+    }
+
+    /**
+     * Takes a snapshot of currently discovered (alive) publications, blocking
+     * up to {@code timeoutMillis} (negative = infinite) for the builtin
+     * DCPSPublication reader to have data. Discovery is asynchronous, so an
+     * empty list shortly after matching entities are created does not mean
+     * discovery failed -- callers on a bounded budget should retry.
+     *
+     * <p>Materializes each entry into an immutable {@link
+     * PublicationBuiltinTopicData} before releasing the native snapshot: the
+     * per-entry box the core mints (a clone of its stored data) is destroyed,
+     * and the snapshot sequence itself deleted, in {@code finally} blocks, so
+     * an exception mid-read still frees everything already allocated.
+     */
+    public List<PublicationBuiltinTopicData> takeDiscoveredPublications(long timeoutMillis) {
+        long h = handle();
+        long[] seqOut = new long[1];
+        int rc = FfiAccess.takeDiscoveredPublicationsSnapshot(h, (int) timeoutMillis, seqOut);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        long seq = seqOut[0];
+        List<PublicationBuiltinTopicData> out = new ArrayList<PublicationBuiltinTopicData>();
+        try {
+            long[] lenOut = new long[1];
+            ReturnCodes.check(FfiAccess.pubDataSeqLength(seq, lenOut));
+            int n = (int) lenOut[0];
+            for (int i = 0; i < n; i++) {
+                long[] dataOut = new long[1];
+                ReturnCodes.check(FfiAccess.pubDataSeqGet(seq, i, dataOut));
+                long data = dataOut[0];
+                try {
+                    out.add(PublicationBuiltinTopicData.materialize(data));
+                } finally {
+                    FfiAccess.pubDataDestroy(data);
+                }
+            }
+        } finally {
+            FfiAccess.pubDataSeqDelete(seq);
+        }
+        return out;
     }
 
     /**

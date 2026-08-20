@@ -1,5 +1,6 @@
 package com.intellectus.int2dds.internal.ffi;
 
+import com.intellectus.int2dds.exceptions.DdsException;
 import com.intellectus.int2dds.internal.NativeKeepAlive;
 import com.intellectus.int2dds.internal.NativeLoader;
 import com.intellectus.int2dds.listeners.DataReaderListener;
@@ -1084,5 +1085,267 @@ public final class FfiAccess {
     /** Detaches a read (or query) condition from a WaitSet. Returns the C ABI status code. */
     public static int waitsetDetachRead(long waitset, long condition) {
         return Ffi.int2dds_waitset_detach_readcondition(waitset, condition);
+    }
+
+    // --- Discovery: PublicationBuiltinTopicData (materialize-then-destroy) ---
+
+    /** Bridge shape for a {@code copy_string_to_c} getter: (bufAddr, capacity, sizeOutAddr) -> rc. */
+    public interface GrowableStringGetter {
+        int get(long bufAddr, long capacity, long sizeOutAddr);
+    }
+
+    /** Bridge shape for a raw-bytes getter with no NUL convention, e.g. {@code user_data}. */
+    public interface GrowableBytesGetter {
+        int get(long bufAddr, long capacity, long sizeOutAddr);
+    }
+
+    /**
+     * Grow-and-retry driver for a {@code copy_string_to_c}-style getter, mirroring
+     * {@code DataReader}'s payload-growth idiom on the read path. On {@code
+     * RET_BUFFER_TOO_SMALL} the size slot holds the required capacity (including
+     * the trailing NUL), so this regrows and retries. Never throws -- policy-free
+     * like every other bridge here -- it just returns the final status code and,
+     * only on {@code RET_OK}, writes the decoded UTF-8 bytes (NUL trimmed) to
+     * {@code bytesOut[0]}.
+     */
+    public static int readGrowableString(GrowableStringGetter getter, byte[][] bytesOut) {
+        int cap = 256;
+        while (true) {
+            ByteBuffer buf = ByteBuffer.allocateDirect(cap);
+            ByteBuffer sizeSlot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+            int rc = getter.get(directBufferAddress(buf), cap, directBufferAddress(sizeSlot));
+            NativeKeepAlive.keepAlive(buf);
+            NativeKeepAlive.keepAlive(sizeSlot);
+            if (rc == DdsException.RET_BUFFER_TOO_SMALL) {
+                cap = (int) sizeSlot.getLong(0);
+                continue;
+            }
+            if (rc == 0) {
+                int n = (int) sizeSlot.getLong(0);
+                int len = n > 0 ? n - 1 : 0; // sizeOut includes the trailing NUL
+                byte[] out = new byte[len];
+                ((java.nio.Buffer) buf).position(0);
+                buf.get(out, 0, len);
+                bytesOut[0] = out;
+            }
+            return rc;
+        }
+    }
+
+    /**
+     * Grow-and-retry driver for a raw-bytes getter (e.g. {@code user_data}) that
+     * has no {@code BUFFER_TOO_SMALL} signal of its own: it always returns
+     * {@code RET_OK} and silently truncates when the buffer is too small, always
+     * reporting the untruncated length via the size slot. So this regrows and
+     * retries whenever the reported size exceeds what was actually copied,
+     * rather than switching on the status code. Never throws -- policy-free.
+     */
+    public static int readGrowableBytes(GrowableBytesGetter getter, byte[][] bytesOut) {
+        int cap = 256;
+        while (true) {
+            ByteBuffer buf = ByteBuffer.allocateDirect(cap);
+            ByteBuffer sizeSlot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+            int rc = getter.get(directBufferAddress(buf), cap, directBufferAddress(sizeSlot));
+            NativeKeepAlive.keepAlive(buf);
+            NativeKeepAlive.keepAlive(sizeSlot);
+            if (rc != 0) {
+                return rc;
+            }
+            int n = (int) sizeSlot.getLong(0);
+            if (n > cap) {
+                cap = n;
+                continue;
+            }
+            byte[] out = new byte[n];
+            ((java.nio.Buffer) buf).position(0);
+            buf.get(out, 0, n);
+            bytesOut[0] = out;
+            return rc;
+        }
+    }
+
+    /**
+     * Collects a snapshot of discovered publications (the builtin DCPSPublication
+     * reader), blocking up to {@code timeoutMs} (negative = infinite). Returns rc;
+     * on {@code RET_OK} writes the snapshot sequence handle to {@code seqOut[0]}.
+     * The caller owns the sequence and must release it with {@link
+     * #pubDataSeqDelete}.
+     */
+    public static int takeDiscoveredPublicationsSnapshot(long participant, int timeoutMs,
+            long[] seqOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_participant_take_discovered_publications_snapshot(
+                participant, timeoutMs, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            seqOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Entry count of a publication snapshot. Returns rc; writes it to {@code out[0]} on success. */
+    public static int pubDataSeqLength(long seq, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_publication_builtin_topic_data_seq_length(seq, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Mints an owned {@code PublicationBuiltinTopicData} box for the entry at
+     * {@code index} (the core clones its stored data into it). Returns rc; writes
+     * the handle to {@code dataOut[0]} on success. The caller owns the box and
+     * must release it with {@link #pubDataDestroy}.
+     */
+    public static int pubDataSeqGet(long seq, long index, long[] dataOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_publication_builtin_topic_data_seq_get(seq, index, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            dataOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Releases a publication snapshot sequence returned by {@link #takeDiscoveredPublicationsSnapshot}. */
+    public static void pubDataSeqDelete(long seq) {
+        Ffi.int2dds_publication_builtin_topic_data_seq_delete(seq);
+    }
+
+    /** Releases one owned {@code PublicationBuiltinTopicData} box minted by {@link #pubDataSeqGet}. */
+    public static void pubDataDestroy(long data) {
+        Ffi.int2dds_publication_builtin_topic_data_destroy(data);
+    }
+
+    /** The 12-byte instance key. {@code keyOut} must be a 12-byte array. */
+    public static int pubDataGetKey(long data, byte[] keyOut) {
+        return Ffi.int2dds_publication_builtin_topic_data_get_key(data, keyOut);
+    }
+
+    /** The 16-byte endpoint GUID. {@code guidOut} must be a 16-byte array. */
+    public static int pubDataGetEndpointGuid(long data, byte[] guidOut) {
+        return Ffi.int2dds_publication_builtin_topic_data_get_endpoint_guid(data, guidOut);
+    }
+
+    /** The 12-byte owning-participant key. {@code keyOut} must be a 12-byte array. */
+    public static int pubDataGetParticipantKey(long data, byte[] keyOut) {
+        return Ffi.int2dds_publication_builtin_topic_data_get_participant_key(data, keyOut);
+    }
+
+    /** Direct passthrough for {@link #readGrowableString}: the topic name getter. */
+    public static int pubDataGetTopicName(long data, long buf, long capacity, long sizeOut) {
+        return Ffi.int2dds_publication_builtin_topic_data_get_topic_name(data, buf, capacity, sizeOut);
+    }
+
+    /** Direct passthrough for {@link #readGrowableString}: the type name getter. */
+    public static int pubDataGetTypeName(long data, long buf, long capacity, long sizeOut) {
+        return Ffi.int2dds_publication_builtin_topic_data_get_type_name(data, buf, capacity, sizeOut);
+    }
+
+    /** Direct passthrough for {@link #readGrowableBytes}: the user_data getter. */
+    public static int pubDataGetUserData(long data, long buf, long capacity, long sizeOut) {
+        return Ffi.int2dds_publication_builtin_topic_data_get_user_data(data, buf, capacity, sizeOut);
+    }
+
+    /** Reliability kind: 0 = BEST_EFFORT, 1 = RELIABLE. Writes it to {@code out[0]} on success. */
+    public static int pubDataGetReliabilityKind(long data, int[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_publication_builtin_topic_data_get_reliability_kind(
+                data, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getInt(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Durability kind: 0 = VOLATILE, 1 = TRANSIENT_LOCAL, 2 = TRANSIENT,
+     * 3 = PERSISTENT. Writes it to {@code out[0]} on success.
+     */
+    public static int pubDataGetDurabilityKind(long data, int[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_publication_builtin_topic_data_get_durability_kind(
+                data, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getInt(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Liveliness kind: 0 = AUTOMATIC, 1 = MANUAL_BY_PARTICIPANT,
+     * 2 = MANUAL_BY_TOPIC. Writes it to {@code out[0]} on success.
+     */
+    public static int pubDataGetLivelinessKind(long data, int[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_publication_builtin_topic_data_get_liveliness_kind(
+                data, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getInt(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Deadline period (sec, nanosec); an infinite period reads back as
+     * (0x7fffffff, 0x7fffffff). Writes it to {@code secOut[0]}/{@code
+     * nanosecOut[0]} on success.
+     */
+    public static int pubDataGetDeadline(long data, int[] secOut, int[] nanosecOut) {
+        ByteBuffer secSlot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
+        ByteBuffer nanoSlot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_publication_builtin_topic_data_get_deadline(
+                data, directBufferAddress(secSlot), directBufferAddress(nanoSlot));
+        NativeKeepAlive.keepAlive(secSlot);
+        NativeKeepAlive.keepAlive(nanoSlot);
+        if (rc == 0) {
+            secOut[0] = secSlot.getInt(0);
+            nanosecOut[0] = nanoSlot.getInt(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Lifespan duration (sec, nanosec); an infinite duration reads back as
+     * (0x7fffffff, 0x7fffffff). Writes it to {@code secOut[0]}/{@code
+     * nanosecOut[0]} on success.
+     */
+    public static int pubDataGetLifespan(long data, int[] secOut, int[] nanosecOut) {
+        ByteBuffer secSlot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
+        ByteBuffer nanoSlot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_publication_builtin_topic_data_get_lifespan(
+                data, directBufferAddress(secSlot), directBufferAddress(nanoSlot));
+        NativeKeepAlive.keepAlive(secSlot);
+        NativeKeepAlive.keepAlive(nanoSlot);
+        if (rc == 0) {
+            secOut[0] = secSlot.getInt(0);
+            nanosecOut[0] = nanoSlot.getInt(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Liveliness lease duration (sec, nanosec); an infinite duration reads back
+     * as (0x7fffffff, 0x7fffffff). Writes it to {@code secOut[0]}/{@code
+     * nanosecOut[0]} on success.
+     */
+    public static int pubDataGetLivelinessLeaseDuration(long data, int[] secOut, int[] nanosecOut) {
+        ByteBuffer secSlot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
+        ByteBuffer nanoSlot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_publication_builtin_topic_data_get_liveliness_lease_duration(
+                data, directBufferAddress(secSlot), directBufferAddress(nanoSlot));
+        NativeKeepAlive.keepAlive(secSlot);
+        NativeKeepAlive.keepAlive(nanoSlot);
+        if (rc == 0) {
+            secOut[0] = secSlot.getInt(0);
+            nanosecOut[0] = nanoSlot.getInt(0);
+        }
+        return rc;
     }
 }
