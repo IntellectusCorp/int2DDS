@@ -6,8 +6,11 @@ import com.intellectus.int2dds.internal.NativeKeepAlive;
 import com.intellectus.int2dds.internal.QosMarshal;
 import com.intellectus.int2dds.internal.ReturnCodes;
 import com.intellectus.int2dds.internal.ffi.FfiAccess;
+import com.intellectus.int2dds.qos.DataReaderQos;
 import com.intellectus.int2dds.qos.SubscriberQos;
+import com.intellectus.int2dds.types.IDdsType;
 import java.util.Objects;
+import java.util.function.Supplier;
 
 /**
  * Groups DataReaders for coordinated subscription.
@@ -44,6 +47,17 @@ public final class Subscriber extends NativeEntity {
      */
     static Subscriber createForTest(DomainParticipant participant, NativeCleaner.Deleter deleter) {
         return new Subscriber(participant, deleter);
+    }
+
+    /** Creates a datareader for {@code topic} with the core's default QoS. */
+    public <T extends IDdsType> DataReader<T> createDataReader(Topic<T> topic, Supplier<T> factory) {
+        return new DataReader<T>(this, topic, factory, null);
+    }
+
+    /** Creates a datareader for {@code topic} with an explicit QoS. */
+    public <T extends IDdsType> DataReader<T> createDataReader(
+            Topic<T> topic, Supplier<T> factory, DataReaderQos qos) {
+        return new DataReader<T>(this, topic, factory, Objects.requireNonNull(qos, "qos"));
     }
 
     /**
