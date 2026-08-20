@@ -720,16 +720,17 @@ public final class FfiAccess {
     // the caller is a test that releases these handles by hand and only ever
     // needs to know success from failure.
 
-    /** Creates a subscriber, or 0 on failure. {@code qos} is {@code 0L} for the core's default. */
-    public static long createSubscriber(long participant, long qos) {
+    /** Creates a subscriber. Returns rc; writes the handle to handleOut[0] only when rc == 0. */
+    public static int createSubscriber(long participant, long qos, long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_create_subscriber(participant, qos, directBufferAddress(slot));
-        // slot is read below only on the rc == 0 path; on rc != 0 nothing else
-        // touches it, so without this fence the JIT could treat it as dead
-        // before the native call above actually finishes using the address it
-        // was handed. Same hazard, same fence as createDataWriter's.
+        // Same fence as createPublisher: slot's address was handed to the native
+        // call, and slot is read below only on the rc == 0 path.
         NativeKeepAlive.keepAlive(slot);
-        return rc == 0 ? slot.getLong(0) : 0L;
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
     }
 
     /** Releases a subscriber. Returns the C ABI status code. */
@@ -737,19 +738,18 @@ public final class FfiAccess {
         return Ffi.int2dds_delete_subscriber(subscriber);
     }
 
-    /**
-     * Creates a datareader, or 0 on failure. {@code qos} is {@code 0L} for the
-     * core's default. {@code listener} is {@code 0L} and {@code mask} is
-     * {@code 0} — this branch does not add listener support.
-     */
-    public static long createDataReader(long subscriber, long topic, long qos, long listener,
-            int mask) {
+    /** Creates a datareader. Returns rc; writes the handle to handleOut[0] only when rc == 0. */
+    public static int createDataReader(long subscriber, long topic, long qos, long listener,
+            int mask, long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_create_datareader(
                 subscriber, topic, qos, listener, mask, directBufferAddress(slot));
-        // See createSubscriber just above for why this fence is here.
+        // Same fence as createDataWriter.
         NativeKeepAlive.keepAlive(slot);
-        return rc == 0 ? slot.getLong(0) : 0L;
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
     }
 
     /** Releases a datareader. Returns the C ABI status code. */
@@ -770,5 +770,19 @@ public final class FfiAccess {
             long actualSizeOut, long validDataOut) {
         return Ffi.int2dds_datareader_take_serialized(
                 reader, buffer, bufferCapacity, actualSizeOut, validDataOut);
+    }
+
+    /** take with full SampleInfo. Copies into the caller buffer; sample removed only if it fits. */
+    public static int datareaderTakeSerializedWInfo(long reader, long buffer, long bufferCapacity,
+            long actualSizeOut, long infoOut) {
+        return Ffi.int2dds_datareader_take_serialized_w_info(
+                reader, buffer, bufferCapacity, actualSizeOut, infoOut);
+    }
+
+    /** read with full SampleInfo. Same signature as take; does not remove the sample. */
+    public static int datareaderReadSerializedWInfo(long reader, long buffer, long bufferCapacity,
+            long actualSizeOut, long infoOut) {
+        return Ffi.int2dds_datareader_read_serialized_w_info(
+                reader, buffer, bufferCapacity, actualSizeOut, infoOut);
     }
 }

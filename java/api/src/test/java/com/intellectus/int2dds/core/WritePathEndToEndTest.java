@@ -11,6 +11,7 @@ import com.intellectus.int2dds.cdr.CdrWriter;
 import com.intellectus.int2dds.cdr.Extensibility;
 import com.intellectus.int2dds.exceptions.DdsException;
 import com.intellectus.int2dds.internal.NativeKeepAlive;
+import com.intellectus.int2dds.internal.ReturnCodes;
 import com.intellectus.int2dds.internal.ffi.FfiAccess;
 import com.intellectus.int2dds.qos.DataWriterQos;
 import com.intellectus.int2dds.qos.Reliability;
@@ -166,9 +167,18 @@ class WritePathEndToEndTest {
             ConformanceRecord proto = new ConformanceRecord();
             Topic<ConformanceRecord> topic = p.createTopic("e2e_topic", proto);
 
-            subscriber = FfiAccess.createSubscriber(p.handle(), 0L);
+            long[] subOut = new long[1];
+            int subRc = FfiAccess.createSubscriber(p.handle(), 0L, subOut);
+            NativeKeepAlive.keepAlive(p);
+            ReturnCodes.check(subRc);
+            subscriber = subOut[0];
             assertNotEquals(0L, subscriber);
-            reader = FfiAccess.createDataReader(subscriber, topic.handle(), 0L, 0L, 0);
+
+            long[] rdOut = new long[1];
+            int rdRc = FfiAccess.createDataReader(subscriber, topic.handle(), 0L, 0L, 0, rdOut);
+            NativeKeepAlive.keepAlive(topic);
+            ReturnCodes.check(rdRc);
+            reader = rdOut[0];
             assertNotEquals(0L, reader);
 
             Publisher pub = p.createPublisher();
@@ -293,9 +303,18 @@ class WritePathEndToEndTest {
         try {
             Topic<ConformanceRecord> topic =
                     p.createTopic("e2e_empty", new ConformanceRecord());
-            subscriber = FfiAccess.createSubscriber(p.handle(), 0L);
+            long[] subOut = new long[1];
+            int subRc = FfiAccess.createSubscriber(p.handle(), 0L, subOut);
+            NativeKeepAlive.keepAlive(p);
+            ReturnCodes.check(subRc);
+            subscriber = subOut[0];
             assertNotEquals(0L, subscriber);
-            reader = FfiAccess.createDataReader(subscriber, topic.handle(), 0L, 0L, 0);
+
+            long[] rdOut = new long[1];
+            int rdRc = FfiAccess.createDataReader(subscriber, topic.handle(), 0L, 0L, 0, rdOut);
+            NativeKeepAlive.keepAlive(topic);
+            ReturnCodes.check(rdRc);
+            reader = rdOut[0];
             assertNotEquals(0L, reader);
 
             ByteBuffer buffer = ByteBuffer.allocateDirect(256).order(ByteOrder.nativeOrder());
