@@ -912,16 +912,17 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1da
     capacity: jlong,
     count_out: jlong,
 ) -> jint {
-    let mut handles_out_out = [0u8; 16];
+    let handles_out_len = env.get_array_length(&handles_out).unwrap_or(0).max(0) as usize;
+    let mut handles_out_buf = vec![0u8; handles_out_len];
     let __ret = unsafe {
         int2dds_ffi::discovery::int2dds_datareader_get_matched_publications(
             reader as usize as *const _,
-            crate::generated_support::fixed_ptr_mut(&mut handles_out_out) as _,
+            handles_out_buf.as_mut_ptr() as *mut [u8; 16] as _,
             capacity as _,
             count_out as usize as *mut _,
         )
     };
-    crate::generated_support::write_back(&mut env, &handles_out, &handles_out_out);
+    crate::generated_support::write_back(&mut env, &handles_out, &handles_out_buf);
     __ret as _
 }
 
@@ -2303,16 +2304,17 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1da
     capacity: jlong,
     count_out: jlong,
 ) -> jint {
-    let mut handles_out_out = [0u8; 16];
+    let handles_out_len = env.get_array_length(&handles_out).unwrap_or(0).max(0) as usize;
+    let mut handles_out_buf = vec![0u8; handles_out_len];
     let __ret = unsafe {
         int2dds_ffi::discovery::int2dds_datawriter_get_matched_subscriptions(
             writer as usize as *const _,
-            crate::generated_support::fixed_ptr_mut(&mut handles_out_out) as _,
+            handles_out_buf.as_mut_ptr() as *mut [u8; 16] as _,
             capacity as _,
             count_out as usize as *mut _,
         )
     };
-    crate::generated_support::write_back(&mut env, &handles_out, &handles_out_out);
+    crate::generated_support::write_back(&mut env, &handles_out, &handles_out_buf);
     __ret as _
 }
 
@@ -5940,16 +5942,17 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1pa
     capacity: jlong,
     count_out: jlong,
 ) -> jint {
-    let mut handles_out_out = [0u8; 16];
+    let handles_out_len = env.get_array_length(&handles_out).unwrap_or(0).max(0) as usize;
+    let mut handles_out_buf = vec![0u8; handles_out_len];
     let __ret = unsafe {
         int2dds_ffi::discovery::int2dds_participant_get_discovered_participants(
             participant as usize as *const _,
-            crate::generated_support::fixed_ptr_mut(&mut handles_out_out) as _,
+            handles_out_buf.as_mut_ptr() as *mut [u8; 16] as _,
             capacity as _,
             count_out as usize as *mut _,
         )
     };
-    crate::generated_support::write_back(&mut env, &handles_out, &handles_out_out);
+    crate::generated_support::write_back(&mut env, &handles_out, &handles_out_buf);
     __ret as _
 }
 

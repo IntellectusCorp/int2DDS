@@ -1,7 +1,7 @@
 //! Renders `java/native/src/generated.rs` — the JNI forwarders.
 
 use crate::gen::parse::FfiFn;
-use crate::gen::typemap::{is_generatable, map_type, Kind};
+use crate::gen::typemap::{is_generatable, map_param, map_type, Kind};
 
 /// JNI symbol mangling: `_` in a Java identifier becomes `_1`.
 fn mangle(java_method: &str) -> String {
@@ -56,8 +56,10 @@ fn emit_one(f: &FfiFn) -> String {
     let mut pre = String::new();
     let mut post = String::new();
     let mut args = Vec::new();
-    for p in &f.params {
-        let m = map_type(&p.ty).unwrap();
+    for (i, p) in f.params.iter().enumerate() {
+        // `map_param` (not `map_type`) so a `*mut [u8; N]` followed by a
+        // `capacity` is seen as a caller-sized array, not a single fixed out.
+        let m = map_param(&f.params, i).unwrap();
         let n = &p.name;
         match m.kind {
             // `jboolean` is a `u8`; Rust forbids `u8 as bool`, so compare.
@@ -106,6 +108,23 @@ fn emit_one(f: &FfiFn) -> String {
                     "    crate::generated_support::write_back(&mut env, &{n}, &{n}_out);\n"
                 ));
                 args.push(format!("crate::generated_support::fixed_ptr_mut(&mut {n}_out) as _"));
+            }
+            Kind::ByteArrayOutSized => {
+                let len = m.len.expect("ByteArrayOutSized carries its element length");
+                // Caller-sized array: the Java `byte[]` holds `capacity * N`
+                // bytes and the FFI writes a variable number of N-byte elements.
+                // Size the buffer from the array's ACTUAL length (never a fixed
+                // N-byte stack array, which would overflow past the first
+                // element), then copy the whole buffer back. `capacity` is
+                // forwarded unchanged by its own scalar arm.
+                pre.push_str(&format!(
+                    "    let {n}_len = env.get_array_length(&{n}).unwrap_or(0).max(0) as usize;\n\
+                     \x20   let mut {n}_buf = vec![0u8; {n}_len];\n"
+                ));
+                post.push_str(&format!(
+                    "    crate::generated_support::write_back(&mut env, &{n}, &{n}_buf);\n"
+                ));
+                args.push(format!("{n}_buf.as_mut_ptr() as *mut [u8; {len}] as _"));
             }
         }
     }
@@ -249,6 +268,34 @@ mod tests {
         assert!(out.contains("write_back(&mut env, &handle_out, &handle_out_out)"), "{out}");
         // The return value must survive the write-back.
         assert!(out.contains("let __ret = unsafe"), "{out}");
+    }
+
+    #[test]
+    fn sized_out_byte_arrays_use_a_heap_buffer_not_a_stack_array() {
+        // A `*mut [u8; N]` followed by a `capacity` is a caller-sized array. It
+        // must be backed by a Vec sized from the Java array, never a fixed
+        // `[0u8; N]` stack array, which the FFI overflows past the first element.
+        let out = emit_rust(&[f(
+            "int2dds_participant_get_discovered_participants",
+            "discovery",
+            vec![
+                p("participant", "*const Int2DdsParticipant"),
+                p("handles_out", "*mut [u8; 16]"),
+                p("capacity", "usize"),
+                p("count_out", "*mut usize"),
+            ],
+            "Int2DdsRet",
+        )]);
+        assert!(out.contains("let mut handles_out_buf = vec![0u8; handles_out_len];"), "{out}");
+        assert!(out.contains("get_array_length(&handles_out)"), "{out}");
+        assert!(
+            !out.contains("let mut handles_out_out = [0u8; 16];"),
+            "a caller-sized array must not use a fixed stack buffer:\n{out}"
+        );
+        assert!(out.contains("handles_out_buf.as_mut_ptr() as *mut [u8; 16]"), "{out}");
+        assert!(out.contains("write_back(&mut env, &handles_out, &handles_out_buf)"), "{out}");
+        // `capacity` is still forwarded unchanged.
+        assert!(out.contains("capacity as _"), "{out}");
     }
 
     #[test]

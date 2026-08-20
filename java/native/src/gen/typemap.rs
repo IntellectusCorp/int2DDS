@@ -4,7 +4,7 @@
 //! uses. Anything outside it returns `None` so the generator fails loudly
 //! instead of emitting a wrong signature.
 
-use crate::gen::parse::FfiFn;
+use crate::gen::parse::{FfiFn, Param};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -24,13 +24,26 @@ pub enum Kind {
     CStringArray,
     /// Fixed-size byte buffer the FFI reads, such as `*const [u8; 16]`.
     ByteArrayIn,
-    /// Fixed-size byte buffer the FFI *writes*, such as `*mut [u8; 16]`.
+    /// Fixed-size byte buffer the FFI *writes*, such as `*mut [u8; 16]`, that is
+    /// a single out-parameter (one GUID or key).
     ///
     /// Distinct from [`Kind::ByteArrayIn`] because the forwarder must copy the
     /// result back into the caller's Java array after the call. Treating an out
     /// parameter as an in parameter compiles and runs, and silently returns
-    /// nothing — 17 functions in the FFI surface take one.
+    /// nothing — 16 such single-out parameters exist in the FFI surface.
     ByteArrayOut,
+    /// A `*mut [u8; N]` that is the base of a caller-provided variable-length
+    /// array, recognised because it is immediately followed by a
+    /// `capacity: usize`. The FFI writes up to `capacity` N-byte elements, so
+    /// the Java side passes a `byte[]` of `capacity * N` bytes.
+    ///
+    /// This can only be told apart from [`Kind::ByteArrayOut`] with the full
+    /// parameter list in view (see [`map_param`]); the pointee type is
+    /// identical. Backing it with a fixed N-byte stack buffer — as a plain
+    /// [`Kind::ByteArrayOut`] does — overflows the moment the FFI writes more
+    /// than one element, so the forwarder must size an N*count heap buffer from
+    /// the Java array's actual length instead.
+    ByteArrayOutSized,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +134,27 @@ pub fn map_type(rust_ty: &str) -> Option<Mapped> {
     // Every other pointer, including double pointers to opaque structs, is a
     // raw address. Java obtains addresses via Ffi.directBufferAddress().
     Some(m("long", "jlong", Kind::Pointer))
+}
+
+/// A `capacity: usize` sibling turns a preceding `*mut [u8; N]` from a single
+/// fixed out-parameter into the base of a caller-sized array.
+fn is_capacity_sibling(p: &Param) -> bool {
+    p.name == "capacity" && canonical(&p.ty) == "usize"
+}
+
+/// Map `params[i]`, using its neighbours to refine the classification.
+///
+/// Identical to [`map_type`] except that a `*mut [u8; N]` out-parameter
+/// immediately followed by a `capacity: usize` is reclassified from
+/// [`Kind::ByteArrayOut`] to [`Kind::ByteArrayOutSized`]. That distinction is
+/// invisible from the type alone, so it can only be made here where the sibling
+/// parameter is known.
+pub fn map_param(params: &[Param], i: usize) -> Option<Mapped> {
+    let mut m = map_type(&params[i].ty)?;
+    if m.kind == Kind::ByteArrayOut && params.get(i + 1).is_some_and(is_capacity_sibling) {
+        m.kind = Kind::ByteArrayOutSized;
+    }
+    Some(m)
 }
 
 /// A function is generatable when every parameter type and the return type map.
@@ -232,14 +266,40 @@ mod tests {
     #[test]
     fn the_real_ffi_surface_has_both_array_directions() {
         let fns = parse_ffi_dir(Path::new("../../ffi/src")).unwrap();
+        // Classify with the parameter list in view so the caller-sized arrays
+        // are told apart from the single fixed out-parameters.
         let count = |k: Kind| {
             fns.iter()
-                .flat_map(|f| f.params.iter())
-                .filter(|p| map_type(&p.ty).map(|m| m.kind) == Some(k))
+                .flat_map(|f| (0..f.params.len()).map(move |i| map_param(&f.params, i)))
+                .filter(|m| m.map(|m| m.kind) == Some(k))
                 .count()
         };
-        assert_eq!(count(Kind::ByteArrayOut), 19, "*mut [u8; N] out parameters");
+        // 19 `*mut [u8; N]` out-parameters total: 3 are caller-sized arrays
+        // (each followed by a `capacity`), the other 16 are single fixed outs.
+        assert_eq!(count(Kind::ByteArrayOut), 16, "*mut [u8; N] single fixed out parameters");
+        assert_eq!(count(Kind::ByteArrayOutSized), 3, "*mut [u8; N] caller-sized array parameters");
         assert!(count(Kind::ByteArrayIn) > 0, "*const [u8; N] in parameters");
+    }
+
+    #[test]
+    fn a_capacity_sibling_promotes_an_out_array_to_sized() {
+        // Alone, `*mut [u8; 16]` is a single fixed out-parameter.
+        let single = vec![p("handle_out", "*mut [u8; 16]")];
+        assert_eq!(map_param(&single, 0).unwrap().kind, Kind::ByteArrayOut);
+
+        // Followed by a `capacity: usize`, the same type is the base of a
+        // caller-sized array and must be classified accordingly.
+        let sized = vec![
+            p("handles_out", "*mut [u8; 16]"),
+            p("capacity", "usize"),
+            p("count_out", "*mut usize"),
+        ];
+        assert_eq!(map_param(&sized, 0).unwrap().kind, Kind::ByteArrayOutSized);
+        assert_eq!(map_param(&sized, 0).unwrap().len, Some(16));
+
+        // A trailing `usize` that is not named `capacity` does not promote it.
+        let other = vec![p("handle_out", "*mut [u8; 16]"), p("len", "usize")];
+        assert_eq!(map_param(&other, 0).unwrap().kind, Kind::ByteArrayOut);
     }
 
     #[test]
