@@ -21,8 +21,8 @@ class NativeLoaderTest {
         String nativeVersion = NativeLoader.nativeVersion();
         assertTrue(nativeVersion.matches("\\d+\\.\\d+\\.\\d+.*"),
                 "expected a semver-ish version, got: " + nativeVersion);
-        // At develop 748e7db8 the workspace version is 0.0.1.
-        assertEquals("0.0.1", nativeVersion);
+        // The workspace version (Cargo.toml [workspace.package]) is 0.1.1.
+        assertEquals("0.1.1", nativeVersion);
     }
 
     @Test
