@@ -7,8 +7,10 @@ import com.intellectus.int2dds.internal.NativeKeepAlive;
 import com.intellectus.int2dds.internal.QosMarshal;
 import com.intellectus.int2dds.internal.ReturnCodes;
 import com.intellectus.int2dds.internal.ffi.FfiAccess;
+import com.intellectus.int2dds.listeners.DataWriterListener;
 import com.intellectus.int2dds.qos.DataRepresentationKind;
 import com.intellectus.int2dds.qos.DataWriterQos;
+import com.intellectus.int2dds.status.StatusMask;
 import com.intellectus.int2dds.types.IDdsType;
 import java.nio.ByteOrder;
 import java.util.Objects;
@@ -29,12 +31,22 @@ import java.util.Objects;
  * writer instead of returning a {@code byte[]}, and the reason {@code
  * CdrWriter}'s buffer is direct.
  *
+ * <p><b>Listener lifecycle:</b> a listener installed with {@link #setListener}
+ * is held by a binding-owned native context whose pointer this writer tracks.
+ * {@link NativeEntity#close()} is final and does not clear it, so a caller that
+ * installed a listener must call {@code setListener(null, null)} before closing
+ * to release that context; automatic teardown is deferred to a later branch.
+ *
  * @param <T> the DDS data type this writer publishes.
  */
 public final class DataWriter<T extends IDdsType> extends NativeEntity {
 
     private static final boolean LITTLE_ENDIAN_HOST =
             ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN;
+
+    // Pointer to the binding-owned native listener context, or 0 when none is
+    // installed. Guarded by setListener's own synchronization.
+    private long listenerCtx = 0L;
 
     /**
      * Held strongly — not only so {@link #topic()} has something to return,
@@ -95,6 +107,39 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
     /** The topic this writer publishes to — the same instance passed to {@code createDataWriter}. */
     public Topic<T> topic() {
         return topic;
+    }
+
+    /**
+     * Installs {@code listener} for the statuses in {@code mask}, or — with a
+     * {@code null} listener — clears any current listener. A {@code null}
+     * {@code mask} means all statuses.
+     *
+     * <p>Any previously installed listener is cleared first, releasing its
+     * native context. Callbacks fire on DDS background threads, so a listener
+     * must be thread-safe. Because {@link #close()} does not clear listeners, a
+     * caller should {@code setListener(null, null)} before closing this writer.
+     *
+     * @throws com.intellectus.int2dds.exceptions.DdsException if the native
+     *     clear or install fails
+     */
+    public synchronized void setListener(DataWriterListener listener, StatusMask mask) {
+        long h = handle();
+        long prev = listenerCtx;
+        if (prev != 0L) {
+            int rc = FfiAccess.writerListenerClear(h, prev);
+            NativeKeepAlive.keepAlive(this);
+            listenerCtx = 0L;
+            ReturnCodes.check(rc);
+        }
+        if (listener != null) {
+            long ctx = FfiAccess.writerListenerSet(
+                    h, listener, mask == null ? StatusMask.all().bits() : mask.bits());
+            NativeKeepAlive.keepAlive(this);
+            if (ctx == 0L) {
+                throw new DdsErrorException("failed to install DataWriter listener");
+            }
+            listenerCtx = ctx;
+        }
     }
 
     /**

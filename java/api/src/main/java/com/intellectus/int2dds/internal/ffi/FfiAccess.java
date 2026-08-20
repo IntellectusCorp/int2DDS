@@ -3,6 +3,7 @@ package com.intellectus.int2dds.internal.ffi;
 import com.intellectus.int2dds.internal.NativeKeepAlive;
 import com.intellectus.int2dds.internal.NativeLoader;
 import com.intellectus.int2dds.listeners.DataReaderListener;
+import com.intellectus.int2dds.listeners.DataWriterListener;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
@@ -306,6 +307,25 @@ public final class FfiAccess {
     /** Releases a datawriter. Returns the C ABI status code. */
     public static int deleteDataWriter(long writer) {
         return Ffi.int2dds_delete_datawriter(writer);
+    }
+
+    // --- DataWriter listeners (hand-written trampoline layer) ---
+
+    /**
+     * Installs {@code listener} on {@code writer} for {@code mask}. Returns the
+     * binding-owned context pointer to pass back to {@link #writerListenerClear},
+     * or 0 on failure. Policy-free passthrough to {@link FfiHandwritten}.
+     */
+    public static long writerListenerSet(long writer, DataWriterListener listener, int mask) {
+        return FfiHandwritten.nativeWriterListenerSet(writer, listener, mask);
+    }
+
+    /**
+     * Clears the listener on {@code writer} and releases {@code ctx}. Returns the
+     * C ABI status code. Policy-free passthrough to {@link FfiHandwritten}.
+     */
+    public static int writerListenerClear(long writer, long ctx) {
+        return FfiHandwritten.nativeWriterListenerClear(writer, ctx);
     }
 
     /**

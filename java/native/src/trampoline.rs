@@ -1,5 +1,5 @@
 //! Bridges DDS listener callbacks — fired on native DDS background threads —
-//! into a Java `DataReaderListener`.
+//! into a Java `DataReaderListener` or `DataWriterListener`.
 //!
 //! DDS invokes C function pointers with a `user_context` pointer. Java cannot
 //! supply C function pointers, so each callback gets a hand-written Rust
@@ -39,14 +39,17 @@ use jni::objects::{GlobalRef, JClass, JObject, JValue};
 use jni::sys::{jint, jlong};
 use jni::JNIEnv;
 
-use int2dds_ffi::listener::Int2DdsDataReaderListener;
+use int2dds_ffi::listener::{Int2DdsDataReaderListener, Int2DdsDataWriterListener};
+use int2dds_ffi::publisher::int2dds_datawriter_set_listener;
 use int2dds_ffi::status::{
-    Int2DdsLivelinessChangedStatus, Int2DdsRequestedDeadlineMissedStatus,
+    Int2DdsLivelinessChangedStatus, Int2DdsLivelinessLostStatus,
+    Int2DdsOfferedDeadlineMissedStatus, Int2DdsOfferedIncompatibleQosStatus,
+    Int2DdsPublicationMatchedStatus, Int2DdsRequestedDeadlineMissedStatus,
     Int2DdsRequestedIncompatibleQosStatus, Int2DdsSampleLostStatus, Int2DdsSampleRejectedStatus,
     Int2DdsSubscriptionMatchedStatus,
 };
 use int2dds_ffi::subscriber::int2dds_datareader_set_listener;
-use int2dds_ffi::types::Int2DdsDataReader;
+use int2dds_ffi::types::{Int2DdsDataReader, Int2DdsDataWriter};
 
 /// Binding-owned callback context. `Send + Sync` because `GlobalRef` is.
 struct ListenerCtx {
@@ -445,6 +448,239 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_FfiHandwritten_
     let rc = unsafe {
         int2dds_datareader_set_listener(
             reader as usize as *mut Int2DdsDataReader,
+            std::ptr::null(),
+            0,
+        )
+    };
+    if id != 0 {
+        REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).remove(&(id as u64));
+    }
+    rc
+}
+
+/// Trampoline for `on_publication_matched`.
+///
+/// # Safety
+/// Invoked by the DDS core under the C ABI. `user_context` is the registry id
+/// `nativeWriterListenerSet` stored; `status` must point at a valid
+/// `Int2DdsPublicationMatchedStatus` for the call.
+unsafe extern "C" fn tramp_on_publication_matched(
+    _writer: *mut Int2DdsDataWriter,
+    status: *const Int2DdsPublicationMatchedStatus,
+    user_context: *mut c_void,
+) {
+    if status.is_null() {
+        return;
+    }
+    let s = &*status;
+    run_trampoline(user_context, |env, listener| {
+        let handle = env.byte_array_from_slice(&s.last_subscription_handle)?;
+        let cls = "com/intellectus/int2dds/status/PublicationMatchedStatus";
+        let jstatus = env.new_object(
+            cls,
+            "(IIII[B)V",
+            &[
+                JValue::Int(s.total_count),
+                JValue::Int(s.total_count_change),
+                JValue::Int(s.current_count),
+                JValue::Int(s.current_count_change),
+                JValue::Object(&handle),
+            ],
+        )?;
+        // v1 passes the writer as Java null: native->entity reverse mapping
+        // is out of scope for this branch.
+        env.call_method(
+            listener.as_obj(),
+            "onPublicationMatched",
+            "(Lcom/intellectus/int2dds/core/DataWriter;\
+             Lcom/intellectus/int2dds/status/PublicationMatchedStatus;)V",
+            &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
+        )?;
+        Ok(())
+    });
+}
+
+/// Trampoline for `on_offered_deadline_missed`.
+///
+/// # Safety
+/// Invoked by the DDS core under the C ABI. `user_context` is the registry id
+/// `nativeWriterListenerSet` stored; `status` must point at a valid
+/// `Int2DdsOfferedDeadlineMissedStatus` for the call.
+unsafe extern "C" fn tramp_on_offered_deadline_missed(
+    _writer: *mut Int2DdsDataWriter,
+    status: *const Int2DdsOfferedDeadlineMissedStatus,
+    user_context: *mut c_void,
+) {
+    if status.is_null() {
+        return;
+    }
+    let s = &*status;
+    run_trampoline(user_context, |env, listener| {
+        let handle = env.byte_array_from_slice(&s.last_instance_handle)?;
+        let cls = "com/intellectus/int2dds/status/OfferedDeadlineMissedStatus";
+        let jstatus = env.new_object(
+            cls,
+            "(II[B)V",
+            &[
+                JValue::Int(s.total_count),
+                JValue::Int(s.total_count_change),
+                JValue::Object(&handle),
+            ],
+        )?;
+        env.call_method(
+            listener.as_obj(),
+            "onOfferedDeadlineMissed",
+            "(Lcom/intellectus/int2dds/core/DataWriter;\
+             Lcom/intellectus/int2dds/status/OfferedDeadlineMissedStatus;)V",
+            &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
+        )?;
+        Ok(())
+    });
+}
+
+/// Trampoline for `on_offered_incompatible_qos`.
+///
+/// # Safety
+/// Invoked by the DDS core under the C ABI. `user_context` is the registry id
+/// `nativeWriterListenerSet` stored; `status` must point at a valid
+/// `Int2DdsOfferedIncompatibleQosStatus` for the call.
+unsafe extern "C" fn tramp_on_offered_incompatible_qos(
+    _writer: *mut Int2DdsDataWriter,
+    status: *const Int2DdsOfferedIncompatibleQosStatus,
+    user_context: *mut c_void,
+) {
+    if status.is_null() {
+        return;
+    }
+    let s = &*status;
+    run_trampoline(user_context, |env, listener| {
+        let cls = "com/intellectus/int2dds/status/OfferedIncompatibleQosStatus";
+        let jstatus = env.new_object(
+            cls,
+            "(IIII)V",
+            &[
+                JValue::Int(s.total_count),
+                JValue::Int(s.total_count_change),
+                JValue::Int(s.last_policy_id as i32),
+                JValue::Int(s.policies_count as i32),
+            ],
+        )?;
+        env.call_method(
+            listener.as_obj(),
+            "onOfferedIncompatibleQos",
+            "(Lcom/intellectus/int2dds/core/DataWriter;\
+             Lcom/intellectus/int2dds/status/OfferedIncompatibleQosStatus;)V",
+            &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
+        )?;
+        Ok(())
+    });
+}
+
+/// Trampoline for `on_liveliness_lost`.
+///
+/// # Safety
+/// Invoked by the DDS core under the C ABI. `user_context` is the registry id
+/// `nativeWriterListenerSet` stored; `status` must point at a valid
+/// `Int2DdsLivelinessLostStatus` for the call.
+unsafe extern "C" fn tramp_on_liveliness_lost(
+    _writer: *mut Int2DdsDataWriter,
+    status: *const Int2DdsLivelinessLostStatus,
+    user_context: *mut c_void,
+) {
+    if status.is_null() {
+        return;
+    }
+    let s = &*status;
+    run_trampoline(user_context, |env, listener| {
+        let cls = "com/intellectus/int2dds/status/LivelinessLostStatus";
+        let jstatus = env.new_object(
+            cls,
+            "(II)V",
+            &[JValue::Int(s.total_count), JValue::Int(s.total_count_change)],
+        )?;
+        env.call_method(
+            listener.as_obj(),
+            "onLivelinessLost",
+            "(Lcom/intellectus/int2dds/core/DataWriter;\
+             Lcom/intellectus/int2dds/status/LivelinessLostStatus;)V",
+            &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
+        )?;
+        Ok(())
+    });
+}
+
+/// Installs a Java listener on `writer` for the given status `mask`. Returns the
+/// registry id (pass it back to clear), or 0 on failure. Same id space and
+/// `ListenerCtx`/`REGISTRY` as the reader side.
+///
+/// # Safety
+/// Invoked by the JVM under JNI conventions. `writer` must be a live
+/// `Int2DdsDataWriter` handle.
+#[no_mangle]
+pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_FfiHandwritten_nativeWriterListenerSet<
+    'local,
+>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    writer: jlong,
+    listener: JObject<'local>,
+    mask: jint,
+) -> jlong {
+    let global = match env.new_global_ref(listener) {
+        Ok(g) => g,
+        Err(_) => return 0,
+    };
+    let ctx = Arc::new(ListenerCtx { listener: global });
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).insert(id, ctx);
+
+    // Every trampoline whose Java method exists is always installed; the
+    // caller's mask decides which ones DDS actually fires, and callers that
+    // did not override a method get DataWriterListenerBase's no-op.
+    let c_listener = Int2DdsDataWriterListener {
+        on_publication_matched: Some(tramp_on_publication_matched),
+        on_offered_deadline_missed: Some(tramp_on_offered_deadline_missed),
+        on_offered_incompatible_qos: Some(tramp_on_offered_incompatible_qos),
+        on_liveliness_lost: Some(tramp_on_liveliness_lost),
+        // The id, not a pointer: the core never dereferences user_context.
+        user_context: id as usize as *mut c_void,
+    };
+
+    let rc = unsafe {
+        int2dds_datawriter_set_listener(
+            writer as usize as *mut Int2DdsDataWriter,
+            &c_listener as *const _,
+            mask as u32,
+        )
+    };
+    if rc != 0 {
+        // Registration failed: forget the context so it does not leak.
+        REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+        return 0;
+    }
+    id as jlong
+}
+
+/// Clears the listener on `writer` and forgets the registry entry `id`. A
+/// concurrent in-flight callback already cloned its `Arc`, so the `GlobalRef`
+/// frees only when that last clone drops. Removing an absent id is a harmless
+/// no-op, so a double clear is safe.
+///
+/// # Safety
+/// Invoked by the JVM under JNI conventions. `writer` must be a live handle;
+/// `id` must be a value returned by `nativeWriterListenerSet`.
+#[no_mangle]
+pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_FfiHandwritten_nativeWriterListenerClear<
+    'local,
+>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    writer: jlong,
+    id: jlong,
+) -> jint {
+    let rc = unsafe {
+        int2dds_datawriter_set_listener(
+            writer as usize as *mut Int2DdsDataWriter,
             std::ptr::null(),
             0,
         )

@@ -1,6 +1,7 @@
 package com.intellectus.int2dds.internal.ffi;
 
 import com.intellectus.int2dds.listeners.DataReaderListener;
+import com.intellectus.int2dds.listeners.DataWriterListener;
 
 /**
  * Native declarations that the generator cannot express.
@@ -27,6 +28,23 @@ public final class FfiHandwritten {
      * C ABI status code of the underlying clear.
      */
     static native int nativeReaderListenerClear(long reader, long ctx);
+
+    /**
+     * Installs {@code listener} on {@code writer} for the given status
+     * {@code mask}. The native side wraps the listener in a global reference
+     * held by a binding-owned context and returns that context's pointer, or
+     * {@code 0} on failure. The returned pointer must later be handed to
+     * {@link #nativeWriterListenerClear} to release the global reference.
+     */
+    static native long nativeWriterListenerSet(long writer, DataWriterListener listener, int mask);
+
+    /**
+     * Clears the listener on {@code writer} and releases the context pointer
+     * {@code ctx} returned by {@link #nativeWriterListenerSet}. The held global
+     * reference is freed only once any in-flight callback finishes. Returns the
+     * C ABI status code of the underlying clear.
+     */
+    static native int nativeWriterListenerClear(long writer, long ctx);
 
     /**
      * Returns properties whose names start with {@code prefix}, as alternating
