@@ -277,8 +277,13 @@ public final class DomainParticipant extends NativeEntity {
         // it above; without this fence the JIT could treat buf as dead before
         // that call finishes using it. Same hazard FfiAccess's own bridges
         // guard against -- see NativeKeepAlive's doc for the full argument.
+        // type is fenced too: type.handle() feeds type_obj, which the native
+        // call dereferences, so the reaper could otherwise free the
+        // TypeObject mid-call -- the same two-handle fencing DataWriter's
+        // createNative applies to both publisher and topic.
         NativeKeepAlive.keepAlive(buf);
         NativeKeepAlive.keepAlive(this);
+        NativeKeepAlive.keepAlive(type);
         ReturnCodes.check(rc);
         return DynamicData.fromHandle(out[0]);
     }

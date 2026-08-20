@@ -4,6 +4,7 @@ import com.intellectus.int2dds.cdr.Extensibility;
 import com.intellectus.int2dds.exceptions.DdsErrorException;
 import com.intellectus.int2dds.internal.NativeCleaner;
 import com.intellectus.int2dds.internal.NativeHandle;
+import com.intellectus.int2dds.internal.NativeKeepAlive;
 import com.intellectus.int2dds.internal.ReturnCodes;
 import com.intellectus.int2dds.internal.ffi.FfiAccess;
 import java.nio.charset.Charset;
@@ -48,16 +49,25 @@ public final class TypeInfo implements AutoCloseable {
     /** Appends one field. {@code name} crosses as UTF-8, never modified UTF-8. */
     public void addField(String name, int fieldType, int flags) {
         int rc = FfiAccess.typeInfoAddField(handle(), name.getBytes(UTF8), fieldType, flags);
+        // Without this fence the reaper could destroy this TypeInfo while the
+        // native call above is still dereferencing the handle it was handed.
+        // Same hazard FfiAccess's own bridges guard against -- see
+        // NativeKeepAlive's doc for the full argument.
+        NativeKeepAlive.keepAlive(this);
         ReturnCodes.check(rc);
     }
 
     /** Bakes the fields appended so far into an immutable {@link TypeObject}. */
     public TypeObject toTypeObject() {
-        long h = FfiAccess.typeInfoToTypeObject(handle());
-        if (h == 0L) {
+        long h = handle();
+        long typeObj = FfiAccess.typeInfoToTypeObject(h);
+        // Same fence as addField: this TypeInfo must stay reachable until the
+        // native call that dereferenced its handle has returned.
+        NativeKeepAlive.keepAlive(this);
+        if (typeObj == 0L) {
             throw new DdsErrorException("failed to build a TypeObject from this TypeInfo");
         }
-        return new TypeObject(h);
+        return new TypeObject(typeObj);
     }
 
     public boolean isClosed() {
