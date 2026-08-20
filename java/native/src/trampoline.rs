@@ -7,20 +7,26 @@
 //! listener. The JVM is cached in `crate::jvm()` at `JNI_OnLoad` (see `lib.rs`);
 //! trampolines run on threads with no `JNIEnv`, so they attach on demand.
 //!
-//! # Teardown safety
-//! The core does not drain callbacks on `set_listener(None)`: it swaps the
-//! listener slot under a lock, clones the `Arc`, then releases the lock before
-//! invoking, so a callback can still be mid-flight after `set_listener` returns.
-//! There is no destructor hook for `user_context`. So the binding owns the
-//! lifetime with its own `Arc<ListenerCtx>`: `nativeReaderListenerSet` stores
-//! one strong ref as `user_context`; each trampoline reconstructs a *temporary*
-//! clone without consuming the stored ref; `nativeReaderListenerClear` drops the
-//! one stored ref. The `GlobalRef` frees only when the last in-flight callback
-//! finishes. See `.superpowers/sdd/listener-lifecycle-investigation.md`.
+//! # Teardown safety — id registry, not a raw Arc pointer
+//! The core clones its `Arc<FfiDataReaderListener>` and RELEASES its lock
+//! *before* invoking the trampoline, and holds `user_context` only as an opaque
+//! value. So a raw `Arc<ListenerCtx>` pointer in `user_context` cannot be made
+//! safe: a clear on another thread could free the `Arc` between the core's clone
+//! and the trampoline's entry, and the trampoline would then dereference freed
+//! memory. Instead `user_context` carries an integer *id* into a global
+//! `REGISTRY` that owns the `Arc<ListenerCtx>`. The trampoline clones the `Arc`
+//! out of the map *while holding the registry lock*; a clear removes the id
+//! under the same lock. Either the trampoline gets a live clone that outlives
+//! the callback, or the id is already gone and it returns without calling —
+//! never a use-after-free. See
+//! `.superpowers/sdd/listener-lifecycle-investigation.md`.
 
+use std::collections::HashMap;
 use std::os::raw::c_void;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 
+use jni::errors::Error as JniError;
 use jni::objects::{GlobalRef, JClass, JObject, JValue};
 use jni::sys::{jint, jlong};
 use jni::JNIEnv;
@@ -35,6 +41,15 @@ struct ListenerCtx {
     listener: GlobalRef,
 }
 
+/// Owns every live listener context, keyed by the id carried in `user_context`.
+/// The lock mediates lifetime: a trampoline clones its `Arc` out under the lock,
+/// a clear removes the id under the same lock, so a callback never observes a
+/// half-freed context.
+static REGISTRY: LazyLock<Mutex<HashMap<u64, Arc<ListenerCtx>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Next id to hand out. Starts at 1 so 0 can mean "no listener" on the Java side.
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
 /// Attaches the current (DDS background) thread to the JVM as a daemon and
 /// returns its env. Daemon attach stays for the thread's life and detaches
 /// automatically at thread exit — DDS reuses its threads, so this amortizes.
@@ -46,27 +61,40 @@ fn env_for_callback() -> Option<JNIEnv<'static>> {
 /// this exact shape.
 ///
 /// # Safety
-/// Invoked by the DDS core under the C ABI. `user_context` must be the pointer
-/// `nativeReaderListenerSet` stored (an `Arc<ListenerCtx>` raw ref); `status`
-/// must point at a valid `Int2DdsSubscriptionMatchedStatus` for the call.
+/// Invoked by the DDS core under the C ABI. `user_context` is the registry id
+/// `nativeReaderListenerSet` stored; `status` must point at a valid
+/// `Int2DdsSubscriptionMatchedStatus` for the call.
 unsafe extern "C" fn tramp_on_subscription_matched(
     _reader: *mut Int2DdsDataReader,
     status: *const Int2DdsSubscriptionMatchedStatus,
     user_context: *mut c_void,
 ) {
-    if user_context.is_null() || status.is_null() {
+    if status.is_null() {
         return;
     }
-    // Temporary clone: bump the count, then reconstruct — this reborrows the
-    // stored ref rather than consuming it. Dropped at scope end (one decrement).
-    Arc::increment_strong_count(user_context as *const ListenerCtx);
-    let ctx = Arc::from_raw(user_context as *const ListenerCtx);
+    let id = user_context as usize as u64;
+    // Clone the Arc out while holding the lock: this keeps the context (and its
+    // GlobalRef) alive for the whole callback even if a concurrent clear removes
+    // the id right after. If the id is already gone, there is no listener to
+    // call, so return.
+    let ctx = {
+        let guard = REGISTRY.lock().unwrap();
+        match guard.get(&id) {
+            Some(c) => Arc::clone(c),
+            None => return,
+        }
+    };
 
     if let Some(mut env) = env_for_callback() {
         let s = &*status;
-        if let Ok(handle) = env.byte_array_from_slice(&s.last_publication_handle) {
+        // Bound the JNI locals this callback allocates: the DDS thread is
+        // daemon-attached, not entered through a native-method stub, so nothing
+        // else pushes/pops a frame — without this the byte array and status
+        // object leak one local ref each per callback until the table overflows.
+        let _ = env.with_local_frame(8, |env| -> Result<(), JniError> {
+            let handle = env.byte_array_from_slice(&s.last_publication_handle)?;
             let cls = "com/intellectus/int2dds/status/SubscriptionMatchedStatus";
-            if let Ok(jstatus) = env.new_object(
+            let jstatus = env.new_object(
                 cls,
                 "(IIII[B)V",
                 &[
@@ -76,30 +104,29 @@ unsafe extern "C" fn tramp_on_subscription_matched(
                     JValue::Int(s.current_count_change),
                     JValue::Object(&handle),
                 ],
-            ) {
-                // v1 passes the reader as Java null: native->entity reverse
-                // mapping is out of scope for this branch.
-                let _ = env.call_method(
-                    ctx.listener.as_obj(),
-                    "onSubscriptionMatched",
-                    "(Lcom/intellectus/int2dds/core/DataReader;\
-                     Lcom/intellectus/int2dds/status/SubscriptionMatchedStatus;)V",
-                    &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
-                );
-            }
-        }
-        // A Java exception must never leak back onto the native DDS thread.
+            )?;
+            // v1 passes the reader as Java null: native->entity reverse mapping
+            // is out of scope for this branch.
+            env.call_method(
+                ctx.listener.as_obj(),
+                "onSubscriptionMatched",
+                "(Lcom/intellectus/int2dds/core/DataReader;\
+                 Lcom/intellectus/int2dds/status/SubscriptionMatchedStatus;)V",
+                &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
+            )?;
+            Ok(())
+        });
+        // A pending Java exception is thread-wide and survives the frame pop, so
+        // it is still checked here. It must never leak onto the native DDS thread.
         if env.exception_check().unwrap_or(false) {
             let _ = env.exception_describe();
             let _ = env.exception_clear();
         }
     }
-
-    drop(ctx);
 }
 
-/// Installs a Java listener on `reader` for `mask`. Returns the stored context
-/// pointer (pass it back to clear), or 0 on failure.
+/// Installs a Java listener on `reader` for the given status `mask`. Returns the
+/// registry id (pass it back to clear), or 0 on failure.
 ///
 /// # Safety
 /// Invoked by the JVM under JNI conventions. `reader` must be a live
@@ -119,8 +146,8 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_FfiHandwritten_
         Err(_) => return 0,
     };
     let ctx = Arc::new(ListenerCtx { listener: global });
-    // The one stored strong ref. Rides in the C struct's user_context.
-    let uc = Arc::into_raw(ctx) as *mut c_void;
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    REGISTRY.lock().unwrap().insert(id, ctx);
 
     let c_listener = Int2DdsDataReaderListener {
         on_data_available: None,
@@ -130,7 +157,8 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_FfiHandwritten_
         on_requested_deadline_missed: None,
         on_requested_incompatible_qos: None,
         on_sample_lost: None,
-        user_context: uc,
+        // The id, not a pointer: the core never dereferences user_context.
+        user_context: id as usize as *mut c_void,
     };
 
     let rc = unsafe {
@@ -141,21 +169,21 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_FfiHandwritten_
         )
     };
     if rc != 0 {
-        // Registration failed: reclaim the stored ref so it does not leak.
-        unsafe { drop(Arc::from_raw(uc as *const ListenerCtx)) };
+        // Registration failed: forget the context so it does not leak.
+        REGISTRY.lock().unwrap().remove(&id);
         return 0;
     }
-    uc as jlong
+    id as jlong
 }
 
-/// Clears the listener on `reader` and releases the stored context `ctx`.
-/// In-flight callbacks hold their own clone, so the `GlobalRef` frees only when
-/// the last one finishes.
+/// Clears the listener on `reader` and forgets the registry entry `id`. A
+/// concurrent in-flight callback already cloned its `Arc`, so the `GlobalRef`
+/// frees only when that last clone drops. Removing an absent id is a harmless
+/// no-op, so a double clear is safe.
 ///
 /// # Safety
 /// Invoked by the JVM under JNI conventions. `reader` must be a live handle;
-/// `ctx` must be a value returned by `nativeReaderListenerSet` and not yet
-/// cleared.
+/// `id` must be a value returned by `nativeReaderListenerSet`.
 #[no_mangle]
 pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_FfiHandwritten_nativeReaderListenerClear<
     'local,
@@ -163,7 +191,7 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_FfiHandwritten_
     _env: JNIEnv<'local>,
     _class: JClass<'local>,
     reader: jlong,
-    ctx: jlong,
+    id: jlong,
 ) -> jint {
     let rc = unsafe {
         int2dds_datareader_set_listener(
@@ -172,9 +200,8 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_FfiHandwritten_
             0,
         )
     };
-    if ctx != 0 {
-        // Drop exactly the one stored strong ref.
-        unsafe { drop(Arc::from_raw(ctx as usize as *const ListenerCtx)) };
+    if id != 0 {
+        REGISTRY.lock().unwrap().remove(&(id as u64));
     }
     rc
 }
