@@ -1266,6 +1266,24 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1da
 }
 
 #[no_mangle]
+pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1datareader_1qos_1get_1lifespan_1reference<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    qos: jlong,
+    kind_out: jlong,
+) -> jint {
+    let __ret = unsafe {
+        int2dds_ffi::qos::int2dds_datareader_qos_get_lifespan_reference(
+            qos as usize as *const _,
+            kind_out as usize as *mut _,
+        )
+    };
+    __ret as _
+}
+
+#[no_mangle]
 pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1datareader_1qos_1get_1liveliness<
     'local,
 >(
@@ -1485,6 +1503,24 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1da
         int2dds_ffi::qos::int2dds_datareader_qos_set_latency_budget(
             qos as usize as *mut _,
             duration_ns as _,
+        )
+    };
+    __ret as _
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1datareader_1qos_1set_1lifespan_1reference<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    qos: jlong,
+    kind: jint,
+) -> jint {
+    let __ret = unsafe {
+        int2dds_ffi::qos::int2dds_datareader_qos_set_lifespan_reference(
+            qos as usize as *mut _,
+            kind as _,
         )
     };
     __ret as _
@@ -2106,17 +2142,27 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1da
     writer: jlong,
     loan: jlong,
     actual_size: jlong,
-    key: jlong,
-    key_len: jlong,
 ) -> jint {
     let __ret = unsafe {
         int2dds_ffi::publisher::int2dds_datawriter_commit_serialized_write(
             writer as usize as *const _,
             loan as usize as *mut _,
             actual_size as _,
-            key as usize as *const _,
-            key_len as _,
         )
+    };
+    __ret as _
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1datawriter_1data_1representation<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    writer: jlong,
+) -> jint {
+    let __ret = unsafe {
+        int2dds_ffi::publisher::int2dds_datawriter_data_representation(writer as usize as *const _)
     };
     __ret as _
 }
@@ -3153,16 +3199,12 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1da
     writer: jlong,
     data: jlong,
     data_len: jlong,
-    key: jlong,
-    key_len: jlong,
 ) -> jint {
     let __ret = unsafe {
         int2dds_ffi::publisher::int2dds_datawriter_write_serialized(
             writer as usize as *const _,
             data as usize as *const _,
             data_len as _,
-            key as usize as *const _,
-            key_len as _,
         )
     };
     __ret as _
@@ -3177,8 +3219,6 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1da
     writer: jlong,
     data: jlong,
     data_len: jlong,
-    key: jlong,
-    key_len: jlong,
     timestamp_sec: jint,
     timestamp_nanosec: jint,
 ) -> jint {
@@ -3187,8 +3227,6 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1da
             writer as usize as *const _,
             data as usize as *const _,
             data_len as _,
-            key as usize as *const _,
-            key_len as _,
             timestamp_sec as _,
             timestamp_nanosec as _,
         )
@@ -6186,6 +6224,28 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1pa
 }
 
 #[no_mangle]
+pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1participant_1take_1discovered_1publications_1snapshot_1filtered<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    participant: jlong,
+    timeout_ms: jint,
+    instance_state_mask: jint,
+    seq_out: jlong,
+) -> jint {
+    let __ret = unsafe {
+        int2dds_ffi::discovery::int2dds_participant_take_discovered_publications_snapshot_filtered(
+            participant as usize as *const _,
+            timeout_ms as _,
+            instance_state_mask as _,
+            seq_out as usize as *mut _,
+        )
+    };
+    __ret as _
+}
+
+#[no_mangle]
 pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1participant_1take_1discovered_1subscriptions_1snapshot<
     'local,
 >(
@@ -6199,6 +6259,28 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1pa
         int2dds_ffi::discovery::int2dds_participant_take_discovered_subscriptions_snapshot(
             participant as usize as *const _,
             timeout_ms as _,
+            seq_out as usize as *mut _,
+        )
+    };
+    __ret as _
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1participant_1take_1discovered_1subscriptions_1snapshot_1filtered<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    participant: jlong,
+    timeout_ms: jint,
+    instance_state_mask: jint,
+    seq_out: jlong,
+) -> jint {
+    let __ret = unsafe {
+        int2dds_ffi::discovery::int2dds_participant_take_discovered_subscriptions_snapshot_filtered(
+            participant as usize as *const _,
+            timeout_ms as _,
+            instance_state_mask as _,
             seq_out as usize as *mut _,
         )
     };
@@ -6523,6 +6605,48 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1pu
             seq as usize as *const _,
             index as _,
             data_out as usize as *mut _,
+        )
+    };
+    __ret as _
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1publication_1builtin_1topic_1data_1seq_1get_1instance_1handle<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    seq: jlong,
+    index: jlong,
+    handle_out: JByteArray<'local>,
+) -> jint {
+    let mut handle_out_out = [0u8; 16];
+    let __ret = unsafe {
+        int2dds_ffi::discovery::int2dds_publication_builtin_topic_data_seq_get_instance_handle(
+            seq as usize as *const _,
+            index as _,
+            crate::generated_support::fixed_ptr_mut(&mut handle_out_out) as _,
+        )
+    };
+    crate::generated_support::write_back(&mut env, &handle_out, &handle_out_out);
+    __ret as _
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1publication_1builtin_1topic_1data_1seq_1get_1instance_1state<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    seq: jlong,
+    index: jlong,
+    instance_state_out: jlong,
+) -> jint {
+    let __ret = unsafe {
+        int2dds_ffi::discovery::int2dds_publication_builtin_topic_data_seq_get_instance_state(
+            seq as usize as *const _,
+            index as _,
+            instance_state_out as usize as *mut _,
         )
     };
     __ret as _
@@ -7370,6 +7494,48 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1su
             seq as usize as *const _,
             index as _,
             data_out as usize as *mut _,
+        )
+    };
+    __ret as _
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1subscription_1builtin_1topic_1data_1seq_1get_1instance_1handle<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    seq: jlong,
+    index: jlong,
+    handle_out: JByteArray<'local>,
+) -> jint {
+    let mut handle_out_out = [0u8; 16];
+    let __ret = unsafe {
+        int2dds_ffi::discovery::int2dds_subscription_builtin_topic_data_seq_get_instance_handle(
+            seq as usize as *const _,
+            index as _,
+            crate::generated_support::fixed_ptr_mut(&mut handle_out_out) as _,
+        )
+    };
+    crate::generated_support::write_back(&mut env, &handle_out, &handle_out_out);
+    __ret as _
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1subscription_1builtin_1topic_1data_1seq_1get_1instance_1state<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    seq: jlong,
+    index: jlong,
+    instance_state_out: jlong,
+) -> jint {
+    let __ret = unsafe {
+        int2dds_ffi::discovery::int2dds_subscription_builtin_topic_data_seq_get_instance_state(
+            seq as usize as *const _,
+            index as _,
+            instance_state_out as usize as *mut _,
         )
     };
     __ret as _

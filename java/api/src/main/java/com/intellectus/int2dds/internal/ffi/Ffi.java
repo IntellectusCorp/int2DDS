@@ -79,6 +79,7 @@ public final class Ffi {
     static native int int2dds_datareader_qos_get_durability(long qos, long kind_out);
     static native int int2dds_datareader_qos_get_history(long qos, long kind_out, long depth_out);
     static native int int2dds_datareader_qos_get_latency_budget(long qos, long duration_ns_out);
+    static native int int2dds_datareader_qos_get_lifespan_reference(long qos, long kind_out);
     static native int int2dds_datareader_qos_get_liveliness(long qos, long kind_out, long lease_duration_ns_out);
     static native int int2dds_datareader_qos_get_ownership(long qos, long kind_out);
     static native int int2dds_datareader_qos_get_reader_data_lifecycle(long qos, long autopurge_nowriter_ns_out, long autopurge_disposed_ns_out);
@@ -91,6 +92,7 @@ public final class Ffi {
     static native int int2dds_datareader_qos_set_durability(long qos, int kind);
     static native int int2dds_datareader_qos_set_history(long qos, int kind, int depth);
     static native int int2dds_datareader_qos_set_latency_budget(long qos, long duration_ns);
+    static native int int2dds_datareader_qos_set_lifespan_reference(long qos, int kind);
     static native int int2dds_datareader_qos_set_liveliness(long qos, int kind, long lease_duration_ns);
     static native int int2dds_datareader_qos_set_ownership(long qos, int kind);
     static native int int2dds_datareader_qos_set_reader_data_lifecycle(long qos, long autopurge_nowriter_ns, long autopurge_disposed_ns);
@@ -119,7 +121,8 @@ public final class Ffi {
     static native int int2dds_datareader_wait_for_historical_data(long reader, long timeout_ms);
     static native int int2dds_datawriter_abort_serialized_write(long loan);
     static native int int2dds_datawriter_assert_liveliness(long writer);
-    static native int int2dds_datawriter_commit_serialized_write(long writer, long loan, long actual_size, long key, long key_len);
+    static native int int2dds_datawriter_commit_serialized_write(long writer, long loan, long actual_size);
+    static native int int2dds_datawriter_data_representation(long writer);
     static native int int2dds_datawriter_dispose(long writer, long key, long key_len, byte[] handle);
     static native int int2dds_datawriter_get_guid(long writer, byte[] guid_out);
     static native int int2dds_datawriter_get_key_value(long writer, byte[] handle, long key_buf, long key_capacity, long key_size_out);
@@ -174,8 +177,8 @@ public final class Ffi {
     static native int int2dds_datawriter_set_qos(long writer, long qos);
     static native int int2dds_datawriter_unregister_instance(long writer, long key, long key_len, byte[] handle);
     static native int int2dds_datawriter_wait_for_acknowledgments(long writer, long timeout_ms);
-    static native int int2dds_datawriter_write_serialized(long writer, long data, long data_len, long key, long key_len);
-    static native int int2dds_datawriter_write_serialized_w_timestamp(long writer, long data, long data_len, long key, long key_len, int timestamp_sec, int timestamp_nanosec);
+    static native int int2dds_datawriter_write_serialized(long writer, long data, long data_len);
+    static native int int2dds_datawriter_write_serialized_w_timestamp(long writer, long data, long data_len, int timestamp_sec, int timestamp_nanosec);
     static native int int2dds_default_data_representation();
     static native int int2dds_default_extensibility();
     static native int int2dds_delete_contentfilteredtopic(long cft);
@@ -335,7 +338,9 @@ public final class Ffi {
     static native int int2dds_participant_qos_set_user_data(long qos, long data, long data_len);
     static native int int2dds_participant_set_qos(long participant, long qos);
     static native int int2dds_participant_take_discovered_publications_snapshot(long participant, int timeout_ms, long seq_out);
+    static native int int2dds_participant_take_discovered_publications_snapshot_filtered(long participant, int timeout_ms, int instance_state_mask, long seq_out);
     static native int int2dds_participant_take_discovered_subscriptions_snapshot(long participant, int timeout_ms, long seq_out);
+    static native int int2dds_participant_take_discovered_subscriptions_snapshot_filtered(long participant, int timeout_ms, int instance_state_mask, long seq_out);
     static native int int2dds_participant_wait_for_type_object(long participant, byte[] topic_name, int timeout_ms, long type_obj_out, byte[] type_name_buf, long type_name_buf_len, long out_len);
     static native int int2dds_publication_builtin_topic_data_destroy(long data);
     static native int int2dds_publication_builtin_topic_data_get_deadline(long data, long sec_out, long nanosec_out);
@@ -352,6 +357,8 @@ public final class Ffi {
     static native int int2dds_publication_builtin_topic_data_get_user_data(long data, long buf, long capacity, long size_out);
     static native int int2dds_publication_builtin_topic_data_seq_delete(long seq);
     static native int int2dds_publication_builtin_topic_data_seq_get(long seq, long index, long data_out);
+    static native int int2dds_publication_builtin_topic_data_seq_get_instance_handle(long seq, long index, byte[] handle_out);
+    static native int int2dds_publication_builtin_topic_data_seq_get_instance_state(long seq, long index, long instance_state_out);
     static native int int2dds_publication_builtin_topic_data_seq_length(long seq, long count_out);
     static native int int2dds_publication_builtin_topic_data_take_type_object(long data, long out);
     static native int int2dds_publisher_delete_contained_entities(long publisher);
@@ -399,6 +406,8 @@ public final class Ffi {
     static native int int2dds_subscription_builtin_topic_data_get_user_data(long data, long buf, long capacity, long size_out);
     static native int int2dds_subscription_builtin_topic_data_seq_delete(long seq);
     static native int int2dds_subscription_builtin_topic_data_seq_get(long seq, long index, long data_out);
+    static native int int2dds_subscription_builtin_topic_data_seq_get_instance_handle(long seq, long index, byte[] handle_out);
+    static native int int2dds_subscription_builtin_topic_data_seq_get_instance_state(long seq, long index, long instance_state_out);
     static native int int2dds_subscription_builtin_topic_data_seq_length(long seq, long count_out);
     static native int int2dds_topic_get_inconsistent_topic_status(long topic, long status_out);
     static native int int2dds_topic_get_name(long topic, byte[] name_out, long name_size);

@@ -357,7 +357,7 @@ public class WritePathBenchmark {
         try (CdrWriter w = CdrWriter.acquire(Extensibility.APPENDABLE, true, true)) {
             encodeDirect(w, id, value, label);
             int rc = FfiAccess.datawriterWriteSerialized(
-                    target.writer, w.address(), w.length(), 0L, 0L);
+                    target.writer, w.address(), w.length());
             if (rc != 0) {
                 throw new IllegalStateException("write_serialized failed: rc=" + rc);
             }
@@ -377,7 +377,7 @@ public class WritePathBenchmark {
         int len = heapEncoder.length();
         ((Buffer) staging).clear();
         heapEncoder.copyInto(staging);
-        int rc = FfiAccess.datawriterWriteSerialized(target.writer, stagingAddr, len, 0L, 0L);
+        int rc = FfiAccess.datawriterWriteSerialized(target.writer, stagingAddr, len);
         if (rc != 0) {
             throw new IllegalStateException("write_serialized failed: rc=" + rc);
         }

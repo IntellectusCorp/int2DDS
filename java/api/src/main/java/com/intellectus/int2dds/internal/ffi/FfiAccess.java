@@ -308,17 +308,12 @@ public final class FfiAccess {
     }
 
     /**
-     * Writes a pre-serialized CDR sample. {@code key}/{@code keyLen} are
-     * always {@code 0L} here because the core ignores this pair regardless
-     * of whether the topic is keyed: {@code
-     * int2dds_datawriter_write_serialized}'s own doc comment
-     * (ffi/src/publisher.rs) says they are retained only for ABI
-     * compatibility, and the instance key and KeyHash are instead derived
-     * canonically from {@code data}, the full serialized sample.
+     * Writes a pre-serialized CDR sample. No key is passed: the core derives
+     * the instance key and KeyHash canonically from {@code data}, the full
+     * serialized sample, for a keyed topic the same way as an unkeyed one.
      */
-    public static int datawriterWriteSerialized(long writer, long data, long dataLen,
-            long key, long keyLen) {
-        return Ffi.int2dds_datawriter_write_serialized(writer, data, dataLen, key, keyLen);
+    public static int datawriterWriteSerialized(long writer, long data, long dataLen) {
+        return Ffi.int2dds_datawriter_write_serialized(writer, data, dataLen);
     }
 
     /**

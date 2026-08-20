@@ -102,18 +102,10 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
      *
      * <p>Allocates nothing and copies nothing: {@code sample.serializeCdr}
      * writes straight into a pooled direct buffer, and only that buffer's
-     * native address and length cross into the C ABI. The key arguments are
-     * {@code 0L} because the core ignores them regardless of whether the
-     * topic is keyed: {@code int2dds_datawriter_write_serialized}'s {@code
-     * key}/{@code key_len} parameters (ffi/src/publisher.rs) are retained
-     * only for ABI compatibility — the core derives the instance key and
-     * KeyHash canonically from {@code data}, the full serialized sample
-     * this method already builds, the same way for a keyed topic as an
-     * unkeyed one. An earlier version of this doc, and of the commit that
-     * introduced it, said the opposite — that {@code 0L} was correct only
-     * because this branch creates unkeyed topics; that reasoning was wrong,
-     * though the {@code 0L} it justified was already correct for the actual
-     * reason above. See the task report for the correction.
+     * native address and length cross into the C ABI. No key is passed: the
+     * core derives the instance key and KeyHash canonically from {@code data},
+     * the full serialized sample this method already builds, the same way for
+     * a keyed topic as an unkeyed one.
      *
      * @throws NullPointerException if {@code sample} is null
      */
@@ -125,7 +117,7 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
         long h = handle();
         try (CdrWriter w = CdrWriter.acquire(topic.extensibility(), LITTLE_ENDIAN_HOST, xcdr2)) {
             sample.serializeCdr(w);
-            int rc = FfiAccess.datawriterWriteSerialized(h, w.address(), w.length(), 0L, 0L);
+            int rc = FfiAccess.datawriterWriteSerialized(h, w.address(), w.length());
             // `h = handle()` above this try block reads this writer's own
             // handle; nothing else in this method touches `this` again
             // before the try-with-resources closes `w`, so without this

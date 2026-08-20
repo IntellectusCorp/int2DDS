@@ -238,7 +238,7 @@ mod tests {
                 .filter(|p| map_type(&p.ty).map(|m| m.kind) == Some(k))
                 .count()
         };
-        assert_eq!(count(Kind::ByteArrayOut), 17, "*mut [u8; N] out parameters");
+        assert_eq!(count(Kind::ByteArrayOut), 19, "*mut [u8; N] out parameters");
         assert!(count(Kind::ByteArrayIn) > 0, "*const [u8; N] in parameters");
     }
 
@@ -285,12 +285,12 @@ mod tests {
             vec!["int2dds_participant_qos_get_properties_with_prefix"],
             "the set of hand-written functions changed"
         );
-        assert_eq!(fns.iter().filter(|f| is_generatable(f)).count(), 443);
+        assert_eq!(fns.iter().filter(|f| is_generatable(f)).count(), 452);
     }
 
     #[test]
     fn every_type_in_the_real_ffi_surface_is_accounted_for() {
-        // Totality check: the only type in the whole 444-function surface that
+        // Totality check: the only type in the whole 453-function surface that
         // map_type refuses is the C callback. If a future FFI change introduces
         // another unmapped type this names it, rather than silently shrinking
         // the generated binding.
