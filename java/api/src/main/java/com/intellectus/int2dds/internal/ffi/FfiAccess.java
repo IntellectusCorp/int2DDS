@@ -1010,4 +1010,79 @@ public final class FfiAccess {
     public static int waitsetDetachStatus(long waitset, long condition) {
         return Ffi.int2dds_waitset_detach_statuscondition(waitset, condition);
     }
+
+    /**
+     * Creates a read condition on {@code reader} for the given state masks,
+     * writing its handle to {@code out[0]} on success. Each call mints a new
+     * native box the caller owns and must release through {@link
+     * #readConditionDelete}.
+     */
+    public static int datareaderCreateReadCondition(
+            long reader, int sampleMask, int viewMask, int instanceMask, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_datareader_create_readcondition(
+                reader, sampleMask, viewMask, instanceMask, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Creates a query condition on {@code reader} for the given state masks
+     * and query, writing its handle to {@code out[0]} on success. {@code
+     * queryExpr} and {@code queryParams} cross as UTF-8 {@code byte[]} /
+     * {@code byte[][]}, never {@code String}. Each call mints a new native
+     * box the caller owns and must release through {@link
+     * #readConditionDelete} — a query condition is deleted the same way as a
+     * read condition.
+     */
+    public static int datareaderCreateQueryCondition(long reader, int sampleMask, int viewMask,
+            int instanceMask, byte[] queryExpr, byte[][] queryParams, long paramsCount,
+            long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_datareader_create_querycondition(reader, sampleMask, viewMask,
+                instanceMask, queryExpr, queryParams, paramsCount, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Reads a read condition's own trigger value (its own handle, not a seq
+     * entry), writing it to {@code out[0]} on success. Also valid for a
+     * QueryCondition handle, which is a ReadCondition.
+     */
+    public static int readConditionGetTriggerValue(long condition, boolean[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_readcondition_get_trigger_value(condition, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.get(0) != 0; // bool out is 1 byte, not 4
+        }
+        return rc;
+    }
+
+    /** Sets a query condition's query parameters. Returns the C ABI status code. */
+    public static int querySetParameters(long condition, byte[][] params, long count) {
+        return Ffi.int2dds_querycondition_set_query_parameters(condition, params, count);
+    }
+
+    /** Releases a read (or query) condition. Returns the C ABI status code. */
+    public static int readConditionDelete(long condition) {
+        return Ffi.int2dds_readcondition_delete(condition);
+    }
+
+    /** Attaches a read (or query) condition to a WaitSet. Returns the C ABI status code. */
+    public static int waitsetAttachRead(long waitset, long condition) {
+        return Ffi.int2dds_waitset_attach_readcondition(waitset, condition);
+    }
+
+    /** Detaches a read (or query) condition from a WaitSet. Returns the C ABI status code. */
+    public static int waitsetDetachRead(long waitset, long condition) {
+        return Ffi.int2dds_waitset_detach_readcondition(waitset, condition);
+    }
 }

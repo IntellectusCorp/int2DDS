@@ -1,6 +1,8 @@
 package com.intellectus.int2dds.core;
 
 import com.intellectus.int2dds.cdr.CdrReader;
+import com.intellectus.int2dds.conditions.QueryCondition;
+import com.intellectus.int2dds.conditions.ReadCondition;
 import com.intellectus.int2dds.conditions.StatusCondition;
 import com.intellectus.int2dds.exceptions.DdsErrorException;
 import com.intellectus.int2dds.exceptions.DdsException;
@@ -109,6 +111,33 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
         NativeKeepAlive.keepAlive(this);
         ReturnCodes.check(rc);
         return new StatusCondition(out[0]);
+    }
+
+    /** A fresh {@link ReadCondition} filtering this reader's cache by state masks. */
+    public ReadCondition createReadCondition(int sampleStates, int viewStates, int instanceStates) {
+        long h = handle();
+        long[] out = new long[1];
+        int rc = FfiAccess.datareaderCreateReadCondition(
+                h, sampleStates, viewStates, instanceStates, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return new ReadCondition(out[0]);
+    }
+
+    /**
+     * A fresh {@link QueryCondition} filtering this reader's cache by state
+     * masks and a query expression. {@code queryExpr} and {@code params}
+     * cross as UTF-8 {@code byte[]} / {@code byte[][]}, never {@code String}.
+     */
+    public QueryCondition createQueryCondition(int sampleStates, int viewStates,
+            int instanceStates, byte[] queryExpr, byte[][] params) {
+        long h = handle();
+        long[] out = new long[1];
+        int rc = FfiAccess.datareaderCreateQueryCondition(h, sampleStates, viewStates,
+                instanceStates, queryExpr, params, params.length, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return new QueryCondition(out[0]);
     }
 
     /** Takes (removes) the next sample, or null if the cache is empty. */
