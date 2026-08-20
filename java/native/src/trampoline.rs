@@ -40,7 +40,11 @@ use jni::sys::{jint, jlong};
 use jni::JNIEnv;
 
 use int2dds_ffi::listener::Int2DdsDataReaderListener;
-use int2dds_ffi::status::Int2DdsSubscriptionMatchedStatus;
+use int2dds_ffi::status::{
+    Int2DdsLivelinessChangedStatus, Int2DdsRequestedDeadlineMissedStatus,
+    Int2DdsRequestedIncompatibleQosStatus, Int2DdsSampleLostStatus, Int2DdsSampleRejectedStatus,
+    Int2DdsSubscriptionMatchedStatus,
+};
 use int2dds_ffi::subscriber::int2dds_datareader_set_listener;
 use int2dds_ffi::types::Int2DdsDataReader;
 
@@ -116,8 +120,7 @@ where
     }
 }
 
-/// Trampoline for `on_subscription_matched`. Every other reader callback
-/// follows this exact shape through [`run_trampoline`].
+/// Trampoline for `on_subscription_matched`.
 ///
 /// # Safety
 /// Invoked by the DDS core under the C ABI. `user_context` is the registry id
@@ -159,6 +162,215 @@ unsafe extern "C" fn tramp_on_subscription_matched(
     });
 }
 
+/// Trampoline for `on_data_available`. Unlike the other callbacks this one
+/// carries no status argument.
+///
+/// # Safety
+/// Invoked by the DDS core under the C ABI. `user_context` is the registry id
+/// `nativeReaderListenerSet` stored.
+unsafe extern "C" fn tramp_on_data_available(
+    _reader: *mut Int2DdsDataReader,
+    user_context: *mut c_void,
+) {
+    run_trampoline(user_context, |env, listener| {
+        env.call_method(
+            listener.as_obj(),
+            "onDataAvailable",
+            "(Lcom/intellectus/int2dds/core/DataReader;)V",
+            &[JValue::Object(&JObject::null())],
+        )?;
+        Ok(())
+    });
+}
+
+/// Trampoline for `on_sample_rejected`.
+///
+/// # Safety
+/// Invoked by the DDS core under the C ABI. `user_context` is the registry id
+/// `nativeReaderListenerSet` stored; `status` must point at a valid
+/// `Int2DdsSampleRejectedStatus` for the call.
+unsafe extern "C" fn tramp_on_sample_rejected(
+    _reader: *mut Int2DdsDataReader,
+    status: *const Int2DdsSampleRejectedStatus,
+    user_context: *mut c_void,
+) {
+    if status.is_null() {
+        return;
+    }
+    let s = &*status;
+    run_trampoline(user_context, |env, listener| {
+        let handle = env.byte_array_from_slice(&s.last_instance_handle)?;
+        let cls = "com/intellectus/int2dds/status/SampleRejectedStatus";
+        let jstatus = env.new_object(
+            cls,
+            "(III[B)V",
+            &[
+                JValue::Int(s.total_count),
+                JValue::Int(s.total_count_change),
+                JValue::Int(s.last_reason as i32),
+                JValue::Object(&handle),
+            ],
+        )?;
+        env.call_method(
+            listener.as_obj(),
+            "onSampleRejected",
+            "(Lcom/intellectus/int2dds/core/DataReader;\
+             Lcom/intellectus/int2dds/status/SampleRejectedStatus;)V",
+            &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
+        )?;
+        Ok(())
+    });
+}
+
+/// Trampoline for `on_liveliness_changed`.
+///
+/// # Safety
+/// Invoked by the DDS core under the C ABI. `user_context` is the registry id
+/// `nativeReaderListenerSet` stored; `status` must point at a valid
+/// `Int2DdsLivelinessChangedStatus` for the call.
+unsafe extern "C" fn tramp_on_liveliness_changed(
+    _reader: *mut Int2DdsDataReader,
+    status: *const Int2DdsLivelinessChangedStatus,
+    user_context: *mut c_void,
+) {
+    if status.is_null() {
+        return;
+    }
+    let s = &*status;
+    run_trampoline(user_context, |env, listener| {
+        let handle = env.byte_array_from_slice(&s.last_publication_handle)?;
+        let cls = "com/intellectus/int2dds/status/LivelinessChangedStatus";
+        let jstatus = env.new_object(
+            cls,
+            "(IIII[B)V",
+            &[
+                JValue::Int(s.alive_count),
+                JValue::Int(s.not_alive_count),
+                JValue::Int(s.alive_count_change),
+                JValue::Int(s.not_alive_count_change),
+                JValue::Object(&handle),
+            ],
+        )?;
+        env.call_method(
+            listener.as_obj(),
+            "onLivelinessChanged",
+            "(Lcom/intellectus/int2dds/core/DataReader;\
+             Lcom/intellectus/int2dds/status/LivelinessChangedStatus;)V",
+            &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
+        )?;
+        Ok(())
+    });
+}
+
+/// Trampoline for `on_requested_deadline_missed`.
+///
+/// # Safety
+/// Invoked by the DDS core under the C ABI. `user_context` is the registry id
+/// `nativeReaderListenerSet` stored; `status` must point at a valid
+/// `Int2DdsRequestedDeadlineMissedStatus` for the call.
+unsafe extern "C" fn tramp_on_requested_deadline_missed(
+    _reader: *mut Int2DdsDataReader,
+    status: *const Int2DdsRequestedDeadlineMissedStatus,
+    user_context: *mut c_void,
+) {
+    if status.is_null() {
+        return;
+    }
+    let s = &*status;
+    run_trampoline(user_context, |env, listener| {
+        let handle = env.byte_array_from_slice(&s.last_instance_handle)?;
+        let cls = "com/intellectus/int2dds/status/RequestedDeadlineMissedStatus";
+        let jstatus = env.new_object(
+            cls,
+            "(II[B)V",
+            &[
+                JValue::Int(s.total_count),
+                JValue::Int(s.total_count_change),
+                JValue::Object(&handle),
+            ],
+        )?;
+        env.call_method(
+            listener.as_obj(),
+            "onRequestedDeadlineMissed",
+            "(Lcom/intellectus/int2dds/core/DataReader;\
+             Lcom/intellectus/int2dds/status/RequestedDeadlineMissedStatus;)V",
+            &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
+        )?;
+        Ok(())
+    });
+}
+
+/// Trampoline for `on_requested_incompatible_qos`.
+///
+/// # Safety
+/// Invoked by the DDS core under the C ABI. `user_context` is the registry id
+/// `nativeReaderListenerSet` stored; `status` must point at a valid
+/// `Int2DdsRequestedIncompatibleQosStatus` for the call.
+unsafe extern "C" fn tramp_on_requested_incompatible_qos(
+    _reader: *mut Int2DdsDataReader,
+    status: *const Int2DdsRequestedIncompatibleQosStatus,
+    user_context: *mut c_void,
+) {
+    if status.is_null() {
+        return;
+    }
+    let s = &*status;
+    run_trampoline(user_context, |env, listener| {
+        let cls = "com/intellectus/int2dds/status/RequestedIncompatibleQosStatus";
+        let jstatus = env.new_object(
+            cls,
+            "(IIII)V",
+            &[
+                JValue::Int(s.total_count),
+                JValue::Int(s.total_count_change),
+                JValue::Int(s.last_policy_id as i32),
+                JValue::Int(s.policies_count as i32),
+            ],
+        )?;
+        env.call_method(
+            listener.as_obj(),
+            "onRequestedIncompatibleQos",
+            "(Lcom/intellectus/int2dds/core/DataReader;\
+             Lcom/intellectus/int2dds/status/RequestedIncompatibleQosStatus;)V",
+            &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
+        )?;
+        Ok(())
+    });
+}
+
+/// Trampoline for `on_sample_lost`.
+///
+/// # Safety
+/// Invoked by the DDS core under the C ABI. `user_context` is the registry id
+/// `nativeReaderListenerSet` stored; `status` must point at a valid
+/// `Int2DdsSampleLostStatus` for the call.
+unsafe extern "C" fn tramp_on_sample_lost(
+    _reader: *mut Int2DdsDataReader,
+    status: *const Int2DdsSampleLostStatus,
+    user_context: *mut c_void,
+) {
+    if status.is_null() {
+        return;
+    }
+    let s = &*status;
+    run_trampoline(user_context, |env, listener| {
+        let cls = "com/intellectus/int2dds/status/SampleLostStatus";
+        let jstatus = env.new_object(
+            cls,
+            "(II)V",
+            &[JValue::Int(s.total_count), JValue::Int(s.total_count_change)],
+        )?;
+        env.call_method(
+            listener.as_obj(),
+            "onSampleLost",
+            "(Lcom/intellectus/int2dds/core/DataReader;\
+             Lcom/intellectus/int2dds/status/SampleLostStatus;)V",
+            &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
+        )?;
+        Ok(())
+    });
+}
+
 /// Installs a Java listener on `reader` for the given status `mask`. Returns the
 /// registry id (pass it back to clear), or 0 on failure.
 ///
@@ -183,14 +395,17 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_FfiHandwritten_
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).insert(id, ctx);
 
+    // Every trampoline whose Java method exists is always installed; the
+    // caller's mask decides which ones DDS actually fires, and callers that
+    // did not override a method get DataReaderListenerBase's no-op.
     let c_listener = Int2DdsDataReaderListener {
-        on_data_available: None,
+        on_data_available: Some(tramp_on_data_available),
         on_subscription_matched: Some(tramp_on_subscription_matched),
-        on_sample_rejected: None,
-        on_liveliness_changed: None,
-        on_requested_deadline_missed: None,
-        on_requested_incompatible_qos: None,
-        on_sample_lost: None,
+        on_sample_rejected: Some(tramp_on_sample_rejected),
+        on_liveliness_changed: Some(tramp_on_liveliness_changed),
+        on_requested_deadline_missed: Some(tramp_on_requested_deadline_missed),
+        on_requested_incompatible_qos: Some(tramp_on_requested_incompatible_qos),
+        on_sample_lost: Some(tramp_on_sample_lost),
         // The id, not a pointer: the core never dereferences user_context.
         user_context: id as usize as *mut c_void,
     };

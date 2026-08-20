@@ -52,4 +52,58 @@ class DataReaderListenerTest {
             assertTrue(got.get().currentCount() >= 1, "matched writer count should be >= 1");
         }
     }
+
+    @Test
+    void onDataAvailableFiresWhenAWriterWrites() throws InterruptedException {
+        try (DomainParticipant p = new DomainParticipant(testDomain())) {
+            Topic<ConformanceRecord> topic = p.createTopic("ListenerDataAvail", new ConformanceRecord());
+            Publisher pub = p.createPublisher();
+            DataWriter<ConformanceRecord> w = pub.createDataWriter(topic);
+            Subscriber sub = p.createSubscriber();
+            DataReader<ConformanceRecord> reader = sub.createDataReader(topic, ConformanceRecord::new);
+
+            CountDownLatch latch = new CountDownLatch(1);
+            AtomicReference<DataReader<?>> got = new AtomicReference<>();
+            reader.setListener(new DataReaderListenerBase() {
+                @Override
+                public void onDataAvailable(DataReader<?> r) {
+                    got.set(r);
+                    latch.countDown();
+                }
+            }, StatusMask.of(StatusMask.DATA_AVAILABLE));
+
+            // Discovery is async, so retry the write until the callback fires or
+            // the bound is hit.
+            ConformanceRecord sample = new ConformanceRecord();
+            sample.id = 1;
+            long deadline = System.nanoTime() + 5_000_000_000L;
+            while (System.nanoTime() < deadline && latch.getCount() > 0) {
+                w.write(sample);
+                latch.await(20, TimeUnit.MILLISECONDS);
+            }
+            reader.setListener(null, null);   // explicit teardown releases the native ctx
+
+            assertTrue(latch.getCount() == 0, "onDataAvailable did not fire within 5s -- trampoline or receive path");
+        }
+    }
+
+    @Test
+    void otherReaderCallbacksRegisterAndClearWithoutCrashing() {
+        try (DomainParticipant p = new DomainParticipant(testDomain())) {
+            Topic<ConformanceRecord> topic = p.createTopic("ListenerOthers", new ConformanceRecord());
+            Subscriber sub = p.createSubscriber();
+            DataReader<ConformanceRecord> reader = sub.createDataReader(topic, ConformanceRecord::new);
+
+            // These statuses are hard to trigger deterministically in a unit test;
+            // this only proves install/clear with all 7 trampolines wired does not
+            // crash, and the mask covers every remaining callback.
+            reader.setListener(new DataReaderListenerBase(), StatusMask.of(
+                    StatusMask.SAMPLE_REJECTED
+                            | StatusMask.LIVELINESS_CHANGED
+                            | StatusMask.REQUESTED_DEADLINE_MISSED
+                            | StatusMask.REQUESTED_INCOMPATIBLE_QOS
+                            | StatusMask.SAMPLE_LOST));
+            reader.setListener(null, null);
+        }
+    }
 }
