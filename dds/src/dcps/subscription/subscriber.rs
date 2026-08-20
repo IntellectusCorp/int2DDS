@@ -593,6 +593,7 @@ impl Subscriber {
         // drain, which only this thread can release. Refuse instead of deadlocking. The caller must
         // delete from another thread or after the callback returns.
         if crate::utils::notify::in_listener_callback() {
+            log::debug!("[delete] refusing delete_datareader from inside a listener callback");
             return Err(DdsError::IllegalOperation);
         }
 
@@ -603,6 +604,9 @@ impl Subscriber {
 
         // An attached ReadCondition or QueryCondition must be deleted before its reader.
         if !datareader.get_readconditions()?.is_empty() {
+            log::debug!(
+                "[delete] refusing delete_datareader: reader has outstanding read conditions"
+            );
             return Err(DdsError::PreconditionNotMet);
         }
 

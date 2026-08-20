@@ -687,6 +687,10 @@ impl Participant {
                 while writer.in_flight_callbacks() > 0 {
                     std::thread::sleep(std::time::Duration::from_micros(50));
                 }
+                debug!(
+                    "[delete] writer {:?} in-flight callbacks drained, all callbacks finished",
+                    entity_id
+                );
             }
         }
 
@@ -781,6 +785,10 @@ impl Participant {
                 while reader.in_flight_callbacks() > 0 {
                     std::thread::sleep(std::time::Duration::from_micros(50));
                 }
+                debug!(
+                    "[delete] reader {:?} in-flight callbacks drained, all callbacks finished",
+                    entity_id
+                );
             }
         }
 

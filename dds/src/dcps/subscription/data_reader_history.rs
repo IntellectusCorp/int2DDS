@@ -1087,7 +1087,9 @@ fn deliver_held_sample<Foo: 'static + Clone + Debug>(
     // section with no early return between them.
     rtps_reader.enter_callback();
 
-    if !rtps_reader.is_deleted() {
+    if rtps_reader.is_deleted() {
+        debug!("[TimeBasedFilter] reader is being deleted, skipping held-sample delivery");
+    } else {
         let pending = match cache_arc.lock() {
             Ok(cache) => {
                 cache.time_based_filter.take_pending_on_timer(instance_handle, RtpsTime::now())

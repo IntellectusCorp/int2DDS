@@ -434,6 +434,13 @@ impl WaitSet {
             }
         }
 
+        if !dead_keys.is_empty() {
+            debug!(
+                "[WaitSet-{}] dropping {} condition(s) whose entity was deleted",
+                self.instance_id,
+                dead_keys.len()
+            );
+        }
         for key in dead_keys {
             if let Some(condition) = conditions.remove(&key) {
                 condition.set_waitset_callback(None);

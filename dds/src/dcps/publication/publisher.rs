@@ -522,6 +522,7 @@ impl Publisher {
         // drain, which only this thread can release. Refuse instead of deadlocking. The caller must
         // delete from another thread or after the callback returns.
         if crate::utils::notify::in_listener_callback() {
+            log::debug!("[delete] refusing delete_datawriter from inside a listener callback");
             return Err(DdsError::IllegalOperation);
         }
 
