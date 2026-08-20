@@ -432,18 +432,19 @@ fn skip_node<R: PlanReader>(reader: &mut R, node: &Node) -> DdsResult<()> {
             advance(reader, length.saturating_mul(2))
         }
         Node::Struct(node) => skip_struct(reader, node),
+        // A collection's DHEADER is read and discarded rather than jumped, which
+        // is what the dynamic path does with it: the elements state their own
+        // extent, and jumping would swallow every error inside them.
         Node::Seq { elem, framed_in, .. } => {
             if *framed_in {
-                let size = reader.read_dheader().map_err(cdr_error)? as usize;
-                return advance(reader, size);
+                let _ = reader.read_dheader().map_err(cdr_error)?;
             }
             let count = reader.deserialize_u32().map_err(cdr_error)?;
             skip_elements(reader, elem, count)
         }
         Node::Array { elem, count, framed_in, .. } => {
             if *framed_in {
-                let size = reader.read_dheader().map_err(cdr_error)? as usize;
-                return advance(reader, size);
+                let _ = reader.read_dheader().map_err(cdr_error)?;
             }
             skip_elements(reader, elem, *count)
         }
@@ -474,37 +475,12 @@ fn scalar_width(node: &Node) -> Option<usize> {
     }
 }
 
+/// Step over one struct without decoding it — the same walk, discarding where
+/// the members sat.
 fn skip_struct<R: PlanReader>(reader: &mut R, node: &StructNode) -> DdsResult<()> {
-    match node.framing {
-        // The DHEADER states the whole extent, and an Appendable struct has no
-        // member that could object to being skipped.
-        Framing::Delimited => {
-            let size = reader.read_dheader().map_err(cdr_error)? as usize;
-            advance(reader, size)
-        }
-        Framing::Plain => {
-            for member in &node.members {
-                skip_member(reader, member)?;
-            }
-            Ok(())
-        }
-        // Tagged framings are walked rather than jumped even here: a member that
-        // demands to be understood has to be refused inside a struct nothing
-        // reads, which is what the dynamic path does. (`TaggedSentinel` has no
-        // extent to jump either way.)
-        Framing::TaggedSentinel | Framing::TaggedDelimited => {
-            let (_, end) = locate_members(reader, node)?;
-            reader.set_position(end);
-            Ok(())
-        }
-    }
-}
-
-fn skip_member<R: PlanReader>(reader: &mut R, member: &MemberNode) -> DdsResult<()> {
-    if member.optional && !reader.read_optional_presence().map_err(cdr_error)? {
-        return Ok(());
-    }
-    skip_node(reader, &member.node)
+    let end = walk_struct(reader, node, None)?;
+    reader.set_position(end);
+    Ok(())
 }
 
 /// Where each member's value begins in this sample, `None` for one the sample
@@ -517,7 +493,28 @@ fn locate_members<R: PlanReader>(
     node: &StructNode,
 ) -> DdsResult<(Vec<Option<usize>>, usize)> {
     let mut starts = vec![None; node.members.len()];
+    let end = walk_struct(reader, node, Some(&mut starts))?;
+    Ok((starts, end))
+}
 
+/// Walk one struct's members — recording where each begins when `starts` is
+/// given — and return the position just past it.
+///
+/// Every framing is walked, never jumped, even when nothing here is read: a
+/// DHEADER states an extent but says nothing about what is inside it, and the
+/// dynamic path refuses an unknown must-understand member, a truncated string or
+/// an overlong sequence wherever it sits. Jumping to the extent would hand back a
+/// key for a sample the fallback rejects.
+///
+/// The extent is still what closes the struct, because an Appendable or Mutable
+/// sample may carry trailing members this plan cannot name — refusing those would
+/// be the opposite divergence. A collection's DHEADER (`skip_node`) is the other
+/// case and is *not* an extent to resume from: the dynamic path discards it.
+fn walk_struct<R: PlanReader>(
+    reader: &mut R,
+    node: &StructNode,
+    mut starts: Option<&mut [Option<usize>]>,
+) -> DdsResult<usize> {
     let declared_end = match node.framing {
         Framing::Delimited | Framing::TaggedDelimited => {
             let size = reader.read_dheader().map_err(cdr_error)? as usize;
@@ -532,7 +529,9 @@ fn locate_members<R: PlanReader>(
                 if member.optional && !reader.read_optional_presence().map_err(cdr_error)? {
                     continue;
                 }
-                starts[index] = Some(reader.get_position());
+                if let Some(starts) = starts.as_deref_mut() {
+                    starts[index] = Some(reader.get_position());
+                }
                 skip_node(reader, &member.node)?;
             }
         }
@@ -545,7 +544,9 @@ fn locate_members<R: PlanReader>(
                 let start = reader.get_position();
                 match node.index_of_id(tag.id) {
                     Some(index) => {
-                        starts[index] = Some(start);
+                        if let Some(starts) = starts.as_deref_mut() {
+                            starts[index] = Some(start);
+                        }
                         skip_node(reader, &node.members[index].node)?;
                     }
                     // Refusing an unknown must-understand member is what the
@@ -586,7 +587,7 @@ fn locate_members<R: PlanReader>(
         }
         None => reader.get_position(),
     };
-    Ok((starts, end))
+    Ok(end)
 }
 
 // ============================================================================
@@ -1461,6 +1462,195 @@ mod tests {
             let plans = TypePlans::compile(&reader_type);
             assert!(plans.serialize_key(&bytes).unwrap().is_err(), "{format_name}");
             assert!(deserialize_dynamic_data(&bytes, &reader_type).is_err(), "{format_name}");
+        }
+    }
+
+    fn array_of(element: TypeIdentifier, count: u8) -> TypeIdentifier {
+        TypeIdentifier::PlainArraySmall {
+            header: PlainCollectionHeader {
+                equiv_kind: plain_collection_equiv_kind(&element),
+                element_flags: CollectionElementFlag::default(),
+            },
+            array_bound_seq: vec![count],
+            element_identifier: Box::new(element),
+        }
+    }
+
+    /// The three ways a nested type can sit behind a DHEADER the key must step
+    /// over.
+    #[derive(Clone, Copy, Debug)]
+    enum Skipped {
+        /// Wrapped in an Appendable struct, whose own DHEADER states the extent.
+        Delimited,
+        Sequence,
+        Array,
+    }
+
+    /// `Outer { skipped: <shape of Inner>, id: @key }` — the key lives past the
+    /// nested type, so reaching it steps over one.
+    fn outer_over(inner: CompleteTypeObject, shape: Skipped) -> Arc<DynamicType> {
+        let inner_hash = EquivalenceHash::compute(&inner.serialize());
+        let mut registry = TypeRegistry::new();
+        registry.register_complete(inner_hash, "Inner".into(), inner);
+        let inner_id = TypeIdentifier::CompleteTypeId(inner_hash);
+
+        let skipped = match shape {
+            Skipped::Delimited => {
+                let mid = struct_object(
+                    "Mid",
+                    ExtensibilityKind::Appendable,
+                    vec![field("child", 0, inner_id)],
+                );
+                let mid_hash = EquivalenceHash::compute(&mid.serialize());
+                registry.register_complete(mid_hash, "Mid".into(), mid);
+                TypeIdentifier::CompleteTypeId(mid_hash)
+            }
+            Skipped::Sequence => sequence_of(inner_id),
+            Skipped::Array => array_of(inner_id, 2),
+        };
+
+        build_with(
+            struct_object(
+                "Outer",
+                ExtensibilityKind::Final,
+                vec![field("skipped", 0, skipped), key("id", 1, TypeIdentifier::Int32)],
+            ),
+            &registry,
+        )
+    }
+
+    /// Populate that `Outer`, applying `fill` to every `Inner` it holds.
+    fn outer_data(
+        outer: &Arc<DynamicType>,
+        shape: Skipped,
+        fill: impl Fn(&mut DynamicData),
+    ) -> DynamicData {
+        let member = &outer.get_member("skipped").unwrap().member_type;
+        let value = match shape {
+            Skipped::Delimited => {
+                let mid_type = member.as_type_ref().expect("Mid unresolved").clone();
+                let inner_type = mid_type
+                    .get_member("child")
+                    .unwrap()
+                    .member_type
+                    .as_type_ref()
+                    .expect("Inner unresolved")
+                    .clone();
+                let mut inner = DynamicData::new(inner_type);
+                fill(&mut inner);
+                let mut mid = DynamicData::new(mid_type);
+                mid.set_value("child", DynamicValue::Struct(Box::new(inner))).unwrap();
+                DynamicValue::Struct(Box::new(mid))
+            }
+            Skipped::Sequence | Skipped::Array => {
+                let element_type = match member {
+                    DynamicTypeKind::Sequence { element_type, .. }
+                    | DynamicTypeKind::Array { element_type, .. } => {
+                        element_type.as_type_ref().expect("Inner unresolved").clone()
+                    }
+                    other => panic!("collection member did not resolve: {other:?}"),
+                };
+                let items = (0..2)
+                    .map(|_| {
+                        let mut inner = DynamicData::new(element_type.clone());
+                        fill(&mut inner);
+                        DynamicValue::Struct(Box::new(inner))
+                    })
+                    .collect();
+                match shape {
+                    Skipped::Array => DynamicValue::Array(items),
+                    _ => DynamicValue::Sequence(items),
+                }
+            }
+        };
+
+        let mut data = DynamicData::new(outer.clone());
+        data.set_value("skipped", value).unwrap();
+        data.set("id", 7i32).unwrap();
+        data
+    }
+
+    /// The same rule one frame further down. An Appendable struct's DHEADER and a
+    /// collection's both state an extent, and taking either as a jump would hide
+    /// the member demanding to be understood inside it — the shape the tagged-only
+    /// fix above still let through.
+    #[test]
+    fn unknown_must_understand_member_below_a_framed_skip() {
+        // The wstring is here because its skip rule derives the byte count by hand
+        // (code units x 2) rather than delegating to the decoder, and widening the
+        // walk is what starts exercising it.
+        fn inner_type(must_understand: bool, with_secret: bool) -> CompleteTypeObject {
+            let mut members = vec![
+                field("a", 0, TypeIdentifier::Int32),
+                field("w", 2, TypeIdentifier::String16Small { bound: 0 }),
+            ];
+            if with_secret {
+                members
+                    .push(Field { must_understand, ..field("secret", 9, TypeIdentifier::Int32) });
+            }
+            struct_object("Inner", ExtensibilityKind::Mutable, members)
+        }
+
+        for shape in [Skipped::Delimited, Skipped::Sequence, Skipped::Array] {
+            for must_understand in [false, true] {
+                let writer = outer_over(inner_type(must_understand, true), shape);
+                let reader = outer_over(inner_type(false, false), shape);
+                let data = outer_data(&writer, shape, |inner| {
+                    inner.set("a", 11i32).unwrap();
+                    // Non-BMP: the code-unit count is neither the byte count nor
+                    // the character count.
+                    inner.set_value("w", DynamicValue::WString("wide\u{1F600}".into())).unwrap();
+                    inner.set("secret", 99i32).unwrap();
+                });
+
+                for (format_name, format) in formats(ExtensibilityKind::Final) {
+                    let label = format!("framed-skip/{shape:?}/mu={must_understand}/{format_name}");
+                    let bytes = serialize_dynamic_data(&data, &format).unwrap();
+                    if must_understand {
+                        let plans = TypePlans::compile(&reader);
+                        assert!(plans.serialize_key(&bytes).unwrap().is_err(), "{label}");
+                        assert!(deserialize_dynamic_data(&bytes, &reader).is_err(), "{label}");
+                    } else {
+                        // Walking must not become refusing what the fallback accepts.
+                        assert_matches_dynamic(&label, &bytes, &reader);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The opposite direction, and the reason the walk still ends at the DHEADER:
+    /// an Appendable writer may append members below a skip too, and those have to
+    /// be accepted. XCDR2 only — XCDR1 frames Appendable inline, with no extent to
+    /// resume from.
+    #[test]
+    fn appendable_trailing_members_survive_a_framed_skip() {
+        fn inner_type(with_appended: bool) -> CompleteTypeObject {
+            let mut members = vec![
+                field("a", 0, TypeIdentifier::Int32),
+                field("w", 2, TypeIdentifier::String16Small { bound: 0 }),
+            ];
+            if with_appended {
+                members.push(field("appended", 1, TypeIdentifier::Int64));
+            }
+            struct_object("Inner", ExtensibilityKind::Appendable, members)
+        }
+
+        let format = SerializationFormat::Xcdr {
+            extensibility_kind: ExtensibilityKind::Final,
+            use_delimiters: false,
+        };
+        for shape in [Skipped::Delimited, Skipped::Sequence, Skipped::Array] {
+            let writer = outer_over(inner_type(true), shape);
+            let reader = outer_over(inner_type(false), shape);
+            let data = outer_data(&writer, shape, |inner| {
+                inner.set("a", 11i32).unwrap();
+                inner.set_value("w", DynamicValue::WString("wide\u{1F600}".into())).unwrap();
+                inner.set("appended", 22i64).unwrap();
+            });
+
+            let bytes = serialize_dynamic_data(&data, &format).unwrap();
+            assert_matches_dynamic(&format!("appendable-below/{shape:?}"), &bytes, &reader);
         }
     }
 
