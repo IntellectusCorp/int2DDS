@@ -21,6 +21,9 @@ val java22 by sourceSets.creating {
 // JDK 22+ toolchain. Until then the task is NO-SOURCE and never runs, so the
 // build stays green on the JDK 17 baseline.
 tasks.named<JavaCompile>("compileJava22Java") {
+    javaCompiler.set(javaToolchains.compilerFor {
+        languageVersion.set(JavaLanguageVersion.of(24))
+    })
     options.release.set(22)
 }
 
