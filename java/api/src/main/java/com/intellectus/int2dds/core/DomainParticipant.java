@@ -1,6 +1,7 @@
 package com.intellectus.int2dds.core;
 
 import com.intellectus.int2dds.discovery.PublicationBuiltinTopicData;
+import com.intellectus.int2dds.discovery.SubscriptionBuiltinTopicData;
 import com.intellectus.int2dds.exceptions.DdsErrorException;
 import com.intellectus.int2dds.internal.NativeCleaner;
 import com.intellectus.int2dds.internal.NativeKeepAlive;
@@ -152,6 +153,47 @@ public final class DomainParticipant extends NativeEntity {
             }
         } finally {
             FfiAccess.pubDataSeqDelete(seq);
+        }
+        return out;
+    }
+
+    /**
+     * Takes a snapshot of currently discovered (alive) subscriptions, blocking
+     * up to {@code timeoutMillis} (negative = infinite) for the builtin
+     * DCPSSubscription reader to have data. Discovery is asynchronous, so an
+     * empty list shortly after matching entities are created does not mean
+     * discovery failed -- callers on a bounded budget should retry.
+     *
+     * <p>Materializes each entry into an immutable {@link
+     * SubscriptionBuiltinTopicData} before releasing the native snapshot: the
+     * per-entry box the core mints (a clone of its stored data) is destroyed,
+     * and the snapshot sequence itself deleted, in {@code finally} blocks, so
+     * an exception mid-read still frees everything already allocated.
+     */
+    public List<SubscriptionBuiltinTopicData> takeDiscoveredSubscriptions(long timeoutMillis) {
+        long h = handle();
+        long[] seqOut = new long[1];
+        int rc = FfiAccess.takeDiscoveredSubscriptionsSnapshot(h, (int) timeoutMillis, seqOut);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        long seq = seqOut[0];
+        List<SubscriptionBuiltinTopicData> out = new ArrayList<SubscriptionBuiltinTopicData>();
+        try {
+            long[] lenOut = new long[1];
+            ReturnCodes.check(FfiAccess.subDataSeqLength(seq, lenOut));
+            int n = (int) lenOut[0];
+            for (int i = 0; i < n; i++) {
+                long[] dataOut = new long[1];
+                ReturnCodes.check(FfiAccess.subDataSeqGet(seq, i, dataOut));
+                long data = dataOut[0];
+                try {
+                    out.add(SubscriptionBuiltinTopicData.materialize(data));
+                } finally {
+                    FfiAccess.subDataDestroy(data);
+                }
+            }
+        } finally {
+            FfiAccess.subDataSeqDelete(seq);
         }
         return out;
     }

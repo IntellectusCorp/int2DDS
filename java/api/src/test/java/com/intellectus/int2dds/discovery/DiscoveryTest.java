@@ -2,9 +2,11 @@ package com.intellectus.int2dds.discovery;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.intellectus.int2dds.core.DataReader;
 import com.intellectus.int2dds.core.DataWriter;
 import com.intellectus.int2dds.core.DomainParticipant;
 import com.intellectus.int2dds.core.Publisher;
+import com.intellectus.int2dds.core.Subscriber;
 import com.intellectus.int2dds.core.Topic;
 import com.intellectus.int2dds.types.ConformanceRecord;
 import java.util.Collections;
@@ -53,6 +55,37 @@ class DiscoveryTest {
                 Thread.sleep(50);
             }
             assertTrue(hit, "should discover the remote writer's publication within 5s");
+        }
+    }
+
+    /**
+     * Mirrors {@link #takeDiscoveredPublicationsSeesAWriter()} for the
+     * subscription side: a reader lives on one participant, and a second,
+     * separate participant in the same domain polls
+     * {@code takeDiscoveredSubscriptions} for its {@code
+     * SubscriptionBuiltinTopicData}.
+     */
+    @Test
+    void takeDiscoveredSubscriptionsSeesAReader() throws InterruptedException {
+        try (DomainParticipant readerParticipant = new DomainParticipant(testDomain());
+                DomainParticipant discovererParticipant = new DomainParticipant(testDomain())) {
+            Topic<ConformanceRecord> topic =
+                    readerParticipant.createTopic("DiscoSubTopic", new ConformanceRecord());
+            Subscriber sub = readerParticipant.createSubscriber();
+            DataReader<ConformanceRecord> r = sub.createDataReader(topic, ConformanceRecord::new);
+
+            List<SubscriptionBuiltinTopicData> found = Collections.emptyList();
+            long deadline = System.nanoTime() + 5_000_000_000L;
+            boolean hit = false;
+            while (System.nanoTime() < deadline) {
+                found = discovererParticipant.takeDiscoveredSubscriptions(200);
+                hit = found.stream().anyMatch(d -> "DiscoSubTopic".equals(d.topicName()));
+                if (hit) {
+                    break;
+                }
+                Thread.sleep(50);
+            }
+            assertTrue(hit, "should discover the remote reader's subscription within 5s");
         }
     }
 }

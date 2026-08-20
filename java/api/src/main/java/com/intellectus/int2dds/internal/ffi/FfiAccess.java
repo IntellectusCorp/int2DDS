@@ -1348,4 +1348,172 @@ public final class FfiAccess {
         }
         return rc;
     }
+
+    // --- Discovery: SubscriptionBuiltinTopicData (materialize-then-destroy) ---
+
+    /**
+     * Collects a snapshot of discovered subscriptions (the builtin DCPSSubscription
+     * reader), blocking up to {@code timeoutMs} (negative = infinite). Returns rc;
+     * on {@code RET_OK} writes the snapshot sequence handle to {@code seqOut[0]}.
+     * The caller owns the sequence and must release it with {@link
+     * #subDataSeqDelete}.
+     */
+    public static int takeDiscoveredSubscriptionsSnapshot(long participant, int timeoutMs,
+            long[] seqOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_participant_take_discovered_subscriptions_snapshot(
+                participant, timeoutMs, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            seqOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Entry count of a subscription snapshot. Returns rc; writes it to {@code out[0]} on success. */
+    public static int subDataSeqLength(long seq, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_subscription_builtin_topic_data_seq_length(seq, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Mints an owned {@code SubscriptionBuiltinTopicData} box for the entry at
+     * {@code index} (the core clones its stored data into it). Returns rc; writes
+     * the handle to {@code dataOut[0]} on success. The caller owns the box and
+     * must release it with {@link #subDataDestroy}.
+     */
+    public static int subDataSeqGet(long seq, long index, long[] dataOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_subscription_builtin_topic_data_seq_get(seq, index, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            dataOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Releases a subscription snapshot sequence returned by {@link #takeDiscoveredSubscriptionsSnapshot}. */
+    public static void subDataSeqDelete(long seq) {
+        Ffi.int2dds_subscription_builtin_topic_data_seq_delete(seq);
+    }
+
+    /** Releases one owned {@code SubscriptionBuiltinTopicData} box minted by {@link #subDataSeqGet}. */
+    public static void subDataDestroy(long data) {
+        Ffi.int2dds_subscription_builtin_topic_data_destroy(data);
+    }
+
+    /** The 12-byte instance key. {@code keyOut} must be a 12-byte array. */
+    public static int subDataGetKey(long data, byte[] keyOut) {
+        return Ffi.int2dds_subscription_builtin_topic_data_get_key(data, keyOut);
+    }
+
+    /** The 16-byte endpoint GUID. {@code guidOut} must be a 16-byte array. */
+    public static int subDataGetEndpointGuid(long data, byte[] guidOut) {
+        return Ffi.int2dds_subscription_builtin_topic_data_get_endpoint_guid(data, guidOut);
+    }
+
+    /** The 12-byte owning-participant key. {@code keyOut} must be a 12-byte array. */
+    public static int subDataGetParticipantKey(long data, byte[] keyOut) {
+        return Ffi.int2dds_subscription_builtin_topic_data_get_participant_key(data, keyOut);
+    }
+
+    /** Direct passthrough for {@link #readGrowableString}: the topic name getter. */
+    public static int subDataGetTopicName(long data, long buf, long capacity, long sizeOut) {
+        return Ffi.int2dds_subscription_builtin_topic_data_get_topic_name(data, buf, capacity, sizeOut);
+    }
+
+    /** Direct passthrough for {@link #readGrowableString}: the type name getter. */
+    public static int subDataGetTypeName(long data, long buf, long capacity, long sizeOut) {
+        return Ffi.int2dds_subscription_builtin_topic_data_get_type_name(data, buf, capacity, sizeOut);
+    }
+
+    /** Direct passthrough for {@link #readGrowableBytes}: the user_data getter. */
+    public static int subDataGetUserData(long data, long buf, long capacity, long sizeOut) {
+        return Ffi.int2dds_subscription_builtin_topic_data_get_user_data(data, buf, capacity, sizeOut);
+    }
+
+    /** Reliability kind: 0 = BEST_EFFORT, 1 = RELIABLE. Writes it to {@code out[0]} on success. */
+    public static int subDataGetReliabilityKind(long data, int[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_subscription_builtin_topic_data_get_reliability_kind(
+                data, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getInt(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Durability kind: 0 = VOLATILE, 1 = TRANSIENT_LOCAL, 2 = TRANSIENT,
+     * 3 = PERSISTENT. Writes it to {@code out[0]} on success.
+     */
+    public static int subDataGetDurabilityKind(long data, int[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_subscription_builtin_topic_data_get_durability_kind(
+                data, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getInt(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Liveliness kind: 0 = AUTOMATIC, 1 = MANUAL_BY_PARTICIPANT,
+     * 2 = MANUAL_BY_TOPIC. Writes it to {@code out[0]} on success.
+     */
+    public static int subDataGetLivelinessKind(long data, int[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_subscription_builtin_topic_data_get_liveliness_kind(
+                data, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getInt(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Deadline period (sec, nanosec); an infinite period reads back as
+     * (0x7fffffff, 0x7fffffff). Writes it to {@code secOut[0]}/{@code
+     * nanosecOut[0]} on success.
+     */
+    public static int subDataGetDeadline(long data, int[] secOut, int[] nanosecOut) {
+        ByteBuffer secSlot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
+        ByteBuffer nanoSlot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_subscription_builtin_topic_data_get_deadline(
+                data, directBufferAddress(secSlot), directBufferAddress(nanoSlot));
+        NativeKeepAlive.keepAlive(secSlot);
+        NativeKeepAlive.keepAlive(nanoSlot);
+        if (rc == 0) {
+            secOut[0] = secSlot.getInt(0);
+            nanosecOut[0] = nanoSlot.getInt(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Liveliness lease duration (sec, nanosec); an infinite duration reads back
+     * as (0x7fffffff, 0x7fffffff). Writes it to {@code secOut[0]}/{@code
+     * nanosecOut[0]} on success.
+     */
+    public static int subDataGetLivelinessLeaseDuration(long data, int[] secOut, int[] nanosecOut) {
+        ByteBuffer secSlot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
+        ByteBuffer nanoSlot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_subscription_builtin_topic_data_get_liveliness_lease_duration(
+                data, directBufferAddress(secSlot), directBufferAddress(nanoSlot));
+        NativeKeepAlive.keepAlive(secSlot);
+        NativeKeepAlive.keepAlive(nanoSlot);
+        if (rc == 0) {
+            secOut[0] = secSlot.getInt(0);
+            nanosecOut[0] = nanoSlot.getInt(0);
+        }
+        return rc;
+    }
 }
