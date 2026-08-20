@@ -7,7 +7,9 @@ import com.intellectus.int2dds.internal.NativeKeepAlive;
 import com.intellectus.int2dds.internal.QosMarshal;
 import com.intellectus.int2dds.internal.ReturnCodes;
 import com.intellectus.int2dds.internal.ffi.FfiAccess;
+import com.intellectus.int2dds.listeners.DataReaderListener;
 import com.intellectus.int2dds.qos.DataReaderQos;
+import com.intellectus.int2dds.status.StatusMask;
 import com.intellectus.int2dds.types.IDdsType;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -20,10 +22,11 @@ import java.util.function.Supplier;
  * takes/reads one serialized sample into a pooled direct buffer and rebuilds
  * {@code T} with the CDR layer — no loan, no copy beyond the core's own.
  *
- * <p><b>Listener defect (deferred):</b> {@code int2dds_delete_datareader}
- * runs {@code set_listener(None)} before its rejectable delete without
- * restoring on failure. This binding never installs a listener, so that path
- * is dormant here; a future listener branch owns the fix.
+ * <p><b>Listener lifecycle:</b> a listener installed with {@link #setListener}
+ * is held by a binding-owned native context whose pointer this reader tracks.
+ * {@link NativeEntity#close()} is final and does not clear it, so a caller that
+ * installed a listener must call {@code setListener(null, null)} before closing
+ * to release that context; automatic teardown is deferred to a later branch.
  *
  * @param <T> the DDS data type this reader receives.
  */
@@ -36,6 +39,10 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
 
     private final Topic<T> topic;
     private final Supplier<T> factory;
+
+    // Pointer to the binding-owned native listener context, or 0 when none is
+    // installed. Guarded by setListener's own synchronization.
+    private long listenerCtx = 0L;
 
     // Reused across take/read on this reader. Not thread-safe by design: a
     // DataReader is used from one consumer thread at a time, as in the C#
@@ -58,6 +65,39 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
     /** The topic this reader receives from — the same instance passed to {@code createDataReader}. */
     public Topic<T> topic() {
         return topic;
+    }
+
+    /**
+     * Installs {@code listener} for the statuses in {@code mask}, or — with a
+     * {@code null} listener — clears any current listener. A {@code null}
+     * {@code mask} means all statuses.
+     *
+     * <p>Any previously installed listener is cleared first, releasing its
+     * native context. Callbacks fire on DDS background threads, so a listener
+     * must be thread-safe. Because {@link #close()} does not clear listeners, a
+     * caller should {@code setListener(null, null)} before closing this reader.
+     *
+     * @throws com.intellectus.int2dds.exceptions.DdsException if the native
+     *     clear or install fails
+     */
+    public synchronized void setListener(DataReaderListener listener, StatusMask mask) {
+        long h = handle();
+        long prev = listenerCtx;
+        if (prev != 0L) {
+            int rc = FfiAccess.readerListenerClear(h, prev);
+            NativeKeepAlive.keepAlive(this);
+            listenerCtx = 0L;
+            ReturnCodes.check(rc);
+        }
+        if (listener != null) {
+            long ctx = FfiAccess.readerListenerSet(
+                    h, listener, mask == null ? StatusMask.all().bits() : mask.bits());
+            NativeKeepAlive.keepAlive(this);
+            if (ctx == 0L) {
+                throw new DdsErrorException("failed to install DataReader listener");
+            }
+            listenerCtx = ctx;
+        }
     }
 
     /** Takes (removes) the next sample, or null if the cache is empty. */

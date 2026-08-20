@@ -18,6 +18,7 @@ pub mod handwritten;
 #[cfg(test)]
 mod sample_info_layout;
 pub mod strings;
+mod trampoline;
 
 /// The product version, inherited from the workspace `Cargo.toml`.
 /// `NativeLoader` on the Java side compares this against the JAR version.

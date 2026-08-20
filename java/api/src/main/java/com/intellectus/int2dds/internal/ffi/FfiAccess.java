@@ -2,6 +2,7 @@ package com.intellectus.int2dds.internal.ffi;
 
 import com.intellectus.int2dds.internal.NativeKeepAlive;
 import com.intellectus.int2dds.internal.NativeLoader;
+import com.intellectus.int2dds.listeners.DataReaderListener;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
@@ -755,6 +756,25 @@ public final class FfiAccess {
     /** Releases a datareader. Returns the C ABI status code. */
     public static int deleteDataReader(long reader) {
         return Ffi.int2dds_delete_datareader(reader);
+    }
+
+    // --- DataReader listeners (hand-written trampoline layer) ---
+
+    /**
+     * Installs {@code listener} on {@code reader} for {@code mask}. Returns the
+     * binding-owned context pointer to pass back to {@link #readerListenerClear},
+     * or 0 on failure. Policy-free passthrough to {@link FfiHandwritten}.
+     */
+    public static long readerListenerSet(long reader, DataReaderListener listener, int mask) {
+        return FfiHandwritten.nativeReaderListenerSet(reader, listener, mask);
+    }
+
+    /**
+     * Clears the listener on {@code reader} and releases {@code ctx}. Returns the
+     * C ABI status code. Policy-free passthrough to {@link FfiHandwritten}.
+     */
+    public static int readerListenerClear(long reader, long ctx) {
+        return FfiHandwritten.nativeReaderListenerClear(reader, ctx);
     }
 
     /**
