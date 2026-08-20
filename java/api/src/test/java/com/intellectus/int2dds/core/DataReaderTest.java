@@ -57,4 +57,41 @@ class DataReaderTest {
             assertEquals("hello", got.data().label);
         }
     }
+
+    @Test
+    void takeGrowsBufferForLargeSample() throws InterruptedException {
+        try (DomainParticipant p = new DomainParticipant(testDomain())) {
+            Topic<ConformanceRecord> topic =
+                    p.createTopic("ReadGrowBuffer", new ConformanceRecord());
+            Publisher pub = p.createPublisher();
+            DataWriter<ConformanceRecord> w = pub.createDataWriter(topic);
+            Subscriber sub = p.createSubscriber();
+            DataReader<ConformanceRecord> reader =
+                    sub.createDataReader(topic, ConformanceRecord::new);
+
+            char[] big = new char[8000];
+            java.util.Arrays.fill(big, 'x');
+            ConformanceRecord sent = new ConformanceRecord();
+            sent.id = 42;
+            sent.value = 9.75;
+            sent.label = new String(big);
+
+            Sample<ConformanceRecord> got = null;
+            long deadline = System.nanoTime() + 5_000_000_000L;
+            while (System.nanoTime() < deadline) {
+                w.write(sent);
+                got = reader.take();
+                if (got != null) {
+                    break;
+                }
+                Thread.sleep(20);
+            }
+
+            assertNotNull(got, "no sample within 5s -- discovery or receive path");
+            assertTrue(got.info().validData(), "sample should carry valid data");
+            assertEquals(42, got.data().id);
+            assertEquals(9.75, got.data().value);
+            assertEquals(sent.label, got.data().label);
+        }
+    }
 }
