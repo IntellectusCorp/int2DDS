@@ -17,9 +17,12 @@ val java22 by sourceSets.creating {
     compileClasspath += sourceSets.main.get().output
 }
 
-// Only meaningful once src/main/java22 has sources, and only compilable on a
-// JDK 22+ toolchain. Until then the task is NO-SOURCE and never runs, so the
-// build stays green on the JDK 17 baseline.
+// src/main/java22 is now populated (the generated FFM Ffi backend), so this
+// task runs on every build, not just when triggered directly, and needs a
+// real JDK 22+ compiler. javaToolchains.compilerFor auto-provisions JDK 24
+// via the foojay-resolver-convention plugin the first time this runs on a
+// machine without one already cached -- a network dependency that the base
+// `test` task now implicitly triggers.
 tasks.named<JavaCompile>("compileJava22Java") {
     javaCompiler.set(javaToolchains.compilerFor {
         languageVersion.set(JavaLanguageVersion.of(24))
@@ -31,8 +34,8 @@ tasks.named<JavaCompile>("compileJava22Java") {
 // straight to java.lang.ref.Reference.reachabilityFence -- unavailable
 // before 9, which is exactly why the --release-8 src/main/java fallback
 // exists at all. Same shape as java22 above; release 9 rather than 22 means
-// this one is compilable by this build's own JDK 17 toolchain today, so
-// unlike java22 it is populated immediately, not left NO-SOURCE.
+// this one is compilable by this build's own JDK 17 toolchain, no extra
+// toolchain provisioning needed.
 val java9 by sourceSets.creating {
     java.srcDir("src/main/java9")
     compileClasspath += sourceSets.main.get().output

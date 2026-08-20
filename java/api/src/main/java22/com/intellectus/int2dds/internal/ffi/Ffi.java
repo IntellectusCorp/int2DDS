@@ -139,7 +139,7 @@ public final class Ffi {
     static int int2dds_contentfilteredtopic_set_expression_parameters(long cft, byte[][] expression_parameters, long expression_parameters_count) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_expression_parameters;
-            if (expression_parameters == null) {
+            if (expression_parameters == null || expression_parameters.length == 0) {
                 __ffi_seg_expression_parameters = MemorySegment.NULL;
             } else {
                 __ffi_seg_expression_parameters = __ffi_arena.allocate(ADDRESS, expression_parameters.length);
@@ -147,7 +147,7 @@ public final class Ffi {
                     byte[] __ffi_elem_expression_parameters = expression_parameters[__ffi_i_expression_parameters];
                     MemorySegment __ffi_elemSeg_expression_parameters;
                     if (__ffi_elem_expression_parameters == null) {
-                        __ffi_elemSeg_expression_parameters = MemorySegment.NULL;
+                        __ffi_elemSeg_expression_parameters = __ffi_arena.allocate(1);
                     } else {
                         __ffi_elemSeg_expression_parameters = __ffi_arena.allocate(__ffi_elem_expression_parameters.length + 1);
                         MemorySegment.copy(__ffi_elem_expression_parameters, 0, __ffi_elemSeg_expression_parameters, JAVA_BYTE, 0, __ffi_elem_expression_parameters.length);
@@ -168,7 +168,7 @@ public final class Ffi {
             MemorySegment __ffi_seg_filter_expression = (filter_expression == null) ? MemorySegment.NULL : __ffi_arena.allocate(filter_expression.length + 1);
             if (filter_expression != null) MemorySegment.copy(filter_expression, 0, __ffi_seg_filter_expression, JAVA_BYTE, 0, filter_expression.length);
             MemorySegment __ffi_seg_expression_parameters;
-            if (expression_parameters == null) {
+            if (expression_parameters == null || expression_parameters.length == 0) {
                 __ffi_seg_expression_parameters = MemorySegment.NULL;
             } else {
                 __ffi_seg_expression_parameters = __ffi_arena.allocate(ADDRESS, expression_parameters.length);
@@ -176,7 +176,7 @@ public final class Ffi {
                     byte[] __ffi_elem_expression_parameters = expression_parameters[__ffi_i_expression_parameters];
                     MemorySegment __ffi_elemSeg_expression_parameters;
                     if (__ffi_elem_expression_parameters == null) {
-                        __ffi_elemSeg_expression_parameters = MemorySegment.NULL;
+                        __ffi_elemSeg_expression_parameters = __ffi_arena.allocate(1);
                     } else {
                         __ffi_elemSeg_expression_parameters = __ffi_arena.allocate(__ffi_elem_expression_parameters.length + 1);
                         MemorySegment.copy(__ffi_elem_expression_parameters, 0, __ffi_elemSeg_expression_parameters, JAVA_BYTE, 0, __ffi_elem_expression_parameters.length);
@@ -199,7 +199,7 @@ public final class Ffi {
             MemorySegment __ffi_seg_filter_expression = (filter_expression == null) ? MemorySegment.NULL : __ffi_arena.allocate(filter_expression.length + 1);
             if (filter_expression != null) MemorySegment.copy(filter_expression, 0, __ffi_seg_filter_expression, JAVA_BYTE, 0, filter_expression.length);
             MemorySegment __ffi_seg_expression_parameters;
-            if (expression_parameters == null) {
+            if (expression_parameters == null || expression_parameters.length == 0) {
                 __ffi_seg_expression_parameters = MemorySegment.NULL;
             } else {
                 __ffi_seg_expression_parameters = __ffi_arena.allocate(ADDRESS, expression_parameters.length);
@@ -207,7 +207,7 @@ public final class Ffi {
                     byte[] __ffi_elem_expression_parameters = expression_parameters[__ffi_i_expression_parameters];
                     MemorySegment __ffi_elemSeg_expression_parameters;
                     if (__ffi_elem_expression_parameters == null) {
-                        __ffi_elemSeg_expression_parameters = MemorySegment.NULL;
+                        __ffi_elemSeg_expression_parameters = __ffi_arena.allocate(1);
                     } else {
                         __ffi_elemSeg_expression_parameters = __ffi_arena.allocate(__ffi_elem_expression_parameters.length + 1);
                         MemorySegment.copy(__ffi_elem_expression_parameters, 0, __ffi_elemSeg_expression_parameters, JAVA_BYTE, 0, __ffi_elem_expression_parameters.length);
@@ -408,7 +408,7 @@ public final class Ffi {
             MemorySegment __ffi_seg_dds_type_name = (dds_type_name == null) ? MemorySegment.NULL : __ffi_arena.allocate(dds_type_name.length + 1);
             if (dds_type_name != null) MemorySegment.copy(dds_type_name, 0, __ffi_seg_dds_type_name, JAVA_BYTE, 0, dds_type_name.length);
             MemorySegment __ffi_seg_field_names;
-            if (field_names == null) {
+            if (field_names == null || field_names.length == 0) {
                 __ffi_seg_field_names = MemorySegment.NULL;
             } else {
                 __ffi_seg_field_names = __ffi_arena.allocate(ADDRESS, field_names.length);
@@ -416,7 +416,7 @@ public final class Ffi {
                     byte[] __ffi_elem_field_names = field_names[__ffi_i_field_names];
                     MemorySegment __ffi_elemSeg_field_names;
                     if (__ffi_elem_field_names == null) {
-                        __ffi_elemSeg_field_names = MemorySegment.NULL;
+                        __ffi_elemSeg_field_names = __ffi_arena.allocate(1);
                     } else {
                         __ffi_elemSeg_field_names = __ffi_arena.allocate(__ffi_elem_field_names.length + 1);
                         MemorySegment.copy(__ffi_elem_field_names, 0, __ffi_elemSeg_field_names, JAVA_BYTE, 0, __ffi_elem_field_names.length);
@@ -479,7 +479,7 @@ public final class Ffi {
             MemorySegment __ffi_seg_query_expression = (query_expression == null) ? MemorySegment.NULL : __ffi_arena.allocate(query_expression.length + 1);
             if (query_expression != null) MemorySegment.copy(query_expression, 0, __ffi_seg_query_expression, JAVA_BYTE, 0, query_expression.length);
             MemorySegment __ffi_seg_query_parameters;
-            if (query_parameters == null) {
+            if (query_parameters == null || query_parameters.length == 0) {
                 __ffi_seg_query_parameters = MemorySegment.NULL;
             } else {
                 __ffi_seg_query_parameters = __ffi_arena.allocate(ADDRESS, query_parameters.length);
@@ -487,7 +487,7 @@ public final class Ffi {
                     byte[] __ffi_elem_query_parameters = query_parameters[__ffi_i_query_parameters];
                     MemorySegment __ffi_elemSeg_query_parameters;
                     if (__ffi_elem_query_parameters == null) {
-                        __ffi_elemSeg_query_parameters = MemorySegment.NULL;
+                        __ffi_elemSeg_query_parameters = __ffi_arena.allocate(1);
                     } else {
                         __ffi_elemSeg_query_parameters = __ffi_arena.allocate(__ffi_elem_query_parameters.length + 1);
                         MemorySegment.copy(__ffi_elem_query_parameters, 0, __ffi_elemSeg_query_parameters, JAVA_BYTE, 0, __ffi_elem_query_parameters.length);
@@ -515,9 +515,9 @@ public final class Ffi {
 
     static int int2dds_datareader_get_guid(long reader, byte[] guid_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_guid_out = (guid_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(guid_out.length);
+            MemorySegment __ffi_seg_guid_out = (guid_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
             int __ffi_ret = (int) MH_int2dds_datareader_get_guid.invokeExact(reader, __ffi_seg_guid_out);
-            if (guid_out != null) MemorySegment.copy(__ffi_seg_guid_out, JAVA_BYTE, 0, guid_out, 0, guid_out.length);
+            if (guid_out != null) MemorySegment.copy(__ffi_seg_guid_out, JAVA_BYTE, 0, guid_out, 0, Math.min(guid_out.length, 16));
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datareader_get_guid", __ffi_thrown);
@@ -528,8 +528,8 @@ public final class Ffi {
 
     static int int2dds_datareader_get_key_value(long reader, byte[] handle, long key_buf, long key_capacity, long key_size_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(handle.length);
-            if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, handle.length);
+            MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
+            if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, Math.min(handle.length, 16));
             return (int) MH_int2dds_datareader_get_key_value.invokeExact(reader, __ffi_seg_handle, key_buf, key_capacity, key_size_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datareader_get_key_value", __ffi_thrown);
@@ -560,8 +560,8 @@ public final class Ffi {
 
     static int int2dds_datareader_get_matched_publication_data(long reader, byte[] handle, long data_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(handle.length);
-            if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, handle.length);
+            MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
+            if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, Math.min(handle.length, 16));
             return (int) MH_int2dds_datareader_get_matched_publication_data.invokeExact(reader, __ffi_seg_handle, data_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datareader_get_matched_publication_data", __ffi_thrown);
@@ -573,7 +573,8 @@ public final class Ffi {
     static int int2dds_datareader_get_matched_publications(long reader, byte[] handles_out, long capacity, long count_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_handles_out = (handles_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(handles_out.length);
-            int __ffi_ret = (int) MH_int2dds_datareader_get_matched_publications.invokeExact(reader, __ffi_seg_handles_out, capacity, count_out);
+            long __ffi_cap_handles_out = (handles_out == null) ? 0L : Math.min(capacity, (long) (handles_out.length / 16));
+            int __ffi_ret = (int) MH_int2dds_datareader_get_matched_publications.invokeExact(reader, __ffi_seg_handles_out, __ffi_cap_handles_out, count_out);
             if (handles_out != null) MemorySegment.copy(__ffi_seg_handles_out, JAVA_BYTE, 0, handles_out, 0, handles_out.length);
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
@@ -685,9 +686,9 @@ public final class Ffi {
 
     static int int2dds_datareader_lookup_instance(long reader, long key, long key_len, byte[] handle_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_handle_out = (handle_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(handle_out.length);
+            MemorySegment __ffi_seg_handle_out = (handle_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
             int __ffi_ret = (int) MH_int2dds_datareader_lookup_instance.invokeExact(reader, key, key_len, __ffi_seg_handle_out);
-            if (handle_out != null) MemorySegment.copy(__ffi_seg_handle_out, JAVA_BYTE, 0, handle_out, 0, handle_out.length);
+            if (handle_out != null) MemorySegment.copy(__ffi_seg_handle_out, JAVA_BYTE, 0, handle_out, 0, Math.min(handle_out.length, 16));
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datareader_lookup_instance", __ffi_thrown);
@@ -988,8 +989,8 @@ public final class Ffi {
 
     static int int2dds_datareader_read_instance_serialized_batch(long reader, byte[] handle, int max_samples, int sample_state_mask, int view_state_mask, int instance_state_mask, long seq_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(handle.length);
-            if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, handle.length);
+            MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
+            if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, Math.min(handle.length, 16));
             return (int) MH_int2dds_datareader_read_instance_serialized_batch.invokeExact(reader, __ffi_seg_handle, max_samples, sample_state_mask, view_state_mask, instance_state_mask, seq_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datareader_read_instance_serialized_batch", __ffi_thrown);
@@ -1090,8 +1091,8 @@ public final class Ffi {
 
     static int int2dds_datareader_take_instance_serialized_batch(long reader, byte[] handle, int max_samples, int sample_state_mask, int view_state_mask, int instance_state_mask, long seq_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(handle.length);
-            if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, handle.length);
+            MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
+            if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, Math.min(handle.length, 16));
             return (int) MH_int2dds_datareader_take_instance_serialized_batch.invokeExact(reader, __ffi_seg_handle, max_samples, sample_state_mask, view_state_mask, instance_state_mask, seq_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datareader_take_instance_serialized_batch", __ffi_thrown);
@@ -1222,8 +1223,8 @@ public final class Ffi {
 
     static int int2dds_datawriter_dispose(long writer, long key, long key_len, byte[] handle) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(handle.length);
-            if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, handle.length);
+            MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
+            if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, Math.min(handle.length, 16));
             return (int) MH_int2dds_datawriter_dispose.invokeExact(writer, key, key_len, __ffi_seg_handle);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datawriter_dispose", __ffi_thrown);
@@ -1234,9 +1235,9 @@ public final class Ffi {
 
     static int int2dds_datawriter_get_guid(long writer, byte[] guid_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_guid_out = (guid_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(guid_out.length);
+            MemorySegment __ffi_seg_guid_out = (guid_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
             int __ffi_ret = (int) MH_int2dds_datawriter_get_guid.invokeExact(writer, __ffi_seg_guid_out);
-            if (guid_out != null) MemorySegment.copy(__ffi_seg_guid_out, JAVA_BYTE, 0, guid_out, 0, guid_out.length);
+            if (guid_out != null) MemorySegment.copy(__ffi_seg_guid_out, JAVA_BYTE, 0, guid_out, 0, Math.min(guid_out.length, 16));
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datawriter_get_guid", __ffi_thrown);
@@ -1247,8 +1248,8 @@ public final class Ffi {
 
     static int int2dds_datawriter_get_key_value(long writer, byte[] handle, long key_buf, long key_capacity, long key_size_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(handle.length);
-            if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, handle.length);
+            MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
+            if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, Math.min(handle.length, 16));
             return (int) MH_int2dds_datawriter_get_key_value.invokeExact(writer, __ffi_seg_handle, key_buf, key_capacity, key_size_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datawriter_get_key_value", __ffi_thrown);
@@ -1279,8 +1280,8 @@ public final class Ffi {
 
     static int int2dds_datawriter_get_matched_subscription_data(long writer, byte[] handle, long data_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(handle.length);
-            if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, handle.length);
+            MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
+            if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, Math.min(handle.length, 16));
             return (int) MH_int2dds_datawriter_get_matched_subscription_data.invokeExact(writer, __ffi_seg_handle, data_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datawriter_get_matched_subscription_data", __ffi_thrown);
@@ -1292,7 +1293,8 @@ public final class Ffi {
     static int int2dds_datawriter_get_matched_subscriptions(long writer, byte[] handles_out, long capacity, long count_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_handles_out = (handles_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(handles_out.length);
-            int __ffi_ret = (int) MH_int2dds_datawriter_get_matched_subscriptions.invokeExact(writer, __ffi_seg_handles_out, capacity, count_out);
+            long __ffi_cap_handles_out = (handles_out == null) ? 0L : Math.min(capacity, (long) (handles_out.length / 16));
+            int __ffi_ret = (int) MH_int2dds_datawriter_get_matched_subscriptions.invokeExact(writer, __ffi_seg_handles_out, __ffi_cap_handles_out, count_out);
             if (handles_out != null) MemorySegment.copy(__ffi_seg_handles_out, JAVA_BYTE, 0, handles_out, 0, handles_out.length);
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
@@ -1374,9 +1376,9 @@ public final class Ffi {
 
     static int int2dds_datawriter_lookup_instance(long writer, long key, long key_len, byte[] handle_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_handle_out = (handle_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(handle_out.length);
+            MemorySegment __ffi_seg_handle_out = (handle_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
             int __ffi_ret = (int) MH_int2dds_datawriter_lookup_instance.invokeExact(writer, key, key_len, __ffi_seg_handle_out);
-            if (handle_out != null) MemorySegment.copy(__ffi_seg_handle_out, JAVA_BYTE, 0, handle_out, 0, handle_out.length);
+            if (handle_out != null) MemorySegment.copy(__ffi_seg_handle_out, JAVA_BYTE, 0, handle_out, 0, Math.min(handle_out.length, 16));
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datawriter_lookup_instance", __ffi_thrown);
@@ -1727,9 +1729,9 @@ public final class Ffi {
 
     static int int2dds_datawriter_register_instance(long writer, long key, long key_len, byte[] handle_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_handle_out = (handle_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(handle_out.length);
+            MemorySegment __ffi_seg_handle_out = (handle_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
             int __ffi_ret = (int) MH_int2dds_datawriter_register_instance.invokeExact(writer, key, key_len, __ffi_seg_handle_out);
-            if (handle_out != null) MemorySegment.copy(__ffi_seg_handle_out, JAVA_BYTE, 0, handle_out, 0, handle_out.length);
+            if (handle_out != null) MemorySegment.copy(__ffi_seg_handle_out, JAVA_BYTE, 0, handle_out, 0, Math.min(handle_out.length, 16));
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datawriter_register_instance", __ffi_thrown);
@@ -1760,8 +1762,8 @@ public final class Ffi {
 
     static int int2dds_datawriter_unregister_instance(long writer, long key, long key_len, byte[] handle) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(handle.length);
-            if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, handle.length);
+            MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
+            if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, Math.min(handle.length, 16));
             return (int) MH_int2dds_datawriter_unregister_instance.invokeExact(writer, key, key_len, __ffi_seg_handle);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_datawriter_unregister_instance", __ffi_thrown);
@@ -3253,7 +3255,7 @@ public final class Ffi {
     static int int2dds_load_profiles(byte[][] paths, long count) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_paths;
-            if (paths == null) {
+            if (paths == null || paths.length == 0) {
                 __ffi_seg_paths = MemorySegment.NULL;
             } else {
                 __ffi_seg_paths = __ffi_arena.allocate(ADDRESS, paths.length);
@@ -3261,7 +3263,7 @@ public final class Ffi {
                     byte[] __ffi_elem_paths = paths[__ffi_i_paths];
                     MemorySegment __ffi_elemSeg_paths;
                     if (__ffi_elem_paths == null) {
-                        __ffi_elemSeg_paths = MemorySegment.NULL;
+                        __ffi_elemSeg_paths = __ffi_arena.allocate(1);
                     } else {
                         __ffi_elemSeg_paths = __ffi_arena.allocate(__ffi_elem_paths.length + 1);
                         MemorySegment.copy(__ffi_elem_paths, 0, __ffi_elemSeg_paths, JAVA_BYTE, 0, __ffi_elem_paths.length);
@@ -3299,9 +3301,9 @@ public final class Ffi {
 
     static int int2dds_participant_builtin_topic_data_get_key(long data, byte[] key_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_key_out = (key_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(key_out.length);
+            MemorySegment __ffi_seg_key_out = (key_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(12);
             int __ffi_ret = (int) MH_int2dds_participant_builtin_topic_data_get_key.invokeExact(data, __ffi_seg_key_out);
-            if (key_out != null) MemorySegment.copy(__ffi_seg_key_out, JAVA_BYTE, 0, key_out, 0, key_out.length);
+            if (key_out != null) MemorySegment.copy(__ffi_seg_key_out, JAVA_BYTE, 0, key_out, 0, Math.min(key_out.length, 12));
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_participant_builtin_topic_data_get_key", __ffi_thrown);
@@ -3322,8 +3324,8 @@ public final class Ffi {
 
     static int int2dds_participant_contains_entity(long participant, byte[] handle, long result_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(handle.length);
-            if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, handle.length);
+            MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
+            if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, Math.min(handle.length, 16));
             return (int) MH_int2dds_participant_contains_entity.invokeExact(participant, __ffi_seg_handle, result_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_participant_contains_entity", __ffi_thrown);
@@ -3378,8 +3380,8 @@ public final class Ffi {
 
     static int int2dds_participant_get_discovered_participant_data(long participant, byte[] handle, long data_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(handle.length);
-            if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, handle.length);
+            MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
+            if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, Math.min(handle.length, 16));
             return (int) MH_int2dds_participant_get_discovered_participant_data.invokeExact(participant, __ffi_seg_handle, data_out);
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_participant_get_discovered_participant_data", __ffi_thrown);
@@ -3391,7 +3393,8 @@ public final class Ffi {
     static int int2dds_participant_get_discovered_participants(long participant, byte[] handles_out, long capacity, long count_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_handles_out = (handles_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(handles_out.length);
-            int __ffi_ret = (int) MH_int2dds_participant_get_discovered_participants.invokeExact(participant, __ffi_seg_handles_out, capacity, count_out);
+            long __ffi_cap_handles_out = (handles_out == null) ? 0L : Math.min(capacity, (long) (handles_out.length / 16));
+            int __ffi_ret = (int) MH_int2dds_participant_get_discovered_participants.invokeExact(participant, __ffi_seg_handles_out, __ffi_cap_handles_out, count_out);
             if (handles_out != null) MemorySegment.copy(__ffi_seg_handles_out, JAVA_BYTE, 0, handles_out, 0, handles_out.length);
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
@@ -3631,9 +3634,9 @@ public final class Ffi {
 
     static int int2dds_publication_builtin_topic_data_get_endpoint_guid(long data, byte[] guid_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_guid_out = (guid_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(guid_out.length);
+            MemorySegment __ffi_seg_guid_out = (guid_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
             int __ffi_ret = (int) MH_int2dds_publication_builtin_topic_data_get_endpoint_guid.invokeExact(data, __ffi_seg_guid_out);
-            if (guid_out != null) MemorySegment.copy(__ffi_seg_guid_out, JAVA_BYTE, 0, guid_out, 0, guid_out.length);
+            if (guid_out != null) MemorySegment.copy(__ffi_seg_guid_out, JAVA_BYTE, 0, guid_out, 0, Math.min(guid_out.length, 16));
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_get_endpoint_guid", __ffi_thrown);
@@ -3644,9 +3647,9 @@ public final class Ffi {
 
     static int int2dds_publication_builtin_topic_data_get_key(long data, byte[] key_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_key_out = (key_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(key_out.length);
+            MemorySegment __ffi_seg_key_out = (key_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(12);
             int __ffi_ret = (int) MH_int2dds_publication_builtin_topic_data_get_key.invokeExact(data, __ffi_seg_key_out);
-            if (key_out != null) MemorySegment.copy(__ffi_seg_key_out, JAVA_BYTE, 0, key_out, 0, key_out.length);
+            if (key_out != null) MemorySegment.copy(__ffi_seg_key_out, JAVA_BYTE, 0, key_out, 0, Math.min(key_out.length, 12));
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_get_key", __ffi_thrown);
@@ -3687,9 +3690,9 @@ public final class Ffi {
 
     static int int2dds_publication_builtin_topic_data_get_participant_key(long data, byte[] key_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_key_out = (key_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(key_out.length);
+            MemorySegment __ffi_seg_key_out = (key_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(12);
             int __ffi_ret = (int) MH_int2dds_publication_builtin_topic_data_get_participant_key.invokeExact(data, __ffi_seg_key_out);
-            if (key_out != null) MemorySegment.copy(__ffi_seg_key_out, JAVA_BYTE, 0, key_out, 0, key_out.length);
+            if (key_out != null) MemorySegment.copy(__ffi_seg_key_out, JAVA_BYTE, 0, key_out, 0, Math.min(key_out.length, 12));
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_get_participant_key", __ffi_thrown);
@@ -3760,9 +3763,9 @@ public final class Ffi {
 
     static int int2dds_publication_builtin_topic_data_seq_get_instance_handle(long seq, long index, byte[] handle_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_handle_out = (handle_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(handle_out.length);
+            MemorySegment __ffi_seg_handle_out = (handle_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
             int __ffi_ret = (int) MH_int2dds_publication_builtin_topic_data_seq_get_instance_handle.invokeExact(seq, index, __ffi_seg_handle_out);
-            if (handle_out != null) MemorySegment.copy(__ffi_seg_handle_out, JAVA_BYTE, 0, handle_out, 0, handle_out.length);
+            if (handle_out != null) MemorySegment.copy(__ffi_seg_handle_out, JAVA_BYTE, 0, handle_out, 0, Math.min(handle_out.length, 16));
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_publication_builtin_topic_data_seq_get_instance_handle", __ffi_thrown);
@@ -3813,9 +3816,9 @@ public final class Ffi {
 
     static int int2dds_publisher_get_instance_handle(long publisher, byte[] handle_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_handle_out = (handle_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(handle_out.length);
+            MemorySegment __ffi_seg_handle_out = (handle_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
             int __ffi_ret = (int) MH_int2dds_publisher_get_instance_handle.invokeExact(publisher, __ffi_seg_handle_out);
-            if (handle_out != null) MemorySegment.copy(__ffi_seg_handle_out, JAVA_BYTE, 0, handle_out, 0, handle_out.length);
+            if (handle_out != null) MemorySegment.copy(__ffi_seg_handle_out, JAVA_BYTE, 0, handle_out, 0, Math.min(handle_out.length, 16));
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_publisher_get_instance_handle", __ffi_thrown);
@@ -3877,7 +3880,7 @@ public final class Ffi {
     static int int2dds_publisher_qos_set_partition(long qos, byte[][] partitions, long partition_count) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_partitions;
-            if (partitions == null) {
+            if (partitions == null || partitions.length == 0) {
                 __ffi_seg_partitions = MemorySegment.NULL;
             } else {
                 __ffi_seg_partitions = __ffi_arena.allocate(ADDRESS, partitions.length);
@@ -3885,7 +3888,7 @@ public final class Ffi {
                     byte[] __ffi_elem_partitions = partitions[__ffi_i_partitions];
                     MemorySegment __ffi_elemSeg_partitions;
                     if (__ffi_elem_partitions == null) {
-                        __ffi_elemSeg_partitions = MemorySegment.NULL;
+                        __ffi_elemSeg_partitions = __ffi_arena.allocate(1);
                     } else {
                         __ffi_elemSeg_partitions = __ffi_arena.allocate(__ffi_elem_partitions.length + 1);
                         MemorySegment.copy(__ffi_elem_partitions, 0, __ffi_elemSeg_partitions, JAVA_BYTE, 0, __ffi_elem_partitions.length);
@@ -3924,7 +3927,7 @@ public final class Ffi {
     static int int2dds_querycondition_set_query_parameters(long condition, byte[][] query_parameters, long query_parameters_count) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_query_parameters;
-            if (query_parameters == null) {
+            if (query_parameters == null || query_parameters.length == 0) {
                 __ffi_seg_query_parameters = MemorySegment.NULL;
             } else {
                 __ffi_seg_query_parameters = __ffi_arena.allocate(ADDRESS, query_parameters.length);
@@ -3932,7 +3935,7 @@ public final class Ffi {
                     byte[] __ffi_elem_query_parameters = query_parameters[__ffi_i_query_parameters];
                     MemorySegment __ffi_elemSeg_query_parameters;
                     if (__ffi_elem_query_parameters == null) {
-                        __ffi_elemSeg_query_parameters = MemorySegment.NULL;
+                        __ffi_elemSeg_query_parameters = __ffi_arena.allocate(1);
                     } else {
                         __ffi_elemSeg_query_parameters = __ffi_arena.allocate(__ffi_elem_query_parameters.length + 1);
                         MemorySegment.copy(__ffi_elem_query_parameters, 0, __ffi_elemSeg_query_parameters, JAVA_BYTE, 0, __ffi_elem_query_parameters.length);
@@ -4060,9 +4063,9 @@ public final class Ffi {
 
     static int int2dds_subscriber_get_instance_handle(long subscriber, byte[] handle_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_handle_out = (handle_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(handle_out.length);
+            MemorySegment __ffi_seg_handle_out = (handle_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
             int __ffi_ret = (int) MH_int2dds_subscriber_get_instance_handle.invokeExact(subscriber, __ffi_seg_handle_out);
-            if (handle_out != null) MemorySegment.copy(__ffi_seg_handle_out, JAVA_BYTE, 0, handle_out, 0, handle_out.length);
+            if (handle_out != null) MemorySegment.copy(__ffi_seg_handle_out, JAVA_BYTE, 0, handle_out, 0, Math.min(handle_out.length, 16));
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_subscriber_get_instance_handle", __ffi_thrown);
@@ -4124,7 +4127,7 @@ public final class Ffi {
     static int int2dds_subscriber_qos_set_partition(long qos, byte[][] partitions, long partition_count) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
             MemorySegment __ffi_seg_partitions;
-            if (partitions == null) {
+            if (partitions == null || partitions.length == 0) {
                 __ffi_seg_partitions = MemorySegment.NULL;
             } else {
                 __ffi_seg_partitions = __ffi_arena.allocate(ADDRESS, partitions.length);
@@ -4132,7 +4135,7 @@ public final class Ffi {
                     byte[] __ffi_elem_partitions = partitions[__ffi_i_partitions];
                     MemorySegment __ffi_elemSeg_partitions;
                     if (__ffi_elem_partitions == null) {
-                        __ffi_elemSeg_partitions = MemorySegment.NULL;
+                        __ffi_elemSeg_partitions = __ffi_arena.allocate(1);
                     } else {
                         __ffi_elemSeg_partitions = __ffi_arena.allocate(__ffi_elem_partitions.length + 1);
                         MemorySegment.copy(__ffi_elem_partitions, 0, __ffi_elemSeg_partitions, JAVA_BYTE, 0, __ffi_elem_partitions.length);
@@ -4202,9 +4205,9 @@ public final class Ffi {
 
     static int int2dds_subscription_builtin_topic_data_get_endpoint_guid(long data, byte[] guid_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_guid_out = (guid_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(guid_out.length);
+            MemorySegment __ffi_seg_guid_out = (guid_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
             int __ffi_ret = (int) MH_int2dds_subscription_builtin_topic_data_get_endpoint_guid.invokeExact(data, __ffi_seg_guid_out);
-            if (guid_out != null) MemorySegment.copy(__ffi_seg_guid_out, JAVA_BYTE, 0, guid_out, 0, guid_out.length);
+            if (guid_out != null) MemorySegment.copy(__ffi_seg_guid_out, JAVA_BYTE, 0, guid_out, 0, Math.min(guid_out.length, 16));
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_get_endpoint_guid", __ffi_thrown);
@@ -4215,9 +4218,9 @@ public final class Ffi {
 
     static int int2dds_subscription_builtin_topic_data_get_key(long data, byte[] key_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_key_out = (key_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(key_out.length);
+            MemorySegment __ffi_seg_key_out = (key_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(12);
             int __ffi_ret = (int) MH_int2dds_subscription_builtin_topic_data_get_key.invokeExact(data, __ffi_seg_key_out);
-            if (key_out != null) MemorySegment.copy(__ffi_seg_key_out, JAVA_BYTE, 0, key_out, 0, key_out.length);
+            if (key_out != null) MemorySegment.copy(__ffi_seg_key_out, JAVA_BYTE, 0, key_out, 0, Math.min(key_out.length, 12));
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_get_key", __ffi_thrown);
@@ -4248,9 +4251,9 @@ public final class Ffi {
 
     static int int2dds_subscription_builtin_topic_data_get_participant_key(long data, byte[] key_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_key_out = (key_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(key_out.length);
+            MemorySegment __ffi_seg_key_out = (key_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(12);
             int __ffi_ret = (int) MH_int2dds_subscription_builtin_topic_data_get_participant_key.invokeExact(data, __ffi_seg_key_out);
-            if (key_out != null) MemorySegment.copy(__ffi_seg_key_out, JAVA_BYTE, 0, key_out, 0, key_out.length);
+            if (key_out != null) MemorySegment.copy(__ffi_seg_key_out, JAVA_BYTE, 0, key_out, 0, Math.min(key_out.length, 12));
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_get_participant_key", __ffi_thrown);
@@ -4321,9 +4324,9 @@ public final class Ffi {
 
     static int int2dds_subscription_builtin_topic_data_seq_get_instance_handle(long seq, long index, byte[] handle_out) {
         try (Arena __ffi_arena = Arena.ofConfined()) {
-            MemorySegment __ffi_seg_handle_out = (handle_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(handle_out.length);
+            MemorySegment __ffi_seg_handle_out = (handle_out == null) ? MemorySegment.NULL : __ffi_arena.allocate(16);
             int __ffi_ret = (int) MH_int2dds_subscription_builtin_topic_data_seq_get_instance_handle.invokeExact(seq, index, __ffi_seg_handle_out);
-            if (handle_out != null) MemorySegment.copy(__ffi_seg_handle_out, JAVA_BYTE, 0, handle_out, 0, handle_out.length);
+            if (handle_out != null) MemorySegment.copy(__ffi_seg_handle_out, JAVA_BYTE, 0, handle_out, 0, Math.min(handle_out.length, 16));
             return __ffi_ret;
         } catch (Throwable __ffi_thrown) {
             throw new AssertionError("FFM downcall failed: int2dds_subscription_builtin_topic_data_seq_get_instance_handle", __ffi_thrown);

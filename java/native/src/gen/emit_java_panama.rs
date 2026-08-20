@@ -136,16 +136,22 @@ fn plan_param(p: &Param, m: Mapped) -> ParamPlan {
                 needs_arena: true,
             }
         }
+        // Fixed `[u8; N]` in-parameter (e.g. a 16-byte GUID): the segment is
+        // always exactly N bytes — the type's own size, never the caller's
+        // array length — and the copy-in is bounded to `min(array.length,
+        // N)` so a mis-sized Java array can neither overflow the segment nor
+        // under/overread it. Mirrors emit_rust.rs's `take_fixed::<N>`.
         Kind::ByteArrayIn => {
             let seg = format!("__ffi_seg_{n}");
+            let len = m.len.expect("ByteArrayIn carries its length");
             ParamPlan {
                 layout: "ADDRESS",
                 pre: vec![
                     format!(
-                        "MemorySegment {seg} = ({n} == null) ? MemorySegment.NULL : __ffi_arena.allocate({n}.length);"
+                        "MemorySegment {seg} = ({n} == null) ? MemorySegment.NULL : __ffi_arena.allocate({len});"
                     ),
                     format!(
-                        "if ({n} != null) MemorySegment.copy({n}, 0, {seg}, JAVA_BYTE, 0, {n}.length);"
+                        "if ({n} != null) MemorySegment.copy({n}, 0, {seg}, JAVA_BYTE, 0, Math.min({n}.length, {len}));"
                     ),
                 ],
                 call_arg: seg,
@@ -153,10 +159,31 @@ fn plan_param(p: &Param, m: Mapped) -> ParamPlan {
                 needs_arena: true,
             }
         }
-        // CStringOut / ByteArrayOut / ByteArrayOutSized: same shape — allocate
-        // a scratch segment sized from the caller's array, pass it, and copy
-        // the native result back into the array AFTER invokeExact.
-        Kind::CStringOut | Kind::ByteArrayOut | Kind::ByteArrayOutSized => {
+        // Fixed `[u8; N]` single out-parameter (e.g. a 16-byte GUID out): same
+        // N-sized segment as ByteArrayIn, and the copy-back is bounded to
+        // `min(array.length, N)` for the same reason. Mirrors emit_rust.rs's
+        // fixed `[0u8; N]` stack buffer + write_back.
+        Kind::ByteArrayOut => {
+            let seg = format!("__ffi_seg_{n}");
+            let len = m.len.expect("ByteArrayOut carries its length");
+            ParamPlan {
+                layout: "ADDRESS",
+                pre: vec![format!(
+                    "MemorySegment {seg} = ({n} == null) ? MemorySegment.NULL : __ffi_arena.allocate({len});"
+                )],
+                call_arg: seg.clone(),
+                post: vec![format!(
+                    "if ({n} != null) MemorySegment.copy({seg}, JAVA_BYTE, 0, {n}, 0, Math.min({n}.length, {len}));"
+                )],
+                needs_arena: true,
+            }
+        }
+        // CStringOut / ByteArrayOutSized: genuinely variable-length buffers,
+        // so (unlike the fixed kinds above) the segment is sized from the
+        // caller's actual array length, same as before. ByteArrayOutSized's
+        // `capacity` sibling argument is clamped separately in emit_one,
+        // mirroring emit_rust.rs's `capacity = min(capacity, len / N)`.
+        Kind::CStringOut | Kind::ByteArrayOutSized => {
             let seg = format!("__ffi_seg_{n}");
             ParamPlan {
                 layout: "ADDRESS",
@@ -179,7 +206,11 @@ fn plan_param(p: &Param, m: Mapped) -> ParamPlan {
                 layout: "ADDRESS",
                 pre: vec![
                     format!("MemorySegment {seg};"),
-                    format!("if ({n} == null) {{"),
+                    // JNI's take_string_array (generated_support.rs) passes a
+                    // NULL pointer for both an absent array and an empty one
+                    // — an allocated-but-zero-length pointer array is not the
+                    // same thing on the C side, so mirror both branches here.
+                    format!("if ({n} == null || {n}.length == 0) {{"),
                     format!("    {seg} = MemorySegment.NULL;"),
                     "} else {".to_string(),
                     format!("    {seg} = __ffi_arena.allocate(ADDRESS, {n}.length);"),
@@ -187,7 +218,12 @@ fn plan_param(p: &Param, m: Mapped) -> ParamPlan {
                     format!("        byte[] {elem} = {n}[{idx}];"),
                     format!("        MemorySegment {elem_seg};"),
                     format!("        if ({elem} == null) {{"),
-                    format!("            {elem_seg} = MemorySegment.NULL;"),
+                    // A null element is JNI's take_bytes()-absent case, which
+                    // take_string_array (generated_support.rs:169) substitutes
+                    // with `vec![0]` — an empty NUL-terminated C string, NOT a
+                    // NULL pointer. A NULL element pointer here would SIGSEGV
+                    // the first native strlen/deref on it, where JNI is safe.
+                    format!("            {elem_seg} = __ffi_arena.allocate(1);"),
                     "        } else {".to_string(),
                     format!("            {elem_seg} = __ffi_arena.allocate({elem}.length + 1);"),
                     format!(
@@ -215,12 +251,34 @@ fn emit_one(f: &FfiFn) -> String {
     let name = &f.name;
     let ret_java = if f.ret == "()" { None } else { Some(map_type(&f.ret).unwrap().java) };
 
-    let plans: Vec<ParamPlan> = f
+    let mut plans: Vec<ParamPlan> = f
         .params
         .iter()
         .enumerate()
         .map(|(i, p)| plan_param(p, map_param(&f.params, i).unwrap()))
         .collect();
+
+    // ByteArrayOutSized: clamp the sibling `capacity` argument forwarded to
+    // the downcall to what the caller's array can actually hold, mirroring
+    // emit_rust.rs's `capacity = min(capacity as usize, array_len / N)`. The
+    // segment itself stays sized to the array's actual length (handled in
+    // plan_param above) — only the capacity VALUE passed to invokeExact is
+    // clamped here, so a caller-overstated capacity can no longer make
+    // native write past the segment.
+    for i in 0..f.params.len() {
+        let m = map_param(&f.params, i).unwrap();
+        if m.kind != Kind::ByteArrayOutSized {
+            continue;
+        }
+        let len = m.len.expect("ByteArrayOutSized carries its element length");
+        let array_name = f.params[i].name.clone();
+        let cap_name = f.params[i + 1].name.clone(); // guaranteed by map_param's sibling check
+        let cap_local = format!("__ffi_cap_{array_name}");
+        plans[i].pre.push(format!(
+            "long {cap_local} = ({array_name} == null) ? 0L : Math.min({cap_name}, (long) ({array_name}.length / {len}));"
+        ));
+        plans[i + 1].call_arg = cap_local;
+    }
 
     // Same signature rendering as the base (JNI) emitter, so the public
     // surface is byte-for-byte identical across both backends.
@@ -396,7 +454,9 @@ mod tests {
         );
     }
 
-    // (c) ByteArrayOut byte[] param: copy-back happens AFTER invokeExact.
+    // (c) ByteArrayOut byte[] param: copy-back happens AFTER invokeExact, and
+    // both the segment size and the copy-back are bounded to the fixed N
+    // from Mapped.len, never the caller's array length (parity fix #3).
     #[test]
     fn byte_array_out_param_copies_back_after_the_call() {
         let out = emit_java_panama(&[f(
@@ -404,14 +464,21 @@ mod tests {
             vec![p("writer", "*const Int2DdsDataWriter"), p("handle_out", "*mut [u8; 16]")],
             "Int2DdsRet",
         )]);
+        assert!(
+            out.contains(
+                "MemorySegment __ffi_seg_handle_out = (handle_out == null) ? MemorySegment.NULL : \
+                 __ffi_arena.allocate(16);"
+            ),
+            "the segment must be sized to the fixed N=16, not the array length:\n{out}"
+        );
         let invoke_at = out
             .find("invokeExact(writer, __ffi_seg_handle_out)")
             .expect("must invoke with the segment");
         let copy_back_at = out
             .find(
-                "MemorySegment.copy(__ffi_seg_handle_out, JAVA_BYTE, 0, handle_out, 0, handle_out.length)",
+                "MemorySegment.copy(__ffi_seg_handle_out, JAVA_BYTE, 0, handle_out, 0, Math.min(handle_out.length, 16))",
             )
-            .expect("must copy the result back into the caller's array");
+            .expect("must copy the result back into the caller's array, bounded to N");
         assert!(invoke_at < copy_back_at, "copy-back must happen after invokeExact:\n{out}");
         // The out segment is allocated but never pre-filled from the array.
         assert!(
@@ -543,5 +610,121 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("invokeExact(handle, __ffi_seg_arena)"), "{out}");
+    }
+
+    // Parity fix #1: a null byte[][] element must become a 1-byte zeroed
+    // (empty NUL C-string) segment, not MemorySegment.NULL — matching
+    // generated_support.rs:169's `None => owned.push(vec![0])`. A NULL
+    // pointer element SIGSEGVs the first native strlen/deref where JNI is
+    // safe.
+    #[test]
+    fn cstring_array_null_element_becomes_a_one_byte_zero_segment_not_null() {
+        let out = emit_java_panama(&[f(
+            "int2dds_publisher_qos_set_partition",
+            vec![
+                p("qos", "*mut Int2DdsPublisherQos"),
+                p("names", "*const *const c_char"),
+                p("count", "usize"),
+            ],
+            "Int2DdsRet",
+        )]);
+        assert!(
+            out.contains("__ffi_elemSeg_names = __ffi_arena.allocate(1);"),
+            "a null element must allocate a 1-byte zeroed segment:\n{out}"
+        );
+        // The null-element branch must never fall back to NULL.
+        let null_elem_branch =
+            out.find("if (__ffi_elem_names == null) {").map(|i| &out[i..i + 120]).unwrap_or("");
+        assert!(
+            !null_elem_branch.contains("MemorySegment.NULL"),
+            "null element branch must not use MemorySegment.NULL:\n{null_elem_branch}"
+        );
+    }
+
+    // Parity fix #4: an empty (non-null, zero-length) byte[][] must pass
+    // MemorySegment.NULL for the whole pointer-array argument — matching
+    // generated_support.rs's take_string_array, which returns its `empty`
+    // (NULL-pointer) CStrArray for a zero-length Java array, not just an
+    // absent one.
+    #[test]
+    fn cstring_array_empty_but_non_null_array_passes_null() {
+        let out = emit_java_panama(&[f(
+            "int2dds_publisher_qos_set_partition",
+            vec![
+                p("qos", "*mut Int2DdsPublisherQos"),
+                p("names", "*const *const c_char"),
+                p("count", "usize"),
+            ],
+            "Int2DdsRet",
+        )]);
+        assert!(
+            out.contains("if (names == null || names.length == 0) {"),
+            "an empty array must be folded into the null branch:\n{out}"
+        );
+    }
+
+    // Parity fix #2: the `capacity` sibling argument forwarded to the
+    // downcall must be clamped to what the caller's array can actually hold
+    // — matching emit_rust.rs's `capacity = min(capacity as usize, len /
+    // N)`. Without this an overstated capacity makes native write N *
+    // capacity bytes past the N * array.length-sized segment.
+    #[test]
+    fn byte_array_out_sized_clamps_the_forwarded_capacity() {
+        let out = emit_java_panama(&[f(
+            "int2dds_participant_get_discovered_participants",
+            vec![
+                p("participant", "*const Int2DdsParticipant"),
+                p("handles_out", "*mut [u8; 16]"),
+                p("capacity", "usize"),
+                p("count_out", "*mut usize"),
+            ],
+            "Int2DdsRet",
+        )]);
+        // Segment is still sized to the array's actual length, unclamped.
+        assert!(
+            out.contains(
+                "MemorySegment __ffi_seg_handles_out = (handles_out == null) ? MemorySegment.NULL \
+                 : __ffi_arena.allocate(handles_out.length);"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "long __ffi_cap_handles_out = (handles_out == null) ? 0L : Math.min(capacity, \
+                 (long) (handles_out.length / 16));"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains("invokeExact(participant, __ffi_seg_handles_out, __ffi_cap_handles_out, count_out)"),
+            "the clamped local, not the raw `capacity` param, must be forwarded to invokeExact:\n{out}"
+        );
+    }
+
+    // Parity fix #3: a fixed `[u8; N]` in-parameter must allocate exactly N
+    // bytes (the type's own size) and bound the copy-in to
+    // min(array.length, N) — matching emit_rust.rs's `take_fixed::<N>`,
+    // never the caller-supplied array's own (possibly mismatched) length.
+    #[test]
+    fn byte_array_in_param_allocates_and_copies_bounded_to_n() {
+        let out = emit_java_panama(&[f(
+            "int2dds_datawriter_unregister_instance",
+            vec![p("writer", "*const Int2DdsDataWriter"), p("handle", "*const [u8; 16]")],
+            "Int2DdsRet",
+        )]);
+        assert!(
+            out.contains(
+                "MemorySegment __ffi_seg_handle = (handle == null) ? MemorySegment.NULL : \
+                 __ffi_arena.allocate(16);"
+            ),
+            "must allocate the fixed N=16, not handle.length:\n{out}"
+        );
+        assert!(
+            out.contains(
+                "if (handle != null) MemorySegment.copy(handle, 0, __ffi_seg_handle, JAVA_BYTE, 0, \
+                 Math.min(handle.length, 16));"
+            ),
+            "copy-in must be bounded to N:\n{out}"
+        );
     }
 }
