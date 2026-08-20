@@ -6,7 +6,10 @@
 //! Deliberately a separate binary rather than a build script: writing into the
 //! source tree from `build.rs` would dirty the working tree on every build.
 
-use int2dds_java::gen::{emit_java::emit_java, emit_rust::emit_rust, parse::parse_ffi_dir};
+use int2dds_java::gen::{
+    emit_java::emit_java, emit_java_panama::emit_java_panama, emit_rust::emit_rust,
+    parse::parse_ffi_dir,
+};
 use std::path::{Path, PathBuf};
 
 /// Normalise the emitted Rust with the repo's own rustfmt settings.
@@ -43,12 +46,19 @@ fn main() -> Result<(), String> {
     let rust_path = root.join("java/native/src/generated.rs");
     let java_path =
         root.join("java/api/src/main/java/com/intellectus/int2dds/internal/ffi/Ffi.java");
+    let java_panama_path =
+        root.join("java/api/src/main/java22/com/intellectus/int2dds/internal/ffi/Ffi.java");
 
     if let Some(parent) = java_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
     }
+    if let Some(parent) = java_panama_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
+    }
     std::fs::write(&rust_path, emit_rust(&fns)).map_err(|e| format!("write rust: {e}"))?;
     std::fs::write(&java_path, emit_java(&fns)).map_err(|e| format!("write java: {e}"))?;
+    std::fs::write(&java_panama_path, emit_java_panama(&fns))
+        .map_err(|e| format!("write java22: {e}"))?;
     rustfmt(&rust_path)?;
 
     let generated = fns.iter().filter(|f| int2dds_java::gen::typemap::is_generatable(f)).count();
@@ -58,5 +68,6 @@ fn main() -> Result<(), String> {
     );
     println!("  {}", rust_path.display());
     println!("  {}", java_path.display());
+    println!("  {}", java_panama_path.display());
     Ok(())
 }
