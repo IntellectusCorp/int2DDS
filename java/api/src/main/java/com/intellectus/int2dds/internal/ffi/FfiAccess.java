@@ -825,4 +825,106 @@ public final class FfiAccess {
         return Ffi.int2dds_datareader_read_serialized_w_info(
                 reader, buffer, bufferCapacity, actualSizeOut, infoOut);
     }
+
+    /** Creates a guard condition, writing its handle to {@code handleOut[0]} on success. */
+    public static int guardConditionNew(long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_guardcondition_new(directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Sets a guard condition's trigger value. */
+    public static void guardConditionSetTrigger(long condition, boolean value) {
+        Ffi.int2dds_guardcondition_set_trigger_value(condition, value);
+    }
+
+    /**
+     * Reads a trigger value through the generic {@code Int2DdsCondition} accessor.
+     * Only valid for a handle obtained from {@code condition_seq_get} — that
+     * wrapper type (a fat {@code Arc<dyn Condition>}) has a different native
+     * layout from a concrete condition's own handle (e.g. a GuardCondition's
+     * thin {@code Arc<GuardCondition>}), so calling this on an original handle
+     * reads across the mismatch and corrupts memory. Use {@link
+     * #guardConditionGetTriggerValue} etc. for a concrete condition's own handle.
+     */
+    public static boolean conditionGetTriggerValue(long condition) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_condition_get_trigger_value(condition, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        com.intellectus.int2dds.internal.ReturnCodes.check(rc);
+        return slot.get(0) != 0; // bool out is 1 byte, not 4
+    }
+
+    /** Reads a guard condition's own trigger value (its own handle, not a seq entry). */
+    public static boolean guardConditionGetTriggerValue(long condition) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_guardcondition_get_trigger_value(condition, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        com.intellectus.int2dds.internal.ReturnCodes.check(rc);
+        return slot.get(0) != 0; // bool out is 1 byte, not 4
+    }
+
+    /** Releases a guard condition. Returns the C ABI status code. */
+    public static int guardConditionDelete(long condition) {
+        return Ffi.int2dds_guardcondition_delete(condition);
+    }
+
+    /** Releases any condition through the generic deleter. Returns the C ABI status code. */
+    public static int conditionDelete(long condition) {
+        return Ffi.int2dds_condition_delete(condition);
+    }
+
+    /** Creates a WaitSet, writing its handle to {@code handleOut[0]} on success. */
+    public static int waitsetNew(long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_waitset_new(directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Releases a WaitSet. Returns the C ABI status code. */
+    public static int waitsetDelete(long waitset) {
+        return Ffi.int2dds_waitset_delete(waitset);
+    }
+
+    /** Attaches a guard condition to a WaitSet. Returns the C ABI status code. */
+    public static int waitsetAttachGuard(long waitset, long condition) {
+        return Ffi.int2dds_waitset_attach_guardcondition(waitset, condition);
+    }
+
+    /** Detaches a guard condition from a WaitSet. Returns the C ABI status code. */
+    public static int waitsetDetachGuard(long waitset, long condition) {
+        return Ffi.int2dds_waitset_detach_guardcondition(waitset, condition);
+    }
+
+    /**
+     * Blocks up to {@code timeoutMs} (negative = infinite) for an attached
+     * condition to trigger. On success writes the resulting condition
+     * sequence's handle to {@code seqOut[0]} — a new pointer sequence
+     * unrelated to the attached handles, meant only to be passed to {@link
+     * #conditionSeqDelete}, never to {@code condition_seq_get}. Returns
+     * {@code RET_TIMEOUT} with {@code seqOut} left untouched when nothing
+     * triggered before the timeout.
+     */
+    public static int waitsetWaitEx(long waitset, long timeoutMs, long[] seqOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_waitset_wait_ex(waitset, timeoutMs, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            seqOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Releases a condition sequence returned by {@link #waitsetWaitEx}. */
+    public static void conditionSeqDelete(long seq) {
+        Ffi.int2dds_condition_seq_delete(seq);
+    }
 }
