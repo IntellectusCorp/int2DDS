@@ -723,9 +723,25 @@ pub unsafe extern "C" fn int2dds_dynamic_data_from_sample(
     check_null!(type_obj);
     check_null!(out);
     let slice = std::slice::from_raw_parts(bytes, len);
-    let support = ffi_try!((*participant)
-        .inner
-        .create_dynamic_type_from_type_object((*type_obj).inner.clone()));
+    let support = if (*type_obj).deps.is_empty() {
+        ffi_try!((*participant)
+            .inner
+            .create_dynamic_type_from_type_object((*type_obj).inner.clone()))
+    } else {
+        // Register the nested dependency closure so struct-of-nested members resolve,
+        // mirroring decode_flat / RawTypeSupport::with_type_info_and_deps.
+        let mut registry = TypeRegistry::new();
+        for (id, obj) in &(*type_obj).deps {
+            registry.register_type_object_with_id(id, obj.clone());
+        }
+        match DynamicTypeSupport::from_type_object_with_registry(
+            (*type_obj).inner.clone(),
+            &registry,
+        ) {
+            Ok(s) => s,
+            Err(_) => return INT2DDS_RET_DYNAMIC_UNSUPPORTED_TYPE,
+        }
+    };
     let data = match deserialize_dynamic_data(slice, support.dynamic_type()) {
         Ok(d) => d,
         Err(_) => return INT2DDS_RET_DYNAMIC_DECODE_ERROR,

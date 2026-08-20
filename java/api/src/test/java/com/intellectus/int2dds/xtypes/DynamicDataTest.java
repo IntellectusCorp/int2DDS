@@ -1,12 +1,10 @@
 package com.intellectus.int2dds.xtypes;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.intellectus.int2dds.cdr.CdrWriter;
 import com.intellectus.int2dds.cdr.Extensibility;
 import com.intellectus.int2dds.core.DomainParticipant;
-import com.intellectus.int2dds.exceptions.DdsException;
 import com.intellectus.int2dds.types.ConformanceRecord;
 import java.nio.ByteOrder;
 import org.junit.jupiter.api.Test;
@@ -149,34 +147,15 @@ class DynamicDataTest {
     }
 
     /**
-     * {@code getMember}'s bridge plumbing (path encoding, the keepAlive fence, rc ->
-     * exception mapping, wrapping the returned handle in a NativeCleaner-managed {@link
-     * DynamicData}) exactly mirrors {@code int2dds_dynamic_data_get_member} in {@code
-     * ffi/src/dynamic.rs}: {@code (rc, *mut *mut Int2DdsDynamicData)}, cloning the
-     * resolved {@code DynamicValue::Struct} into an independent box freed the same way as
-     * a top-level handle -- verified by reading that function directly, not by a passing
-     * test here.
-     *
-     * <p>A true success-path round trip (decode a nested struct, then getMember it) is
-     * blocked by a gap one layer below this binding: {@code
-     * int2dds_dynamic_data_from_sample} resolves its {@code TypeObject} through the
-     * participant's own {@code TypeRegistry} and never consults the {@code TypeObject}'s
-     * own {@code deps} closure that {@code TypeInfo.addNestedField} records -- unlike the
-     * flat {@code dynamic_sample_get_*} path's {@code decode_flat}, which builds a
-     * throwaway {@code TypeRegistry} from exactly that closure (see {@code decode_flat} vs.
-     * {@code int2dds_dynamic_data_from_sample} in {@code ffi/src/dynamic.rs}). A fresh
-     * participant's registry never learns about a nested type built purely through {@link
-     * TypeInfo}, so decoding a sample with a nested-struct field currently fails with
-     * {@code RET_DYNAMIC_DECODE_ERROR} before {@code getMember} is ever reached --
-     * confirmed empirically: the identical setup below with the nested field removed (see
-     * {@link #readsSequenceLength}) decodes and reads back correctly, isolating the
-     * failure to struct-typed nesting specifically. Fixing that belongs in the native FFI
-     * layer, not this binding; this test pins the current (broken) behavior so a native fix
-     * shows up here as a build failure needing a real success assertion, rather than
-     * silently passing nothing.
+     * {@code getMember} on a struct-typed nested field, decoded through {@link
+     * TypeInfo#addNestedField}'s dependency closure. Exercises the fix in {@code
+     * int2dds_dynamic_data_from_sample} (ffi/src/dynamic.rs): it now registers {@code
+     * TypeObject.deps} into a throwaway {@code TypeRegistry} before resolving, the same
+     * way {@code decode_flat} already did -- previously this path ignored {@code deps}
+     * entirely and any struct-typed nested field failed to decode.
      */
     @Test
-    void getMemberRoundTripIsBlockedByNativeRegistryGap() {
+    void getMemberReadsANestedStructField() {
         DomainParticipant p = new DomainParticipant(testDomain());
         try (TypeInfo pointType = new TypeInfo("Point", Extensibility.FINAL)) {
             pointType.addField("x", FieldType.INT32, 0);
@@ -186,18 +165,25 @@ class DynamicDataTest {
                 typeInfo.addNestedField("point", pointType, 0);
 
                 try (TypeObject typeObject = typeInfo.toTypeObject()) {
+                    int x = 11;
+                    int y = 22;
+
                     byte[] serialized;
                     try (CdrWriter w = CdrWriter.acquire(Extensibility.APPENDABLE,
                             ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN, false)) {
                         int token = w.dheaderBegin();
-                        w.writeI32(11);
-                        w.writeI32(22);
+                        w.writeI32(x);
+                        w.writeI32(y);
                         w.dheaderFinalize(token);
                         serialized = w.toBytes();
                     }
 
-                    assertThrows(DdsException.class,
-                            () -> p.dynamicDataFromSample(serialized, typeObject));
+                    try (DynamicData data = p.dynamicDataFromSample(serialized, typeObject)) {
+                        try (DynamicData point = data.getMember("point")) {
+                            assertEquals(x, point.getI32("x"));
+                            assertEquals(y, point.getI32("y"));
+                        }
+                    }
                 }
             }
         } finally {
