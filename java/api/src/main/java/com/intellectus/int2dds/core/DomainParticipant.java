@@ -7,6 +7,7 @@ import com.intellectus.int2dds.internal.ReturnCodes;
 import com.intellectus.int2dds.internal.ffi.FfiAccess;
 import com.intellectus.int2dds.qos.ParticipantQos;
 import com.intellectus.int2dds.qos.PublisherQos;
+import com.intellectus.int2dds.qos.SubscriberQos;
 import com.intellectus.int2dds.qos.TopicQos;
 import com.intellectus.int2dds.types.IDdsType;
 import java.util.Objects;
@@ -98,6 +99,16 @@ public final class DomainParticipant extends NativeEntity {
     /** Creates a publisher with an explicit QoS. */
     public Publisher createPublisher(PublisherQos qos) {
         return new Publisher(this, Objects.requireNonNull(qos, "qos"));
+    }
+
+    /** Creates a subscriber with the core's default QoS. */
+    public Subscriber createSubscriber() {
+        return new Subscriber(this, (SubscriberQos) null);
+    }
+
+    /** Creates a subscriber with an explicit QoS. */
+    public Subscriber createSubscriber(SubscriberQos qos) {
+        return new Subscriber(this, Objects.requireNonNull(qos, "qos"));
     }
 
     /**

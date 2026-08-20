@@ -1,0 +1,88 @@
+package com.intellectus.int2dds.core;
+
+import com.intellectus.int2dds.exceptions.DdsErrorException;
+import com.intellectus.int2dds.internal.NativeCleaner;
+import com.intellectus.int2dds.internal.NativeKeepAlive;
+import com.intellectus.int2dds.internal.QosMarshal;
+import com.intellectus.int2dds.internal.ReturnCodes;
+import com.intellectus.int2dds.internal.ffi.FfiAccess;
+import com.intellectus.int2dds.qos.SubscriberQos;
+import java.util.Objects;
+
+/**
+ * Groups DataReaders for coordinated subscription.
+ *
+ * <p>Created through {@link DomainParticipant#createSubscriber}, which
+ * registers this instance in the participant's weak child list — the
+ * structural twin of {@link Publisher}. DataReader factory methods land on
+ * this class in a later task, once {@code DataReader} itself exists.
+ */
+public final class Subscriber extends NativeEntity {
+
+    /**
+     * @param qos may be null for the core's default Subscriber QoS; {@link
+     *     DomainParticipant#createSubscriber(SubscriberQos)} is responsible
+     *     for rejecting an explicit null before reaching here.
+     */
+    Subscriber(DomainParticipant participant, SubscriberQos qos) {
+        super(Objects.requireNonNull(participant, "participant"), create(participant, qos),
+                FfiAccess::deleteSubscriber);
+    }
+
+    private Subscriber(DomainParticipant participant, NativeCleaner.Deleter deleter) {
+        super(Objects.requireNonNull(participant, "participant"), create(participant, null),
+                deleter);
+    }
+
+    /**
+     * Package-private construction seam, the same pattern as {@link
+     * Publisher#createForTest}: the same default-QoS creation path as the
+     * public factory, but with an explicit deleter in place of the fixed
+     * {@code FfiAccess::deleteSubscriber}, for tests that need to observe
+     * exactly how many times the deleter is actually invoked. A
+     * test-supplied deleter should still delegate to the real delete.
+     */
+    static Subscriber createForTest(DomainParticipant participant, NativeCleaner.Deleter deleter) {
+        return new Subscriber(participant, deleter);
+    }
+
+    /**
+     * Resolves the create argument and, when {@code qos} is supplied, builds
+     * a native QoS handle, applies the policies onto it, and destroys it
+     * again once the create call returns — success or failure, thrown or
+     * not, the same shape as {@link Publisher#create}. {@code qos == null}
+     * passes {@code 0L}, engaging the same core-side default resolution as
+     * an explicit {@link SubscriberQos} with every policy left null.
+     */
+    private static long create(DomainParticipant participant, SubscriberQos qos) {
+        if (qos == null) {
+            return createNative(participant, 0L);
+        }
+        long qosHandle = FfiAccess.createSubscriberQos();
+        if (qosHandle == 0L) {
+            // Same failure-hiding hazard Publisher.create guards against:
+            // falling through to createNative(..., 0L) here would silently
+            // downgrade a QoS-allocation failure into a successful
+            // default-QoS create whenever qos itself has no policy set.
+            throw new DdsErrorException(
+                    "failed to allocate a native SubscriberQos handle for subscriber creation");
+        }
+        try {
+            QosMarshal.applySubscriberQos(qosHandle, qos);
+            return createNative(participant, qosHandle);
+        } finally {
+            FfiAccess.destroySubscriberQos(qosHandle);
+        }
+    }
+
+    private static long createNative(DomainParticipant participant, long qos) {
+        long[] handleOut = new long[1];
+        int rc = FfiAccess.createSubscriber(participant.handle(), qos, handleOut);
+        // See Publisher.createNative: participant.handle() is a bare long,
+        // disconnected from `participant` once read, so this keeps
+        // `participant` reachable for the duration of the native call above.
+        NativeKeepAlive.keepAlive(participant);
+        ReturnCodes.check(rc);
+        return handleOut[0];
+    }
+}
