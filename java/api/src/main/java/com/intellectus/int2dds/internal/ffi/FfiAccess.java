@@ -1516,4 +1516,59 @@ public final class FfiAccess {
         }
         return rc;
     }
+
+    // --- Discovery: ParticipantBuiltinTopicData (handle-list + per-handle lookup) ---
+
+    /**
+     * Writes up to {@code capacity} discovered-participant handles (16 bytes
+     * each) into {@code handles}. Returns rc; writes the TRUE total discovered
+     * count to {@code countOut[0]} on success, even when it exceeds {@code
+     * capacity} (the JNI shim clamps what it actually copies to {@code
+     * handles.length / 16}, but still reports the real total so a caller can
+     * regrow and retry).
+     */
+    public static int getDiscoveredParticipants(long participant, byte[] handles, long capacity,
+            long[] countOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_participant_get_discovered_participants(
+                participant, handles, capacity, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            countOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Mints an owned {@code ParticipantBuiltinTopicData} box for the given
+     * 16-byte handle. Returns rc; writes the handle to {@code dataOut[0]} on
+     * success. The caller owns the box and must release it with {@link
+     * #participantDataDestroy}.
+     */
+    public static int getDiscoveredParticipantData(long participant, byte[] handle,
+            long[] dataOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_participant_get_discovered_participant_data(
+                participant, handle, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            dataOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Releases one owned {@code ParticipantBuiltinTopicData} box minted by {@link #getDiscoveredParticipantData}. */
+    public static void participantDataDestroy(long data) {
+        Ffi.int2dds_participant_builtin_topic_data_destroy(data);
+    }
+
+    /** The 12-byte instance key. {@code keyOut} must be a 12-byte array. */
+    public static int participantDataGetKey(long data, byte[] keyOut) {
+        return Ffi.int2dds_participant_builtin_topic_data_get_key(data, keyOut);
+    }
+
+    /** Direct passthrough for {@link #readGrowableBytes}: the user_data getter. */
+    public static int participantDataGetUserData(long data, long buf, long capacity, long sizeOut) {
+        return Ffi.int2dds_participant_builtin_topic_data_get_user_data(data, buf, capacity, sizeOut);
+    }
 }

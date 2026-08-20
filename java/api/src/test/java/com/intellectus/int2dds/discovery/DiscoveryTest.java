@@ -88,4 +88,31 @@ class DiscoveryTest {
             assertTrue(hit, "should discover the remote reader's subscription within 5s");
         }
     }
+
+    /**
+     * Proof that {@code getDiscoveredParticipants} works with two live
+     * participants -- i.e. capacity &gt;= 2 on the underlying {@code
+     * int2dds_participant_get_discovered_participants} call. Before the JNI
+     * codegen fix, the generated shim allocated a fixed 16-byte stack buffer
+     * regardless of the requested capacity, so a call that actually needed to
+     * copy back more than one 16-byte handle would have overflowed that stack
+     * buffer. Two participants in the same domain is the minimal case that
+     * exercises capacity &gt;= 2 without crashing.
+     */
+    @Test
+    void getDiscoveredParticipantsSeesAnotherParticipant() throws InterruptedException {
+        try (DomainParticipant a = new DomainParticipant(testDomain());
+                DomainParticipant b = new DomainParticipant(testDomain())) {
+            List<ParticipantBuiltinTopicData> found = Collections.emptyList();
+            long deadline = System.nanoTime() + 5_000_000_000L;
+            while (System.nanoTime() < deadline) {
+                found = a.getDiscoveredParticipants();
+                if (!found.isEmpty()) {
+                    break;
+                }
+                Thread.sleep(50);
+            }
+            assertTrue(!found.isEmpty(), "should discover at least one remote participant within 5s");
+        }
+    }
 }
