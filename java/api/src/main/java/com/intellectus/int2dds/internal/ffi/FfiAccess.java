@@ -693,6 +693,22 @@ public final class FfiAccess {
         return Ffi.int2dds_type_info_add_field(typeInfo, fieldName, fieldType, flags);
     }
 
+    /** Appends a sequence field ({@code bound == 0} means unbounded). Returns the C ABI status code. */
+    public static int typeInfoAddSequenceField(
+            long typeInfo, byte[] fieldName, int elementType, int bound, int flags) {
+        return Ffi.int2dds_type_info_add_sequence_field(typeInfo, fieldName, elementType, bound, flags);
+    }
+
+    /**
+     * Appends a nested struct-typed field, referencing {@code nestedTypeInfo}'s own
+     * builder. {@code nestedTypeInfo} is borrowed, not consumed -- the caller still owns
+     * it and must destroy it separately. Returns the C ABI status code.
+     */
+    public static int typeInfoAddNestedField(
+            long typeInfo, byte[] fieldName, long nestedTypeInfo, int flags) {
+        return Ffi.int2dds_type_info_add_nested_field(typeInfo, fieldName, nestedTypeInfo, flags);
+    }
+
     /** Builds a type object from a completed builder, or 0 on failure. */
     public static long typeInfoToTypeObject(long typeInfo) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -817,6 +833,156 @@ public final class FfiAccess {
             }
             return rc;
         }
+    }
+
+    /** Reads a bool field at {@code path}, writing it to {@code out[0]} on success. */
+    public static int dynamicDataGetBool(long d, byte[] path, boolean[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_data_get_bool(d, path, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.get(0) != 0; // bool out is 1 byte, not 4
+        }
+        return rc;
+    }
+
+    /** Reads an i8 field at {@code path}, writing it to {@code out[0]} on success. */
+    public static int dynamicDataGetI8(long d, byte[] path, byte[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_data_get_i8(d, path, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.get(0); // native writes an i8 (1 byte)
+        }
+        return rc;
+    }
+
+    /** Reads a u8 field at {@code path}, writing its unsigned 0-255 value to {@code out[0]} on success. */
+    public static int dynamicDataGetU8(long d, byte[] path, int[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_data_get_u8(d, path, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.get(0) & 0xFF; // native writes a u8 (1 byte); widen unsigned
+        }
+        return rc;
+    }
+
+    /** Reads an i16 field at {@code path}, writing it to {@code out[0]} on success. */
+    public static int dynamicDataGetI16(long d, byte[] path, short[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_data_get_i16(d, path, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getShort(0); // native writes an i16 (2 bytes)
+        }
+        return rc;
+    }
+
+    /** Reads a u16 field at {@code path}, writing its unsigned 0-65535 value to {@code out[0]} on success. */
+    public static int dynamicDataGetU16(long d, byte[] path, int[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_data_get_u16(d, path, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getShort(0) & 0xFFFF; // native writes a u16 (2 bytes); widen unsigned
+        }
+        return rc;
+    }
+
+    /**
+     * Reads a u32 field at {@code path}, writing its raw 32 bits to {@code
+     * out[0]} on success -- callers wanting the unsigned magnitude widen with
+     * {@code & 0xFFFFFFFFL} themselves, mirroring how {@link
+     * #statusConditionGetEnabledStatuses} hands back a raw u32 mask.
+     */
+    public static int dynamicDataGetU32(long d, byte[] path, int[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_data_get_u32(d, path, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getInt(0); // native writes a u32 (4 bytes); raw bits, not widened
+        }
+        return rc;
+    }
+
+    /** Reads an i64 field at {@code path}, writing it to {@code out[0]} on success. */
+    public static int dynamicDataGetI64(long d, byte[] path, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_data_get_i64(d, path, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0); // native writes a full 8-byte i64
+        }
+        return rc;
+    }
+
+    /**
+     * Reads a u64 field at {@code path}, writing its raw 64 bits to {@code
+     * out[0]} on success -- same "raw bits, caller widens" contract as {@link
+     * #dynamicDataGetU32}.
+     */
+    public static int dynamicDataGetU64(long d, byte[] path, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_data_get_u64(d, path, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0); // native writes a u64 (8 bytes); raw bits, not widened
+        }
+        return rc;
+    }
+
+    /** Reads an f32 field at {@code path}, writing it to {@code out[0]} on success. */
+    public static int dynamicDataGetF32(long d, byte[] path, float[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_data_get_f32(d, path, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getFloat(0); // native writes a full 4-byte f32
+        }
+        return rc;
+    }
+
+    /** Reads a char8 field at {@code path} as its raw byte value, writing it to {@code out[0]} on success. */
+    public static int dynamicDataGetChar8(long d, byte[] path, byte[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_data_get_char8(d, path, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.get(0); // native writes a char8 as one byte
+        }
+        return rc;
+    }
+
+    /**
+     * Reads the element count of a sequence/array field at {@code path},
+     * writing it to {@code out[0]} on success.
+     */
+    public static int dynamicDataGetLen(long d, byte[] path, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_data_get_len(d, path, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0); // native writes a usize (8 bytes on this platform)
+        }
+        return rc;
+    }
+
+    /**
+     * Extracts a nested struct field at {@code path} into a new DynamicData
+     * handle, writing it to {@code out[0]} on success. An independent native
+     * box (ffi/src/dynamic.rs clones the nested value into its own {@code
+     * Int2DdsDynamicData}), released through {@link #dynamicDataDestroy} the
+     * same as a top-level handle.
+     */
+    public static int dynamicDataGetMember(long d, byte[] path, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_data_get_member(d, path, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
     }
 
     // --- Subscriber / DataReader (raw receive side, for WritePathEndToEndTest only) ---

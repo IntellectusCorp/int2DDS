@@ -57,6 +57,28 @@ public final class TypeInfo implements AutoCloseable {
         ReturnCodes.check(rc);
     }
 
+    /** Appends a sequence field ({@code bound == 0} means unbounded). */
+    public void addSequenceField(String name, int elementType, int bound, int flags) {
+        int rc = FfiAccess.typeInfoAddSequenceField(
+                handle(), name.getBytes(UTF8), elementType, bound, flags);
+        // Same fence as addField.
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
+    /**
+     * Appends a nested struct-typed field referencing {@code nested}'s own builder.
+     * {@code nested} is borrowed, not consumed -- the caller still owns it.
+     */
+    public void addNestedField(String name, TypeInfo nested, int flags) {
+        int rc = FfiAccess.typeInfoAddNestedField(handle(), name.getBytes(UTF8), nested.handle(), flags);
+        // Same fence as addField, for both this builder and the borrowed nested one --
+        // the native call dereferences both handles.
+        NativeKeepAlive.keepAlive(this);
+        NativeKeepAlive.keepAlive(nested);
+        ReturnCodes.check(rc);
+    }
+
     /** Bakes the fields appended so far into an immutable {@link TypeObject}. */
     public TypeObject toTypeObject() {
         long h = handle();
