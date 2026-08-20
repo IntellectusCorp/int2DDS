@@ -1571,4 +1571,78 @@ public final class FfiAccess {
     public static int participantDataGetUserData(long data, long buf, long capacity, long sizeOut) {
         return Ffi.int2dds_participant_builtin_topic_data_get_user_data(data, buf, capacity, sizeOut);
     }
+
+    // --- Discovery: matched endpoints (handle-list + per-handle lookup) ---
+
+    /**
+     * Writes up to {@code capacity} matched-subscription handles (16 bytes
+     * each) into {@code handles}, for the subscriptions currently matched to
+     * {@code writer}. Returns rc; writes the TRUE total matched count to
+     * {@code countOut[0]} on success, even when it exceeds {@code capacity} --
+     * same contract as {@link #getDiscoveredParticipants}.
+     */
+    public static int getMatchedSubscriptions(long writer, byte[] handles, long capacity,
+            long[] countOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_datawriter_get_matched_subscriptions(
+                writer, handles, capacity, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            countOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Mints an owned {@code SubscriptionBuiltinTopicData} box for the given
+     * matched-subscription 16-byte handle. Returns rc; writes the handle to
+     * {@code dataOut[0]} on success. The caller owns the box and must release
+     * it with {@link #subDataDestroy}.
+     */
+    public static int getMatchedSubscriptionData(long writer, byte[] handle, long[] dataOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_datawriter_get_matched_subscription_data(
+                writer, handle, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            dataOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Writes up to {@code capacity} matched-publication handles (16 bytes
+     * each) into {@code handles}, for the publications currently matched to
+     * {@code reader}. Returns rc; writes the TRUE total matched count to
+     * {@code countOut[0]} on success, even when it exceeds {@code capacity} --
+     * same contract as {@link #getDiscoveredParticipants}.
+     */
+    public static int getMatchedPublications(long reader, byte[] handles, long capacity,
+            long[] countOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_datareader_get_matched_publications(
+                reader, handles, capacity, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            countOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Mints an owned {@code PublicationBuiltinTopicData} box for the given
+     * matched-publication 16-byte handle. Returns rc; writes the handle to
+     * {@code dataOut[0]} on success. The caller owns the box and must release
+     * it with {@link #pubDataDestroy}.
+     */
+    public static int getMatchedPublicationData(long reader, byte[] handle, long[] dataOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_datareader_get_matched_publication_data(
+                reader, handle, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            dataOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
 }

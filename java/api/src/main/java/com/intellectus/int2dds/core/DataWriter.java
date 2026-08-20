@@ -2,6 +2,7 @@ package com.intellectus.int2dds.core;
 
 import com.intellectus.int2dds.cdr.CdrWriter;
 import com.intellectus.int2dds.conditions.StatusCondition;
+import com.intellectus.int2dds.discovery.SubscriptionBuiltinTopicData;
 import com.intellectus.int2dds.exceptions.DdsErrorException;
 import com.intellectus.int2dds.internal.NativeCleaner;
 import com.intellectus.int2dds.internal.NativeKeepAlive;
@@ -14,6 +15,9 @@ import com.intellectus.int2dds.qos.DataWriterQos;
 import com.intellectus.int2dds.status.StatusMask;
 import com.intellectus.int2dds.types.IDdsType;
 import java.nio.ByteOrder;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -214,6 +218,53 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
         } finally {
             FfiAccess.destroyDataWriterQos(qosHandle);
         }
+    }
+
+    /** Size in bytes of one native instance handle, as used by the matched-endpoint handle-list call. */
+    private static final int HANDLE_SIZE = 16;
+
+    /**
+     * Lists the subscriptions currently matched to this writer: a
+     * handle-list-then-per-handle-lookup call, the same shape as {@link
+     * DomainParticipant#getDiscoveredParticipants()}. First the matched
+     * subscriptions' instance handles are collected (grow-and-retry on {@code
+     * byte[]} capacity, since the native call reports the TRUE total even
+     * when it exceeds what was copied), then each handle is resolved to a
+     * {@link SubscriptionBuiltinTopicData} and materialized.
+     */
+    public List<SubscriptionBuiltinTopicData> getMatchedSubscriptions() {
+        long h = handle();
+        int capacity = 8;
+        byte[] handles = new byte[capacity * HANDLE_SIZE];
+        int count;
+        while (true) {
+            long[] countOut = new long[1];
+            int rc = FfiAccess.getMatchedSubscriptions(h, handles, capacity, countOut);
+            NativeKeepAlive.keepAlive(this);
+            ReturnCodes.check(rc);
+            count = (int) countOut[0];
+            if (count <= capacity) {
+                break;
+            }
+            capacity = count;
+            handles = new byte[capacity * HANDLE_SIZE];
+        }
+
+        List<SubscriptionBuiltinTopicData> out = new ArrayList<SubscriptionBuiltinTopicData>();
+        for (int i = 0; i < count; i++) {
+            byte[] handle = Arrays.copyOfRange(handles, i * HANDLE_SIZE, (i + 1) * HANDLE_SIZE);
+            long[] dataOut = new long[1];
+            int rc = FfiAccess.getMatchedSubscriptionData(h, handle, dataOut);
+            NativeKeepAlive.keepAlive(this);
+            ReturnCodes.check(rc);
+            long data = dataOut[0];
+            try {
+                out.add(SubscriptionBuiltinTopicData.materialize(data));
+            } finally {
+                FfiAccess.subDataDestroy(data);
+            }
+        }
+        return out;
     }
 
     /**

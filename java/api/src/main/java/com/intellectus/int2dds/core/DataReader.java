@@ -4,6 +4,7 @@ import com.intellectus.int2dds.cdr.CdrReader;
 import com.intellectus.int2dds.conditions.QueryCondition;
 import com.intellectus.int2dds.conditions.ReadCondition;
 import com.intellectus.int2dds.conditions.StatusCondition;
+import com.intellectus.int2dds.discovery.PublicationBuiltinTopicData;
 import com.intellectus.int2dds.exceptions.DdsErrorException;
 import com.intellectus.int2dds.exceptions.DdsException;
 import com.intellectus.int2dds.internal.NativeKeepAlive;
@@ -16,6 +17,9 @@ import com.intellectus.int2dds.status.StatusMask;
 import com.intellectus.int2dds.types.IDdsType;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Objects;
 import java.util.function.Supplier;
 
@@ -138,6 +142,53 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
         NativeKeepAlive.keepAlive(this);
         ReturnCodes.check(rc);
         return new QueryCondition(out[0]);
+    }
+
+    /** Size in bytes of one native instance handle, as used by the matched-endpoint handle-list call. */
+    private static final int HANDLE_SIZE = 16;
+
+    /**
+     * Lists the publications currently matched to this reader: a
+     * handle-list-then-per-handle-lookup call, the same shape as {@link
+     * DomainParticipant#getDiscoveredParticipants()}. First the matched
+     * publications' instance handles are collected (grow-and-retry on {@code
+     * byte[]} capacity, since the native call reports the TRUE total even
+     * when it exceeds what was copied), then each handle is resolved to a
+     * {@link PublicationBuiltinTopicData} and materialized.
+     */
+    public List<PublicationBuiltinTopicData> getMatchedPublications() {
+        long h = handle();
+        int capacity = 8;
+        byte[] handles = new byte[capacity * HANDLE_SIZE];
+        int count;
+        while (true) {
+            long[] countOut = new long[1];
+            int rc = FfiAccess.getMatchedPublications(h, handles, capacity, countOut);
+            NativeKeepAlive.keepAlive(this);
+            ReturnCodes.check(rc);
+            count = (int) countOut[0];
+            if (count <= capacity) {
+                break;
+            }
+            capacity = count;
+            handles = new byte[capacity * HANDLE_SIZE];
+        }
+
+        List<PublicationBuiltinTopicData> out = new ArrayList<PublicationBuiltinTopicData>();
+        for (int i = 0; i < count; i++) {
+            byte[] handle = Arrays.copyOfRange(handles, i * HANDLE_SIZE, (i + 1) * HANDLE_SIZE);
+            long[] dataOut = new long[1];
+            int rc = FfiAccess.getMatchedPublicationData(h, handle, dataOut);
+            NativeKeepAlive.keepAlive(this);
+            ReturnCodes.check(rc);
+            long data = dataOut[0];
+            try {
+                out.add(PublicationBuiltinTopicData.materialize(data));
+            } finally {
+                FfiAccess.pubDataDestroy(data);
+            }
+        }
+        return out;
     }
 
     /** Takes (removes) the next sample, or null if the cache is empty. */
