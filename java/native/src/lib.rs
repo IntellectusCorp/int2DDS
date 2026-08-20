@@ -15,6 +15,8 @@ pub mod gen;
 mod generated;
 pub mod generated_support;
 pub mod handwritten;
+#[cfg(test)]
+mod sample_info_layout;
 pub mod strings;
 
 /// The product version, inherited from the workspace `Cargo.toml`.
