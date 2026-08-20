@@ -843,29 +843,37 @@ public final class FfiAccess {
     }
 
     /**
-     * Reads a trigger value through the generic {@code Int2DdsCondition} accessor.
-     * Only valid for a handle obtained from {@code condition_seq_get} — that
-     * wrapper type (a fat {@code Arc<dyn Condition>}) has a different native
-     * layout from a concrete condition's own handle (e.g. a GuardCondition's
-     * thin {@code Arc<GuardCondition>}), so calling this on an original handle
-     * reads across the mismatch and corrupts memory. Use {@link
+     * Reads a trigger value through the generic {@code Int2DdsCondition} accessor,
+     * writing it to {@code out[0]} on success. Only valid for a handle obtained
+     * from {@code condition_seq_get} — that wrapper type (a fat
+     * {@code Arc<dyn Condition>}) has a different native layout from a concrete
+     * condition's own handle (e.g. a GuardCondition's thin
+     * {@code Arc<GuardCondition>}), so calling this on an original handle reads
+     * across the mismatch and corrupts memory. Use {@link
      * #guardConditionGetTriggerValue} etc. for a concrete condition's own handle.
      */
-    public static boolean conditionGetTriggerValue(long condition) {
+    public static int conditionGetTriggerValue(long condition, boolean[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_condition_get_trigger_value(condition, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
-        com.intellectus.int2dds.internal.ReturnCodes.check(rc);
-        return slot.get(0) != 0; // bool out is 1 byte, not 4
+        if (rc == 0) {
+            out[0] = slot.get(0) != 0; // bool out is 1 byte, not 4
+        }
+        return rc;
     }
 
-    /** Reads a guard condition's own trigger value (its own handle, not a seq entry). */
-    public static boolean guardConditionGetTriggerValue(long condition) {
+    /**
+     * Reads a guard condition's own trigger value (its own handle, not a seq
+     * entry), writing it to {@code out[0]} on success.
+     */
+    public static int guardConditionGetTriggerValue(long condition, boolean[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_guardcondition_get_trigger_value(condition, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
-        com.intellectus.int2dds.internal.ReturnCodes.check(rc);
-        return slot.get(0) != 0; // bool out is 1 byte, not 4
+        if (rc == 0) {
+            out[0] = slot.get(0) != 0; // bool out is 1 byte, not 4
+        }
+        return rc;
     }
 
     /** Releases a guard condition. Returns the C ABI status code. */

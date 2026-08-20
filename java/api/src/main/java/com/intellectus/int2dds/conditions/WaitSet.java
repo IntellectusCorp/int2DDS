@@ -1,6 +1,8 @@
 package com.intellectus.int2dds.conditions;
 
 import com.intellectus.int2dds.exceptions.DdsException;
+import com.intellectus.int2dds.internal.NativeCleaner;
+import com.intellectus.int2dds.internal.NativeHandle;
 import com.intellectus.int2dds.internal.NativeKeepAlive;
 import com.intellectus.int2dds.internal.ReturnCodes;
 import com.intellectus.int2dds.internal.ffi.FfiAccess;
@@ -13,8 +15,7 @@ import java.util.Objects;
  * triggers. Not thread-safe: use one WaitSet per waiting thread.
  */
 public final class WaitSet implements AutoCloseable {
-    private final long handle;
-    private boolean closed;
+    private final NativeHandle handle;
     // Attached conditions, kept alive and re-checked after wait(): wait_ex's
     // returned sequence uses different pointers than what was attached, so we
     // identify triggers by re-reading triggerValue() on the originals.
@@ -23,7 +24,7 @@ public final class WaitSet implements AutoCloseable {
     public WaitSet() {
         long[] out = new long[1];
         ReturnCodes.check(FfiAccess.waitsetNew(out));
-        this.handle = out[0];
+        this.handle = NativeCleaner.register(this, out[0], FfiAccess::waitsetDelete);
     }
 
     /** Attaches a condition (dispatch by type). */
@@ -31,6 +32,7 @@ public final class WaitSet implements AutoCloseable {
         Objects.requireNonNull(c, "condition");
         int rc = attachNative(c);
         NativeKeepAlive.keepAlive(c);
+        NativeKeepAlive.keepAlive(this);
         ReturnCodes.check(rc);
         attached.add(c);
     }
@@ -40,6 +42,7 @@ public final class WaitSet implements AutoCloseable {
         Objects.requireNonNull(c, "condition");
         int rc = detachNative(c);
         NativeKeepAlive.keepAlive(c);
+        NativeKeepAlive.keepAlive(this);
         ReturnCodes.check(rc);
         attached.remove(c);
     }
@@ -47,14 +50,14 @@ public final class WaitSet implements AutoCloseable {
     private int attachNative(Condition c) {
         // Task 2/3 extend this dispatch for StatusCondition/ReadCondition.
         if (c instanceof GuardCondition) {
-            return FfiAccess.waitsetAttachGuard(handle, c.handle());
+            return FfiAccess.waitsetAttachGuard(handle.value(), c.handle());
         }
         throw new IllegalArgumentException("unsupported condition type: " + c.getClass());
     }
 
     private int detachNative(Condition c) {
         if (c instanceof GuardCondition) {
-            return FfiAccess.waitsetDetachGuard(handle, c.handle());
+            return FfiAccess.waitsetDetachGuard(handle.value(), c.handle());
         }
         throw new IllegalArgumentException("unsupported condition type: " + c.getClass());
     }
@@ -69,7 +72,7 @@ public final class WaitSet implements AutoCloseable {
      */
     public List<Condition> await(long timeoutMillis) {
         long[] seqOut = new long[1];
-        int rc = FfiAccess.waitsetWaitEx(handle, timeoutMillis, seqOut);
+        int rc = FfiAccess.waitsetWaitEx(handle.value(), timeoutMillis, seqOut);
         NativeKeepAlive.keepAlive(this);
         if (rc == DdsException.RET_TIMEOUT) {
             return new ArrayList<Condition>();
@@ -89,10 +92,6 @@ public final class WaitSet implements AutoCloseable {
 
     @Override
     public void close() {
-        if (closed) {
-            return;
-        }
-        closed = true;
-        ReturnCodes.check(FfiAccess.waitsetDelete(handle));
+        ReturnCodes.check(handle.close());
     }
 }

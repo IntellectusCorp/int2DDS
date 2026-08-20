@@ -27,8 +27,10 @@ public final class GuardCondition extends Condition {
     @Override
     public boolean triggerValue() {
         long h = handle();
-        boolean v = FfiAccess.guardConditionGetTriggerValue(h);
+        boolean[] out = new boolean[1];
+        int rc = FfiAccess.guardConditionGetTriggerValue(h, out);
         NativeKeepAlive.keepAlive(this);
-        return v;
+        ReturnCodes.check(rc);
+        return out[0];
     }
 }
