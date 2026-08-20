@@ -115,11 +115,18 @@ fn emit_one(f: &FfiFn) -> String {
                 // bytes and the FFI writes a variable number of N-byte elements.
                 // Size the buffer from the array's ACTUAL length (never a fixed
                 // N-byte stack array, which would overflow past the first
-                // element), then copy the whole buffer back. `capacity` is
-                // forwarded unchanged by its own scalar arm.
+                // element), then copy the whole buffer back.
+                //
+                // Clamp `capacity` to what the buffer actually holds: shadowing
+                // the `jlong` parameter here (before the call) turns a caller
+                // that overstates capacity into safe truncation rather than a
+                // heap overflow, since the core writes up to `capacity * N`
+                // bytes. The sibling is always literally named `capacity`
+                // (that is why `map_param` fired), so the identifier is in scope.
                 pre.push_str(&format!(
                     "    let {n}_len = env.get_array_length(&{n}).unwrap_or(0).max(0) as usize;\n\
-                     \x20   let mut {n}_buf = vec![0u8; {n}_len];\n"
+                     \x20   let mut {n}_buf = vec![0u8; {n}_len];\n\
+                     \x20   let capacity = core::cmp::min(capacity as usize, {n}_len / {len});\n"
                 ));
                 post.push_str(&format!(
                     "    crate::generated_support::write_back(&mut env, &{n}, &{n}_buf);\n"
@@ -294,7 +301,12 @@ mod tests {
         );
         assert!(out.contains("handles_out_buf.as_mut_ptr() as *mut [u8; 16]"), "{out}");
         assert!(out.contains("write_back(&mut env, &handles_out, &handles_out_buf)"), "{out}");
-        // `capacity` is still forwarded unchanged.
+        // `capacity` is clamped to what the buffer holds, then forwarded, so a
+        // caller that overstates capacity truncates instead of overflowing.
+        assert!(
+            out.contains("let capacity = core::cmp::min(capacity as usize, handles_out_len / 16);"),
+            "{out}"
+        );
         assert!(out.contains("capacity as _"), "{out}");
     }
 

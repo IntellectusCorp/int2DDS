@@ -914,6 +914,7 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1da
 ) -> jint {
     let handles_out_len = env.get_array_length(&handles_out).unwrap_or(0).max(0) as usize;
     let mut handles_out_buf = vec![0u8; handles_out_len];
+    let capacity = core::cmp::min(capacity as usize, handles_out_len / 16);
     let __ret = unsafe {
         int2dds_ffi::discovery::int2dds_datareader_get_matched_publications(
             reader as usize as *const _,
@@ -2306,6 +2307,7 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1da
 ) -> jint {
     let handles_out_len = env.get_array_length(&handles_out).unwrap_or(0).max(0) as usize;
     let mut handles_out_buf = vec![0u8; handles_out_len];
+    let capacity = core::cmp::min(capacity as usize, handles_out_len / 16);
     let __ret = unsafe {
         int2dds_ffi::discovery::int2dds_datawriter_get_matched_subscriptions(
             writer as usize as *const _,
@@ -5944,6 +5946,7 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1pa
 ) -> jint {
     let handles_out_len = env.get_array_length(&handles_out).unwrap_or(0).max(0) as usize;
     let mut handles_out_buf = vec![0u8; handles_out_len];
+    let capacity = core::cmp::min(capacity as usize, handles_out_len / 16);
     let __ret = unsafe {
         int2dds_ffi::discovery::int2dds_participant_get_discovered_participants(
             participant as usize as *const _,
