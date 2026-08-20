@@ -81,6 +81,14 @@ struct ParamPlan {
     needs_arena: bool,
 }
 
+// Every local this function introduces is prefixed `__ffi_`. Real Rust FFI
+// params (which drive `n`, the Java parameter name) never start with that
+// prefix — e.g. `ffi/src/dynamic.rs` has several C params literally named
+// `t` (TypeObject) — so deriving locals from `n` without the prefix (the
+// previous scheme used `{n}_seg`) can collide with an unrelated sibling
+// param and fail to compile. Prefixing unconditionally, rather than
+// detecting collisions per function, makes every emitted local
+// un-collidable by construction.
 fn plan_param(p: &Param, m: Mapped) -> ParamPlan {
     let n = &p.name;
     match m.kind {
@@ -108,7 +116,7 @@ fn plan_param(p: &Param, m: Mapped) -> ParamPlan {
             needs_arena: false,
         },
         Kind::CStringIn => {
-            let seg = format!("{n}_seg");
+            let seg = format!("__ffi_seg_{n}");
             ParamPlan {
                 layout: "ADDRESS",
                 // FfiAccess's byte[] does not include a trailing NUL (the JNI
@@ -117,7 +125,7 @@ fn plan_param(p: &Param, m: Mapped) -> ParamPlan {
                 // extra byte stays zero.
                 pre: vec![
                     format!(
-                        "MemorySegment {seg} = ({n} == null) ? MemorySegment.NULL : arena.allocate({n}.length + 1);"
+                        "MemorySegment {seg} = ({n} == null) ? MemorySegment.NULL : __ffi_arena.allocate({n}.length + 1);"
                     ),
                     format!(
                         "if ({n} != null) MemorySegment.copy({n}, 0, {seg}, JAVA_BYTE, 0, {n}.length);"
@@ -129,12 +137,12 @@ fn plan_param(p: &Param, m: Mapped) -> ParamPlan {
             }
         }
         Kind::ByteArrayIn => {
-            let seg = format!("{n}_seg");
+            let seg = format!("__ffi_seg_{n}");
             ParamPlan {
                 layout: "ADDRESS",
                 pre: vec![
                     format!(
-                        "MemorySegment {seg} = ({n} == null) ? MemorySegment.NULL : arena.allocate({n}.length);"
+                        "MemorySegment {seg} = ({n} == null) ? MemorySegment.NULL : __ffi_arena.allocate({n}.length);"
                     ),
                     format!(
                         "if ({n} != null) MemorySegment.copy({n}, 0, {seg}, JAVA_BYTE, 0, {n}.length);"
@@ -149,11 +157,11 @@ fn plan_param(p: &Param, m: Mapped) -> ParamPlan {
         // a scratch segment sized from the caller's array, pass it, and copy
         // the native result back into the array AFTER invokeExact.
         Kind::CStringOut | Kind::ByteArrayOut | Kind::ByteArrayOutSized => {
-            let seg = format!("{n}_seg");
+            let seg = format!("__ffi_seg_{n}");
             ParamPlan {
                 layout: "ADDRESS",
                 pre: vec![format!(
-                    "MemorySegment {seg} = ({n} == null) ? MemorySegment.NULL : arena.allocate({n}.length);"
+                    "MemorySegment {seg} = ({n} == null) ? MemorySegment.NULL : __ffi_arena.allocate({n}.length);"
                 )],
                 call_arg: seg.clone(),
                 post: vec![format!(
@@ -163,10 +171,10 @@ fn plan_param(p: &Param, m: Mapped) -> ParamPlan {
             }
         }
         Kind::CStringArray => {
-            let seg = format!("{n}_seg");
-            let idx = format!("i_{n}");
-            let elem = format!("{n}_elem");
-            let elem_seg = format!("{n}_elemSeg");
+            let seg = format!("__ffi_seg_{n}");
+            let idx = format!("__ffi_i_{n}");
+            let elem = format!("__ffi_elem_{n}");
+            let elem_seg = format!("__ffi_elemSeg_{n}");
             ParamPlan {
                 layout: "ADDRESS",
                 pre: vec![
@@ -174,14 +182,14 @@ fn plan_param(p: &Param, m: Mapped) -> ParamPlan {
                     format!("if ({n} == null) {{"),
                     format!("    {seg} = MemorySegment.NULL;"),
                     "} else {".to_string(),
-                    format!("    {seg} = arena.allocate(ADDRESS, {n}.length);"),
+                    format!("    {seg} = __ffi_arena.allocate(ADDRESS, {n}.length);"),
                     format!("    for (int {idx} = 0; {idx} < {n}.length; {idx}++) {{"),
                     format!("        byte[] {elem} = {n}[{idx}];"),
                     format!("        MemorySegment {elem_seg};"),
                     format!("        if ({elem} == null) {{"),
                     format!("            {elem_seg} = MemorySegment.NULL;"),
                     "        } else {".to_string(),
-                    format!("            {elem_seg} = arena.allocate({elem}.length + 1);"),
+                    format!("            {elem_seg} = __ffi_arena.allocate({elem}.length + 1);"),
                     format!(
                         "            MemorySegment.copy({elem}, 0, {elem_seg}, JAVA_BYTE, 0, {elem}.length);"
                     ),
@@ -257,28 +265,32 @@ fn emit_one(f: &FfiFn) -> String {
         }
         (Some(rj), true) => {
             let carrier = scalar_carrier(rj);
-            body_lines.push(format!("{carrier} __ret = ({carrier}) {invoke};"));
+            body_lines.push(format!("{carrier} __ffi_ret = ({carrier}) {invoke};"));
             for pl in &plans {
                 body_lines.extend(pl.post.iter().cloned());
             }
             if rj == "boolean" {
-                body_lines.push("return __ret != 0;".to_string());
+                body_lines.push("return __ffi_ret != 0;".to_string());
             } else {
-                body_lines.push("return __ret;".to_string());
+                body_lines.push("return __ffi_ret;".to_string());
             }
         }
     }
 
     let ret_type = ret_java.unwrap_or("void");
-    let try_open = if needs_arena { "try (Arena arena = Arena.ofConfined()) {" } else { "try {" };
+    // `__ffi_arena`/`__ffi_thrown` are prefixed so neither can collide with a
+    // C parameter's own name (e.g. `t`, the TypeObject param on several
+    // dynamic.rs functions) — see plan_param's doc comment.
+    let try_open =
+        if needs_arena { "try (Arena __ffi_arena = Arena.ofConfined()) {" } else { "try {" };
 
     format!(
         "    private static final MethodHandle MH_{name} = dc(\"{name}\", {descriptor});\n\n\
          \x20   static {ret_type} {name}({}) {{\n\
          \x20       {try_open}\n\
          {}\
-         \x20       }} catch (Throwable t) {{\n\
-         \x20           throw new AssertionError(\"FFM downcall failed: {name}\", t);\n\
+         \x20       }} catch (Throwable __ffi_thrown) {{\n\
+         \x20           throw new AssertionError(\"FFM downcall failed: {name}\", __ffi_thrown);\n\
          \x20       }}\n\
          \x20   }}\n\n",
         sig_params.join(", "),
@@ -363,17 +375,17 @@ mod tests {
             vec![p("participant", "*const Int2DdsParticipant"), p("topic_name", "*const c_char")],
             "Int2DdsRet",
         )]);
-        assert!(out.contains("try (Arena arena = Arena.ofConfined()) {"), "{out}");
+        assert!(out.contains("try (Arena __ffi_arena = Arena.ofConfined()) {"), "{out}");
         assert!(
             out.contains(
-                "MemorySegment topic_name_seg = (topic_name == null) ? MemorySegment.NULL : \
-                 arena.allocate(topic_name.length + 1);"
+                "MemorySegment __ffi_seg_topic_name = (topic_name == null) ? MemorySegment.NULL : \
+                 __ffi_arena.allocate(topic_name.length + 1);"
             ),
             "{out}"
         );
         assert!(
             out.contains(
-                "if (topic_name != null) MemorySegment.copy(topic_name, 0, topic_name_seg, \
+                "if (topic_name != null) MemorySegment.copy(topic_name, 0, __ffi_seg_topic_name, \
                  JAVA_BYTE, 0, topic_name.length);"
             ),
             "{out}"
@@ -392,15 +404,18 @@ mod tests {
             vec![p("writer", "*const Int2DdsDataWriter"), p("handle_out", "*mut [u8; 16]")],
             "Int2DdsRet",
         )]);
-        let invoke_at =
-            out.find("invokeExact(writer, handle_out_seg)").expect("must invoke with the segment");
+        let invoke_at = out
+            .find("invokeExact(writer, __ffi_seg_handle_out)")
+            .expect("must invoke with the segment");
         let copy_back_at = out
-            .find("MemorySegment.copy(handle_out_seg, JAVA_BYTE, 0, handle_out, 0, handle_out.length)")
+            .find(
+                "MemorySegment.copy(__ffi_seg_handle_out, JAVA_BYTE, 0, handle_out, 0, handle_out.length)",
+            )
             .expect("must copy the result back into the caller's array");
         assert!(invoke_at < copy_back_at, "copy-back must happen after invokeExact:\n{out}");
         // The out segment is allocated but never pre-filled from the array.
         assert!(
-            !out.contains("MemorySegment.copy(handle_out, 0, handle_out_seg"),
+            !out.contains("MemorySegment.copy(handle_out, 0, __ffi_seg_handle_out"),
             "an out-only param must not be copied in:\n{out}"
         );
     }
@@ -442,8 +457,11 @@ mod tests {
             ],
             "Int2DdsRet",
         )]);
-        assert!(out.contains("arena.allocate(ADDRESS, names.length)"), "{out}");
-        assert!(out.contains("names_seg.setAtIndex(ADDRESS, i_names, names_elemSeg)"), "{out}");
+        assert!(out.contains("__ffi_arena.allocate(ADDRESS, names.length)"), "{out}");
+        assert!(
+            out.contains("__ffi_seg_names.setAtIndex(ADDRESS, __ffi_i_names, __ffi_elemSeg_names)"),
+            "{out}"
+        );
         assert!(
             out.contains("byte[][] names"),
             "public signature must still take byte[][]:\n{out}"
@@ -460,5 +478,70 @@ mod tests {
             out.contains("static long directBufferAddress(java.nio.ByteBuffer buf) {"),
             "{out}"
         );
+        // Regression guard: no emitted local may ever be a bare, unprefixed
+        // identifier that a C param could shadow. `int2dds_type_object_*`
+        // (ffi/src/dynamic.rs) has six functions whose TypeObject param is
+        // literally named `t`; if the catch variable ever regresses to a
+        // bare `t`, this fails across the whole real surface, not just one
+        // fixture.
+        assert!(
+            !out.contains("catch (Throwable t)"),
+            "catch var must never collide with a C param named `t`"
+        );
+        assert!(
+            out.matches("catch (Throwable __ffi_thrown)").count() == handles,
+            "every downcall must catch with __ffi_thrown"
+        );
+    }
+
+    // Regression: a C param literally named `t` (six real functions in
+    // ffi/src/dynamic.rs, e.g. int2dds_type_object_destroy) used to collide
+    // with the hardcoded `catch (Throwable t)` variable and fail to compile
+    // under JDK 24 ("variable t is already defined").
+    #[test]
+    fn a_param_literally_named_t_does_not_collide_with_the_catch_variable() {
+        // Same shape as the real int2dds_type_object_destroy: single Pointer
+        // param named `t`, unit return.
+        let out = emit_java_panama(&[f(
+            "int2dds_type_object_destroy",
+            vec![p("t", "*mut Int2DdsTypeObject")],
+            "()",
+        )]);
+        assert!(out.contains("static void int2dds_type_object_destroy(long t) {"), "{out}");
+        assert!(out.contains("catch (Throwable __ffi_thrown) {"), "{out}");
+        assert!(!out.contains("catch (Throwable t)"), "{out}");
+        assert!(
+            out.contains(
+                "throw new AssertionError(\"FFM downcall failed: int2dds_type_object_destroy\", \
+                 __ffi_thrown);"
+            ),
+            "{out}"
+        );
+        assert!(out.contains("MH_int2dds_type_object_destroy.invokeExact(t);"), "{out}");
+    }
+
+    // Regression: a C param literally named `arena` used to collide with the
+    // hardcoded `Arena arena = Arena.ofConfined()` local for any byte[]
+    // param sharing that name.
+    #[test]
+    fn a_param_literally_named_arena_does_not_collide_with_the_arena_local() {
+        let out = emit_java_panama(&[f(
+            "int2dds_example_with_arena_param",
+            vec![p("handle", "*mut Int2DdsHandle"), p("arena", "*const c_char")],
+            "Int2DdsRet",
+        )]);
+        assert!(
+            out.contains("try (Arena __ffi_arena = Arena.ofConfined()) {"),
+            "the Arena local must be __ffi_arena, not the `arena` param's own name:\n{out}"
+        );
+        assert!(!out.contains("Arena arena ="), "{out}");
+        assert!(
+            out.contains(
+                "MemorySegment __ffi_seg_arena = (arena == null) ? MemorySegment.NULL : \
+                 __ffi_arena.allocate(arena.length + 1);"
+            ),
+            "{out}"
+        );
+        assert!(out.contains("invokeExact(handle, __ffi_seg_arena)"), "{out}");
     }
 }
