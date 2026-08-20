@@ -20,9 +20,17 @@
 //! the callback, or the id is already gone and it returns without calling —
 //! never a use-after-free. See
 //! `.superpowers/sdd/listener-lifecycle-investigation.md`.
+//!
+//! # Shared scaffold
+//! Every trampoline funnels through [`run_trampoline`]: registry lookup with
+//! clone-under-lock, a `catch_unwind` so a Java-triggered or marshaling panic
+//! can never unwind across the `unsafe extern "C"` boundary (UB), JVM attach,
+//! and a bounded local frame with post-call exception draining. Each trampoline
+//! supplies only its status marshaling as a closure.
 
 use std::collections::HashMap;
 use std::os::raw::c_void;
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
@@ -57,8 +65,59 @@ fn env_for_callback() -> Option<JNIEnv<'static>> {
     crate::jvm()?.attach_current_thread_as_daemon().ok()
 }
 
-/// Trampoline for `on_subscription_matched`. Every later reader callback follows
-/// this exact shape.
+/// Shared trampoline scaffold. Looks up the listener context for `user_context`
+/// (cloning the `Arc` out under the registry lock; a missing id is a silent
+/// no-op), then — inside a `catch_unwind` so nothing can unwind across the
+/// `extern "C"` boundary — attaches the calling thread to the JVM and runs
+/// `marshal` inside a bounded local frame. Any pending Java exception left by
+/// `marshal` is described and cleared before returning; a Rust panic from
+/// `marshal` is logged and swallowed the same way.
+///
+/// `marshal` builds the Java status object (if any) and calls the listener
+/// method; it receives the attached env and the listener's `GlobalRef`.
+fn run_trampoline<F>(user_context: *mut c_void, marshal: F)
+where
+    F: FnOnce(&mut JNIEnv<'_>, &GlobalRef) -> Result<(), JniError>,
+{
+    let id = user_context as usize as u64;
+    // Clone the Arc out while holding the lock: this keeps the context (and its
+    // GlobalRef) alive for the whole callback even if a concurrent clear removes
+    // the id right after. If the id is already gone, there is no listener to
+    // call, so return.
+    let ctx = {
+        let guard = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.get(&id) {
+            Some(c) => Arc::clone(c),
+            None => return,
+        }
+    };
+
+    let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+        if let Some(mut env) = env_for_callback() {
+            // Bound the JNI locals this callback allocates: the DDS thread is
+            // daemon-attached, not entered through a native-method stub, so
+            // nothing else pushes/pops a frame — without this the status
+            // object (and any byte arrays it needs) leak one local ref each
+            // per callback until the table overflows.
+            let _ = env.with_local_frame(8, |env| marshal(env, &ctx.listener));
+            // A pending Java exception is thread-wide and survives the frame
+            // pop, so it is still checked here. It must never leak onto the
+            // native DDS thread.
+            if env.exception_check().unwrap_or(false) {
+                let _ = env.exception_describe();
+                let _ = env.exception_clear();
+            }
+        }
+    }));
+    if outcome.is_err() {
+        // A panic here would be UB unwinding across the extern "C" boundary.
+        // Log and swallow: the DDS thread must keep running regardless.
+        eprintln!("int2dds: listener trampoline panicked (id={id}), swallowed at FFI boundary");
+    }
+}
+
+/// Trampoline for `on_subscription_matched`. Every other reader callback
+/// follows this exact shape through [`run_trampoline`].
 ///
 /// # Safety
 /// Invoked by the DDS core under the C ABI. `user_context` is the registry id
@@ -72,57 +131,32 @@ unsafe extern "C" fn tramp_on_subscription_matched(
     if status.is_null() {
         return;
     }
-    let id = user_context as usize as u64;
-    // Clone the Arc out while holding the lock: this keeps the context (and its
-    // GlobalRef) alive for the whole callback even if a concurrent clear removes
-    // the id right after. If the id is already gone, there is no listener to
-    // call, so return.
-    let ctx = {
-        let guard = REGISTRY.lock().unwrap();
-        match guard.get(&id) {
-            Some(c) => Arc::clone(c),
-            None => return,
-        }
-    };
-
-    if let Some(mut env) = env_for_callback() {
-        let s = &*status;
-        // Bound the JNI locals this callback allocates: the DDS thread is
-        // daemon-attached, not entered through a native-method stub, so nothing
-        // else pushes/pops a frame — without this the byte array and status
-        // object leak one local ref each per callback until the table overflows.
-        let _ = env.with_local_frame(8, |env| -> Result<(), JniError> {
-            let handle = env.byte_array_from_slice(&s.last_publication_handle)?;
-            let cls = "com/intellectus/int2dds/status/SubscriptionMatchedStatus";
-            let jstatus = env.new_object(
-                cls,
-                "(IIII[B)V",
-                &[
-                    JValue::Int(s.total_count),
-                    JValue::Int(s.total_count_change),
-                    JValue::Int(s.current_count),
-                    JValue::Int(s.current_count_change),
-                    JValue::Object(&handle),
-                ],
-            )?;
-            // v1 passes the reader as Java null: native->entity reverse mapping
-            // is out of scope for this branch.
-            env.call_method(
-                ctx.listener.as_obj(),
-                "onSubscriptionMatched",
-                "(Lcom/intellectus/int2dds/core/DataReader;\
-                 Lcom/intellectus/int2dds/status/SubscriptionMatchedStatus;)V",
-                &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
-            )?;
-            Ok(())
-        });
-        // A pending Java exception is thread-wide and survives the frame pop, so
-        // it is still checked here. It must never leak onto the native DDS thread.
-        if env.exception_check().unwrap_or(false) {
-            let _ = env.exception_describe();
-            let _ = env.exception_clear();
-        }
-    }
+    let s = &*status;
+    run_trampoline(user_context, |env, listener| {
+        let handle = env.byte_array_from_slice(&s.last_publication_handle)?;
+        let cls = "com/intellectus/int2dds/status/SubscriptionMatchedStatus";
+        let jstatus = env.new_object(
+            cls,
+            "(IIII[B)V",
+            &[
+                JValue::Int(s.total_count),
+                JValue::Int(s.total_count_change),
+                JValue::Int(s.current_count),
+                JValue::Int(s.current_count_change),
+                JValue::Object(&handle),
+            ],
+        )?;
+        // v1 passes the reader as Java null: native->entity reverse mapping
+        // is out of scope for this branch.
+        env.call_method(
+            listener.as_obj(),
+            "onSubscriptionMatched",
+            "(Lcom/intellectus/int2dds/core/DataReader;\
+             Lcom/intellectus/int2dds/status/SubscriptionMatchedStatus;)V",
+            &[JValue::Object(&JObject::null()), JValue::Object(&jstatus)],
+        )?;
+        Ok(())
+    });
 }
 
 /// Installs a Java listener on `reader` for the given status `mask`. Returns the
@@ -147,7 +181,7 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_FfiHandwritten_
     };
     let ctx = Arc::new(ListenerCtx { listener: global });
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    REGISTRY.lock().unwrap().insert(id, ctx);
+    REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).insert(id, ctx);
 
     let c_listener = Int2DdsDataReaderListener {
         on_data_available: None,
@@ -170,7 +204,7 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_FfiHandwritten_
     };
     if rc != 0 {
         // Registration failed: forget the context so it does not leak.
-        REGISTRY.lock().unwrap().remove(&id);
+        REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
         return 0;
     }
     id as jlong
@@ -201,7 +235,7 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_FfiHandwritten_
         )
     };
     if id != 0 {
-        REGISTRY.lock().unwrap().remove(&(id as u64));
+        REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).remove(&(id as u64));
     }
     rc
 }
