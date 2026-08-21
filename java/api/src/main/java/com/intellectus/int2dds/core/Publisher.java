@@ -9,6 +9,9 @@ import com.intellectus.int2dds.internal.ffi.FfiAccess;
 import com.intellectus.int2dds.qos.DataWriterQos;
 import com.intellectus.int2dds.qos.PublisherQos;
 import com.intellectus.int2dds.types.IDdsType;
+import com.intellectus.int2dds.xtypes.DynamicDataWriter;
+import com.intellectus.int2dds.xtypes.DynamicTopic;
+import com.intellectus.int2dds.xtypes.DynamicTypeSupport;
 import java.util.Objects;
 
 /**
@@ -58,6 +61,28 @@ public final class Publisher extends NativeEntity {
     /** Creates a datawriter for {@code topic} with an explicit QoS. */
     public <T extends IDdsType> DataWriter<T> createDataWriter(Topic<T> topic, DataWriterQos qos) {
         return new DataWriter<T>(this, topic, Objects.requireNonNull(qos, "qos"));
+    }
+
+    /**
+     * Creates a datawriter for {@code topic}, backed by {@code support} (an
+     * XTypes dynamic type support), with the core's default QoS.
+     */
+    public DynamicDataWriter createDynamicDataWriter(DynamicTopic topic, DynamicTypeSupport support) {
+        Objects.requireNonNull(topic, "topic");
+        Objects.requireNonNull(support, "support");
+        long p = handle();
+        long t = topic.handle();
+        long s = support.handle();
+        long[] out = new long[1];
+        int rc = FfiAccess.createDataWriterDynamic(p, t, s, out);
+        // p, t and s are bare longs read moments before the native call that
+        // consumes them; keep this publisher, topic and support reachable
+        // across it -- see NativeKeepAlive's own doc for the full argument.
+        NativeKeepAlive.keepAlive(this);
+        NativeKeepAlive.keepAlive(topic);
+        NativeKeepAlive.keepAlive(support);
+        ReturnCodes.check(rc);
+        return DynamicDataWriter.fromHandle(out[0]);
     }
 
     /**

@@ -9,6 +9,9 @@ import com.intellectus.int2dds.internal.ffi.FfiAccess;
 import com.intellectus.int2dds.qos.DataReaderQos;
 import com.intellectus.int2dds.qos.SubscriberQos;
 import com.intellectus.int2dds.types.IDdsType;
+import com.intellectus.int2dds.xtypes.DynamicDataReader;
+import com.intellectus.int2dds.xtypes.DynamicTopic;
+import com.intellectus.int2dds.xtypes.DynamicTypeSupport;
 import java.util.Objects;
 import java.util.function.Supplier;
 
@@ -58,6 +61,29 @@ public final class Subscriber extends NativeEntity {
     public <T extends IDdsType> DataReader<T> createDataReader(
             Topic<T> topic, Supplier<T> factory, DataReaderQos qos) {
         return new DataReader<T>(this, topic, factory, Objects.requireNonNull(qos, "qos"));
+    }
+
+    /**
+     * Creates a datareader for {@code topic}, backed by {@code support} (an
+     * XTypes dynamic type support), with the core's default QoS.
+     */
+    public DynamicDataReader createDynamicDataReader(DynamicTopic topic, DynamicTypeSupport support) {
+        Objects.requireNonNull(topic, "topic");
+        Objects.requireNonNull(support, "support");
+        long sub = handle();
+        long t = topic.handle();
+        long s = support.handle();
+        long[] out = new long[1];
+        int rc = FfiAccess.createDataReaderDynamic(sub, t, s, out);
+        // sub, t and s are bare longs read moments before the native call
+        // that consumes them; keep this subscriber, topic and support
+        // reachable across it -- see NativeKeepAlive's own doc for the full
+        // argument.
+        NativeKeepAlive.keepAlive(this);
+        NativeKeepAlive.keepAlive(topic);
+        NativeKeepAlive.keepAlive(support);
+        ReturnCodes.check(rc);
+        return DynamicDataReader.fromHandle(out[0]);
     }
 
     /**

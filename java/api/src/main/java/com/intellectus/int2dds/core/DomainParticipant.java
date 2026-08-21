@@ -15,9 +15,12 @@ import com.intellectus.int2dds.qos.SubscriberQos;
 import com.intellectus.int2dds.qos.TopicQos;
 import com.intellectus.int2dds.types.IDdsType;
 import com.intellectus.int2dds.xtypes.DynamicData;
+import com.intellectus.int2dds.xtypes.DynamicTopic;
+import com.intellectus.int2dds.xtypes.DynamicTypeSupport;
 import com.intellectus.int2dds.xtypes.TypeObject;
 import java.nio.Buffer;
 import java.nio.ByteBuffer;
+import java.nio.charset.Charset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -33,6 +36,8 @@ import java.util.Objects;
  * participant before releasing the participant itself.
  */
 public final class DomainParticipant extends NativeEntity {
+
+    private static final Charset UTF8 = Charset.forName("UTF-8");
 
     private final int domainId;
 
@@ -100,6 +105,28 @@ public final class DomainParticipant extends NativeEntity {
     /** Creates a topic named {@code name} for {@code prototype}'s type, with an explicit QoS. */
     public <T extends IDdsType> Topic<T> createTopic(String name, T prototype, TopicQos qos) {
         return new Topic<T>(this, name, prototype, Objects.requireNonNull(qos, "qos"));
+    }
+
+    /**
+     * Creates a topic named {@code name} backed by {@code support} (an
+     * XTypes dynamic type support, from {@link
+     * com.intellectus.int2dds.xtypes.XmlTypeRegistry#getTypeSupport}) rather
+     * than a generated {@link IDdsType}, with the core's default QoS.
+     */
+    public DynamicTopic createDynamicTopic(String name, DynamicTypeSupport support) {
+        Objects.requireNonNull(name, "name");
+        Objects.requireNonNull(support, "support");
+        long h = handle();
+        long s = support.handle();
+        long[] out = new long[1];
+        int rc = FfiAccess.createTopicDynamic(h, name.getBytes(UTF8), s, out);
+        // h and s are bare longs read moments before the native call that
+        // consumes them; keep this participant and support reachable across
+        // it -- see NativeKeepAlive's own doc for the full argument.
+        NativeKeepAlive.keepAlive(this);
+        NativeKeepAlive.keepAlive(support);
+        ReturnCodes.check(rc);
+        return DynamicTopic.fromHandle(out[0]);
     }
 
     /** Creates a publisher with the core's default QoS. */

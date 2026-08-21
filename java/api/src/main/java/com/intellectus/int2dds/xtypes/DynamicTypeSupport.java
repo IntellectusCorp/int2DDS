@@ -23,7 +23,16 @@ public final class DynamicTypeSupport implements AutoCloseable {
         return 0;
     }
 
-    long handle() {
+    /**
+     * The native pointer. Public -- unlike the package-private {@code
+     * handle()} convention elsewhere -- because {@link
+     * com.intellectus.int2dds.core.DomainParticipant#createDynamicTopic},
+     * {@link com.intellectus.int2dds.core.Publisher#createDynamicDataWriter}
+     * and {@link com.intellectus.int2dds.core.Subscriber#createDynamicDataReader}
+     * live in a different package and need it to call the matching
+     * {@code FfiAccess} bridge, the same reasoning as {@link TypeObject#handle()}.
+     */
+    public long handle() {
         return handle.value();
     }
 

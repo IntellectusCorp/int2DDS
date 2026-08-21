@@ -2033,4 +2033,108 @@ public final class FfiAccess {
         }
         return rc;
     }
+
+    // --- Dynamic entities (xtypes write-path Topic/DataWriter/DataReader) ---
+
+    /**
+     * Creates a topic backed by a dynamic type support. Returns rc; writes
+     * the handle to {@code out[0]} only when rc == 0 -- the same shape as
+     * {@link #createTopic}. {@code qos} is {@code 0L} for the core's default
+     * Topic QoS.
+     */
+    public static int createTopicDynamic(long participant, byte[] topicName, long support, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_create_topic_dynamic(
+                participant, topicName, support, 0L, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Creates a datawriter backed by a dynamic type support. Returns rc;
+     * writes the handle to {@code out[0]} only when rc == 0. {@code qos} is
+     * {@code 0L} for the core's default DataWriter QoS.
+     */
+    public static int createDataWriterDynamic(long publisher, long topic, long support, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_create_datawriter_dynamic(
+                publisher, topic, support, 0L, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Creates a datareader backed by a dynamic type support. Returns rc;
+     * writes the handle to {@code out[0]} only when rc == 0. {@code qos} is
+     * {@code 0L} for the core's default DataReader QoS.
+     */
+    public static int createDataReaderDynamic(long subscriber, long topic, long support, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_create_datareader_dynamic(
+                subscriber, topic, support, 0L, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Publishes a populated DynamicData sample. Returns the C ABI status code. */
+    public static int dynamicWriterWrite(long writer, long data) {
+        return Ffi.int2dds_dynamic_writer_write(writer, data);
+    }
+
+    /**
+     * Takes the next available DynamicData sample. {@code out_info} is passed
+     * as {@code 0L} (NULL) -- sample info is not needed here. Returns rc;
+     * writes a fresh DynamicData handle to {@code outData[0]} only on
+     * success. {@code RET_NO_DATA} (27) means the cache is empty.
+     */
+    public static int dynamicReaderTake(long reader, long[] outData) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_reader_take(reader, directBufferAddress(slot), 0L);
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            outData[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Reads the number of DataReaders matched to a dynamic writer, writing it to {@code out[0]} on success. */
+    public static int dynamicWriterPublicationMatchedCount(long writer, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_writer_publication_matched_count(writer, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getInt(0); // native writes an i32 (4 bytes), not 8
+        }
+        return rc;
+    }
+
+    /** Reads the number of DataWriters matched to a dynamic reader, writing it to {@code out[0]} on success. */
+    public static int dynamicReaderSubscriptionMatchedCount(long reader, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_reader_subscription_matched_count(reader, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getInt(0); // native writes an i32 (4 bytes), not 8
+        }
+        return rc;
+    }
+
+    /** Releases a dynamic datawriter. */
+    public static void dynamicWriterDestroy(long writer) {
+        Ffi.int2dds_dynamic_writer_destroy(writer);
+    }
+
+    /** Releases a dynamic datareader. */
+    public static void dynamicReaderDestroy(long reader) {
+        Ffi.int2dds_dynamic_reader_destroy(reader);
+    }
 }
