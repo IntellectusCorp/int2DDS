@@ -97,6 +97,11 @@ pub unsafe extern "C" fn int2dds_xml_type_registry_get_type_support(
         Ok(s) => s,
         Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
     };
+    // Report an unknown name the same way `..._get_type_object` does, rather
+    // than as a generic error, so both lookups surface not-found identically.
+    if (*registry).inner.get_type_object(name_str).is_none() {
+        return INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND;
+    }
     let support = ffi_try!((*registry).inner.get(name_str));
     *out = Box::into_raw(Box::new(Int2DdsDynamicTypeSupport { inner: Arc::new(support) }));
     INT2DDS_RET_OK
