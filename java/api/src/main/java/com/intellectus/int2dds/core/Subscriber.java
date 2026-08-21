@@ -87,6 +87,42 @@ public final class Subscriber extends NativeEntity {
     }
 
     /**
+     * Creates a datareader for {@code topic}, backed by {@code support} (an
+     * XTypes dynamic type support), with an explicit QoS.
+     *
+     * <p>Builds a native {@link DataReaderQos} handle, applies {@code qos}'s
+     * policies onto it, and destroys it again once the create call returns —
+     * the same shape as {@link DataReader}'s own QoS-taking constructor path.
+     */
+    public DynamicDataReader createDynamicDataReader(
+            DynamicTopic topic, DynamicTypeSupport support, DataReaderQos qos) {
+        Objects.requireNonNull(topic, "topic");
+        Objects.requireNonNull(support, "support");
+        Objects.requireNonNull(qos, "qos");
+        long qosHandle = FfiAccess.createDataReaderQos();
+        if (qosHandle == 0L) {
+            throw new DdsErrorException(
+                    "failed to allocate a native DataReaderQos handle for dynamic datareader creation");
+        }
+        try {
+            QosMarshal.applyReaderQos(qosHandle, qos);
+            long sub = handle();
+            long t = topic.handle();
+            long s = support.handle();
+            long[] out = new long[1];
+            int rc = FfiAccess.createDataReaderDynamic(sub, t, s, qosHandle, out);
+            // Same keep-alive reasoning as the no-QoS overload above.
+            NativeKeepAlive.keepAlive(this);
+            NativeKeepAlive.keepAlive(topic);
+            NativeKeepAlive.keepAlive(support);
+            ReturnCodes.check(rc);
+            return DynamicDataReader.fromHandle(out[0]);
+        } finally {
+            FfiAccess.destroyDataReaderQos(qosHandle);
+        }
+    }
+
+    /**
      * Resolves the create argument and, when {@code qos} is supplied, builds
      * a native QoS handle, applies the policies onto it, and destroys it
      * again once the create call returns — success or failure, thrown or

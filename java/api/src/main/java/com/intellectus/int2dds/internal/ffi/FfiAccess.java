@@ -2124,14 +2124,26 @@ public final class FfiAccess {
     }
 
     /**
-     * Creates a datawriter backed by a dynamic type support. Returns rc;
-     * writes the handle to {@code out[0]} only when rc == 0. {@code qos} is
-     * {@code 0L} for the core's default DataWriter QoS.
+     * Creates a datawriter backed by a dynamic type support, with the core's
+     * default DataWriter QoS. Delegates to {@link
+     * #createDataWriterDynamic(long, long, long, long, long[])} with {@code
+     * qos = 0L}.
      */
     public static int createDataWriterDynamic(long publisher, long topic, long support, long[] out) {
+        return createDataWriterDynamic(publisher, topic, support, 0L, out);
+    }
+
+    /**
+     * Creates a datawriter backed by a dynamic type support. Returns rc;
+     * writes the handle to {@code out[0]} only when rc == 0. {@code qos} is
+     * {@code 0L} for the core's default DataWriter QoS, or a handle from
+     * {@link #createDataWriterQos()} with policies applied.
+     */
+    public static int createDataWriterDynamic(
+            long publisher, long topic, long support, long qos, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_create_datawriter_dynamic(
-                publisher, topic, support, 0L, directBufferAddress(slot));
+                publisher, topic, support, qos, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             out[0] = slot.getLong(0);
@@ -2140,14 +2152,26 @@ public final class FfiAccess {
     }
 
     /**
-     * Creates a datareader backed by a dynamic type support. Returns rc;
-     * writes the handle to {@code out[0]} only when rc == 0. {@code qos} is
-     * {@code 0L} for the core's default DataReader QoS.
+     * Creates a datareader backed by a dynamic type support, with the core's
+     * default DataReader QoS. Delegates to {@link
+     * #createDataReaderDynamic(long, long, long, long, long[])} with {@code
+     * qos = 0L}.
      */
     public static int createDataReaderDynamic(long subscriber, long topic, long support, long[] out) {
+        return createDataReaderDynamic(subscriber, topic, support, 0L, out);
+    }
+
+    /**
+     * Creates a datareader backed by a dynamic type support. Returns rc;
+     * writes the handle to {@code out[0]} only when rc == 0. {@code qos} is
+     * {@code 0L} for the core's default DataReader QoS, or a handle from
+     * {@link #createDataReaderQos()} with policies applied.
+     */
+    public static int createDataReaderDynamic(
+            long subscriber, long topic, long support, long qos, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_create_datareader_dynamic(
-                subscriber, topic, support, 0L, directBufferAddress(slot));
+                subscriber, topic, support, qos, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             out[0] = slot.getLong(0);
