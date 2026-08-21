@@ -107,7 +107,7 @@ impl TransportConfig for TcpConfig {
                 .unwrap_or(false),
             nodelay: prop_parse::<bool>(property, PROP_TCP_NODELAY).unwrap_or(true),
             connect_timeout: ms(PROP_TCP_CONNECT_TIMEOUT_MS, 5_000),
-            peer_handshake_timeout: ms(PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS, 5_000),
+            peer_handshake_timeout: ms(PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS, 20_000),
             tls_handshake_timeout: ms(PROP_TCP_TLS_HANDSHAKE_TIMEOUT_MS, 5_000),
             unacked_timeout: match prop_parse::<u64>(property, PROP_TCP_UNACKED_TIMEOUT_MS) {
                 Some(0) => None,
@@ -227,7 +227,7 @@ mod tests {
         assert_eq!(cfg.public_address, None);
         assert!(cfg.nodelay);
         assert_eq!(cfg.connect_timeout, Duration::from_millis(5_000));
-        assert_eq!(cfg.peer_handshake_timeout, Duration::from_millis(5_000));
+        assert_eq!(cfg.peer_handshake_timeout, Duration::from_millis(20_000));
         assert_eq!(cfg.tls_handshake_timeout, Duration::from_millis(5_000));
         assert_eq!(cfg.unacked_timeout, Some(Duration::from_millis(25_000)));
         assert_eq!(cfg.keepalive_interval, Duration::from_millis(10_000));
