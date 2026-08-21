@@ -169,6 +169,29 @@ public final class DynamicValue implements AutoCloseable {
         return new DynamicValue(out[0]);
     }
 
+    /** Builds an empty array value. Fill it with {@link #push}. */
+    public static DynamicValue array() {
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicValueArray(out);
+        ReturnCodes.check(rc);
+        return new DynamicValue(out[0]);
+    }
+
+    /**
+     * Snapshots the current field values of {@code data} into an immutable
+     * struct value. {@code data} is cloned natively, not consumed -- the
+     * caller still owns {@code data} and must {@link DynamicData#close} it
+     * independently, before or after this call.
+     */
+    public static DynamicValue struct(DynamicData data) {
+        long d = data.handle();
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicValueStruct(d, out);
+        NativeKeepAlive.keepAlive(data);
+        ReturnCodes.check(rc);
+        return new DynamicValue(out[0]);
+    }
+
     /**
      * Appends {@code element} to this sequence/array value.
      *

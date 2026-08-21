@@ -255,6 +255,36 @@ public final class FfiAccess {
         return Ffi.int2dds_dynamic_value_push(collection, element);
     }
 
+    /**
+     * Snapshots the populated DynamicData {@code data} into a struct dynamic
+     * value, writing the handle to {@code out[0]} on success. {@code data} is
+     * cloned natively, not consumed -- the caller still owns and must destroy
+     * {@code data} independently.
+     */
+    public static int dynamicValueStruct(long data, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_struct(data, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Creates an empty array dynamic value, writing the handle to {@code
+     * out[0]} on success. Append elements with {@link #dynamicValuePush}.
+     */
+    public static int dynamicValueArray(long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_array(directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
     // --- DomainParticipantFactory / DomainParticipant ---
 
     /**
