@@ -518,6 +518,17 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
     }
 
     /**
+     * This writer's effective data representation — the wire encoding it uses
+     * for samples, resolved from its QoS (XCDR1 for FINAL types, XCDR2 for
+     * APPENDABLE/MUTABLE). A pure read with no failure path.
+     */
+    public DataRepresentationKind getDataRepresentation() {
+        int v = FfiAccess.datawriterDataRepresentation(handle());
+        NativeKeepAlive.keepAlive(this);
+        return DataRepresentationKind.fromValue(v);
+    }
+
+    /**
      * Applies {@code qos} to this writer at runtime. Builds a native {@link
      * DataWriterQos} handle, applies {@code qos}'s policies onto it, and
      * destroys it again once the native {@code set_qos} call returns —

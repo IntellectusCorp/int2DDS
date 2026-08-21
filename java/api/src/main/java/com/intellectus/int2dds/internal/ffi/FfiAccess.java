@@ -815,6 +815,15 @@ public final class FfiAccess {
     }
 
     /**
+     * The writer's effective data-representation id ({@code 0} XCDR1, {@code 2}
+     * XCDR2). A pure getter with no failure path: a null writer yields the
+     * default rather than an error code.
+     */
+    public static int datawriterDataRepresentation(long writer) {
+        return Ffi.int2dds_datawriter_data_representation(writer);
+    }
+
+    /**
      * Creates a datawriter whose QoS comes from a loaded profile ({@code
      * qosPath} is a {@code "LibraryName::ProfileName"} path). Same {@code
      * (rc, long[] handleOut)} shape as {@link #createDataWriter}, and the
