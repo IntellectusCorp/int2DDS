@@ -15,6 +15,7 @@ import com.intellectus.int2dds.types.IDdsType;
 import com.intellectus.int2dds.xtypes.DynamicDataWriter;
 import com.intellectus.int2dds.xtypes.DynamicTopic;
 import com.intellectus.int2dds.xtypes.DynamicTypeSupport;
+import java.nio.charset.Charset;
 import java.util.Objects;
 
 /**
@@ -28,6 +29,8 @@ import java.util.Objects;
  */
 public final class Publisher extends NativeEntity {
 
+    private static final Charset UTF8 = Charset.forName("UTF-8");
+
     /**
      * @param qos may be null for the core's default Publisher QoS; {@link
      *     DomainParticipant#createPublisher(PublisherQos)} is responsible
@@ -35,6 +38,20 @@ public final class Publisher extends NativeEntity {
      */
     Publisher(DomainParticipant participant, PublisherQos qos) {
         super(Objects.requireNonNull(participant, "participant"), create(participant, qos),
+                FfiAccess::deletePublisher);
+    }
+
+    /**
+     * Package-private profile-create path, reached only through {@link
+     * DomainParticipant#createPublisher(String)}: a normal publisher whose
+     * QoS comes from the named profile at {@code profilePath} (a {@code
+     * "LibraryName::ProfileName"} path previously loaded via {@link
+     * DomainParticipantFactory#loadProfiles}), released the same way as the
+     * default-QoS path ({@code FfiAccess::deletePublisher}).
+     */
+    Publisher(DomainParticipant participant, String profilePath) {
+        super(Objects.requireNonNull(participant, "participant"),
+                createWithProfile(participant, Objects.requireNonNull(profilePath, "profilePath")),
                 FfiAccess::deletePublisher);
     }
 
@@ -255,6 +272,16 @@ public final class Publisher extends NativeEntity {
         // See Topic.createNative: participant.handle() is a bare long,
         // disconnected from `participant` once read, so this keeps
         // `participant` reachable for the duration of the native call above.
+        NativeKeepAlive.keepAlive(participant);
+        ReturnCodes.check(rc);
+        return handleOut[0];
+    }
+
+    /** The profile-create path, the same keep-alive/check shape as {@link #createNative}. */
+    private static long createWithProfile(DomainParticipant participant, String profilePath) {
+        long[] handleOut = new long[1];
+        int rc = FfiAccess.createPublisherWithProfile(
+                participant.handle(), profilePath.getBytes(UTF8), handleOut);
         NativeKeepAlive.keepAlive(participant);
         ReturnCodes.check(rc);
         return handleOut[0];

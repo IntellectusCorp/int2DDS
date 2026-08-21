@@ -60,6 +60,18 @@ public final class DomainParticipant extends NativeEntity {
         this.domainId = domainId;
     }
 
+    /**
+     * Creates a participant in {@code domainId} with QoS from the named
+     * profile at {@code profilePath} (a {@code "LibraryName::ProfileName"}
+     * path). The profile must already be loaded via {@link
+     * DomainParticipantFactory#loadProfiles}.
+     */
+    public DomainParticipant(int domainId, String profilePath) {
+        super(null, createWithProfile(domainId, Objects.requireNonNull(profilePath, "profilePath")),
+                FfiAccess::deleteParticipant);
+        this.domainId = domainId;
+    }
+
     private DomainParticipant(int domainId, NativeCleaner.Deleter deleter) {
         super(null, create(domainId, 0L), deleter);
         this.domainId = domainId;
@@ -102,12 +114,23 @@ public final class DomainParticipant extends NativeEntity {
      * and unnecessary here.
      */
     public <T extends IDdsType> Topic<T> createTopic(String name, T prototype) {
-        return new Topic<T>(this, name, prototype, null);
+        // Cast disambiguates from the (String, T, String) profile-create constructor.
+        return new Topic<T>(this, name, prototype, (TopicQos) null);
     }
 
     /** Creates a topic named {@code name} for {@code prototype}'s type, with an explicit QoS. */
     public <T extends IDdsType> Topic<T> createTopic(String name, T prototype, TopicQos qos) {
         return new Topic<T>(this, name, prototype, Objects.requireNonNull(qos, "qos"));
+    }
+
+    /**
+     * Creates a topic named {@code name} for {@code prototype}'s type, with
+     * QoS from the named profile at {@code profilePath} (a {@code
+     * "LibraryName::ProfileName"} path). The profile must already be loaded
+     * via {@link DomainParticipantFactory#loadProfiles}.
+     */
+    public <T extends IDdsType> Topic<T> createTopic(String name, T prototype, String profilePath) {
+        return new Topic<T>(this, name, prototype, Objects.requireNonNull(profilePath, "profilePath"));
     }
 
     /**
@@ -221,12 +244,22 @@ public final class DomainParticipant extends NativeEntity {
 
     /** Creates a publisher with the core's default QoS. */
     public Publisher createPublisher() {
-        return new Publisher(this, null);
+        // Cast disambiguates from the (DomainParticipant, String) profile-create constructor.
+        return new Publisher(this, (PublisherQos) null);
     }
 
     /** Creates a publisher with an explicit QoS. */
     public Publisher createPublisher(PublisherQos qos) {
         return new Publisher(this, Objects.requireNonNull(qos, "qos"));
+    }
+
+    /**
+     * Creates a publisher with QoS from the named profile at {@code
+     * profilePath} (a {@code "LibraryName::ProfileName"} path). The profile
+     * must already be loaded via {@link DomainParticipantFactory#loadProfiles}.
+     */
+    public Publisher createPublisher(String profilePath) {
+        return new Publisher(this, Objects.requireNonNull(profilePath, "profilePath"));
     }
 
     /** Creates a subscriber with the core's default QoS. */
@@ -237,6 +270,15 @@ public final class DomainParticipant extends NativeEntity {
     /** Creates a subscriber with an explicit QoS. */
     public Subscriber createSubscriber(SubscriberQos qos) {
         return new Subscriber(this, Objects.requireNonNull(qos, "qos"));
+    }
+
+    /**
+     * Creates a subscriber with QoS from the named profile at {@code
+     * profilePath} (a {@code "LibraryName::ProfileName"} path). The profile
+     * must already be loaded via {@link DomainParticipantFactory#loadProfiles}.
+     */
+    public Subscriber createSubscriber(String profilePath) {
+        return new Subscriber(this, Objects.requireNonNull(profilePath, "profilePath"));
     }
 
     /** Whether this participant contains the entity identified by {@code handle}. */
@@ -543,6 +585,20 @@ public final class DomainParticipant extends NativeEntity {
         long factory = DomainParticipantFactory.getInstance().handle();
         long[] handleOut = new long[1];
         int rc = FfiAccess.createParticipant(factory, domainId, qos, handleOut);
+        ReturnCodes.check(rc);
+        return handleOut[0];
+    }
+
+    /**
+     * Calls the profile-create bridge and turns a non-zero status into the
+     * mapped exception — the same shape as {@link #create}, with {@code
+     * profilePath} in place of a QoS handle.
+     */
+    private static long createWithProfile(int domainId, String profilePath) {
+        long factory = DomainParticipantFactory.getInstance().handle();
+        long[] handleOut = new long[1];
+        int rc = FfiAccess.createParticipantWithProfile(
+                factory, domainId, profilePath.getBytes(UTF8), handleOut);
         ReturnCodes.check(rc);
         return handleOut[0];
     }

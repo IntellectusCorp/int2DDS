@@ -55,6 +55,25 @@ public final class Topic<T extends IDdsType> extends NativeEntity {
         this.extensibility = prototype.extensibility();
     }
 
+    /**
+     * Package-private profile-create path, reached only through {@link
+     * DomainParticipant#createTopic(String, IDdsType, String)}: a normal
+     * topic whose QoS comes from the named profile at {@code profilePath} (a
+     * {@code "LibraryName::ProfileName"} path previously loaded via {@link
+     * DomainParticipantFactory#loadProfiles}), released the same way as the
+     * default-QoS path ({@code FfiAccess::deleteTopic}).
+     */
+    Topic(DomainParticipant participant, String name, T prototype, String profilePath) {
+        super(Objects.requireNonNull(participant, "participant"),
+                createWithProfile(participant, Objects.requireNonNull(name, "name"),
+                        Objects.requireNonNull(prototype, "prototype"),
+                        Objects.requireNonNull(profilePath, "profilePath")),
+                FfiAccess::deleteTopic);
+        this.name = name;
+        this.typeName = prototype.typeName();
+        this.extensibility = prototype.extensibility();
+    }
+
     private Topic(DomainParticipant participant, String name, T prototype,
             NativeCleaner.Deleter deleter) {
         super(Objects.requireNonNull(participant, "participant"),
@@ -266,6 +285,26 @@ public final class Topic<T extends IDdsType> extends NativeEntity {
         // observe it as phantom-reachable and race the native call above,
         // which is still using the handle that call read. See
         // NativeKeepAlive's own doc for the full argument.
+        NativeKeepAlive.keepAlive(participant);
+        ReturnCodes.check(rc);
+        return handleOut[0];
+    }
+
+    /**
+     * The profile-create path: derives {@code nameBytes}/{@code
+     * typeNameBytes}/{@code extensibility} from {@code prototype} the same
+     * way {@link #create} does, then routes through {@link
+     * FfiAccess#createTopicWithProfile} instead of building a QoS handle.
+     */
+    private static long createWithProfile(
+            DomainParticipant participant, String name, IDdsType prototype, String profilePath) {
+        byte[] nameBytes = utf8(name);
+        byte[] typeNameBytes = utf8(prototype.typeName());
+        int extensibility = prototype.extensibility().value();
+        long[] handleOut = new long[1];
+        int rc = FfiAccess.createTopicWithProfile(participant.handle(), nameBytes, typeNameBytes,
+                extensibility, utf8(profilePath), handleOut);
+        // Same fence as createNative.
         NativeKeepAlive.keepAlive(participant);
         ReturnCodes.check(rc);
         return handleOut[0];

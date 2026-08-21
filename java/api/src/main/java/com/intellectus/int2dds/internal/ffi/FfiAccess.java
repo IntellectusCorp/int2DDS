@@ -401,6 +401,26 @@ public final class FfiAccess {
     }
 
     /**
+     * Creates a participant whose QoS comes from a loaded profile ({@code
+     * qosPath} is a {@code "LibraryName::ProfileName"} path). Same {@code
+     * (rc, long[] handleOut)} shape as {@link #createParticipant}, and the
+     * resulting participant is a normal participant, released the same way
+     * ({@link #deleteParticipant}).
+     */
+    public static int createParticipantWithProfile(
+            long factory, int domainId, byte[] qosPath, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_create_participant_with_profile(
+                factory, domainId, qosPath, directBufferAddress(slot));
+        // Same fence as createParticipant.
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
      * Reads a participant's resolved domain id into {@code domainIdOut}
      * (a direct address, at least 4 bytes) and returns the C ABI status
      * code. "Resolved" matters specifically for {@code DEFAULT_DOMAIN_ID}
@@ -591,6 +611,25 @@ public final class FfiAccess {
     }
 
     /**
+     * Creates a topic whose QoS comes from a loaded profile ({@code qosPath}
+     * is a {@code "LibraryName::ProfileName"} path). Same {@code (rc,
+     * long[] handleOut)} shape as {@link #createTopic}, and the resulting
+     * topic is a normal topic, released the same way ({@link #deleteTopic}).
+     */
+    public static int createTopicWithProfile(long participant, byte[] topicName,
+            byte[] ddsTypeName, int extensibility, byte[] qosPath, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_create_topic_with_profile(participant, topicName, ddsTypeName,
+                extensibility, qosPath, directBufferAddress(slot));
+        // Same fence as createTopic.
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
      * Creates a topic with explicit CDR field descriptors, so a {@code
      * ContentFilteredTopic} built against it can evaluate a SQL filter
      * expression against named fields -- the {@code
@@ -717,6 +756,25 @@ public final class FfiAccess {
     /** Releases a publisher. Returns the C ABI status code. */
     public static int deletePublisher(long publisher) {
         return Ffi.int2dds_delete_publisher(publisher);
+    }
+
+    /**
+     * Creates a publisher whose QoS comes from a loaded profile ({@code
+     * qosPath} is a {@code "LibraryName::ProfileName"} path). Same {@code
+     * (rc, long[] handleOut)} shape as {@link #createPublisher}, and the
+     * resulting publisher is a normal publisher, released the same way
+     * ({@link #deletePublisher}).
+     */
+    public static int createPublisherWithProfile(long participant, byte[] qosPath, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_create_publisher_with_profile(
+                participant, qosPath, directBufferAddress(slot));
+        // Same fence as createPublisher.
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
     }
 
     /** The 16-byte instance handle identifying this publisher. {@code handleOut} must be a 16-byte array. */
@@ -2490,6 +2548,25 @@ public final class FfiAccess {
     /** Releases a subscriber. Returns the C ABI status code. */
     public static int deleteSubscriber(long subscriber) {
         return Ffi.int2dds_delete_subscriber(subscriber);
+    }
+
+    /**
+     * Creates a subscriber whose QoS comes from a loaded profile ({@code
+     * qosPath} is a {@code "LibraryName::ProfileName"} path). Same {@code
+     * (rc, long[] handleOut)} shape as {@link #createSubscriber}, and the
+     * resulting subscriber is a normal subscriber, released the same way
+     * ({@link #deleteSubscriber}).
+     */
+    public static int createSubscriberWithProfile(long participant, byte[] qosPath, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_create_subscriber_with_profile(
+                participant, qosPath, directBufferAddress(slot));
+        // Same fence as createSubscriber.
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
     }
 
     /** The 16-byte instance handle identifying this subscriber. {@code handleOut} must be a 16-byte array. */

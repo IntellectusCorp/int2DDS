@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 
 import com.intellectus.int2dds.internal.NativeCleaner;
 import com.intellectus.int2dds.internal.ffi.FfiAccess;
+import com.intellectus.int2dds.qos.ParticipantQos;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.concurrent.TimeUnit;
@@ -183,6 +184,8 @@ class DomainParticipantTest {
      */
     @Test
     void aNullQosIsRejectedBeforeAnyNativeCall() {
-        assertThrows(NullPointerException.class, () -> new DomainParticipant(testDomain(), null));
+        // Cast disambiguates from the (int, String) profile-create constructor.
+        assertThrows(NullPointerException.class,
+                () -> new DomainParticipant(testDomain(), (ParticipantQos) null));
     }
 }
