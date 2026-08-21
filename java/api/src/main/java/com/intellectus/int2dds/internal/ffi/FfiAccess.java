@@ -360,6 +360,21 @@ public final class FfiAccess {
         return rc;
     }
 
+    /**
+     * Reads a typed datareader's current QoS into a freshly allocated native
+     * handle. Same shape as {@link #getWriterQos}.
+     */
+    public static int getReaderQos(long reader, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_datareader_get_qos(reader, directBufferAddress(slot));
+        // See createDataWriter's identical fence just above.
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
     // --- Topic QoS setters ---
 
     public static int topicQosSetReliability(long qos, int kind, long maxBlockingTimeNs) {

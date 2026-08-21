@@ -117,6 +117,28 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
         return new StatusCondition(out[0]);
     }
 
+    /**
+     * Reads this reader's current QoS off the native side — not the {@code
+     * DataReaderQos} it was constructed with, which this class does not
+     * retain. Policies with no native getter come back null; see {@link
+     * QosMarshal#readReaderQos}'s own doc for the full list.
+     */
+    public DataReaderQos getQos() {
+        long[] qosOut = new long[1];
+        int rc = FfiAccess.getReaderQos(handle(), qosOut);
+        // Same reasoning as DataWriter.getQos(): handle() reads this reader's
+        // own handle right before the native call that consumes it, with
+        // nothing else touching `this` in between.
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        long qosHandle = qosOut[0];
+        try {
+            return QosMarshal.readReaderQos(qosHandle);
+        } finally {
+            FfiAccess.destroyDataReaderQos(qosHandle);
+        }
+    }
+
     /** A fresh {@link ReadCondition} filtering this reader's cache by state masks. */
     public ReadCondition createReadCondition(int sampleStates, int viewStates, int instanceStates) {
         long h = handle();

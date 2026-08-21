@@ -6,6 +6,9 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.intellectus.int2dds.qos.DataReaderQos;
+import com.intellectus.int2dds.qos.Reliability;
+import com.intellectus.int2dds.qos.ReliabilityKind;
 import com.intellectus.int2dds.types.ConformanceRecord;
 import org.junit.jupiter.api.Test;
 
@@ -92,6 +95,24 @@ class DataReaderTest {
             assertEquals(42, got.data().id);
             assertEquals(9.75, got.data().value);
             assertEquals(sent.label, got.data().label);
+        }
+    }
+
+    @Test
+    void aReaderHonoursItsQos() {
+        try (DomainParticipant p = new DomainParticipant(testDomain())) {
+            Topic<ConformanceRecord> topic =
+                    p.createTopic("reader_qos", new ConformanceRecord());
+            Subscriber sub = p.createSubscriber();
+
+            DataReaderQos qos = new DataReaderQos();
+            qos.setReliability(new Reliability(ReliabilityKind.RELIABLE));
+
+            DataReader<ConformanceRecord> reader =
+                    sub.createDataReader(topic, ConformanceRecord::new, qos);
+            DataReaderQos back = reader.getQos();
+
+            assertEquals(ReliabilityKind.RELIABLE, back.getReliability().getKind());
         }
     }
 }
