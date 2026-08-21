@@ -322,7 +322,7 @@ impl TcpSender {
                 let result = push_connecting(
                     backlog,
                     backlog_bytes,
-                    PendingFrame { kind, payload: self.shared.buffer_pool().copy_from_slice(data) },
+                    PendingFrame { kind, payload: data.to_vec() },
                 );
                 if result.is_err() {
                     self.stats.connect_buffer_full.record("connect buffer full", addr, kind);
@@ -376,10 +376,7 @@ impl TcpSender {
                 }
 
                 let command = WriterCommand {
-                    frame: PendingFrame {
-                        kind,
-                        payload: self.shared.buffer_pool().copy_from_slice(data),
-                    },
+                    frame: PendingFrame { kind, payload: data.to_vec() },
                     _permit: permit,
                 };
                 ready.tx.try_send(command).map_err(|error| {

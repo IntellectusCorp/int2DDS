@@ -9,7 +9,6 @@ use std::collections::VecDeque;
 use std::io;
 use std::sync::Arc;
 
-use bytes::Bytes;
 use tokio::sync::{mpsc, Mutex, OwnedSemaphorePermit, Semaphore};
 
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
@@ -21,7 +20,7 @@ const WRITER_CHANNEL_CAPACITY: usize = 1;
 
 pub(crate) struct PendingFrame {
     pub(crate) kind: TcpFrameKind,
-    pub(crate) payload: Bytes,
+    pub(crate) payload: Vec<u8>,
 }
 
 pub(crate) struct WriterCommand {
@@ -109,14 +108,14 @@ mod tests {
             push_connecting(
                 &mut backlog,
                 &mut bytes,
-                PendingFrame { kind: TcpFrameKind::Discovery, payload: Bytes::from_static(b"\0") },
+                PendingFrame { kind: TcpFrameKind::Discovery, payload: vec![0] },
             )
             .unwrap();
         }
         assert!(push_connecting(
             &mut backlog,
             &mut bytes,
-            PendingFrame { kind: TcpFrameKind::Discovery, payload: Bytes::from_static(b"\0") },
+            PendingFrame { kind: TcpFrameKind::Discovery, payload: vec![0] },
         )
         .is_err());
 
@@ -125,7 +124,7 @@ mod tests {
         assert!(push_connecting(
             &mut backlog,
             &mut bytes,
-            PendingFrame { kind: TcpFrameKind::UserData, payload: Bytes::from_static(b"\0") },
+            PendingFrame { kind: TcpFrameKind::UserData, payload: vec![0] },
         )
         .is_err());
     }
