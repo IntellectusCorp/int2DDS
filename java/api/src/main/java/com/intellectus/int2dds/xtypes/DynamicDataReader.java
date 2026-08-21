@@ -1,5 +1,6 @@
 package com.intellectus.int2dds.xtypes;
 
+import com.intellectus.int2dds.conditions.StatusCondition;
 import com.intellectus.int2dds.internal.NativeCleaner;
 import com.intellectus.int2dds.internal.NativeHandle;
 import com.intellectus.int2dds.internal.NativeKeepAlive;
@@ -55,6 +56,22 @@ public final class DynamicDataReader implements AutoCloseable {
         }
         ReturnCodes.check(rc);
         return DynamicData.fromHandle(out[0]);
+    }
+
+    /**
+     * A fresh {@link StatusCondition} for this dynamic reader's status
+     * changes; attach it to a {@link com.intellectus.int2dds.conditions.WaitSet}
+     * (e.g. enabled for {@code DATA_AVAILABLE}) to wait for data instead of
+     * polling {@link #take}. Caller-owned: close it (or let its NativeCleaner
+     * do so) when done.
+     */
+    public StatusCondition getStatusCondition() {
+        long h = handle();
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicReaderGetStatusCondition(h, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return new StatusCondition(out[0]);
     }
 
     /** The number of DataWriters currently matched to this reader. */

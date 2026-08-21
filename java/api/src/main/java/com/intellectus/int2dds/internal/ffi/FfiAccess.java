@@ -2222,6 +2222,22 @@ public final class FfiAccess {
         return rc;
     }
 
+    /**
+     * Mints a fresh status condition for a dynamic {@code reader}, writing its
+     * handle to {@code handleOut[0]} on success. Each call returns a new
+     * native box the caller owns and must release through {@link
+     * #statusConditionDelete}.
+     */
+    public static int dynamicReaderGetStatusCondition(long reader, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_reader_get_statuscondition(reader, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
     /** Releases a dynamic datawriter. */
     public static void dynamicWriterDestroy(long writer) {
         Ffi.int2dds_dynamic_writer_destroy(writer);
