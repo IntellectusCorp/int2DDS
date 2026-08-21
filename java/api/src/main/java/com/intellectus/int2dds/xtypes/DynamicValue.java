@@ -10,19 +10,20 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * A standalone dynamic-type value, built up from scalars (and, via {@link
- * #push}, sequences of them) and then handed to {@link
- * DynamicData#setValue} to write a field that a plain scalar setter cannot
- * reach -- today, a sequence.
+ * #push} or {@link #insert}, sequences/arrays or maps of them) and then
+ * handed to {@link DynamicData#setValue} to write a field that a plain
+ * scalar setter cannot reach -- today, a sequence, array or map.
  *
  * <p><b>Ownership.</b> The native layer transfers ownership of a value's
  * handle whenever it is moved into something else: {@link #push} moves this
- * value into the sequence/array it is called on, and {@link
- * DynamicData#setValue} moves a value into a field. After either happens,
- * the moved handle is dead on the native side -- the memory it pointed to
- * has been freed -- so this class tracks a {@code consumed} flag and makes
- * every use of a consumed value's handle (further {@link #push} or {@link
- * #handle()} calls, {@link #close()}, and the NativeCleaner reaper) a
- * no-op or a loud failure instead of a double-free.
+ * value into the sequence/array it is called on, {@link #insert} moves a key
+ * and a value into the map it is called on, and {@link DynamicData#setValue}
+ * moves a value into a field. After any of these happen, the moved handle is
+ * dead on the native side -- the memory it pointed to has been freed -- so
+ * this class tracks a {@code consumed} flag and makes every use of a
+ * consumed value's handle (further {@link #push}, {@link #insert} or {@link
+ * #handle()} calls, {@link #close()}, and the NativeCleaner reaper) a no-op
+ * or a loud failure instead of a double-free.
  */
 public final class DynamicValue implements AutoCloseable {
 
@@ -184,6 +185,14 @@ public final class DynamicValue implements AutoCloseable {
         return new DynamicValue(out[0]);
     }
 
+    /** Builds an empty map value. Fill it with {@link #insert}. */
+    public static DynamicValue map() {
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicValueMap(out);
+        ReturnCodes.check(rc);
+        return new DynamicValue(out[0]);
+    }
+
     /**
      * Snapshots the current field values of {@code data} into an immutable
      * struct value. {@code data} is cloned natively, not consumed -- the
@@ -229,6 +238,36 @@ public final class DynamicValue implements AutoCloseable {
         long v = handle();
         long[] out = new long[1];
         int rc = FfiAccess.dynamicValueElement(v, index, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return new DynamicValue(out[0]);
+    }
+
+    /**
+     * Clones the key at {@code index} of this map value into a new,
+     * independently-owned {@link DynamicValue}. The caller owns the returned
+     * value and must {@link #close} it -- this value is untouched and
+     * remains usable afterward.
+     */
+    public DynamicValue mapKey(int index) {
+        long v = handle();
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicValueMapKey(v, index, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return new DynamicValue(out[0]);
+    }
+
+    /**
+     * Clones the value at {@code index} of this map value into a new,
+     * independently-owned {@link DynamicValue}. The caller owns the returned
+     * value and must {@link #close} it -- this value is untouched and
+     * remains usable afterward.
+     */
+    public DynamicValue mapValue(int index) {
+        long v = handle();
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicValueMapValue(v, index, out);
         NativeKeepAlive.keepAlive(this);
         ReturnCodes.check(rc);
         return new DynamicValue(out[0]);
@@ -395,6 +434,41 @@ public final class DynamicValue implements AutoCloseable {
         NativeKeepAlive.keepAlive(element);
         ReturnCodes.check(rc);
         element.consumed.set(true);
+    }
+
+    /**
+     * Inserts {@code key}/{@code value} into this map value.
+     *
+     * <p>Consumes BOTH {@code key} and {@code value}: on success their
+     * handles have been moved into this map, so neither must be used, pushed
+     * or inserted elsewhere, or closed again -- this method marks both
+     * consumed itself, making their {@link #close()} a no-op. Throws
+     * (without consuming either) if this value is not a map, or if either
+     * argument has already been consumed.
+     */
+    public void insert(DynamicValue key, DynamicValue value) {
+        if (key == null) {
+            throw new NullPointerException("key");
+        }
+        if (value == null) {
+            throw new NullPointerException("value");
+        }
+        if (key.consumed.get()) {
+            throw new IllegalStateException("key has already been consumed");
+        }
+        if (value.consumed.get()) {
+            throw new IllegalStateException("value has already been consumed");
+        }
+        long m = handle();
+        long k = key.handle();
+        long v = value.handle();
+        int rc = FfiAccess.dynamicValueMapInsert(m, k, v);
+        NativeKeepAlive.keepAlive(this);
+        NativeKeepAlive.keepAlive(key);
+        NativeKeepAlive.keepAlive(value);
+        ReturnCodes.check(rc);
+        key.consumed.set(true);
+        value.consumed.set(true);
     }
 
     /**

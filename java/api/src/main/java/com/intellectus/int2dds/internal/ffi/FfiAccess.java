@@ -1953,6 +1953,63 @@ public final class FfiAccess {
         return rc;
     }
 
+    /**
+     * Creates an empty map dynamic value, writing the handle to {@code
+     * out[0]} on success. Fill it with {@link #dynamicValueMapInsert}.
+     */
+    public static int dynamicValueMap(long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_map(directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Inserts a key/value pair into the map value {@code map}. On {@code
+     * RET_OK} this consumes BOTH {@code key} and {@code value}'s handles --
+     * they are moved into {@code map} and the caller must not use or destroy
+     * either again. On any other code (e.g. {@code map} is not a map), both
+     * are left untouched and still owned by the caller.
+     */
+    public static int dynamicValueMapInsert(long map, long key, long value) {
+        return Ffi.int2dds_dynamic_value_map_insert(map, key, value);
+    }
+
+    /**
+     * Clones the key at {@code index} of a map dynamic value into a new,
+     * independently-owned DynamicValue handle, writing it to {@code out[0]}
+     * on success. The caller owns the returned handle and must destroy it --
+     * the source value is untouched.
+     */
+    public static int dynamicValueMapKey(long value, long index, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_map_key(value, index, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Clones the value at {@code index} of a map dynamic value into a new,
+     * independently-owned DynamicValue handle, writing it to {@code out[0]}
+     * on success. The caller owns the returned handle and must destroy it --
+     * the source value is untouched.
+     */
+    public static int dynamicValueMapValue(long value, long index, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_map_value(value, index, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
     // --- XmlTypeRegistry / DynamicTypeSupport / DynamicData (xtypes write path) ---
 
     /** Creates an XML type registry, writing its handle to {@code out[0]} on success. */
