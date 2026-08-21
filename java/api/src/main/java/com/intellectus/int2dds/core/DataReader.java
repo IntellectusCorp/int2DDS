@@ -139,6 +139,43 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
         }
     }
 
+    /**
+     * Applies {@code qos} to this reader at runtime. Builds a native {@link
+     * DataReaderQos} handle, applies {@code qos}'s policies onto it, and
+     * destroys it again once the native {@code set_qos} call returns —
+     * success or failure, thrown or not, the same build-apply-destroy shape
+     * {@link #create} uses for the create path. The core rejects a change to
+     * an immutable policy (e.g. {@code Reliability}, {@code Durability},
+     * {@code History}) once this reader is enabled, surfaced here through
+     * {@link ReturnCodes#check}; {@code Deadline}, {@code TimeBasedFilter},
+     * {@code UserData} and {@code ReaderDataLifecycle} remain mutable.
+     * ({@code LatencyBudget} is rejected outright by this core regardless of
+     * mutability -- see {@code check_unsupported_policies} in
+     * dds/src/dcps/subscription/qos/mod.rs -- so it is not a useful example
+     * of a runtime-mutable policy here.)
+     *
+     * @throws NullPointerException if {@code qos} is null
+     */
+    public void setQos(DataReaderQos qos) {
+        Objects.requireNonNull(qos, "qos");
+        long qosHandle = FfiAccess.createDataReaderQos();
+        if (qosHandle == 0L) {
+            throw new DdsErrorException(
+                    "failed to allocate a native DataReaderQos handle for setQos");
+        }
+        try {
+            QosMarshal.applyReaderQos(qosHandle, qos);
+            int rc = FfiAccess.datareaderSetQos(handle(), qosHandle);
+            // handle() is a bare long read moments before the native call
+            // that consumes it; keep this reader reachable across it -- see
+            // NativeKeepAlive's own doc for the full argument.
+            NativeKeepAlive.keepAlive(this);
+            ReturnCodes.check(rc);
+        } finally {
+            FfiAccess.destroyDataReaderQos(qosHandle);
+        }
+    }
+
     /** A fresh {@link ReadCondition} filtering this reader's cache by state masks. */
     public ReadCondition createReadCondition(int sampleStates, int viewStates, int instanceStates) {
         long h = handle();

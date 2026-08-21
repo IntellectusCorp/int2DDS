@@ -122,6 +122,38 @@ public final class Publisher extends NativeEntity {
     }
 
     /**
+     * Applies {@code qos} to this publisher at runtime. Builds a native
+     * {@link PublisherQos} handle, applies {@code qos}'s policies onto it,
+     * and destroys it again once the native {@code set_qos} call returns —
+     * success or failure, thrown or not, the same build-apply-destroy shape
+     * {@link #create} uses for the create path. The core rejects a change to
+     * {@code Presentation} once this publisher is enabled, surfaced here
+     * through {@link ReturnCodes#check}; {@code Partition}, {@code
+     * GroupData} and {@code EntityFactory} remain mutable.
+     *
+     * @throws NullPointerException if {@code qos} is null
+     */
+    public void setQos(PublisherQos qos) {
+        Objects.requireNonNull(qos, "qos");
+        long qosHandle = FfiAccess.createPublisherQos();
+        if (qosHandle == 0L) {
+            throw new DdsErrorException(
+                    "failed to allocate a native PublisherQos handle for setQos");
+        }
+        try {
+            QosMarshal.applyPublisherQos(qosHandle, qos);
+            int rc = FfiAccess.publisherSetQos(handle(), qosHandle);
+            // handle() is a bare long read moments before the native call
+            // that consumes it; keep this publisher reachable across it --
+            // see NativeKeepAlive's own doc for the full argument.
+            NativeKeepAlive.keepAlive(this);
+            ReturnCodes.check(rc);
+        } finally {
+            FfiAccess.destroyPublisherQos(qosHandle);
+        }
+    }
+
+    /**
      * Resolves the create argument and, when {@code qos} is supplied, builds
      * a native QoS handle, applies the policies onto it, and destroys it
      * again once the create call returns — success or failure, thrown or

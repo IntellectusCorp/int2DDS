@@ -123,6 +123,38 @@ public final class Subscriber extends NativeEntity {
     }
 
     /**
+     * Applies {@code qos} to this subscriber at runtime. Builds a native
+     * {@link SubscriberQos} handle, applies {@code qos}'s policies onto it,
+     * and destroys it again once the native {@code set_qos} call returns —
+     * success or failure, thrown or not, the same build-apply-destroy shape
+     * {@link #create} uses for the create path. The core rejects a change to
+     * {@code Presentation} once this subscriber is enabled, surfaced here
+     * through {@link ReturnCodes#check}; {@code Partition}, {@code
+     * GroupData} and {@code EntityFactory} remain mutable.
+     *
+     * @throws NullPointerException if {@code qos} is null
+     */
+    public void setQos(SubscriberQos qos) {
+        Objects.requireNonNull(qos, "qos");
+        long qosHandle = FfiAccess.createSubscriberQos();
+        if (qosHandle == 0L) {
+            throw new DdsErrorException(
+                    "failed to allocate a native SubscriberQos handle for setQos");
+        }
+        try {
+            QosMarshal.applySubscriberQos(qosHandle, qos);
+            int rc = FfiAccess.subscriberSetQos(handle(), qosHandle);
+            // handle() is a bare long read moments before the native call
+            // that consumes it; keep this subscriber reachable across it --
+            // see NativeKeepAlive's own doc for the full argument.
+            NativeKeepAlive.keepAlive(this);
+            ReturnCodes.check(rc);
+        } finally {
+            FfiAccess.destroySubscriberQos(qosHandle);
+        }
+    }
+
+    /**
      * Resolves the create argument and, when {@code qos} is supplied, builds
      * a native QoS handle, applies the policies onto it, and destroys it
      * again once the create call returns — success or failure, thrown or

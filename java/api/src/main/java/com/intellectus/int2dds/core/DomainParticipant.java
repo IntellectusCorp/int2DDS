@@ -316,6 +316,40 @@ public final class DomainParticipant extends NativeEntity {
     }
 
     /**
+     * Applies {@code qos} to this participant at runtime. Builds a native
+     * {@link ParticipantQos} handle, applies {@code qos}'s policies onto it,
+     * and destroys it again once the native {@code set_qos} call returns —
+     * success or failure, thrown or not, the same build-apply-destroy shape
+     * {@link #createWithQos} uses for the create path. {@code ParticipantQos}
+     * declares no immutable policies in this core, so a change to {@code
+     * Property} succeeds regardless of whether this participant is already
+     * enabled; {@code UserData} is this type's one unsupported policy --
+     * rejected outright, mutable or not -- see {@code
+     * check_unsupported_policies} in dds/src/dcps/domain/qos/mod.rs.
+     *
+     * @throws NullPointerException if {@code qos} is null
+     */
+    public void setQos(ParticipantQos qos) {
+        Objects.requireNonNull(qos, "qos");
+        long qosHandle = FfiAccess.createParticipantQos();
+        if (qosHandle == 0L) {
+            throw new DdsErrorException(
+                    "failed to allocate a native ParticipantQos handle for setQos");
+        }
+        try {
+            QosMarshal.applyParticipantQos(qosHandle, qos);
+            int rc = FfiAccess.participantSetQos(handle(), qosHandle);
+            // handle() is a bare long read moments before the native call
+            // that consumes it; keep this participant reachable across it --
+            // see NativeKeepAlive's own doc for the full argument.
+            NativeKeepAlive.keepAlive(this);
+            ReturnCodes.check(rc);
+        } finally {
+            FfiAccess.destroyParticipantQos(qosHandle);
+        }
+    }
+
+    /**
      * Builds a native QoS handle, applies {@code qos} onto it, and destroys it
      * again once {@link #create} has returned — success or failure, thrown or
      * not. The native create call reads the QoS synchronously and does not

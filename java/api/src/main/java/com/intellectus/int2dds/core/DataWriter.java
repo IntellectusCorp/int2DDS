@@ -220,6 +220,44 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
         }
     }
 
+    /**
+     * Applies {@code qos} to this writer at runtime. Builds a native {@link
+     * DataWriterQos} handle, applies {@code qos}'s policies onto it, and
+     * destroys it again once the native {@code set_qos} call returns —
+     * success or failure, thrown or not, the same build-apply-destroy shape
+     * {@link #create} uses for the create path. The core rejects a change to
+     * an immutable policy (e.g. {@code Reliability}, {@code Durability},
+     * {@code History}) once this writer is enabled, surfaced here through
+     * {@link ReturnCodes#check}; {@code Deadline}, {@code Lifespan}, {@code
+     * UserData}, {@code OwnershipStrength} and {@code WriterDataLifecycle}
+     * remain mutable. ({@code LatencyBudget} and {@code TransportPriority}
+     * are rejected outright by this core regardless of mutability -- see
+     * {@code check_unsupported_policies} in
+     * dds/src/dcps/publication/qos/mod.rs -- so neither is a useful example
+     * of a runtime-mutable policy here.)
+     *
+     * @throws NullPointerException if {@code qos} is null
+     */
+    public void setQos(DataWriterQos qos) {
+        Objects.requireNonNull(qos, "qos");
+        long qosHandle = FfiAccess.createDataWriterQos();
+        if (qosHandle == 0L) {
+            throw new DdsErrorException(
+                    "failed to allocate a native DataWriterQos handle for setQos");
+        }
+        try {
+            QosMarshal.applyWriterQos(qosHandle, qos);
+            int rc = FfiAccess.datawriterSetQos(handle(), qosHandle);
+            // handle() is a bare long read moments before the native call
+            // that consumes it; keep this writer reachable across it -- see
+            // NativeKeepAlive's own doc for the full argument.
+            NativeKeepAlive.keepAlive(this);
+            ReturnCodes.check(rc);
+        } finally {
+            FfiAccess.destroyDataWriterQos(qosHandle);
+        }
+    }
+
     /** Size in bytes of one native instance handle, as used by the matched-endpoint handle-list call. */
     private static final int HANDLE_SIZE = 16;
 

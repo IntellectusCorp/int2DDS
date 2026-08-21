@@ -95,6 +95,43 @@ public final class Topic<T extends IDdsType> extends NativeEntity {
     }
 
     /**
+     * Applies {@code qos} to this topic at runtime. Builds a native {@link
+     * TopicQos} handle, applies {@code qos}'s policies onto it, and destroys
+     * it again once the native {@code set_qos} call returns — success or
+     * failure, thrown or not, the same build-apply-destroy shape {@link
+     * #create} uses for the create path. The core rejects a change to an
+     * immutable policy (e.g. {@code Reliability}, {@code Durability}, {@code
+     * History}) once a writer or reader on this topic is enabled, surfaced
+     * here through {@link ReturnCodes#check}; {@code Deadline} and {@code
+     * Lifespan} remain mutable. ({@code TopicData}, {@code LatencyBudget}
+     * and {@code TransportPriority} are rejected outright by this core
+     * regardless of mutability -- see {@code check_unsupported_policies} in
+     * dds/src/dcps/topic/qos/mod.rs -- so none of the three is a useful
+     * example of a runtime-mutable policy here.)
+     *
+     * @throws NullPointerException if {@code qos} is null
+     */
+    public void setQos(TopicQos qos) {
+        Objects.requireNonNull(qos, "qos");
+        long qosHandle = FfiAccess.createTopicQos();
+        if (qosHandle == 0L) {
+            throw new DdsErrorException(
+                    "failed to allocate a native TopicQos handle for setQos");
+        }
+        try {
+            QosMarshal.applyTopicQos(qosHandle, qos);
+            int rc = FfiAccess.topicSetQos(handle(), qosHandle);
+            // handle() is a bare long read moments before the native call
+            // that consumes it; keep this topic reachable across it -- see
+            // NativeKeepAlive's own doc for the full argument.
+            NativeKeepAlive.keepAlive(this);
+            ReturnCodes.check(rc);
+        } finally {
+            FfiAccess.destroyTopicQos(qosHandle);
+        }
+    }
+
+    /**
      * Resolves the create arguments and, when {@code qos} is supplied,
      * builds a native QoS handle, applies the policies onto it, and destroys
      * it again once the create call returns — success or failure, thrown or

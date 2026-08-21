@@ -224,6 +224,45 @@ public final class FfiAccess {
         Ffi.int2dds_datareader_qos_destroy(handle);
     }
 
+    // --- Entity setQos bridges ---
+
+    /**
+     * Applies {@code qos} to an already-created datawriter. Returns the C ABI
+     * status code, which the core maps to {@code RET_IMMUTABLE_POLICY} for a
+     * change to an immutable policy on an enabled writer. Unlike the {@code
+     * createXQos}/{@code getXxxQos} bridges above, this takes two live
+     * handles and returns nothing but a status -- no out-slot, no {@code
+     * directBufferAddress}.
+     */
+    public static int datawriterSetQos(long writer, long qos) {
+        return Ffi.int2dds_datawriter_set_qos(writer, qos);
+    }
+
+    /** Applies {@code qos} to an already-created datareader. Same shape as {@link #datawriterSetQos}. */
+    public static int datareaderSetQos(long reader, long qos) {
+        return Ffi.int2dds_datareader_set_qos(reader, qos);
+    }
+
+    /** Applies {@code qos} to an already-created publisher. Same shape as {@link #datawriterSetQos}. */
+    public static int publisherSetQos(long publisher, long qos) {
+        return Ffi.int2dds_publisher_set_qos(publisher, qos);
+    }
+
+    /** Applies {@code qos} to an already-created subscriber. Same shape as {@link #datawriterSetQos}. */
+    public static int subscriberSetQos(long subscriber, long qos) {
+        return Ffi.int2dds_subscriber_set_qos(subscriber, qos);
+    }
+
+    /** Applies {@code qos} to an already-created participant. Same shape as {@link #datawriterSetQos}. */
+    public static int participantSetQos(long participant, long qos) {
+        return Ffi.int2dds_participant_set_qos(participant, qos);
+    }
+
+    /** Applies {@code qos} to an already-created topic. Same shape as {@link #datawriterSetQos}. */
+    public static int topicSetQos(long topic, long qos) {
+        return Ffi.int2dds_topic_set_qos(topic, qos);
+    }
+
     // --- Topic / Publisher / DataWriter ---
 
     /**
