@@ -7,8 +7,6 @@ import static org.junit.jupiter.api.Assertions.fail;
 import com.intellectus.int2dds.core.DomainParticipant;
 import com.intellectus.int2dds.core.Publisher;
 import com.intellectus.int2dds.core.Subscriber;
-import java.util.ArrayList;
-import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -20,44 +18,8 @@ import org.junit.jupiter.api.Test;
  * <p>Two participants, the same pattern {@code MatchedEndpointsTest} and
  * {@code DiscoveryTest} settled on: matching does not appear to loop back
  * within a single participant.
- *
- * <p><b>Why this test never closes the topics, publisher, subscriber or
- * participants:</b> confirmed against the native layer directly (a scratch
- * {@code ffi/tests} case, run and discarded -- not part of this change),
- * {@code int2dds_dynamic_writer_destroy}/{@code int2dds_dynamic_reader_destroy}
- * (ffi/src/dynamic.rs) free only the FFI-level handle -- unlike the typed
- * {@code int2dds_delete_datawriter}/{@code int2dds_delete_datareader}, they
- * never call the core's {@code Publisher::delete_datawriter}/{@code
- * Subscriber::delete_datareader}, so the DCPS-level writer/reader stays
- * registered forever. A {@link DynamicTopic#close} (or a {@code Publisher}/
- * {@code Subscriber} close that cascades to one) on a topic/publisher/
- * subscriber that ever had a dynamic writer/reader attached is refused with
- * {@code RET_PRECONDITION_NOT_MET} for the lifetime of the process, even
- * after the writer/reader's own {@code close()} has already returned
- * successfully -- reproduced directly against the C ABI, independent of this
- * binding or the JVM. That is a native-layer gap outside this task's
- * Java-only scope (no `ffi/` changes) to fix.
- *
- * <p>Rather than let that refusal surface as a spurious test failure -- or
- * silently leave these handles for {@link
- * com.intellectus.int2dds.internal.NativeCleaner}'s reaper to retry forever,
- * permanently inflating {@code NativeCleaner.deferredCount()} for every test
- * that runs afterward in this same JVM -- this test deliberately keeps a
- * strong reference to every entity it cannot actually release ({@link
- * #LEAKED}), for the rest of the test JVM's life. A {@code
- * PhantomReference}-based reaper only ever sees an object once it becomes
- * unreachable, so an object that stays reachable never gets enqueued in the
- * first place, and {@code deferredCount()} is never touched by it. The
- * round-trip assertions above -- the actual point of this test -- are
- * unmodified and unrelaxed; only this known, reported, out-of-scope teardown
- * limitation is worked around.
  */
 class DynamicPubSubTest {
-
-    // Deliberately never cleared: see this class's doc for why. Retains
-    // exactly the entities this test cannot cleanly close, for the life of
-    // the test JVM.
-    private static final List<Object> LEAKED = new ArrayList<Object>();
 
     // Mirrors DomainParticipantTest.testDomain(), package-private to core and
     // not otherwise reachable from here.
@@ -155,19 +117,28 @@ class DynamicPubSubTest {
             if (received != null) {
                 received.close();
             }
-            // writer/reader always release cleanly at the Java-visible level
-            // too (int2dds_dynamic_{writer,reader}_destroy always reports
-            // success) -- it is what that native call leaves unregistered
-            // underneath that blocks the topic/publisher/subscriber below.
-            // See this class's doc.
+            // Close in dependency order: writer/reader first (they now
+            // unregister from their parent publisher/subscriber on close),
+            // then the topics, then publisher/subscriber, then support and
+            // registry, and finally the participants.
             if (writer != null) {
                 writer.close();
             }
             if (reader != null) {
                 reader.close();
             }
-            // support/registry are independent of the topic/writer and
-            // always release cleanly.
+            if (writerTopic != null) {
+                writerTopic.close();
+            }
+            if (readerTopic != null) {
+                readerTopic.close();
+            }
+            if (publisher != null) {
+                publisher.close();
+            }
+            if (subscriber != null) {
+                subscriber.close();
+            }
             if (writerSupport != null) {
                 writerSupport.close();
             }
@@ -180,15 +151,8 @@ class DynamicPubSubTest {
             if (readerRegistry != null) {
                 readerRegistry.close();
             }
-            // writerTopic/readerTopic/publisher/subscriber/*Participant are
-            // deliberately never closed -- see this class's doc. Retaining
-            // the topics and publisher/subscriber is enough: NativeEntity
-            // holds its parent strongly, so each participant stays reachable
-            // through them too.
-            LEAKED.add(writerTopic);
-            LEAKED.add(readerTopic);
-            LEAKED.add(publisher);
-            LEAKED.add(subscriber);
+            writerParticipant.close();
+            readerParticipant.close();
         }
     }
 }

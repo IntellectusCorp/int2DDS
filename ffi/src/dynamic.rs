@@ -1029,19 +1029,45 @@ pub unsafe extern "C" fn int2dds_create_datareader_dynamic(
 }
 
 /// Destroy a dynamic DataWriter handle. Safe to call with null.
+///
+/// Mirrors `int2dds_delete_datawriter`: unregisters the writer from its
+/// parent publisher so the publisher/participant can be deleted afterward.
+/// Best-effort, since a void destructor cannot report a failure code; the
+/// FFI wrapper is freed either way.
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_writer_destroy(w: *mut Int2DdsDynamicDataWriter) {
-    if !w.is_null() {
-        drop(Box::from_raw(w));
+    if w.is_null() {
+        return;
     }
+    let boxed = Box::from_raw(w);
+    let writer_obj = boxed.inner.clone();
+    if let Ok(publisher) = writer_obj.get_publisher() {
+        let _ = publisher.delete_datawriter(writer_obj);
+    }
+    // `boxed` (and its own `inner` clone) drops here. `deleted` is a shared
+    // atomic flag, so if delete_datawriter succeeded above this drop is a
+    // no-op rather than a double unregister.
 }
 
 /// Destroy a dynamic DataReader handle. Safe to call with null.
+///
+/// Mirrors `int2dds_delete_datareader`: unregisters the reader from its
+/// parent subscriber so the subscriber/participant can be deleted afterward.
+/// Best-effort, since a void destructor cannot report a failure code; the
+/// FFI wrapper is freed either way.
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_reader_destroy(r: *mut Int2DdsDynamicDataReader) {
-    if !r.is_null() {
-        drop(Box::from_raw(r));
+    if r.is_null() {
+        return;
     }
+    let boxed = Box::from_raw(r);
+    let reader_obj = boxed.inner.clone();
+    if let Ok(subscriber) = reader_obj.get_subscriber() {
+        let _ = subscriber.delete_datareader(reader_obj);
+    }
+    // `boxed` (and its own `inner` clone) drops here. `deleted` is a shared
+    // atomic flag, so if delete_datareader succeeded above this drop is a
+    // no-op rather than a double unregister.
 }
 
 /// Get the effective QoS of a dynamic DataWriter.

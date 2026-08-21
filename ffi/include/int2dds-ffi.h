@@ -1623,11 +1623,21 @@ Int2DdsRet int2dds_create_datareader_dynamic(const struct Int2DdsSubscriber *sub
 
 /**
  * Destroy a dynamic DataWriter handle. Safe to call with null.
+ *
+ * Mirrors `int2dds_delete_datawriter`: unregisters the writer from its
+ * parent publisher so the publisher/participant can be deleted afterward.
+ * Best-effort, since a void destructor cannot report a failure code; the
+ * FFI wrapper is freed either way.
  */
 void int2dds_dynamic_writer_destroy(struct Int2DdsDynamicDataWriter *w);
 
 /**
  * Destroy a dynamic DataReader handle. Safe to call with null.
+ *
+ * Mirrors `int2dds_delete_datareader`: unregisters the reader from its
+ * parent subscriber so the subscriber/participant can be deleted afterward.
+ * Best-effort, since a void destructor cannot report a failure code; the
+ * FFI wrapper is freed either way.
  */
 void int2dds_dynamic_reader_destroy(struct Int2DdsDynamicDataReader *r);
 
