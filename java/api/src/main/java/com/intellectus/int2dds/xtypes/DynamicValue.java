@@ -208,6 +208,78 @@ public final class DynamicValue implements AutoCloseable {
         return new DynamicValue(out[0]);
     }
 
+    /**
+     * Builds a union value from {@code discriminator} and {@code value}, the
+     * selected branch.
+     *
+     * <p>Consumes BOTH {@code discriminator} and {@code value}: the native
+     * call frees their handles unconditionally -- right after its null
+     * checks and before any fallible step -- so, unlike {@link #push} and
+     * {@link #insert}, there is no failure path that leaves either argument
+     * still owned by the caller. Both are therefore marked consumed the same
+     * way regardless of the returned code, mirroring {@link
+     * DynamicData#setValue}: if the native call somehow still failed, the
+     * handles are already dead, and marking them consumed before the {@link
+     * ReturnCodes#check} that raises the exception avoids a double-free from
+     * a subsequent {@link #close()}. Throws (without consuming either) only
+     * if a null is passed or an argument has already been consumed --
+     * conditions Java rejects before making the native call.
+     */
+    public static DynamicValue union(DynamicValue discriminator, DynamicValue value) {
+        if (discriminator == null) {
+            throw new NullPointerException("discriminator");
+        }
+        if (value == null) {
+            throw new NullPointerException("value");
+        }
+        if (discriminator.consumed.get()) {
+            throw new IllegalStateException("discriminator has already been consumed");
+        }
+        if (value.consumed.get()) {
+            throw new IllegalStateException("value has already been consumed");
+        }
+        long d = discriminator.handle();
+        long v = value.handle();
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicValueUnion(d, v, out);
+        NativeKeepAlive.keepAlive(discriminator);
+        NativeKeepAlive.keepAlive(value);
+        discriminator.consumed.set(true);
+        value.consumed.set(true);
+        ReturnCodes.check(rc);
+        return new DynamicValue(out[0]);
+    }
+
+    /**
+     * Clones this union value's discriminator into a new,
+     * independently-owned {@link DynamicValue}. The caller owns the
+     * returned value and must {@link #close} it -- this value is untouched
+     * and remains usable afterward.
+     */
+    public DynamicValue unionDiscriminator() {
+        long v = handle();
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicValueUnionDiscriminator(v, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return new DynamicValue(out[0]);
+    }
+
+    /**
+     * Clones this union value's selected branch value into a new,
+     * independently-owned {@link DynamicValue}. The caller owns the
+     * returned value and must {@link #close} it -- this value is untouched
+     * and remains usable afterward.
+     */
+    public DynamicValue unionValue() {
+        long v = handle();
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicValueUnionValue(v, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return new DynamicValue(out[0]);
+    }
+
     /** The kind of this value, one of the {@link DynamicValueKind} constants. */
     public int kind() {
         long v = handle();

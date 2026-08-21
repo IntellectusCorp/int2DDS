@@ -2010,6 +2010,57 @@ public final class FfiAccess {
         return rc;
     }
 
+    /**
+     * Constructs a union dynamic value from {@code discriminator} and {@code
+     * value}, writing the handle to {@code out[0]} on success. Consumes BOTH
+     * {@code discriminator} and {@code value}'s handles unconditionally --
+     * the native call frees them via {@code Box::from_raw} right after its
+     * null checks and before any fallible step, so unlike {@link
+     * #dynamicValuePush} and {@link #dynamicValueMapInsert} there is no
+     * failure path that leaves either argument still owned by the caller.
+     */
+    public static int dynamicValueUnion(long discriminator, long value, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_union(discriminator, value, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Clones a union value's discriminator into a new, independently-owned
+     * DynamicValue handle, writing it to {@code out[0]} on success. The
+     * caller owns the returned handle and must destroy it -- the source
+     * value is untouched.
+     */
+    public static int dynamicValueUnionDiscriminator(long value, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_union_discriminator(value, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Clones a union value's selected branch value into a new,
+     * independently-owned DynamicValue handle, writing it to {@code out[0]}
+     * on success. The caller owns the returned handle and must destroy it --
+     * the source value is untouched.
+     */
+    public static int dynamicValueUnionValue(long value, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_union_value(value, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
     // --- XmlTypeRegistry / DynamicTypeSupport / DynamicData (xtypes write path) ---
 
     /** Creates an XML type registry, writing its handle to {@code out[0]} on success. */
