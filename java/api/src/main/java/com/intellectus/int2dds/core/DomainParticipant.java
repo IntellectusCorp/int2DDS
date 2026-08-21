@@ -19,6 +19,7 @@ import com.intellectus.int2dds.types.IDdsType;
 import com.intellectus.int2dds.xtypes.DynamicData;
 import com.intellectus.int2dds.xtypes.DynamicTopic;
 import com.intellectus.int2dds.xtypes.DynamicTypeSupport;
+import com.intellectus.int2dds.xtypes.FieldType;
 import com.intellectus.int2dds.xtypes.TypeObject;
 import java.nio.Buffer;
 import java.nio.ByteBuffer;
@@ -129,6 +130,72 @@ public final class DomainParticipant extends NativeEntity {
         NativeKeepAlive.keepAlive(support);
         ReturnCodes.check(rc);
         return DynamicTopic.fromHandle(out[0]);
+    }
+
+    /**
+     * Creates a topic named {@code name} for {@code prototype}'s type,
+     * declaring {@code fields} as the type's CDR field descriptors: fields
+     * with {@link TopicFieldDescriptor#isKey()} true become instance keys,
+     * and the core can evaluate a {@link #createContentFilteredTopic content
+     * filter expression} against any declared field. Unlike {@link
+     * #createTopic(String, IDdsType)}, which registers no field metadata at
+     * all, the topic this returns supports both.
+     *
+     * <p>{@code fields} must include every field up to and including the
+     * last one a later content filter or the instance key needs -- the
+     * core's flat parser walks them in declaration order and skips each by
+     * its declared type, so a gap before a needed field misaligns everything
+     * after it.
+     *
+     * @throws IllegalArgumentException if a descriptor's {@link
+     *     TopicFieldDescriptor#fieldType()} is a kind this path cannot
+     *     represent (float, byte, char, wide string, or a nested/collection
+     *     kind -- see {@link #nativeFieldTypeCode})
+     */
+    public <T extends IDdsType> Topic<T> createTopic(
+            String name, T prototype, List<TopicFieldDescriptor> fields) {
+        Objects.requireNonNull(fields, "fields");
+        int n = fields.size();
+        String[] names = new String[n];
+        int[] typeCodes = new int[n];
+        boolean[] isKey = new boolean[n];
+        for (int i = 0; i < n; i++) {
+            TopicFieldDescriptor f = Objects.requireNonNull(fields.get(i), "fields[" + i + "]");
+            names[i] = f.name();
+            typeCodes[i] = nativeFieldTypeCode(f.name(), f.fieldType());
+            isKey[i] = f.isKey();
+        }
+        return Topic.createWithFieldDescriptors(this, name, prototype, names, typeCodes, isKey);
+    }
+
+    /**
+     * Translates a {@link FieldType} constant to the distinct scalar code
+     * {@link FfiAccess#createTopicWithFieldDescriptors} expects (0=String,
+     * 1=Int32, 2=UInt32, 3=Int16, 4=UInt16, 5=Int64, 6=UInt64, 7=Int8,
+     * 8=UInt8, 9=Bool -- see that method's own doc). That native path is
+     * scalar-only, so a {@link FieldType} kind it cannot represent (floats,
+     * {@code BYTE}, the char/wide-string kinds, or a nested/collection kind)
+     * is rejected here rather than silently mis-encoded as an unrelated
+     * scalar.
+     */
+    private static int nativeFieldTypeCode(String fieldName, int fieldType) {
+        switch (fieldType) {
+            case FieldType.STRING: return 0;
+            case FieldType.INT32: return 1;
+            case FieldType.UINT32: return 2;
+            case FieldType.INT16: return 3;
+            case FieldType.UINT16: return 4;
+            case FieldType.INT64: return 5;
+            case FieldType.UINT64: return 6;
+            case FieldType.INT8: return 7;
+            case FieldType.UINT8: return 8;
+            case FieldType.BOOL: return 9;
+            default:
+                throw new IllegalArgumentException("field '" + fieldName + "' has FieldType "
+                        + fieldType + ", which createTopic(String, T, List<TopicFieldDescriptor>)"
+                        + " cannot represent -- only BOOL/INT8/INT16/INT32/INT64/UINT8/UINT16/"
+                        + "UINT32/UINT64/STRING are supported");
+        }
     }
 
     /**
