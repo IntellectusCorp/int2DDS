@@ -1,5 +1,6 @@
 package com.intellectus.int2dds.core;
 
+import com.intellectus.int2dds.conditions.StatusCondition;
 import com.intellectus.int2dds.discovery.ParticipantBuiltinTopicData;
 import com.intellectus.int2dds.discovery.PublicationBuiltinTopicData;
 import com.intellectus.int2dds.discovery.SubscriptionBuiltinTopicData;
@@ -357,6 +358,19 @@ public final class DomainParticipant extends NativeEntity {
         int rc = FfiAccess.participantAssertLiveliness(handle());
         NativeKeepAlive.keepAlive(this);
         ReturnCodes.check(rc);
+    }
+
+    /**
+     * A fresh StatusCondition for this participant's status changes; attach
+     * it to a WaitSet to wait on status transitions.
+     */
+    public StatusCondition getStatusCondition() {
+        long h = handle();
+        long[] out = new long[1];
+        int rc = FfiAccess.participantGetStatusCondition(h, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return new StatusCondition(out[0]);
     }
 
     /**

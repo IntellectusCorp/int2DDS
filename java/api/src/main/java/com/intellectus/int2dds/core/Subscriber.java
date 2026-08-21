@@ -1,5 +1,6 @@
 package com.intellectus.int2dds.core;
 
+import com.intellectus.int2dds.conditions.StatusCondition;
 import com.intellectus.int2dds.exceptions.DdsErrorException;
 import com.intellectus.int2dds.internal.NativeCleaner;
 import com.intellectus.int2dds.internal.NativeKeepAlive;
@@ -152,6 +153,19 @@ public final class Subscriber extends NativeEntity {
         } finally {
             FfiAccess.destroySubscriberQos(qosHandle);
         }
+    }
+
+    /**
+     * A fresh StatusCondition for this subscriber's status changes; attach
+     * it to a WaitSet to wait on status transitions.
+     */
+    public StatusCondition getStatusCondition() {
+        long h = handle();
+        long[] out = new long[1];
+        int rc = FfiAccess.subscriberGetStatusCondition(h, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return new StatusCondition(out[0]);
     }
 
     /**

@@ -1507,6 +1507,68 @@ public final class FfiAccess {
     }
 
     /**
+     * Mints a fresh status condition for {@code publisher}, writing its handle
+     * to {@code handleOut[0]} on success. Each call returns a new native box
+     * the caller owns and must release through {@link #statusConditionDelete}.
+     */
+    public static int publisherGetStatusCondition(long publisher, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_publisher_get_statuscondition(publisher, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Mints a fresh status condition for {@code subscriber}, writing its
+     * handle to {@code handleOut[0]} on success. Each call returns a new
+     * native box the caller owns and must release through {@link
+     * #statusConditionDelete}.
+     */
+    public static int subscriberGetStatusCondition(long subscriber, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_subscriber_get_statuscondition(subscriber, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Mints a fresh status condition for {@code participant}, writing its
+     * handle to {@code handleOut[0]} on success. Each call returns a new
+     * native box the caller owns and must release through {@link
+     * #statusConditionDelete}.
+     */
+    public static int participantGetStatusCondition(long participant, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_participant_get_statuscondition(participant, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Mints a fresh status condition for {@code topic}, writing its handle to
+     * {@code handleOut[0]} on success. Each call returns a new native box the
+     * caller owns and must release through {@link #statusConditionDelete}.
+     */
+    public static int topicGetStatusCondition(long topic, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_topic_get_statuscondition(topic, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
      * Reads a status condition's own trigger value (its own handle, not a seq
      * entry), writing it to {@code out[0]} on success.
      */

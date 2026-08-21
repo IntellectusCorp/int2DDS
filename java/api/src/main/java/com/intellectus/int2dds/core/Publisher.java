@@ -1,5 +1,6 @@
 package com.intellectus.int2dds.core;
 
+import com.intellectus.int2dds.conditions.StatusCondition;
 import com.intellectus.int2dds.exceptions.DdsErrorException;
 import com.intellectus.int2dds.exceptions.DdsException;
 import com.intellectus.int2dds.internal.NativeCleaner;
@@ -168,6 +169,19 @@ public final class Publisher extends NativeEntity {
         }
         ReturnCodes.check(rc);
         return true;
+    }
+
+    /**
+     * A fresh StatusCondition for this publisher's status changes; attach it
+     * to a WaitSet to wait on status transitions.
+     */
+    public StatusCondition getStatusCondition() {
+        long h = handle();
+        long[] out = new long[1];
+        int rc = FfiAccess.publisherGetStatusCondition(h, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return new StatusCondition(out[0]);
     }
 
     /**
