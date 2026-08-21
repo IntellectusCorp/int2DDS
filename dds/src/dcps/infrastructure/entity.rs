@@ -338,3 +338,62 @@ pub(crate) use impl_check_parent_enabled;
 pub(crate) use impl_dds_entity;
 pub(crate) use impl_dds_entity_impl;
 use log::debug;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn begin_operation_raises_count_and_guard_drop_lowers_it() {
+        let lifecycle = EntityLifecycle::default();
+
+        {
+            let _first = lifecycle.begin_operation().expect("admitted while alive");
+            assert_eq!(lifecycle.active_operation_count.load(Ordering::SeqCst), 1);
+
+            let _second = lifecycle.begin_operation().expect("admitted while alive");
+            assert_eq!(lifecycle.active_operation_count.load(Ordering::SeqCst), 2);
+        }
+
+        assert_eq!(lifecycle.active_operation_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn begin_operation_is_refused_after_deletion_and_leaves_count_at_zero() {
+        let lifecycle = EntityLifecycle::default();
+        lifecycle.mark_deleted_and_await_operation_completion();
+
+        assert!(matches!(lifecycle.begin_operation(), Err(DdsError::AlreadyDeleted)));
+        assert_eq!(lifecycle.active_operation_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn deletion_blocks_until_an_in_flight_operation_finishes() {
+        let lifecycle = Arc::new(EntityLifecycle::default());
+
+        let worker_lifecycle = lifecycle.clone();
+        let operation_finished = Arc::new(AtomicBool::new(false));
+        let worker_finished = operation_finished.clone();
+
+        let worker = thread::spawn(move || {
+            let _operation = worker_lifecycle.begin_operation().expect("admitted while alive");
+            thread::sleep(Duration::from_millis(50));
+            worker_finished.store(true, Ordering::SeqCst);
+        });
+
+        // Let the worker acquire its guard before deletion starts draining.
+        thread::sleep(Duration::from_millis(10));
+        lifecycle.mark_deleted_and_await_operation_completion();
+
+        assert!(
+            operation_finished.load(Ordering::SeqCst),
+            "deletion returned before the in-flight operation finished"
+        );
+
+        worker.join().expect("worker thread panicked");
+    }
+}
