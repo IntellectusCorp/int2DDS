@@ -59,4 +59,23 @@ public final class DomainParticipantFactory {
         int rc = FfiAccess.loadProfiles(pathBytes, pathBytes.length);
         ReturnCodes.check(rc);
     }
+
+    /**
+     * Builds a whole participant tree — participant, publishers/subscribers,
+     * datawriters/datareaders and topics — from a {@code
+     * domain_participant_library} entry, declaratively, instead of building
+     * each entity by hand. The XML declaring {@code libraryPath}'s library
+     * (a {@code "LibraryName::ParticipantName"} path, e.g. {@code
+     * "PL::App"}) must already have been loaded into this factory via {@link
+     * #loadProfiles}.
+     *
+     * @throws NullPointerException if {@code libraryPath} is null
+     */
+    public ConfiguredParticipant createParticipantFromConfig(String libraryPath) {
+        Objects.requireNonNull(libraryPath, "libraryPath");
+        long[] out = new long[1];
+        int rc = FfiAccess.createParticipantFromConfig(handle(), libraryPath.getBytes(UTF8), out);
+        ReturnCodes.check(rc);
+        return new ConfiguredParticipant(out[0]);
+    }
 }

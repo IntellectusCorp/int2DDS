@@ -420,6 +420,76 @@ public final class FfiAccess {
         return rc;
     }
 
+    // --- Configured participant (declarative XML tree) ---
+
+    /**
+     * Builds a whole participant tree -- participant, publishers/
+     * subscribers, datawriters/datareaders and topics -- from a {@code
+     * domain_participant_library} entry already loaded into this factory via
+     * {@link #loadProfiles}. {@code path} is a {@code
+     * "LibraryName::ParticipantName"} library path, not a file path. Same
+     * {@code (rc, long[] handleOut)} shape as {@link #createParticipant}, but
+     * the returned handle names a configured tree, released with {@link
+     * #configuredParticipantDestroy}, not {@link #deleteParticipant}.
+     */
+    public static int createParticipantFromConfig(long factory, byte[] path, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_create_participant_from_config(factory, path, directBufferAddress(slot));
+        // Same fence as createParticipant.
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Fetches a datawriter already built into {@code configured} by its
+     * {@code "publisher::writer"} name. Returns {@code
+     * RET_DYNAMIC_FIELD_NOT_FOUND} (200) if no such name exists in the tree.
+     * The returned handle is an Arc-clone sharing the underlying entity with
+     * the tree's own copy through one shared atomic deleted flag, so
+     * releasing either does not free out from under the other.
+     */
+    public static int configuredParticipantGetDataWriter(
+            long configured, byte[] name, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_configured_participant_get_datawriter(
+                configured, name, directBufferAddress(slot));
+        // Same fence as createParticipant.
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Fetches a datareader by {@code "subscriber::reader"} name. Same shape as {@link #configuredParticipantGetDataWriter}. */
+    public static int configuredParticipantGetDataReader(
+            long configured, byte[] name, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_configured_participant_get_datareader(
+                configured, name, directBufferAddress(slot));
+        // Same fence as createParticipant.
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Releases a whole configured tree -- participant, publishers/
+     * subscribers, datawriters/datareaders and topics it built. Every
+     * previously-fetched writer/reader wrapper should be closed first (see
+     * {@link com.intellectus.int2dds.core.ConfiguredParticipant#close}); the
+     * shared deleted flag {@link #configuredParticipantGetDataWriter} notes
+     * makes a second release of the same entity a safe no-op either way.
+     */
+    public static void configuredParticipantDestroy(long configured) {
+        Ffi.int2dds_configured_participant_destroy(configured);
+    }
+
     /**
      * Reads a participant's resolved domain id into {@code domainIdOut}
      * (a direct address, at least 4 bytes) and returns the C ABI status
