@@ -39,7 +39,7 @@ use crate::{
         domain_entity::DomainEntity,
         entity::{
             impl_check_parent_enabled, impl_dds_entity, impl_dds_entity_impl, BaseEntity,
-            EnableChild, Entity, EntityInternal, UpdateStatus,
+            EnableChild, Entity, EntityInternal, EntityLifecycle, UpdateStatus,
         },
         qos_kind::QosKind,
         qos_policy::{PresentationQosAccessScopeKind, Qos},
@@ -91,7 +91,7 @@ pub struct Subscriber {
     status_condition: Arc<Mutex<StatusCondition<SubscriberQos>>>,
     pub(crate) self_ref: Option<Arc<Subscriber>>,
     pub(crate) enabled: Arc<AtomicBool>,
-    deleted: Arc<AtomicBool>,
+    lifecycle: Arc<EntityLifecycle>,
     #[allow(clippy::type_complexity)]
     readers_by_topic_name:
         Arc<Mutex<HashMap<String, Vec<Weak<dyn DataReaderInternal<Qos = DataReaderQos>>>>>>,
@@ -117,7 +117,7 @@ impl Debug for Subscriber {
             .field("status_condition", &self.status_condition.lock().unwrap())
             .field("self_ref", &self.self_ref.as_ref().map(|_| "Arc<Subscriber>"))
             .field("enabled", &self.enabled.load(std::sync::atomic::Ordering::Acquire))
-            .field("deleted", &self.deleted.load(std::sync::atomic::Ordering::Acquire))
+            .field("deleted", &self.lifecycle.is_deleted().is_err())
             .finish()
     }
 }
@@ -145,7 +145,7 @@ impl Drop for Subscriber {
             return; // Never fully initialized
         }
 
-        if !self.deleted.load(Ordering::SeqCst) {
+        if self.lifecycle.is_deleted().is_ok() {
             if let Some(ref participant_weak) = self.participant {
                 if let Some(participant) = participant_weak.upgrade() {
                     let subscriber_handle = InstanceHandle::from_guid(&self.guid);
@@ -197,7 +197,7 @@ impl Subscriber {
             status_condition: Arc::new(Mutex::new(StatusCondition::new(None))),
             self_ref: None,
             enabled: Arc::new(AtomicBool::new(false)),
-            deleted: Arc::new(AtomicBool::new(false)),
+            lifecycle: Arc::new(EntityLifecycle::default()),
             readers_by_topic_name: Arc::new(Mutex::new(HashMap::new())),
             readers_by_topic_handle: Arc::new(Mutex::new(HashMap::new())),
             builtin_readers: Arc::new(Mutex::new(Vec::new())),
@@ -1347,7 +1347,7 @@ impl Subscriber {
             status_condition.mark_dead();
         }
 
-        self.deleted.store(true, Ordering::SeqCst);
+        self.lifecycle.mark_deleted_and_await_operation_completion();
     }
 
     /// Cleans up builtin entities (datareaders) to break self-reference cycles.
@@ -1361,15 +1361,11 @@ impl Subscriber {
         }
         // Break self-reference cycle
         self.self_ref = None;
-        self.deleted.store(true, Ordering::SeqCst);
+        self.lifecycle.mark_deleted_and_await_operation_completion();
     }
 
     fn is_deleted(&self) -> DdsResult<()> {
-        if self.deleted.load(Ordering::SeqCst) {
-            Err(DdsError::AlreadyDeleted)
-        } else {
-            Ok(())
-        }
+        self.lifecycle.is_deleted()
     }
 }
 

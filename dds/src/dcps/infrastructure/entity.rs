@@ -13,15 +13,80 @@
 //! The trait hierarchy includes `BaseEntity` for core functionality and `Entity` for
 //! QoS-aware entities.
 
-use std::{fmt::Debug, sync::Arc};
+use std::{
+    fmt::Debug,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    },
+};
 
 use crate::{
     common::instance_handle::InstanceHandle,
-    core::error::DdsResult,
+    core::error::{DdsError, DdsResult},
     infrastructure::status::{StatusInfo, StatusMask},
 };
 
 use super::{status::StatusKind, status_condition::StatusCondition};
+
+// Serializes an entity's teardown against its in-flight public operations. begin_operation
+// admits an operation and refuses once the entity is marked deleted; delete marks deleted then
+// drains the count, so no admitted operation is aborted mid-way or outlived by teardown.
+#[derive(Debug, Default)]
+pub(crate) struct EntityLifecycle {
+    deleted: AtomicBool,
+    active_operation_count: AtomicUsize,
+}
+
+impl EntityLifecycle {
+    pub(crate) fn is_deleted(&self) -> DdsResult<()> {
+        if self.deleted.load(Ordering::SeqCst) {
+            Err(DdsError::AlreadyDeleted)
+        } else {
+            Ok(())
+        }
+    }
+
+    // Admit one public operation, or refuse with AlreadyDeleted if teardown already began. The
+    // returned guard holds the in-flight count raised until it drops.
+    pub(crate) fn begin_operation(&self) -> DdsResult<OperationGuard<'_>> {
+        self.active_operation_count.fetch_add(1, Ordering::SeqCst);
+
+        if self.deleted.load(Ordering::SeqCst) {
+            self.active_operation_count.fetch_sub(1, Ordering::SeqCst);
+            return Err(DdsError::AlreadyDeleted);
+        }
+
+        Ok(OperationGuard { lifecycle: self })
+    }
+
+    // Close the entity to new operations, then block until admitted ones finish. A listener
+    // callback caller skips the wait, since it holds a lease only it could release.
+    pub(crate) fn mark_deleted_and_await_operation_completion(&self) {
+        self.deleted.store(true, Ordering::SeqCst);
+
+        if crate::utils::notify::in_listener_callback() {
+            return;
+        }
+
+        // Poll cadence matches the rtps callback drain.
+        while self.active_operation_count.load(Ordering::SeqCst) > 0 {
+            std::thread::sleep(std::time::Duration::from_micros(50));
+        }
+    }
+}
+
+// Raises the entity's in-flight count for one public operation. Drop lowers it, so every early
+// return (including `?`) releases the entity to a waiting delete.
+pub(crate) struct OperationGuard<'a> {
+    lifecycle: &'a EntityLifecycle,
+}
+
+impl Drop for OperationGuard<'_> {
+    fn drop(&mut self) {
+        self.lifecycle.active_operation_count.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 pub trait BaseEntity: Send + Sync + Debug {
     fn get_status_changes(&self) -> DdsResult<StatusMask>;
@@ -86,7 +151,7 @@ macro_rules! impl_dds_entity_impl {
             $($where_clause)*
         {
             fn get_status_changes(&self) -> DdsResult<StatusMask> {
-                self.is_deleted()?;
+                self.lifecycle.is_deleted()?;
 
                 // Read the changed-status mask under the lock without materializing a clone.
                 let status_condition = self
@@ -117,7 +182,7 @@ macro_rules! impl_dds_entity_impl {
             }
 
             fn get_instance_handle(&self) -> DdsResult<InstanceHandle> {
-                self.is_deleted()?;
+                self.lifecycle.is_deleted()?;
                 Ok(InstanceHandle::from_guid(&self.guid))
             }
         }
@@ -129,7 +194,7 @@ macro_rules! impl_dds_entity_impl {
             type Qos = $qos_type;
 
             fn get_statuscondition(&self) -> DdsResult<StatusCondition<Self::Qos>> {
-                self.is_deleted()?;
+                self.lifecycle.is_deleted()?;
                 let status_condition =
                     self.status_condition.lock().map_err(|e| DdsError::Error(e.to_string()))?;
                 Ok(status_condition.clone())
@@ -139,7 +204,7 @@ macro_rules! impl_dds_entity_impl {
                 if self.is_builtin {
                     return Err(DdsError::PreconditionNotMet);
                 }
-                self.is_deleted()?;
+                self.lifecycle.is_deleted()?;
                 qos.check_unsupported_policies()?;
                 qos.is_consistent()?;
 
@@ -159,12 +224,11 @@ macro_rules! impl_dds_entity_impl {
             }
 
             fn get_qos(&self) -> DdsResult<Self::Qos> {
-                self.is_deleted()?;
+                self.lifecycle.is_deleted()?;
                 Ok((**self.qos.load()).clone())
             }
 
             fn get_qos_arc(&self) -> DdsResult<std::sync::Arc<Self::Qos>> {
-                self.is_deleted()?;
                 Ok(self.qos.load_full())
             }
         }

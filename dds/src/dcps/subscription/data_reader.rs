@@ -64,7 +64,7 @@ use crate::{
         domain_entity::DomainEntity,
         entity::{
             impl_check_parent_enabled, impl_dds_entity, impl_dds_entity_impl, BaseEntity,
-            EnableChild, Entity, EntityInternal, UpdateStatus,
+            EnableChild, Entity, EntityInternal, EntityLifecycle, UpdateStatus,
         },
         history_cache::HistoryCache as DcpsHistoryCache,
         qos_policy::Qos,
@@ -179,7 +179,7 @@ pub struct DataReader<Foo> {
     read_conditions: Arc<Mutex<Vec<Arc<dyn ReadConditionTrait + Send + Sync>>>>,
     pub(crate) self_ref: Arc<Mutex<Option<Arc<DataReader<Foo>>>>>,
     enabled: Arc<AtomicBool>,
-    deleted: Arc<AtomicBool>,
+    lifecycle: Arc<EntityLifecycle>,
     instance_infos: Arc<Mutex<HashMap<InstanceHandle, InstanceInfo>>>,
     read_samples: Arc<Mutex<HashMap<Guid, BTreeSet<SequenceNumber>>>>,
     topic: Option<Weak<Topic>>,
@@ -215,7 +215,7 @@ impl<Foo> Debug for DataReader<Foo> {
             .field("status_condition", &self.status_condition.lock().unwrap())
             .field("self_ref", &self.self_ref.lock().unwrap().as_ref().map(|_| "Arc<DataReader>"))
             .field("enabled", &self.enabled.load(std::sync::atomic::Ordering::Acquire))
-            .field("deleted", &self.deleted.load(std::sync::atomic::Ordering::Acquire))
+            .field("deleted", &self.lifecycle.is_deleted().is_err())
             .field("topic", &self.topic.as_ref().map(|_| "Weak<Topic>"))
             .field("type_support", &"Arc<dyn TypeSupport>")
             .field("publisher", &self.subscriber.as_ref().map(|_| "Weak<Subscriber>"))
@@ -255,7 +255,7 @@ impl<Foo: 'static + Clone + Debug> Clone for DataReader<Foo> {
             read_conditions: self.read_conditions.clone(),
             self_ref: self.self_ref.clone(),
             enabled: self.enabled.clone(),
-            deleted: self.deleted.clone(),
+            lifecycle: self.lifecycle.clone(),
             instance_infos: self.instance_infos.clone(),
             read_samples: self.read_samples.clone(),
             topic: self.topic.clone(),
@@ -300,7 +300,7 @@ impl<Foo> Drop for DataReader<Foo> {
             return; // Never fully initialized
         }
 
-        if !self.deleted.load(Ordering::SeqCst) {
+        if self.lifecycle.is_deleted().is_ok() {
             if let Some(ref subscriber_weak) = self.subscriber {
                 if let Some(subscriber) = subscriber_weak.upgrade() {
                     if let Some(ref topic_weak) = self.topic {
@@ -2164,7 +2164,7 @@ impl<Foo: DdsType> DataReader<Foo> {
             subscriber: Some(Arc::downgrade(subscriber)),
             rtps_reader: Arc::new(Mutex::new(rtps_reader.map(|r| Arc::downgrade(&r)))),
             enabled: Arc::new(AtomicBool::new(false)),
-            deleted: Arc::new(AtomicBool::new(false)),
+            lifecycle: Arc::new(EntityLifecycle::default()),
             liveliness_changed_status: Arc::new(Mutex::new(LivelinessChangedStatus::default())),
             sample_rejected_status: Arc::new(Mutex::new(SampleRejectedStatus::default())),
             sample_lost_status: Arc::new(Mutex::new(SampleLostStatus::default())),
@@ -3864,15 +3864,11 @@ impl<Foo: 'static + Clone + Debug> DataReaderInternal for DataReader<Foo> {
             }
         }
 
-        self.deleted.store(true, Ordering::SeqCst);
+        self.lifecycle.mark_deleted_and_await_operation_completion();
     }
 
     fn is_deleted(&self) -> DdsResult<()> {
-        if self.deleted.load(Ordering::SeqCst) {
-            Err(DdsError::AlreadyDeleted)
-        } else {
-            Ok(())
-        }
+        self.lifecycle.is_deleted()
     }
 
     fn is_builtin(&self) -> bool {

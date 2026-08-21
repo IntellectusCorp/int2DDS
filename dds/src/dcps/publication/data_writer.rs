@@ -51,7 +51,7 @@ use crate::{
         domain_entity::DomainEntity,
         entity::{
             impl_check_parent_enabled, impl_dds_entity, impl_dds_entity_impl, BaseEntity,
-            EnableChild, Entity, EntityInternal, UpdateStatus,
+            EnableChild, Entity, EntityInternal, EntityLifecycle, UpdateStatus,
         },
         history_cache::HistoryCache as _,
         qos_policy::{
@@ -128,6 +128,7 @@ pub(crate) trait DataWriterInternal: DataWriterBase {
     fn as_any(&self) -> &dyn Any;
     fn get_type_id(&self) -> TypeId;
     fn delete(&self);
+    fn mark_deleted_and_await_operation_completion(&self);
     fn is_deleted(&self) -> DdsResult<()>;
     fn is_builtin(&self) -> bool;
     fn end_coherent_set(&self) -> DdsResult<()>;
@@ -152,7 +153,7 @@ pub struct DataWriter<Foo> {
     status_condition: Arc<Mutex<StatusCondition<DataWriterQos>>>,
     pub(crate) self_ref: Arc<Mutex<Option<Arc<DataWriter<Foo>>>>>,
     enabled: Arc<AtomicBool>,
-    deleted: Arc<AtomicBool>,
+    lifecycle: Arc<EntityLifecycle>,
     topic: Option<Weak<Topic>>,
     type_support: Arc<dyn TypeSupport>,
     publisher: Option<Weak<Publisher>>,
@@ -186,7 +187,7 @@ impl<Foo> Debug for DataWriter<Foo> {
             .field("status_condition", &self.status_condition.lock().unwrap())
             .field("self_ref", &self.self_ref.lock().unwrap().as_ref().map(|_| "Arc<DataWriter>"))
             .field("enabled", &self.enabled.load(std::sync::atomic::Ordering::Acquire))
-            .field("deleted", &self.deleted.load(std::sync::atomic::Ordering::Acquire))
+            .field("deleted", &self.lifecycle.is_deleted().is_err())
             .field("topic", &self.topic.as_ref().map(|_| "Weak<Topic>"))
             .field("type_support", &"Arc<dyn TypeSupport>")
             .field("publisher", &self.publisher.as_ref().map(|_| "Weak<Publisher>"))
@@ -224,7 +225,7 @@ impl<Foo: 'static + Clone> Clone for DataWriter<Foo> {
             status_condition: self.status_condition.clone(),
             self_ref: self.self_ref.clone(),
             enabled: self.enabled.clone(),
-            deleted: self.deleted.clone(),
+            lifecycle: self.lifecycle.clone(),
             topic: self.topic.clone(),
             type_support: self.type_support.clone(),
             publisher: self.publisher.clone(),
@@ -266,7 +267,7 @@ impl<Foo> Drop for DataWriter<Foo> {
             return; // Never fully initialized
         }
 
-        if !self.deleted.load(Ordering::SeqCst) {
+        if self.lifecycle.is_deleted().is_ok() {
             if let Some(ref publisher_weak) = self.publisher {
                 if let Some(publisher) = publisher_weak.upgrade() {
                     if let Some(ref topic_weak) = self.topic {
@@ -506,7 +507,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             key_instances: Arc::new(Mutex::new(HashMap::new())),
             instances: Arc::new(Mutex::new(HashMap::new())),
             enabled: Arc::new(AtomicBool::new(false)),
-            deleted: Arc::new(AtomicBool::new(false)),
+            lifecycle: Arc::new(EntityLifecycle::default()),
             liveliness_lost_status: Arc::new(Mutex::new(LivelinessLostStatus::default())),
             offered_deadline_missed_status: Arc::new(Mutex::new(
                 OfferedDeadlineMissedStatus::default(),
@@ -868,6 +869,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         handle: InstanceHandle,
         timestamp: Time,
     ) -> DdsResult<SequenceNumber> {
+        let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
         Self::validate_timestamp(&timestamp)?;
 
@@ -1868,6 +1870,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         handle: InstanceHandle,
         timestamp: Time,
     ) -> DdsResult<InstanceHandle> {
+        let _operation = self.lifecycle.begin_operation()?;
         self.register_instance_to_datawriter_cache(handle)?;
 
         {
@@ -1942,6 +1945,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         timestamp: Time,
         typed: Option<&Foo>,
     ) -> DdsResult<()> {
+        let _operation = self.lifecycle.begin_operation()?;
         let mut instances = self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
         match instances.get(&resolved_handle) {
@@ -1989,6 +1993,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         timestamp: Time,
         typed: Option<&Foo>,
     ) -> DdsResult<()> {
+        let _operation = self.lifecycle.begin_operation()?;
         let mut instances = self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
         match instances.get(&resolved_handle) {
@@ -2519,15 +2524,15 @@ impl<Foo: 'static + Clone> DataWriterInternal for DataWriter<Foo> {
             status_condition.mark_dead();
         }
 
-        self.deleted.store(true, Ordering::SeqCst);
+        self.lifecycle.mark_deleted_and_await_operation_completion();
+    }
+
+    fn mark_deleted_and_await_operation_completion(&self) {
+        self.lifecycle.mark_deleted_and_await_operation_completion();
     }
 
     fn is_deleted(&self) -> DdsResult<()> {
-        if self.deleted.load(Ordering::SeqCst) {
-            Err(DdsError::AlreadyDeleted)
-        } else {
-            Ok(())
-        }
+        self.lifecycle.is_deleted()
     }
 
     fn is_builtin(&self) -> bool {

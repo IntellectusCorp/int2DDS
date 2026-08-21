@@ -49,7 +49,7 @@ use crate::{
         domain_entity::DomainEntity,
         entity::{
             impl_check_parent_enabled, impl_dds_entity, impl_dds_entity_impl, BaseEntity,
-            EnableChild, Entity, EntityInternal, UpdateStatus,
+            EnableChild, Entity, EntityInternal, EntityLifecycle, UpdateStatus,
         },
         qos_kind::QosKind,
         qos_policy::Qos,
@@ -78,7 +78,7 @@ pub struct Publisher {
     status_condition: Arc<Mutex<StatusCondition<PublisherQos>>>,
     pub(crate) self_ref: Option<Arc<Publisher>>,
     enabled: Arc<AtomicBool>,
-    deleted: Arc<AtomicBool>,
+    lifecycle: Arc<EntityLifecycle>,
     #[allow(clippy::type_complexity)]
     writers_by_topic_name:
         Arc<Mutex<HashMap<String, Vec<Weak<dyn DataWriterInternal<Qos = DataWriterQos>>>>>>,
@@ -105,7 +105,7 @@ impl Debug for Publisher {
             .field("status_condition", &self.status_condition.lock().unwrap())
             .field("self_ref", &self.self_ref.as_ref().map(|_| "Arc<Publisher>"))
             .field("enabled", &self.enabled.load(std::sync::atomic::Ordering::Acquire))
-            .field("deleted", &self.deleted.load(std::sync::atomic::Ordering::Acquire))
+            .field("deleted", &self.lifecycle.is_deleted().is_err())
             .finish()
     }
 }
@@ -133,7 +133,7 @@ impl Drop for Publisher {
             return; // Never fully initialized
         }
 
-        if !self.deleted.load(Ordering::SeqCst) {
+        if self.lifecycle.is_deleted().is_ok() {
             if let Some(ref participant_weak) = self.participant {
                 if let Some(participant) = participant_weak.upgrade() {
                     let publisher_handle = InstanceHandle::from_guid(&self.guid);
@@ -185,7 +185,7 @@ impl Publisher {
             status_condition: Arc::new(Mutex::new(StatusCondition::new(None))),
             self_ref: None,
             enabled: Arc::new(AtomicBool::new(false)),
-            deleted: Arc::new(AtomicBool::new(false)),
+            lifecycle: Arc::new(EntityLifecycle::default()),
             writers_by_topic_name: Arc::new(Mutex::new(HashMap::new())),
             writers_by_topic_handle: Arc::new(Mutex::new(HashMap::new())),
             orphaned_writers: Arc::new(Mutex::new(Vec::new())),
@@ -533,6 +533,10 @@ impl Publisher {
         let handle = datawriter.get_instance_handle()?;
         let topic_name = datawriter.get_topic()?.get_name().to_string();
         let topic_handle = datawriter.get_topic()?.get_instance_handle()?;
+
+        // Close the writer to new API calls and drain in-flight ones before the rtps writer is
+        // torn down, so no admitted write is aborted or loses its sample.
+        datawriter.mark_deleted_and_await_operation_completion();
 
         {
             let participant = self.get_participant()?;
@@ -1269,15 +1273,11 @@ impl Publisher {
             status_condition.mark_dead();
         }
 
-        self.deleted.store(true, Ordering::SeqCst);
+        self.lifecycle.mark_deleted_and_await_operation_completion();
     }
 
     fn is_deleted(&self) -> DdsResult<()> {
-        if self.deleted.load(Ordering::SeqCst) {
-            Err(DdsError::AlreadyDeleted)
-        } else {
-            Ok(())
-        }
+        self.lifecycle.is_deleted()
     }
 }
 

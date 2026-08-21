@@ -44,7 +44,7 @@ use crate::{
         domain_entity::DomainEntity,
         entity::{
             impl_check_parent_enabled, impl_dds_entity, impl_dds_entity_impl, BaseEntity,
-            EnableChild, Entity, EntityInternal, UpdateStatus,
+            EnableChild, Entity, EntityInternal, EntityLifecycle, UpdateStatus,
         },
         qos_policy::Qos,
         status::{InconsistentTopicStatus, StatusInfo, StatusKind, StatusMask},
@@ -72,7 +72,7 @@ pub struct Topic {
     status_condition: Arc<Mutex<StatusCondition<TopicQos>>>,
     pub(crate) self_ref: Option<Arc<Topic>>,
     enabled: Arc<AtomicBool>,
-    deleted: Arc<AtomicBool>,
+    lifecycle: Arc<EntityLifecycle>,
     topic_name: String,
     type_name: String,
     participant: Option<Weak<DomainParticipant>>,
@@ -92,7 +92,7 @@ impl Debug for Topic {
             .field("status_condition", &self.status_condition.lock().unwrap())
             .field("self_ref", &self.self_ref.as_ref().map(|_| "Arc<Topic>"))
             .field("enabled", &self.enabled.load(std::sync::atomic::Ordering::Acquire))
-            .field("deleted", &self.deleted.load(std::sync::atomic::Ordering::Acquire))
+            .field("deleted", &self.lifecycle.is_deleted().is_err())
             .field("inconsistent_topic_status", &self.inconsistent_topic_status.lock().unwrap())
             .finish()
     }
@@ -121,7 +121,7 @@ impl Drop for Topic {
             return; // Never fully initialized
         }
 
-        if !self.deleted.load(Ordering::SeqCst) {
+        if self.lifecycle.is_deleted().is_ok() {
             if let Ok(ref participant) = self.get_participant() {
                 let topic_handle = InstanceHandle::from_guid(&self.guid);
                 participant.handle_topic_drop(&topic_handle);
@@ -183,7 +183,7 @@ impl Topic {
             status_condition: Arc::new(Mutex::new(StatusCondition::new(None))),
             self_ref: None,
             enabled: Arc::new(AtomicBool::new(false)),
-            deleted: Arc::new(AtomicBool::new(false)),
+            lifecycle: Arc::new(EntityLifecycle::default()),
             topic_name: topic_name.to_owned(),
             type_name: type_name.to_owned(),
             participant: Some(Arc::downgrade(participant)),
@@ -270,15 +270,11 @@ impl Topic {
             status_condition.mark_dead();
         }
 
-        self.deleted.store(true, Ordering::SeqCst);
+        self.lifecycle.mark_deleted_and_await_operation_completion();
     }
 
     fn is_deleted(&self) -> DdsResult<()> {
-        if self.deleted.load(Ordering::SeqCst) {
-            Err(DdsError::AlreadyDeleted)
-        } else {
-            Ok(())
-        }
+        self.lifecycle.is_deleted()
     }
 
     fn take_inconsistent_topic_status(&self) -> DdsResult<InconsistentTopicStatus> {

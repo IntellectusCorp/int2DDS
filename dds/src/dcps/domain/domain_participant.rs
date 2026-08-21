@@ -87,7 +87,7 @@ use crate::{
     infrastructure::{
         entity::{
             impl_dds_entity, impl_dds_entity_impl, BaseEntity, EnableChild, Entity, EntityInternal,
-            UpdateStatus,
+            EntityLifecycle, UpdateStatus,
         },
         qos_policy::{
             DeadlineQosPolicy, DestinationOrderQosPolicy, DestinationOrderQosPolicyKind,
@@ -144,7 +144,7 @@ pub struct DomainParticipant {
     status_condition: Arc<Mutex<StatusCondition<DomainParticipantQos>>>,
     pub(crate) self_ref: Option<Arc<DomainParticipant>>,
     enabled: Arc<AtomicBool>,
-    deleted: Arc<AtomicBool>,
+    lifecycle: Arc<EntityLifecycle>,
     // rtps_participant: Arc<Mutex<Option<RtpsParticipant>>>,
     dcps_bridge: Arc<Mutex<Option<DcpsBridge>>>,
     builtin_subscriber: Arc<Mutex<Option<Subscriber>>>,
@@ -200,7 +200,7 @@ impl Drop for DomainParticipant {
             return; // Never fully initialized
         }
 
-        if !self.deleted.load(Ordering::SeqCst) {
+        if self.lifecycle.is_deleted().is_ok() {
             let factory = DomainParticipantFactory::get_instance();
             factory.handle_participant_drop(
                 &self.domain_id,
@@ -249,7 +249,7 @@ impl Drop for ParticipantRef {
         if Arc::strong_count(&self.0) > 1 {
             return;
         }
-        if self.0.deleted.load(Ordering::SeqCst) {
+        if self.0.lifecycle.is_deleted().is_err() {
             return;
         }
         if let Ok(guid) = self.0.guid() {
@@ -433,7 +433,7 @@ impl DomainParticipant {
             status_condition: Arc::new(Mutex::new(StatusCondition::new(None))),
             self_ref: None,
             enabled: Arc::new(AtomicBool::new(false)),
-            deleted: Arc::new(AtomicBool::new(false)),
+            lifecycle: Arc::new(EntityLifecycle::default()),
             // rtps_participant: Arc::new(Mutex::new(None)),
             dcps_bridge: Arc::new(Mutex::new(Some(dcps_bridge))),
             builtin_subscriber: Arc::new(Mutex::new(None)),
@@ -3128,7 +3128,7 @@ impl DomainParticipant {
             status_condition.mark_dead();
         }
 
-        self.deleted.store(true, Ordering::SeqCst);
+        self.lifecycle.mark_deleted_and_await_operation_completion();
         Ok(())
     }
 
@@ -3150,11 +3150,7 @@ impl DomainParticipant {
     }
 
     fn is_deleted(&self) -> DdsResult<()> {
-        if self.deleted.load(Ordering::SeqCst) {
-            Err(DdsError::AlreadyDeleted)
-        } else {
-            Ok(())
-        }
+        self.lifecycle.is_deleted()
     }
 }
 

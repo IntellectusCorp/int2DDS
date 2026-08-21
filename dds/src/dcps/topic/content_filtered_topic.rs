@@ -28,6 +28,7 @@ use crate::{
     common::instance_handle::InstanceHandle,
     core::error::{DdsError, DdsResult},
     domain::domain_participant::DomainParticipant,
+    infrastructure::entity::EntityLifecycle,
     rtps::common::guid::Guid,
     topic::sql::{ast::Expression, parse_expression},
 };
@@ -44,7 +45,7 @@ use super::{
 pub struct ContentFilteredTopic {
     guid: Guid,
     pub(crate) self_ref: Option<Arc<ContentFilteredTopic>>,
-    deleted: Arc<AtomicBool>,
+    lifecycle: Arc<EntityLifecycle>,
     enabled: Arc<AtomicBool>,
     related_topic: Option<Weak<Topic>>,
     topic_name: String,
@@ -71,7 +72,7 @@ impl Drop for ContentFilteredTopic {
             return; // Never fully initialized
         }
 
-        if !self.deleted.load(Ordering::SeqCst) {
+        if self.lifecycle.is_deleted().is_ok() {
             if let Ok(ref participant) = self.get_participant() {
                 if let Ok(topic) = self.get_related_topic() {
                     if let Ok(topic_handle) = topic.get_instance_handle() {
@@ -102,7 +103,7 @@ impl ContentFilteredTopic {
         let mut cft = Self {
             guid: handle.to_guid(),
             self_ref: None,
-            deleted: Arc::new(AtomicBool::new(false)),
+            lifecycle: Arc::new(EntityLifecycle::default()),
             enabled: Arc::new(AtomicBool::new(true)),
             related_topic: Some(Arc::downgrade(related_topic)),
             topic_name: topic_name.to_owned(),
@@ -222,15 +223,11 @@ impl ContentFilteredTopic {
 
     pub(crate) fn delete(&mut self) {
         self.self_ref = None;
-        self.deleted.store(true, Ordering::SeqCst);
+        self.lifecycle.mark_deleted_and_await_operation_completion();
     }
 
     fn is_deleted(&self) -> DdsResult<()> {
-        if self.deleted.load(Ordering::SeqCst) {
-            Err(DdsError::AlreadyDeleted)
-        } else {
-            Ok(())
-        }
+        self.lifecycle.is_deleted()
     }
 }
 
