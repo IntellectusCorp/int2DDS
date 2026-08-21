@@ -615,6 +615,10 @@ impl Subscriber {
         let topic_name = effective_topic_name(topic_description.as_ref())?;
         let topic_handle = topic_description.topic_instance_handle()?;
 
+        // Close the reader to new API calls and drain in-flight ones before the rtps reader is
+        // torn down, so no admitted read or take runs against a half-deleted reader.
+        datareader.mark_deleted_and_await_operation_completion();
+
         {
             let participant = self.get_participant()?;
             let mut bridge_guard = participant.get_dcps_bridge()?;
