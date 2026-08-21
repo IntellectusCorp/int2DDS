@@ -1079,10 +1079,12 @@ fn check_collection_compatibility(
         let r_info = get_array_info(reader_type);
 
         if let (Some((w_elem, w_dims)), Some((r_elem, r_dims))) = (w_info, r_info) {
+            // Arrays are assignable only with identical bounds (XTypes 7.2.4.3). Before the
+            // bounds were flattened this compared dimension counts, which were always 1.
             if w_dims != r_dims {
                 return TypeCompatibility::Incompatible(TypeCompatibilityError::IncompatibleKind {
-                    writer: format!("array[{} dims]", w_dims),
-                    reader: format!("array[{} dims]", r_dims),
+                    writer: format!("array{:?}", w_dims),
+                    reader: format!("array{:?}", r_dims),
                 });
             }
 
@@ -1158,14 +1160,15 @@ fn is_array_type(type_id: &TypeIdentifier) -> bool {
     )
 }
 
-/// Get array element type and dimension count.
-fn get_array_info(type_id: &TypeIdentifier) -> Option<(&TypeIdentifier, usize)> {
+/// Get array element type and bounds, in declaration order. Normalized to `u32` so the
+/// SMALL/LARGE spelling does not decide equality.
+fn get_array_info(type_id: &TypeIdentifier) -> Option<(&TypeIdentifier, Vec<u32>)> {
     match type_id {
         TypeIdentifier::PlainArraySmall { element_identifier, array_bound_seq, .. } => {
-            Some((element_identifier, array_bound_seq.len()))
+            Some((element_identifier, array_bound_seq.iter().map(|b| *b as u32).collect()))
         }
         TypeIdentifier::PlainArrayLarge { element_identifier, array_bound_seq, .. } => {
-            Some((element_identifier, array_bound_seq.len()))
+            Some((element_identifier, array_bound_seq.clone()))
         }
         _ => None,
     }
@@ -1293,6 +1296,32 @@ mod tests {
             check_structural_compatibility(Some(&writer_id), Some(&reader_id), None, None, &policy);
 
         assert!(matches!(result, Err(TypeCompatibilityError::HashMismatch { .. })));
+    }
+
+    /// Arrays are assignable only with identical bounds (XTypes 7.2.4.3). While a
+    /// multidimensional array nested one identifier per dimension this compared dimension
+    /// counts, which were always 1 — so any two arrays of the same element matched.
+    #[test]
+    fn test_array_bounds_must_match() {
+        let small = |dims: Vec<u8>| TypeIdentifier::PlainArraySmall {
+            header: crate::xtypes::PlainCollectionHeader::default(),
+            array_bound_seq: dims,
+            element_identifier: Box::new(TypeIdentifier::Int32),
+        };
+        let large = |dims: Vec<u32>| TypeIdentifier::PlainArrayLarge {
+            header: crate::xtypes::PlainCollectionHeader::default(),
+            array_bound_seq: dims,
+            element_identifier: Box::new(TypeIdentifier::Int32),
+        };
+        let check = |w: &TypeIdentifier, r: &TypeIdentifier| {
+            check_structural_compatibility(Some(w), Some(r), None, None, &default_tce_policy())
+        };
+
+        assert!(check(&small(vec![2, 3]), &small(vec![2, 3])).is_ok());
+        assert!(check(&small(vec![2]), &small(vec![5])).is_err(), "different bound");
+        assert!(check(&small(vec![2, 3]), &small(vec![6])).is_err(), "flattened is not the same");
+        // SMALL vs LARGE is a spelling of the same bounds, not a difference.
+        assert!(check(&small(vec![2, 3]), &large(vec![2, 3])).is_ok());
     }
 
     #[test]

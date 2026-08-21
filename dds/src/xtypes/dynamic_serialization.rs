@@ -2880,8 +2880,9 @@ mod fidelity_tests {
     }
 
     /// `InnerFinal grid[2][2]` is one array of four elements (DDS-XTypes 7.4.3.4), so it
-    /// carries a single DHEADER. The dynamic path stores the elements flat and could only
-    /// ever emit one; codegen nests, so this pins the two against each other.
+    /// carries a single DHEADER. This builds the flat identifier by hand — the spelling the
+    /// XML and FFI builders produce — and pins it against codegen. The *derived* identifier
+    /// is a separate axis: see `derived_multidim_array_matches_its_own_codec`.
     #[test]
     fn multidim_array_of_struct_byte_match_xcdr_final() {
         let inner_complete = InnerFinal::complete_type_object();
@@ -2938,6 +2939,72 @@ mod fidelity_tests {
         let bytes = concrete_xcdr(&concrete, ExtensibilityKind::Final);
         assert_eq!(bytes.len(), 4 + 4 + 32, "one DHEADER over all four elements");
         assert_eq!(dynamic_bytes(&dynamic, &format), bytes);
+    }
+
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "int2dds", extensibility = "Final")]
+    struct PrimGridFinal {
+        g: [[i32; 3]; 2],
+    }
+
+    fn member_id_of<T: HasTypeObject>(index: usize) -> TypeIdentifier {
+        match T::complete_type_object() {
+            CompleteTypeObject::Struct(s) => s.member_seq[index].common.member_type_id.clone(),
+            other => panic!("expected a struct type object, got {other:?}"),
+        }
+    }
+
+    /// The derive macro walks `syn` types and the blanket `HasTypeObject for [T; N]` walks
+    /// identifiers: two spellings of DDS-XTypes 7.4.3.4 that have to land on the same id.
+    #[test]
+    fn derived_multidim_array_identifier_matches_the_blanket_impl() {
+        assert_eq!(member_id_of::<PrimGridFinal>(0), <[[i32; 3]; 2]>::type_identifier());
+        assert_eq!(member_id_of::<GridHolderFinal>(0), <[[InnerFinal; 2]; 2]>::type_identifier());
+    }
+
+    /// A type's own advertised identifier has to describe the bytes its own codec writes.
+    /// A nested identifier does not: the dynamic path frames per dimension and runs off the
+    /// end of a flat payload, so every multidimensional array was undecodable through
+    /// DynamicData, content filters and the FFI field readers.
+    #[test]
+    fn derived_multidim_array_matches_its_own_codec() {
+        let format = xcdr_format(ExtensibilityKind::Final);
+
+        let dt = standalone_type::<PrimGridFinal>();
+        let bytes =
+            concrete_xcdr(&PrimGridFinal { g: [[1, 2, 3], [4, 5, 6]] }, ExtensibilityKind::Final);
+        assert_eq!(bytes.len(), 4 + 24, "primitive elements, so no DHEADER at all");
+        let back = crate::xtypes::deserialize_dynamic_data(&bytes, &dt).unwrap();
+        assert_eq!(
+            back.get_value("g").unwrap(),
+            &DynamicValue::Array((1..=6).map(DynamicValue::Int32).collect()),
+            "row-major over the flat six"
+        );
+        assert_eq!(dynamic_bytes(&back, &format), bytes);
+
+        let mut registry = TypeRegistry::new();
+        registry.register_complete(
+            hash_of(&InnerFinal::type_identifier()),
+            "InnerFinal".into(),
+            InnerFinal::complete_type_object(),
+        );
+        let grid_dt = Arc::new(
+            DynamicType::from_type_object_with_registry(
+                Arc::new(GridHolderFinal::complete_type_object()),
+                GridHolderFinal::type_identifier(),
+                &registry,
+            )
+            .unwrap(),
+        );
+        let concrete = GridHolderFinal {
+            grid: [
+                [InnerFinal { a: 1, b: 2 }, InnerFinal { a: 3, b: 4 }],
+                [InnerFinal { a: 5, b: 6 }, InnerFinal { a: 7, b: 8 }],
+            ],
+        };
+        let bytes = concrete_xcdr(&concrete, ExtensibilityKind::Final);
+        let back = crate::xtypes::deserialize_dynamic_data(&bytes, &grid_dt).unwrap();
+        assert_eq!(dynamic_bytes(&back, &format), bytes);
     }
 
     fn enum_holder_dynamic_type() -> Arc<DynamicType> {
