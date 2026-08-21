@@ -782,6 +782,95 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
         }
     }
 
+    /**
+     * Takes (removes) up to {@code maxSamples} samples' raw CDR bytes plus
+     * {@link SampleInfo} in a single native call -- the batch counterpart of
+     * {@link #takeSerialized()}. Returns an empty list when the cache has
+     * nothing; otherwise up to {@code maxSamples} elements in delivery order.
+     * The native sample sequence backing the batch is freed before this
+     * method returns.
+     *
+     * <p><b>Unlike</b> the no-arg {@link #takeSerialized()} (NOT_READ-only,
+     * {@code take_next_sample} scoping), this and {@link #readSerializedBatch}
+     * match sample/view/instance state {@code ANY}: an already-READ sample
+     * (e.g. left behind by a prior {@link #readSerializedBatch}) is eligible
+     * too, and reading still flips a sample to READ per ordinary DDS
+     * semantics but does not exclude it from a later batch take.
+     *
+     * @throws IllegalArgumentException if {@code maxSamples <= 0}
+     */
+    public List<SerializedSample> takeSerializedBatch(int maxSamples) {
+        return nextSerializedBatch(true, maxSamples);
+    }
+
+    /**
+     * Non-removing counterpart of {@link #takeSerializedBatch}. Same {@code
+     * ANY} sample/view/instance state matching -- see that method's doc for
+     * how this differs from the no-arg {@link #readSerialized()}. A sample
+     * this reads is left in the cache and is still eligible for a later
+     * {@link #takeSerializedBatch} even though reading marks it READ.
+     *
+     * @throws IllegalArgumentException if {@code maxSamples <= 0}
+     */
+    public List<SerializedSample> readSerializedBatch(int maxSamples) {
+        return nextSerializedBatch(false, maxSamples);
+    }
+
+    private List<SerializedSample> nextSerializedBatch(boolean take, int maxSamples) {
+        if (maxSamples <= 0) {
+            throw new IllegalArgumentException("maxSamples must be > 0: " + maxSamples);
+        }
+        long h = handle();
+        long[] seqOut = new long[1];
+        int rc = take
+                ? FfiAccess.datareaderTakeSerializedBatch(h, maxSamples, seqOut)
+                : FfiAccess.datareaderReadSerializedBatch(h, maxSamples, seqOut);
+        NativeKeepAlive.keepAlive(this);
+        if (!ReturnCodes.checkOrNoData(rc)) {
+            // NO_DATA: the native side still allocated an empty sequence.
+            FfiAccess.sampleSeqDelete(seqOut[0]);
+            return new ArrayList<SerializedSample>();
+        }
+        long seq = seqOut[0];
+        try {
+            long len = FfiAccess.sampleSeqLength(seq);
+            List<SerializedSample> result = new ArrayList<SerializedSample>((int) len);
+            for (long i = 0; i < len; i++) {
+                int infoRc = FfiAccess.sampleSeqGetInfo(seq, i, addr(infoSlot));
+                NativeKeepAlive.keepAlive(infoSlot);
+                ReturnCodes.check(infoRc);
+                SampleInfo info = SampleInfo.decode(infoSlot);
+                byte[] b = info.validData() ? copySampleSeqData(seq, i) : new byte[0];
+                result.add(new SerializedSample(b, info));
+            }
+            return result;
+        } finally {
+            FfiAccess.sampleSeqDelete(seq);
+        }
+    }
+
+    /** Copies sample {@code index}'s bytes out of {@code seq} into {@link #payload}, growing on BUFFER_TOO_SMALL. */
+    private byte[] copySampleSeqData(long seq, long index) {
+        while (true) {
+            int rc = FfiAccess.sampleSeqGetData(
+                    seq, index, addr(payload), payload.capacity(), addr(sizeSlot));
+            NativeKeepAlive.keepAlive(payload);
+            NativeKeepAlive.keepAlive(sizeSlot);
+            if (rc == DdsException.RET_BUFFER_TOO_SMALL) {
+                growPayload(sizeSlot.getLong(0));
+                continue;
+            }
+            ReturnCodes.check(rc);
+            int n = (int) sizeSlot.getLong(0);
+            ((java.nio.Buffer) payload).position(0);
+            ((java.nio.Buffer) payload).limit(n);
+            byte[] out = new byte[n];
+            payload.get(out);
+            ((java.nio.Buffer) payload).clear();
+            return out;
+        }
+    }
+
     private Sample<T> next(boolean take) {
         long h = handle();
         // The core removes the sample only when it fits, so on BUFFER_TOO_SMALL

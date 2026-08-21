@@ -2796,6 +2796,68 @@ public final class FfiAccess {
                 actualSizeOut, infoOut, sampleStateMask, viewStateMask, instanceStateMask);
     }
 
+    /**
+     * Takes up to {@code maxSamples} serialized samples as a batch, writing a
+     * native sample-sequence handle to {@code seqOut[0]} on {@code RET_OK} or
+     * {@code RET_NO_DATA} -- on NO_DATA the native side still allocates an
+     * empty sequence, which must be freed with {@link #sampleSeqDelete} the
+     * same as a non-empty one. Iterate the sequence with {@link
+     * #sampleSeqLength}, {@link #sampleSeqGetData} and {@link
+     * #sampleSeqGetInfo}.
+     */
+    public static int datareaderTakeSerializedBatch(long reader, int maxSamples, long[] seqOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_datareader_take_serialized_batch(
+                reader, maxSamples, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == DdsException.RET_OK || rc == DdsException.RET_NO_DATA) {
+            seqOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Non-removing counterpart of {@link #datareaderTakeSerializedBatch}. Same seq_out contract. */
+    public static int datareaderReadSerializedBatch(long reader, int maxSamples, long[] seqOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_datareader_read_serialized_batch(
+                reader, maxSamples, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == DdsException.RET_OK || rc == DdsException.RET_NO_DATA) {
+            seqOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Number of samples in a sample sequence returned by a batch take/read. */
+    public static long sampleSeqLength(long seq) {
+        return Ffi.int2dds_sample_seq_length(seq);
+    }
+
+    /**
+     * Copies sample {@code index}'s raw CDR bytes into {@code buffer}.
+     * Returns {@code RET_BUFFER_TOO_SMALL} with {@code actualSizeOut} set to
+     * the required size when {@code bufferCapacity} is too small -- the
+     * buffer is left untouched (no truncated copy), so a caller grows and
+     * retries, the same contract as the single-sample take/read bridges.
+     */
+    public static int sampleSeqGetData(
+            long seq, long index, long buffer, long bufferCapacity, long actualSizeOut) {
+        return Ffi.int2dds_sample_seq_get_data(seq, index, buffer, bufferCapacity, actualSizeOut);
+    }
+
+    /**
+     * Writes sample {@code index}'s SampleInfo into the native buffer at
+     * {@code infoOut} (decode with {@link com.intellectus.int2dds.core.SampleInfo#decode}).
+     */
+    public static int sampleSeqGetInfo(long seq, long index, long infoOut) {
+        return Ffi.int2dds_sample_seq_get_info(seq, index, infoOut);
+    }
+
+    /** Frees a sample sequence returned by a batch take/read. Call from a finally block. */
+    public static int sampleSeqDelete(long seq) {
+        return Ffi.int2dds_sample_seq_delete(seq);
+    }
+
     /** Creates a guard condition, writing its handle to {@code handleOut[0]} on success. */
     public static int guardConditionNew(long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
