@@ -1678,6 +1678,13 @@ Int2DdsRet int2dds_type_info_add_array_field(struct Int2DdsTypeInfo *type_info,
                                              uint32_t array_size,
                                              int32_t flags);
 
+Int2DdsRet int2dds_type_info_add_array_field_nd(struct Int2DdsTypeInfo *type_info,
+                                                const char *field_name,
+                                                int32_t element_type,
+                                                const uint32_t *dims,
+                                                uintptr_t dims_len,
+                                                int32_t flags);
+
 Int2DdsRet int2dds_type_info_add_named_type_field(struct Int2DdsTypeInfo *type_info,
                                                   const char *field_name,
                                                   const char *type_hash_name,
@@ -1700,6 +1707,13 @@ Int2DdsRet int2dds_type_info_add_array_of_nested_field(struct Int2DdsTypeInfo *t
                                                        uint32_t array_size,
                                                        int32_t flags);
 
+Int2DdsRet int2dds_type_info_add_array_of_nested_field_nd(struct Int2DdsTypeInfo *type_info,
+                                                          const char *field_name,
+                                                          const struct Int2DdsTypeInfo *element_type_info,
+                                                          const uint32_t *dims,
+                                                          uintptr_t dims_len,
+                                                          int32_t flags);
+
 Int2DdsRet int2dds_type_info_add_sequence_of_named_field(struct Int2DdsTypeInfo *type_info,
                                                          const char *field_name,
                                                          const char *element_hash_name,
@@ -1711,6 +1725,13 @@ Int2DdsRet int2dds_type_info_add_array_of_named_field(struct Int2DdsTypeInfo *ty
                                                       const char *element_hash_name,
                                                       uint32_t array_size,
                                                       int32_t flags);
+
+Int2DdsRet int2dds_type_info_add_array_of_named_field_nd(struct Int2DdsTypeInfo *type_info,
+                                                         const char *field_name,
+                                                         const char *element_hash_name,
+                                                         const uint32_t *dims,
+                                                         uintptr_t dims_len,
+                                                         int32_t flags);
 
 Int2DdsRet int2dds_type_info_to_type_object(const struct Int2DdsTypeInfo *type_info,
                                             struct Int2DdsTypeObject **out);

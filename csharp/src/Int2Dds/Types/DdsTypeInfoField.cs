@@ -11,7 +11,10 @@ namespace Int2Dds.Types
     /// </summary>
     public readonly struct DdsTypeInfoField
     {
-        /// <summary>Builder operation: "field", "string", "wstring", "seq", "arr", or "nested".</summary>
+        /// <summary>
+        /// Builder operation: "field", "string", "wstring", "seq", "arr", "arr_nd", or "nested"
+        /// (plus the collection-of-nested forms "seq_nested"/"arr_nested"/"arr_nested_nd").
+        /// </summary>
         public string Op { get; }
 
         /// <summary>DDS member name (the IDL name, used in the TypeObject).</summary>
@@ -34,6 +37,13 @@ namespace Int2Dds.Types
         /// </summary>
         public Type? NestedType { get; }
 
+        /// <summary>
+        /// For the multidimensional "arr_nd"/"arr_nested_nd" ops: the array sizes in
+        /// declaration order (outer first, e.g. <c>long m[2][3]</c> -&gt; <c>{2, 3}</c>).
+        /// Null for all other ops.
+        /// </summary>
+        public uint[]? Dims { get; }
+
         public DdsTypeInfoField(string op, string name, int typeConst, uint size, int flags)
         {
             Op = op;
@@ -42,6 +52,7 @@ namespace Int2Dds.Types
             Size = size;
             Flags = flags;
             NestedType = null;
+            Dims = null;
         }
 
         public DdsTypeInfoField(string op, string name, Type nestedType, int flags)
@@ -52,6 +63,7 @@ namespace Int2Dds.Types
             Size = 0;
             Flags = flags;
             NestedType = nestedType;
+            Dims = null;
         }
 
         /// <summary>Collection-of-nested ("seq_nested"/"arr_nested"): element type + bound/size.</summary>
@@ -63,6 +75,31 @@ namespace Int2Dds.Types
             Size = size;
             Flags = flags;
             NestedType = elementType;
+            Dims = null;
+        }
+
+        /// <summary>Multidimensional array of a primitive/string element ("arr_nd").</summary>
+        public DdsTypeInfoField(string op, string name, int typeConst, uint[] dims, int flags)
+        {
+            Op = op;
+            Name = name;
+            TypeConst = typeConst;
+            Size = 0;
+            Flags = flags;
+            NestedType = null;
+            Dims = dims;
+        }
+
+        /// <summary>Multidimensional array of a nested struct/enum element ("arr_nested_nd").</summary>
+        public DdsTypeInfoField(string op, string name, Type elementType, uint[] dims, int flags)
+        {
+            Op = op;
+            Name = name;
+            TypeConst = 0;
+            Size = 0;
+            Flags = flags;
+            NestedType = elementType;
+            Dims = dims;
         }
     }
 }

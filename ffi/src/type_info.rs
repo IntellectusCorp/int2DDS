@@ -229,8 +229,20 @@ impl Int2DdsTypeInfo {
         array_size: u32,
         flags: i32,
     ) {
+        self.push_array_of_nested_field_nd(name, element, &[array_size], flags);
+    }
+
+    /// Multidimensional variant: `dims` in declaration order (outer first), folded into a
+    /// single flat plain-array id.
+    pub(crate) fn push_array_of_nested_field_nd(
+        &mut self,
+        name: String,
+        element: &Int2DdsTypeInfo,
+        dims: &[u32],
+        flags: i32,
+    ) {
         let element_id = self.intern_nested(element);
-        let type_id = plain_array_id(element_id, array_size);
+        let type_id = plain_array_identifier(element_id, dims);
         self.fields.push(FieldInfo { name, type_id, flags });
     }
 
@@ -650,6 +662,40 @@ pub unsafe extern "C" fn int2dds_type_info_add_array_field(
     INT2DDS_RET_OK
 }
 
+/// Add a multidimensional array field. `dims` lists the sizes in declaration order
+/// (outer first, e.g. `long m[2][3]` -> `{2, 3}`); they are folded into one flat
+/// plain-array TypeIdentifier (XTypes 7.4.3.4), matching the Rust derive.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_type_info_add_array_field_nd(
+    type_info: *mut Int2DdsTypeInfo,
+    field_name: *const std::os::raw::c_char,
+    element_type: i32,
+    dims: *const u32,
+    dims_len: usize,
+    flags: i32,
+) -> Int2DdsRet {
+    check_null!(type_info);
+    check_null!(field_name);
+    check_null!(dims);
+    if dims_len == 0 {
+        return INT2DDS_RET_INVALID_ARGUMENT;
+    }
+
+    let ti = &mut *type_info;
+    let name_str = cstr_arg!(field_name);
+
+    let element_id = match field_type_to_type_identifier(element_type) {
+        Some(id) => id,
+        None => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    let type_id = plain_array_identifier(element_id, std::slice::from_raw_parts(dims, dims_len));
+
+    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags });
+
+    INT2DDS_RET_OK
+}
+
 /// Add a named (complex) type field to the type info builder.
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_add_named_type_field(
@@ -750,6 +796,40 @@ pub unsafe extern "C" fn int2dds_type_info_add_array_of_nested_field(
     INT2DDS_RET_OK
 }
 
+/// Multidimensional `Nested[N][M]...` variant of
+/// `int2dds_type_info_add_array_of_nested_field`. `dims` is in declaration order
+/// (outer first) and is folded into one flat plain-array id.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_type_info_add_array_of_nested_field_nd(
+    type_info: *mut Int2DdsTypeInfo,
+    field_name: *const std::os::raw::c_char,
+    element_type_info: *const Int2DdsTypeInfo,
+    dims: *const u32,
+    dims_len: usize,
+    flags: i32,
+) -> Int2DdsRet {
+    check_null!(type_info);
+    check_null!(field_name);
+    check_null!(element_type_info);
+    check_null!(dims);
+    if dims_len == 0 {
+        return INT2DDS_RET_INVALID_ARGUMENT;
+    }
+
+    let ti = &mut *type_info;
+    let element = &*element_type_info;
+    let name_str = cstr_arg!(field_name);
+
+    ti.push_array_of_nested_field_nd(
+        name_str.to_string(),
+        element,
+        std::slice::from_raw_parts(dims, dims_len),
+        flags,
+    );
+
+    INT2DDS_RET_OK
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_add_sequence_of_named_field(
     type_info: *mut Int2DdsTypeInfo,
@@ -792,6 +872,40 @@ pub unsafe extern "C" fn int2dds_type_info_add_array_of_named_field(
     let hash_name = cstr_arg!(element_hash_name);
 
     let type_id = plain_array_id(named_type_identifier(hash_name), array_size);
+
+    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags });
+
+    INT2DDS_RET_OK
+}
+
+/// Multidimensional variant of `int2dds_type_info_add_array_of_named_field`. `dims` is in
+/// declaration order (outer first) and is folded into one flat plain-array id.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_type_info_add_array_of_named_field_nd(
+    type_info: *mut Int2DdsTypeInfo,
+    field_name: *const std::os::raw::c_char,
+    element_hash_name: *const std::os::raw::c_char,
+    dims: *const u32,
+    dims_len: usize,
+    flags: i32,
+) -> Int2DdsRet {
+    check_null!(type_info);
+    check_null!(field_name);
+    check_null!(element_hash_name);
+    check_null!(dims);
+    if dims_len == 0 {
+        return INT2DDS_RET_INVALID_ARGUMENT;
+    }
+
+    let ti = &mut *type_info;
+
+    let name_str = cstr_arg!(field_name);
+    let hash_name = cstr_arg!(element_hash_name);
+
+    let type_id = plain_array_identifier(
+        named_type_identifier(hash_name),
+        std::slice::from_raw_parts(dims, dims_len),
+    );
 
     ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags });
 
@@ -1069,6 +1183,108 @@ mod tests {
             ffi_type_id, derive_type_id,
             "TypeIdentifier hashes differ for named sequence/array element fields"
         );
+
+        unsafe { int2dds_type_info_destroy(ffi_ptr) };
+    }
+
+    /// The `_nd` exports must fold every dimension into ONE flat plain-array id
+    /// (XTypes 7.4.3.4). Asymmetric dims in declaration order are the only defense
+    /// against a silent dimension-order flip: element counts are order-invariant, so
+    /// round-trip and hash tests cannot catch a reversal.
+    #[test]
+    fn test_nd_array_exports_emit_flat_asymmetric_bounds() {
+        use std::ffi::CString;
+
+        let name = CString::new("NdArrType").unwrap();
+        let mut ffi_ptr: *mut Int2DdsTypeInfo = std::ptr::null_mut();
+        let dims: [u32; 3] = [2, 3, 5];
+        unsafe {
+            assert_eq!(int2dds_type_info_create(name.as_ptr(), 1, &mut ffi_ptr), INT2DDS_RET_OK);
+
+            let f_prim = CString::new("m").unwrap();
+            assert_eq!(
+                int2dds_type_info_add_array_field_nd(
+                    ffi_ptr,
+                    f_prim.as_ptr(),
+                    INT2DDS_FIELD_INT32,
+                    dims.as_ptr(),
+                    dims.len(),
+                    0,
+                ),
+                INT2DDS_RET_OK
+            );
+
+            let f_named = CString::new("e").unwrap();
+            let elem_name = CString::new("Color").unwrap();
+            assert_eq!(
+                int2dds_type_info_add_array_of_named_field_nd(
+                    ffi_ptr,
+                    f_named.as_ptr(),
+                    elem_name.as_ptr(),
+                    dims.as_ptr(),
+                    dims.len(),
+                    0,
+                ),
+                INT2DDS_RET_OK
+            );
+
+            let mut enum_ptr: *mut Int2DdsTypeInfo = std::ptr::null_mut();
+            assert_eq!(
+                int2dds_type_info_create_enum(elem_name.as_ptr(), 32, &mut enum_ptr),
+                INT2DDS_RET_OK
+            );
+            let lit = CString::new("RED").unwrap();
+            assert_eq!(
+                int2dds_type_info_add_enum_literal(enum_ptr, lit.as_ptr(), 0, 0),
+                INT2DDS_RET_OK
+            );
+            let f_nested = CString::new("n").unwrap();
+            assert_eq!(
+                int2dds_type_info_add_array_of_nested_field_nd(
+                    ffi_ptr,
+                    f_nested.as_ptr(),
+                    enum_ptr,
+                    dims.as_ptr(),
+                    dims.len(),
+                    0,
+                ),
+                INT2DDS_RET_OK
+            );
+            int2dds_type_info_destroy(enum_ptr);
+
+            let f_bad = CString::new("bad").unwrap();
+            assert_eq!(
+                int2dds_type_info_add_array_field_nd(
+                    ffi_ptr,
+                    f_bad.as_ptr(),
+                    INT2DDS_FIELD_INT32,
+                    dims.as_ptr(),
+                    0,
+                    0,
+                ),
+                INT2DDS_RET_INVALID_ARGUMENT
+            );
+        }
+
+        let ti = unsafe { &*ffi_ptr };
+        assert_eq!(ti.fields.len(), 3);
+        for f in &ti.fields {
+            match &f.type_id {
+                TypeIdentifier::PlainArraySmall { array_bound_seq, element_identifier, .. } => {
+                    assert_eq!(array_bound_seq.as_slice(), &[2u8, 3, 5], "field {}", f.name);
+                    assert!(
+                        !matches!(
+                            element_identifier.as_ref(),
+                            TypeIdentifier::PlainArraySmall { .. }
+                                | TypeIdentifier::PlainArrayLarge { .. }
+                        ),
+                        "field {} element must not be a nested array",
+                        f.name
+                    );
+                }
+                other => panic!("field {} is not a flat small array: {:?}", f.name, other),
+            }
+        }
 
         unsafe { int2dds_type_info_destroy(ffi_ptr) };
     }

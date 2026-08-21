@@ -210,12 +210,25 @@ namespace Int2Dds.Core
                             case "arr":
                                 rc = NativeMethods.int2dds_type_info_add_array_field(ti, pField, f.TypeConst, f.Size, f.Flags);
                                 break;
+                            case "arr_nd":
+                                if (f.Dims == null)
+                                    throw new InvalidOperationException(
+                                        $"Multidim type_info field '{f.Name}' has no Dims.");
+                                fixed (uint* pDims = f.Dims!)
+                                {
+                                    rc = NativeMethods.int2dds_type_info_add_array_field_nd(ti, pField, f.TypeConst, pDims, (UIntPtr)f.Dims!.Length, f.Flags);
+                                }
+                                break;
                             case "nested":
                             case "seq_nested":
                             case "arr_nested":
+                            case "arr_nested_nd":
                                 if (f.NestedType == null)
                                     throw new InvalidOperationException(
                                         $"Nested type_info field '{f.Name}' has no NestedType.");
+                                if (f.Op == "arr_nested_nd" && f.Dims == null)
+                                    throw new InvalidOperationException(
+                                        $"Multidim type_info field '{f.Name}' has no Dims.");
                                 IntPtr nestedTi = BuildTypeInfoForType(f.NestedType);
                                 try
                                 {
@@ -223,6 +236,13 @@ namespace Int2Dds.Core
                                         rc = NativeMethods.int2dds_type_info_add_sequence_of_nested_field(ti, pField, nestedTi, f.Size, f.Flags);
                                     else if (f.Op == "arr_nested")
                                         rc = NativeMethods.int2dds_type_info_add_array_of_nested_field(ti, pField, nestedTi, f.Size, f.Flags);
+                                    else if (f.Op == "arr_nested_nd")
+                                    {
+                                        fixed (uint* pDims = f.Dims!)
+                                        {
+                                            rc = NativeMethods.int2dds_type_info_add_array_of_nested_field_nd(ti, pField, nestedTi, pDims, (UIntPtr)f.Dims!.Length, f.Flags);
+                                        }
+                                    }
                                     else
                                         rc = NativeMethods.int2dds_type_info_add_nested_field(ti, pField, nestedTi, f.Flags);
                                 }
