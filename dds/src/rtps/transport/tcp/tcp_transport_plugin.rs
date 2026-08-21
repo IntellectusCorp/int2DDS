@@ -27,12 +27,9 @@ use crate::rtps::transport::tcp::tcp_sender::TcpSender;
 use crate::rtps::transport::tcp::tls::TlsConfig;
 use crate::rtps::transport::{TcpConfig, TransportType};
 
-/// Capacity of inbound discovery channels.
-const DISCOVERY_CHANNEL_CAPACITY: usize = 512;
-
-/// Capacity of the inbound user_data channel. Single-slot so a full channel
+/// Capacity of the inbound channel. Single-slot so a full channel
 /// blocks the router at once, pushing backpressure onto the TCP window.
-const USER_CHANNEL_CAPACITY: usize = 1;
+const TO_RTPS_CHANNEL_CAPACITY: usize = 1;
 
 // ── TcpTransportPlugin ──────────────────────────────────────────────────
 
@@ -114,23 +111,18 @@ impl TcpTransportPlugin {
 
         let initial_peers = tcp_config.initial_peers.clone();
 
-        // **Verify whether `initial_peers` has been initialized.**
-        // Pure TCP has no multicast, so discovery cannot bootstrap without
-        // initial peers — fail fast with a clear message. Hybrid embeds this
-        // plugin but bootstraps over UDP multicast, so its `transport_type`
-        // (not `TCP`) exempts it from this requirement.
         if tcp_config.transport_type == TransportType::TCP && initial_peers.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "TCP transport requires initial peers: TCP has no multicast for discovery. \
+            log::warn!(
+                "No initial peers configured: TCP has no multicast for discovery. \
                  Set the int2dds.initial_peers QoS property (or INT2DDS_INITIAL_PEERS) to the \
-                 peer's ip:port.",
-            ));
+                 peer's ip:port. Ignore this if only endpoints \
+                 within this participant are meant to match."
+            );
         }
 
         // Bridge async → sync.
-        let (discovery_tx, discovery_rx) = bounded::<IncomingMessage>(DISCOVERY_CHANNEL_CAPACITY);
-        let (user_data_tx, user_data_rx) = bounded::<IncomingMessage>(USER_CHANNEL_CAPACITY);
+        let (discovery_tx, discovery_rx) = bounded::<IncomingMessage>(TO_RTPS_CHANNEL_CAPACITY);
+        let (user_data_tx, user_data_rx) = bounded::<IncomingMessage>(TO_RTPS_CHANNEL_CAPACITY);
 
         let worker_threads = tcp_config.async_workers.unwrap_or_else(default_worker_count);
         let runtime = Arc::new(
@@ -203,10 +195,17 @@ impl TcpTransportPlugin {
             // dispatch routes responses back into the same pending_ack slots.
             let shared = Arc::clone(listener.shared());
 
+            // Every address this participant answers on, so the sender can tell
+            // a frame aimed at ourselves from one aimed at a peer.
+            let mut local_ips = working_ips.clone();
+            if !local_ips.contains(&working_ip) {
+                local_ips.push(working_ip);
+            }
+
             let sender = TcpSender::new(
                 domain_id,
                 participant_id,
-                working_ip,
+                local_ips,
                 listener_port,
                 guid_prefix,
                 tls_config,
@@ -282,8 +281,13 @@ impl TcpTransportPlugin {
     /// Whether an outbound dial to `addr` is permitted. Restricted to
     /// `initial_peers` unless `accept_undefined_peers` is set
     /// or `initial_peers` is empty (dial-all fallback).
+    ///
+    /// Our own listener is exempt: nobody lists themselves as an initial peer,
+    /// and what a Reader and a Writer of this participant exchange is not a dial
+    /// — the sender keeps it in-process.
     fn should_dial(&self, addr: &SocketAddr) -> bool {
-        self.accept_undefined_peers
+        self.sender.is_self_connection(addr)
+            || self.accept_undefined_peers
             || self.initial_peers.is_empty()
             || self.initial_peers.contains(addr)
     }

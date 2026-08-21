@@ -261,12 +261,17 @@ impl ControlMsg {
 
 // ─── Cookie Generator ───────────────────────────────────────────────────────
 
-/// Generate a connection cookie with a monotonically increasing first byte.
-/// Returns a 16-byte cookie: [counter, 0, 0, ...]
-pub(crate) fn generate_cookie(counter: &mut u8) -> [u8; 16] {
+/// Build the cookie handed out for `counter`, one issue of the participant's
+/// cookie sequence.
+///
+/// The sequence has to outlast the participant: a cookie lives from
+/// PORT_RESERVE until the matching PORT_BIND consumes it, and a reservation the
+/// peer abandons is never consumed at all. A repeat would overwrite a live
+/// reservation and bind that peer's data connection to another peer's port, so
+/// the counter is given the room never to come back around.
+pub(crate) fn generate_cookie(counter: u64) -> [u8; 16] {
     let mut cookie = [0u8; 16];
-    cookie[0] = *counter;
-    *counter = counter.wrapping_add(1);
+    cookie[..8].copy_from_slice(&counter.to_be_bytes());
     cookie
 }
 
@@ -300,10 +305,8 @@ mod tests {
 
     #[test]
     fn test_port_reserve_ack_roundtrip() {
-        let mut counter = 0x31u8;
-        let cookie = generate_cookie(&mut counter);
-        assert_eq!(cookie[0], 0x31);
-        assert_eq!(counter, 0x32);
+        let cookie = generate_cookie(0x31);
+        assert_eq!(cookie[..8], 0x31u64.to_be_bytes());
 
         let msg = ControlMsg::PortReserveAck { cookie };
         let bytes = msg.to_bytes();

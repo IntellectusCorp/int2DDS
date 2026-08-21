@@ -64,7 +64,8 @@ impl TcpMuxListener {
             user_data_tx,
         ));
 
-        let mut handles = Vec::with_capacity(1);
+        let mut handles = Vec::with_capacity(2);
+        handles.push(shared.spawn_self_delivery_task(cancel.clone()));
         handles.push(tokio::spawn(accept_loop_task(
             std_listener,
             shared.clone(),
