@@ -98,6 +98,20 @@ public final class FfiAccess {
         return rc;
     }
 
+    /**
+     * Creates a dynamic value holding a wide-string (UTF-8-encoded) string,
+     * writing the handle to {@code out[0]} on success.
+     */
+    public static int dynamicValueWstring(byte[] value, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_wstring(value, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
     /** Creates a {@code bool} dynamic value, writing the handle to {@code out[0]} on success. */
     public static int dynamicValueBool(boolean value, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -201,6 +215,28 @@ public final class FfiAccess {
     public static int dynamicValueU64(long value, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_dynamic_value_u64(value, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Creates a {@code bitmask} dynamic value from its packed bits, writing the handle to {@code out[0]} on success. */
+    public static int dynamicValueBitmask(long value, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_bitmask(value, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Creates a {@code bitset} dynamic value from its packed bitfields, writing the handle to {@code out[0]} on success. */
+    public static int dynamicValueBitset(long value, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_bitset(value, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             out[0] = slot.getLong(0);
@@ -1852,6 +1888,28 @@ public final class FfiAccess {
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             out[0] = slot.getLong(0); // native writes a u64 (8 bytes); raw bits, not widened
+        }
+        return rc;
+    }
+
+    /** Reads a bitmask dynamic value's packed bits into {@code out[0]}. */
+    public static int dynamicValueAsBitmask(long value, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_as_bitmask(value, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0); // native writes a u64 (8 bytes)
+        }
+        return rc;
+    }
+
+    /** Reads a bitset dynamic value's packed bitfields into {@code out[0]}. */
+    public static int dynamicValueAsBitset(long value, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_as_bitset(value, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0); // native writes a u64 (8 bytes)
         }
         return rc;
     }

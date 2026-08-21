@@ -145,6 +145,22 @@ public final class DynamicValue implements AutoCloseable {
         return new DynamicValue(out[0]);
     }
 
+    /** Builds a {@code bitmask} value from its packed bits. */
+    public static DynamicValue bitmask(long bits) {
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicValueBitmask(bits, out);
+        ReturnCodes.check(rc);
+        return new DynamicValue(out[0]);
+    }
+
+    /** Builds a {@code bitset} value from its packed bitfields. */
+    public static DynamicValue bitset(long bits) {
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicValueBitset(bits, out);
+        ReturnCodes.check(rc);
+        return new DynamicValue(out[0]);
+    }
+
     /** Builds a {@code float32} value. */
     public static DynamicValue f32(float value) {
         long[] out = new long[1];
@@ -165,6 +181,14 @@ public final class DynamicValue implements AutoCloseable {
     public static DynamicValue string(String value) {
         long[] out = new long[1];
         int rc = FfiAccess.dynamicValueString(value.getBytes(UTF8), out);
+        ReturnCodes.check(rc);
+        return new DynamicValue(out[0]);
+    }
+
+    /** Builds a {@code wstring} value from a UTF-8-encoded string. */
+    public static DynamicValue wstring(String value) {
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicValueWstring(value.getBytes(UTF8), out);
         ReturnCodes.check(rc);
         return new DynamicValue(out[0]);
     }
@@ -445,6 +469,26 @@ public final class DynamicValue implements AutoCloseable {
         long v = handle();
         long[] out = new long[1];
         int rc = FfiAccess.dynamicValueAsU64(v, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return out[0];
+    }
+
+    /** Reads this value as a {@code bitmask}, its packed bits. Throws if it is not a bitmask. */
+    public long asBitmask() {
+        long v = handle();
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicValueAsBitmask(v, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return out[0];
+    }
+
+    /** Reads this value as a {@code bitset}, its packed bitfields. Throws if it is not a bitset. */
+    public long asBitset() {
+        long v = handle();
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicValueAsBitset(v, out);
         NativeKeepAlive.keepAlive(this);
         ReturnCodes.check(rc);
         return out[0];
