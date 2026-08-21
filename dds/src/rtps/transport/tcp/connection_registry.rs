@@ -9,19 +9,20 @@
 //! `CancellationToken`.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::io;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-use flume::Sender;
+use flume::{Receiver, Sender, TrySendError};
 use log::{debug, warn};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::rtps::common::guid::GuidPrefix;
-use crate::rtps::transport::error::TransportErrorCode;
+use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::plugin::IncomingMessage;
 use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::tcp::protocol::ControlMsg;
@@ -204,6 +205,13 @@ pub(crate) fn apply_socket_tuning(tcp: &tokio::net::TcpStream, tuning: &TcpSocke
     apply_keepalive(tcp, tuning.keepalive);
 }
 
+/// Bounds on the queue holding self-addressed frames until the self-deliver-task moves them
+/// onto the inbound channel. The byte cap is the one that bounds memory: a
+/// count alone lets a queue of large frames grow without limit. Reaching either
+/// means the decoding thread has stopped, and dropping is the right answer.
+const SELF_DELIVERY_BYTE_CAP: usize = 64 * 1024 * 1024;
+const SELF_DELIVERY_COUNT_BACKSTOP: usize = 65_536;
+
 /// First reconnect-backoff delay after a failed outbound connect.
 pub(crate) const BACKOFF_BASE: Duration = Duration::from_millis(500);
 /// Cap for the exponential reconnect-backoff growth (kept high on purpose so a
@@ -236,12 +244,21 @@ pub(crate) struct ConnectionRegistry {
     /// Cookie issued at PORT_RESERVE → consumed at PORT_BIND.
     cookie_to_port: DashMap<[u8; 16], u16>,
     cookie_to_guid: DashMap<[u8; 16], GuidPrefix>,
-    next_cookie: AtomicU8,
+    next_cookie: AtomicU64,
 
     pub(crate) next_conn_id: AtomicUsize,
 
     discovery_tx: Sender<IncomingMessage>,
     user_data_tx: Sender<IncomingMessage>,
+
+    /// Self-addressed frames raised on a thread other than the one decoding
+    /// RTPS messages. They cannot go straight onto `user_data_tx`: its single
+    /// slot is cleared only by that decoding thread, so a sender waiting there
+    /// pays out a whole decode — and the thread creating entities pays it
+    /// inline, once per local endpoint it matches.
+    self_delivery_tx: Sender<IncomingMessage>,
+    self_delivery_rx: Mutex<Option<Receiver<IncomingMessage>>>,
+    self_delivery_bytes: Arc<AtomicUsize>,
 }
 
 impl ConnectionRegistry {
@@ -253,6 +270,8 @@ impl ConnectionRegistry {
         discovery_tx: Sender<IncomingMessage>,
         user_data_tx: Sender<IncomingMessage>,
     ) -> Self {
+        let (self_delivery_tx, self_delivery_rx) = flume::bounded(SELF_DELIVERY_COUNT_BACKSTOP);
+
         Self {
             domain_id,
             participant_id,
@@ -263,11 +282,62 @@ impl ConnectionRegistry {
             backoff: DashMap::new(),
             cookie_to_port: DashMap::new(),
             cookie_to_guid: DashMap::new(),
-            next_cookie: AtomicU8::new(0x31),
+            next_cookie: AtomicU64::new(0x31),
             next_conn_id: AtomicUsize::new(0),
             discovery_tx,
             user_data_tx,
+            self_delivery_tx,
+            self_delivery_rx: Mutex::new(Some(self_delivery_rx)),
+            self_delivery_bytes: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// Move self-addressed frames onto the inbound channel from a task of their
+    /// own, so no sender thread ever waits for that channel's single slot. The
+    /// wait still happens — it is what paces a writer against a busy reader —
+    /// but it happens here, where nothing else is held up by it.
+    ///
+    /// Returns immediately after the first call: the receiver is taken.
+    pub(crate) fn spawn_self_delivery_task(
+        self: &Arc<Self>,
+        cancel: CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
+        let shared = Arc::clone(self);
+        let receiver = shared.self_delivery_rx.lock().expect("self_delivery_rx lock").take();
+
+        tokio::spawn(async move {
+            let Some(receiver) = receiver else { return };
+
+            loop {
+                let msg = tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    received = receiver.recv_async() => match received {
+                        Ok(msg) => msg,
+                        Err(_) => break,
+                    },
+                };
+
+                shared.self_delivery_bytes.fetch_sub(msg.data.len(), Ordering::AcqRel);
+
+                // The wait for the inbound channel's slot has no bound of its
+                // own: a receiver that is alive but no longer draining holds it
+                // forever, and shutdown waits on this task.
+                let sent = tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    sent = shared.user_data_tx.send_async(msg) => sent,
+                };
+                if sent.is_err() {
+                    break;
+                }
+            }
+
+            // Nothing still queued will ever be delivered, so the budget it
+            // holds is released here rather than left claimed for a queue no
+            // one reads.
+            for msg in receiver.drain() {
+                shared.self_delivery_bytes.fetch_sub(msg.data.len(), Ordering::AcqRel);
+            }
+        })
     }
 
     // ── basic counters ───────────────────────────────────────────────────────
@@ -290,14 +360,19 @@ impl ConnectionRegistry {
     }
 
     /// Record a failed outbound connect: grow the backoff (exponential, capped).
-    pub(crate) fn note_connect_failure(&self, addr: SocketAddr) {
+    pub(crate) fn note_connect_failure(&self, addr: SocketAddr, err: &io::Error) {
         let now = Instant::now();
         let mut entry = self
             .backoff
             .entry(addr)
             .or_insert(BackoffState { next_attempt: now, delay: Duration::ZERO });
-        let delay =
-            if entry.delay.is_zero() { BACKOFF_BASE } else { (entry.delay * 2).min(BACKOFF_MAX) };
+        let delay = if err.kind() == io::ErrorKind::ConnectionRefused {
+            BACKOFF_BASE
+        } else if entry.delay.is_zero() {
+            BACKOFF_BASE
+        } else {
+            (entry.delay * 2).min(BACKOFF_MAX)
+        };
         entry.delay = delay;
         entry.next_attempt = now + delay;
     }
@@ -305,6 +380,98 @@ impl ConnectionRegistry {
     /// Clear a peer's backoff.
     pub(crate) fn clear_backoff(&self, addr: SocketAddr) {
         self.backoff.remove(&addr);
+    }
+
+    /// Drop any outbound backoff held against the peer on `conn_id`.
+    ///
+    /// A frame arriving from a peer proves it is up just as its PEER_HELLO did.
+    /// Without this the evidence only counts at the moment the peer first
+    /// reaches us: a peer we keep hearing from all along can still be held off
+    /// by a window our own failed dials grew after that.
+    pub(crate) fn note_peer_alive(&self, conn_id: ConnectionId) {
+        let Some(prefix) = self.connections.get(&conn_id).and_then(|c| c.remote_guid_prefix) else {
+            return;
+        };
+        // The prefix of a peer connection is its advertised address packed by
+        // `addr_to_guid`, so the address reads straight back out of it.
+        let ip = Ipv4Addr::new(prefix[0], prefix[1], prefix[2], prefix[3]);
+        let port = u16::from_be_bytes([prefix[4], prefix[5]]);
+        if ip.is_unspecified() || port == 0 {
+            return;
+        }
+        self.clear_backoff(SocketAddr::new(IpAddr::V4(ip), port));
+    }
+
+    /// Hand a frame addressed to this participant's own user-traffic port
+    /// straight to the receive side, bypassing the wire.
+    ///
+    /// A Reader and a Writer in one Participant still address each other by
+    /// locator, and that locator is our own listener. Reaching it over a socket
+    /// would mean dialling ourselves — a connection pair, a TLS session and a
+    /// task pair to arrive where the frame already is. Discovery traffic is not
+    /// delivered this way: the discovery listener discards messages carrying our
+    /// own GUID prefix, so intra-participant matching is resolved locally
+    /// instead. `Ok(false)` means `logical_port` is not that port, leaving the
+    /// caller to decide what the frame was.
+    ///
+    /// Only a frame the queue refused is an error. A closed receive side is not:
+    /// the participant is already on its way down, and the caller has nothing
+    /// left to do about it.
+    pub(crate) fn deliver_to_self(
+        &self,
+        source: SocketAddr,
+        logical_port: u16,
+        data: &[u8],
+    ) -> io::Result<bool> {
+        if logical_port
+            != PortManager::get_user_traffic_unicast_port(self.domain_id, self.participant_id)
+        {
+            return Ok(false);
+        }
+
+        // Hand the frame to the self-deliver-task and return. Waiting for the inbound
+        // channel here would put a decode on the caller's critical path — and
+        // the thread that decodes is itself a caller, so it would be waiting on
+        // itself. Either way it is how entity creation came to stall for
+        // seconds at a time.
+        //
+        // The bytes are claimed before the frame is queued, and released only by
+        // whoever fails to queue it. Claiming afterwards would let the
+        // deliver-task release a frame's bytes before they were ever counted,
+        // wrapping the total past zero, and would let two senders each read a
+        // total that leaves room for a frame the other has already taken. A
+        // refused frame is never copied.
+        let len = data.len();
+        if self
+            .self_delivery_bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                used.checked_add(len).filter(|total| *total <= SELF_DELIVERY_BYTE_CAP)
+            })
+            .is_err()
+        {
+            return Err(transport_io_error(
+                TransportErrorCode::TcpChannelFull,
+                format!("intra-participant queue over byte cap, dropped a {len} byte frame"),
+            ));
+        }
+
+        let msg = IncomingMessage { data: data.to_vec(), source };
+        match self.self_delivery_tx.try_send(msg) {
+            Ok(()) => Ok(true),
+            Err(TrySendError::Full(_)) => {
+                self.self_delivery_bytes.fetch_sub(len, Ordering::AcqRel);
+                Err(transport_io_error(
+                    TransportErrorCode::TcpChannelFull,
+                    format!(
+                        "intra-participant queue over count backstop, dropped a {len} byte frame"
+                    ),
+                ))
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.self_delivery_bytes.fetch_sub(len, Ordering::AcqRel);
+                Ok(true)
+            }
+        }
     }
 
     /// Register a freshly-accepted inbound connection.
@@ -553,10 +720,213 @@ fn send_control(writer_tx: &mpsc::Sender<Vec<u8>>, msg: &ControlMsg) {
 mod tests {
     use super::*;
 
+    /// Traffic from a peer clears the window our failed dials opened, so the
+    /// next dial to a peer that is plainly up is not held back.
+    #[test]
+    fn traffic_from_a_peer_clears_its_backoff() {
+        let registry = test_registry(0);
+        let peer: SocketAddr = "127.0.0.1:7411".parse().unwrap();
+
+        registry.note_connect_failure(peer, &io::Error::from(io::ErrorKind::TimedOut));
+        assert!(registry.backoff_remaining(peer).is_some(), "backoff after a failed dial");
+
+        let conn_id = registry.register_inbound_connection(peer, CancellationToken::new());
+        registry
+            .connections
+            .get_mut(&conn_id)
+            .expect("connection just registered")
+            .remote_guid_prefix = Some(addr_to_guid(peer));
+
+        registry.note_peer_alive(conn_id);
+        assert!(registry.backoff_remaining(peer).is_none(), "traffic must clear the backoff");
+    }
+
     fn test_registry(domain_id: u32) -> ConnectionRegistry {
         let (d_tx, _d_rx) = flume::bounded(8);
         let (u_tx, _u_rx) = flume::bounded(8);
         ConnectionRegistry::new(domain_id, 0, [0u8; 12], TcpSocketTuning::default(), d_tx, u_tx)
+    }
+
+    /// A registry whose inbound user-data channel holds one frame and is never
+    /// drained: anything that reaches it wedges the caller for good.
+    fn registry_with_a_stalled_inbound_channel(
+        domain_id: u32,
+    ) -> (Arc<ConnectionRegistry>, flume::Receiver<IncomingMessage>) {
+        let (d_tx, _d_rx) = flume::bounded(8);
+        let (u_tx, u_rx) = flume::bounded(1);
+        let registry = ConnectionRegistry::new(
+            domain_id,
+            0,
+            [0u8; 12],
+            TcpSocketTuning::default(),
+            d_tx,
+            u_tx,
+        );
+        (Arc::new(registry), u_rx)
+    }
+
+    /// One handled message owes the local endpoints more than one response --
+    /// two matched readers, or a repair round -- and the thread that handles it
+    /// is the inbound channel's only consumer. None of those responses may make
+    /// any caller wait: the channel starts full here, so a caller that queued
+    /// through it would not come back. The deliver-task does the waiting, and the
+    /// frames arrive in the order they were raised once the slot frees.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn self_addressed_frames_never_park_the_thread_that_raises_them() {
+        const DOMAIN_ID: u32 = 951;
+        const RESPONSES: usize = 8;
+
+        let (registry, u_rx) = registry_with_a_stalled_inbound_channel(DOMAIN_ID);
+        let logical_port = PortManager::get_user_traffic_unicast_port(DOMAIN_ID, 0);
+        let source: SocketAddr = "127.0.0.1:7400".parse().unwrap();
+
+        registry
+            .user_data_tx
+            .send(IncomingMessage { data: b"remote".to_vec(), source })
+            .expect("occupy the only slot");
+
+        let _task = registry.spawn_self_delivery_task(CancellationToken::new());
+
+        let (done_tx, done_rx) = flume::bounded(1);
+        let caller = Arc::clone(&registry);
+        std::thread::spawn(move || {
+            for i in 0..RESPONSES {
+                assert!(caller
+                    .deliver_to_self(source, logical_port, &[i as u8])
+                    .expect("the queue refused a frame"));
+            }
+            let _ = done_tx.send(());
+        });
+
+        done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the caller parked on the inbound channel instead of handing off");
+
+        assert_eq!(u_rx.recv().expect("remote frame").data, b"remote");
+
+        let mut settled = Vec::with_capacity(RESPONSES);
+        for _ in 0..RESPONSES {
+            let msg = u_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the deliver-task never delivered the frame");
+            settled.push(msg.data);
+        }
+        assert_eq!(settled, (0..RESPONSES).map(|i| vec![i as u8]).collect::<Vec<_>>());
+    }
+
+    /// The byte cap is one budget shared by every sender, so what the queue
+    /// accepts stays under it however many senders claim at the same moment.
+    #[test]
+    fn concurrent_senders_never_claim_past_the_byte_cap() {
+        const DOMAIN_ID: u32 = 953;
+        const SENDERS: usize = 8;
+        const FRAME_LEN: usize = 4 * 1024 * 1024;
+        const FRAMES_EACH: usize = 4;
+
+        let (registry, _u_rx) = registry_with_a_stalled_inbound_channel(DOMAIN_ID);
+        let logical_port = PortManager::get_user_traffic_unicast_port(DOMAIN_ID, 0);
+        let source: SocketAddr = "127.0.0.1:7400".parse().unwrap();
+
+        // Nothing drains the queue: no deliver-task is spawned, so every claim
+        // that succeeds stays claimed and the total is the accepted total.
+        let accepted: usize = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..SENDERS)
+                .map(|_| {
+                    let registry = Arc::clone(&registry);
+                    scope.spawn(move || {
+                        let frame = vec![0u8; FRAME_LEN];
+                        (0..FRAMES_EACH)
+                            .filter(|_| {
+                                registry.deliver_to_self(source, logical_port, &frame).is_ok()
+                            })
+                            .count()
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().expect("sender panicked")).sum()
+        });
+
+        assert_eq!(
+            accepted * FRAME_LEN,
+            SELF_DELIVERY_BYTE_CAP,
+            "senders together claimed past the cap"
+        );
+        assert_eq!(registry.self_delivery_bytes.load(Ordering::Acquire), SELF_DELIVERY_BYTE_CAP);
+    }
+
+    /// The wait for the inbound channel has no bound of its own, and shutdown
+    /// waits on this task -- so cancelling has to break the wait itself.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancelling_ends_the_task_parked_on_a_full_inbound_channel() {
+        const DOMAIN_ID: u32 = 954;
+
+        let (registry, _u_rx) = registry_with_a_stalled_inbound_channel(DOMAIN_ID);
+        let logical_port = PortManager::get_user_traffic_unicast_port(DOMAIN_ID, 0);
+        let source: SocketAddr = "127.0.0.1:7400".parse().unwrap();
+
+        registry
+            .user_data_tx
+            .send(IncomingMessage { data: b"remote".to_vec(), source })
+            .expect("occupy the only slot");
+
+        let cancel = CancellationToken::new();
+        let task = registry.spawn_self_delivery_task(cancel.clone());
+        registry.deliver_to_self(source, logical_port, b"parked").expect("the queue refused it");
+
+        // The budget clears when the task takes the frame off the queue, which
+        // is the moment it is parked on the channel with nowhere to put it.
+        while registry.self_delivery_bytes.load(Ordering::Acquire) != 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("the task stayed parked on the channel after being cancelled")
+            .expect("the task panicked");
+    }
+
+    /// A cancelled task leaves frames behind. Their bytes go back to the budget
+    /// rather than staying claimed for a queue nobody will read again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancelled_task_releases_the_budget_its_backlog_held() {
+        const DOMAIN_ID: u32 = 955;
+        const BACKLOG: usize = 5;
+
+        let (registry, _u_rx) = registry_with_a_stalled_inbound_channel(DOMAIN_ID);
+        let logical_port = PortManager::get_user_traffic_unicast_port(DOMAIN_ID, 0);
+        let source: SocketAddr = "127.0.0.1:7400".parse().unwrap();
+
+        registry
+            .user_data_tx
+            .send(IncomingMessage { data: b"remote".to_vec(), source })
+            .expect("occupy the only slot");
+
+        let cancel = CancellationToken::new();
+        let task = registry.spawn_self_delivery_task(cancel.clone());
+        for i in 0..BACKLOG {
+            registry
+                .deliver_to_self(source, logical_port, &[i as u8])
+                .expect("the queue refused a frame");
+        }
+
+        // Wait until the task is parked on the channel, so the frames still
+        // queued behind it are a real backlog when the cancel lands.
+        while registry.self_delivery_bytes.load(Ordering::Acquire) > BACKLOG - 1 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("the task did not end")
+            .expect("the task panicked");
+
+        assert_eq!(
+            registry.self_delivery_bytes.load(Ordering::Acquire),
+            0,
+            "the backlog kept its claim on the budget"
+        );
     }
 
     /// `PeerConnectionGroup` tracks occupied roles and reports `has_data_conns`.
