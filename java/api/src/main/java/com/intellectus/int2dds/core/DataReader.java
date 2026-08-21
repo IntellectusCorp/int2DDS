@@ -13,6 +13,11 @@ import com.intellectus.int2dds.internal.ReturnCodes;
 import com.intellectus.int2dds.internal.ffi.FfiAccess;
 import com.intellectus.int2dds.listeners.DataReaderListener;
 import com.intellectus.int2dds.qos.DataReaderQos;
+import com.intellectus.int2dds.status.LivelinessChangedStatus;
+import com.intellectus.int2dds.status.RequestedDeadlineMissedStatus;
+import com.intellectus.int2dds.status.RequestedIncompatibleQosStatus;
+import com.intellectus.int2dds.status.SampleLostStatus;
+import com.intellectus.int2dds.status.SampleRejectedStatus;
 import com.intellectus.int2dds.status.StatusMask;
 import com.intellectus.int2dds.status.SubscriptionMatchedStatus;
 import com.intellectus.int2dds.types.IDdsType;
@@ -172,6 +177,114 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
         return new SubscriptionMatchedStatus(
                 totalCount, totalCountChange, currentCount, currentCountChange,
                 lastPublicationHandle);
+    }
+
+    /**
+     * This reader's LIVELINESS_CHANGED status: how many matched writers are
+     * currently alive versus not alive, and the change since last read. Per
+     * DDS, reading this status clears its {@code *Change} fields.
+     */
+    public LivelinessChangedStatus getLivelinessChangedStatus() {
+        ByteBuffer buf = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder());
+        int rc = FfiAccess.datareaderGetLivelinessChangedStatus(
+                handle(), FfiAccess.directBufferAddress(buf));
+        NativeKeepAlive.keepAlive(this);
+        NativeKeepAlive.keepAlive(buf);
+        ReturnCodes.check(rc);
+        int aliveCount = buf.getInt(0);
+        int notAliveCount = buf.getInt(4);
+        int aliveCountChange = buf.getInt(8);
+        int notAliveCountChange = buf.getInt(12);
+        byte[] lastPublicationHandle = new byte[16];
+        for (int i = 0; i < 16; i++) {
+            lastPublicationHandle[i] = buf.get(16 + i);
+        }
+        return new LivelinessChangedStatus(
+                aliveCount, notAliveCount, aliveCountChange, notAliveCountChange,
+                lastPublicationHandle);
+    }
+
+    /**
+     * This reader's REQUESTED_DEADLINE_MISSED status: how many times this
+     * reader missed the deadline it requested for an instance, and the
+     * change since last read. Per DDS, reading this status clears its
+     * {@code *Change} field.
+     */
+    public RequestedDeadlineMissedStatus getRequestedDeadlineMissedStatus() {
+        ByteBuffer buf = ByteBuffer.allocateDirect(24).order(ByteOrder.nativeOrder());
+        int rc = FfiAccess.datareaderGetRequestedDeadlineMissedStatus(
+                handle(), FfiAccess.directBufferAddress(buf));
+        NativeKeepAlive.keepAlive(this);
+        NativeKeepAlive.keepAlive(buf);
+        ReturnCodes.check(rc);
+        int totalCount = buf.getInt(0);
+        int totalCountChange = buf.getInt(4);
+        byte[] lastInstanceHandle = new byte[16];
+        for (int i = 0; i < 16; i++) {
+            lastInstanceHandle[i] = buf.get(8 + i);
+        }
+        return new RequestedDeadlineMissedStatus(totalCount, totalCountChange, lastInstanceHandle);
+    }
+
+    /**
+     * This reader's REQUESTED_INCOMPATIBLE_QOS status: how many times this
+     * reader discovered a requested QoS incompatible with an offering
+     * writer's QoS, and the change since last read. Per DDS, reading this
+     * status clears its {@code *Change} field.
+     */
+    public RequestedIncompatibleQosStatus getRequestedIncompatibleQosStatus() {
+        ByteBuffer buf = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder());
+        int rc = FfiAccess.datareaderGetRequestedIncompatibleQosStatus(
+                handle(), FfiAccess.directBufferAddress(buf));
+        NativeKeepAlive.keepAlive(this);
+        NativeKeepAlive.keepAlive(buf);
+        ReturnCodes.check(rc);
+        int totalCount = buf.getInt(0);
+        int totalCountChange = buf.getInt(4);
+        int lastPolicyId = buf.getInt(8);
+        int policiesCount = buf.getInt(12);
+        return new RequestedIncompatibleQosStatus(
+                totalCount, totalCountChange, lastPolicyId, policiesCount);
+    }
+
+    /**
+     * This reader's SAMPLE_LOST status: how many samples were lost (never
+     * received) by this reader, and the change since last read. Per DDS,
+     * reading this status clears its {@code *Change} field.
+     */
+    public SampleLostStatus getSampleLostStatus() {
+        ByteBuffer buf = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = FfiAccess.datareaderGetSampleLostStatus(
+                handle(), FfiAccess.directBufferAddress(buf));
+        NativeKeepAlive.keepAlive(this);
+        NativeKeepAlive.keepAlive(buf);
+        ReturnCodes.check(rc);
+        int totalCount = buf.getInt(0);
+        int totalCountChange = buf.getInt(4);
+        return new SampleLostStatus(totalCount, totalCountChange);
+    }
+
+    /**
+     * This reader's SAMPLE_REJECTED status: how many samples this reader
+     * rejected (e.g. resource-limit related), the last reason, and the
+     * change since last read. Per DDS, reading this status clears its
+     * {@code *Change} field.
+     */
+    public SampleRejectedStatus getSampleRejectedStatus() {
+        ByteBuffer buf = ByteBuffer.allocateDirect(28).order(ByteOrder.nativeOrder());
+        int rc = FfiAccess.datareaderGetSampleRejectedStatus(
+                handle(), FfiAccess.directBufferAddress(buf));
+        NativeKeepAlive.keepAlive(this);
+        NativeKeepAlive.keepAlive(buf);
+        ReturnCodes.check(rc);
+        int totalCount = buf.getInt(0);
+        int totalCountChange = buf.getInt(4);
+        int lastReason = buf.getInt(8);
+        byte[] lastInstanceHandle = new byte[16];
+        for (int i = 0; i < 16; i++) {
+            lastInstanceHandle[i] = buf.get(12 + i);
+        }
+        return new SampleRejectedStatus(totalCount, totalCountChange, lastReason, lastInstanceHandle);
     }
 
     /**

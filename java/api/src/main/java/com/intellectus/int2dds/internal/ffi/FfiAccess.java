@@ -382,6 +382,33 @@ public final class FfiAccess {
         return Ffi.int2dds_datawriter_get_publication_matched_status(writer, statusOutAddr);
     }
 
+    /**
+     * Reads the writer's LIVELINESS_LOST status into the 8-byte native
+     * struct at {@code statusOutAddr}. Thin passthrough -- the caller owns
+     * the buffer and decodes it.
+     */
+    public static int datawriterGetLivelinessLostStatus(long writer, long statusOutAddr) {
+        return Ffi.int2dds_datawriter_get_liveliness_lost_status(writer, statusOutAddr);
+    }
+
+    /**
+     * Reads the writer's OFFERED_DEADLINE_MISSED status into the 24-byte
+     * native struct at {@code statusOutAddr}. Thin passthrough -- the caller
+     * owns the buffer and decodes it.
+     */
+    public static int datawriterGetOfferedDeadlineMissedStatus(long writer, long statusOutAddr) {
+        return Ffi.int2dds_datawriter_get_offered_deadline_missed_status(writer, statusOutAddr);
+    }
+
+    /**
+     * Reads the writer's OFFERED_INCOMPATIBLE_QOS status into the 16-byte
+     * native struct at {@code statusOutAddr}. Thin passthrough -- the caller
+     * owns the buffer and decodes it.
+     */
+    public static int datawriterGetOfferedIncompatibleQosStatus(long writer, long statusOutAddr) {
+        return Ffi.int2dds_datawriter_get_offered_incompatible_qos_status(writer, statusOutAddr);
+    }
+
     // --- DataWriter listeners (hand-written trampoline layer) ---
 
     /**
@@ -487,6 +514,51 @@ public final class FfiAccess {
      */
     public static int datareaderGetSubscriptionMatchedStatus(long reader, long statusOutAddr) {
         return Ffi.int2dds_datareader_get_subscription_matched_status(reader, statusOutAddr);
+    }
+
+    /**
+     * Reads the reader's LIVELINESS_CHANGED status into the 32-byte native
+     * struct at {@code statusOutAddr}. Thin passthrough -- the caller owns
+     * the buffer and decodes it.
+     */
+    public static int datareaderGetLivelinessChangedStatus(long reader, long statusOutAddr) {
+        return Ffi.int2dds_datareader_get_liveliness_changed_status(reader, statusOutAddr);
+    }
+
+    /**
+     * Reads the reader's REQUESTED_DEADLINE_MISSED status into the 24-byte
+     * native struct at {@code statusOutAddr}. Thin passthrough -- the caller
+     * owns the buffer and decodes it.
+     */
+    public static int datareaderGetRequestedDeadlineMissedStatus(long reader, long statusOutAddr) {
+        return Ffi.int2dds_datareader_get_requested_deadline_missed_status(reader, statusOutAddr);
+    }
+
+    /**
+     * Reads the reader's REQUESTED_INCOMPATIBLE_QOS status into the 16-byte
+     * native struct at {@code statusOutAddr}. Thin passthrough -- the caller
+     * owns the buffer and decodes it.
+     */
+    public static int datareaderGetRequestedIncompatibleQosStatus(long reader, long statusOutAddr) {
+        return Ffi.int2dds_datareader_get_requested_incompatible_qos_status(reader, statusOutAddr);
+    }
+
+    /**
+     * Reads the reader's SAMPLE_LOST status into the 8-byte native struct at
+     * {@code statusOutAddr}. Thin passthrough -- the caller owns the buffer
+     * and decodes it.
+     */
+    public static int datareaderGetSampleLostStatus(long reader, long statusOutAddr) {
+        return Ffi.int2dds_datareader_get_sample_lost_status(reader, statusOutAddr);
+    }
+
+    /**
+     * Reads the reader's SAMPLE_REJECTED status into the 28-byte native
+     * struct at {@code statusOutAddr}. Thin passthrough -- the caller owns
+     * the buffer and decodes it.
+     */
+    public static int datareaderGetSampleRejectedStatus(long reader, long statusOutAddr) {
+        return Ffi.int2dds_datareader_get_sample_rejected_status(reader, statusOutAddr);
     }
 
     /** Whether the reader has any samples available to take/read. Writes it to {@code out[0]} on success. */

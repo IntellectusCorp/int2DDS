@@ -13,6 +13,9 @@ import com.intellectus.int2dds.internal.ffi.FfiAccess;
 import com.intellectus.int2dds.listeners.DataWriterListener;
 import com.intellectus.int2dds.qos.DataRepresentationKind;
 import com.intellectus.int2dds.qos.DataWriterQos;
+import com.intellectus.int2dds.status.LivelinessLostStatus;
+import com.intellectus.int2dds.status.OfferedDeadlineMissedStatus;
+import com.intellectus.int2dds.status.OfferedIncompatibleQosStatus;
 import com.intellectus.int2dds.status.PublicationMatchedStatus;
 import com.intellectus.int2dds.status.StatusMask;
 import com.intellectus.int2dds.types.IDdsType;
@@ -205,6 +208,67 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
         return new PublicationMatchedStatus(
                 totalCount, totalCountChange, currentCount, currentCountChange,
                 lastSubscriptionHandle);
+    }
+
+    /**
+     * This writer's LIVELINESS_LOST status: how many times this writer
+     * failed to assert its liveliness within its offered liveliness period,
+     * and the change since last read. Per DDS, reading this status clears
+     * its {@code *Change} field.
+     */
+    public LivelinessLostStatus getLivelinessLostStatus() {
+        ByteBuffer buf = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = FfiAccess.datawriterGetLivelinessLostStatus(
+                handle(), FfiAccess.directBufferAddress(buf));
+        NativeKeepAlive.keepAlive(this);
+        NativeKeepAlive.keepAlive(buf);
+        ReturnCodes.check(rc);
+        int totalCount = buf.getInt(0);
+        int totalCountChange = buf.getInt(4);
+        return new LivelinessLostStatus(totalCount, totalCountChange);
+    }
+
+    /**
+     * This writer's OFFERED_DEADLINE_MISSED status: how many times this
+     * writer missed the deadline it offered for an instance, and the change
+     * since last read. Per DDS, reading this status clears its {@code
+     * *Change} field.
+     */
+    public OfferedDeadlineMissedStatus getOfferedDeadlineMissedStatus() {
+        ByteBuffer buf = ByteBuffer.allocateDirect(24).order(ByteOrder.nativeOrder());
+        int rc = FfiAccess.datawriterGetOfferedDeadlineMissedStatus(
+                handle(), FfiAccess.directBufferAddress(buf));
+        NativeKeepAlive.keepAlive(this);
+        NativeKeepAlive.keepAlive(buf);
+        ReturnCodes.check(rc);
+        int totalCount = buf.getInt(0);
+        int totalCountChange = buf.getInt(4);
+        byte[] lastInstanceHandle = new byte[16];
+        for (int i = 0; i < 16; i++) {
+            lastInstanceHandle[i] = buf.get(8 + i);
+        }
+        return new OfferedDeadlineMissedStatus(totalCount, totalCountChange, lastInstanceHandle);
+    }
+
+    /**
+     * This writer's OFFERED_INCOMPATIBLE_QOS status: how many times this
+     * writer discovered an offered QoS incompatible with a requesting
+     * reader's QoS, and the change since last read. Per DDS, reading this
+     * status clears its {@code *Change} field.
+     */
+    public OfferedIncompatibleQosStatus getOfferedIncompatibleQosStatus() {
+        ByteBuffer buf = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder());
+        int rc = FfiAccess.datawriterGetOfferedIncompatibleQosStatus(
+                handle(), FfiAccess.directBufferAddress(buf));
+        NativeKeepAlive.keepAlive(this);
+        NativeKeepAlive.keepAlive(buf);
+        ReturnCodes.check(rc);
+        int totalCount = buf.getInt(0);
+        int totalCountChange = buf.getInt(4);
+        int lastPolicyId = buf.getInt(8);
+        int policiesCount = buf.getInt(12);
+        return new OfferedIncompatibleQosStatus(
+                totalCount, totalCountChange, lastPolicyId, policiesCount);
     }
 
     /**
