@@ -31,7 +31,14 @@ public final class DynamicValue implements AutoCloseable {
     private final AtomicBoolean consumed = new AtomicBoolean(false);
     private final NativeHandle handle;
 
-    private DynamicValue(long rawHandle) {
+    /**
+     * Package-visible so {@link DynamicData#getValue} can wrap a handle
+     * produced by {@code int2dds_dynamic_data_get_value} -- that call clones
+     * a new, independently-owned value rather than transferring ownership of
+     * an existing one, so the result is a fresh {@code DynamicValue} exactly
+     * like one of the static factories below returns.
+     */
+    DynamicValue(long rawHandle) {
         this.handle = NativeCleaner.register(this, rawHandle, this::deleteUnlessConsumed);
     }
 
@@ -190,6 +197,178 @@ public final class DynamicValue implements AutoCloseable {
         NativeKeepAlive.keepAlive(data);
         ReturnCodes.check(rc);
         return new DynamicValue(out[0]);
+    }
+
+    /** The kind of this value, one of the {@link DynamicValueKind} constants. */
+    public int kind() {
+        long v = handle();
+        int[] out = new int[1];
+        int rc = FfiAccess.dynamicValueKind(v, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return out[0];
+    }
+
+    /** The element count of this sequence/array/map value. */
+    public int length() {
+        long v = handle();
+        int[] out = new int[1];
+        int rc = FfiAccess.dynamicValueLen(v, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return out[0];
+    }
+
+    /**
+     * Clones the element at {@code index} of this sequence/array value into a
+     * new, independently-owned {@link DynamicValue}. The caller owns the
+     * returned value and must {@link #close} it -- this value is untouched
+     * and remains usable afterward.
+     */
+    public DynamicValue element(int index) {
+        long v = handle();
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicValueElement(v, index, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return new DynamicValue(out[0]);
+    }
+
+    /** Reads this value as a {@code bool}. Throws if it is not a bool. */
+    public boolean asBool() {
+        long v = handle();
+        boolean[] out = new boolean[1];
+        int rc = FfiAccess.dynamicValueAsBool(v, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return out[0];
+    }
+
+    /** Reads this value as an {@code int8}. Throws if it is not an int8. */
+    public byte asI8() {
+        long v = handle();
+        int[] out = new int[1];
+        int rc = FfiAccess.dynamicValueAsI8(v, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return (byte) out[0];
+    }
+
+    /** Reads this value as a {@code uint8}, its unsigned 0-255 value. Throws if it is not a uint8. */
+    public int asU8() {
+        long v = handle();
+        int[] out = new int[1];
+        int rc = FfiAccess.dynamicValueAsU8(v, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return out[0];
+    }
+
+    /** Reads this value as an {@code int16}. Throws if it is not an int16. */
+    public short asI16() {
+        long v = handle();
+        int[] out = new int[1];
+        int rc = FfiAccess.dynamicValueAsI16(v, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return (short) out[0];
+    }
+
+    /** Reads this value as a {@code uint16}, its unsigned 0-65535 value. Throws if it is not a uint16. */
+    public int asU16() {
+        long v = handle();
+        int[] out = new int[1];
+        int rc = FfiAccess.dynamicValueAsU16(v, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return out[0];
+    }
+
+    /** Reads this value as an {@code int32}. Throws if it is not an int32. */
+    public int asI32() {
+        long v = handle();
+        int[] out = new int[1];
+        int rc = FfiAccess.dynamicValueAsI32(v, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return out[0];
+    }
+
+    /**
+     * Reads this value as a {@code uint32}, its raw 32 bits. A value at or
+     * above 2^31 reads back negative; widen with {@code & 0xFFFFFFFFL} for
+     * the unsigned magnitude. Throws if it is not a uint32.
+     */
+    public int asU32() {
+        long v = handle();
+        int[] out = new int[1];
+        int rc = FfiAccess.dynamicValueAsU32(v, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return out[0];
+    }
+
+    /** Reads this value as an {@code int64}. Throws if it is not an int64. */
+    public long asI64() {
+        long v = handle();
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicValueAsI64(v, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return out[0];
+    }
+
+    /**
+     * Reads this value as a {@code uint64}, its raw 64 bits. A value at or
+     * above 2^63 reads back negative. Throws if it is not a uint64.
+     */
+    public long asU64() {
+        long v = handle();
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicValueAsU64(v, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return out[0];
+    }
+
+    /** Reads this value as a {@code float32}. Throws if it is not a float32. */
+    public float asF32() {
+        long v = handle();
+        float[] out = new float[1];
+        int rc = FfiAccess.dynamicValueAsF32(v, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return out[0];
+    }
+
+    /** Reads this value as a {@code float64}. Throws if it is not a float64. */
+    public double asF64() {
+        long v = handle();
+        double[] out = new double[1];
+        int rc = FfiAccess.dynamicValueAsF64(v, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return out[0];
+    }
+
+    /** Reads this value as a {@code char8}, its unsigned 0-255 byte value. Throws if it is not a char8. */
+    public int asChar8() {
+        long v = handle();
+        int[] out = new int[1];
+        int rc = FfiAccess.dynamicValueAsChar8(v, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return out[0];
+    }
+
+    /** Reads this value as a {@code string}/{@code wstring}. Throws if it is not one. */
+    public String asString() {
+        long v = handle();
+        byte[][] out = new byte[1][];
+        int rc = FfiAccess.dynamicValueAsString(v, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return new String(out[0], UTF8);
     }
 
     /**

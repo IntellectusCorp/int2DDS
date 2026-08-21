@@ -1630,6 +1630,244 @@ public final class FfiAccess {
         return rc;
     }
 
+    // --- DynamicValue (xtypes read/introspection path) ---
+
+    /**
+     * Clones the value at {@code path} into a new, independently-owned
+     * DynamicValue handle, writing it to {@code out[0]} on success. The
+     * caller owns the returned handle and must destroy it (via {@link
+     * #dynamicValueDestroy}) -- {@code d} itself is untouched.
+     */
+    public static int dynamicDataGetValue(long d, byte[] path, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_data_get_value(d, path, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Reads a dynamic value as {@code bool}, writing it to {@code out[0]} on success. */
+    public static int dynamicValueAsBool(long value, boolean[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_as_bool(value, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.get(0) != 0; // bool out is 1 byte, not 4
+        }
+        return rc;
+    }
+
+    /** Reads a dynamic value as {@code int8}, writing it to {@code out[0]} on success. */
+    public static int dynamicValueAsI8(long value, int[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_as_i8(value, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.get(0); // native writes an i8 (1 byte)
+        }
+        return rc;
+    }
+
+    /** Reads a dynamic value as {@code uint8}, writing its unsigned 0-255 value to {@code out[0]} on success. */
+    public static int dynamicValueAsU8(long value, int[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_as_u8(value, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.get(0) & 0xFF; // native writes a u8 (1 byte); widen unsigned
+        }
+        return rc;
+    }
+
+    /** Reads a dynamic value as {@code int16}, writing it to {@code out[0]} on success. */
+    public static int dynamicValueAsI16(long value, int[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_as_i16(value, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getShort(0); // native writes an i16 (2 bytes)
+        }
+        return rc;
+    }
+
+    /** Reads a dynamic value as {@code uint16}, writing its unsigned 0-65535 value to {@code out[0]} on success. */
+    public static int dynamicValueAsU16(long value, int[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_as_u16(value, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getShort(0) & 0xFFFF; // native writes a u16 (2 bytes); widen unsigned
+        }
+        return rc;
+    }
+
+    /** Reads a dynamic value as {@code int32}, writing it to {@code out[0]} on success. */
+    public static int dynamicValueAsI32(long value, int[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_as_i32(value, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getInt(0); // native writes an i32 (4 bytes)
+        }
+        return rc;
+    }
+
+    /**
+     * Reads a dynamic value as {@code uint32}, writing its raw 32 bits to
+     * {@code out[0]} on success -- callers wanting the unsigned magnitude
+     * widen with {@code & 0xFFFFFFFFL} themselves, mirroring {@link
+     * #dynamicDataGetU32}.
+     */
+    public static int dynamicValueAsU32(long value, int[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_as_u32(value, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getInt(0); // native writes a u32 (4 bytes); raw bits, not widened
+        }
+        return rc;
+    }
+
+    /** Reads a dynamic value as {@code int64}, writing it to {@code out[0]} on success. */
+    public static int dynamicValueAsI64(long value, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_as_i64(value, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0); // native writes a full 8-byte i64
+        }
+        return rc;
+    }
+
+    /**
+     * Reads a dynamic value as {@code uint64}, writing its raw 64 bits to
+     * {@code out[0]} on success -- same "raw bits, caller widens" contract as
+     * {@link #dynamicValueAsU32}.
+     */
+    public static int dynamicValueAsU64(long value, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_as_u64(value, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0); // native writes a u64 (8 bytes); raw bits, not widened
+        }
+        return rc;
+    }
+
+    /** Reads a dynamic value as {@code float32}, writing it to {@code out[0]} on success. */
+    public static int dynamicValueAsF32(long value, float[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_as_f32(value, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getFloat(0); // native writes a full 4-byte f32
+        }
+        return rc;
+    }
+
+    /** Reads a dynamic value as {@code float64}, writing it to {@code out[0]} on success. */
+    public static int dynamicValueAsF64(long value, double[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_as_f64(value, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getDouble(0); // native writes a full 8-byte f64
+        }
+        return rc;
+    }
+
+    /**
+     * Reads a dynamic value as {@code char8}, writing its unsigned 0-255 byte
+     * value to {@code out[0]} on success. Native out is {@code *mut u8}, one
+     * byte, the same as {@link #dynamicDataGetChar8} but widened here instead
+     * of left raw, to match this file's {@code i8/u8/i16/u16/i32/u32/char8 ->
+     * int} carrier convention for {@code DynamicValue} scalar extractors.
+     */
+    public static int dynamicValueAsChar8(long value, int[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_as_char8(value, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.get(0) & 0xFF;
+        }
+        return rc;
+    }
+
+    /**
+     * Grow-and-retry driver for a dynamic value's {@code string}/{@code
+     * wstring} contents, mirroring {@link #dynamicDataGetString} exactly:
+     * {@code int2dds_dynamic_value_as_string} (ffi/src/dynamic_value.rs)
+     * shares {@code copy_str_to_c} with {@code int2dds_dynamic_data_get_string},
+     * so the required size excludes the trailing NUL both on {@code
+     * RET_BUFFER_TOO_SMALL} and on success, and this regrows to {@code
+     * outLen + 1} accordingly. Never throws -- policy-free like every other
+     * bridge here.
+     */
+    public static int dynamicValueAsString(long value, byte[][] bytesOut) {
+        int cap = 64;
+        while (true) {
+            byte[] buf = new byte[cap];
+            ByteBuffer sizeSlot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+            int rc = Ffi.int2dds_dynamic_value_as_string(value, buf, cap, directBufferAddress(sizeSlot));
+            NativeKeepAlive.keepAlive(sizeSlot);
+            if (rc == DdsException.RET_BUFFER_TOO_SMALL) {
+                cap = (int) sizeSlot.getLong(0) + 1; // out_len excludes the NUL here
+                continue;
+            }
+            if (rc == 0) {
+                int n = (int) sizeSlot.getLong(0); // excludes the NUL -- no -1 needed
+                byte[] out = new byte[n];
+                System.arraycopy(buf, 0, out, 0, n);
+                bytesOut[0] = out;
+            }
+            return rc;
+        }
+    }
+
+    /** Reads a dynamic value's kind (one of {@code DynamicValueKind}'s constants) into {@code out[0]}. */
+    public static int dynamicValueKind(long value, int[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_kind(value, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getInt(0); // native writes an i32 (4 bytes)
+        }
+        return rc;
+    }
+
+    /**
+     * Reads the element count of a sequence/array/map dynamic value into
+     * {@code out[0]}.
+     */
+    public static int dynamicValueLen(long value, int[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_len(value, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = (int) slot.getLong(0); // native writes a usize (8 bytes on this platform)
+        }
+        return rc;
+    }
+
+    /**
+     * Clones the element at {@code index} of a sequence/array dynamic value
+     * into a new, independently-owned DynamicValue handle, writing it to
+     * {@code out[0]} on success. The caller owns the returned handle and must
+     * destroy it (via {@link #dynamicValueDestroy}) -- the source value is
+     * untouched.
+     */
+    public static int dynamicValueElement(long value, long index, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_element(value, index, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
     // --- XmlTypeRegistry / DynamicTypeSupport / DynamicData (xtypes write path) ---
 
     /** Creates an XML type registry, writing its handle to {@code out[0]} on success. */

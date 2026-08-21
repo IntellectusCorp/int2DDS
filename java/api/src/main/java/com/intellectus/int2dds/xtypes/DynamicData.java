@@ -223,6 +223,20 @@ public final class DynamicData implements AutoCloseable {
         return DynamicData.fromHandle(out[0]);
     }
 
+    /**
+     * Clones the field at {@code path} (dotted/indexed) into a new, owned
+     * {@link DynamicValue} snapshot -- independent of this DynamicData, which
+     * is untouched by the call. Close the returned value when done with it.
+     */
+    public DynamicValue getValue(String path) {
+        long h = handle();
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicDataGetValue(h, path.getBytes(UTF8), out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return new DynamicValue(out[0]);
+    }
+
     /** Sets a {@code bool} field at {@code field}. */
     public void setBool(String field, boolean value) {
         long h = handle();
