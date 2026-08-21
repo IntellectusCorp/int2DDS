@@ -532,13 +532,25 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
     /**
      * Looks up the instance handle for {@code sample}'s key, without taking
      * or reading it. Serializes {@code sample} the same way {@link
-     * DataWriter#write} does and hands the buffer to the core as the key it
-     * resolves against this reader's known instances. Returns an {@link
-     * InstanceHandle} wrapping 16 zero bytes when the instance is unknown to
-     * this reader (e.g. no sample of that instance has been received yet) —
-     * callers that need to distinguish "unknown" from a real handle should
-     * compare against {@code new InstanceHandle(new byte[16])}. Requires a
-     * keyed topic.
+     * DataWriter#write} does and hands the buffer to the core as the lookup
+     * key. Requires a keyed topic.
+     *
+     * <p><b>Currently always returns the NIL handle in practice.</b> Unlike
+     * the writer-side lookup ({@link DataWriter#lookupInstance}), which
+     * projects the key fields out of the full sample before comparing, the
+     * native reader-side lookup ({@code int2dds_datareader_lookup_instance})
+     * does a raw byte-compare of the full serialized sample this method
+     * passes against each instance's stored key, which the core keeps as the
+     * canonical key-only CDR (not the full sample) — see
+     * {@code dds/src/dcps/subscription/data_reader.rs}'s
+     * {@code cache_change_received}. For any type with fields beyond the key
+     * (including every generated type in this codebase) those two byte
+     * strings never match, so this returns {@code new InstanceHandle(new
+     * byte[16])} (NIL) every time, even for an instance the reader has
+     * actually seen. Use {@link DataWriter#lookupInstance} when a real
+     * handle is needed; this method is kept for API symmetry with the writer
+     * side and in case the core's reader-side lookup is later made to
+     * project the key the same way.
      *
      * @throws NullPointerException if {@code sample} is null
      */

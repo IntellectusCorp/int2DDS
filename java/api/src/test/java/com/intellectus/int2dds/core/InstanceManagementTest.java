@@ -109,12 +109,23 @@ class InstanceManagementTest {
             // that per-instance key (dds/src/dcps/subscription/data_reader.rs,
             // cache_change_received's ALIVE branch), not the full sample --
             // so this deterministically returns NIL here, not from a race.
-            // Asserted as "does not throw and returns a well-formed handle"
-            // rather than "matches registered", since the two are genuinely
-            // different byte strings by core design, not a timing issue.
+            // See DataReader#lookupInstance's own doc for the full argument;
+            // this asserts NIL is exactly what comes back, a real (currently
+            // passing but falsifiable) check on that documented behavior.
             InstanceHandle readerLookup = reader.lookupInstance(one);
-            assertNotNull(readerLookup);
-            assertEquals(16, readerLookup.bytes().length);
+            assertEquals(new InstanceHandle(NIL_HANDLE), readerLookup,
+                    "reader.lookupInstance should return NIL for this core/topic combination"
+                            + " -- see DataReader#lookupInstance's own doc");
+
+            // unregisterInstance: exercised on a second, separate instance
+            // (id=2) so it cannot interfere with id=1's dispose flow below.
+            // A broken marshaling (wrong key/handle shape) would throw via
+            // ReturnCodes.check, so a clean return is itself the assertion.
+            ConformanceRecord two = new ConformanceRecord();
+            two.id = 2;
+            two.label = "two";
+            writer.registerInstance(two);
+            writer.unregisterInstance(two);
 
             // dispose_instance: the reader should eventually observe
             // NOT_ALIVE_DISPOSED. This is the can-fail assertion -- report
