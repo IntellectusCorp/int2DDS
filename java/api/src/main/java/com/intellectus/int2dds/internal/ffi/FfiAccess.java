@@ -998,9 +998,29 @@ public final class FfiAccess {
         return rc;
     }
 
+    /**
+     * Creates a new registry and loads {@code path} into it in one step,
+     * writing the new handle to {@code out[0]} on success -- the same
+     * {@code (rc, long[] out)} shape as {@link #xmlTypeRegistryCreate}.
+     */
+    public static int xmlTypeRegistryFromFile(byte[] path, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_xml_type_registry_from_file(path, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
     /** Loads XML type descriptions (as UTF-8 bytes) into a registry. */
     public static int xmlTypeRegistryLoadStr(long registry, byte[] xml) {
         return Ffi.int2dds_xml_type_registry_load_str(registry, xml);
+    }
+
+    /** Loads additional types from {@code path} into an existing registry. */
+    public static int xmlTypeRegistryLoadFile(long registry, byte[] path) {
+        return Ffi.int2dds_xml_type_registry_load_file(registry, path);
     }
 
     /** Reads the number of types loaded into a registry, writing it to {@code out[0]} on success. */
@@ -1026,6 +1046,56 @@ public final class FfiAccess {
             out[0] = slot.getLong(0);
         }
         return rc;
+    }
+
+    /**
+     * Looks up a loaded type by name, writing a TypeObject handle to {@code
+     * out[0]} on success. Returns {@code RET_DYNAMIC_FIELD_NOT_FOUND} (200) if
+     * no type by that name is loaded -- the same handle type {@link
+     * #typeInfoToTypeObject} produces, released the same way.
+     */
+    public static int xmlTypeRegistryGetTypeObject(long registry, byte[] name, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_xml_type_registry_get_type_object(registry, name, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Grow-and-retry driver for the fully-qualified name of the type at
+     * {@code index}, mirroring {@link #dynamicDataGetString} exactly: {@code
+     * int2dds_xml_type_registry_type_name} shares {@code copy_str_to_c}'s
+     * contract with {@code int2dds_dynamic_data_get_string} (size reported
+     * WITHOUT the trailing NUL, both on {@code RET_BUFFER_TOO_SMALL} and on
+     * success), so the same regrow-to-{@code outLen + 1} logic applies. An
+     * out-of-range {@code index} returns {@code RET_INVALID_ARGUMENT} on the
+     * first call, never {@code RET_BUFFER_TOO_SMALL}, so the loop exits
+     * immediately in that case. Never throws -- policy-free like every other
+     * bridge here.
+     */
+    public static int xmlTypeRegistryTypeName(long registry, long index, byte[][] bytesOut) {
+        int cap = 64;
+        while (true) {
+            byte[] buf = new byte[cap];
+            ByteBuffer sizeSlot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+            int rc = Ffi.int2dds_xml_type_registry_type_name(
+                    registry, index, buf, cap, directBufferAddress(sizeSlot));
+            NativeKeepAlive.keepAlive(sizeSlot);
+            if (rc == DdsException.RET_BUFFER_TOO_SMALL) {
+                cap = (int) sizeSlot.getLong(0) + 1; // out_len excludes the NUL here
+                continue;
+            }
+            if (rc == 0) {
+                int n = (int) sizeSlot.getLong(0); // excludes the NUL -- no -1 needed
+                byte[] out = new byte[n];
+                System.arraycopy(buf, 0, out, 0, n);
+                bytesOut[0] = out;
+            }
+            return rc;
+        }
     }
 
     /** Releases an XML type registry. */
