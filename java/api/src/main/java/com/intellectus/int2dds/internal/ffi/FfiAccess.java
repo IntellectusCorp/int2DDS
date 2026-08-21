@@ -985,6 +985,138 @@ public final class FfiAccess {
         return rc;
     }
 
+    // --- XmlTypeRegistry / DynamicTypeSupport / DynamicData (xtypes write path) ---
+
+    /** Creates an XML type registry, writing its handle to {@code out[0]} on success. */
+    public static int xmlTypeRegistryCreate(long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_xml_type_registry_create(directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Loads XML type descriptions (as UTF-8 bytes) into a registry. */
+    public static int xmlTypeRegistryLoadStr(long registry, byte[] xml) {
+        return Ffi.int2dds_xml_type_registry_load_str(registry, xml);
+    }
+
+    /** Reads the number of types loaded into a registry, writing it to {@code out[0]} on success. */
+    public static int xmlTypeRegistryTypeCount(long registry, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_xml_type_registry_type_count(registry, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0); // native writes a usize (8 bytes on this platform)
+        }
+        return rc;
+    }
+
+    /**
+     * Looks up a loaded type by name, writing a DynamicTypeSupport handle to
+     * {@code out[0]} on success.
+     */
+    public static int xmlTypeRegistryGetTypeSupport(long registry, byte[] name, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_xml_type_registry_get_type_support(registry, name, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Releases an XML type registry. */
+    public static void xmlTypeRegistryDestroy(long registry) {
+        Ffi.int2dds_xml_type_registry_destroy(registry);
+    }
+
+    /** Releases a DynamicTypeSupport handle. */
+    public static void dynamicTypeSupportDestroy(long support) {
+        Ffi.int2dds_dynamic_type_support_destroy(support);
+    }
+
+    /**
+     * Creates a writable DynamicData instance from a DynamicTypeSupport,
+     * writing its handle to {@code out[0]} on success.
+     */
+    public static int dynamicDataCreate(long support, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_data_create(support, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Sets a bool field at {@code field}. Returns the C ABI status code. */
+    public static int dynamicDataSetBool(long data, byte[] field, boolean value) {
+        return Ffi.int2dds_dynamic_data_set_bool(data, field, value);
+    }
+
+    /** Sets an i8 field at {@code field} (passed widened as an int). Returns the C ABI status code. */
+    public static int dynamicDataSetI8(long data, byte[] field, int value) {
+        return Ffi.int2dds_dynamic_data_set_i8(data, field, value);
+    }
+
+    /** Sets a u8 field at {@code field} (passed widened as an int). Returns the C ABI status code. */
+    public static int dynamicDataSetU8(long data, byte[] field, int value) {
+        return Ffi.int2dds_dynamic_data_set_u8(data, field, value);
+    }
+
+    /** Sets an i16 field at {@code field} (passed widened as an int). Returns the C ABI status code. */
+    public static int dynamicDataSetI16(long data, byte[] field, int value) {
+        return Ffi.int2dds_dynamic_data_set_i16(data, field, value);
+    }
+
+    /** Sets a u16 field at {@code field} (passed widened as an int). Returns the C ABI status code. */
+    public static int dynamicDataSetU16(long data, byte[] field, int value) {
+        return Ffi.int2dds_dynamic_data_set_u16(data, field, value);
+    }
+
+    /** Sets an i32 field at {@code field}. Returns the C ABI status code. */
+    public static int dynamicDataSetI32(long data, byte[] field, int value) {
+        return Ffi.int2dds_dynamic_data_set_i32(data, field, value);
+    }
+
+    /** Sets a u32 field at {@code field} (raw bits). Returns the C ABI status code. */
+    public static int dynamicDataSetU32(long data, byte[] field, int value) {
+        return Ffi.int2dds_dynamic_data_set_u32(data, field, value);
+    }
+
+    /** Sets an i64 field at {@code field}. Returns the C ABI status code. */
+    public static int dynamicDataSetI64(long data, byte[] field, long value) {
+        return Ffi.int2dds_dynamic_data_set_i64(data, field, value);
+    }
+
+    /** Sets a u64 field at {@code field} (raw bits). Returns the C ABI status code. */
+    public static int dynamicDataSetU64(long data, byte[] field, long value) {
+        return Ffi.int2dds_dynamic_data_set_u64(data, field, value);
+    }
+
+    /** Sets an f32 field at {@code field}. Returns the C ABI status code. */
+    public static int dynamicDataSetF32(long data, byte[] field, float value) {
+        return Ffi.int2dds_dynamic_data_set_f32(data, field, value);
+    }
+
+    /** Sets an f64 field at {@code field}. Returns the C ABI status code. */
+    public static int dynamicDataSetF64(long data, byte[] field, double value) {
+        return Ffi.int2dds_dynamic_data_set_f64(data, field, value);
+    }
+
+    /** Sets a char8 field at {@code field} (passed widened as an int). Returns the C ABI status code. */
+    public static int dynamicDataSetChar8(long data, byte[] field, int value) {
+        return Ffi.int2dds_dynamic_data_set_char8(data, field, value);
+    }
+
+    /** Sets a string field at {@code field} to {@code value} (UTF-8 bytes). Returns the C ABI status code. */
+    public static int dynamicDataSetString(long data, byte[] field, byte[] value) {
+        return Ffi.int2dds_dynamic_data_set_string(data, field, value);
+    }
+
     // --- Subscriber / DataReader (raw receive side, for WritePathEndToEndTest only) ---
     //
     // No Subscriber or DataReader Java entity exists yet -- the read branch

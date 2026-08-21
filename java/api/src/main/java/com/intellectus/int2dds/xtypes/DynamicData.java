@@ -34,6 +34,20 @@ public final class DynamicData implements AutoCloseable {
         return new DynamicData(rawHandle);
     }
 
+    /**
+     * Creates a new, writable DynamicData instance from {@code support}.
+     * Consumes {@code support}'s handle for the call, not ownership -- the
+     * caller still owns and must close {@code support} independently.
+     */
+    public static DynamicData create(DynamicTypeSupport support) {
+        long s = support.handle();
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicDataCreate(s, out);
+        NativeKeepAlive.keepAlive(support);
+        ReturnCodes.check(rc);
+        return new DynamicData(out[0]);
+    }
+
     private static int deleteVoid(long h) {
         FfiAccess.dynamicDataDestroy(h);
         return 0;
@@ -207,6 +221,110 @@ public final class DynamicData implements AutoCloseable {
         NativeKeepAlive.keepAlive(this);
         ReturnCodes.check(rc);
         return DynamicData.fromHandle(out[0]);
+    }
+
+    /** Sets a {@code bool} field at {@code field}. */
+    public void setBool(String field, boolean value) {
+        long h = handle();
+        int rc = FfiAccess.dynamicDataSetBool(h, field.getBytes(UTF8), value);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
+    /** Sets an {@code int8} field at {@code field}. */
+    public void setI8(String field, int value) {
+        long h = handle();
+        int rc = FfiAccess.dynamicDataSetI8(h, field.getBytes(UTF8), value);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
+    /** Sets a {@code uint8} field at {@code field}. */
+    public void setU8(String field, int value) {
+        long h = handle();
+        int rc = FfiAccess.dynamicDataSetU8(h, field.getBytes(UTF8), value);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
+    /** Sets an {@code int16} field at {@code field}. */
+    public void setI16(String field, int value) {
+        long h = handle();
+        int rc = FfiAccess.dynamicDataSetI16(h, field.getBytes(UTF8), value);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
+    /** Sets a {@code uint16} field at {@code field}. */
+    public void setU16(String field, int value) {
+        long h = handle();
+        int rc = FfiAccess.dynamicDataSetU16(h, field.getBytes(UTF8), value);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
+    /** Sets an {@code int32} field at {@code field}. */
+    public void setI32(String field, int value) {
+        long h = handle();
+        int rc = FfiAccess.dynamicDataSetI32(h, field.getBytes(UTF8), value);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
+    /** Sets a {@code uint32} field at {@code field}. */
+    public void setU32(String field, int value) {
+        long h = handle();
+        int rc = FfiAccess.dynamicDataSetU32(h, field.getBytes(UTF8), value);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
+    /** Sets an {@code int64} field at {@code field}. */
+    public void setI64(String field, long value) {
+        long h = handle();
+        int rc = FfiAccess.dynamicDataSetI64(h, field.getBytes(UTF8), value);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
+    /** Sets a {@code uint64} field at {@code field}. */
+    public void setU64(String field, long value) {
+        long h = handle();
+        int rc = FfiAccess.dynamicDataSetU64(h, field.getBytes(UTF8), value);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
+    /** Sets a {@code float32} field at {@code field}. */
+    public void setF32(String field, float value) {
+        long h = handle();
+        int rc = FfiAccess.dynamicDataSetF32(h, field.getBytes(UTF8), value);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
+    /** Sets a {@code float64} field at {@code field}. */
+    public void setF64(String field, double value) {
+        long h = handle();
+        int rc = FfiAccess.dynamicDataSetF64(h, field.getBytes(UTF8), value);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
+    /** Sets a {@code char8} field at {@code field}. */
+    public void setChar8(String field, int value) {
+        long h = handle();
+        int rc = FfiAccess.dynamicDataSetChar8(h, field.getBytes(UTF8), value);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
+    /** Sets a {@code string} field at {@code field}. */
+    public void setString(String field, String value) {
+        long h = handle();
+        int rc = FfiAccess.dynamicDataSetString(h, field.getBytes(UTF8), value.getBytes(UTF8));
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
     }
 
     @Override
