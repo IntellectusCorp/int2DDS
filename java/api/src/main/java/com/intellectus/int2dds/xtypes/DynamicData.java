@@ -327,6 +327,25 @@ public final class DynamicData implements AutoCloseable {
         ReturnCodes.check(rc);
     }
 
+    /**
+     * Sets field {@code field} to a built {@link DynamicValue} -- the path for
+     * a value a scalar setter cannot reach, e.g. a sequence built with {@link
+     * DynamicValue#sequence()} and {@link DynamicValue#push}.
+     *
+     * <p>Consumes {@code value}: its handle is moved into this DynamicData, so
+     * afterward {@code value} must not be used or closed -- this method marks
+     * it consumed itself, making its {@link DynamicValue#close()} a no-op.
+     */
+    public void setValue(String field, DynamicValue value) {
+        long h = handle();
+        long v = value.handle();
+        int rc = FfiAccess.dynamicDataSetValue(h, field.getBytes(UTF8), v);
+        NativeKeepAlive.keepAlive(this);
+        NativeKeepAlive.keepAlive(value);
+        value.markConsumed();
+        ReturnCodes.check(rc);
+    }
+
     @Override
     public void close() {
         ReturnCodes.check(handle.close());

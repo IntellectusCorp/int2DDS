@@ -67,6 +67,62 @@ public final class FfiAccess {
         Ffi.int2dds_dynamic_value_destroy(value);
     }
 
+    /**
+     * Creates a dynamic value holding {@code value}, writing the handle to
+     * {@code out[0]} on success. Sibling of {@link #dynamicValueI32(int, long)}
+     * that follows this file's usual {@code long[] out} idiom instead of a raw
+     * native address, for callers building a value with {@link
+     * com.intellectus.int2dds.xtypes.DynamicValue}.
+     */
+    public static int dynamicValueI32(int value, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_i32(value, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Creates a dynamic value holding a UTF-8 string, writing the handle to
+     * {@code out[0]} on success.
+     */
+    public static int dynamicValueString(byte[] value, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_string(value, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Creates an empty sequence dynamic value, writing the handle to {@code
+     * out[0]} on success. Append elements with {@link #dynamicValuePush}.
+     */
+    public static int dynamicValueSequence(long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_sequence(directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Appends {@code element} to the sequence/array value {@code collection}.
+     * On {@code RET_OK} this consumes {@code element}'s handle -- it is moved
+     * into {@code collection} and the caller must not use or destroy it again.
+     * On any other code (e.g. {@code collection} is not a sequence/array),
+     * {@code element} is left untouched and still owned by the caller.
+     */
+    public static int dynamicValuePush(long collection, long element) {
+        return Ffi.int2dds_dynamic_value_push(collection, element);
+    }
+
     // --- DomainParticipantFactory / DomainParticipant ---
 
     /**
@@ -1612,6 +1668,15 @@ public final class FfiAccess {
     /** Sets a string field at {@code field} to {@code value} (UTF-8 bytes). Returns the C ABI status code. */
     public static int dynamicDataSetString(long data, byte[] field, byte[] value) {
         return Ffi.int2dds_dynamic_data_set_string(data, field, value);
+    }
+
+    /**
+     * Sets field {@code field} to the dynamic value {@code value}. On {@code
+     * RET_OK} this consumes {@code value}'s handle -- it is moved into {@code
+     * data} and the caller must not use or destroy it again.
+     */
+    public static int dynamicDataSetValue(long data, byte[] field, long value) {
+        return Ffi.int2dds_dynamic_data_set_value(data, field, value);
     }
 
     // --- Subscriber / DataReader (raw receive side, for WritePathEndToEndTest only) ---
