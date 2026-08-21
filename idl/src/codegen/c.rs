@@ -6,6 +6,11 @@ use crate::codegen::flatten_array;
 use crate::naming;
 use crate::types::*;
 
+/// `{2, 3}`-style initializer body for a dims array in declaration order.
+fn dims_literal(dims: &[u32]) -> String {
+    dims.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", ")
+}
+
 /// String representation mode for C code generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StringMode {
@@ -1675,9 +1680,9 @@ impl<'a> CGen<'a> {
             | ResolvedType::Bitmask(_)
             | ResolvedType::Struct(_)
             | ResolvedType::Map { .. } => true,
-            ResolvedType::Sequence { element, .. } | ResolvedType::Array { element, .. } => {
-                // `add_{sequence,array}_field` carries one element kind and one bound, so a
-                // collection directly inside a collection has no spelling there. Without
+            ResolvedType::Sequence { element, .. } => {
+                // `add_sequence_field` carries one element kind and one bound, so a
+                // collection directly inside a sequence has no spelling there. Without
                 // this the member was dropped from the advertised type entirely.
                 matches!(
                     element.as_ref(),
@@ -1685,6 +1690,14 @@ impl<'a> CGen<'a> {
                         | ResolvedType::Array { .. }
                         | ResolvedType::Map { .. }
                 ) || Self::type_uses_fallback_hash(element)
+            }
+            ResolvedType::Array { .. } => {
+                // Array dims flatten into one plain-array id (`_nd` builders), so only a
+                // sequence/map base is left without a spelling. A named base is handled by
+                // the nested/named arms before this check runs.
+                let (_, base) = flatten_array(ty);
+                matches!(base, ResolvedType::Sequence { .. } | ResolvedType::Map { .. })
+                    || Self::type_uses_fallback_hash(base)
             }
             _ => false,
         }
@@ -1818,16 +1831,26 @@ impl<'a> CGen<'a> {
                 ),
                 _ => return false,
             },
-            ResolvedType::Array { element, size } => match element.as_ref() {
-                ResolvedType::Struct(ename) if self.is_model_struct(ename) => (
-                    ename,
-                    format!(
-                        "int2dds_type_info_add_array_of_nested_field(ti, \"{}\", {}, {}, {});",
-                        name, var, size, flags
+            ResolvedType::Array { .. } => {
+                let (dims, base) = flatten_array(&m.resolved_type);
+                match base {
+                    ResolvedType::Struct(ename) if self.is_model_struct(ename) => (
+                        ename,
+                        if dims.len() > 1 {
+                            format!(
+                                "const uint32_t _dims_{}[] = {{{}}}; int2dds_type_info_add_array_of_nested_field_nd(ti, \"{}\", {}, _dims_{}, {}, {});",
+                                name, dims_literal(&dims), name, var, name, dims.len(), flags
+                            )
+                        } else {
+                            format!(
+                                "int2dds_type_info_add_array_of_nested_field(ti, \"{}\", {}, {}, {});",
+                                name, var, dims[0], flags
+                            )
+                        },
                     ),
-                ),
-                _ => return false,
-            },
+                    _ => return false,
+                }
+            }
             _ => return false,
         };
         // Cycle guard: emitting `{nested}_type_info()` inside `{owner}_type_info()` must not
@@ -1869,18 +1892,26 @@ impl<'a> CGen<'a> {
                 ));
                 return;
             }
-            ResolvedType::Array { element, size }
+            ResolvedType::Array { .. } => {
+                let (dims, base) = flatten_array(ty);
                 if matches!(
-                    element.as_ref(),
+                    base,
                     ResolvedType::Struct(_) | ResolvedType::Enum(_) | ResolvedType::Bitmask(_)
-                ) =>
-            {
-                let elem_name = Self::rust_type_quote_str(element);
-                self.raw(&format!(
-                    "    int2dds_type_info_add_array_of_named_field(ti, \"{}\", \"{}\", {}, {});\n",
-                    name, elem_name, size, flags
-                ));
-                return;
+                ) {
+                    let elem_name = Self::rust_type_quote_str(base);
+                    if dims.len() > 1 {
+                        self.raw(&format!(
+                            "    {{ const uint32_t _dims_{}[] = {{{}}}; int2dds_type_info_add_array_of_named_field_nd(ti, \"{}\", \"{}\", _dims_{}, {}, {}); }}\n",
+                            name, dims_literal(&dims), name, elem_name, name, dims.len(), flags
+                        ));
+                    } else {
+                        self.raw(&format!(
+                            "    int2dds_type_info_add_array_of_named_field(ti, \"{}\", \"{}\", {}, {});\n",
+                            name, elem_name, dims[0], flags
+                        ));
+                    }
+                    return;
+                }
             }
             _ => {}
         }
@@ -1906,12 +1937,20 @@ impl<'a> CGen<'a> {
                     ));
                 }
             }
-            ResolvedType::Array { element, size } => {
-                if let Some(elem_const) = Self::resolved_type_to_field_constant(element) {
-                    self.raw(&format!(
-                        "    int2dds_type_info_add_array_field(ti, \"{}\", {}, {}, {});\n",
-                        name, elem_const, size, flags
-                    ));
+            ResolvedType::Array { .. } => {
+                let (dims, base) = flatten_array(ty);
+                if let Some(elem_const) = Self::resolved_type_to_field_constant(base) {
+                    if dims.len() > 1 {
+                        self.raw(&format!(
+                            "    {{ const uint32_t _dims_{}[] = {{{}}}; int2dds_type_info_add_array_field_nd(ti, \"{}\", {}, _dims_{}, {}, {}); }}\n",
+                            name, dims_literal(&dims), name, elem_const, name, dims.len(), flags
+                        ));
+                    } else {
+                        self.raw(&format!(
+                            "    int2dds_type_info_add_array_field(ti, \"{}\", {}, {}, {});\n",
+                            name, elem_const, dims[0], flags
+                        ));
+                    }
                 }
             }
             ResolvedType::String { bound } => {
@@ -2735,10 +2774,14 @@ mod tests {
     fn test_multidim_array_c() {
         let defs = parse_idl(
             r#"
+            enum Color { RED, GREEN };
+            struct Pt { long x; };
             struct Holder {
                 long nums[2][3];
                 string words[2][3];
                 sequence<long> lists[2];
+                Color e[2][3];
+                Pt ps[2][3];
             };
             "#,
         )
@@ -2775,5 +2818,38 @@ mod tests {
             "{}",
             code
         );
+
+        // type_info advertises the flattened dims (declaration order, outer first) through
+        // the `_nd` builders instead of the opaque name-hash fallback. An array-of-sequence
+        // still has no builder spelling and stays on the fallback.
+        assert!(
+            code.contains(
+                "{ const uint32_t _dims_nums[] = {2, 3}; int2dds_type_info_add_array_field_nd(ti, \"nums\", INT2DDS_FIELD_INT32, _dims_nums, 2, 0); }"
+            ),
+            "{}",
+            code
+        );
+        assert!(
+            code.contains(
+                "{ const uint32_t _dims_words[] = {2, 3}; int2dds_type_info_add_array_field_nd(ti, \"words\", INT2DDS_FIELD_STRING, _dims_words, 2, 0); }"
+            ),
+            "{}",
+            code
+        );
+        assert!(
+            code.contains(
+                "{ const uint32_t _dims_e[] = {2, 3}; int2dds_type_info_add_array_of_named_field_nd(ti, \"e\", \"Color\", _dims_e, 2, 0); }"
+            ),
+            "{}",
+            code
+        );
+        assert!(
+            code.contains(
+                "const uint32_t _dims_ps[] = {2, 3}; int2dds_type_info_add_array_of_nested_field_nd(ti, \"ps\", _nti_ps, _dims_ps, 2, 0);"
+            ),
+            "{}",
+            code
+        );
+        assert!(code.contains("int2dds_type_info_add_named_type_field(ti, \"lists\""), "{}", code);
     }
 }

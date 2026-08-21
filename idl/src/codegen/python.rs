@@ -646,10 +646,20 @@ impl<'a> PyGen<'a> {
         match ty {
             ResolvedType::Struct(name) => self.struct_advertisable(name, visited),
             ResolvedType::Enum(_) => true,
-            ResolvedType::Sequence { element, .. } | ResolvedType::Array { element, .. } => {
+            ResolvedType::Sequence { element, .. } => {
                 // Single-level only: element is a leaf named type or primitive/string, not
                 // another collection (nested-collection ids aren't emitted yet).
                 match element.as_ref() {
+                    ResolvedType::Struct(name) => self.struct_advertisable(name, visited),
+                    ResolvedType::Enum(_) => true,
+                    other => Self::field_constant(other).is_some(),
+                }
+            }
+            ResolvedType::Array { .. } => {
+                // Dimensions flatten into one plain-array id, so only the base element
+                // decides; a sequence/map base still has no builder spelling.
+                let (_, base) = flatten_array(ty);
+                match base {
                     ResolvedType::Struct(name) => self.struct_advertisable(name, visited),
                     ResolvedType::Enum(_) => true,
                     other => Self::field_constant(other).is_some(),
@@ -736,12 +746,25 @@ impl<'a> PyGen<'a> {
                     format!("(\"seq\", \"{}\", {}, {}, {}),", m.name, ec, bound.unwrap_or(0), flags)
                 }
             }
-            ResolvedType::Array { element, size } => {
-                if let Some(cls) = Self::element_class_name(element) {
-                    format!("(\"arr_nested\", \"{}\", {}, {}, {}),", m.name, cls, size, flags)
+            ResolvedType::Array { .. } => {
+                let (dims, base) = flatten_array(&m.resolved_type);
+                if dims.len() > 1 {
+                    let dims_lit =
+                        dims.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", ");
+                    if let Some(cls) = Self::element_class_name(base) {
+                        format!(
+                            "(\"arr_nested_nd\", \"{}\", {}, ({}), {}),",
+                            m.name, cls, dims_lit, flags
+                        )
+                    } else {
+                        let ec = Self::field_constant(base).unwrap_or(0);
+                        format!("(\"arr_nd\", \"{}\", {}, ({}), {}),", m.name, ec, dims_lit, flags)
+                    }
+                } else if let Some(cls) = Self::element_class_name(base) {
+                    format!("(\"arr_nested\", \"{}\", {}, {}, {}),", m.name, cls, dims[0], flags)
                 } else {
-                    let ec = Self::field_constant(element).unwrap_or(0);
-                    format!("(\"arr\", \"{}\", {}, {}, {}),", m.name, ec, size, flags)
+                    let ec = Self::field_constant(base).unwrap_or(0);
+                    format!("(\"arr\", \"{}\", {}, {}, {}),", m.name, ec, dims[0], flags)
                 }
             }
             ResolvedType::Struct(name) | ResolvedType::Enum(name) => {
@@ -1906,11 +1929,13 @@ mod tests {
     fn test_multidim_array_python() {
         let defs = parse_idl(
             r#"
+            enum Color { RED, GREEN };
             struct Pt { long x; };
             struct Holder {
                 long nums[2][3];
                 string words[2][3];
                 Pt pts[2];
+                Color e[2][3];
             };
             "#,
         )
@@ -1940,5 +1965,13 @@ mod tests {
 
         assert!(code.contains("for _item1 in _item0:"), "{}", code);
         assert!(code.contains("_words_l1.append(_words_item)"), "{}", code);
+
+        // type_info advertises the flattened dims (declaration order, outer first) via the
+        // "arr_nd"/"arr_nested_nd" ops; a 1-D array keeps the scalar "arr"/"arr_nested"
+        // spelling. Before the `_nd` builders these members made the type non-advertisable.
+        assert!(code.contains(r#"("arr_nd", "nums", 5, (2, 3), 0),"#), "{}", code);
+        assert!(code.contains(r#"("arr_nd", "words", 13, (2, 3), 0),"#), "{}", code);
+        assert!(code.contains(r#"("arr_nested_nd", "e", Color, (2, 3), 0),"#), "{}", code);
+        assert!(code.contains(r#"("arr_nested", "pts", Pt, 2, 0),"#), "{}", code);
     }
 }

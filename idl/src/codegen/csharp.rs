@@ -627,8 +627,16 @@ impl<'a> CsGen<'a> {
         match ty {
             ResolvedType::Struct(name) => self.struct_advertisable(name, visited),
             ResolvedType::Enum(_) => true,
-            ResolvedType::Sequence { element, .. } | ResolvedType::Array { element, .. } => {
-                match element.as_ref() {
+            ResolvedType::Sequence { element, .. } => match element.as_ref() {
+                ResolvedType::Struct(name) => self.struct_advertisable(name, visited),
+                ResolvedType::Enum(_) => true,
+                other => Self::field_constant(other).is_some(),
+            },
+            ResolvedType::Array { .. } => {
+                // Dimensions flatten into one plain-array id, so only the base element
+                // decides; a sequence/map base still has no builder spelling.
+                let (_, base) = flatten_array(ty);
+                match base {
                     ResolvedType::Struct(name) => self.struct_advertisable(name, visited),
                     ResolvedType::Enum(_) => true,
                     other => Self::field_constant(other).is_some(),
@@ -726,17 +734,33 @@ impl<'a> CsGen<'a> {
                     )
                 }
             }
-            ResolvedType::Array { element, size } => {
-                if let Some(cls) = Self::element_class_name(element) {
+            ResolvedType::Array { .. } => {
+                let (dims, base) = flatten_array(&m.resolved_type);
+                if dims.len() > 1 {
+                    let dims_lit =
+                        dims.iter().map(|d| format!("{}u", d)).collect::<Vec<_>>().join(", ");
+                    if let Some(cls) = Self::element_class_name(base) {
+                        format!(
+                            "new DdsTypeInfoField(\"arr_nested_nd\", \"{}\", typeof({}), new uint[] {{ {} }}, {}),",
+                            m.name, cls, dims_lit, flags
+                        )
+                    } else {
+                        let ec = Self::field_constant(base).unwrap_or(0);
+                        format!(
+                            "new DdsTypeInfoField(\"arr_nd\", \"{}\", {}, new uint[] {{ {} }}, {}),",
+                            m.name, ec, dims_lit, flags
+                        )
+                    }
+                } else if let Some(cls) = Self::element_class_name(base) {
                     format!(
                         "new DdsTypeInfoField(\"arr_nested\", \"{}\", typeof({}), {}u, {}),",
-                        m.name, cls, size, flags
+                        m.name, cls, dims[0], flags
                     )
                 } else {
-                    let ec = Self::field_constant(element).unwrap_or(0);
+                    let ec = Self::field_constant(base).unwrap_or(0);
                     format!(
                         "new DdsTypeInfoField(\"arr\", \"{}\", {}, {}u, {}),",
-                        m.name, ec, size, flags
+                        m.name, ec, dims[0], flags
                     )
                 }
             }
@@ -1972,9 +1996,11 @@ mod tests {
     fn test_multidim_array_csharp() {
         let defs = parse_idl(
             r#"
+            enum Color { RED, GREEN };
             struct Holder {
                 long nums[2][3];
                 string words[2][3];
+                Color e[2][3];
             };
             "#,
         )
@@ -1990,14 +2016,42 @@ mod tests {
         // the flat `string words[6]`, rather than once per row.
         let flat = parse_idl("struct Flat { string words[6]; };").unwrap();
         let flat = generate(&resolve(flat).unwrap(), "Flat.idl", &CSharpOptions::default());
+        let words_only = parse_idl("struct Holder { string words[2][3]; };").unwrap();
+        let words_only =
+            generate(&resolve(words_only).unwrap(), "Holder.idl", &CSharpOptions::default());
         assert_eq!(
-            code.matches("w.DheaderBegin();").count(),
+            words_only.matches("w.DheaderBegin();").count(),
             flat.matches("w.DheaderBegin();").count(),
             "multidimensional array frames once: {}",
-            code
+            words_only
         );
 
         // Distinct names per dimension: C# rejects the redeclaration outright (CS0136).
         assert!(code.contains("foreach (var _item1 in _item0)"), "{}", code);
+
+        // type_info advertises the flattened dims (declaration order, outer first) via the
+        // "arr_nd"/"arr_nested_nd" ops; before the `_nd` builders these members made the
+        // whole type non-advertisable.
+        assert!(
+            code.contains(
+                r#"new DdsTypeInfoField("arr_nd", "nums", 5, new uint[] { 2u, 3u }, 0),"#
+            ),
+            "{}",
+            code
+        );
+        assert!(
+            code.contains(
+                r#"new DdsTypeInfoField("arr_nd", "words", 13, new uint[] { 2u, 3u }, 0),"#
+            ),
+            "{}",
+            code
+        );
+        assert!(
+            code.contains(
+                r#"new DdsTypeInfoField("arr_nested_nd", "e", typeof(Color), new uint[] { 2u, 3u }, 0),"#
+            ),
+            "{}",
+            code
+        );
     }
 }

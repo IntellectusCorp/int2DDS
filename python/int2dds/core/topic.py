@@ -95,6 +95,14 @@ def _build_type_info(type_name: str, extensibility: Extensibility, fields: list)
                 check_ret(
                     lib.int2dds_type_info_add_array_field(ti, fname_c, type_const, size, flags)
                 )
+            elif op == "arr_nd":
+                # `size` is the dims tuple in declaration order (outer first).
+                dims_c = ffi.new("uint32_t[]", list(size))
+                check_ret(
+                    lib.int2dds_type_info_add_array_field_nd(
+                        ti, fname_c, type_const, dims_c, len(size), flags
+                    )
+                )
             elif op == "nested":
                 # `type_const` holds the nested generated class (struct/enum/bitmask). Build its
                 # own type_info and reference it by content-hash so composite keys resolve.
@@ -123,6 +131,19 @@ def _build_type_info(type_name: str, extensibility: Extensibility, fields: list)
                     check_ret(
                         lib.int2dds_type_info_add_array_of_nested_field(
                             ti, fname_c, elem_ti, size, flags
+                        )
+                    )
+                finally:
+                    lib.int2dds_type_info_destroy(elem_ti)
+            elif op == "arr_nested_nd":
+                # `type_const` holds the element class; `size` is the dims tuple
+                # in declaration order (outer first).
+                elem_ti = _build_nested_type_info(type_const)
+                try:
+                    dims_c = ffi.new("uint32_t[]", list(size))
+                    check_ret(
+                        lib.int2dds_type_info_add_array_of_nested_field_nd(
+                            ti, fname_c, elem_ti, dims_c, len(size), flags
                         )
                     )
                 finally:
