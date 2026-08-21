@@ -993,6 +993,13 @@ public final class FfiAccess {
         return Ffi.int2dds_datawriter_write_serialized(writer, data, dataLen);
     }
 
+    /** Same as {@link #datawriterWriteSerialized} but with an explicit source timestamp. */
+    public static int datawriterWriteSerializedWTimestamp(long writer, long data, long dataLen,
+            int tsSec, int tsNanosec) {
+        return Ffi.int2dds_datawriter_write_serialized_w_timestamp(
+                writer, data, dataLen, tsSec, tsNanosec);
+    }
+
     /**
      * Reads a datawriter's current QoS into a freshly allocated native
      * handle. Returns the C ABI status code and, only on success, writes the
@@ -2743,6 +2750,13 @@ public final class FfiAccess {
     public static int datareaderTakeSerialized(long reader, long buffer, long bufferCapacity,
             long actualSizeOut, long validDataOut) {
         return Ffi.int2dds_datareader_take_serialized(
+                reader, buffer, bufferCapacity, actualSizeOut, validDataOut);
+    }
+
+    /** Same as {@link #datareaderTakeSerialized} but non-removing (read, not take). */
+    public static int datareaderReadSerialized(long reader, long buffer, long bufferCapacity,
+            long actualSizeOut, long validDataOut) {
+        return Ffi.int2dds_datareader_read_serialized(
                 reader, buffer, bufferCapacity, actualSizeOut, validDataOut);
     }
 

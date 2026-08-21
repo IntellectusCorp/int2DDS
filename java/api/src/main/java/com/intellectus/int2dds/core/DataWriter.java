@@ -356,6 +356,39 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
         }
     }
 
+    /**
+     * Publishes {@code cdr} as-is, bypassing the CDR codec: the exact
+     * pre-serialized bytes (including the encapsulation header) are sent with
+     * {@code timestampNanos} as the sample's source timestamp. {@code cdr}
+     * MUST match this writer's topic type — e.g. bytes obtained from {@link
+     * DataReader#takeSerialized} on a reader of the same type — since the
+     * core derives the instance key and KeyHash from it exactly as {@link
+     * #write} does. This is the primitive a type-agnostic gateway/bridge
+     * needs to forward a sample without decoding it.
+     *
+     * @param cdr the full serialized sample, encapsulation header included
+     * @param timestampNanos the source timestamp as epoch nanoseconds, e.g.
+     *     from {@link DomainParticipant#getCurrentTime()}
+     * @throws NullPointerException if {@code cdr} is null
+     */
+    public void writeSerialized(byte[] cdr, long timestampNanos) {
+        Objects.requireNonNull(cdr, "cdr");
+        long h = handle();
+        // The C ABI's timestamp_sec is a 32-bit int, so a timestamp beyond
+        // year 2038 truncates; timestamp_nanosec is the sub-second remainder.
+        int sec = (int) (timestampNanos / 1_000_000_000L);
+        int nanosec = (int) (timestampNanos % 1_000_000_000L);
+        ByteBuffer buf = ByteBuffer.allocateDirect(cdr.length).order(ByteOrder.nativeOrder());
+        buf.put(cdr);
+        int rc = FfiAccess.datawriterWriteSerializedWTimestamp(
+                h, FfiAccess.directBufferAddress(buf), cdr.length, sec, nanosec);
+        // Same fence as write(): h was read off this writer just above, and
+        // buf's address crosses into the native call above.
+        NativeKeepAlive.keepAlive(this);
+        NativeKeepAlive.keepAlive(buf);
+        ReturnCodes.check(rc);
+    }
+
     /** 16 zero bytes: the NIL instance handle, used to let the core derive an instance from its key. */
     private static final byte[] NIL_HANDLE = new byte[16];
 
