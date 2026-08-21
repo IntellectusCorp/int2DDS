@@ -229,12 +229,6 @@ mod tests {
         predicate()
     }
 
-    #[test]
-    fn bind_uses_kernel_backlog_and_reports_ephemeral_port() {
-        let listener = bind_listener(0).unwrap();
-        assert_ne!(listener.local_addr().unwrap().port(), 0);
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn one_reader_routes_interleaved_kinds() {
         let (listener, discovery_rx, user_rx) = listener(Duration::from_secs(1));

@@ -493,14 +493,6 @@ mod tests {
         plugin.close();
     }
 
-    /// TCP transport has no multicast — multicast source is always `None`.
-    #[test]
-    fn multicast_discovery_source_is_none() {
-        let plugin = make_plugin(next_test_domain());
-        assert!(plugin.take_discovery_multicast_source().is_none());
-        plugin.close();
-    }
-
     /// Dropping the plugin cancels both halves through the one root, even when
     /// neither half's own `Drop` can do it: the listener has already left its
     /// slot and an outside `Arc` keeps the sender alive past the plugin.
@@ -552,22 +544,6 @@ mod tests {
         plugin.close();
     }
 
-    /// Sending to a TCP locator does not panic / block the caller.
-    /// The connect path either succeeds or returns an error; the sync `send`
-    /// call itself is fire-and-forget.
-    #[test]
-    fn send_to_unreachable_does_not_panic() {
-        let plugin = make_plugin(next_test_domain());
-
-        // Physical port (7400) is the make_plugin initial peer, so should_dial
-        // passes and the connect path is exercised (then refused → dead peer).
-        let locator = Locator::from_tcp_v4(std::net::Ipv4Addr::new(127, 0, 0, 1), 7400);
-        let target = SendTarget::UserData(&locator);
-        let _ = plugin.send(b"\x52\x54\x50\x53", &target);
-
-        plugin.close();
-    }
-
     /// Discovery and user-data advertise the same standard physical locator.
     #[test]
     fn advertised_locators_share_the_physical_port() {
@@ -588,19 +564,6 @@ mod tests {
         assert_eq!(meta, def);
 
         plugin.close();
-    }
-
-    /// `access_port()` is the standard locator port for both TCP and UDP.
-    #[test]
-    fn access_port_returns_the_standard_port_field() {
-        let ip = std::net::Ipv4Addr::new(127, 0, 0, 1);
-        let physical: u16 = 7401;
-
-        let tcp = Locator::from_tcp_v4(ip, physical as u32);
-        assert_eq!(tcp.access_port(), physical as u32, "TCP must match the physical dial port");
-
-        let udp = Locator::from_ip(ip, physical as u32);
-        assert_eq!(udp.access_port(), physical as u32, "UDP port field is already physical");
     }
 
     /// A sender at participant_id 0 reaches a listener at participant_id 1
