@@ -51,7 +51,12 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
     /** Largest power-of-two direct buffer size an int capacity can hold (2^30). */
     private static final long MAX_SAMPLE_BYTES = 1 << 30;
 
+    // Exactly one of topic/cft is non-null, matching which constructor built
+    // this reader. Both exist purely to keep the entity that was created
+    // against reachable -- see topic()'s own doc for why the accessor stays
+    // Topic<T>-typed even though a CFT-backed reader has no such value.
     private final Topic<T> topic;
+    private final ContentFilteredTopic<T> cft;
     private final Supplier<T> factory;
 
     // Pointer to the binding-owned native listener context, or 0 when none is
@@ -73,12 +78,51 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
                 create(subscriber, Objects.requireNonNull(topic, "topic"), qos),
                 FfiAccess::deleteDataReader);
         this.topic = topic;
+        this.cft = null;
         this.factory = Objects.requireNonNull(factory, "factory");
     }
 
-    /** The topic this reader receives from — the same instance passed to {@code createDataReader}. */
+    /**
+     * Parallel construction path for a reader created on a {@link
+     * ContentFilteredTopic} rather than a plain {@link Topic} -- {@code
+     * int2dds_create_datareader_cft} in place of {@code
+     * int2dds_create_datareader}, everything else (QoS build-apply-destroy,
+     * {@link com.intellectus.int2dds.internal.NativeCleaner NativeCleaner}
+     * registration via the inherited constructor,
+     * keep-alive fences) identical. Package-private, reached only through
+     * {@link Subscriber#createDataReader(ContentFilteredTopic, Supplier)}.
+     */
+    private DataReader(Subscriber subscriber, ContentFilteredTopic<T> cft, Supplier<T> factory,
+            DataReaderQos qos) {
+        super(Objects.requireNonNull(subscriber, "subscriber"),
+                createCft(subscriber, Objects.requireNonNull(cft, "cft"), qos),
+                FfiAccess::deleteDataReader);
+        this.topic = null;
+        this.cft = cft;
+        this.factory = Objects.requireNonNull(factory, "factory");
+    }
+
+    /** See the private CFT constructor's own doc; {@code qos} may be null for the core's default. */
+    static <T extends IDdsType> DataReader<T> forCft(
+            Subscriber subscriber, ContentFilteredTopic<T> cft, Supplier<T> factory, DataReaderQos qos) {
+        return new DataReader<T>(subscriber, cft, factory, qos);
+    }
+
+    /**
+     * The topic this reader receives from — the same instance passed to
+     * {@code createDataReader}. {@code null} for a reader created on a
+     * {@link ContentFilteredTopic} instead; see {@link #contentFilteredTopic()}.
+     */
     public Topic<T> topic() {
         return topic;
+    }
+
+    /**
+     * The ContentFilteredTopic this reader receives from, or {@code null} for
+     * a reader created on a plain {@link Topic}; see {@link #topic()}.
+     */
+    public ContentFilteredTopic<T> contentFilteredTopic() {
+        return cft;
     }
 
     /**
@@ -551,6 +595,33 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
                 subscriber.handle(), topic.handle(), qos, 0L, 0, handleOut);
         NativeKeepAlive.keepAlive(subscriber);
         NativeKeepAlive.keepAlive(topic);
+        ReturnCodes.check(rc);
+        return handleOut[0];
+    }
+
+    private static long createCft(Subscriber subscriber, ContentFilteredTopic<?> cft, DataReaderQos qos) {
+        if (qos == null) {
+            return createNativeCft(subscriber, cft, 0L);
+        }
+        long qosHandle = FfiAccess.createDataReaderQos();
+        if (qosHandle == 0L) {
+            throw new DdsErrorException(
+                    "failed to allocate a native DataReaderQos handle for CFT datareader creation");
+        }
+        try {
+            QosMarshal.applyReaderQos(qosHandle, qos);
+            return createNativeCft(subscriber, cft, qosHandle);
+        } finally {
+            FfiAccess.destroyDataReaderQos(qosHandle);
+        }
+    }
+
+    private static long createNativeCft(Subscriber subscriber, ContentFilteredTopic<?> cft, long qos) {
+        long[] handleOut = new long[1];
+        int rc = FfiAccess.createDataReaderCft(
+                subscriber.handle(), cft.handle(), qos, 0L, 0, handleOut);
+        NativeKeepAlive.keepAlive(subscriber);
+        NativeKeepAlive.keepAlive(cft);
         ReturnCodes.check(rc);
         return handleOut[0];
     }

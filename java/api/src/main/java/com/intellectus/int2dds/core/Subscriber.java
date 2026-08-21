@@ -65,6 +65,18 @@ public final class Subscriber extends NativeEntity {
         return new DataReader<T>(this, topic, factory, Objects.requireNonNull(qos, "qos"));
     }
 
+    /** Creates a datareader for {@code cft} (a filtered view of a Topic) with the core's default QoS. */
+    public <T extends IDdsType> DataReader<T> createDataReader(
+            ContentFilteredTopic<T> cft, Supplier<T> factory) {
+        return DataReader.forCft(this, cft, factory, null);
+    }
+
+    /** Creates a datareader for {@code cft} (a filtered view of a Topic) with an explicit QoS. */
+    public <T extends IDdsType> DataReader<T> createDataReader(
+            ContentFilteredTopic<T> cft, Supplier<T> factory, DataReaderQos qos) {
+        return DataReader.forCft(this, cft, factory, Objects.requireNonNull(qos, "qos"));
+    }
+
     /**
      * Creates a datareader for {@code topic}, backed by {@code support} (an
      * XTypes dynamic type support), with the core's default QoS.

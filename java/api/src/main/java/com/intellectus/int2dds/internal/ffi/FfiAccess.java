@@ -313,6 +313,103 @@ public final class FfiAccess {
     }
 
     /**
+     * Creates a topic with explicit CDR field descriptors, so a {@code
+     * ContentFilteredTopic} built against it can evaluate a SQL filter
+     * expression against named fields -- the {@code
+     * int2dds_create_topic_with_field_descriptors} path. A plain {@link
+     * #createTopic} topic registers no field metadata, so filter evaluation
+     * against it errors on every sample and the core treats that as "passes"
+     * (see {@code DataReader::passes_content_filter}), silently delivering
+     * everything unfiltered.
+     *
+     * <p>{@code fieldTypeCodes} are the native {@code field_descriptor_type}
+     * codes (0=String, 1=Int32, 2=UInt32, 3=Int16, 4=UInt16, 5=Int64,
+     * 6=UInt64, 7=Int8, 8=UInt8, 9=Bool) -- a distinct encoding from the
+     * XTypes {@code INT2DDS_FIELD_*} constants {@link #typeInfoAddField}
+     * uses. The core's flat parser walks {@code fieldNames} in order and
+     * stops at the first name match, skipping each field ahead of it by its
+     * declared type -- so a field after the one being filtered on may be
+     * omitted entirely, but any field before it must still be declared (with
+     * a type the parser can skip), or every field after the gap misaligns.
+     * {@code fieldTypeCodes} and {@code fieldIsKey} cross as raw native
+     * arrays (a direct-buffer address each), not JNI arrays -- the same
+     * shape the generated declaration expects.
+     */
+    public static int createTopicWithFieldDescriptors(long participant, byte[] topicName,
+            byte[] typeName, int extensibility, long qos, byte[][] fieldNames,
+            int[] fieldTypeCodes, boolean[] fieldIsKey, long fieldCount, long[] handleOut) {
+        ByteBuffer typesBuf =
+                ByteBuffer.allocateDirect(fieldTypeCodes.length * 4).order(ByteOrder.nativeOrder());
+        for (int c : fieldTypeCodes) {
+            typesBuf.putInt(c);
+        }
+        ByteBuffer isKeyBuf =
+                ByteBuffer.allocateDirect(fieldIsKey.length).order(ByteOrder.nativeOrder());
+        for (boolean k : fieldIsKey) {
+            isKeyBuf.put((byte) (k ? 1 : 0));
+        }
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_create_topic_with_field_descriptors(participant, topicName, typeName,
+                extensibility, qos, fieldNames, directBufferAddress(typesBuf),
+                directBufferAddress(isKeyBuf), fieldCount, directBufferAddress(slot));
+        // typesBuf/isKeyBuf/slot were only handed off by native address above;
+        // keep them all reachable across the call -- see NativeKeepAlive's own
+        // doc for the full argument.
+        NativeKeepAlive.keepAlive(typesBuf);
+        NativeKeepAlive.keepAlive(isKeyBuf);
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Creates a ContentFilteredTopic on {@code relatedTopic}: samples not
+     * matching {@code filterExpr} (a SQL-92-like WHERE clause, {@code %0}
+     * {@code %1}... referencing {@code params} positionally) are not
+     * delivered to a reader created on the returned handle. {@code
+     * topicName}, {@code filterExpr} and each element of {@code params}
+     * cross as UTF-8 {@code byte[]}, never {@code String}.
+     */
+    public static int createContentFilteredTopic(long participant, byte[] topicName,
+            long relatedTopic, byte[] filterExpr, byte[][] params, long paramCount,
+            long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_create_contentfilteredtopic(
+                participant, topicName, relatedTopic, filterExpr, params, paramCount,
+                directBufferAddress(slot));
+        // Same fence as createTopic.
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Releases a ContentFilteredTopic. Returns the C ABI status code. */
+    public static int deleteContentFilteredTopic(long cft) {
+        return Ffi.int2dds_delete_contentfilteredtopic(cft);
+    }
+
+    /** Replaces a ContentFilteredTopic's filter expression and parameters. */
+    public static int contentFilteredTopicSetFilterExpression(
+            long cft, byte[] filterExpr, byte[][] params, long count) {
+        return Ffi.int2dds_contentfilteredtopic_set_filter_expression(cft, filterExpr, params, count);
+    }
+
+    /** Replaces a ContentFilteredTopic's expression parameters, keeping its filter expression. */
+    public static int contentFilteredTopicSetExpressionParameters(
+            long cft, byte[][] params, long count) {
+        return Ffi.int2dds_contentfilteredtopic_set_expression_parameters(cft, params, count);
+    }
+
+    /** Enables or disables a ContentFilteredTopic's filtering (disabled = every sample passes). */
+    public static int contentFilteredTopicSetEnabled(long cft, boolean enabled) {
+        return Ffi.int2dds_contentfilteredtopic_set_enabled(cft, enabled);
+    }
+
+    /**
      * Reads the topic's INCONSISTENT_TOPIC status into the 8-byte native
      * struct at {@code statusOutAddr}. Thin passthrough -- the caller owns
      * the buffer and decodes it.
@@ -1509,6 +1606,25 @@ public final class FfiAccess {
     /** Releases a datareader. Returns the C ABI status code. */
     public static int deleteDataReader(long reader) {
         return Ffi.int2dds_delete_datareader(reader);
+    }
+
+    /**
+     * Creates a datareader on a ContentFilteredTopic rather than a plain
+     * Topic. Returns the same {@code Int2DdsDataReader} handle shape as
+     * {@link #createDataReader} -- read/take/status calls afterward are
+     * identical either way.
+     */
+    public static int createDataReaderCft(long subscriber, long cft, long qos, long listener,
+            int mask, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_create_datareader_cft(
+                subscriber, cft, qos, listener, mask, directBufferAddress(slot));
+        // Same fence as createDataReader.
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
     }
 
     // --- DataReader listeners (hand-written trampoline layer) ---

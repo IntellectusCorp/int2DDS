@@ -81,6 +81,42 @@ public final class Topic<T extends IDdsType> extends NativeEntity {
         return new Topic<T>(participant, name, prototype, deleter);
     }
 
+    /**
+     * Package-private construction seam for a topic whose native
+     * RawTypeSupport carries explicit CDR field descriptors -- the {@code
+     * int2dds_create_topic_with_field_descriptors} path -- rather than the
+     * name-only registration the public constructors above use. A {@link
+     * ContentFilteredTopic} built against a name-only topic cannot evaluate
+     * its filter expression against sample fields: the core's {@code
+     * has_field} always returns false, filter evaluation errors on every
+     * sample, and {@code DataReader::passes_content_filter} treats that
+     * error as "passes" -- so the filter silently becomes a no-op. This seam
+     * exists for {@code ContentFilteredTopicTest}, which needs a topic that
+     * actually filters; it is not reachable from the public API.
+     *
+     * <p>{@code fieldTypeCodes}/{@code fieldIsKey} follow {@link
+     * FfiAccess#createTopicWithFieldDescriptors}'s own doc for the type
+     * codes and the "fields before the filtered one must still be declared"
+     * ordering rule.
+     */
+    static <T extends IDdsType> Topic<T> createWithFieldDescriptors(DomainParticipant participant,
+            String name, T prototype, String[] fieldNames, int[] fieldTypeCodes,
+            boolean[] fieldIsKey) {
+        return new Topic<T>(participant, name, prototype, fieldNames, fieldTypeCodes, fieldIsKey);
+    }
+
+    private Topic(DomainParticipant participant, String name, T prototype, String[] fieldNames,
+            int[] fieldTypeCodes, boolean[] fieldIsKey) {
+        super(Objects.requireNonNull(participant, "participant"),
+                createWithFields(participant, Objects.requireNonNull(name, "name"),
+                        Objects.requireNonNull(prototype, "prototype"),
+                        fieldNames, fieldTypeCodes, fieldIsKey),
+                FfiAccess::deleteTopic);
+        this.name = name;
+        this.typeName = prototype.typeName();
+        this.extensibility = prototype.extensibility();
+    }
+
     /** The topic name this instance was created with. */
     public String name() {
         return name;
@@ -230,6 +266,24 @@ public final class Topic<T extends IDdsType> extends NativeEntity {
         // observe it as phantom-reachable and race the native call above,
         // which is still using the handle that call read. See
         // NativeKeepAlive's own doc for the full argument.
+        NativeKeepAlive.keepAlive(participant);
+        ReturnCodes.check(rc);
+        return handleOut[0];
+    }
+
+    private static long createWithFields(DomainParticipant participant, String name,
+            IDdsType prototype, String[] fieldNames, int[] fieldTypeCodes, boolean[] fieldIsKey) {
+        byte[] nameBytes = utf8(name);
+        byte[] typeNameBytes = utf8(prototype.typeName());
+        int extensibility = prototype.extensibility().value();
+        byte[][] fieldNameBytes = new byte[fieldNames.length][];
+        for (int i = 0; i < fieldNames.length; i++) {
+            fieldNameBytes[i] = utf8(fieldNames[i]);
+        }
+        long[] handleOut = new long[1];
+        int rc = FfiAccess.createTopicWithFieldDescriptors(participant.handle(), nameBytes,
+                typeNameBytes, extensibility, 0L, fieldNameBytes, fieldTypeCodes, fieldIsKey,
+                fieldNames.length, handleOut);
         NativeKeepAlive.keepAlive(participant);
         ReturnCodes.check(rc);
         return handleOut[0];

@@ -131,6 +131,27 @@ public final class DomainParticipant extends NativeEntity {
         return DynamicTopic.fromHandle(out[0]);
     }
 
+    /**
+     * Creates a {@link ContentFilteredTopic} on {@code related}: a reader
+     * created on the result only receives samples of {@code related} for
+     * which {@code filterExpression} (a SQL-92-like WHERE clause) evaluates
+     * true. {@code params} supplies positional values for {@code %0},
+     * {@code %1}... references in the expression; omit it for a
+     * self-contained expression (e.g. {@code "id > 5"}).
+     *
+     * <p><b>Prerequisite:</b> {@code related} must carry the field metadata the
+     * filter reads. A topic from {@link #createTopic(String, IDdsType)} registers
+     * none, so a filter over its fields cannot be evaluated and every sample
+     * silently passes through unfiltered; use a topic created with field
+     * descriptors for the fields {@code filterExpression} references.
+     */
+    public <T extends IDdsType> ContentFilteredTopic<T> createContentFilteredTopic(
+            String name, Topic<T> related, String filterExpression, String... params) {
+        return new ContentFilteredTopic<T>(this, name,
+                Objects.requireNonNull(related, "related"),
+                Objects.requireNonNull(filterExpression, "filterExpression"), params);
+    }
+
     /** Creates a publisher with the core's default QoS. */
     public Publisher createPublisher() {
         return new Publisher(this, null);
