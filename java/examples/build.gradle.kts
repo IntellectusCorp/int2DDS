@@ -24,3 +24,14 @@ tasks.named<JavaExec>("run") {
     environment("INT2DDS_JAVA_LIB",
             rootProject.file("../target/release/libint2dds_java.so").absolutePath)
 }
+
+// Launches DynamicHelloWorld the same way "run" launches HelloWorldPub: same
+// native lib env var, nothing else added (see the note above "run" for why).
+tasks.register<JavaExec>("runDynamic") {
+    group = "application"
+    description = "Runs the DynamicHelloWorld (XTypes) example."
+    mainClass.set("com.intellectus.int2dds.examples.DynamicHelloWorld")
+    classpath = sourceSets["main"].runtimeClasspath
+    environment("INT2DDS_JAVA_LIB",
+            rootProject.file("../target/release/libint2dds_java.so").absolutePath)
+}
