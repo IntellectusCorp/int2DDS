@@ -51,9 +51,17 @@ impl EntityLifecycle {
     // returned guard holds the in-flight count raised until it drops.
     pub(crate) fn begin_operation(&self) -> DdsResult<OperationGuard<'_>> {
         self.active_operation_count.fetch_add(1, Ordering::SeqCst);
+        debug!(
+            "EntityLifecycle::begin_operation() - active_operation_count = {}",
+            self.active_operation_count.load(Ordering::SeqCst)
+        );
 
         if self.deleted.load(Ordering::SeqCst) {
             self.active_operation_count.fetch_sub(1, Ordering::SeqCst);
+            debug!(
+                "EntityLifecycle::begin_operation() - operation refused, entity already deleted, active_operation_count = {}",
+                self.active_operation_count.load(Ordering::SeqCst)
+            );
             return Err(DdsError::AlreadyDeleted);
         }
 
@@ -64,8 +72,10 @@ impl EntityLifecycle {
     // callback caller skips the wait, since it holds a lease only it could release.
     pub(crate) fn mark_deleted_and_await_operation_completion(&self) {
         self.deleted.store(true, Ordering::SeqCst);
+        debug!("Marked entity as deleted, waiting for operations to complete");
 
         if crate::utils::notify::in_listener_callback() {
+            debug!("Cannot delete entity while in listener callback");
             return;
         }
 
@@ -73,6 +83,8 @@ impl EntityLifecycle {
         while self.active_operation_count.load(Ordering::SeqCst) > 0 {
             std::thread::sleep(std::time::Duration::from_micros(50));
         }
+
+        debug!("All operations completed, entity can be safely deleted");
     }
 }
 
@@ -325,3 +337,4 @@ macro_rules! impl_check_parent_enabled {
 pub(crate) use impl_check_parent_enabled;
 pub(crate) use impl_dds_entity;
 pub(crate) use impl_dds_entity_impl;
+use log::debug;
