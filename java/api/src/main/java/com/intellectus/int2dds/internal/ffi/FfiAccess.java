@@ -272,6 +272,21 @@ public final class FfiAccess {
     }
 
     /**
+     * Creates an {@code enum} dynamic value from a literal {@code name} and
+     * its numeric {@code value}, writing the handle to {@code out[0]} on
+     * success.
+     */
+    public static int dynamicValueEnum(byte[] name, int value, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_enum(name, value, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
      * Creates an empty array dynamic value, writing the handle to {@code
      * out[0]} on success. Append elements with {@link #dynamicValuePush}.
      */
@@ -1909,6 +1924,59 @@ public final class FfiAccess {
             }
             return rc;
         }
+    }
+
+    /**
+     * Grow-and-retry driver for an enum dynamic value's literal name, plus a
+     * single fixed-size out slot for its numeric value read in the same
+     * native call -- mirrors {@link #dynamicValueAsString}'s buffer contract
+     * for the name (out_len excludes the NUL, regrow to {@code outLen + 1});
+     * {@code int2dds_dynamic_value_as_enum} (ffi/src/dynamic_value.rs) writes
+     * the numeric value to {@code out_value} before the string copy, so it is
+     * available on every call, but only read here on {@code RET_OK} since a
+     * too-small buffer means a retry is coming anyway.
+     */
+    public static int dynamicValueAsEnum(long value, byte[][] nameOut, int[] valueOut) {
+        int cap = 64;
+        while (true) {
+            byte[] buf = new byte[cap];
+            ByteBuffer sizeSlot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+            ByteBuffer valueSlot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
+            int rc = Ffi.int2dds_dynamic_value_as_enum(
+                    value, buf, cap, directBufferAddress(sizeSlot), directBufferAddress(valueSlot));
+            NativeKeepAlive.keepAlive(sizeSlot);
+            NativeKeepAlive.keepAlive(valueSlot);
+            if (rc == DdsException.RET_BUFFER_TOO_SMALL) {
+                cap = (int) sizeSlot.getLong(0) + 1; // out_len excludes the NUL here
+                continue;
+            }
+            if (rc == 0) {
+                int n = (int) sizeSlot.getLong(0); // excludes the NUL -- no -1 needed
+                byte[] out = new byte[n];
+                System.arraycopy(buf, 0, out, 0, n);
+                nameOut[0] = out;
+                valueOut[0] = valueSlot.getInt(0);
+            }
+            return rc;
+        }
+    }
+
+    /**
+     * Clones a struct dynamic value's fields into a new, independently-owned
+     * DynamicData handle, writing it to {@code out[0]} on success. {@code
+     * int2dds_dynamic_value_as_struct} (ffi/src/dynamic_value.rs) clones the
+     * inner DynamicData rather than transferring ownership of an existing
+     * one, so the source value is untouched and the caller owns the returned
+     * handle and must destroy it (via {@link #dynamicDataDestroy}).
+     */
+    public static int dynamicValueAsStruct(long value, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_value_as_struct(value, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
     }
 
     /** Reads a dynamic value's kind (one of {@code DynamicValueKind}'s constants) into {@code out[0]}. */

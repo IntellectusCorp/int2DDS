@@ -169,6 +169,14 @@ public final class DynamicValue implements AutoCloseable {
         return new DynamicValue(out[0]);
     }
 
+    /** Builds an {@code enum} value from a literal {@code name} and its numeric {@code value}. */
+    public static DynamicValue enumValue(String name, int value) {
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicValueEnum(name.getBytes(UTF8), value, out);
+        ReturnCodes.check(rc);
+        return new DynamicValue(out[0]);
+    }
+
     /** Builds an empty sequence value. Fill it with {@link #push}. */
     public static DynamicValue sequence() {
         long[] out = new long[1];
@@ -480,6 +488,35 @@ public final class DynamicValue implements AutoCloseable {
         NativeKeepAlive.keepAlive(this);
         ReturnCodes.check(rc);
         return new String(out[0], UTF8);
+    }
+
+    /**
+     * Reads this value as an {@code enum} literal, its numeric value and
+     * name. Throws if it is not an enum.
+     */
+    public EnumValue asEnum() {
+        long v = handle();
+        byte[][] nameOut = new byte[1][];
+        int[] valueOut = new int[1];
+        int rc = FfiAccess.dynamicValueAsEnum(v, nameOut, valueOut);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return new EnumValue(valueOut[0], new String(nameOut[0], UTF8));
+    }
+
+    /**
+     * Clones this struct value's fields into a new, independently-owned
+     * {@link DynamicData}. The caller owns the returned handle and must
+     * {@link DynamicData#close} it -- this value is untouched and remains
+     * usable afterward. Throws if this value is not a struct.
+     */
+    public DynamicData asStruct() {
+        long v = handle();
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicValueAsStruct(v, out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return DynamicData.fromHandle(out[0]);
     }
 
     /**
