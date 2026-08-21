@@ -13,6 +13,12 @@ import java.util.Objects;
 /**
  * Blocks the calling thread until one of its attached {@link Condition}s
  * triggers. Not thread-safe: use one WaitSet per waiting thread.
+ *
+ * <p><b>Contract:</b> an attached {@link Condition} must be {@link #detach}ed
+ * before it is closed. Closing a still-attached condition leaves a dangling
+ * handle in the native WaitSet; the next {@link #await} is then undefined
+ * behavior (possible crash). Per DDS, deleting an attached condition is a
+ * precondition violation.
  */
 public final class WaitSet implements AutoCloseable {
     private final NativeHandle handle;
@@ -27,9 +33,19 @@ public final class WaitSet implements AutoCloseable {
         this.handle = NativeCleaner.register(this, out[0], FfiAccess::waitsetDelete);
     }
 
-    /** Attaches a condition (dispatch by type). */
+    /**
+     * Attaches a condition (dispatch by type). Idempotent: re-attaching an
+     * already-attached instance is a no-op. Must be {@link #detach}ed before
+     * {@code c} is closed; see the class Javadoc for why.
+     */
     public void attach(Condition c) {
         Objects.requireNonNull(c, "condition");
+        if (c.isClosed()) {
+            throw new IllegalStateException("cannot attach a closed condition");
+        }
+        if (attached.contains(c)) {
+            return;
+        }
         int rc = attachNative(c);
         NativeKeepAlive.keepAlive(c);
         NativeKeepAlive.keepAlive(this);
@@ -40,6 +56,11 @@ public final class WaitSet implements AutoCloseable {
     /** Detaches a previously attached condition. */
     public void detach(Condition c) {
         Objects.requireNonNull(c, "condition");
+        if (c.isClosed()) {
+            // Handle is already freed natively; nothing to detach there.
+            attached.remove(c);
+            return;
+        }
         int rc = detachNative(c);
         NativeKeepAlive.keepAlive(c);
         NativeKeepAlive.keepAlive(this);
@@ -82,6 +103,9 @@ public final class WaitSet implements AutoCloseable {
      * <p>Named {@code await}, not {@code wait}: {@code Object.wait(long)} is
      * {@code final}, so a same-erasure instance method named {@code wait}
      * cannot be declared here at all, regardless of return type.
+     *
+     * <p>Undefined behavior (possible crash) if an attached condition was
+     * closed without first being {@link #detach}ed.
      */
     public List<Condition> await(long timeoutMillis) {
         long[] seqOut = new long[1];
