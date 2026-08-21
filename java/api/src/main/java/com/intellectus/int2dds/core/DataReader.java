@@ -826,12 +826,123 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
                 ? FfiAccess.datareaderTakeSerializedBatch(h, maxSamples, seqOut)
                 : FfiAccess.datareaderReadSerializedBatch(h, maxSamples, seqOut);
         NativeKeepAlive.keepAlive(this);
+        return drainSeq(rc, seqOut[0]);
+    }
+
+    /**
+     * State-filtered counterpart of {@link #takeSerializedBatch(int)}: takes
+     * (removes) up to {@code maxSamples} samples matching {@code
+     * sampleStateMask}/{@code viewStateMask}/{@code instanceStateMask} as a
+     * single native batch call. Masks are a bitwise-OR of the constants in
+     * {@link com.intellectus.int2dds.conditions.SampleState}, {@link
+     * com.intellectus.int2dds.conditions.ViewState} and {@link
+     * com.intellectus.int2dds.conditions.InstanceState} (e.g. {@code
+     * SampleState.ANY, ViewState.ANY, InstanceState.ANY} to match the
+     * no-arg {@link #takeSerializedBatch(int)}'s own {@code ANY} scoping --
+     * see that method's doc for how batch matching differs from the no-arg
+     * single-sample {@link #takeSerialized()}). Returns an empty list when
+     * nothing in the cache matches the masks. The native sample sequence
+     * backing the batch is freed before this method returns.
+     *
+     * @throws IllegalArgumentException if {@code maxSamples <= 0}
+     */
+    public List<SerializedSample> takeSerializedBatch(
+            int maxSamples, int sampleStateMask, int viewStateMask, int instanceStateMask) {
+        if (maxSamples <= 0) {
+            throw new IllegalArgumentException("maxSamples must be > 0: " + maxSamples);
+        }
+        long h = handle();
+        long[] seqOut = new long[1];
+        int rc = FfiAccess.datareaderTakeSerializedBatchWStates(
+                h, maxSamples, seqOut, sampleStateMask, viewStateMask, instanceStateMask);
+        NativeKeepAlive.keepAlive(this);
+        return drainSeq(rc, seqOut[0]);
+    }
+
+    /**
+     * Non-removing counterpart of {@link #takeSerializedBatch(int, int, int,
+     * int)}. Same mask semantics.
+     *
+     * @throws IllegalArgumentException if {@code maxSamples <= 0}
+     */
+    public List<SerializedSample> readSerializedBatch(
+            int maxSamples, int sampleStateMask, int viewStateMask, int instanceStateMask) {
+        if (maxSamples <= 0) {
+            throw new IllegalArgumentException("maxSamples must be > 0: " + maxSamples);
+        }
+        long h = handle();
+        long[] seqOut = new long[1];
+        int rc = FfiAccess.datareaderReadSerializedBatchWStates(
+                h, maxSamples, seqOut, sampleStateMask, viewStateMask, instanceStateMask);
+        NativeKeepAlive.keepAlive(this);
+        return drainSeq(rc, seqOut[0]);
+    }
+
+    /**
+     * Instance-scoped counterpart of {@link #takeSerializedBatch(int, int,
+     * int, int)}: takes (removes) up to {@code maxSamples} samples belonging
+     * only to the instance {@code instance} identifies, filtered by the same
+     * state masks. Samples of any other instance are left untouched in the
+     * cache. {@code instance} typically comes from a received sample's
+     * {@link SampleInfo#instanceHandle()} (wrapped in an {@link
+     * InstanceHandle}), or from {@link DataWriter#registerInstance}/{@link
+     * #lookupInstance}; meaningful only on a keyed topic, since an unkeyed
+     * topic has a single (NIL) instance.
+     *
+     * @throws NullPointerException if {@code instance} is null
+     * @throws IllegalArgumentException if {@code maxSamples <= 0}
+     */
+    public List<SerializedSample> takeInstanceSerializedBatch(InstanceHandle instance,
+            int maxSamples, int sampleStateMask, int viewStateMask, int instanceStateMask) {
+        Objects.requireNonNull(instance, "instance");
+        if (maxSamples <= 0) {
+            throw new IllegalArgumentException("maxSamples must be > 0: " + maxSamples);
+        }
+        long h = handle();
+        long[] seqOut = new long[1];
+        int rc = FfiAccess.datareaderTakeInstanceSerializedBatch(h, instance.bytes(), maxSamples,
+                sampleStateMask, viewStateMask, instanceStateMask, seqOut);
+        NativeKeepAlive.keepAlive(this);
+        return drainSeq(rc, seqOut[0]);
+    }
+
+    /**
+     * Non-removing counterpart of {@link #takeInstanceSerializedBatch}. Same
+     * instance-scoping and mask semantics.
+     *
+     * @throws NullPointerException if {@code instance} is null
+     * @throws IllegalArgumentException if {@code maxSamples <= 0}
+     */
+    public List<SerializedSample> readInstanceSerializedBatch(InstanceHandle instance,
+            int maxSamples, int sampleStateMask, int viewStateMask, int instanceStateMask) {
+        Objects.requireNonNull(instance, "instance");
+        if (maxSamples <= 0) {
+            throw new IllegalArgumentException("maxSamples must be > 0: " + maxSamples);
+        }
+        long h = handle();
+        long[] seqOut = new long[1];
+        int rc = FfiAccess.datareaderReadInstanceSerializedBatch(h, instance.bytes(), maxSamples,
+                sampleStateMask, viewStateMask, instanceStateMask, seqOut);
+        NativeKeepAlive.keepAlive(this);
+        return drainSeq(rc, seqOut[0]);
+    }
+
+    /**
+     * Drains a native sample sequence returned by a batch take/read into a
+     * {@link SerializedSample} list, freeing the sequence before returning
+     * -- shared by every batch variant ({@link #nextSerializedBatch} and the
+     * state-filtered/instance-scoped methods above). {@code rc} is the
+     * status the batch take/read call itself returned; {@code seq} is the
+     * sequence handle it wrote to its {@code seqOut} slot, valid on both
+     * {@code RET_OK} and {@code RET_NO_DATA} (an empty sequence on the
+     * latter, still requiring the same free).
+     */
+    private List<SerializedSample> drainSeq(int rc, long seq) {
         if (!ReturnCodes.checkOrNoData(rc)) {
             // NO_DATA: the native side still allocated an empty sequence.
-            FfiAccess.sampleSeqDelete(seqOut[0]);
+            FfiAccess.sampleSeqDelete(seq);
             return new ArrayList<SerializedSample>();
         }
-        long seq = seqOut[0];
         try {
             long len = FfiAccess.sampleSeqLength(seq);
             List<SerializedSample> result = new ArrayList<SerializedSample>((int) len);

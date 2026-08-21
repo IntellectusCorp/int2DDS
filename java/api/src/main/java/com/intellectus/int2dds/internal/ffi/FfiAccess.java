@@ -2828,6 +2828,71 @@ public final class FfiAccess {
         return rc;
     }
 
+    /**
+     * State-filtered counterpart of {@link #datareaderTakeSerializedBatch}. Same
+     * {@code seqOut} contract (RET_OK or RET_NO_DATA both allocate a sequence
+     * to be freed with {@link #sampleSeqDelete}), but only samples matching
+     * {@code sampleStateMask}/{@code viewStateMask}/{@code instanceStateMask}
+     * are included.
+     */
+    public static int datareaderTakeSerializedBatchWStates(long reader, int maxSamples,
+            long[] seqOut, int sampleStateMask, int viewStateMask, int instanceStateMask) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_datareader_take_serialized_batch_w_states(reader, maxSamples,
+                directBufferAddress(slot), sampleStateMask, viewStateMask, instanceStateMask);
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == DdsException.RET_OK || rc == DdsException.RET_NO_DATA) {
+            seqOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Non-removing counterpart of {@link #datareaderTakeSerializedBatchWStates}. Same {@code seqOut} contract. */
+    public static int datareaderReadSerializedBatchWStates(long reader, int maxSamples,
+            long[] seqOut, int sampleStateMask, int viewStateMask, int instanceStateMask) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_datareader_read_serialized_batch_w_states(reader, maxSamples,
+                directBufferAddress(slot), sampleStateMask, viewStateMask, instanceStateMask);
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == DdsException.RET_OK || rc == DdsException.RET_NO_DATA) {
+            seqOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Batch take scoped to the single instance {@code handle} (16 bytes)
+     * identifies, filtered by state masks. Same {@code seqOut} contract as
+     * {@link #datareaderTakeSerializedBatch}. Note the native parameter
+     * order: {@code handle} and the state masks precede {@code seqOut}.
+     */
+    public static int datareaderTakeInstanceSerializedBatch(long reader, byte[] handle,
+            int maxSamples, int sampleStateMask, int viewStateMask, int instanceStateMask,
+            long[] seqOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_datareader_take_instance_serialized_batch(reader, handle, maxSamples,
+                sampleStateMask, viewStateMask, instanceStateMask, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == DdsException.RET_OK || rc == DdsException.RET_NO_DATA) {
+            seqOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Non-removing counterpart of {@link #datareaderTakeInstanceSerializedBatch}. Same {@code seqOut} contract. */
+    public static int datareaderReadInstanceSerializedBatch(long reader, byte[] handle,
+            int maxSamples, int sampleStateMask, int viewStateMask, int instanceStateMask,
+            long[] seqOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_datareader_read_instance_serialized_batch(reader, handle, maxSamples,
+                sampleStateMask, viewStateMask, instanceStateMask, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == DdsException.RET_OK || rc == DdsException.RET_NO_DATA) {
+            seqOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
     /** Number of samples in a sample sequence returned by a batch take/read. */
     public static long sampleSeqLength(long seq) {
         return Ffi.int2dds_sample_seq_length(seq);
