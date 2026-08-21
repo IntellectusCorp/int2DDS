@@ -46,6 +46,9 @@ use crate::{
     utils::timer::timer_id::TimerId,
 };
 
+// Upper bound on pooled idle changes, mirroring ReaderHistoryCache.
+const MAX_POOL_CAP: usize = 1024;
+
 #[derive(Debug)]
 pub(crate) struct DataWriterHistoryCache<Foo> {
     data_writer: Weak<DataWriter<Foo>>,
@@ -363,17 +366,14 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
             lifespan_timers: Arc::new(Mutex::new(HashMap::new())),
             pool: {
                 let pool_size = match history_qos.kind {
-                    HistoryQosPolicyKind::KeepLast(depth) => {
-                        if has_key {
-                            // Instance count unknown at creation — pre-allocate for 1 instance
-                            depth as usize
-                        } else {
-                            depth as usize
-                        }
-                    }
+                    HistoryQosPolicyKind::KeepLast(depth) => depth as usize,
                     HistoryQosPolicyKind::KeepAll => 32,
                 };
-                CacheChangePool::with_capacity(pool_size)
+                // Cap without pre-filling, as ReaderHistoryCache does: pooled entries only pay off
+                // once a write has grown their payload, and `/rosout` alone asks for depth 1000.
+                let mut pool = CacheChangePool::with_capacity(0);
+                pool.set_cap(pool_size.min(MAX_POOL_CAP));
+                pool
             },
         }
     }
