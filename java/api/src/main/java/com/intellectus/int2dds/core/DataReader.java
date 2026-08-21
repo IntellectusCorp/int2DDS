@@ -250,6 +250,28 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
         return out;
     }
 
+    /**
+     * Blocks until historical data (relevant under transient/persistent
+     * durability) has been received, or {@code timeoutMillis} elapses.
+     * Returns {@code true} if historical data arrived, {@code false} if the
+     * timeout expired first.
+     *
+     * <p><b>Not yet supported by the core:</b> the native implementation
+     * currently returns {@code UNSUPPORTED} unconditionally, so this method
+     * throws {@link com.intellectus.int2dds.exceptions.DdsException} until the
+     * core implements durability-aware historical delivery. The wrapper is in
+     * place so callers work unchanged once it does.
+     */
+    public boolean waitForHistoricalData(long timeoutMillis) {
+        int rc = FfiAccess.datareaderWaitForHistoricalData(handle(), timeoutMillis);
+        NativeKeepAlive.keepAlive(this);
+        if (rc == DdsException.RET_TIMEOUT) {
+            return false;
+        }
+        ReturnCodes.check(rc);
+        return true;
+    }
+
     /** Takes (removes) the next sample, or null if the cache is empty. */
     public Sample<T> take() {
         return next(true);

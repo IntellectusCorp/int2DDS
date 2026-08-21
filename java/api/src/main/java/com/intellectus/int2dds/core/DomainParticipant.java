@@ -350,6 +350,16 @@ public final class DomainParticipant extends NativeEntity {
     }
 
     /**
+     * Manually asserts liveliness for all of this participant's {@code
+     * MANUAL_BY_PARTICIPANT} writers.
+     */
+    public void assertLiveliness() {
+        int rc = FfiAccess.participantAssertLiveliness(handle());
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
+    /**
      * Builds a native QoS handle, applies {@code qos} onto it, and destroys it
      * again once {@link #create} has returned — success or failure, thrown or
      * not. The native create call reads the QoS synchronously and does not

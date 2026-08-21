@@ -414,6 +414,33 @@ public final class FfiAccess {
         return rc;
     }
 
+    // --- Reliability / liveliness ---
+
+    /** Blocks up to {@code timeoutMs} for all matched reliable readers to ack. Status code, incl. RET_TIMEOUT. */
+    public static int datawriterWaitForAcknowledgments(long writer, long timeoutMs) {
+        return Ffi.int2dds_datawriter_wait_for_acknowledgments(writer, timeoutMs);
+    }
+
+    /** Same as {@link #datawriterWaitForAcknowledgments}, for all of a publisher's writers. */
+    public static int publisherWaitForAcknowledgments(long publisher, long timeoutMs) {
+        return Ffi.int2dds_publisher_wait_for_acknowledgments(publisher, timeoutMs);
+    }
+
+    /** Manually asserts a writer's liveliness (MANUAL_BY_* liveliness QoS). */
+    public static int datawriterAssertLiveliness(long writer) {
+        return Ffi.int2dds_datawriter_assert_liveliness(writer);
+    }
+
+    /** Manually asserts a participant's liveliness, for all its MANUAL_BY_PARTICIPANT writers. */
+    public static int participantAssertLiveliness(long participant) {
+        return Ffi.int2dds_participant_assert_liveliness(participant);
+    }
+
+    /** Blocks up to {@code timeoutMs} for historical (durable) data to arrive. Status code, incl. RET_TIMEOUT. */
+    public static int datareaderWaitForHistoricalData(long reader, long timeoutMs) {
+        return Ffi.int2dds_datareader_wait_for_historical_data(reader, timeoutMs);
+    }
+
     // --- Topic QoS setters ---
 
     public static int topicQosSetReliability(long qos, int kind, long maxBlockingTimeNs) {

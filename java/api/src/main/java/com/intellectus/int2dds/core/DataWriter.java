@@ -4,6 +4,7 @@ import com.intellectus.int2dds.cdr.CdrWriter;
 import com.intellectus.int2dds.conditions.StatusCondition;
 import com.intellectus.int2dds.discovery.SubscriptionBuiltinTopicData;
 import com.intellectus.int2dds.exceptions.DdsErrorException;
+import com.intellectus.int2dds.exceptions.DdsException;
 import com.intellectus.int2dds.internal.NativeCleaner;
 import com.intellectus.int2dds.internal.NativeKeepAlive;
 import com.intellectus.int2dds.internal.QosMarshal;
@@ -303,6 +304,32 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
             }
         }
         return out;
+    }
+
+    /**
+     * Blocks until every matched reliable {@link DataReader} has acknowledged
+     * all samples this writer has sent so far, or {@code timeoutMillis}
+     * elapses. Returns {@code true} if acknowledgment completed, {@code
+     * false} if the timeout expired first.
+     */
+    public boolean waitForAcknowledgments(long timeoutMillis) {
+        int rc = FfiAccess.datawriterWaitForAcknowledgments(handle(), timeoutMillis);
+        NativeKeepAlive.keepAlive(this);
+        if (rc == DdsException.RET_TIMEOUT) {
+            return false;
+        }
+        ReturnCodes.check(rc);
+        return true;
+    }
+
+    /**
+     * Manually asserts this writer's liveliness, for use with {@code
+     * MANUAL_BY_TOPIC} (or {@code MANUAL_BY_PARTICIPANT}) liveliness QoS.
+     */
+    public void assertLiveliness() {
+        int rc = FfiAccess.datawriterAssertLiveliness(handle());
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
     }
 
     /**

@@ -1,6 +1,7 @@
 package com.intellectus.int2dds.core;
 
 import com.intellectus.int2dds.exceptions.DdsErrorException;
+import com.intellectus.int2dds.exceptions.DdsException;
 import com.intellectus.int2dds.internal.NativeCleaner;
 import com.intellectus.int2dds.internal.NativeKeepAlive;
 import com.intellectus.int2dds.internal.QosMarshal;
@@ -151,6 +152,22 @@ public final class Publisher extends NativeEntity {
         } finally {
             FfiAccess.destroyPublisherQos(qosHandle);
         }
+    }
+
+    /**
+     * Blocks until every matched reliable {@link DataReader} of every writer
+     * belonging to this publisher has acknowledged all samples sent so far,
+     * or {@code timeoutMillis} elapses. Returns {@code true} if
+     * acknowledgment completed, {@code false} if the timeout expired first.
+     */
+    public boolean waitForAcknowledgments(long timeoutMillis) {
+        int rc = FfiAccess.publisherWaitForAcknowledgments(handle(), timeoutMillis);
+        NativeKeepAlive.keepAlive(this);
+        if (rc == DdsException.RET_TIMEOUT) {
+            return false;
+        }
+        ReturnCodes.check(rc);
+        return true;
     }
 
     /**
