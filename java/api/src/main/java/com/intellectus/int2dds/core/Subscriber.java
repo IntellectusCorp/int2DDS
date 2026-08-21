@@ -65,13 +65,26 @@ public final class Subscriber extends NativeEntity {
 
     /** Creates a datareader for {@code topic} with the core's default QoS. */
     public <T extends IDdsType> DataReader<T> createDataReader(Topic<T> topic, Supplier<T> factory) {
-        return new DataReader<T>(this, topic, factory, null);
+        // Cast disambiguates from the (Topic, Supplier, String) profile-create constructor.
+        return new DataReader<T>(this, topic, factory, (DataReaderQos) null);
     }
 
     /** Creates a datareader for {@code topic} with an explicit QoS. */
     public <T extends IDdsType> DataReader<T> createDataReader(
             Topic<T> topic, Supplier<T> factory, DataReaderQos qos) {
         return new DataReader<T>(this, topic, factory, Objects.requireNonNull(qos, "qos"));
+    }
+
+    /**
+     * Creates a datareader for {@code topic} with QoS from the named profile
+     * at {@code profilePath} (a {@code "LibraryName::ProfileName"} path).
+     * The profile must already be loaded via {@link
+     * DomainParticipantFactory#loadProfiles}.
+     */
+    public <T extends IDdsType> DataReader<T> createDataReader(
+            Topic<T> topic, Supplier<T> factory, String profilePath) {
+        return new DataReader<T>(this, Objects.requireNonNull(topic, "topic"), factory,
+                Objects.requireNonNull(profilePath, "profilePath"));
     }
 
     /** Creates a datareader for {@code cft} (a filtered view of a Topic) with the core's default QoS. */

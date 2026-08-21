@@ -22,6 +22,7 @@ import com.intellectus.int2dds.status.StatusMask;
 import com.intellectus.int2dds.types.IDdsType;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.Charset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -52,6 +53,8 @@ import java.util.Objects;
  * @param <T> the DDS data type this writer publishes.
  */
 public final class DataWriter<T extends IDdsType> extends NativeEntity {
+
+    private static final Charset UTF8 = Charset.forName("UTF-8");
 
     private static final boolean LITTLE_ENDIAN_HOST =
             ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN;
@@ -100,6 +103,25 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
                 create(publisher, Objects.requireNonNull(topic, "topic"), null),
                 deleter);
         this.topic = topic;
+        this.xcdr2 = resolveXcdr2(null);
+    }
+
+    /**
+     * Package-private profile-create path, reached only through {@link
+     * Publisher#createDataWriter(Topic, String)}: a normal typed datawriter
+     * whose QoS comes from the named profile at {@code profilePath} (a
+     * {@code "LibraryName::ProfileName"} path previously loaded via {@link
+     * DomainParticipantFactory#loadProfiles}), released the same way as the
+     * default-QoS path ({@code FfiAccess::deleteDataWriter}).
+     */
+    DataWriter(Publisher publisher, Topic<T> topic, String profilePath) {
+        super(Objects.requireNonNull(publisher, "publisher"),
+                createWithProfile(publisher, Objects.requireNonNull(topic, "topic"),
+                        Objects.requireNonNull(profilePath, "profilePath")),
+                FfiAccess::deleteDataWriter);
+        this.topic = topic;
+        // Same default resolution as the no-QoS path: the profile's own
+        // data_representation is not reflected in this local encoding choice.
         this.xcdr2 = resolveXcdr2(null);
     }
 
@@ -655,6 +677,20 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
         } finally {
             FfiAccess.destroyDataWriterQos(qosHandle);
         }
+    }
+
+    /**
+     * The profile-create path: {@code listener=0L, mask=0} (no creation-time
+     * listener), same keep-alive/check shape as {@link #createNative}.
+     */
+    private static long createWithProfile(Publisher publisher, Topic<?> topic, String profilePath) {
+        long[] handleOut = new long[1];
+        int rc = FfiAccess.createDataWriterWithProfile(publisher.handle(), topic.handle(),
+                profilePath.getBytes(UTF8), 0L, 0, handleOut);
+        NativeKeepAlive.keepAlive(publisher);
+        NativeKeepAlive.keepAlive(topic);
+        ReturnCodes.check(rc);
+        return handleOut[0];
     }
 
     private static long createNative(Publisher publisher, Topic<?> topic, long qos) {

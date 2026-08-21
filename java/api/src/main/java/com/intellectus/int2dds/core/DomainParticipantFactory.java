@@ -1,6 +1,10 @@
 package com.intellectus.int2dds.core;
 
+import com.intellectus.int2dds.internal.ReturnCodes;
 import com.intellectus.int2dds.internal.ffi.FfiAccess;
+import java.nio.charset.Charset;
+import java.util.List;
+import java.util.Objects;
 
 /**
  * The process-wide DDS entry point. A singleton: the native factory is not
@@ -14,6 +18,8 @@ import com.intellectus.int2dds.internal.ffi.FfiAccess;
  * Lazy<T>} used by the reference binding.
  */
 public final class DomainParticipantFactory {
+
+    private static final Charset UTF8 = Charset.forName("UTF-8");
 
     private static final class Holder {
         private static final DomainParticipantFactory INSTANCE = new DomainParticipantFactory();
@@ -33,5 +39,24 @@ public final class DomainParticipantFactory {
     /** The native factory handle, for entities built on top of this class. */
     public long handle() {
         return handle;
+    }
+
+    /**
+     * Loads named QoS profiles (and any {@code <types>} they declare) from
+     * {@code paths} — JSON profile files — into this process-wide factory
+     * singleton. Once loaded, a profile is addressed as {@code
+     * "LibraryName::ProfileName"} by the profile-aware creators on {@link
+     * Publisher} and {@link Subscriber}.
+     *
+     * @throws NullPointerException if {@code paths} is null
+     */
+    public void loadProfiles(List<String> paths) {
+        Objects.requireNonNull(paths, "paths");
+        byte[][] pathBytes = new byte[paths.size()][];
+        for (int i = 0; i < paths.size(); i++) {
+            pathBytes[i] = paths.get(i).getBytes(UTF8);
+        }
+        int rc = FfiAccess.loadProfiles(pathBytes, pathBytes.length);
+        ReturnCodes.check(rc);
     }
 }

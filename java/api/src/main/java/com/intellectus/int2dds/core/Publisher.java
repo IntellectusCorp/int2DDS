@@ -67,12 +67,24 @@ public final class Publisher extends NativeEntity {
 
     /** Creates a datawriter for {@code topic} with the core's default QoS. */
     public <T extends IDdsType> DataWriter<T> createDataWriter(Topic<T> topic) {
-        return new DataWriter<T>(this, topic, null);
+        // Cast disambiguates from the (Topic, String) profile-create constructor.
+        return new DataWriter<T>(this, topic, (DataWriterQos) null);
     }
 
     /** Creates a datawriter for {@code topic} with an explicit QoS. */
     public <T extends IDdsType> DataWriter<T> createDataWriter(Topic<T> topic, DataWriterQos qos) {
         return new DataWriter<T>(this, topic, Objects.requireNonNull(qos, "qos"));
+    }
+
+    /**
+     * Creates a datawriter for {@code topic} with QoS from the named profile
+     * at {@code profilePath} (a {@code "LibraryName::ProfileName"} path).
+     * The profile must already be loaded via {@link
+     * DomainParticipantFactory#loadProfiles}.
+     */
+    public <T extends IDdsType> DataWriter<T> createDataWriter(Topic<T> topic, String profilePath) {
+        return new DataWriter<T>(this, Objects.requireNonNull(topic, "topic"),
+                Objects.requireNonNull(profilePath, "profilePath"));
     }
 
     /**

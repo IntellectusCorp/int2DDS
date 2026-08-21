@@ -361,6 +361,15 @@ public final class FfiAccess {
     }
 
     /**
+     * Loads named QoS profiles (and any {@code <types>}) from {@code count}
+     * JSON files into the process-wide factory singleton. Returns the C ABI
+     * status code; no out-slot, nothing built here to free.
+     */
+    public static int loadProfiles(byte[][] paths, long count) {
+        return Ffi.int2dds_load_profiles(paths, count);
+    }
+
+    /**
      * Creates a participant. Returns the C ABI status code and, only on
      * success, writes the new handle to {@code handleOut[0]}; on failure
      * {@code handleOut} is left untouched.
@@ -745,6 +754,27 @@ public final class FfiAccess {
     /** Releases a datawriter. Returns the C ABI status code. */
     public static int deleteDataWriter(long writer) {
         return Ffi.int2dds_delete_datawriter(writer);
+    }
+
+    /**
+     * Creates a datawriter whose QoS comes from a loaded profile ({@code
+     * qosPath} is a {@code "LibraryName::ProfileName"} path). Same {@code
+     * (rc, long[] handleOut)} shape as {@link #createDataWriter}, and the
+     * resulting writer is a normal typed datawriter, released the same way
+     * ({@link #deleteDataWriter}). {@code listener} is {@code 0L} and {@code
+     * mask} is {@code 0} — no creation-time listener.
+     */
+    public static int createDataWriterWithProfile(long publisher, long topic, byte[] qosPath,
+            long listener, int mask, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_create_datawriter_with_profile(
+                publisher, topic, qosPath, listener, mask, directBufferAddress(slot));
+        // Same fence as createDataWriter.
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
     }
 
     /** The 16-byte entity GUID. {@code guidOut} must be a 16-byte array. */
@@ -2484,6 +2514,27 @@ public final class FfiAccess {
     /** Releases a datareader. Returns the C ABI status code. */
     public static int deleteDataReader(long reader) {
         return Ffi.int2dds_delete_datareader(reader);
+    }
+
+    /**
+     * Creates a datareader whose QoS comes from a loaded profile ({@code
+     * qosPath} is a {@code "LibraryName::ProfileName"} path). Same {@code
+     * (rc, long[] handleOut)} shape as {@link #createDataReader}, and the
+     * resulting reader is a normal typed datareader, released the same way
+     * ({@link #deleteDataReader}). {@code listener} is {@code 0L} and {@code
+     * mask} is {@code 0} — no creation-time listener.
+     */
+    public static int createDataReaderWithProfile(long subscriber, long topic, byte[] qosPath,
+            long listener, int mask, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_create_datareader_with_profile(
+                subscriber, topic, qosPath, listener, mask, directBufferAddress(slot));
+        // Same fence as createDataReader.
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
     }
 
     /**

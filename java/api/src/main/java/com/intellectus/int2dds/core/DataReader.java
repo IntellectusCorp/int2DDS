@@ -27,6 +27,7 @@ import com.intellectus.int2dds.status.SubscriptionMatchedStatus;
 import com.intellectus.int2dds.types.IDdsType;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.Charset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -48,6 +49,8 @@ import java.util.function.Supplier;
  * @param <T> the DDS data type this reader receives.
  */
 public final class DataReader<T extends IDdsType> extends NativeEntity {
+
+    private static final Charset UTF8 = Charset.forName("UTF-8");
 
     private static final boolean LITTLE_ENDIAN_HOST =
             ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN;
@@ -116,6 +119,27 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
         this.cft = cft;
         this.factory = Objects.requireNonNull(factory, "factory");
         this.xcdr2 = resolveXcdr2(qos);
+    }
+
+    /**
+     * Package-private profile-create path, reached only through {@link
+     * Subscriber#createDataReader(Topic, Supplier, String)}: a normal typed
+     * datareader whose QoS comes from the named profile at {@code
+     * profilePath} (a {@code "LibraryName::ProfileName"} path previously
+     * loaded via {@link DomainParticipantFactory#loadProfiles}), released the
+     * same way as the default-QoS path ({@code FfiAccess::deleteDataReader}).
+     * No {@code xcdr2} concern here the way {@link DataWriter}'s profile
+     * constructor has one: a reader decodes self-describing CDR.
+     */
+    DataReader(Subscriber subscriber, Topic<T> topic, Supplier<T> factory, String profilePath) {
+        super(Objects.requireNonNull(subscriber, "subscriber"),
+                createWithProfile(subscriber, Objects.requireNonNull(topic, "topic"),
+                        Objects.requireNonNull(profilePath, "profilePath")),
+                FfiAccess::deleteDataReader);
+        this.topic = topic;
+        this.cft = null;
+        this.factory = Objects.requireNonNull(factory, "factory");
+        this.xcdr2 = resolveXcdr2(null);
     }
 
     /** Same resolution as {@link DataWriter#resolveXcdr2}, for {@link #lookupInstance}. */
@@ -706,6 +730,20 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
         long[] handleOut = new long[1];
         int rc = FfiAccess.createDataReader(
                 subscriber.handle(), topic.handle(), qos, 0L, 0, handleOut);
+        NativeKeepAlive.keepAlive(subscriber);
+        NativeKeepAlive.keepAlive(topic);
+        ReturnCodes.check(rc);
+        return handleOut[0];
+    }
+
+    /**
+     * The profile-create path: {@code listener=0L, mask=0} (no creation-time
+     * listener), same keep-alive/check shape as {@link #createNative}.
+     */
+    private static long createWithProfile(Subscriber subscriber, Topic<?> topic, String profilePath) {
+        long[] handleOut = new long[1];
+        int rc = FfiAccess.createDataReaderWithProfile(subscriber.handle(), topic.handle(),
+                profilePath.getBytes(UTF8), 0L, 0, handleOut);
         NativeKeepAlive.keepAlive(subscriber);
         NativeKeepAlive.keepAlive(topic);
         ReturnCodes.check(rc);
