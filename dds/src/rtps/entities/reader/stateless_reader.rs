@@ -42,7 +42,10 @@ use crate::{
 use std::{
     any::Any,
     fmt::Debug,
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, Weak,
+    },
 };
 
 use super::{Reader, RemoteWriterInfo};
@@ -72,6 +75,9 @@ pub(crate) struct StatelessReader {
     subscription_matched_status: Arc<Mutex<SubscriptionMatchedStatus>>,
     requested_incompatible_qos_status: Arc<Mutex<RequestedIncompatibleQosStatus>>,
     requested_incompatible_type_status: Arc<Mutex<RequestedIncompatibleTypeStatus>>,
+    // Callback-producing accesses currently in flight against this reader. `remove_reader`
+    // drains this to zero before returning.
+    in_flight_callbacks: AtomicUsize,
 }
 
 impl StatelessReader {
@@ -117,6 +123,7 @@ impl StatelessReader {
             requested_incompatible_type_status: Arc::new(Mutex::new(
                 RequestedIncompatibleTypeStatus::default(),
             )),
+            in_flight_callbacks: AtomicUsize::new(0),
         }
     }
 
@@ -342,6 +349,18 @@ impl Endpoint for StatelessReader {
 }
 
 impl Reader for StatelessReader {
+    fn enter_callback(&self) {
+        self.in_flight_callbacks.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn exit_callback(&self) {
+        self.in_flight_callbacks.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    fn in_flight_callbacks(&self) -> usize {
+        self.in_flight_callbacks.load(Ordering::SeqCst)
+    }
+
     fn reader_cache(&self) -> Arc<Mutex<ReaderHistoryCache>> {
         Arc::clone(&self.reader_cache)
     }

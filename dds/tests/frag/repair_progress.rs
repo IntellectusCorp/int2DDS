@@ -16,9 +16,7 @@
 //! genuinely large receive buffer the sample may arrive intact and the test passes without
 //! testing anything.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use int2dds::{
     common::instance_handle::InstanceHandle,
     core::time::Duration,
