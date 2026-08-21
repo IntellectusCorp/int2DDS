@@ -9,8 +9,6 @@
 //!
 //! SUBSCRIPTION_MATCHED is used because it is driven by discovery rather than by sample delivery.
 
-mod common;
-
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -55,7 +53,7 @@ impl DataReaderListener for CountingListener {
 
 #[test]
 fn a_consumed_status_does_not_leave_the_condition_triggered() {
-    let domain_id = common::next_domain_id();
+    let domain_id = crate::common::next_domain_id();
     let factory = DomainParticipantFactory::get_instance();
     let participant = factory
         .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())

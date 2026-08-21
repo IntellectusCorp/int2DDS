@@ -29,9 +29,7 @@
 //! can only complete if the `ENTITYID_UNKNOWN` burst's fragments are already in that reader's
 //! own reassembly buffer. The byte-for-byte checks on both readers catch it either way.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use int2dds::{
     common::instance_handle::InstanceHandle,
     core::time::Duration,

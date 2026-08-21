@@ -11,9 +11,7 @@
 //! Bounded on a worker thread: if delivery stops, the reader never signals again and the
 //! assertion would otherwise wait forever.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use int2dds::{
     common::instance_handle::InstanceHandle,
     core::time::Duration,

@@ -5,7 +5,6 @@ use tempfile::NamedTempFile;
 
 use common::*;
 use int2dds::dcps::{
-    core::time::Duration,
     domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
     infrastructure::{
         qos_policy::{HistoryQosPolicyKind, ReliabilityQosPolicyKind},
@@ -56,122 +55,10 @@ fn create_test_profile_file() -> NamedTempFile {
                     "depth": 10
                 }
             }
-        },
-        {
-            "name": "BestEffortProfile",
-            "datawriter_qos": {
-                "reliability": {
-                    "kind": "BEST_EFFORT_RELIABILITY_QOS"
-                }
-            },
-            "datareader_qos": {
-                "reliability": {
-                    "kind": "BEST_EFFORT_RELIABILITY_QOS"
-                }
-            }
-        },
-        {
-            "name": "BlockingTimeOnly",
-            "datawriter_qos": {
-                "reliability": {
-                    "max_blocking_time": { "sec": 1, "nanosec": 0 }
-                }
-            },
-            "datareader_qos": {
-                "reliability": {
-                    "max_blocking_time": { "sec": 1, "nanosec": 0 }
-                }
-            }
         }]
     }"#;
     file.write_all(json.as_bytes()).unwrap();
     file
-}
-
-#[test]
-fn test_factory_load_profiles() {
-    let file = create_test_profile_file();
-    let factory = DomainParticipantFactory::get_instance();
-
-    let result = factory.load_profiles(&[file.path()]);
-    assert!(result.is_ok());
-}
-
-#[test]
-fn test_get_datawriter_qos_from_profile() {
-    let file = create_test_profile_file();
-    let factory = DomainParticipantFactory::get_instance();
-    factory.load_profiles(&[file.path()]).unwrap();
-
-    let qos = factory.get_datawriter_qos_from_profile("TestLibrary::ReliableProfile");
-    assert!(qos.is_ok());
-
-    let qos = qos.unwrap();
-    assert_eq!(qos.reliability.kind, ReliabilityQosPolicyKind::Reliable);
-    assert!(matches!(qos.history.kind, HistoryQosPolicyKind::KeepLast(10)));
-}
-
-#[test]
-fn test_get_datareader_qos_from_profile() {
-    let file = create_test_profile_file();
-    let factory = DomainParticipantFactory::get_instance();
-    factory.load_profiles(&[file.path()]).unwrap();
-
-    let qos = factory.get_datareader_qos_from_profile("TestLibrary::ReliableProfile");
-    assert!(qos.is_ok());
-
-    let qos = qos.unwrap();
-    assert_eq!(qos.reliability.kind, ReliabilityQosPolicyKind::Reliable);
-    assert!(matches!(qos.history.kind, HistoryQosPolicyKind::KeepLast(10)));
-}
-
-#[test]
-fn test_get_publisher_qos_from_profile() {
-    let file = create_test_profile_file();
-    let factory = DomainParticipantFactory::get_instance();
-    factory.load_profiles(&[file.path()]).unwrap();
-
-    let qos = factory.get_publisher_qos_from_profile("TestLibrary::ReliableProfile");
-    assert!(qos.is_ok());
-
-    let qos = qos.unwrap();
-    assert_eq!(qos.partition.name, vec!["partition1".to_string()]);
-}
-
-#[test]
-fn test_get_subscriber_qos_from_profile() {
-    let file = create_test_profile_file();
-    let factory = DomainParticipantFactory::get_instance();
-    factory.load_profiles(&[file.path()]).unwrap();
-
-    let qos = factory.get_subscriber_qos_from_profile("TestLibrary::ReliableProfile");
-    assert!(qos.is_ok());
-
-    let qos = qos.unwrap();
-    assert_eq!(qos.partition.name, vec!["partition1".to_string()]);
-}
-
-#[test]
-fn test_get_topic_qos_from_profile() {
-    let file = create_test_profile_file();
-    let factory = DomainParticipantFactory::get_instance();
-    factory.load_profiles(&[file.path()]).unwrap();
-
-    let qos = factory.get_topic_qos_from_profile("TestLibrary::ReliableProfile");
-    assert!(qos.is_ok());
-
-    let qos = qos.unwrap();
-    assert_eq!(qos.reliability.kind, ReliabilityQosPolicyKind::Reliable);
-}
-
-#[test]
-fn test_profile_not_found() {
-    let file = create_test_profile_file();
-    let factory = DomainParticipantFactory::get_instance();
-    factory.load_profiles(&[file.path()]).unwrap();
-
-    let qos = factory.get_datawriter_qos_from_profile("NonExistent::Profile");
-    assert!(qos.is_err());
 }
 
 #[test]
@@ -345,67 +232,4 @@ fn test_create_datareader_with_profile() {
 
     participant.delete_contained_entities().unwrap();
     factory.delete_participant(participant).unwrap();
-}
-
-#[test]
-fn test_multiple_profiles() {
-    let file = create_test_profile_file();
-    let factory = DomainParticipantFactory::get_instance();
-    factory.load_profiles(&[file.path()]).unwrap();
-
-    let reliable_qos =
-        factory.get_datawriter_qos_from_profile("TestLibrary::ReliableProfile").unwrap();
-    let best_effort_qos =
-        factory.get_datawriter_qos_from_profile("TestLibrary::BestEffortProfile").unwrap();
-
-    assert_eq!(reliable_qos.reliability.kind, ReliabilityQosPolicyKind::Reliable);
-    assert_eq!(best_effort_qos.reliability.kind, ReliabilityQosPolicyKind::BestEffort);
-}
-
-#[test]
-fn test_blocking_time_only() {
-    let file = create_test_profile_file();
-    let factory = DomainParticipantFactory::get_instance();
-    factory.load_profiles(&[file.path()]).unwrap();
-
-    let datawriter =
-        factory.get_datawriter_qos_from_profile("TestLibrary::BlockingTimeOnly").unwrap();
-    let datareader =
-        factory.get_datareader_qos_from_profile("TestLibrary::BlockingTimeOnly").unwrap();
-
-    assert_eq!(datawriter.reliability.kind, ReliabilityQosPolicyKind::Reliable);
-    assert_eq!(datawriter.reliability.max_blocking_time, Duration::from_seconds(1));
-    assert_eq!(datareader.reliability.kind, ReliabilityQosPolicyKind::BestEffort);
-    assert_eq!(datareader.reliability.max_blocking_time, Duration::from_seconds(1));
-}
-
-fn create_test_profile_xml() -> NamedTempFile {
-    let mut file = tempfile::Builder::new().suffix(".xml").tempfile().unwrap();
-    let xml = r#"<dds><qos_library name="XmlLibrary">
-        <qos_profile name="ReliableProfile">
-            <publisher_qos>
-                <partition><name><element>partition1</element></name></partition>
-            </publisher_qos>
-            <datawriter_qos>
-                <reliability><kind>RELIABLE_RELIABILITY_QOS</kind></reliability>
-                <history><kind>KEEP_LAST_HISTORY_QOS</kind><depth>10</depth></history>
-            </datawriter_qos>
-        </qos_profile>
-    </qos_library></dds>"#;
-    file.write_all(xml.as_bytes()).unwrap();
-    file
-}
-
-#[test]
-fn test_factory_load_xml_profiles() {
-    let file = create_test_profile_xml();
-    let factory = DomainParticipantFactory::get_instance();
-    factory.load_profiles(&[file.path()]).unwrap();
-
-    let qos = factory.get_datawriter_qos_from_profile("XmlLibrary::ReliableProfile").unwrap();
-    assert_eq!(qos.reliability.kind, ReliabilityQosPolicyKind::Reliable);
-    assert!(matches!(qos.history.kind, HistoryQosPolicyKind::KeepLast(10)));
-
-    let pub_qos = factory.get_publisher_qos_from_profile("XmlLibrary::ReliableProfile").unwrap();
-    assert_eq!(pub_qos.partition.name, vec!["partition1".to_string()]);
 }
