@@ -2200,6 +2200,24 @@ public final class FfiAccess {
         return rc;
     }
 
+    /**
+     * Reads a dynamic writer's current QoS into a freshly allocated native
+     * handle. Same shape as {@link #getWriterQos}: returns the C ABI status
+     * code and, only on success, writes the new QoS handle to {@code
+     * handleOut[0]}. The handle is the same {@code Int2DdsDataWriterQos}
+     * type the typed path returns, readable with {@link
+     * com.intellectus.int2dds.internal.QosMarshal#readWriterQos}.
+     */
+    public static int dynamicWriterGetQos(long writer, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_writer_get_qos(writer, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
     /** Reads the number of DataReaders matched to a dynamic writer, writing it to {@code out[0]} on success. */
     public static int dynamicWriterPublicationMatchedCount(long writer, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -2207,6 +2225,22 @@ public final class FfiAccess {
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             out[0] = slot.getInt(0); // native writes an i32 (4 bytes), not 8
+        }
+        return rc;
+    }
+
+    /**
+     * Reads a dynamic reader's current QoS into a freshly allocated native
+     * handle. Same shape as {@link #dynamicWriterGetQos}: the handle is the
+     * same {@code Int2DdsDataReaderQos} type the typed path returns, readable
+     * with {@link com.intellectus.int2dds.internal.QosMarshal#readReaderQos}.
+     */
+    public static int dynamicReaderGetQos(long reader, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_dynamic_reader_get_qos(reader, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
         }
         return rc;
     }

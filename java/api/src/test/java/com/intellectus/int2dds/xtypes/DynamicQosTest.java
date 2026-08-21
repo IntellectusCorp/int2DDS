@@ -161,4 +161,84 @@ class DynamicQosTest {
             readerParticipant.close();
         }
     }
+
+    /**
+     * {@link DynamicDataWriter#getQos} / {@link DynamicDataReader#getQos}
+     * read back the RELIABLE reliability the entities were created with,
+     * proving the dynamic-entity QoS story round-trips both ways (set at
+     * creation, read back after). No matching/pub-sub needed for this.
+     */
+    @Test
+    void getQosReturnsReliabilityFromCreation() {
+        DomainParticipant writerParticipant = new DomainParticipant(testDomain());
+        DomainParticipant readerParticipant = new DomainParticipant(testDomain());
+
+        XmlTypeRegistry writerRegistry = null;
+        XmlTypeRegistry readerRegistry = null;
+        DynamicTypeSupport writerSupport = null;
+        DynamicTypeSupport readerSupport = null;
+        DynamicTopic writerTopic = null;
+        DynamicTopic readerTopic = null;
+        Publisher publisher = null;
+        Subscriber subscriber = null;
+        DynamicDataWriter writer = null;
+        DynamicDataReader reader = null;
+        try {
+            writerRegistry = new XmlTypeRegistry();
+            writerRegistry.loadString(XML);
+            writerSupport = writerRegistry.getTypeSupport("Telemetry");
+
+            readerRegistry = new XmlTypeRegistry();
+            readerRegistry.loadString(XML);
+            readerSupport = readerRegistry.getTypeSupport("Telemetry");
+
+            writerTopic = writerParticipant.createDynamicTopic("TelemetryQosGetTopic", writerSupport);
+            publisher = writerParticipant.createPublisher();
+            DataWriterQos writerQos = new DataWriterQos();
+            writerQos.setReliability(new Reliability(ReliabilityKind.RELIABLE));
+            writer = publisher.createDynamicDataWriter(writerTopic, writerSupport, writerQos);
+
+            readerTopic = readerParticipant.createDynamicTopic("TelemetryQosGetTopic", readerSupport);
+            subscriber = readerParticipant.createSubscriber();
+            DataReaderQos readerQos = new DataReaderQos();
+            readerQos.setReliability(new Reliability(ReliabilityKind.RELIABLE));
+            reader = subscriber.createDynamicDataReader(readerTopic, readerSupport, readerQos);
+
+            assertEquals(ReliabilityKind.RELIABLE, writer.getQos().getReliability().getKind());
+            assertEquals(ReliabilityKind.RELIABLE, reader.getQos().getReliability().getKind());
+        } finally {
+            if (writer != null) {
+                writer.close();
+            }
+            if (reader != null) {
+                reader.close();
+            }
+            if (writerTopic != null) {
+                writerTopic.close();
+            }
+            if (readerTopic != null) {
+                readerTopic.close();
+            }
+            if (publisher != null) {
+                publisher.close();
+            }
+            if (subscriber != null) {
+                subscriber.close();
+            }
+            if (writerSupport != null) {
+                writerSupport.close();
+            }
+            if (readerSupport != null) {
+                readerSupport.close();
+            }
+            if (writerRegistry != null) {
+                writerRegistry.close();
+            }
+            if (readerRegistry != null) {
+                readerRegistry.close();
+            }
+            writerParticipant.close();
+            readerParticipant.close();
+        }
+    }
 }

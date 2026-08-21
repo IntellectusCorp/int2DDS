@@ -4,9 +4,11 @@ import com.intellectus.int2dds.conditions.StatusCondition;
 import com.intellectus.int2dds.internal.NativeCleaner;
 import com.intellectus.int2dds.internal.NativeHandle;
 import com.intellectus.int2dds.internal.NativeKeepAlive;
+import com.intellectus.int2dds.internal.QosMarshal;
 import com.intellectus.int2dds.internal.ReturnCodes;
 import com.intellectus.int2dds.internal.ffi.FfiAccess;
 import com.intellectus.int2dds.exceptions.DdsException;
+import com.intellectus.int2dds.qos.DataReaderQos;
 
 /**
  * Receives {@link DynamicData} samples from a {@link DynamicTopic}. Produced
@@ -72,6 +74,26 @@ public final class DynamicDataReader implements AutoCloseable {
         NativeKeepAlive.keepAlive(this);
         ReturnCodes.check(rc);
         return new StatusCondition(out[0]);
+    }
+
+    /**
+     * Reads this reader's current QoS off the native side — not the {@code
+     * DataReaderQos} it was constructed with, which this class does not
+     * retain. Policies with no native getter come back null; see {@link
+     * QosMarshal#readReaderQos}'s own doc for the full list.
+     */
+    public DataReaderQos getQos() {
+        long h = handle();
+        long[] qosOut = new long[1];
+        int rc = FfiAccess.dynamicReaderGetQos(h, qosOut);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        long qosHandle = qosOut[0];
+        try {
+            return QosMarshal.readReaderQos(qosHandle);
+        } finally {
+            FfiAccess.destroyDataReaderQos(qosHandle);
+        }
     }
 
     /** The number of DataWriters currently matched to this reader. */

@@ -3,8 +3,10 @@ package com.intellectus.int2dds.xtypes;
 import com.intellectus.int2dds.internal.NativeCleaner;
 import com.intellectus.int2dds.internal.NativeHandle;
 import com.intellectus.int2dds.internal.NativeKeepAlive;
+import com.intellectus.int2dds.internal.QosMarshal;
 import com.intellectus.int2dds.internal.ReturnCodes;
 import com.intellectus.int2dds.internal.ffi.FfiAccess;
+import com.intellectus.int2dds.qos.DataWriterQos;
 import java.util.Objects;
 
 /**
@@ -55,6 +57,26 @@ public final class DynamicDataWriter implements AutoCloseable {
         NativeKeepAlive.keepAlive(this);
         NativeKeepAlive.keepAlive(d);
         ReturnCodes.check(rc);
+    }
+
+    /**
+     * Reads this writer's current QoS off the native side — not the {@code
+     * DataWriterQos} it was constructed with, which this class does not
+     * retain. Policies with no native getter come back null; see {@link
+     * QosMarshal#readWriterQos}'s own doc for the full list.
+     */
+    public DataWriterQos getQos() {
+        long h = handle();
+        long[] qosOut = new long[1];
+        int rc = FfiAccess.dynamicWriterGetQos(h, qosOut);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        long qosHandle = qosOut[0];
+        try {
+            return QosMarshal.readWriterQos(qosHandle);
+        } finally {
+            FfiAccess.destroyDataWriterQos(qosHandle);
+        }
     }
 
     /** The number of DataReaders currently matched to this writer. */
