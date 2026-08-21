@@ -167,6 +167,7 @@ pub fn derive_struct_impl(
         crate_path,
         type_config.extensibility,
         type_config.type_name.as_deref(),
+        !type_config.skip_field_accessor,
         &gc,
     );
 
@@ -832,12 +833,25 @@ fn generate_unified_type_support_impl(
     crate_path: &proc_macro2::TokenStream,
     extensibility: Option<ExtensibilityKind>,
     type_name_override: Option<&str>,
+    has_field_accessor: bool,
     gc: &GenCtx,
 ) -> proc_macro2::TokenStream {
     let extensibility_tokens = quote_extensibility_tokens(
         extensibility.unwrap_or(ExtensibilityKind::Appendable),
         crate_path,
     );
+
+    // With `skip_field_accessor` the FieldAccessor lives on a user-written type,
+    // not on the TypeSupport struct, so the default (no metadata) stays.
+    let filter_has_field_impl = if has_field_accessor {
+        quote! {
+            fn filter_has_field(&self, field_path: &str) -> Option<bool> {
+                Some(#crate_path::dcps::topic::type_support::FieldAccessor::has_field(self, field_path))
+            }
+        }
+    } else {
+        quote! {}
+    };
 
     let serialize_impl = quote_serialize_impl(name, crate_path, &extensibility_tokens, gc);
     let serialize_into_impl =
@@ -896,6 +910,8 @@ fn generate_unified_type_support_impl(
     quote! {
         impl #impl_generics #crate_path::dcps::topic::type_support::TypeSupport for #full_ts_type #where_clause {
             #get_type_name_impl
+
+            #filter_has_field_impl
 
             fn type_id(&self) -> std::any::TypeId {
                 std::any::TypeId::of::<#full_type>()
@@ -986,6 +1002,32 @@ fn quote_field_to_parameter_conversion(
                 Ok(Parameter::CharValue(*v))
             } else if let Some(v) = field_value.downcast_ref::<String>() {
                 Ok(Parameter::String(v.clone()))
+            } else if let Some(v) = field_value.downcast_ref::<Option<u8>>() {
+                Ok(v.map_or(Parameter::Unset, |v| Parameter::IntegerValue(v as i128)))
+            } else if let Some(v) = field_value.downcast_ref::<Option<u16>>() {
+                Ok(v.map_or(Parameter::Unset, |v| Parameter::IntegerValue(v as i128)))
+            } else if let Some(v) = field_value.downcast_ref::<Option<u32>>() {
+                Ok(v.map_or(Parameter::Unset, |v| Parameter::IntegerValue(v as i128)))
+            } else if let Some(v) = field_value.downcast_ref::<Option<u64>>() {
+                Ok(v.map_or(Parameter::Unset, |v| Parameter::IntegerValue(v as i128)))
+            } else if let Some(v) = field_value.downcast_ref::<Option<i8>>() {
+                Ok(v.map_or(Parameter::Unset, |v| Parameter::IntegerValue(v as i128)))
+            } else if let Some(v) = field_value.downcast_ref::<Option<i16>>() {
+                Ok(v.map_or(Parameter::Unset, |v| Parameter::IntegerValue(v as i128)))
+            } else if let Some(v) = field_value.downcast_ref::<Option<i32>>() {
+                Ok(v.map_or(Parameter::Unset, |v| Parameter::IntegerValue(v as i128)))
+            } else if let Some(v) = field_value.downcast_ref::<Option<i64>>() {
+                Ok(v.map_or(Parameter::Unset, |v| Parameter::IntegerValue(v as i128)))
+            } else if let Some(v) = field_value.downcast_ref::<Option<f32>>() {
+                Ok(v.map_or(Parameter::Unset, |v| Parameter::FloatValue(v as f64)))
+            } else if let Some(v) = field_value.downcast_ref::<Option<f64>>() {
+                Ok(v.map_or(Parameter::Unset, Parameter::FloatValue))
+            } else if let Some(v) = field_value.downcast_ref::<Option<bool>>() {
+                Ok(v.map_or(Parameter::Unset, |v| Parameter::IntegerValue(if v { 1 } else { 0 })))
+            } else if let Some(v) = field_value.downcast_ref::<Option<char>>() {
+                Ok(v.map_or(Parameter::Unset, Parameter::CharValue))
+            } else if let Some(v) = field_value.downcast_ref::<Option<String>>() {
+                Ok(v.as_ref().map_or(Parameter::Unset, |v| Parameter::String(v.clone())))
             } else if field_value.downcast_ref::<Vec<u8>>().is_some() {
                 Err(#crate_path::dcps::core::error::DdsError::Error(
                     "Vec<u8> field type not supported in SQL queries".to_string()

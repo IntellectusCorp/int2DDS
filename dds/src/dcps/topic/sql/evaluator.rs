@@ -106,6 +106,9 @@ impl Predicate {
             }
             Predicate::Between { field, negated, range } => {
                 let field_value = data.get_field_value(field)?;
+                if matches!(field_value, Parameter::Unset) {
+                    return Ok(false);
+                }
                 if *negated {
                     match (&field_value, &range.start, &range.end) {
                         (
@@ -281,6 +284,11 @@ impl Predicate {
 
 impl RelOp {
     fn compare_parameters(&self, left: &Parameter, right: &Parameter) -> DdsResult<bool> {
+        // RTI parity: any comparison involving an unset member is false, so the
+        // other branch of an OR still gets evaluated.
+        if matches!(left, Parameter::Unset) || matches!(right, Parameter::Unset) {
+            return Ok(false);
+        }
         match self {
             RelOp::Equal => match (left, right) {
                 (Parameter::IntegerValue(left), Parameter::IntegerValue(right)) => {

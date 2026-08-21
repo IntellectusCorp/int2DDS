@@ -227,8 +227,14 @@ pub enum Parameter {
     CharValue(char),
     FloatValue(f64),
     String(String),
-    EnumeratedValue { type_name: Option<String>, value: String },
+    EnumeratedValue {
+        type_name: Option<String>,
+        value: String,
+    },
     Parameter(usize), // %0 = Parameter(0), %1 = Parameter(1)
+    /// A member with no value in this sample (unset optional, or a member the
+    /// writer's type does not have). Any comparison involving it is false.
+    Unset,
 }
 
 impl Expression {

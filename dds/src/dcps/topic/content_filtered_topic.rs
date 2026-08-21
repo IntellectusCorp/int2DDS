@@ -97,6 +97,9 @@ impl ContentFilteredTopic {
     ) -> DdsResult<Self> {
         let expression = parse_expression(filter_expression, false)?;
         expression.validate_expression_parameters(&expression_parameters)?;
+        if let Some(ts) = participant.find_typesupport(related_topic.get_type_name()) {
+            expression.validate_fields(&|path| ts.filter_has_field(path))?;
+        }
 
         let filter_expression = filter_expression.to_owned();
         let mut cft = Self {
@@ -171,6 +174,11 @@ impl ContentFilteredTopic {
         self.is_deleted()?;
         let expression = parse_expression(filter_expression, false)?;
         expression.validate_expression_parameters(&expression_parameters)?;
+        if let Some(participant) = self.participant.as_ref().and_then(|weak| weak.upgrade()) {
+            if let Some(ts) = participant.find_typesupport(&self.type_name) {
+                expression.validate_fields(&|path| ts.filter_has_field(path))?;
+            }
+        }
 
         match self.parsed_expression.lock() {
             Ok(mut parsed_expression) => {
@@ -304,7 +312,7 @@ mod tests {
         let result = ContentFilteredTopic::new(
             "content_test",
             &topic,
-            "height > 100",
+            "score > 100",
             vec![],
             handle,
             &Arc::new(domain_participant.clone()),
@@ -459,7 +467,7 @@ mod tests {
         let result = ContentFilteredTopic::new(
             "content_test",
             &topic,
-            "(height > %0 AND weight < %1) OR (speed BETWEEN %2 AND %3)",
+            "(height > %0 AND weight < %1) OR (score BETWEEN %2 AND %3)",
             vec!["100".to_string(), "200".to_string(), "50".to_string(), "100".to_string()],
             handle,
             &Arc::new(domain_participant.clone()),
@@ -470,7 +478,7 @@ mod tests {
         let result = ContentFilteredTopic::new(
             "content_test",
             &topic,
-            "(height > %0 AND weight < %1) OR (speed BETWEEN %2 AND %3)",
+            "(height > %0 AND weight < %1) OR (score BETWEEN %2 AND %3)",
             vec!["100".to_string(), "200".to_string(), "50".to_string()], // Missing %3
             handle,
             &Arc::new(domain_participant.clone()),

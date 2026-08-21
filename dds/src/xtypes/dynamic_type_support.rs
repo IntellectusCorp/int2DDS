@@ -306,6 +306,10 @@ impl TypeSupport for DynamicTypeSupport {
         self.dynamic_type.extensibility()
     }
 
+    fn filter_has_field(&self, field_path: &str) -> Option<bool> {
+        Some(FieldAccessor::has_field(self, field_path))
+    }
+
     fn get_type_identifier(&self) -> Option<TypeIdentifier> {
         Some(self.type_identifier.clone())
     }
