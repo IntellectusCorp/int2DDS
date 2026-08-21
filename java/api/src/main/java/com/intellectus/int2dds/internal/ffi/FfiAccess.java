@@ -2774,6 +2774,28 @@ public final class FfiAccess {
                 reader, buffer, bufferCapacity, actualSizeOut, infoOut);
     }
 
+    /**
+     * take with full SampleInfo, filtered by sample/view/instance state masks
+     * -- unlike {@link #datareaderTakeSerializedWInfo}, which only ever
+     * matches a NOT_READ sample, this can retrieve a sample in any state the
+     * masks admit (e.g. an already-READ one via {@code SampleState.READ}).
+     * {@code NO_DATA} when nothing matches the masks.
+     */
+    public static int datareaderTakeSerializedWStates(long reader, long buffer, long bufferCapacity,
+            long actualSizeOut, long infoOut, int sampleStateMask, int viewStateMask,
+            int instanceStateMask) {
+        return Ffi.int2dds_datareader_take_serialized_w_states(reader, buffer, bufferCapacity,
+                actualSizeOut, infoOut, sampleStateMask, viewStateMask, instanceStateMask);
+    }
+
+    /** read with full SampleInfo, filtered by state masks. Same signature as take; does not remove. */
+    public static int datareaderReadSerializedWStates(long reader, long buffer, long bufferCapacity,
+            long actualSizeOut, long infoOut, int sampleStateMask, int viewStateMask,
+            int instanceStateMask) {
+        return Ffi.int2dds_datareader_read_serialized_w_states(reader, buffer, bufferCapacity,
+                actualSizeOut, infoOut, sampleStateMask, viewStateMask, instanceStateMask);
+    }
+
     /** Creates a guard condition, writing its handle to {@code handleOut[0]} on success. */
     public static int guardConditionNew(long[] handleOut) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());

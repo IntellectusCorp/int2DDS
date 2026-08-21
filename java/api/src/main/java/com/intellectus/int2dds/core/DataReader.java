@@ -716,6 +716,72 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
         }
     }
 
+    /**
+     * State-filtered counterpart of {@link #takeSerialized()}: takes (removes)
+     * the next sample matching {@code sampleStateMask}/{@code
+     * viewStateMask}/{@code instanceStateMask} as its raw CDR bytes plus its
+     * {@link SampleInfo}. Masks are a bitwise-OR of the constants in {@link
+     * com.intellectus.int2dds.conditions.SampleState}, {@link
+     * com.intellectus.int2dds.conditions.ViewState} and {@link
+     * com.intellectus.int2dds.conditions.InstanceState} (e.g. {@code
+     * SampleState.ANY, ViewState.ANY, InstanceState.ANY} for "any state").
+     * Unlike the no-arg {@link #takeSerialized()} (NOT_READ-only), this can
+     * retrieve an already-READ sample via {@code SampleState.READ}. Returns
+     * {@code null} if nothing in the cache matches the masks.
+     */
+    public SerializedSample takeSerialized(int sampleStateMask, int viewStateMask, int instanceStateMask) {
+        return nextSerializedWStates(true, sampleStateMask, viewStateMask, instanceStateMask);
+    }
+
+    /**
+     * Non-removing counterpart of {@link #takeSerialized(int, int, int)}.
+     * Same mask semantics; unlike the no-arg {@link #readSerialized()}
+     * (NOT_READ-only), this can retrieve an already-READ sample via {@code
+     * SampleState.READ}.
+     */
+    public SerializedSample readSerialized(int sampleStateMask, int viewStateMask, int instanceStateMask) {
+        return nextSerializedWStates(false, sampleStateMask, viewStateMask, instanceStateMask);
+    }
+
+    private SerializedSample nextSerializedWStates(
+            boolean take, int sampleStateMask, int viewStateMask, int instanceStateMask) {
+        long h = handle();
+        while (true) {
+            int rc = take
+                    ? FfiAccess.datareaderTakeSerializedWStates(h, addr(payload), payload.capacity(),
+                            addr(sizeSlot), addr(infoSlot), sampleStateMask, viewStateMask, instanceStateMask)
+                    : FfiAccess.datareaderReadSerializedWStates(h, addr(payload), payload.capacity(),
+                            addr(sizeSlot), addr(infoSlot), sampleStateMask, viewStateMask, instanceStateMask);
+            // handle() and the three buffer addresses were consumed by the
+            // native call above; keep them all reachable across it -- same
+            // reasoning as next()'s identical fence.
+            NativeKeepAlive.keepAlive(this);
+            NativeKeepAlive.keepAlive(payload);
+            NativeKeepAlive.keepAlive(sizeSlot);
+            NativeKeepAlive.keepAlive(infoSlot);
+            if (rc == DdsException.RET_BUFFER_TOO_SMALL) {
+                growPayload(sizeSlot.getLong(0));
+                continue;
+            }
+            if (!ReturnCodes.checkOrNoData(rc)) {
+                return null;   // NO_DATA: nothing matches the state masks.
+            }
+            SampleInfo info = SampleInfo.decode(infoSlot);
+            int n = (int) sizeSlot.getLong(0);
+            byte[] b;
+            if (info.validData()) {
+                ((java.nio.Buffer) payload).position(0);
+                ((java.nio.Buffer) payload).limit(n);
+                b = new byte[n];
+                payload.get(b);
+                ((java.nio.Buffer) payload).clear();
+            } else {
+                b = new byte[0];
+            }
+            return new SerializedSample(b, info);
+        }
+    }
+
     private Sample<T> next(boolean take) {
         long h = handle();
         // The core removes the sample only when it fits, so on BUFFER_TOO_SMALL
