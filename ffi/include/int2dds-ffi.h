@@ -3451,6 +3451,17 @@ Int2DdsRet int2dds_datareader_get_statuscondition(const struct Int2DdsDataReader
                                                   struct Int2DdsStatusCondition **condition_out);
 
 /**
+ * Get the StatusCondition from a dynamic DataReader.
+ *
+ * # Safety
+ * - `reader` must be a valid handle from `int2dds_create_datareader_dynamic`
+ * - `condition_out` must be a valid pointer to a null pointer
+ * - The returned condition must be freed with `int2dds_statuscondition_delete`
+ */
+Int2DdsRet int2dds_dynamic_reader_get_statuscondition(const struct Int2DdsDynamicDataReader *reader,
+                                                      struct Int2DdsStatusCondition **condition_out);
+
+/**
  * Get the StatusCondition from a DataWriter
  *
  * # Safety

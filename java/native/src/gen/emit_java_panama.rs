@@ -540,7 +540,7 @@ mod tests {
         let fns = crate::gen::parse::parse_ffi_dir(std::path::Path::new("../../ffi/src")).unwrap();
         let out = emit_java_panama(&fns);
         let handles = out.matches("private static final MethodHandle MH_").count();
-        assert_eq!(handles, 452, "one MethodHandle per generatable function");
+        assert_eq!(handles, 453, "one MethodHandle per generatable function");
         assert!(
             out.contains("static long directBufferAddress(java.nio.ByteBuffer buf) {"),
             "{out}"

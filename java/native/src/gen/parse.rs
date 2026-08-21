@@ -4,7 +4,7 @@
 //! types, which the type mapper needs to distinguish `*const c_char` from
 //! other pointers.
 //!
-//! `syn` does not expand macros, but 59 of the 453 exported functions are
+//! `syn` does not expand macros, but 59 of the 454 exported functions are
 //! produced by five `macro_rules!` macros in `dynamic.rs` and
 //! `dynamic_value.rs`. Skipping them would drop the whole dynamic-data API
 //! from the Java binding, so this module expands those invocations itself.
@@ -323,12 +323,11 @@ mod tests {
         let fns = parse_ffi_dir(ffi_dir()).expect("parse must succeed");
         // Ground truth is the dynamic symbol table of the built cdylib:
         //   nm -D --defined-only target/release/libint2dds_ffi.so | grep -c ' T int2dds_'
-        // reports 453 after the develop merge that dropped the ignored key/key_len
-        // parameters from the serialized-write functions and added nine functions
-        // (data-representation, QoS lifespan references, filtered discovery
-        // snapshots, builtin-topic-data sequence accessors). This assertion is
-        // intentionally exact so an FFI change forces a deliberate update here.
-        assert_eq!(fns.len(), 453, "exported FFI function count changed");
+        // reports 454 after adding int2dds_dynamic_reader_get_statuscondition
+        // (dynamic-reader StatusCondition access, mirroring the typed reader).
+        // This assertion is intentionally exact so an FFI change forces a
+        // deliberate update here.
+        assert_eq!(fns.len(), 454, "exported FFI function count changed");
     }
 
     #[test]

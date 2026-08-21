@@ -345,12 +345,12 @@ mod tests {
             vec!["int2dds_participant_qos_get_properties_with_prefix"],
             "the set of hand-written functions changed"
         );
-        assert_eq!(fns.iter().filter(|f| is_generatable(f)).count(), 452);
+        assert_eq!(fns.iter().filter(|f| is_generatable(f)).count(), 453);
     }
 
     #[test]
     fn every_type_in_the_real_ffi_surface_is_accounted_for() {
-        // Totality check: the only type in the whole 453-function surface that
+        // Totality check: the only type in the whole 454-function surface that
         // map_type refuses is the C callback. If a future FFI change introduces
         // another unmapped type this names it, rather than silently shrinking
         // the generated binding.

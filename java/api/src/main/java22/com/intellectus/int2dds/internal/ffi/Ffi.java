@@ -2375,6 +2375,16 @@ public final class Ffi {
         }
     }
 
+    private static final MethodHandle MH_int2dds_dynamic_reader_get_statuscondition = dc("int2dds_dynamic_reader_get_statuscondition", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+
+    static int int2dds_dynamic_reader_get_statuscondition(long reader, long condition_out) {
+        try {
+            return (int) MH_int2dds_dynamic_reader_get_statuscondition.invokeExact(reader, condition_out);
+        } catch (Throwable __ffi_thrown) {
+            throw new AssertionError("FFM downcall failed: int2dds_dynamic_reader_get_statuscondition", __ffi_thrown);
+        }
+    }
+
     private static final MethodHandle MH_int2dds_dynamic_reader_subscription_matched_count = dc("int2dds_dynamic_reader_subscription_matched_count", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     static int int2dds_dynamic_reader_subscription_matched_count(long reader, long out) {

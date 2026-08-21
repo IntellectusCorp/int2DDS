@@ -4196,6 +4196,24 @@ pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1dy
 }
 
 #[no_mangle]
+pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1dynamic_1reader_1get_1statuscondition<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    reader: jlong,
+    condition_out: jlong,
+) -> jint {
+    let __ret = unsafe {
+        int2dds_ffi::status_condition::int2dds_dynamic_reader_get_statuscondition(
+            reader as usize as *const _,
+            condition_out as usize as *mut _,
+        )
+    };
+    __ret as _
+}
+
+#[no_mangle]
 pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1dynamic_1reader_1subscription_1matched_1count<
     'local,
 >(

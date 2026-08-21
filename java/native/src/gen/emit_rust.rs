@@ -381,11 +381,11 @@ mod tests {
 
     #[test]
     fn the_whole_real_surface_emits_without_panicking() {
-        // Every one of the 452 generatable functions must render; a panic here
+        // Every one of the 453 generatable functions must render; a panic here
         // means map_type and the emitter disagree about some type.
         let fns = crate::gen::parse::parse_ffi_dir(std::path::Path::new("../../ffi/src")).unwrap();
         let out = emit_rust(&fns);
         let emitted = out.matches("#[no_mangle]").count();
-        assert_eq!(emitted, 452, "one forwarder per generatable function");
+        assert_eq!(emitted, 453, "one forwarder per generatable function");
     }
 }

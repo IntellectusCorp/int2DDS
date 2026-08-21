@@ -230,6 +230,7 @@ public final class Ffi {
     static native int int2dds_dynamic_data_set_value(long data, byte[] field, long value);
     static native void int2dds_dynamic_reader_destroy(long r);
     static native int int2dds_dynamic_reader_get_qos(long reader, long qos_out);
+    static native int int2dds_dynamic_reader_get_statuscondition(long reader, long condition_out);
     static native int int2dds_dynamic_reader_subscription_matched_count(long reader, long out);
     static native int int2dds_dynamic_reader_take(long reader, long out_data, long out_info);
     static native int int2dds_dynamic_sample_get_bool(long bytes, long len, long type_obj, byte[] field_name, long out);
