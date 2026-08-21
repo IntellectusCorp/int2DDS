@@ -163,7 +163,7 @@ macro_rules! impl_dds_entity_impl {
             $($where_clause)*
         {
             fn get_status_changes(&self) -> DdsResult<StatusMask> {
-                self.lifecycle.is_deleted()?;
+                let _operation = self.lifecycle.begin_operation()?;
 
                 // Read the changed-status mask under the lock without materializing a clone.
                 let status_condition = self
@@ -194,7 +194,7 @@ macro_rules! impl_dds_entity_impl {
             }
 
             fn get_instance_handle(&self) -> DdsResult<InstanceHandle> {
-                self.lifecycle.is_deleted()?;
+                let _operation = self.lifecycle.begin_operation()?;
                 Ok(InstanceHandle::from_guid(&self.guid))
             }
         }
@@ -206,7 +206,7 @@ macro_rules! impl_dds_entity_impl {
             type Qos = $qos_type;
 
             fn get_statuscondition(&self) -> DdsResult<StatusCondition<Self::Qos>> {
-                self.lifecycle.is_deleted()?;
+                let _operation = self.lifecycle.begin_operation()?;
                 let status_condition =
                     self.status_condition.lock().map_err(|e| DdsError::Error(e.to_string()))?;
                 Ok(status_condition.clone())
@@ -216,7 +216,7 @@ macro_rules! impl_dds_entity_impl {
                 if self.is_builtin {
                     return Err(DdsError::PreconditionNotMet);
                 }
-                self.lifecycle.is_deleted()?;
+                let _operation = self.lifecycle.begin_operation()?;
                 qos.check_unsupported_policies()?;
                 qos.is_consistent()?;
 
@@ -236,7 +236,7 @@ macro_rules! impl_dds_entity_impl {
             }
 
             fn get_qos(&self) -> DdsResult<Self::Qos> {
-                self.lifecycle.is_deleted()?;
+                let _operation = self.lifecycle.begin_operation()?;
                 Ok((**self.qos.load()).clone())
             }
 

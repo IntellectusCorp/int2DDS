@@ -205,7 +205,7 @@ impl Topic {
     }
 
     pub fn get_inconsistent_topic_status(&self) -> DdsResult<InconsistentTopicStatus> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         // Topic, DomainParticipant StatusCondition reset
         self.set_communication_status(&StatusKind::INCONSISTENT_TOPIC, false)?;
@@ -220,7 +220,7 @@ impl Topic {
         listener: Option<Arc<dyn TopicListener>>,
         mask: StatusMask,
     ) -> DdsResult<()> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         {
             match self.listener.write() {
                 Ok(mut guard) => {
@@ -242,7 +242,7 @@ impl Topic {
 
     // For Entity
     pub fn get_listener(&self) -> DdsResult<Option<Arc<dyn TopicListener>>> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         match self.listener.read() {
             Ok(guard) => Ok(guard.clone()),
             Err(e) => Err(DdsError::Error(e.to_string())),
@@ -250,7 +250,6 @@ impl Topic {
     }
 
     pub(crate) fn is_enabled(&self) -> DdsResult<()> {
-        self.is_deleted()?;
         if self.enabled.load(Ordering::SeqCst) {
             Ok(())
         } else {
@@ -271,10 +270,6 @@ impl Topic {
         }
 
         self.lifecycle.mark_deleted_and_await_operation_completion();
-    }
-
-    fn is_deleted(&self) -> DdsResult<()> {
-        self.lifecycle.is_deleted()
     }
 
     fn take_inconsistent_topic_status(&self) -> DdsResult<InconsistentTopicStatus> {

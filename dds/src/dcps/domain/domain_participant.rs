@@ -606,7 +606,6 @@ impl DomainParticipant {
     }
 
     pub(crate) fn has_active_entities(&self) -> DdsResult<bool> {
-        self.is_deleted()?;
         {
             // Check non-builtin publishers
             match self.get_publishers() {
@@ -787,7 +786,7 @@ impl DomainParticipant {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         // Resolution chain for QosKind::Default: registered default → configured
         // default profile → spec default. QosKind::Specific is used as-is.
@@ -872,7 +871,7 @@ impl DomainParticipant {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         match self.try_delete_publisher(&mut publisher) {
             Ok(()) => Ok(()),
@@ -1005,7 +1004,7 @@ impl DomainParticipant {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         let qos = match qos.into() {
             QosKind::Specific(q) => q,
@@ -1088,7 +1087,7 @@ impl DomainParticipant {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         match self.try_delete_subscriber(&mut subscriber) {
             Ok(()) => Ok(()),
@@ -1108,8 +1107,6 @@ impl DomainParticipant {
     }
 
     fn try_delete_subscriber(&self, subscriber: &mut Subscriber) -> DdsResult<()> {
-        self.is_deleted()?;
-
         {
             let mut orphaned = self.orphaned_entities.lock().unwrap();
             orphaned.remove_subscriber(subscriber)
@@ -1200,7 +1197,7 @@ impl DomainParticipant {
             Built-in Topics are used to convey information about other DomainParticipant, Topic, DataReader, and DataWriter objects.
             Descriptions of these built-in objects are covered in Section 2.2.5, Built-in Topics.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         self.builtin_subscriber
             .lock()
             .map_err(|e| DdsError::Error(e.to_string()))?
@@ -1233,7 +1230,7 @@ impl DomainParticipant {
             If the operation fails to find a TopicDescription, a platform-defined .nil. value is returned.
         */
 
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         match self.find_topic_description_by_name(topic_name) {
             Ok(Some(topic)) => Ok(Some(topic)),
             Ok(None) => Ok(None),
@@ -1251,7 +1248,7 @@ impl DomainParticipant {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         // let multi_topic = MultiTopic::new(
         //     type_name,
         //     topic_name,
@@ -1275,7 +1272,7 @@ impl DomainParticipant {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         Err(DdsError::Unsupported)
     }
 
@@ -1286,7 +1283,7 @@ impl DomainParticipant {
         filter_expression: &str,
         expression_parameters: Vec<String>,
     ) -> DdsResult<ContentFilteredTopic> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         let topic_arc = self.find_internal_topic(related_topic)?;
 
@@ -1341,7 +1338,7 @@ impl DomainParticipant {
         &self,
         mut content_filtered_topic: ContentFilteredTopic,
     ) -> DdsResult<()> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         match self.try_delete_contentfilteredtopic(&mut content_filtered_topic) {
             Ok(()) => Ok(()),
@@ -1479,6 +1476,7 @@ impl DomainParticipant {
 
             For details, see Section 2.2.3.11 LIVELINESS.
         */
+        let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
 
         if !self.has_manual_by_participant_writers()? {
@@ -1508,7 +1506,7 @@ impl DomainParticipant {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         {
             match self.get_publishers() {
                 Ok(publishers) => {
@@ -1653,7 +1651,7 @@ impl DomainParticipant {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         let qos = self.resolve_topic_qos(qos.into());
 
@@ -1834,7 +1832,7 @@ impl DomainParticipant {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         match self.try_delete_topic(&mut topic) {
             Ok(()) => Ok(()),
@@ -1963,7 +1961,7 @@ impl DomainParticipant {
            Regardless of whether the middleware provides Topic propagation, the delete_topic operation only deletes the local proxy object.
            If the operation reaches a timeout, it returns a platform-defined .nil. value.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         if let Ok(Some(topic)) = self.find_topic_by_name(topic_name) {
             return Ok((*topic).clone());
@@ -2044,7 +2042,7 @@ impl DomainParticipant {
             If the infrastructure does not maintain connectivity information locally
         */
         // TODO: Filter out participants ignored via ignore_participant operation
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         let rtps_participant = self.get_rtps_participant()?;
         let proxy_datas = rtps_participant.remote_participant_proxy_datas();
         let result = match proxy_datas.lock() {
@@ -2074,7 +2072,7 @@ impl DomainParticipant {
             If the infrastructure does not maintain the information needed to fill participant_data,
         */
         // TODO: Filter out participants ignored via ignore_participant operation
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         let participant_guid = participant_handle.to_guid();
         let rtps_participant = self.get_rtps_participant()?;
         let proxy_datas = rtps_participant.remote_participant_proxy_datas();
@@ -2087,7 +2085,7 @@ impl DomainParticipant {
     }
 
     pub fn get_discovered_publications(&self) -> DdsResult<Vec<PublicationBuiltinTopicData>> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         let rtps_participant = self.get_rtps_participant()?;
         let remote_publications = rtps_participant.remote_publications();
         let mut result = Vec::new();
@@ -2098,7 +2096,7 @@ impl DomainParticipant {
     }
 
     pub fn get_discovered_subscriptions(&self) -> DdsResult<Vec<SubscriptionBuiltinTopicData>> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         let rtps_participant = self.get_rtps_participant()?;
         let remote_subscriptions = rtps_participant.remote_subscriptions();
         let mut result = Vec::new();
@@ -2114,7 +2112,7 @@ impl DomainParticipant {
             Among the Topics discovered in the domain,
             retrieves a list of Topics that the application has not specified to "ignore" through the ignore_topic operation.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         Err(DdsError::Unsupported)
     }
 
@@ -2131,12 +2129,12 @@ impl DomainParticipant {
             If the infrastructure does not maintain the information needed to fill topic_data, this operation may fail and return UNSUPPORTED.
             This operation may also fail if the infrastructure does not maintain connectivity information locally, in which case it returns UNSUPPORTED.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         Err(DdsError::Unsupported)
     }
 
     pub fn contains_entity(&self, handle: InstanceHandle) -> DdsResult<bool> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         match self.get_publishers_by_handle() {
             Ok(publishers_by_handle) => {
@@ -2186,7 +2184,7 @@ impl DomainParticipant {
     }
 
     pub fn get_current_time(&self) -> DdsResult<Time> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         let now_system_time = SystemTime::now();
         match now_system_time.duration_since(UNIX_EPOCH) {
@@ -2201,7 +2199,7 @@ impl DomainParticipant {
         &self,
         qos: impl Into<QosKind<PublisherQos>>,
     ) -> DdsResult<()> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         match qos.into() {
             QosKind::Default => self.reset_default_publisher_qos(),
@@ -2229,7 +2227,7 @@ impl DomainParticipant {
     }
 
     pub fn get_default_publisher_qos(&self) -> DdsResult<PublisherQos> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         Ok(self
             .default_publisher_qos
@@ -2249,7 +2247,7 @@ impl DomainParticipant {
     ///
     /// Returns an error if the participant is deleted or the profile is not found.
     pub fn get_publisher_qos_from_profile(&self, qos_path: &str) -> DdsResult<PublisherQos> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         DomainParticipantFactory::get_instance().get_publisher_qos_from_profile(qos_path)
     }
 
@@ -2257,7 +2255,7 @@ impl DomainParticipant {
         &self,
         qos: impl Into<QosKind<SubscriberQos>>,
     ) -> DdsResult<()> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         match qos.into() {
             QosKind::Default => self.reset_default_subscriber_qos(),
@@ -2285,7 +2283,7 @@ impl DomainParticipant {
     }
 
     pub fn get_default_subscriber_qos(&self) -> DdsResult<SubscriberQos> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         Ok(self
             .default_subscriber_qos
@@ -2305,12 +2303,12 @@ impl DomainParticipant {
     ///
     /// Returns an error if the participant is deleted or the profile is not found.
     pub fn get_subscriber_qos_from_profile(&self, qos_path: &str) -> DdsResult<SubscriberQos> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         DomainParticipantFactory::get_instance().get_subscriber_qos_from_profile(qos_path)
     }
 
     pub fn set_default_topic_qos(&self, qos: impl Into<QosKind<TopicQos>>) -> DdsResult<()> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         match qos.into() {
             QosKind::Default => self.reset_default_topic_qos(),
@@ -2338,7 +2336,7 @@ impl DomainParticipant {
     }
 
     pub fn get_default_topic_qos(&self) -> DdsResult<TopicQos> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         Ok(self
             .default_topic_qos
@@ -2358,12 +2356,12 @@ impl DomainParticipant {
     ///
     /// Returns an error if the participant is deleted or the profile is not found.
     pub fn get_topic_qos_from_profile(&self, qos_path: &str) -> DdsResult<TopicQos> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         DomainParticipantFactory::get_instance().get_topic_qos_from_profile(qos_path)
     }
 
     pub fn get_domain_id(&self) -> DdsResult<DomainId> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         Ok(self.domain_id)
     }
 
@@ -2373,7 +2371,7 @@ impl DomainParticipant {
         listener: Option<Arc<dyn DomainParticipantListener>>,
         mask: StatusMask,
     ) -> DdsResult<()> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         {
             match self.listener.write() {
@@ -2396,7 +2394,7 @@ impl DomainParticipant {
 
     // For Entity
     pub fn get_listener(&self) -> DdsResult<Option<Arc<dyn DomainParticipantListener>>> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         match self.listener.read() {
             Ok(guard) => Ok(guard.clone()),
@@ -2677,7 +2675,7 @@ impl DomainParticipant {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         // Same default-resolution chain as the typed create_topic: a caller that wants
         // the QoS profile applied passes TOPIC_QOS_DEFAULT. Passing a concrete TopicQos
@@ -3018,7 +3016,6 @@ impl DomainParticipant {
     }
 
     pub(crate) fn is_enabled(&self) -> DdsResult<()> {
-        self.is_deleted()?;
         if self.enabled.load(Ordering::SeqCst) {
             Ok(())
         } else {
@@ -3147,10 +3144,6 @@ impl DomainParticipant {
                 topic.delete();
             }
         }
-    }
-
-    fn is_deleted(&self) -> DdsResult<()> {
-        self.lifecycle.is_deleted()
     }
 }
 

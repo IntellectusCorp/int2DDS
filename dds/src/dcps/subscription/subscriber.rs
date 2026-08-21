@@ -288,7 +288,7 @@ impl Subscriber {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         let qos = self.resolve_datareader_qos(qos.into());
 
@@ -490,7 +490,7 @@ impl Subscriber {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         // Same default-resolution chain as the typed create_datareader: a caller that
         // wants the QoS profile applied passes DATAREADER_QOS_DEFAULT. Passing a
@@ -562,7 +562,7 @@ impl Subscriber {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         let arc_reader: Arc<dyn DataReaderInternal<Qos = DataReaderQos>> =
             Arc::new(datareader.clone());
         match self.try_delete_datareader(&arc_reader) {
@@ -761,7 +761,7 @@ impl Subscriber {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         {
             match self.get_datareaders_internal() {
                 Ok(readers) => {
@@ -794,12 +794,11 @@ impl Subscriber {
             In this case, the application should process each DataReader in the order they appear in the returned "list" and read or take exactly one sample from each DataReader.
             The pattern that the application should use when accessing data is described in detail in section 2.2.2.5.1 "Access to the data".
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         Err(DdsError::Unsupported)
     }
 
     pub fn get_data_readers(&self) -> DdsResult<Vec<Arc<dyn DataReaderBase<Qos = DataReaderQos>>>> {
-        self.is_deleted()?;
         let mut result = Vec::new();
         let readers_by_topic_name =
             self.readers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
@@ -817,7 +816,6 @@ impl Subscriber {
     pub(crate) fn get_datareaders_internal(
         &self,
     ) -> DdsResult<Vec<Arc<dyn DataReaderInternal<Qos = DataReaderQos>>>> {
-        self.is_deleted()?;
         let mut result = Vec::new();
         let readers_by_topic_name =
             self.readers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
@@ -836,7 +834,7 @@ impl Subscriber {
         &self,
         topic_name: &str,
     ) -> DdsResult<DataReader<Foo>> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         // For builtin subscriber, search in builtin_readers
         if self.is_builtin {
@@ -876,7 +874,6 @@ impl Subscriber {
     }
 
     pub fn get_datareaders_of_type<Foo: 'static>(&self) -> DdsResult<Vec<Arc<DataReader<Foo>>>> {
-        self.is_deleted()?;
         let target_type_id = TypeId::of::<Foo>();
         let mut result = Vec::new();
 
@@ -910,7 +907,6 @@ impl Subscriber {
         &self,
         topic_name: &str,
     ) -> DdsResult<Option<Arc<DataReader<Foo>>>> {
-        self.is_deleted()?;
         let target_type_id = TypeId::of::<Foo>();
 
         if let Ok(readers_by_topic_name) = self.readers_by_topic_name.lock() {
@@ -942,7 +938,6 @@ impl Subscriber {
         topic_name: &str,
         f: impl FnOnce(&DataReader<Foo>) -> R,
     ) -> DdsResult<Option<R>> {
-        self.is_deleted()?;
         let target_type_id = TypeId::of::<Foo>();
 
         if let Ok(readers_by_topic_name) = self.readers_by_topic_name.lock() {
@@ -969,7 +964,6 @@ impl Subscriber {
         &self,
         mut f: impl FnMut(&DataReader<Foo>),
     ) -> DdsResult<()> {
-        self.is_deleted()?;
         let target_type_id = TypeId::of::<Foo>();
 
         if let Ok(readers_by_topic_name) = self.readers_by_topic_name.lock() {
@@ -995,7 +989,6 @@ impl Subscriber {
     pub fn get_readers_by_type(
         &self,
     ) -> DdsResult<HashMap<TypeId, Vec<Box<dyn DataReaderBase<Qos = DataReaderQos>>>>> {
-        self.is_deleted()?;
         let mut type_map: HashMap<TypeId, Vec<Box<dyn DataReaderBase<Qos = DataReaderQos>>>> =
             HashMap::new();
 
@@ -1016,7 +1009,6 @@ impl Subscriber {
 
     // Function to notify only for a specific type
     pub fn notify_datareaders_of_type<Foo: 'static>(&self) -> DdsResult<()> {
-        self.is_deleted()?;
         let target_type_id = TypeId::of::<Foo>();
 
         if let Ok(readers_by_topic_name) = self.readers_by_topic_name.lock() {
@@ -1047,7 +1039,7 @@ impl Subscriber {
             begin_access and end_access calls can be nested. In this case, the application must call end_access as many times as it called begin_access.
             Additional error code that may be returned besides standard errors: PRECONDITION_NOT_MET.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         if self.get_qos_arc()?.presentation.access_scope != PresentationQosAccessScopeKind::Group {
             return Ok(());
         }
@@ -1063,7 +1055,7 @@ impl Subscriber {
             The end_access call must match a previous begin_access call, otherwise this operation returns PRECONDITION_NOT_MET error.
             Additional error code that may be returned besides standard errors: PRECONDITION_NOT_MET.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         if self.get_qos_arc()?.presentation.access_scope != PresentationQosAccessScopeKind::Group {
             return Ok(());
         }
@@ -1071,7 +1063,7 @@ impl Subscriber {
     }
 
     pub fn notify_datareaders(&self) -> DdsResult<()> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         let readers_by_topic_name = match self.readers_by_topic_name.lock() {
             Ok(readers_guard) => readers_guard,
             Err(e) => return Err(DdsError::Error(e.to_string())),
@@ -1089,7 +1081,7 @@ impl Subscriber {
 
     /// Upgraded parent handle without the deep clone [`Self::get_participant`] performs.
     ///
-    /// Same failure modes and messages -- `AlreadyDeleted` when this subscriber is deleted, `Error`
+    /// Same failure modes and messages -- `Error`
     /// when the parent `Weak` has expired -- but two atomic read-modify-writes instead of ~52.
     /// `get_participant` clones a struct of 25 `Arc` fields to call one method on it, and at 400
     /// readers under one participant every one of them hammers the same 25 refcounts.
@@ -1098,7 +1090,6 @@ impl Subscriber {
     /// QoS accessors. The value behind the returned handle has `self_ref: None`, so it must not
     /// reach `create_*`/`delete_*`; use [`Self::get_participant`] for those.
     pub(crate) fn participant_arc(&self) -> DdsResult<ParticipantRef> {
-        self.is_deleted()?;
         self.participant
             .as_ref()
             .and_then(|weak_ref| weak_ref.upgrade())
@@ -1111,20 +1102,18 @@ impl Subscriber {
     /// PRESENTATION coherent_access without cloning the whole subscriber to read one bool.
     /// Read twice per received sample by the reader history's coherent-access probes.
     pub(crate) fn presentation_coherent_access(&self) -> DdsResult<bool> {
-        self.is_deleted()?;
         Ok(self.qos.load().presentation.coherent_access)
     }
 
     /// PRESENTATION ordered_access at topic scope, same reasoning. Read on every `read`/`take`.
     pub(crate) fn presentation_topic_ordered(&self) -> DdsResult<bool> {
-        self.is_deleted()?;
         let qos = self.qos.load();
         Ok(qos.presentation.ordered_access
             && qos.presentation.access_scope == PresentationQosAccessScopeKind::Topic)
     }
 
     pub fn get_participant(&self) -> DdsResult<DomainParticipant> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         if let Some(weak_ref) = self.participant.as_ref() {
             // Attempt to upgrade Weak<T> to Arc<T>
             if let Some(participant_arc) = weak_ref.upgrade() {
@@ -1145,7 +1134,7 @@ impl Subscriber {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         match qos.into() {
             QosKind::Default => self.reset_default_datareader_qos(),
             QosKind::Specific(qos) => {
@@ -1172,7 +1161,7 @@ impl Subscriber {
     }
 
     pub fn get_default_datareader_qos(&self) -> DdsResult<DataReaderQos> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         match self.default_datareader_qos.lock() {
             Ok(default_datareader_qos) => Ok(default_datareader_qos.clone().unwrap_or_default()),
             Err(e) => Err(DdsError::Error(e.to_string())),
@@ -1189,7 +1178,7 @@ impl Subscriber {
     ///
     /// Returns an error if the subscriber is deleted or the profile is not found.
     pub fn get_datareader_qos_from_profile(&self, qos_path: &str) -> DdsResult<DataReaderQos> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         DomainParticipantFactory::get_instance().get_datareader_qos_from_profile(qos_path)
     }
 
@@ -1198,7 +1187,7 @@ impl Subscriber {
         mut datareader_qos: DataReaderQos,
         topic_qos: TopicQos,
     ) -> DdsResult<DataReaderQos> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         datareader_qos.durability = topic_qos.durability;
         datareader_qos.deadline = topic_qos.deadline;
         datareader_qos.latency_budget = topic_qos.latency_budget;
@@ -1213,7 +1202,6 @@ impl Subscriber {
     }
 
     pub(crate) fn has_active_entities(&self) -> DdsResult<bool> {
-        self.is_deleted()?;
         {
             match self.readers_by_topic_name.lock() {
                 Ok(readers) => {
@@ -1235,7 +1223,7 @@ impl Subscriber {
     }
 
     pub fn contains_entity(&self, handle: InstanceHandle) -> DdsResult<bool> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         match self.readers_by_topic_name.lock() {
             Ok(guard) => {
                 for weak_readers in guard.values() {
@@ -1259,7 +1247,7 @@ impl Subscriber {
         listener: Option<Arc<dyn SubscriberListener>>,
         mask: StatusMask,
     ) -> DdsResult<()> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         {
             match self.listener.write() {
                 Ok(mut guard) => {
@@ -1281,7 +1269,7 @@ impl Subscriber {
 
     // For Entity
     pub fn get_listener(&self) -> DdsResult<Option<Arc<dyn SubscriberListener>>> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         match self.listener.read() {
             Ok(guard) => Ok(guard.clone()),
             Err(e) => Err(DdsError::Error(e.to_string())),
@@ -1306,7 +1294,6 @@ impl Subscriber {
     }
 
     pub(crate) fn is_enabled(&self) -> DdsResult<()> {
-        self.is_deleted()?;
         if self.enabled.load(Ordering::SeqCst) {
             Ok(())
         } else {
@@ -1366,10 +1353,6 @@ impl Subscriber {
         // Break self-reference cycle
         self.self_ref = None;
         self.lifecycle.mark_deleted_and_await_operation_completion();
-    }
-
-    fn is_deleted(&self) -> DdsResult<()> {
-        self.lifecycle.is_deleted()
     }
 }
 

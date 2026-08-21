@@ -274,7 +274,7 @@ impl Publisher {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         let qos = self.resolve_datawriter_qos(qos.into());
 
@@ -473,7 +473,7 @@ impl Publisher {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         // Same default-resolution chain as the typed create_datawriter: a caller that
         // wants the QoS profile applied passes DATAWRITER_QOS_DEFAULT. Passing a
@@ -491,7 +491,7 @@ impl Publisher {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         let arc_writer: Arc<dyn DataWriterInternal<Qos = DataWriterQos>> =
             Arc::new(datawriter.clone());
         match self.try_delete_datawriter(&arc_writer) {
@@ -687,7 +687,6 @@ impl Publisher {
     pub(crate) fn get_datawriters_internal(
         &self,
     ) -> DdsResult<Vec<Arc<dyn DataWriterInternal<Qos = DataWriterQos>>>> {
-        self.is_deleted()?;
         let mut result = Vec::new();
         let writers_by_topic_name =
             self.writers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
@@ -707,7 +706,7 @@ impl Publisher {
         topic_name: &str,
     ) -> DdsResult<DataWriter<Foo>> {
         let _ = self.cleanup_dead_writers();
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         {
             let writers_guard =
                 self.writers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
@@ -728,7 +727,6 @@ impl Publisher {
     }
 
     pub fn get_datawriters_of_type<Foo: 'static>(&self) -> DdsResult<Vec<Arc<DataWriter<Foo>>>> {
-        self.is_deleted()?;
         let target_type_id = TypeId::of::<Foo>();
         let mut result = Vec::new();
 
@@ -762,7 +760,6 @@ impl Publisher {
         &self,
         topic_name: &str,
     ) -> DdsResult<Option<Arc<DataWriter<Foo>>>> {
-        self.is_deleted()?;
         let target_type_id = TypeId::of::<Foo>();
 
         if let Ok(writers_by_topic_name) = self.writers_by_topic_name.lock() {
@@ -794,7 +791,6 @@ impl Publisher {
         topic_name: &str,
         f: impl FnOnce(&DataWriter<Foo>) -> R,
     ) -> DdsResult<Option<R>> {
-        self.is_deleted()?;
         let target_type_id = TypeId::of::<Foo>();
 
         if let Ok(writers_by_topic_name) = self.writers_by_topic_name.lock() {
@@ -821,7 +817,6 @@ impl Publisher {
         &self,
         mut f: impl FnMut(&DataWriter<Foo>),
     ) -> DdsResult<()> {
-        self.is_deleted()?;
         let target_type_id = TypeId::of::<Foo>();
 
         if let Ok(writers_by_topic_name) = self.writers_by_topic_name.lock() {
@@ -847,7 +842,6 @@ impl Publisher {
     pub fn get_writers_by_type(
         &self,
     ) -> DdsResult<HashMap<TypeId, Vec<Box<dyn DataWriterBase<Qos = DataWriterQos>>>>> {
-        self.is_deleted()?;
         let mut type_map: HashMap<TypeId, Vec<Box<dyn DataWriterBase<Qos = DataWriterQos>>>> =
             HashMap::new();
 
@@ -876,7 +870,7 @@ impl Publisher {
             After calling this operation, subsequent modifications must be matched by a call to resume_publications indicating that the modifications have completed.
             If the Publisher is deleted before resume_publications is called, any pending modifications that have not been propagated are discarded.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         Err(DdsError::Unsupported)
     }
 
@@ -889,7 +883,7 @@ impl Publisher {
             The call to resume_publications must match a previous call to suspend_publications.
             Otherwise, this operation returns PRECONDITION_NOT_MET error.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         Err(DdsError::Unsupported)
     }
 
@@ -911,7 +905,7 @@ impl Publisher {
             This is useful, for example, when two data instances represent 'altitude' and 'velocity vector' that change together for the same aircraft.
             Without delivering both values together, readers might misinterpret them as indicating an aircraft on a collision course.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         // Nested calls only deepen the current set; a new set starts at depth 0 -> 1.
         self.coherent_depth.fetch_add(1, Ordering::AcqRel);
         Ok(())
@@ -922,7 +916,7 @@ impl Publisher {
             This operation terminates the 'coherent set' initiated by begin_coherent_changes.
             If called without a matching begin_coherent_changes call, this operation returns PRECONDITION_NOT_MET error.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         // fetch_update returns the pre-decrement depth; checked_sub refuses to go below zero.
         match self
@@ -972,7 +966,7 @@ impl Publisher {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         {
             match self.get_datawriters_internal() {
                 Ok(writers) => {
@@ -989,7 +983,7 @@ impl Publisher {
         &self,
         qos: impl Into<QosKind<DataWriterQos>>,
     ) -> DdsResult<()> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         match qos.into() {
             QosKind::Default => self.reset_default_datawriter_qos(),
             QosKind::Specific(qos) => {
@@ -1016,7 +1010,7 @@ impl Publisher {
     }
 
     pub fn get_default_datawriter_qos(&self) -> DdsResult<DataWriterQos> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         match self.default_datawriter_qos.lock() {
             Ok(default_datawriter_qos) => Ok(default_datawriter_qos.clone().unwrap_or_default()),
             Err(e) => Err(DdsError::Error(e.to_string())),
@@ -1033,7 +1027,7 @@ impl Publisher {
     ///
     /// Returns an error if the publisher is deleted or the profile is not found.
     pub fn get_datawriter_qos_from_profile(&self, qos_path: &str) -> DdsResult<DataWriterQos> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         DomainParticipantFactory::get_instance().get_datawriter_qos_from_profile(qos_path)
     }
 
@@ -1042,7 +1036,7 @@ impl Publisher {
         mut datawriter_qos: DataWriterQos,
         topic_qos: &TopicQos,
     ) -> DdsResult<DataWriterQos> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         datawriter_qos.durability = topic_qos.durability;
         datawriter_qos.durability_service = topic_qos.durability_service;
         datawriter_qos.deadline = topic_qos.deadline;
@@ -1068,7 +1062,7 @@ impl Publisher {
             A return value of OK means that all written samples have been acknowledged by all matched reliable DataReaders.
             A return value of TIMEOUT means that not all data was acknowledged before the max_wait time elapsed.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         let mut current = max_wait;
         let writers_by_topic_name =
             self.writers_by_topic_name.lock().map_err(|e| DdsError::Error(e.to_string()))?;
@@ -1094,7 +1088,7 @@ impl Publisher {
     }
 
     pub fn get_participant(&self) -> DdsResult<DomainParticipant> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         if let Some(weak_ref) = self.participant.as_ref() {
             // Attempt to upgrade Weak<T> to Arc<T>
             if let Some(participant_arc) = weak_ref.upgrade() {
@@ -1110,10 +1104,9 @@ impl Publisher {
 
     /// Upgraded parent handle without the deep clone [`Self::get_participant`] performs.
     ///
-    /// Same failure modes and messages -- `AlreadyDeleted` when this publisher is deleted,
-    /// `Error` when the parent `Weak` has expired -- but two atomic read-modify-writes instead
-    /// of ~52. `get_participant` clones a struct of 25 `Arc` fields to call one method on it,
-    /// and `write()` does that on every sample.
+    /// Same failure modes and messages -- `Error` when the parent `Weak` has expired -- but two
+    /// atomic read-modify-writes instead of ~52. `get_participant` clones a struct of 25 `Arc`
+    /// fields to call one method on it, and `write()` does that on every sample.
     ///
     /// Returns [`ParticipantRef`], not a bare `Arc`: `get_participant` force-sets `self_ref` on
     /// the value it hands back, so that value performs the factory orphan handoff when it is
@@ -1124,7 +1117,6 @@ impl Publisher {
     /// has `self_ref: None`, so it must not reach `create_*`/`delete_*`; use
     /// [`Self::get_participant`] for those.
     pub(crate) fn participant_arc(&self) -> DdsResult<ParticipantRef> {
-        self.is_deleted()?;
         self.participant
             .as_ref()
             .and_then(|weak_ref| weak_ref.upgrade())
@@ -1135,7 +1127,6 @@ impl Publisher {
     }
 
     pub(crate) fn has_active_entities(&self) -> DdsResult<bool> {
-        self.is_deleted()?;
         {
             match self.writers_by_topic_name.lock() {
                 Ok(writers) => {
@@ -1157,7 +1148,7 @@ impl Publisher {
     }
 
     pub fn contains_entity(&self, handle: InstanceHandle) -> DdsResult<bool> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         match self.writers_by_topic_name.lock() {
             Ok(writers_by_topic_name) => {
                 for weak_writers in writers_by_topic_name.values() {
@@ -1181,7 +1172,7 @@ impl Publisher {
         listener: Option<Arc<dyn PublisherListener>>,
         mask: StatusMask,
     ) -> DdsResult<()> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         {
             match self.listener.write() {
                 Ok(mut guard) => {
@@ -1203,7 +1194,7 @@ impl Publisher {
 
     // For Entity
     pub fn get_listener(&self) -> DdsResult<Option<Arc<dyn PublisherListener>>> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         match self.listener.read() {
             Ok(guard) => Ok(guard.clone()),
             Err(e) => Err(DdsError::Error(e.to_string())),
@@ -1228,7 +1219,6 @@ impl Publisher {
     }
 
     pub(crate) fn is_enabled(&self) -> DdsResult<()> {
-        self.is_deleted()?;
         if self.enabled.load(Ordering::SeqCst) {
             Ok(())
         } else {
@@ -1274,10 +1264,6 @@ impl Publisher {
         }
 
         self.lifecycle.mark_deleted_and_await_operation_completion();
-    }
-
-    fn is_deleted(&self) -> DdsResult<()> {
-        self.lifecycle.is_deleted()
     }
 }
 
