@@ -1,110 +1,132 @@
-//! The write side of a **data** connection — the shared handle over its write
-//! half that the send path and the reaper both reach through.
+//! Outbound writer admission and connect-window backlog.
 //!
-//! Only data connections use this. A control (or inbound) connection has a
-//! single writer, its `writer_task`, which owns its write half outright and
-//! needs no shared state. A data connection is the one with two parties on the
-//! half — the sync send path (`TcpSender::write_frame`, user/discovery data) and
-//! the reaper's [`graceful_close`] — so its half lives inside an
-//! `Arc<Mutex<WriteState>>` and both reach it only by taking the lock.
-//!
-//! That one lock does three jobs at once:
-//!
-//! 1. Serialize the two writers — two overlapping `write_framed_message` calls
-//!    would interleave bytes and corrupt framing (a send racing the close).
-//! 2. Admission control — a frame is written by a task that owns the guard for
-//!    the whole write, so at most one write per connection is ever in flight. A
-//!    sender that cannot take the lock is exactly a sender whose previous frame
-//!    has not reached the wire yet: real backpressure with no intermediate queue.
-//! 3. Measurement — for the same reason, how long the lock takes to acquire is
-//!    how long the previous frame has been stuck.
-//!
-//! Before the handshake completes the state is `Connecting` and frames are
-//! buffered instead, then flushed in order by [`flush_and_ready`].
+//! The persistent writer exclusively owns the socket write half, so socket I/O
+//! needs no mutex. A one-permit semaphore retains the old send-deadline
+//! semantics: the permit is released only after the previous frame has reached
+//! the socket (or failed).
 
 use std::collections::VecDeque;
 use std::io;
 use std::sync::Arc;
 
-use tokio::io::AsyncWriteExt;
-use tokio::sync::Mutex as TokioMutex;
+use bytes::Bytes;
+use tokio::sync::{mpsc, Mutex, OwnedSemaphorePermit, Semaphore};
 
-use crate::rtps::transport::tcp::framing::write_framed_message;
-use crate::rtps::transport::tcp::stream::{AsyncConnReadHalf, AsyncConnStream, AsyncConnWriteHalf};
+use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
+use crate::rtps::transport::tcp::framing::TcpFrameKind;
 
-/// Write side of a data connection, shared between the sync-send path and the
-/// reaper's graceful close.
+pub(crate) const CONNECT_BUFFER_DEPTH: usize = 256;
+pub(crate) const CONNECT_BUFFER_BYTE_CAP: usize = 64 * 1024 * 1024;
+const WRITER_CHANNEL_CAPACITY: usize = 1;
+
+pub(crate) struct PendingFrame {
+    pub(crate) kind: TcpFrameKind,
+    pub(crate) payload: Bytes,
+}
+
+pub(crate) struct WriterCommand {
+    pub(crate) frame: PendingFrame,
+    /// Held through the complete write. Dropping it wakes the next sender.
+    pub(crate) _permit: OwnedSemaphorePermit,
+}
+
+#[derive(Clone)]
+pub(crate) struct ReadyWrite {
+    pub(crate) tx: mpsc::Sender<WriterCommand>,
+    pub(crate) admission: Arc<Semaphore>,
+}
+
 pub(crate) enum WriteState {
-    /// Handshake not finished yet: discovery/user-data frames are buffered here
-    /// for a moment and flushed in order once the connection becomes
-    /// [`WriteState::Ready`].
-    Connecting(VecDeque<Vec<u8>>),
-    /// Live write half — writes go straight to the wire.
-    Ready(WriteHandoff),
+    Connecting { backlog: VecDeque<PendingFrame>, backlog_bytes: usize },
+    Ready(ReadyWrite),
+    Failed,
 }
 
-/// The live write half, plus the reusable staging buffer the send path hands off
-/// to write user/discovery frames.
-///
-/// `data` copies the frame in while the state lock is held, then the whole owned
-/// guard moves into the task that runs the write. That hands the write owned
-/// bytes — required to drive it to completion off the caller's thread — and
-/// reuses one buffer instead of allocating per frame.
-pub(crate) struct WriteHandoff {
-    pub(crate) half: AsyncConnWriteHalf,
-    /// Staging buffer for the send handoff, reused across frames. Only
-    /// meaningful while a write is in flight; the lock makes that at most one
-    /// at a time.
-    pub(crate) data: Vec<u8>,
-}
+pub(crate) type SharedWriteState = Arc<Mutex<WriteState>>;
 
-pub(crate) type SharedWriteState = Arc<TokioMutex<WriteState>>;
-
-/// A fresh write state that buffers sends until the connection is ready.
 pub(crate) fn init_connection_state() -> SharedWriteState {
-    Arc::new(TokioMutex::new(WriteState::Connecting(VecDeque::new())))
+    Arc::new(Mutex::new(WriteState::Connecting { backlog: VecDeque::new(), backlog_bytes: 0 }))
 }
 
-/// Split the stream, flush the frames buffered during the connect (in order),
-/// and transition `write_state` to `Ready`. Returns the read half for the
-/// caller to hand to the reader task.
-///
-/// All of it happens under the state lock, so a direct write cannot overtake a
-/// buffered frame. A flush error aborts here — before any registration — so the
-/// connect is treated as failed.
-pub(crate) async fn flush_and_ready(
-    stream: AsyncConnStream,
-    write_state: &SharedWriteState,
-) -> io::Result<AsyncConnReadHalf> {
-    let (read_half, mut write_half) = stream.into_split();
-    let mut st = write_state.lock().await;
-    if let WriteState::Connecting(buf) = &mut *st {
-        while let Some(frame) = buf.pop_front() {
-            write_framed_message(&mut write_half, &frame).await?;
-        }
+pub(crate) fn push_connecting(
+    backlog: &mut VecDeque<PendingFrame>,
+    backlog_bytes: &mut usize,
+    frame: PendingFrame,
+) -> io::Result<()> {
+    let next_bytes = backlog_bytes.checked_add(frame.payload.len()).ok_or_else(|| {
+        transport_io_error(TransportErrorCode::TcpConnectBufferFull, "connect backlog overflow")
+    })?;
+    if backlog.len() >= CONNECT_BUFFER_DEPTH || next_bytes > CONNECT_BUFFER_BYTE_CAP {
+        return Err(transport_io_error(
+            TransportErrorCode::TcpConnectBufferFull,
+            format!(
+                "connect backlog full: {} frames/{} bytes (limits {}/{})",
+                backlog.len(),
+                *backlog_bytes,
+                CONNECT_BUFFER_DEPTH,
+                CONNECT_BUFFER_BYTE_CAP
+            ),
+        ));
     }
-    *st = WriteState::Ready(WriteHandoff { half: write_half, data: Vec::new() });
-    Ok(read_half)
+    *backlog_bytes = next_bytes;
+    backlog.push_back(frame);
+    Ok(())
 }
 
-/// Send the connection's write half a graceful close — a TCP FIN, and for TLS a
-/// `close_notify` alert.
-///
-/// This is the close path for a connection with no writer task: an outbound data
-/// connection, whose `reader_task` never writes, so the sender's reaper calls
-/// this when the connection's token fires. (A connection that has a writer task
-/// closes from there instead.) It matters most for TLS: tokio-rustls emits
-/// `close_notify` only from `poll_shutdown` and has no `Drop`, so merely dropping
-/// the write half would close the TCP socket without it and the peer would see an
-/// unclean shutdown.
-///
-/// Taking the state lock first serialises against any in-flight send, so the
-/// frame currently on the wire is written to completion — never truncated —
-/// before the half is shut. A `Connecting` state means the stream never reached
-/// `Ready` (the connect died mid-handshake); there is nothing to close.
-pub(crate) async fn graceful_close(write_state: &SharedWriteState) {
-    let mut st = write_state.lock().await;
-    if let WriteState::Ready(r) = &mut *st {
-        let _ = r.half.shutdown().await;
+/// Publish the live writer admission handle and move the connect backlog to the
+/// new persistent writer. New sends can queue at most one live frame while the
+/// writer drains the older backlog, preserving order and bounded memory.
+pub(crate) async fn install_writer(
+    state: &SharedWriteState,
+) -> io::Result<(VecDeque<PendingFrame>, mpsc::Receiver<WriterCommand>)> {
+    let mut guard = state.lock().await;
+    let old = std::mem::replace(&mut *guard, WriteState::Failed);
+    let WriteState::Connecting { backlog, .. } = old else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotConnected,
+            "writer installed after connection left Connecting state",
+        ));
+    };
+
+    let (tx, rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+    *guard = WriteState::Ready(ReadyWrite { tx, admission: Arc::new(Semaphore::new(1)) });
+    Ok((backlog, rx))
+}
+
+pub(crate) async fn mark_failed(state: &SharedWriteState) {
+    *state.lock().await = WriteState::Failed;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connect_backlog_has_count_and_byte_bounds() {
+        let mut backlog = VecDeque::new();
+        let mut bytes = 0;
+        for _ in 0..CONNECT_BUFFER_DEPTH {
+            push_connecting(
+                &mut backlog,
+                &mut bytes,
+                PendingFrame { kind: TcpFrameKind::Discovery, payload: Bytes::from_static(b"\0") },
+            )
+            .unwrap();
+        }
+        assert!(push_connecting(
+            &mut backlog,
+            &mut bytes,
+            PendingFrame { kind: TcpFrameKind::Discovery, payload: Bytes::from_static(b"\0") },
+        )
+        .is_err());
+
+        let mut backlog = VecDeque::new();
+        let mut bytes = CONNECT_BUFFER_BYTE_CAP;
+        assert!(push_connecting(
+            &mut backlog,
+            &mut bytes,
+            PendingFrame { kind: TcpFrameKind::UserData, payload: Bytes::from_static(b"\0") },
+        )
+        .is_err());
     }
 }

@@ -132,7 +132,7 @@ impl DiscoveryUnicastListeningTask {
                         debug!("Detected global termination flag, discovery unicast channel listening terminating...");
                         return Ok(());
                     }
-                    let _ = self.process_rtps_message(Bytes::from(msg.data), msg.source);
+                    let _ = self.process_rtps_message(msg.data, msg.source);
                 }
                 Err(flume::RecvTimeoutError::Timeout) => {
                     if participant.is_terminated() {

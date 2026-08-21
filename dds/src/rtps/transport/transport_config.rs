@@ -74,7 +74,7 @@ pub(crate) struct TcpConfig {
     pub accept_undefined_peers: bool,
     pub nodelay: bool,
     pub connect_timeout: Duration,
-    pub peer_handshake_timeout: Duration,
+    pub first_frame_timeout: Duration,
     pub tls_handshake_timeout: Duration,
     pub unacked_timeout: Option<Duration>,
     pub keepalive_interval: Duration,
@@ -107,7 +107,7 @@ impl TransportConfig for TcpConfig {
                 .unwrap_or(false),
             nodelay: prop_parse::<bool>(property, PROP_TCP_NODELAY).unwrap_or(true),
             connect_timeout: ms(PROP_TCP_CONNECT_TIMEOUT_MS, 5_000),
-            peer_handshake_timeout: ms(PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS, 20_000),
+            first_frame_timeout: ms(PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS, 20_000),
             tls_handshake_timeout: ms(PROP_TCP_TLS_HANDSHAKE_TIMEOUT_MS, 5_000),
             unacked_timeout: match prop_parse::<u64>(property, PROP_TCP_UNACKED_TIMEOUT_MS) {
                 Some(0) => None,
@@ -227,7 +227,7 @@ mod tests {
         assert_eq!(cfg.public_address, None);
         assert!(cfg.nodelay);
         assert_eq!(cfg.connect_timeout, Duration::from_millis(5_000));
-        assert_eq!(cfg.peer_handshake_timeout, Duration::from_millis(20_000));
+        assert_eq!(cfg.first_frame_timeout, Duration::from_millis(20_000));
         assert_eq!(cfg.tls_handshake_timeout, Duration::from_millis(5_000));
         assert_eq!(cfg.unacked_timeout, Some(Duration::from_millis(25_000)));
         assert_eq!(cfg.keepalive_interval, Duration::from_millis(10_000));
@@ -253,7 +253,7 @@ mod tests {
         let cfg = TcpConfig::from_property(&p);
         assert_eq!(cfg.bind_port, Some(17400));
         assert!(!cfg.nodelay);
-        assert_eq!(cfg.peer_handshake_timeout, Duration::from_millis(2222));
+        assert_eq!(cfg.first_frame_timeout, Duration::from_millis(2222));
         assert_eq!(cfg.tls_handshake_timeout, Duration::from_millis(3333));
         assert_eq!(cfg.keepalive_max_misses, 7);
         assert_eq!(cfg.public_address, Some("203.0.113.5:7400".parse().unwrap()));

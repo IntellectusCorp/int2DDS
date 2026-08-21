@@ -192,7 +192,7 @@ impl UserUnicastListeningTask {
                         debug!("Detected global termination flag, user unicast channel listening terminating...");
                         return Ok(());
                     }
-                    self.process_rtps_message(Bytes::from(msg.data), msg.source);
+                    self.process_rtps_message(msg.data, msg.source);
                 }
                 Err(flume::RecvTimeoutError::Timeout) => {
                     if participant.is_terminated() {

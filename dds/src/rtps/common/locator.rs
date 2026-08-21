@@ -176,43 +176,10 @@ impl Locator {
         Self::new(LOCATOR_KIND_TCP_V4, port, address)
     }
 
-    /// Create a TCP locator that carries BOTH ports.
-    ///
-    /// The RTPS `port` field holds the logical (RTPS) port a peer must reserve
-    /// to reach this endpoint over the mux, while the physical listener port is
-    /// packed into the first two address bytes. The IPv4 address stays in the
-    /// last four bytes. Peers dial `tcp_physical_port()` and reserve
-    /// `tcp_logical_port()`, so the logical port no longer has to be guessed
-    /// from the receiver's participant id.
-    pub fn from_tcp_v4_dual(ip_addr: Ipv4Addr, logical_port: u16, physical_port: u16) -> Self {
-        let mut address = [0u8; 16];
-        address[0..2].copy_from_slice(&physical_port.to_be_bytes());
-        address[12..16].copy_from_slice(&ip_addr.octets());
-        Self::new(LOCATOR_KIND_TCP_V4, logical_port as u32, address)
-    }
-
-    /// Logical (RTPS) port of a TCP locator — the value in the `port` field.
-    pub fn tcp_logical_port(&self) -> u16 {
-        self.port as u16
-    }
-
-    /// Physical listener port of a TCP locator, decoded from the first two
-    /// address bytes (see `from_tcp_v4_dual`).
-    pub fn tcp_physical_port(&self) -> u16 {
-        u16::from_be_bytes([self.address[0], self.address[1]])
-    }
-
-    /// Port a peer is actually reached at over the wire.
-    ///
-    /// For UDP the `port` field already holds the physical port. But for a TCP v4
-    /// dual-port locator the `port` field carries the logical port. So the
-    /// physical listener port packed in the address bytes is returned instead.
+    /// Port a peer is reached at over the wire. TCP now uses the standard
+    /// locator port directly; traffic kind is carried in each frame.
     pub fn access_port(&self) -> u32 {
-        if self.kind == LOCATOR_KIND_TCP_V4 {
-            self.tcp_physical_port() as u32
-        } else {
-            self.port
-        }
+        self.port
     }
 
     /// Create a TCP locator from IPv6 address and port

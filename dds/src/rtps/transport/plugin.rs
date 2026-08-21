@@ -8,13 +8,14 @@ use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::locator::Locator;
 use crate::rtps::transport::shm::shm_listener::ShmListener;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
+use bytes::Bytes;
 
 use super::{HybridConfig, TcpConfig, TransportConfig, TransportType, UdpConfig};
 use crate::dcps::infrastructure::qos_policy::PropertyQosPolicy;
 
 /// Intent-based send target, named after the RTPS protocol concept being
 /// delivered rather than the transport mechanism used. Each `TransportPlugin`
-/// picks the mechanism (multicast, unicast fan-out, BIND, SHM write, ...) that
+/// picks the mechanism (multicast, unicast fan-out, framed TCP, SHM write, ...) that
 /// realizes the intent on its own transport.
 pub(crate) enum SendTarget<'a> {
     /// Announce this participant's presence (SPDP).
@@ -30,7 +31,7 @@ pub(crate) enum SendTarget<'a> {
     /// Send endpoint discovery data (SEDP) to a specific remote participant.
     ///
     /// - UDP: sendto(locator address)
-    /// - TCP: BIND handshake + send on discovery logical port
+    /// - TCP: send a discovery-kind frame
     /// - Hybrid: route by locator kind (UDP or TCP)
     /// - SHM: sendto via UDP (discovery is always UDP)
     SEDPDiscovery(&'a Locator),
@@ -38,7 +39,7 @@ pub(crate) enum SendTarget<'a> {
     /// Send user data to a specific remote endpoint.
     ///
     /// - UDP: sendto(locator address)
-    /// - TCP: BIND handshake + send on user_data logical port
+    /// - TCP: send a user-data-kind frame
     /// - Hybrid: route by locator kind (UDP or TCP)
     /// - SHM: route by locator kind (SHM or UDP)
     UserData(&'a Locator),
@@ -46,7 +47,7 @@ pub(crate) enum SendTarget<'a> {
 
 /// Unified message received from any transport source.
 pub(crate) struct IncomingMessage {
-    pub data: Vec<u8>,
+    pub data: Bytes,
     pub source: SocketAddr,
 }
 
@@ -69,8 +70,8 @@ pub(crate) enum MessageSource {
     MioPollWithShm { listener: UdpListener, shm: ShmListener },
 
     /// Channel-based receiving.
-    /// Used when the transport internally demultiplexes a single byte stream
-    /// into per-logical-port streams (TCP single-port mux).
+    /// Used when the transport internally routes framed streams by message kind
+    /// (TCP single-port listener).
     Channel { rx: flume::Receiver<IncomingMessage> },
 }
 
@@ -83,7 +84,7 @@ pub(crate) trait TransportPlugin: Send + Sync {
     /// Send data with intent-based targeting.
     ///
     /// The caller expresses *what* to do (announce, discovery, user data).
-    /// The implementation decides *how* (multicast, TCP BIND, SHM write, etc.).
+    /// The implementation decides *how* (multicast, framed TCP, SHM write, etc.).
     fn send(&self, data: &[u8], target: &SendTarget) -> io::Result<()>;
 
     /// True iff this plugin can route to `locator`.

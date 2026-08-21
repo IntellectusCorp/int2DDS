@@ -866,11 +866,11 @@ pub const PROP_TCP_PUBLIC_ADDRESS: &str = "int2dds.transport.TCPv4.public_addres
 pub const PROP_TCP_NODELAY: &str = "int2dds.transport.TCPv4.nodelay";
 /// Outbound connect timeout, milliseconds. Default `5000`.
 pub const PROP_TCP_CONNECT_TIMEOUT_MS: &str = "int2dds.transport.TCPv4.connect_timeout_ms";
-/// Peer handshake timeout, milliseconds. Covers the PEER_HELLO / PORT_RESERVE /
-/// PORT_BIND exchange, not the TCP connect — that one is
-/// [`PROP_TCP_CONNECT_TIMEOUT_MS`]. Outbound it bounds each response wait;
-/// inbound it bounds the window an accepted connection has to finish the
-/// exchange before it is closed. Default `5000`.
+/// First-frame timeout for an accepted TCP connection, milliseconds.
+///
+/// The legacy property name is retained for configuration compatibility after
+/// removal of the TCP control handshake. It now bounds the time from TLS
+/// completion (or plain accept) to the first valid framed message. Default `20000`.
 pub const PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS: &str =
     "int2dds.transport.TCPv4.peer_handshake_timeout_ms";
 /// TLS handshake timeout, milliseconds. Default `5000`.
@@ -897,9 +897,9 @@ pub const PROP_TCP_SO_SNDBUF: &str = "int2dds.transport.TCPv4.so_sndbuf";
 /// Tokio worker thread count for the TCP runtime.
 pub const PROP_TCP_ASYNC_WORKERS: &str = "int2dds.transport.TCPv4.async_workers";
 /// User-data wire-write deadline, milliseconds. A send waits up to this long for
-/// the previous frame to reach the socket, then drops the frame rather than
+/// the previous frame's admission permit, then drops the frame rather than
 /// delay sends to other peers. `-1` blocks until it completes (no pre-wire drop,
-/// congestion isolation off); `0` is a try-lock (take the lock if free, else drop
+/// congestion isolation off); `0` is a try-admit (accept if free, else drop
 /// at once, isolation off). Default `1000` — generous by design; lower it to
 /// trade flow-control fidelity for tighter HOL isolation.
 pub const PROP_TCP_SEND_DEADLINE_MS: &str = "int2dds.transport.TCPv4.send_deadline_ms";

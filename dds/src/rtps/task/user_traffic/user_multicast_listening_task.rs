@@ -79,7 +79,7 @@ impl UserMulticastListeningTask {
         loop {
             match rx.recv() {
                 Ok(msg) => {
-                    self.process_rtps_message(Bytes::from(msg.data), msg.source);
+                    self.process_rtps_message(msg.data, msg.source);
                 }
                 Err(_) => {
                     info!("[UserMulticast] Channel disconnected, stopping listener");

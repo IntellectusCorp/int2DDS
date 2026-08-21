@@ -120,7 +120,7 @@ impl DiscoveryMulticastListeningTask {
                         debug!("Detected global termination flag, discovery multicast channel listening terminating...");
                         return Ok(());
                     }
-                    self.process_rtps_message(Bytes::from(msg.data), msg.source);
+                    self.process_rtps_message(msg.data, msg.source);
                 }
                 Err(flume::RecvTimeoutError::Timeout) => {
                     let spdp_logic =
