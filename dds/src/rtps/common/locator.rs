@@ -293,6 +293,131 @@ impl Locator {
         self.kind != LOCATOR_KIND_INVALID && self.kind != LOCATOR_KIND_RESERVED
     }
 }
+
+pub(crate) fn narrow_same_host_locators(
+    locators: &[Locator],
+    local_ips: &[String],
+    from_addr: std::net::SocketAddr,
+) -> Option<Vec<Locator>> {
+    let sender_ip = from_addr.ip();
+    let is_same_host = sender_ip.is_loopback()
+        || local_ips.iter().any(|ip| ip.parse::<IpAddr>().is_ok_and(|ip| ip == sender_ip));
+    if !is_same_host {
+        return None;
+    }
+
+    let mut chosen: Vec<(i32, Locator)> = Vec::new();
+    for kind in locators.iter().filter(|l| l.is_udp() || l.is_tcp()).map(|l| l.kind) {
+        if chosen.iter().any(|(chosen_kind, _)| *chosen_kind == kind) {
+            continue;
+        }
+        let group: Vec<&Locator> = locators.iter().filter(|l| l.kind == kind).collect();
+        if group.len() < 2 {
+            continue;
+        }
+        if let Some(pick) = pick_reachable_locator(&group, local_ips) {
+            chosen.push((kind, pick.clone()));
+        }
+    }
+    if chosen.is_empty() {
+        return None;
+    }
+
+    Some(
+        locators
+            .iter()
+            .filter(|l| match chosen.iter().find(|(kind, _)| *kind == l.kind) {
+                Some((_, pick)) => pick == *l,
+                None => true,
+            })
+            .cloned()
+            .collect(),
+    )
+}
+
+fn pick_reachable_locator<'a>(group: &[&'a Locator], local_ips: &[String]) -> Option<&'a Locator> {
+    let lowest = |mut candidates: Vec<&'a Locator>| -> Option<&'a Locator> {
+        candidates.sort_by_key(|l| (locator_ip(l), l.access_port()));
+        candidates.into_iter().next()
+    };
+
+    let loopback: Vec<&Locator> =
+        group.iter().copied().filter(|l| locator_ip(l).is_loopback()).collect();
+    if !loopback.is_empty() {
+        return lowest(loopback);
+    }
+
+    let held_here: Vec<&Locator> = group
+        .iter()
+        .copied()
+        .filter(|l| {
+            local_ips.iter().any(|ip| ip.parse::<IpAddr>().is_ok_and(|ip| ip == locator_ip(l)))
+        })
+        .collect();
+    if held_here.is_empty() {
+        return None;
+    }
+    lowest(held_here)
+}
+
+/// Restrict an endpoint's own locator list to the addresses already settled on
+/// for the participant that announced it.
+///
+/// A SEDP announcement carries one locator per interface exactly as SPDP does,
+/// but no source address reaches this path, so co-location cannot be decided
+/// here. It does not have to be: the participant's stored list is that decision
+/// already made, and keeping only the addresses it still holds narrows a
+/// co-located endpoint while leaving a remote one untouched. A kind whose
+/// endpoint addresses share nothing with the participant's - an external
+/// address override, say - is left alone rather than emptied. `None` means
+/// nothing was dropped.
+pub(crate) fn narrow_endpoint_locators(
+    endpoint_locators: &[Locator],
+    participant_locators: &[Locator],
+) -> Option<Vec<Locator>> {
+    let mut narrowed: Vec<Locator> = Vec::with_capacity(endpoint_locators.len());
+    let mut dropped = false;
+
+    for locator in endpoint_locators {
+        if !(locator.is_udp() || locator.is_tcp()) {
+            narrowed.push(locator.clone());
+            continue;
+        }
+
+        let settled: Vec<IpAddr> = participant_locators
+            .iter()
+            .filter(|p| p.kind == locator.kind)
+            .map(locator_ip)
+            .collect();
+        let group_survives = endpoint_locators
+            .iter()
+            .any(|l| l.kind == locator.kind && settled.contains(&locator_ip(l)));
+
+        if !group_survives || settled.contains(&locator_ip(locator)) {
+            narrowed.push(locator.clone());
+        } else {
+            dropped = true;
+        }
+    }
+
+    if dropped {
+        Some(narrowed)
+    } else {
+        None
+    }
+}
+
+/// A TCP v4 locator packs its physical port into the leading address bytes, so
+/// the raw address is not an address. Read the IP the kind actually implies.
+fn locator_ip(locator: &Locator) -> IpAddr {
+    match locator.kind {
+        LOCATOR_KIND_UDP_V6 | LOCATOR_KIND_TCP_V6 => {
+            IpAddr::V6(std::net::Ipv6Addr::from(locator.address))
+        }
+        _ => IpAddr::V4(locator.to_ip_v4_addr()),
+    }
+}
+
 impl std::fmt::Display for Locator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}/{}:{}", self.kind_name(), self.to_ip_v4_addr_string(), self.port)

@@ -108,6 +108,9 @@ pub struct Participant {
 
     liveliness_monitor: Arc<Mutex<Option<LivelinessMonitor>>>,
     working_ips: Vec<String>,
+    /// What same-host narrowing dropped, keyed by the locator kept in its place.
+    /// The send path reads it only after a send to a narrowed locator fails.
+    narrowing_fallbacks: Arc<DashMap<Locator, (GuidPrefix, Vec<Locator>)>>,
     terminated: Arc<AtomicBool>,
     wire_buffer_pool: Arc<Mutex<WireBufferPool>>,
 }
@@ -200,6 +203,7 @@ impl Participant {
             remote_subscriptions: Arc::new(DashMap::new()),
             type_registry: new_shared_registry(),
             working_ips,
+            narrowing_fallbacks: Arc::new(DashMap::new()),
             terminated: Arc::new(AtomicBool::new(false)),
             liveliness_monitor: Arc::new(Mutex::new(None)),
             wire_buffer_pool: Arc::new(Mutex::new(WireBufferPool::new())),
@@ -362,6 +366,31 @@ impl Participant {
         }
     }
 
+    /// Remember the addresses same-host narrowing removed from `announced`, so a
+    /// send that fails on the surviving one still has somewhere to go. Recorded
+    /// per kind: only the addresses of the same transport can stand in for it.
+    pub(crate) fn record_narrowed_locators(
+        &self,
+        remote_prefix: GuidPrefix,
+        announced: &[Locator],
+        narrowed: &[Locator],
+    ) {
+        for kept in narrowed {
+            let dropped: Vec<Locator> = announced
+                .iter()
+                .filter(|l| l.kind() == kept.kind() && *l != kept)
+                .cloned()
+                .collect();
+            if !dropped.is_empty() {
+                self.narrowing_fallbacks.insert(kept.clone(), (remote_prefix, dropped));
+            }
+        }
+    }
+
+    pub(crate) fn narrowing_fallback(&self, locator: &Locator) -> Option<Vec<Locator>> {
+        self.narrowing_fallbacks.get(locator).map(|entry| entry.value().1.clone())
+    }
+
     pub(crate) fn remove_remote_participant_proxy_data(&self, participant_guid: Guid) -> bool {
         match self.remote_participant_proxy_datas.lock() {
             Ok(mut remote_participant_proxy_datas) => {
@@ -370,6 +399,8 @@ impl Participant {
                     .retain(|data| data.participant_guid() != participant_guid);
                 let removed = initial_len != remote_participant_proxy_datas.len();
                 if removed {
+                    self.narrowing_fallbacks
+                        .retain(|_, (prefix, _)| *prefix != participant_guid.prefix());
                     debug!("Removed remote participant proxy data for GUID: {}", participant_guid);
                 }
                 removed

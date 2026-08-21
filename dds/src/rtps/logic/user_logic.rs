@@ -2377,6 +2377,31 @@ impl UserLogic {
             .unwrap_or(locators)
     }
 
+    /// Reach a peer through the addresses same-host narrowing set aside for it.
+    /// A narrowed locator that stops accepting a send means the one address this
+    /// host settled on is gone, not that the peer is - the rest of what it
+    /// announced is still worth trying, and the worst case has to be that the
+    /// narrowing did not apply.
+    fn send_to_narrowing_fallback(&self, locator: &Locator, buffer: &[u8]) -> bool {
+        let Ok(participant) = self.get_upgraded_participant() else {
+            return false;
+        };
+        let Some(fallbacks) = participant.narrowing_fallback(locator) else {
+            return false;
+        };
+
+        for fallback in &fallbacks {
+            if self.transport.send(buffer, &SendTarget::UserData(fallback)).is_ok() {
+                warn!(
+                    "[UserLogic] Narrowed locator {} unusable, fell back to {}",
+                    locator, fallback
+                );
+                return true;
+            }
+        }
+        false
+    }
+
     /// Send `buffer` via the highest-priority transport reachable on both
     /// sides (SHM > TCP > UDP); a peer advertising multiple transports gets
     /// a single copy. Associated fn so `&self`-less closures (e.g. the
@@ -2400,6 +2425,10 @@ impl UserLogic {
                 }
                 Err(e) => {
                     warn!("[UserLogic] Failed to send to locator {}: {:?}", locator, e);
+                    if self.send_to_narrowing_fallback(locator, buffer) {
+                        is_sent = true;
+                        continue;
+                    }
                     last_error = Some(e);
                     continue;
                 }
