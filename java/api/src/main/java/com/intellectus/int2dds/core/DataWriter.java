@@ -16,6 +16,7 @@ import com.intellectus.int2dds.qos.DataWriterQos;
 import com.intellectus.int2dds.status.LivelinessLostStatus;
 import com.intellectus.int2dds.status.OfferedDeadlineMissedStatus;
 import com.intellectus.int2dds.status.OfferedIncompatibleQosStatus;
+import com.intellectus.int2dds.status.OfferedIncompatibleTypeStatus;
 import com.intellectus.int2dds.status.PublicationMatchedStatus;
 import com.intellectus.int2dds.status.StatusMask;
 import com.intellectus.int2dds.types.IDdsType;
@@ -269,6 +270,24 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
         int policiesCount = buf.getInt(12);
         return new OfferedIncompatibleQosStatus(
                 totalCount, totalCountChange, lastPolicyId, policiesCount);
+    }
+
+    /**
+     * This writer's OFFERED_INCOMPATIBLE_TYPE status: how many times this
+     * writer's type was found incompatible with a requesting reader's type,
+     * and the change since last read. Per DDS, reading this status clears
+     * its {@code *Change} field.
+     */
+    public OfferedIncompatibleTypeStatus getOfferedIncompatibleTypeStatus() {
+        ByteBuffer buf = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = FfiAccess.datawriterGetOfferedIncompatibleTypeStatus(
+                handle(), FfiAccess.directBufferAddress(buf));
+        NativeKeepAlive.keepAlive(this);
+        NativeKeepAlive.keepAlive(buf);
+        ReturnCodes.check(rc);
+        int totalCount = buf.getInt(0);
+        int totalCountChange = buf.getInt(4);
+        return new OfferedIncompatibleTypeStatus(totalCount, totalCountChange);
     }
 
     /**

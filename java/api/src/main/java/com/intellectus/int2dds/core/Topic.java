@@ -9,8 +9,11 @@ import com.intellectus.int2dds.internal.QosMarshal;
 import com.intellectus.int2dds.internal.ReturnCodes;
 import com.intellectus.int2dds.internal.ffi.FfiAccess;
 import com.intellectus.int2dds.qos.TopicQos;
+import com.intellectus.int2dds.status.InconsistentTopicStatus;
 import com.intellectus.int2dds.status.StatusMask;
 import com.intellectus.int2dds.types.IDdsType;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.Charset;
 import java.util.Objects;
 
@@ -157,6 +160,24 @@ public final class Topic<T extends IDdsType> extends NativeEntity {
         NativeKeepAlive.keepAlive(this);
         ReturnCodes.check(rc);
         return StatusMask.of(out[0]);
+    }
+
+    /**
+     * This topic's INCONSISTENT_TOPIC status: how many times a topic of the
+     * same name but an incompatible type or QoS was discovered, and the
+     * change since last read. Per DDS, reading this status clears its
+     * {@code *Change} field.
+     */
+    public InconsistentTopicStatus getInconsistentTopicStatus() {
+        ByteBuffer buf = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = FfiAccess.topicGetInconsistentTopicStatus(
+                handle(), FfiAccess.directBufferAddress(buf));
+        NativeKeepAlive.keepAlive(this);
+        NativeKeepAlive.keepAlive(buf);
+        ReturnCodes.check(rc);
+        int totalCount = buf.getInt(0);
+        int totalCountChange = buf.getInt(4);
+        return new InconsistentTopicStatus(totalCount, totalCountChange);
     }
 
     /**

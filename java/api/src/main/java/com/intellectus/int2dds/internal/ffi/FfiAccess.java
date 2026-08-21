@@ -313,6 +313,15 @@ public final class FfiAccess {
     }
 
     /**
+     * Reads the topic's INCONSISTENT_TOPIC status into the 8-byte native
+     * struct at {@code statusOutAddr}. Thin passthrough -- the caller owns
+     * the buffer and decodes it.
+     */
+    public static int topicGetInconsistentTopicStatus(long topic, long statusOutAddr) {
+        return Ffi.int2dds_topic_get_inconsistent_topic_status(topic, statusOutAddr);
+    }
+
+    /**
      * Creates a publisher. Returns the C ABI status code and, only on
      * success, writes the new handle to {@code handleOut[0]}; on failure
      * {@code handleOut} is left untouched. {@code qos} is {@code 0L} for the
@@ -407,6 +416,15 @@ public final class FfiAccess {
      */
     public static int datawriterGetOfferedIncompatibleQosStatus(long writer, long statusOutAddr) {
         return Ffi.int2dds_datawriter_get_offered_incompatible_qos_status(writer, statusOutAddr);
+    }
+
+    /**
+     * Reads the writer's OFFERED_INCOMPATIBLE_TYPE status into the 8-byte
+     * native struct at {@code statusOutAddr}. Thin passthrough -- the caller
+     * owns the buffer and decodes it.
+     */
+    public static int datawriterGetOfferedIncompatibleTypeStatus(long writer, long statusOutAddr) {
+        return Ffi.int2dds_datawriter_get_offered_incompatible_type_status(writer, statusOutAddr);
     }
 
     // --- DataWriter listeners (hand-written trampoline layer) ---
@@ -541,6 +559,15 @@ public final class FfiAccess {
      */
     public static int datareaderGetRequestedIncompatibleQosStatus(long reader, long statusOutAddr) {
         return Ffi.int2dds_datareader_get_requested_incompatible_qos_status(reader, statusOutAddr);
+    }
+
+    /**
+     * Reads the reader's REQUESTED_INCOMPATIBLE_TYPE status into the 8-byte
+     * native struct at {@code statusOutAddr}. Thin passthrough -- the caller
+     * owns the buffer and decodes it.
+     */
+    public static int datareaderGetRequestedIncompatibleTypeStatus(long reader, long statusOutAddr) {
+        return Ffi.int2dds_datareader_get_requested_incompatible_type_status(reader, statusOutAddr);
     }
 
     /**
