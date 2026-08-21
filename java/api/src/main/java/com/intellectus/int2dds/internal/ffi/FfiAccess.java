@@ -829,6 +829,41 @@ public final class FfiAccess {
         return Ffi.int2dds_type_info_add_nested_field(typeInfo, fieldName, nestedTypeInfo, flags);
     }
 
+    /** Appends a bounded string field ({@code bound == 0} means unbounded). Returns the C ABI status code. */
+    public static int typeInfoAddStringField(long typeInfo, byte[] fieldName, int bound, int flags) {
+        return Ffi.int2dds_type_info_add_string_field(typeInfo, fieldName, bound, flags);
+    }
+
+    /** Appends a fixed-size array field of a primitive {@link com.intellectus.int2dds.xtypes.FieldType}. Returns the C ABI status code. */
+    public static int typeInfoAddArrayField(
+            long typeInfo, byte[] fieldName, int elementType, int arraySize, int flags) {
+        return Ffi.int2dds_type_info_add_array_field(typeInfo, fieldName, elementType, arraySize, flags);
+    }
+
+    /**
+     * Appends a fixed-size array field whose element is a nested struct, referencing
+     * {@code elementTypeInfo}'s own builder. {@code elementTypeInfo} is borrowed, not
+     * consumed -- the caller still owns it and must destroy it separately. Returns the
+     * C ABI status code.
+     */
+    public static int typeInfoAddArrayOfNestedField(
+            long typeInfo, byte[] fieldName, long elementTypeInfo, int arraySize, int flags) {
+        return Ffi.int2dds_type_info_add_array_of_nested_field(
+                typeInfo, fieldName, elementTypeInfo, arraySize, flags);
+    }
+
+    /**
+     * Appends a sequence field whose element is a nested struct ({@code bound == 0}
+     * means unbounded), referencing {@code elementTypeInfo}'s own builder. {@code
+     * elementTypeInfo} is borrowed, not consumed -- the caller still owns it and must
+     * destroy it separately. Returns the C ABI status code.
+     */
+    public static int typeInfoAddSequenceOfNestedField(
+            long typeInfo, byte[] fieldName, long elementTypeInfo, int bound, int flags) {
+        return Ffi.int2dds_type_info_add_sequence_of_nested_field(
+                typeInfo, fieldName, elementTypeInfo, bound, flags);
+    }
+
     /** Builds a type object from a completed builder, or 0 on failure. */
     public static long typeInfoToTypeObject(long typeInfo) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());

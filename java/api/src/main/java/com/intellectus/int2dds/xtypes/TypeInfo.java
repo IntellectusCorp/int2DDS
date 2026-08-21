@@ -79,6 +79,53 @@ public final class TypeInfo implements AutoCloseable {
         ReturnCodes.check(rc);
     }
 
+    /** Appends a bounded string field ({@code bound == 0} means unbounded). */
+    public void addStringField(String name, int bound, int flags) {
+        int rc = FfiAccess.typeInfoAddStringField(handle(), name.getBytes(UTF8), bound, flags);
+        // Same fence as addField.
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
+    /** Appends a fixed-size array field of a primitive {@link FieldType}. */
+    public void addArrayField(String name, int elementType, int arraySize, int flags) {
+        int rc = FfiAccess.typeInfoAddArrayField(
+                handle(), name.getBytes(UTF8), elementType, arraySize, flags);
+        // Same fence as addField.
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
+    /**
+     * Appends a fixed-size array field whose element is a nested struct, referencing
+     * {@code element}'s own builder. {@code element} is borrowed, not consumed -- the
+     * caller still owns it.
+     */
+    public void addArrayOfNestedField(String name, TypeInfo element, int arraySize, int flags) {
+        int rc = FfiAccess.typeInfoAddArrayOfNestedField(
+                handle(), name.getBytes(UTF8), element.handle(), arraySize, flags);
+        // Same fence as addNestedField, for both this builder and the borrowed element one --
+        // the native call dereferences both handles.
+        NativeKeepAlive.keepAlive(this);
+        NativeKeepAlive.keepAlive(element);
+        ReturnCodes.check(rc);
+    }
+
+    /**
+     * Appends a sequence field whose element is a nested struct ({@code bound == 0}
+     * means unbounded), referencing {@code element}'s own builder. {@code element} is
+     * borrowed, not consumed -- the caller still owns it.
+     */
+    public void addSequenceOfNestedField(String name, TypeInfo element, int bound, int flags) {
+        int rc = FfiAccess.typeInfoAddSequenceOfNestedField(
+                handle(), name.getBytes(UTF8), element.handle(), bound, flags);
+        // Same fence as addNestedField, for both this builder and the borrowed element one --
+        // the native call dereferences both handles.
+        NativeKeepAlive.keepAlive(this);
+        NativeKeepAlive.keepAlive(element);
+        ReturnCodes.check(rc);
+    }
+
     /** Bakes the fields appended so far into an immutable {@link TypeObject}. */
     public TypeObject toTypeObject() {
         long h = handle();
