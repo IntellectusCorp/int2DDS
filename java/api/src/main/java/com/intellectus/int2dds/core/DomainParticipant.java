@@ -239,6 +239,16 @@ public final class DomainParticipant extends NativeEntity {
         return new Subscriber(this, Objects.requireNonNull(qos, "qos"));
     }
 
+    /** Whether this participant contains the entity identified by {@code handle}. */
+    public boolean containsEntity(InstanceHandle handle) {
+        Objects.requireNonNull(handle, "handle");
+        boolean[] out = new boolean[1];
+        int rc = FfiAccess.participantContainsEntity(handle(), handle.bytes(), out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return out[0];
+    }
+
     /**
      * Takes a snapshot of currently discovered (alive) publications, blocking
      * up to {@code timeoutMillis} (negative = infinite) for the builtin

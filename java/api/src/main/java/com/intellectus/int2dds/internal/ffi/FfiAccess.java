@@ -710,6 +710,11 @@ public final class FfiAccess {
         return Ffi.int2dds_delete_publisher(publisher);
     }
 
+    /** The 16-byte instance handle identifying this publisher. {@code handleOut} must be a 16-byte array. */
+    public static int publisherGetInstanceHandle(long publisher, byte[] handleOut) {
+        return Ffi.int2dds_publisher_get_instance_handle(publisher, handleOut);
+    }
+
     /**
      * Creates a datawriter. Returns the C ABI status code and, only on
      * success, writes the new handle to {@code handleOut[0]}; on failure
@@ -2429,6 +2434,11 @@ public final class FfiAccess {
         return Ffi.int2dds_delete_subscriber(subscriber);
     }
 
+    /** The 16-byte instance handle identifying this subscriber. {@code handleOut} must be a 16-byte array. */
+    public static int subscriberGetInstanceHandle(long subscriber, byte[] handleOut) {
+        return Ffi.int2dds_subscriber_get_instance_handle(subscriber, handleOut);
+    }
+
     /** Creates a datareader. Returns rc; writes the handle to handleOut[0] only when rc == 0. */
     public static int createDataReader(long subscriber, long topic, long qos, long listener,
             int mask, long[] handleOut) {
@@ -3369,6 +3379,22 @@ public final class FfiAccess {
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             dataOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Whether {@code participant} contains the entity identified by the
+     * 16-byte {@code handle}. Writes the bool result to {@code out[0]} on
+     * success. Same 1-byte bool-slot shape as {@link #datareaderHasData}.
+     */
+    public static int participantContainsEntity(long participant, byte[] handle, boolean[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_participant_contains_entity(
+                participant, handle, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.get(0) != 0; // bool out is 1 byte, not 4
         }
         return rc;
     }

@@ -54,6 +54,15 @@ public final class Subscriber extends NativeEntity {
         return new Subscriber(participant, deleter);
     }
 
+    /** This subscriber's own DDS instance handle. */
+    public InstanceHandle getInstanceHandle() {
+        byte[] h = new byte[16];
+        int rc = FfiAccess.subscriberGetInstanceHandle(handle(), h);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return new InstanceHandle(h);
+    }
+
     /** Creates a datareader for {@code topic} with the core's default QoS. */
     public <T extends IDdsType> DataReader<T> createDataReader(Topic<T> topic, Supplier<T> factory) {
         return new DataReader<T>(this, topic, factory, null);

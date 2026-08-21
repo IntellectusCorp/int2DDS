@@ -56,6 +56,15 @@ public final class Publisher extends NativeEntity {
         return new Publisher(participant, deleter);
     }
 
+    /** This publisher's own DDS instance handle. */
+    public InstanceHandle getInstanceHandle() {
+        byte[] h = new byte[16];
+        int rc = FfiAccess.publisherGetInstanceHandle(handle(), h);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return new InstanceHandle(h);
+    }
+
     /** Creates a datawriter for {@code topic} with the core's default QoS. */
     public <T extends IDdsType> DataWriter<T> createDataWriter(Topic<T> topic) {
         return new DataWriter<T>(this, topic, null);
