@@ -116,6 +116,14 @@ public final class TypeInfo implements AutoCloseable {
         ReturnCodes.check(rc);
     }
 
+    /** Appends a wide-string (wstring) field ({@code bound == 0} means unbounded). */
+    public void addWstringField(String name, int bound, int flags) {
+        int rc = FfiAccess.typeInfoAddWstringField(handle(), name.getBytes(UTF8), bound, flags);
+        // Same fence as addField.
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
     /** Appends a fixed-size array field of a primitive {@link FieldType}. */
     public void addArrayField(String name, int elementType, int arraySize, int flags) {
         int rc = FfiAccess.typeInfoAddArrayField(
@@ -182,6 +190,34 @@ public final class TypeInfo implements AutoCloseable {
     public void addNamedTypeField(String fieldName, String typeName, int flags) {
         int rc = FfiAccess.typeInfoAddNamedTypeField(
                 handle(), fieldName.getBytes(UTF8), typeName.getBytes(UTF8), flags);
+        // Same fence as addField.
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
+    /**
+     * Appends a sequence field whose element is a type referenced by name (e.g. a
+     * struct built elsewhere), rather than a borrowed builder handle ({@code bound == 0}
+     * means unbounded). Like {@link #addNamedTypeField}, this does not record the
+     * referenced type's {@link TypeObject} into this builder's dependency closure, so the
+     * element type must resolve some other way (e.g. discovery) to decode.
+     */
+    public void addSequenceOfNamedField(String fieldName, String elementTypeName, int bound, int flags) {
+        int rc = FfiAccess.typeInfoAddSequenceOfNamedField(
+                handle(), fieldName.getBytes(UTF8), elementTypeName.getBytes(UTF8), bound, flags);
+        // Same fence as addField.
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
+    /**
+     * Appends a fixed-size array field whose element is a type referenced by name,
+     * rather than a borrowed builder handle. Same discovery-resolution caveat as {@link
+     * #addSequenceOfNamedField}.
+     */
+    public void addArrayOfNamedField(String fieldName, String elementTypeName, int arraySize, int flags) {
+        int rc = FfiAccess.typeInfoAddArrayOfNamedField(
+                handle(), fieldName.getBytes(UTF8), elementTypeName.getBytes(UTF8), arraySize, flags);
         // Same fence as addField.
         NativeKeepAlive.keepAlive(this);
         ReturnCodes.check(rc);

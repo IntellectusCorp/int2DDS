@@ -1324,6 +1324,11 @@ public final class FfiAccess {
         return Ffi.int2dds_type_info_add_string_field(typeInfo, fieldName, bound, flags);
     }
 
+    /** Appends a bounded wide-string field ({@code bound == 0} means unbounded). Returns the C ABI status code. */
+    public static int typeInfoAddWstringField(long typeInfo, byte[] fieldName, int bound, int flags) {
+        return Ffi.int2dds_type_info_add_wstring_field(typeInfo, fieldName, bound, flags);
+    }
+
     /** Appends a fixed-size array field of a primitive {@link com.intellectus.int2dds.xtypes.FieldType}. Returns the C ABI status code. */
     public static int typeInfoAddArrayField(
             long typeInfo, byte[] fieldName, int elementType, int arraySize, int flags) {
@@ -1408,6 +1413,29 @@ public final class FfiAccess {
     public static int typeInfoAddNamedTypeField(
             long typeInfo, byte[] fieldName, byte[] typeHashName, int flags) {
         return Ffi.int2dds_type_info_add_named_type_field(typeInfo, fieldName, typeHashName, flags);
+    }
+
+    /**
+     * Appends a sequence field whose element is a type referenced by name-hash rather
+     * than a borrowed builder handle ({@code bound == 0} means unbounded). Same
+     * discovery-resolved caveat as {@link #typeInfoAddNamedTypeField}. Returns the C ABI
+     * status code.
+     */
+    public static int typeInfoAddSequenceOfNamedField(
+            long typeInfo, byte[] fieldName, byte[] elementHashName, int bound, int flags) {
+        return Ffi.int2dds_type_info_add_sequence_of_named_field(
+                typeInfo, fieldName, elementHashName, bound, flags);
+    }
+
+    /**
+     * Appends a fixed-size array field whose element is a type referenced by name-hash
+     * rather than a borrowed builder handle. Same discovery-resolved caveat as {@link
+     * #typeInfoAddNamedTypeField}. Returns the C ABI status code.
+     */
+    public static int typeInfoAddArrayOfNamedField(
+            long typeInfo, byte[] fieldName, byte[] elementHashName, int arraySize, int flags) {
+        return Ffi.int2dds_type_info_add_array_of_named_field(
+                typeInfo, fieldName, elementHashName, arraySize, flags);
     }
 
     /** Builds a type object from a completed builder, or 0 on failure. */
