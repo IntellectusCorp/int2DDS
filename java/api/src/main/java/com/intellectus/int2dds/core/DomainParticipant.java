@@ -387,6 +387,16 @@ public final class DomainParticipant extends NativeEntity {
         return StatusMask.of(out[0]);
     }
 
+    /** This participant's current time, in nanoseconds since the DDS epoch. */
+    public long getCurrentTime() {
+        int[] sec = new int[1];
+        int[] nanos = new int[1];
+        int rc = FfiAccess.participantGetCurrentTime(handle(), sec, nanos);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return sec[0] * 1_000_000_000L + (nanos[0] & 0xFFFFFFFFL);
+    }
+
     /**
      * Builds a native QoS handle, applies {@code qos} onto it, and destroys it
      * again once {@link #create} has returned — success or failure, thrown or

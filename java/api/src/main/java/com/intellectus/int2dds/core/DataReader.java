@@ -130,6 +130,24 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
         return StatusMask.of(out[0]);
     }
 
+    /** Whether this reader has any samples available to take/read. */
+    public boolean hasData() {
+        boolean[] out = new boolean[1];
+        int rc = FfiAccess.datareaderHasData(handle(), out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return out[0];
+    }
+
+    /** This reader's 16-byte DDS entity GUID. */
+    public byte[] getGuid() {
+        byte[] guid = new byte[16];
+        int rc = FfiAccess.datareaderGetGuid(handle(), guid);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return guid;
+    }
+
     /**
      * Reads this reader's current QoS off the native side — not the {@code
      * DataReaderQos} it was constructed with, which this class does not

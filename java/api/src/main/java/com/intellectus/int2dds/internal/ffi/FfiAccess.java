@@ -134,6 +134,24 @@ public final class FfiAccess {
         return Ffi.int2dds_participant_get_domain_id(participant, domainIdOut);
     }
 
+    /**
+     * The participant's current time (sec, nanosec) since the DDS epoch.
+     * Writes it to {@code secOut[0]}/{@code nanosecOut[0]} on success.
+     */
+    public static int participantGetCurrentTime(long participant, int[] secOut, int[] nanosecOut) {
+        ByteBuffer secSlot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
+        ByteBuffer nanoSlot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_participant_get_current_time(
+                participant, directBufferAddress(secSlot), directBufferAddress(nanoSlot));
+        NativeKeepAlive.keepAlive(secSlot);
+        NativeKeepAlive.keepAlive(nanoSlot);
+        if (rc == 0) {
+            secOut[0] = secSlot.getInt(0);
+            nanosecOut[0] = nanoSlot.getInt(0);
+        }
+        return rc;
+    }
+
     /** Creates a standalone DomainParticipant QoS handle, or 0 on failure. */
     public static long createParticipantQos() {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -349,6 +367,11 @@ public final class FfiAccess {
         return Ffi.int2dds_delete_datawriter(writer);
     }
 
+    /** The 16-byte entity GUID. {@code guidOut} must be a 16-byte array. */
+    public static int datawriterGetGuid(long writer, byte[] guidOut) {
+        return Ffi.int2dds_datawriter_get_guid(writer, guidOut);
+    }
+
     // --- DataWriter listeners (hand-written trampoline layer) ---
 
     /**
@@ -439,6 +462,22 @@ public final class FfiAccess {
     /** Blocks up to {@code timeoutMs} for historical (durable) data to arrive. Status code, incl. RET_TIMEOUT. */
     public static int datareaderWaitForHistoricalData(long reader, long timeoutMs) {
         return Ffi.int2dds_datareader_wait_for_historical_data(reader, timeoutMs);
+    }
+
+    /** The 16-byte entity GUID. {@code guidOut} must be a 16-byte array. */
+    public static int datareaderGetGuid(long reader, byte[] guidOut) {
+        return Ffi.int2dds_datareader_get_guid(reader, guidOut);
+    }
+
+    /** Whether the reader has any samples available to take/read. Writes it to {@code out[0]} on success. */
+    public static int datareaderHasData(long reader, boolean[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_datareader_has_data(reader, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.get(0) != 0; // bool out is 1 byte, not 4
+        }
+        return rc;
     }
 
     // --- Topic QoS setters ---

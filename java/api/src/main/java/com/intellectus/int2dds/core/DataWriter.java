@@ -171,6 +171,15 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
         return StatusMask.of(out[0]);
     }
 
+    /** This writer's 16-byte DDS entity GUID. */
+    public byte[] getGuid() {
+        byte[] guid = new byte[16];
+        int rc = FfiAccess.datawriterGetGuid(handle(), guid);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return guid;
+    }
+
     /**
      * Serializes {@code sample} as CDR and publishes it.
      *
