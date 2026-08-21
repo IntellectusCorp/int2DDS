@@ -183,6 +183,13 @@ pub trait TypeSupport: Send + Sync + 'static {
 
     fn get_extensibility_kind(&self) -> crate::serialize::xcdr::ExtensibilityKind;
 
+    /// Whether `field_path` names a member a filter expression can reference,
+    /// answered from the same metadata the runtime filter evaluation uses.
+    /// `None` means no metadata is available and expression validation is skipped.
+    fn filter_has_field(&self, _field_path: &str) -> Option<bool> {
+        None
+    }
+
     fn serialize_key_and_non_key(
         &self,
         data: &dyn Any,

@@ -3783,6 +3783,8 @@ impl<Foo: 'static + Clone + Debug> DataReaderBase for DataReader<Foo> {
             On failure, this operation returns a platform-defined 'nil' value.
         */
         self.is_deleted()?;
+        crate::topic::sql::parse_expression(query_expression, true)?
+            .validate_fields(&|path| self.type_support.filter_has_field(path))?;
         let self_ref = self.self_ref.lock().map_err(|e| DdsError::Error(e.to_string()))?;
         let self_ref = self_ref
             .as_ref()

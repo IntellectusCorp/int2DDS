@@ -496,6 +496,193 @@ fn test_content_filtered_topic_with_query_condition() {
     factory.delete_participant(participant).unwrap();
 }
 
+// A filter expression naming a field the topic type does not have can never
+// match, so CFT and QueryCondition creation reject it (RTI parity). A `%n`
+// operand may resolve to a field name at read time, so those are accepted.
+#[test]
+fn test_filter_unknown_field_rejected_at_creation() {
+    let domain_id = next_domain_id();
+    let factory = DomainParticipantFactory::get_instance();
+    let participant = factory
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+
+    let topic = participant
+        .create_topic::<KeyedDataType>(
+            "CFT_Validation_Test",
+            KeyedDataType::get_type_name(),
+            TopicQos::default(),
+            None,
+            StatusMask::default(),
+        )
+        .unwrap();
+
+    let unknown = participant.create_contentfilteredtopic::<KeyedDataType>(
+        "CFT_Validation_Bad",
+        &topic,
+        "nonexistent > 5",
+        vec![],
+    );
+    assert!(unknown.is_err());
+
+    let partly_unknown = participant.create_contentfilteredtopic::<KeyedDataType>(
+        "CFT_Validation_Partly",
+        &topic,
+        "key > 0 AND bogus = 3",
+        vec![],
+    );
+    assert!(partly_unknown.is_err());
+
+    let cft = participant
+        .create_contentfilteredtopic::<KeyedDataType>(
+            "CFT_Validation_Good",
+            &topic,
+            "key > %0",
+            vec!["0".to_string()],
+        )
+        .unwrap();
+    assert!(cft.set_filter_expression("nonexistent BETWEEN 1 AND 2", vec![]).is_err());
+    assert_eq!(cft.get_filter_expression().unwrap(), "key > %0");
+
+    let subscriber = participant
+        .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+        .unwrap();
+    let data_reader = subscriber
+        .create_datareader::<KeyedDataType>(
+            &topic,
+            DataReaderQos::default(),
+            None,
+            StatusMask::default(),
+        )
+        .unwrap();
+
+    let qc_unknown = data_reader.create_querycondition(
+        &[SampleStateKind::ANY_SAMPLE_STATE],
+        &[ViewStateKind::ANY_VIEW_STATE],
+        &[InstanceStateKind::ANY_INSTANCE_STATE],
+        "nonexistent = 1",
+        vec![],
+    );
+    assert!(qc_unknown.is_err());
+
+    let qc_ok = data_reader.create_querycondition(
+        &[SampleStateKind::ANY_SAMPLE_STATE],
+        &[ViewStateKind::ANY_VIEW_STATE],
+        &[InstanceStateKind::ANY_INSTANCE_STATE],
+        "key >= 0",
+        vec![],
+    );
+    assert!(qc_ok.is_ok());
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
+}
+
+#[derive(int2dds::DdsType)]
+struct OptionalScore {
+    #[dds(key)]
+    id: i32,
+    score: Option<i32>,
+    grade: i32,
+}
+
+// An unset optional makes the comparison false at the predicate level, not a
+// sample-level error: the other branch of an OR still decides the match.
+#[test]
+fn test_unset_optional_comparison_is_predicate_false() {
+    let domain_id = next_domain_id();
+    let factory = DomainParticipantFactory::get_instance();
+    let participant = factory
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+
+    let topic = participant
+        .create_topic::<OptionalScore>(
+            "QC_Unset_Optional_Test",
+            "OptionalScore",
+            TopicQos::default(),
+            None,
+            StatusMask::default(),
+        )
+        .unwrap();
+
+    let publisher =
+        participant.create_publisher(PublisherQos::default(), None, StatusMask::default()).unwrap();
+    let data_writer = publisher
+        .create_datawriter::<OptionalScore>(
+            &topic,
+            DataWriterQos::default(),
+            None,
+            StatusMask::default(),
+        )
+        .unwrap();
+
+    let subscriber = participant
+        .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+        .unwrap();
+    let data_reader = subscriber
+        .create_datareader::<OptionalScore>(
+            &topic,
+            DataReaderQos::default(),
+            None,
+            StatusMask::default(),
+        )
+        .unwrap();
+
+    wait_for_reader_status(
+        &data_reader,
+        StatusMask::SUBSCRIPTION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
+    wait_for_writer_status(
+        &data_writer,
+        StatusMask::PUBLICATION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
+
+    data_writer
+        .write(&OptionalScore { id: 1, score: None, grade: 1 }, InstanceHandle::NIL)
+        .unwrap();
+    data_writer
+        .write(&OptionalScore { id: 2, score: Some(10), grade: 0 }, InstanceHandle::NIL)
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
+    // id 1: score unset -> false, but grade = 1 -> the OR matches.
+    // id 2: score 10 > 5 -> matches.
+    let qc_or = data_reader
+        .create_querycondition(
+            &[SampleStateKind::ANY_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::ANY_INSTANCE_STATE],
+            "score > 5 OR grade = 1",
+            vec![],
+        )
+        .unwrap();
+    let samples = data_reader.read_w_condition(10, qc_or).unwrap();
+    let mut ids: Vec<i32> = samples.iter().map(|s| s.data().unwrap().id).collect();
+    ids.sort();
+    assert_eq!(ids, vec![1, 2]);
+
+    // Under AND the unset comparison is false for id 1, and id 2 fails on grade.
+    let qc_and = data_reader
+        .create_querycondition(
+            &[SampleStateKind::ANY_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::ANY_INSTANCE_STATE],
+            "score > 5 AND grade = 1",
+            vec![],
+        )
+        .unwrap();
+    let result = data_reader.read_w_condition(10, qc_and);
+    assert_eq!(result.err().unwrap(), DdsError::NoData);
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
+}
+
 // A sample the QueryCondition cannot evaluate must not fail or consume the
 // whole read/take batch, and key-only dispose notifications always pass
 // filters (RTI/Fast-DDS convention).

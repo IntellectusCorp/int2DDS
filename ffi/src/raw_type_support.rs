@@ -290,6 +290,13 @@ impl TypeSupport for RawTypeSupport {
         self.extensibility
     }
 
+    fn filter_has_field(&self, field_path: &str) -> Option<bool> {
+        // The reader-side filter reads fields through the compiled plan; without
+        // one (name-only topic, or a shape the plan does not cover) the filter is
+        // inert and expressions are accepted unchecked.
+        self.plans.as_ref().and_then(|plans| plans.filter_has_field(field_path))
+    }
+
     fn get_type_identifier(&self) -> Option<TypeIdentifier> {
         self.type_identifier.clone()
     }

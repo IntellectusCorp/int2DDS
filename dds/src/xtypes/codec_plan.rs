@@ -209,10 +209,13 @@ impl TypePlans {
     /// Whether `field_path` names a readable field. Answered from either plan,
     /// since the two describe the same members.
     pub fn has_field(&self, field_path: &str) -> bool {
-        let Some(plan) = self.xcdr2.as_ref().or(self.xcdr1.as_ref()) else {
-            return false;
-        };
-        plan.has_field(field_path)
+        self.filter_has_field(field_path).unwrap_or(false)
+    }
+
+    /// `has_field` distinguishing "no plan compiled" (`None`) from "the plan does
+    /// not know this field" (`Some(false)`), for creation-time filter validation.
+    pub fn filter_has_field(&self, field_path: &str) -> Option<bool> {
+        self.xcdr2.as_ref().or(self.xcdr1.as_ref()).map(|plan| plan.has_field(field_path))
     }
 }
 
@@ -806,9 +809,11 @@ fn read_field<R: PlanReader>(
     // offset is not derivable from the members before it, and an optional member
     // may not be in the sample at all.
     let (starts, _) = locate_members(reader, node)?;
-    let start = starts[target].ok_or_else(|| {
-        DdsError::Error(format!("Field '{}' is not present in this sample", path[0]))
-    })?;
+    // An absent member (unset optional, or one this writer's type lacks) is a
+    // value-level fact, not an error: comparisons involving it evaluate false.
+    let Some(start) = starts[target] else {
+        return Ok(Parameter::Unset);
+    };
     reader.set_position(start);
 
     let member = &node.members[target];
@@ -1740,10 +1745,14 @@ mod tests {
             assert_eq!(read("note"), Parameter::String("hi".into()), "{format_name}");
             assert_eq!(read("ratio"), Parameter::FloatValue(1.5), "{format_name}");
 
-            // An absent optional is not a value, and the members after it are
+            // An absent optional reads as Unset, and the members after it are
             // still reachable.
             let bytes = serialize_dynamic_data(&absent, &format).unwrap();
-            assert!(plans.field_value(&bytes, "note").unwrap().is_err(), "{format_name}");
+            assert_eq!(
+                plans.field_value(&bytes, "note").unwrap().unwrap(),
+                Parameter::Unset,
+                "{format_name}"
+            );
             assert_eq!(
                 plans.field_value(&bytes, "ratio").unwrap().unwrap(),
                 Parameter::FloatValue(1.5),
