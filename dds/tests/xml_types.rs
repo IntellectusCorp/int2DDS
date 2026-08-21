@@ -11,8 +11,6 @@ use int2dds::dcps::publication::{data_writer::DataWriter, publisher::Publisher};
 use int2dds::dcps::subscription::{data_reader::DataReader, subscriber::Subscriber};
 use int2dds::dcps::topic::topic::Topic;
 use int2dds::{
-    common::instance_handle::InstanceHandle,
-    config::xml::XmlTypeRegistry,
     dcps::{
         core::time::Duration,
         domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
@@ -25,9 +23,7 @@ use int2dds::{
             qos::{DataReaderQos, SubscriberQos},
             sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind},
         },
-        topic::type_support::DdsType,
     },
-    serialize::{cdr::PrimitiveSerialize, WString},
     topic::qos::TopicQos,
     xtypes::{DynamicData, DynamicTypeKind, DynamicValue},
 };

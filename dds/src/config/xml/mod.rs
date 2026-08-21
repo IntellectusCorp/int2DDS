@@ -461,7 +461,7 @@ mod tests {
     use super::*;
     use crate::dcps::topic::type_support::DdsType;
     use crate::serialize::cdr::PrimitiveSerialize;
-    use crate::serialize::{DeserializerReader, WString};
+    use crate::serialize::WString;
     use crate::xtypes::{
         CompleteStructMember, CompleteStructType, ExtensibilityKind, HasTypeObject, MemberFlag,
         TryConstructKind, TypeFlag,

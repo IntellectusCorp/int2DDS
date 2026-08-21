@@ -2131,7 +2131,9 @@ impl<'a> CGen<'a> {
                     self.raw(&format!("{}}}\n", indent));
                 }
             }
-            ResolvedType::Struct(type_name) => {
+            // A `_cleanup` definition only exists when `struct_needs_cleanup` holds
+            // (and never for unions/bitsets, which also resolve as `Struct`).
+            ResolvedType::Struct(type_name) if self.type_needs_cleanup(ty) => {
                 let simple = type_name.rsplit("::").next().unwrap_or(type_name);
                 self.raw(&format!("{}{}_cleanup(&{});\n", indent, simple, accessor));
             }
