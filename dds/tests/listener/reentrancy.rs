@@ -18,9 +18,7 @@
 //! identical callback but touch different locks, so if they ever hang too, the harness is
 //! broken rather than the middleware.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use int2dds::{
     common::instance_handle::InstanceHandle,
     core::time::Duration,

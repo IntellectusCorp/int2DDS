@@ -17,9 +17,7 @@
 //!
 //! Env is process-global and this file rewrites it, so there is exactly one `#[test]`.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use int2dds::{
     common::instance_handle::InstanceHandle,
     core::time::Duration,

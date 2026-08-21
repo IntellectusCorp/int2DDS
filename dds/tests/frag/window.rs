@@ -20,9 +20,7 @@
 //!
 //! Run with `INT2DDS_DATA_FRAG_SIZE=1344 INT2DDS_MAX_MESSAGE_SIZE=13440`, the deployment shape.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use int2dds::{
     common::instance_handle::InstanceHandle,
     core::time::Duration,

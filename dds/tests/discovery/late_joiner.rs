@@ -5,14 +5,12 @@
 //! writer's unsent changes, so discovery has to push them. Heartbeat plus repair is the backstop,
 //! not the mechanism.
 
-mod common;
-
 use std::{
     thread::sleep,
     time::{Duration as StdDuration, Instant},
 };
 
-use common::*;
+use crate::common::*;
 use int2dds::{
     core::time::Duration,
     domain::{

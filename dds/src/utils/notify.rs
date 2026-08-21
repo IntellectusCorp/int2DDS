@@ -17,6 +17,18 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex};
 
+thread_local! {
+    // True while this thread is running a user listener callback. Deleting an entity from inside
+    // its own callback would block on an in-flight count only this thread can release, so the
+    // delete path reads this and refuses rather than deadlocking.
+    static IN_LISTENER: std::cell::Cell<bool> = std::cell::Cell::new(false);
+}
+
+// Whether the current thread is executing a user listener callback.
+pub(crate) fn in_listener_callback() -> bool {
+    IN_LISTENER.with(|flag| flag.get())
+}
+
 /// Clones a registered callback out from behind its mutex, so the caller can invoke it with
 /// the lock released.
 ///
@@ -36,7 +48,11 @@ pub(crate) fn callback_handle<T: ?Sized>(slot: &Mutex<Option<Arc<T>>>) -> Option
 /// visible than the current behaviour of killing a background thread the application cannot
 /// observe. The callback's own work is still lost -- only the thread is saved.
 pub(crate) fn notify_user<F: FnOnce()>(context: &str, notify: F) {
-    if let Err(payload) = catch_unwind(AssertUnwindSafe(notify)) {
+    let was_in_listener = IN_LISTENER.with(|flag| flag.replace(true));
+    let result = catch_unwind(AssertUnwindSafe(notify));
+    IN_LISTENER.with(|flag| flag.set(was_in_listener));
+
+    if let Err(payload) = result {
         let reason = panic_message(&payload);
         log::error!(
             "{context}: user listener panicked ({reason}). The panic was contained so the DDS \
@@ -72,6 +88,37 @@ mod tests {
         let mut ran = false;
         notify_user("test", || ran = true);
         assert!(ran, "the callback did not run");
+    }
+
+    #[test]
+    fn in_listener_callback_is_true_only_inside_notify_user() {
+        assert!(!in_listener_callback(), "must be false before any callback");
+
+        let mut inside = false;
+        notify_user("test", || inside = in_listener_callback());
+
+        assert!(inside, "must be true while the callback runs");
+        assert!(!in_listener_callback(), "must be false after the callback returns");
+    }
+
+    #[test]
+    fn nested_notify_user_stays_flagged_until_the_outer_returns() {
+        let mut after_inner = false;
+
+        notify_user("outer", || {
+            notify_user("inner", || {});
+            // The inner callback returned, but the outer one is still running.
+            after_inner = in_listener_callback();
+        });
+
+        assert!(after_inner, "flag was cleared when the inner callback returned");
+        assert!(!in_listener_callback(), "flag not cleared after the outer callback returned");
+    }
+
+    #[test]
+    fn in_listener_callback_is_cleared_after_a_panicking_callback() {
+        notify_user("test", || panic!("boom"));
+        assert!(!in_listener_callback(), "a panicking callback must not leak the flag");
     }
 
     #[test]
