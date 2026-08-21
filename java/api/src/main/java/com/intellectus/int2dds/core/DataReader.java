@@ -568,6 +568,56 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
         return new InstanceHandle(handleOut);
     }
 
+    /**
+     * The serialized key representation for the instance {@code handle}
+     * identifies, as this reader's core copy holds it: a key-only CDR the
+     * core produces via its own key deserializer, not a full sample -- {@code
+     * T}'s CDR codec has no key-only decoder and cannot rebuild a sample from
+     * these bytes. Round-trips with {@link DataWriter#registerInstance} and
+     * with an instance handle taken off a received {@link Sample}'s {@link
+     * SampleInfo}, for the same logical instance.
+     *
+     * <p>Uses a fresh local buffer, not the reader's shared {@link #payload},
+     * so this is safe to call regardless of take/read state.
+     *
+     * @throws NullPointerException if {@code handle} is null
+     * @throws com.intellectus.int2dds.exceptions.DdsException on a nil or
+     *     unknown handle
+     */
+    public byte[] getKeyValue(InstanceHandle handle) {
+        Objects.requireNonNull(handle, "handle");
+        long h = handle();
+        ByteBuffer buf = ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());
+        ByteBuffer sizeSlot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        while (true) {
+            int rc = FfiAccess.datareaderGetKeyValue(
+                    h, handle.bytes(), addr(buf), buf.capacity(), addr(sizeSlot));
+            NativeKeepAlive.keepAlive(this);
+            NativeKeepAlive.keepAlive(buf);
+            NativeKeepAlive.keepAlive(sizeSlot);
+            if (rc == DdsException.RET_BUFFER_TOO_SMALL) {
+                long required = sizeSlot.getLong(0);
+                if (required > MAX_SAMPLE_BYTES) {
+                    throw new DdsErrorException("serialized key too large: " + required + " bytes");
+                }
+                long cap = buf.capacity();
+                while (cap < required) {
+                    cap <<= 1;
+                }
+                buf = ByteBuffer.allocateDirect((int) cap).order(ByteOrder.nativeOrder());
+                continue;
+            }
+            ReturnCodes.check(rc);
+            break;
+        }
+        int n = (int) sizeSlot.getLong(0);
+        ((java.nio.Buffer) buf).position(0);
+        ((java.nio.Buffer) buf).limit(n);
+        byte[] out = new byte[n];
+        buf.get(out);
+        return out;
+    }
+
     /** Takes (removes) the next sample, or null if the cache is empty. */
     public Sample<T> take() {
         return next(true);

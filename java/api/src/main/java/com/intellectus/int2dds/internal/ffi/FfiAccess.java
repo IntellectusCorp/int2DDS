@@ -3746,4 +3746,25 @@ public final class FfiAccess {
             long reader, long keyAddr, long keyLen, byte[] handleOut) {
         return Ffi.int2dds_datareader_lookup_instance(reader, keyAddr, keyLen, handleOut);
     }
+
+    /**
+     * Fetches the serialized key bytes for the instance {@code handle} on
+     * {@code writer} into {@code keyBuf}, writing the required size to {@code
+     * keySizeOut}. {@code RET_BUFFER_TOO_SMALL} when {@code keyCapacity} is
+     * too small; the grow-and-retry is the caller's job.
+     */
+    public static int datawriterGetKeyValue(
+            long writer, byte[] handle, long keyBuf, long keyCapacity, long keySizeOut) {
+        return Ffi.int2dds_datawriter_get_key_value(writer, handle, keyBuf, keyCapacity, keySizeOut);
+    }
+
+    /**
+     * Fetches the serialized key bytes for the instance {@code handle} on
+     * {@code reader}. Same buffer/grow contract as {@link
+     * #datawriterGetKeyValue}.
+     */
+    public static int datareaderGetKeyValue(
+            long reader, byte[] handle, long keyBuf, long keyCapacity, long keySizeOut) {
+        return Ffi.int2dds_datareader_get_key_value(reader, handle, keyBuf, keyCapacity, keySizeOut);
+    }
 }

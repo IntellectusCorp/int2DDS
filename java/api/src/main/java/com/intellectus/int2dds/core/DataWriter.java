@@ -56,6 +56,9 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
     private static final boolean LITTLE_ENDIAN_HOST =
             ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN;
 
+    /** Largest power-of-two direct buffer size an int capacity can hold (2^30); see {@link #getKeyValue}. */
+    private static final long MAX_SAMPLE_BYTES = 1 << 30;
+
     // Pointer to the binding-owned native listener context, or 0 when none is
     // installed. Guarded by setListener's own synchronization.
     private long listenerCtx = 0L;
@@ -421,6 +424,53 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
             ReturnCodes.check(rc);
         }
         return new InstanceHandle(handleOut);
+    }
+
+    /**
+     * The serialized key representation for the instance {@code handle}
+     * identifies, as this writer's core copy holds it: a key-only CDR the
+     * core produces via its own key deserializer, not a full sample -- {@code
+     * T}'s CDR codec has no key-only decoder and cannot rebuild a sample from
+     * these bytes. Round-trips with {@link #registerInstance} and {@link
+     * #lookupInstance}.
+     *
+     * @throws NullPointerException if {@code handle} is null
+     * @throws com.intellectus.int2dds.exceptions.DdsException on a nil or
+     *     unknown handle
+     */
+    public byte[] getKeyValue(InstanceHandle handle) {
+        Objects.requireNonNull(handle, "handle");
+        long h = handle();
+        ByteBuffer buf = ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());
+        ByteBuffer sizeSlot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        while (true) {
+            int rc = FfiAccess.datawriterGetKeyValue(h, handle.bytes(),
+                    FfiAccess.directBufferAddress(buf), buf.capacity(),
+                    FfiAccess.directBufferAddress(sizeSlot));
+            NativeKeepAlive.keepAlive(this);
+            NativeKeepAlive.keepAlive(buf);
+            NativeKeepAlive.keepAlive(sizeSlot);
+            if (rc == DdsException.RET_BUFFER_TOO_SMALL) {
+                long required = sizeSlot.getLong(0);
+                if (required > MAX_SAMPLE_BYTES) {
+                    throw new DdsErrorException("serialized key too large: " + required + " bytes");
+                }
+                long cap = buf.capacity();
+                while (cap < required) {
+                    cap <<= 1;
+                }
+                buf = ByteBuffer.allocateDirect((int) cap).order(ByteOrder.nativeOrder());
+                continue;
+            }
+            ReturnCodes.check(rc);
+            break;
+        }
+        int n = (int) sizeSlot.getLong(0);
+        ((java.nio.Buffer) buf).position(0);
+        ((java.nio.Buffer) buf).limit(n);
+        byte[] out = new byte[n];
+        buf.get(out);
+        return out;
     }
 
     /**
