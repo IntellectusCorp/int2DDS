@@ -2855,4 +2855,57 @@ public final class FfiAccess {
     public static void dynamicReaderDestroy(long reader) {
         Ffi.int2dds_dynamic_reader_destroy(reader);
     }
+
+    // --- Instance management (register/unregister/dispose/lookup) ---
+
+    /**
+     * Registers the instance identified by the serialized sample at {@code
+     * keyAddr}/{@code keyLen} (the core derives the KeyHash from it, the same
+     * canonical derivation {@link #datawriterWriteSerialized} relies on),
+     * writing the 16-byte instance handle to {@code handleOut}. Requires a
+     * keyed topic ({@code RET_PRECONDITION_NOT_MET} otherwise).
+     */
+    public static int datawriterRegisterInstance(
+            long writer, long keyAddr, long keyLen, byte[] handleOut) {
+        return Ffi.int2dds_datawriter_register_instance(writer, keyAddr, keyLen, handleOut);
+    }
+
+    /**
+     * Unregisters the instance identified by the serialized sample at {@code
+     * keyAddr}/{@code keyLen}. {@code handle} is the registered instance
+     * handle, or 16 zero bytes (NIL) to let the core derive it from the key.
+     */
+    public static int datawriterUnregisterInstance(
+            long writer, long keyAddr, long keyLen, byte[] handle) {
+        return Ffi.int2dds_datawriter_unregister_instance(writer, keyAddr, keyLen, handle);
+    }
+
+    /**
+     * Disposes the instance identified by the serialized sample at {@code
+     * keyAddr}/{@code keyLen}. {@code handle} is the registered instance
+     * handle, or 16 zero bytes (NIL) to let the core derive it from the key.
+     */
+    public static int datawriterDispose(long writer, long keyAddr, long keyLen, byte[] handle) {
+        return Ffi.int2dds_datawriter_dispose(writer, keyAddr, keyLen, handle);
+    }
+
+    /**
+     * Looks up the instance handle for the serialized sample at {@code
+     * keyAddr}/{@code keyLen}, writing it to {@code handleOut}. All-zero on
+     * an unknown instance.
+     */
+    public static int datawriterLookupInstance(
+            long writer, long keyAddr, long keyLen, byte[] handleOut) {
+        return Ffi.int2dds_datawriter_lookup_instance(writer, keyAddr, keyLen, handleOut);
+    }
+
+    /**
+     * Looks up the instance handle for the serialized sample at {@code
+     * keyAddr}/{@code keyLen} on a datareader, writing it to {@code
+     * handleOut}. All-zero on an unknown instance.
+     */
+    public static int datareaderLookupInstance(
+            long reader, long keyAddr, long keyLen, byte[] handleOut) {
+        return Ffi.int2dds_datareader_lookup_instance(reader, keyAddr, keyLen, handleOut);
+    }
 }

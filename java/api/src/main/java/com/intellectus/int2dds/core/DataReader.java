@@ -1,6 +1,8 @@
 package com.intellectus.int2dds.core;
 
 import com.intellectus.int2dds.cdr.CdrReader;
+import com.intellectus.int2dds.cdr.CdrWriter;
+import com.intellectus.int2dds.cdr.Extensibility;
 import com.intellectus.int2dds.conditions.QueryCondition;
 import com.intellectus.int2dds.conditions.ReadCondition;
 import com.intellectus.int2dds.conditions.StatusCondition;
@@ -13,6 +15,7 @@ import com.intellectus.int2dds.internal.ReturnCodes;
 import com.intellectus.int2dds.internal.ffi.FfiAccess;
 import com.intellectus.int2dds.listeners.DataReaderListener;
 import com.intellectus.int2dds.qos.DataReaderQos;
+import com.intellectus.int2dds.qos.DataRepresentationKind;
 import com.intellectus.int2dds.status.LivelinessChangedStatus;
 import com.intellectus.int2dds.status.RequestedDeadlineMissedStatus;
 import com.intellectus.int2dds.status.RequestedIncompatibleQosStatus;
@@ -46,6 +49,9 @@ import java.util.function.Supplier;
  */
 public final class DataReader<T extends IDdsType> extends NativeEntity {
 
+    private static final boolean LITTLE_ENDIAN_HOST =
+            ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN;
+
     private static final int DEFAULT_CAPACITY = 4096;
 
     /** Largest power-of-two direct buffer size an int capacity can hold (2^30). */
@@ -58,6 +64,14 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
     private final Topic<T> topic;
     private final ContentFilteredTopic<T> cft;
     private final Supplier<T> factory;
+
+    /**
+     * Resolved once at construction, the same way {@link
+     * DataWriter#resolveXcdr2} is: used only by {@link #lookupInstance},
+     * which must serialize {@code sample} identically to how a matching
+     * {@link DataWriter#write} on this topic would.
+     */
+    private final boolean xcdr2;
 
     // Pointer to the binding-owned native listener context, or 0 when none is
     // installed. Guarded by setListener's own synchronization.
@@ -80,6 +94,7 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
         this.topic = topic;
         this.cft = null;
         this.factory = Objects.requireNonNull(factory, "factory");
+        this.xcdr2 = resolveXcdr2(qos);
     }
 
     /**
@@ -100,6 +115,15 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
         this.topic = null;
         this.cft = cft;
         this.factory = Objects.requireNonNull(factory, "factory");
+        this.xcdr2 = resolveXcdr2(qos);
+    }
+
+    /** Same resolution as {@link DataWriter#resolveXcdr2}, for {@link #lookupInstance}. */
+    private static boolean resolveXcdr2(DataReaderQos qos) {
+        DataRepresentationKind kind = (qos != null && qos.getDataRepresentation() != null)
+                ? qos.getDataRepresentation().getKind()
+                : DataRepresentationKind.fromValue(FfiAccess.defaultDataRepresentation());
+        return kind == DataRepresentationKind.XCDR2;
     }
 
     /** See the private CFT constructor's own doc; {@code qos} may be null for the core's default. */
@@ -503,6 +527,33 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
         }
         ReturnCodes.check(rc);
         return true;
+    }
+
+    /**
+     * Looks up the instance handle for {@code sample}'s key, without taking
+     * or reading it. Serializes {@code sample} the same way {@link
+     * DataWriter#write} does and hands the buffer to the core as the key it
+     * resolves against this reader's known instances. Returns an {@link
+     * InstanceHandle} wrapping 16 zero bytes when the instance is unknown to
+     * this reader (e.g. no sample of that instance has been received yet) —
+     * callers that need to distinguish "unknown" from a real handle should
+     * compare against {@code new InstanceHandle(new byte[16])}. Requires a
+     * keyed topic.
+     *
+     * @throws NullPointerException if {@code sample} is null
+     */
+    public InstanceHandle lookupInstance(T sample) {
+        Objects.requireNonNull(sample, "sample");
+        long h = handle();
+        byte[] handleOut = new byte[16];
+        Extensibility ext = topic != null ? topic.extensibility() : cft.relatedTopic().extensibility();
+        try (CdrWriter w = CdrWriter.acquire(ext, LITTLE_ENDIAN_HOST, xcdr2)) {
+            sample.serializeCdr(w);
+            int rc = FfiAccess.datareaderLookupInstance(h, w.address(), w.length(), handleOut);
+            NativeKeepAlive.keepAlive(this);
+            ReturnCodes.check(rc);
+        }
+        return new InstanceHandle(handleOut);
     }
 
     /** Takes (removes) the next sample, or null if the cache is empty. */

@@ -331,6 +331,98 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
         }
     }
 
+    /** 16 zero bytes: the NIL instance handle, used to let the core derive an instance from its key. */
+    private static final byte[] NIL_HANDLE = new byte[16];
+
+    /**
+     * Registers the instance {@code sample} belongs to, returning its
+     * instance handle. Serializes {@code sample} the same way {@link #write}
+     * does and hands the buffer to the core as the key it derives the
+     * instance from; requires a keyed topic ({@link
+     * com.intellectus.int2dds.exceptions.DdsException#RET_PRECONDITION_NOT_MET}
+     * on a plain topic).
+     *
+     * @throws NullPointerException if {@code sample} is null
+     */
+    public InstanceHandle registerInstance(T sample) {
+        Objects.requireNonNull(sample, "sample");
+        long h = handle();
+        byte[] handleOut = new byte[16];
+        try (CdrWriter w = CdrWriter.acquire(topic.extensibility(), LITTLE_ENDIAN_HOST, xcdr2)) {
+            sample.serializeCdr(w);
+            int rc = FfiAccess.datawriterRegisterInstance(h, w.address(), w.length(), handleOut);
+            // Same fence as write(): h was read off this writer just above,
+            // and w's address crosses into the native call below it.
+            NativeKeepAlive.keepAlive(this);
+            ReturnCodes.check(rc);
+        }
+        return new InstanceHandle(handleOut);
+    }
+
+    /**
+     * Unregisters the instance {@code sample} belongs to: this writer no
+     * longer has anything to say about it, but the instance itself is not
+     * disposed (a reader still sees it ALIVE until every writer unregisters
+     * it, per {@code NOT_ALIVE_NO_WRITERS}). Serializes {@code sample} as the
+     * key and passes a NIL handle, letting the core derive the instance from
+     * the key. Requires a keyed topic.
+     *
+     * @throws NullPointerException if {@code sample} is null
+     */
+    public void unregisterInstance(T sample) {
+        Objects.requireNonNull(sample, "sample");
+        long h = handle();
+        try (CdrWriter w = CdrWriter.acquire(topic.extensibility(), LITTLE_ENDIAN_HOST, xcdr2)) {
+            sample.serializeCdr(w);
+            int rc = FfiAccess.datawriterUnregisterInstance(
+                    h, w.address(), w.length(), NIL_HANDLE);
+            NativeKeepAlive.keepAlive(this);
+            ReturnCodes.check(rc);
+        }
+    }
+
+    /**
+     * Disposes the instance {@code sample} belongs to: a matched reader that
+     * later takes/reads this instance observes {@code
+     * instanceState() == }{@link com.intellectus.int2dds.conditions.InstanceState#NOT_ALIVE_DISPOSED}.
+     * Serializes {@code sample} as the key and passes a NIL handle, letting
+     * the core derive the instance from the key. Requires a keyed topic.
+     *
+     * @throws NullPointerException if {@code sample} is null
+     */
+    public void disposeInstance(T sample) {
+        Objects.requireNonNull(sample, "sample");
+        long h = handle();
+        try (CdrWriter w = CdrWriter.acquire(topic.extensibility(), LITTLE_ENDIAN_HOST, xcdr2)) {
+            sample.serializeCdr(w);
+            int rc = FfiAccess.datawriterDispose(h, w.address(), w.length(), NIL_HANDLE);
+            NativeKeepAlive.keepAlive(this);
+            ReturnCodes.check(rc);
+        }
+    }
+
+    /**
+     * Looks up the instance handle for {@code sample}'s key, without
+     * registering it. Returns an {@link InstanceHandle} wrapping 16 zero
+     * bytes when the instance is unknown to this writer — callers that need
+     * to distinguish "unknown" from a real handle should compare against
+     * {@code new InstanceHandle(new byte[16])}. Requires a keyed topic.
+     *
+     * @throws NullPointerException if {@code sample} is null
+     */
+    public InstanceHandle lookupInstance(T sample) {
+        Objects.requireNonNull(sample, "sample");
+        long h = handle();
+        byte[] handleOut = new byte[16];
+        try (CdrWriter w = CdrWriter.acquire(topic.extensibility(), LITTLE_ENDIAN_HOST, xcdr2)) {
+            sample.serializeCdr(w);
+            int rc = FfiAccess.datawriterLookupInstance(h, w.address(), w.length(), handleOut);
+            NativeKeepAlive.keepAlive(this);
+            ReturnCodes.check(rc);
+        }
+        return new InstanceHandle(handleOut);
+    }
+
     /**
      * Reads this writer's current QoS off the native side — not the {@code
      * DataWriterQos} it was constructed with, which this class does not
