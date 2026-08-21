@@ -7,6 +7,7 @@
 
 use std::collections::VecDeque;
 use std::io;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, Mutex, OwnedSemaphorePermit, Semaphore};
@@ -17,6 +18,33 @@ use crate::rtps::transport::tcp::framing::TcpFrameKind;
 pub(crate) const CONNECT_BUFFER_DEPTH: usize = 256;
 pub(crate) const CONNECT_BUFFER_BYTE_CAP: usize = 64 * 1024 * 1024;
 const WRITER_CHANNEL_CAPACITY: usize = 1;
+
+pub(crate) struct ConnHealth {
+    misses: AtomicU32,
+    threshold: u32,
+}
+
+impl ConnHealth {
+    pub(crate) fn new(threshold: u32) -> Self {
+        Self { misses: AtomicU32::new(0), threshold }
+    }
+
+    pub(crate) fn is_congested(&self) -> bool {
+        self.misses.load(Ordering::Relaxed) >= self.threshold
+    }
+
+    pub(crate) fn on_success(&self) {
+        let _ = self.misses.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            Some(value.saturating_sub(1))
+        });
+    }
+
+    pub(crate) fn on_miss(&self) {
+        let _ = self.misses.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            Some(value.saturating_add(1))
+        });
+    }
+}
 
 pub(crate) struct PendingFrame {
     pub(crate) kind: TcpFrameKind,

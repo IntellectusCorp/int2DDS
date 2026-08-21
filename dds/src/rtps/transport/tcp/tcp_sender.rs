@@ -6,16 +6,15 @@
 
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use log::{debug, warn};
-use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, OwnedMutexGuard};
+use tokio::sync::OwnedMutexGuard;
 use tokio_util::sync::CancellationToken;
 
 use crate::rtps::common::guid::GuidPrefix;
@@ -23,44 +22,15 @@ use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::tcp::connection_registry::{
     apply_socket_tuning, ConnectionDirection, ConnectionRegistry,
 };
-use crate::rtps::transport::tcp::connection_tasks::spawn_reader;
-use crate::rtps::transport::tcp::framing::{
-    validate_payload_size, write_framed_message, TcpFrameKind,
-};
-use crate::rtps::transport::tcp::stream::{wrap_plain, AsyncConnStream, AsyncConnWriteHalf};
+use crate::rtps::transport::tcp::connection_tasks::{spawn_reader, writer_task};
+use crate::rtps::transport::tcp::framing::{validate_payload_size, TcpFrameKind};
+use crate::rtps::transport::tcp::stream::{wrap_plain, AsyncConnStream};
 use crate::rtps::transport::tcp::tls::{connect_tls_async, TlsConfig};
 use crate::rtps::transport::tcp::write_state::{
-    init_connection_state, install_writer, mark_failed, push_connecting, PendingFrame,
+    init_connection_state, install_writer, mark_failed, push_connecting, ConnHealth, PendingFrame,
     SharedWriteState, WriteState, WriterCommand,
 };
 use crate::rtps::transport::TcpConfig;
-
-struct ConnHealth {
-    misses: AtomicU32,
-    threshold: u32,
-}
-
-impl ConnHealth {
-    fn new(threshold: u32) -> Self {
-        Self { misses: AtomicU32::new(0), threshold }
-    }
-
-    fn is_congested(&self) -> bool {
-        self.misses.load(Ordering::Relaxed) >= self.threshold
-    }
-
-    fn on_success(&self) {
-        let _ = self.misses.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-            Some(value.saturating_sub(1))
-        });
-    }
-
-    fn on_miss(&self) {
-        let _ = self.misses.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-            Some(value.saturating_add(1))
-        });
-    }
-}
 
 #[derive(Default)]
 struct DropCounter {
@@ -510,17 +480,24 @@ async fn establish_connection(
         conn_cancel.clone(),
     );
     spawn_reader(read_half, conn_id, Arc::clone(&sender.shared), conn_cancel.clone(), None);
-    tokio::spawn(writer_task(
-        write_half,
-        backlog,
-        writer_rx,
-        Arc::clone(&write_state),
-        health,
-        Arc::clone(&sender.stats),
-        key,
-        sender.send_deadline,
-        conn_cancel,
-    ));
+    let stats = Arc::clone(&sender.stats);
+    let send_deadline = sender.send_deadline;
+    tokio::spawn(async move {
+        if let Err(error) = writer_task(
+            write_half,
+            backlog,
+            writer_rx,
+            write_state,
+            health,
+            send_deadline,
+            conn_cancel,
+        )
+        .await
+        {
+            debug!("TcpSender: write {:?} to {} failed: {}", key.1, key.0, error);
+            stats.write_error.record("write error", key.0, key.1);
+        }
+    });
     debug!("TcpSender: established {:?} connection to {}", key.1, key.0);
     Ok(())
 }
@@ -551,65 +528,6 @@ async fn create_stream(sender: &Arc<TcpSender>, addr: SocketAddr) -> io::Result<
     } else {
         Ok(wrap_plain(tcp))
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn writer_task(
-    mut write_half: AsyncConnWriteHalf,
-    mut backlog: std::collections::VecDeque<PendingFrame>,
-    mut receiver: mpsc::Receiver<WriterCommand>,
-    write_state: SharedWriteState,
-    health: Arc<ConnHealth>,
-    stats: Arc<SendStats>,
-    key: ConnectionKey,
-    send_deadline: Option<Duration>,
-    cancel: CancellationToken,
-) {
-    let mut failed = false;
-
-    while let Some(frame) = backlog.pop_front() {
-        if cancel.is_cancelled() {
-            break;
-        }
-        if let Err(error) = write_framed_message(&mut write_half, frame.kind, &frame.payload).await
-        {
-            debug!("TcpSender: connect-backlog write to {} failed: {}", key.0, error);
-            stats.write_error.record("write error", key.0, key.1);
-            failed = true;
-            break;
-        }
-    }
-
-    while !failed {
-        let command = tokio::select! {
-            command = receiver.recv() => match command {
-                Some(command) => command,
-                None => break,
-            },
-            _ = cancel.cancelled() => break,
-        };
-
-        let started = Instant::now();
-        let result =
-            write_framed_message(&mut write_half, command.frame.kind, &command.frame.payload).await;
-        // command (and therefore its admission permit) drops after this block.
-        match result {
-            Ok(()) => {
-                if send_deadline.is_some_and(|deadline| started.elapsed() <= deadline) {
-                    health.on_success();
-                }
-            }
-            Err(error) => {
-                debug!("TcpSender: write {:?} to {} failed: {}", key.1, key.0, error);
-                stats.write_error.record("write error", key.0, key.1);
-                failed = true;
-            }
-        }
-    }
-
-    let _ = write_half.shutdown().await;
-    mark_failed(&write_state).await;
-    cancel.cancel();
 }
 
 #[cfg(test)]
