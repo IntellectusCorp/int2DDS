@@ -3091,15 +3091,42 @@ impl<Foo: DdsType> DataReader<Foo> {
                 Some(&instance_infos),
             ) {
                 Ok(data_sample) => {
+                    // Key-only samples (dispose/unregister) always pass filters.
+                    // A sample that cannot be evaluated does not match; it is
+                    // skipped without consuming it or failing the whole call.
                     if let Some(qc_expr) = &qc_expression {
-                        if !qc_expr.evaluate(&data_sample.data()?, &qc_parameters)? {
-                            log::trace!(
-                                "Skipping change {}: QueryCondition expression failed",
-                                idx
-                            );
-                            continue;
+                        if matches!(change.kind(), ChangeKind::Alive | ChangeKind::AliveFiltered) {
+                            match data_sample.data() {
+                                Ok(data) => match qc_expr.evaluate(&data, &qc_parameters) {
+                                    Ok(true) => {
+                                        log::trace!("Change {} passed QueryCondition", idx);
+                                    }
+                                    Ok(false) => {
+                                        log::trace!(
+                                            "Skipping change {}: QueryCondition expression failed",
+                                            idx
+                                        );
+                                        continue;
+                                    }
+                                    Err(e) => {
+                                        log::warn!(
+                                            "Skipping change {}: QueryCondition evaluation failed: {:?}",
+                                            idx,
+                                            e
+                                        );
+                                        continue;
+                                    }
+                                },
+                                Err(e) => {
+                                    log::warn!(
+                                        "Skipping change {}: sample not deserializable for QueryCondition: {:?}",
+                                        idx,
+                                        e
+                                    );
+                                    continue;
+                                }
+                            }
                         }
-                        log::trace!("Change {} passed QueryCondition", idx);
                     }
                     // ContentFilteredTopic is applied on the receive path, so non-matching
                     // samples are never in the cache here.
@@ -3207,24 +3234,48 @@ impl<Foo: DdsType> DataReader<Foo> {
                         readcondition.as_any().downcast_ref::<QueryCondition>()
                     {
                         log::debug!("Condition[{}] is QueryCondition, evaluating expression", idx);
-                        let data = self.change_to_data_sample(
-                            &change,
-                            change.instance_handle(),
-                            sample_state,
-                        )?;
-                        match query_condition.evaluate_expression(&data.data()?) {
-                            Ok(true) => {
-                                log::info!(
-                                    "QueryCondition[{}] triggered (expression matched)",
-                                    idx
-                                );
-                                readcondition.set_trigger_value(true);
-                            }
-                            Ok(false) => {
-                                log::debug!("QueryCondition[{}] expression not matched", idx);
-                            }
-                            Err(e) => {
-                                log::warn!("QueryCondition[{}] evaluation failed: {:?}", idx, e);
+                        // Key-only samples (dispose/unregister) always pass filters.
+                        if !matches!(change.kind(), ChangeKind::Alive | ChangeKind::AliveFiltered) {
+                            log::debug!("QueryCondition[{}] key-only sample passes", idx);
+                            readcondition.set_trigger_value(true);
+                        } else {
+                            match self
+                                .change_to_data_sample(
+                                    &change,
+                                    change.instance_handle(),
+                                    sample_state,
+                                )
+                                .and_then(|data| data.data())
+                            {
+                                Ok(data) => match query_condition.evaluate_expression(&data) {
+                                    Ok(true) => {
+                                        log::info!(
+                                            "QueryCondition[{}] triggered (expression matched)",
+                                            idx
+                                        );
+                                        readcondition.set_trigger_value(true);
+                                    }
+                                    Ok(false) => {
+                                        log::debug!(
+                                            "QueryCondition[{}] expression not matched",
+                                            idx
+                                        );
+                                    }
+                                    Err(e) => {
+                                        log::warn!(
+                                            "QueryCondition[{}] evaluation failed: {:?}",
+                                            idx,
+                                            e
+                                        );
+                                    }
+                                },
+                                Err(e) => {
+                                    log::warn!(
+                                        "QueryCondition[{}] sample not evaluable: {:?}",
+                                        idx,
+                                        e
+                                    );
+                                }
                             }
                         }
                     } else {
@@ -3446,11 +3497,17 @@ impl<Foo: DdsType> DataReader<Foo> {
                 Ok(typed) => typed,
                 Err(_) => return Ok(true),
             },
-            Err(_) => return Ok(true),
+            Err(e) => {
+                log::warn!("Content filter: sample not deserializable, passes unfiltered: {:?}", e);
+                return Ok(true);
+            }
         };
         match expr.evaluate(&*typed, &parameters) {
-            Ok(false) => Ok(false),
-            _ => Ok(true),
+            Ok(keep) => Ok(keep),
+            Err(e) => {
+                log::warn!("Content filter evaluation failed, sample passes unfiltered: {:?}", e);
+                Ok(true)
+            }
         }
     }
 
@@ -3515,13 +3572,20 @@ impl<Foo: DdsType> DataReader<Foo> {
             {
                 // Also check expression if QueryCondition
                 if let Some(query_condition) = condition.as_any().downcast_ref::<QueryCondition>() {
-                    let data = self.change_to_data_sample(
-                        &change,
-                        change.instance_handle(),
-                        sample_state,
-                    )?;
-                    if query_condition.evaluate_expression(&data.data()?).unwrap_or(false) {
+                    // Key-only samples (dispose/unregister) always pass filters.
+                    if !matches!(change.kind(), ChangeKind::Alive | ChangeKind::AliveFiltered) {
                         return Ok(true);
+                    }
+                    match self
+                        .change_to_data_sample(&change, change.instance_handle(), sample_state)
+                        .and_then(|data| data.data())
+                    {
+                        Ok(data) => {
+                            if query_condition.evaluate_expression(&data).unwrap_or(false) {
+                                return Ok(true);
+                            }
+                        }
+                        Err(_) => {}
                     }
                 } else {
                     return Ok(true);

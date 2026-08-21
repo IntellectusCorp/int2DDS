@@ -6,7 +6,10 @@ use int2dds::{
     dcps::{
         core::{error::DdsError, time::Duration},
         domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
-        infrastructure::status::StatusMask,
+        infrastructure::{
+            qos_policy::{HistoryQosPolicy, HistoryQosPolicyKind},
+            status::StatusMask,
+        },
         publication::qos::{DataWriterQos, PublisherQos},
         subscription::{
             qos::{DataReaderQos, SubscriberQos},
@@ -488,6 +491,127 @@ fn test_content_filtered_topic_with_query_condition() {
     // Sorted by value field in ascending order
     assert_eq!(samples[0].data().unwrap().value, 1);
     assert_eq!(samples[1].data().unwrap().value, 1);
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
+}
+
+// A sample the QueryCondition cannot evaluate must not fail or consume the
+// whole read/take batch, and key-only dispose notifications always pass
+// filters (RTI/Fast-DDS convention).
+#[test]
+fn test_query_condition_error_and_dispose_isolation() {
+    let domain_id = next_domain_id();
+    let factory = DomainParticipantFactory::get_instance();
+    let participant = factory
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+
+    let topic = participant
+        .create_topic::<KeyedDataType>(
+            "QC_Error_Dispose_Test",
+            KeyedDataType::get_type_name(),
+            TopicQos::default(),
+            None,
+            StatusMask::default(),
+        )
+        .unwrap();
+
+    let publisher =
+        participant.create_publisher(PublisherQos::default(), None, StatusMask::default()).unwrap();
+    let data_writer = publisher
+        .create_datawriter::<KeyedDataType>(
+            &topic,
+            DataWriterQos::default(),
+            None,
+            StatusMask::default(),
+        )
+        .unwrap();
+
+    let subscriber = participant
+        .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+        .unwrap();
+    // Depth > 1 keeps the data sample of the disposed instance alongside the
+    // dispose notification, so both flow through one read/take batch.
+    let reader_qos = DataReaderQos {
+        history: HistoryQosPolicy {
+            kind: HistoryQosPolicyKind::KeepLast(10),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let data_reader = subscriber
+        .create_datareader::<KeyedDataType>(&topic, reader_qos, None, StatusMask::default())
+        .unwrap();
+
+    wait_for_reader_status(
+        &data_reader,
+        StatusMask::SUBSCRIPTION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
+    wait_for_writer_status(
+        &data_writer,
+        StatusMask::PUBLICATION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
+
+    data_writer.write(&KeyedDataType { key: 1, value: 1 }, InstanceHandle::NIL).unwrap();
+    data_writer.write(&KeyedDataType { key: 2, value: 2 }, InstanceHandle::NIL).unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
+    // Unknown field: every sample fails to evaluate. The call must report
+    // NoData (no matches), not an evaluator error, and must consume nothing.
+    let qc_bad = data_reader
+        .create_querycondition(
+            &[SampleStateKind::ANY_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::ANY_INSTANCE_STATE],
+            "nonexistent > %0",
+            vec!["0".to_string()],
+        )
+        .unwrap();
+    let result = data_reader.take_w_condition(10, qc_bad);
+    assert_eq!(result.err().unwrap(), DdsError::NoData);
+
+    let samples = data_reader
+        .read(
+            10,
+            &[SampleStateKind::ANY_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::ANY_INSTANCE_STATE],
+        )
+        .unwrap();
+    assert_eq!(samples.len(), 2);
+
+    data_writer.dispose(&KeyedDataType { key: 1, value: 1 }, InstanceHandle::NIL).unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
+    // The key-only dispose notification cannot be evaluated against the
+    // expression; it must pass the filter instead of failing the take after
+    // the data samples were already consumed.
+    let qc_good = data_reader
+        .create_querycondition(
+            &[SampleStateKind::ANY_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::ANY_INSTANCE_STATE],
+            "key >= %0",
+            vec!["0".to_string()],
+        )
+        .unwrap();
+    let samples = data_reader.take_w_condition(10, qc_good).unwrap();
+    assert_eq!(samples.len(), 3);
+    let valid: Vec<_> = samples.iter().filter(|s| s.sample_info().valid_data).collect();
+    let mut keys: Vec<i16> = valid.iter().map(|s| s.data().unwrap().key).collect();
+    keys.sort();
+    assert_eq!(keys, vec![1, 2]);
+    let dispose: Vec<_> = samples.iter().filter(|s| !s.sample_info().valid_data).collect();
+    assert_eq!(dispose.len(), 1);
+    assert_eq!(
+        dispose[0].sample_info().instance_state,
+        InstanceStateKind::NOT_ALIVE_DISPOSED_INSTANCE_STATE
+    );
 
     participant.delete_contained_entities().unwrap();
     factory.delete_participant(participant).unwrap();
