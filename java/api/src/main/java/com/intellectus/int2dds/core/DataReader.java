@@ -14,6 +14,7 @@ import com.intellectus.int2dds.internal.ffi.FfiAccess;
 import com.intellectus.int2dds.listeners.DataReaderListener;
 import com.intellectus.int2dds.qos.DataReaderQos;
 import com.intellectus.int2dds.status.StatusMask;
+import com.intellectus.int2dds.status.SubscriptionMatchedStatus;
 import com.intellectus.int2dds.types.IDdsType;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -146,6 +147,31 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
         NativeKeepAlive.keepAlive(this);
         ReturnCodes.check(rc);
         return guid;
+    }
+
+    /**
+     * This reader's SUBSCRIPTION_MATCHED status: how many DataWriters it has
+     * matched, and the change since last read. Per DDS, reading this status
+     * clears its {@code *Change} fields.
+     */
+    public SubscriptionMatchedStatus getSubscriptionMatchedStatus() {
+        ByteBuffer buf = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder());
+        int rc = FfiAccess.datareaderGetSubscriptionMatchedStatus(
+                handle(), FfiAccess.directBufferAddress(buf));
+        NativeKeepAlive.keepAlive(this);
+        NativeKeepAlive.keepAlive(buf);
+        ReturnCodes.check(rc);
+        int totalCount = buf.getInt(0);
+        int totalCountChange = buf.getInt(4);
+        int currentCount = buf.getInt(8);
+        int currentCountChange = buf.getInt(12);
+        byte[] lastPublicationHandle = new byte[16];
+        for (int i = 0; i < 16; i++) {
+            lastPublicationHandle[i] = buf.get(16 + i);
+        }
+        return new SubscriptionMatchedStatus(
+                totalCount, totalCountChange, currentCount, currentCountChange,
+                lastPublicationHandle);
     }
 
     /**

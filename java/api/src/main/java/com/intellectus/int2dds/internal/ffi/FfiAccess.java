@@ -372,6 +372,16 @@ public final class FfiAccess {
         return Ffi.int2dds_datawriter_get_guid(writer, guidOut);
     }
 
+    /**
+     * Reads the writer's PUBLICATION_MATCHED status into the 32-byte native
+     * struct at {@code statusOutAddr} (a direct-buffer address, the caller's
+     * responsibility to allocate and keep alive). Returns the C ABI status
+     * code. Thin passthrough -- the caller owns the buffer and decodes it.
+     */
+    public static int datawriterGetPublicationMatchedStatus(long writer, long statusOutAddr) {
+        return Ffi.int2dds_datawriter_get_publication_matched_status(writer, statusOutAddr);
+    }
+
     // --- DataWriter listeners (hand-written trampoline layer) ---
 
     /**
@@ -467,6 +477,16 @@ public final class FfiAccess {
     /** The 16-byte entity GUID. {@code guidOut} must be a 16-byte array. */
     public static int datareaderGetGuid(long reader, byte[] guidOut) {
         return Ffi.int2dds_datareader_get_guid(reader, guidOut);
+    }
+
+    /**
+     * Reads the reader's SUBSCRIPTION_MATCHED status into the 32-byte native
+     * struct at {@code statusOutAddr} (a direct-buffer address, the caller's
+     * responsibility to allocate and keep alive). Returns the C ABI status
+     * code. Thin passthrough -- the caller owns the buffer and decodes it.
+     */
+    public static int datareaderGetSubscriptionMatchedStatus(long reader, long statusOutAddr) {
+        return Ffi.int2dds_datareader_get_subscription_matched_status(reader, statusOutAddr);
     }
 
     /** Whether the reader has any samples available to take/read. Writes it to {@code out[0]} on success. */
