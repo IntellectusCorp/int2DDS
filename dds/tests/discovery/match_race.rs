@@ -19,14 +19,12 @@
 //! These tests create the two sides of a pair concurrently, so the local
 //! creation of one endpoint overlaps the arrival of the other's announcement.
 
-mod common;
-
 use std::{
     thread::sleep,
     time::{Duration as StdDuration, Instant},
 };
 
-use common::*;
+use crate::common::*;
 use int2dds::{
     core::time::Duration,
     domain::{

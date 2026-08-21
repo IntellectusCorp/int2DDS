@@ -10,11 +10,9 @@
 //! TopicRelay forwards data between two participants on different domains
 //! using DynamicData (no compile-time type knowledge in the gateway).
 
-mod common;
-
 use std::thread::sleep;
 
-use common::*;
+use crate::common::*;
 use int2dds::{
     common::instance_handle::InstanceHandle,
     core::time::Duration,

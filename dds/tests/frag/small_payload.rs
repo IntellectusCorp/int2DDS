@@ -14,9 +14,7 @@
 //! heartbeat drives `has_fragmented_changes` / `all_fragments_received` and the buffered-change
 //! flush, which is where reassembled samples are handed to the reader.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use int2dds::{
     common::instance_handle::InstanceHandle,
     core::time::Duration,

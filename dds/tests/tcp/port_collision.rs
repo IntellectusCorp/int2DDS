@@ -6,9 +6,7 @@
 //! *distinct* ports lets both coexist, which is the whole point of moving the
 //! TCP listen port into per-participant QoS.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use int2dds::{
     domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
     infrastructure::{qos_policy::PropertyQosPolicy, status::StatusMask},

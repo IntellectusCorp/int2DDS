@@ -1,24 +1,22 @@
-//! Derive-generated TypeObjects reference nested composites by their
-//! content-based hash ids (EK_COMPLETE inside complete objects, EK_MINIMAL inside
-//! minimal objects), plain collections carry the matching-EK element id and a
-//! spec-correct `equiv_kind`, and the derive-side minimal object is byte-identical
-//! to the registry-derived one for the same closure.
+// Derive-generated TypeObjects reference nested composites by their content-based
+// hash ids, and the derive-side minimal object matches the registry-derived one.
 
-use int2dds::dcps::topic::type_support::DdsType;
-use int2dds::xtypes::{
-    build_minimal_closure, CompleteTypeObject, EquivalenceKind, HasTypeObject, MinimalTypeObject,
-    PlainCollectionHeader, TypeIdentifier, TypeObject,
+use crate::dcps::topic::type_support::DdsType;
+use crate::xtypes::{
+    build_minimal_closure, CompleteStructMember, CompleteTypeObject, EquivalenceKind,
+    HasTypeObject, MinimalStructMember, MinimalTypeObject, PlainCollectionHeader, TypeIdentifier,
+    TypeObject,
 };
 
 #[derive(DdsType)]
-#[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+#[dds_type(crate_path = "crate", extensibility = "Appendable")]
 struct Inner {
     a: i32,
     b: String,
 }
 
 #[derive(DdsType)]
-#[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+#[dds_type(crate_path = "crate", extensibility = "Appendable")]
 struct Outer {
     inner: Inner,
     many: Vec<Inner>,
@@ -26,19 +24,19 @@ struct Outer {
 }
 
 #[derive(DdsType)]
-#[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+#[dds_type(crate_path = "crate", extensibility = "Appendable")]
 struct NestedColl {
     grid: Vec<Vec<Inner>>,
 }
 
-fn complete_members(o: &CompleteTypeObject) -> &Vec<int2dds::xtypes::CompleteStructMember> {
+fn complete_members(o: &CompleteTypeObject) -> &Vec<CompleteStructMember> {
     match o {
         CompleteTypeObject::Struct(s) => &s.member_seq,
         _ => panic!("expected struct"),
     }
 }
 
-fn minimal_members(o: &MinimalTypeObject) -> &Vec<int2dds::xtypes::MinimalStructMember> {
+fn minimal_members(o: &MinimalTypeObject) -> &Vec<MinimalStructMember> {
     match o {
         MinimalTypeObject::Struct(s) => &s.member_seq,
         _ => panic!("expected struct"),
@@ -179,5 +177,36 @@ fn nested_composite_collection_minimal_matches_registry() {
     assert_eq!(
         derive_min_hash, *registry_min_hash,
         "derive-side minimal hash must equal registry-derived minimal hash for Vec<Vec<Inner>>"
+    );
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "crate", type_name = "sensors::Thing")]
+struct ScopedThing {
+    value: i32,
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "crate")]
+struct HolderOfScoped {
+    thing: ScopedThing,
+}
+
+#[test]
+fn nested_member_ref_matches_registered_id() {
+    // A type_name override must NOT desync the name-based nested id scheme: a referencing
+    // struct's member id (derived from the Rust type ident) must equal the id under which
+    // the referenced type registers itself in the nested set.
+    let mut scoped_set = Vec::new();
+    ScopedThing::collect_nested_type_objects(&mut scoped_set);
+    let scoped_reg_id = scoped_set[0].0.clone();
+
+    let member_id = match HolderOfScoped::complete_type_object() {
+        CompleteTypeObject::Struct(s) => s.member_seq[0].common.member_type_id.clone(),
+        other => panic!("expected struct, got {other:?}"),
+    };
+    assert_eq!(
+        member_id, scoped_reg_id,
+        "nested member ref must resolve to the referenced type's registered nested id"
     );
 }

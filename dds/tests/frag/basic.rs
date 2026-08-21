@@ -1,6 +1,4 @@
-mod common;
-
-use common::*;
+use crate::common::*;
 use int2dds::{
     common::instance_handle::InstanceHandle,
     dcps::{
