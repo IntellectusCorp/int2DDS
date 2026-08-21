@@ -159,6 +159,19 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
     }
 
     /**
+     * The set of statuses that have changed since last read (per DDS, reading
+     * a status via its getter or here clears it). Attach a StatusCondition to
+     * a WaitSet to block on these.
+     */
+    public StatusMask getStatusChanges() {
+        int[] out = new int[1];
+        int rc = FfiAccess.datawriterGetStatusChanges(handle(), out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return StatusMask.of(out[0]);
+    }
+
+    /**
      * Serializes {@code sample} as CDR and publishes it.
      *
      * <p>Allocates nothing and copies nothing: {@code sample.serializeCdr}

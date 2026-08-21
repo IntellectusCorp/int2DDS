@@ -118,6 +118,19 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
     }
 
     /**
+     * The set of statuses that have changed since last read (per DDS, reading
+     * a status via its getter or here clears it). Attach a StatusCondition to
+     * a WaitSet to block on these.
+     */
+    public StatusMask getStatusChanges() {
+        int[] out = new int[1];
+        int rc = FfiAccess.datareaderGetStatusChanges(handle(), out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return StatusMask.of(out[0]);
+    }
+
+    /**
      * Reads this reader's current QoS off the native side — not the {@code
      * DataReaderQos} it was constructed with, which this class does not
      * retain. Policies with no native getter come back null; see {@link

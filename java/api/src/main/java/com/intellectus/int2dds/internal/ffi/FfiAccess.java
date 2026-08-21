@@ -1568,6 +1568,72 @@ public final class FfiAccess {
         return rc;
     }
 
+    /** Reads a reader's pending status-changes mask, writing it to {@code outMask[0]} on success. */
+    public static int datareaderGetStatusChanges(long reader, int[] outMask) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_datareader_get_status_changes(reader, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            outMask[0] = slot.getInt(0); // mask out is a u32
+        }
+        return rc;
+    }
+
+    /** Reads a writer's pending status-changes mask, writing it to {@code outMask[0]} on success. */
+    public static int datawriterGetStatusChanges(long writer, int[] outMask) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_datawriter_get_status_changes(writer, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            outMask[0] = slot.getInt(0); // mask out is a u32
+        }
+        return rc;
+    }
+
+    /** Reads a publisher's pending status-changes mask, writing it to {@code outMask[0]} on success. */
+    public static int publisherGetStatusChanges(long publisher, int[] outMask) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_publisher_get_status_changes(publisher, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            outMask[0] = slot.getInt(0); // mask out is a u32
+        }
+        return rc;
+    }
+
+    /** Reads a subscriber's pending status-changes mask, writing it to {@code outMask[0]} on success. */
+    public static int subscriberGetStatusChanges(long subscriber, int[] outMask) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_subscriber_get_status_changes(subscriber, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            outMask[0] = slot.getInt(0); // mask out is a u32
+        }
+        return rc;
+    }
+
+    /** Reads a participant's pending status-changes mask, writing it to {@code outMask[0]} on success. */
+    public static int participantGetStatusChanges(long participant, int[] outMask) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_participant_get_status_changes(participant, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            outMask[0] = slot.getInt(0); // mask out is a u32
+        }
+        return rc;
+    }
+
+    /** Reads a topic's pending status-changes mask, writing it to {@code outMask[0]} on success. */
+    public static int topicGetStatusChanges(long topic, int[] outMask) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_topic_get_status_changes(topic, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            outMask[0] = slot.getInt(0); // mask out is a u32
+        }
+        return rc;
+    }
+
     /**
      * Reads a status condition's own trigger value (its own handle, not a seq
      * entry), writing it to {@code out[0]} on success.

@@ -10,6 +10,7 @@ import com.intellectus.int2dds.internal.ReturnCodes;
 import com.intellectus.int2dds.internal.ffi.FfiAccess;
 import com.intellectus.int2dds.qos.DataWriterQos;
 import com.intellectus.int2dds.qos.PublisherQos;
+import com.intellectus.int2dds.status.StatusMask;
 import com.intellectus.int2dds.types.IDdsType;
 import com.intellectus.int2dds.xtypes.DynamicDataWriter;
 import com.intellectus.int2dds.xtypes.DynamicTopic;
@@ -182,6 +183,19 @@ public final class Publisher extends NativeEntity {
         NativeKeepAlive.keepAlive(this);
         ReturnCodes.check(rc);
         return new StatusCondition(out[0]);
+    }
+
+    /**
+     * The set of statuses that have changed since last read (per DDS, reading
+     * a status via its getter or here clears it). Attach a StatusCondition to
+     * a WaitSet to block on these.
+     */
+    public StatusMask getStatusChanges() {
+        int[] out = new int[1];
+        int rc = FfiAccess.publisherGetStatusChanges(handle(), out);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        return StatusMask.of(out[0]);
     }
 
     /**
