@@ -102,8 +102,9 @@ pub unsafe extern "C" fn int2dds_xml_type_registry_get_type_support(
     INT2DDS_RET_OK
 }
 
-/// Look up a loaded type by name and return its top-level TypeObject for
-/// introspection. Destroy the result with `int2dds_type_object_destroy`.
+/// Look up a loaded type by name and return its TypeObject, carrying its full
+/// nested-dependency closure so struct/array/sequence members decode correctly.
+/// Destroy the result with `int2dds_type_object_destroy`.
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_xml_type_registry_get_type_object(
     registry: *const Int2DdsXmlTypeRegistry,
@@ -117,11 +118,12 @@ pub unsafe extern "C" fn int2dds_xml_type_registry_get_type_object(
         Ok(s) => s,
         Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
     };
-    let complete = match (*registry).inner.get_type_object(name_str) {
-        Some(c) => c.clone(),
+    let (complete, deps) = match (*registry).inner.get_type_object_with_deps(name_str) {
+        Some(v) => v,
         None => return INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND,
     };
-    let handle = Int2DdsTypeObject::from_type_object(TypeObject::Complete(complete));
+    let handle =
+        Int2DdsTypeObject::from_type_object_with_deps(TypeObject::Complete(complete), deps);
     *out = Box::into_raw(Box::new(handle));
     INT2DDS_RET_OK
 }

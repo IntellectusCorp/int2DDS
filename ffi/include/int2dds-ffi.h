@@ -4771,8 +4771,9 @@ Int2DdsRet int2dds_xml_type_registry_get_type_support(const struct Int2DdsXmlTyp
                                                       struct Int2DdsDynamicTypeSupport **out);
 
 /**
- * Look up a loaded type by name and return its top-level TypeObject for
- * introspection. Destroy the result with `int2dds_type_object_destroy`.
+ * Look up a loaded type by name and return its TypeObject, carrying its full
+ * nested-dependency closure so struct/array/sequence members decode correctly.
+ * Destroy the result with `int2dds_type_object_destroy`.
  */
 Int2DdsRet int2dds_xml_type_registry_get_type_object(const struct Int2DdsXmlTypeRegistry *registry,
                                                      const char *name,
