@@ -54,6 +54,20 @@ class WaitSetTest {
     }
 
     @Test
+    void awaitSkipsAClosedAttachedCondition() {
+        try (WaitSet ws = new WaitSet(); GuardCondition open = new GuardCondition()) {
+            GuardCondition doomed = new GuardCondition();
+            ws.attach(open);
+            ws.attach(doomed);
+            open.setTriggerValue(true);
+            doomed.close(); // closed while still attached: contract violation
+            List<Condition> hit = ws.await(500L);
+            assertEquals(1, hit.size(), "closed-attached condition must be skipped, not thrown on");
+            assertTrue(hit.get(0) == open);
+        }
+    }
+
+    @Test
     void detachAfterCloseIsSafe() {
         // Normal order: detach before close -> no exception either way.
         try (WaitSet ws = new WaitSet()) {

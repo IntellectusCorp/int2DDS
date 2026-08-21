@@ -14,11 +14,13 @@ import java.util.Objects;
  * Blocks the calling thread until one of its attached {@link Condition}s
  * triggers. Not thread-safe: use one WaitSet per waiting thread.
  *
- * <p><b>Contract:</b> an attached {@link Condition} must be {@link #detach}ed
- * before it is closed. Closing a still-attached condition leaves a dangling
- * handle in the native WaitSet; the next {@link #await} is then undefined
- * behavior (possible crash). Per DDS, deleting an attached condition is a
- * precondition violation.
+ * <p><b>Contract:</b> an attached {@link Condition} should be {@link #detach}ed
+ * before it is closed. Per DDS, deleting an attached condition is a
+ * precondition violation. In this binding, closing a still-attached condition
+ * does not crash or corrupt the native WaitSet: the native side keeps its own
+ * reference to the condition alive until the WaitSet itself is closed, and
+ * {@link #await} simply skips such a condition. It is however a leak until
+ * the WaitSet is closed, so detach first when you can.
  */
 public final class WaitSet implements AutoCloseable {
     private final NativeHandle handle;
@@ -104,8 +106,9 @@ public final class WaitSet implements AutoCloseable {
      * {@code final}, so a same-erasure instance method named {@code wait}
      * cannot be declared here at all, regardless of return type.
      *
-     * <p>Undefined behavior (possible crash) if an attached condition was
-     * closed without first being {@link #detach}ed.
+     * <p>If an attached condition was closed without first being
+     * {@link #detach}ed, it is skipped (and dropped from the attached set)
+     * rather than causing this method to throw.
      */
     public List<Condition> await(long timeoutMillis) {
         long[] seqOut = new long[1];
@@ -119,7 +122,12 @@ public final class WaitSet implements AutoCloseable {
             FfiAccess.conditionSeqDelete(seqOut[0]); // we don't read the seq
         }
         List<Condition> triggered = new ArrayList<Condition>();
-        for (Condition c : attached) {
+        for (java.util.Iterator<Condition> it = attached.iterator(); it.hasNext(); ) {
+            Condition c = it.next();
+            if (c.isClosed()) { // closed while still attached: drop it and skip
+                it.remove();
+                continue;
+            }
             if (c.triggerValue()) {
                 triggered.add(c);
             }
