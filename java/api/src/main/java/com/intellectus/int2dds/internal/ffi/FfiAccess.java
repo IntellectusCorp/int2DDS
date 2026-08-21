@@ -1080,6 +1080,62 @@ public final class FfiAccess {
                 typeInfo, fieldName, elementTypeInfo, bound, flags);
     }
 
+    /**
+     * Creates an enum type-info builder ({@code bitBound} is the discriminant bit width;
+     * IDL enums use 32). Returns the C ABI status code; writes the new builder handle to
+     * {@code out[0]} only when it is {@code 0}.
+     */
+    public static int typeInfoCreateEnum(byte[] typeName, int bitBound, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_type_info_create_enum(typeName, bitBound, directBufferAddress(slot));
+        // Same fence as typeInfoCreate -- see NativeKeepAlive's doc for the full argument.
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Creates a bitmask type-info builder ({@code bitBound} is the flag storage bit
+     * width). Returns the C ABI status code; writes the new builder handle to {@code
+     * out[0]} only when it is {@code 0}.
+     */
+    public static int typeInfoCreateBitmask(byte[] typeName, int bitBound, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_type_info_create_bitmask(typeName, bitBound, directBufferAddress(slot));
+        // Same fence as typeInfoCreate.
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Appends a literal to an enum builder. {@code isDefault} marks the {@code @default}
+     * literal (0/1). Returns the C ABI status code.
+     */
+    public static int typeInfoAddEnumLiteral(
+            long typeInfo, byte[] literalName, int value, int isDefault) {
+        return Ffi.int2dds_type_info_add_enum_literal(typeInfo, literalName, value, isDefault);
+    }
+
+    /** Appends a flag to a bitmask builder. {@code position} is the bit index. Returns the C ABI status code. */
+    public static int typeInfoAddBitmaskFlag(long typeInfo, byte[] flagName, int position) {
+        return Ffi.int2dds_type_info_add_bitmask_flag(typeInfo, flagName, position);
+    }
+
+    /**
+     * Appends a field referencing another type by name-hash (a {@code MinimalTypeId}
+     * computed from {@code typeHashName}), rather than by a borrowed builder handle.
+     * Returns the C ABI status code.
+     */
+    public static int typeInfoAddNamedTypeField(
+            long typeInfo, byte[] fieldName, byte[] typeHashName, int flags) {
+        return Ffi.int2dds_type_info_add_named_type_field(typeInfo, fieldName, typeHashName, flags);
+    }
+
     /** Builds a type object from a completed builder, or 0 on failure. */
     public static long typeInfoToTypeObject(long typeInfo) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());

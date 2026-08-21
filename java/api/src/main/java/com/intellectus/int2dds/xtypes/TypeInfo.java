@@ -29,6 +29,35 @@ public final class TypeInfo implements AutoCloseable {
         this.handle = NativeCleaner.register(this, create(name, extensibility), TypeInfo::deleteVoid);
     }
 
+    /** Wraps a raw builder handle already produced natively (e.g. by {@link #createEnum}). */
+    TypeInfo(long rawHandle) {
+        this.handle = NativeCleaner.register(this, rawHandle, TypeInfo::deleteVoid);
+    }
+
+    /**
+     * Creates an enum type-info builder. {@code bitBound} is the discriminant bit width
+     * (IDL enums use 32). Populate literals with {@link #addEnumLiteral}, then reference
+     * this from a struct builder with {@link #addNestedField} so the enum resolves at
+     * decode time.
+     */
+    public static TypeInfo createEnum(String name, int bitBound) {
+        long[] out = new long[1];
+        int rc = FfiAccess.typeInfoCreateEnum(name.getBytes(UTF8), bitBound, out);
+        ReturnCodes.check(rc);
+        return new TypeInfo(out[0]);
+    }
+
+    /**
+     * Creates a bitmask type-info builder. {@code bitBound} is the flag storage bit
+     * width. Populate flags with {@link #addBitmaskFlag}.
+     */
+    public static TypeInfo createBitmask(String name, int bitBound) {
+        long[] out = new long[1];
+        int rc = FfiAccess.typeInfoCreateBitmask(name.getBytes(UTF8), bitBound, out);
+        ReturnCodes.check(rc);
+        return new TypeInfo(out[0]);
+    }
+
     private static long create(byte[] name, Extensibility extensibility) {
         long h = FfiAccess.typeInfoCreate(name, extensibility.value());
         if (h == 0L) {
@@ -123,6 +152,38 @@ public final class TypeInfo implements AutoCloseable {
         // the native call dereferences both handles.
         NativeKeepAlive.keepAlive(this);
         NativeKeepAlive.keepAlive(element);
+        ReturnCodes.check(rc);
+    }
+
+    /** Appends a literal to an enum builder. No-op if this builder is not an enum. */
+    public void addEnumLiteral(String name, int value, boolean isDefault) {
+        int rc = FfiAccess.typeInfoAddEnumLiteral(
+                handle(), name.getBytes(UTF8), value, isDefault ? 1 : 0);
+        // Same fence as addField.
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
+    /** Appends a flag to a bitmask builder. No-op if this builder is not a bitmask. */
+    public void addBitmaskFlag(String name, int position) {
+        int rc = FfiAccess.typeInfoAddBitmaskFlag(handle(), name.getBytes(UTF8), position);
+        // Same fence as addField.
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+    }
+
+    /**
+     * Appends a field referencing another type by name (e.g. an enum built with {@link
+     * #createEnum}), rather than by a borrowed builder handle. Unlike {@link
+     * #addNestedField}, this does not record the referenced type's {@link TypeObject} into
+     * this builder's dependency closure, so the referenced type must resolve some other
+     * way (e.g. discovery) to decode.
+     */
+    public void addNamedTypeField(String fieldName, String typeName, int flags) {
+        int rc = FfiAccess.typeInfoAddNamedTypeField(
+                handle(), fieldName.getBytes(UTF8), typeName.getBytes(UTF8), flags);
+        // Same fence as addField.
+        NativeKeepAlive.keepAlive(this);
         ReturnCodes.check(rc);
     }
 
