@@ -57,6 +57,102 @@ public final class DynamicValue implements AutoCloseable {
         return new DynamicValue(out[0]);
     }
 
+    /** Builds a {@code bool} value. */
+    public static DynamicValue bool(boolean value) {
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicValueBool(value, out);
+        ReturnCodes.check(rc);
+        return new DynamicValue(out[0]);
+    }
+
+    /** Builds an {@code int8} value. */
+    public static DynamicValue i8(int value) {
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicValueI8(value, out);
+        ReturnCodes.check(rc);
+        return new DynamicValue(out[0]);
+    }
+
+    /** Builds a {@code uint8} value. */
+    public static DynamicValue u8(int value) {
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicValueU8(value, out);
+        ReturnCodes.check(rc);
+        return new DynamicValue(out[0]);
+    }
+
+    /** Builds an {@code int16} value. */
+    public static DynamicValue i16(int value) {
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicValueI16(value, out);
+        ReturnCodes.check(rc);
+        return new DynamicValue(out[0]);
+    }
+
+    /** Builds a {@code uint16} value. */
+    public static DynamicValue u16(int value) {
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicValueU16(value, out);
+        ReturnCodes.check(rc);
+        return new DynamicValue(out[0]);
+    }
+
+    /** Builds a {@code uint32} value. */
+    public static DynamicValue u32(int value) {
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicValueU32(value, out);
+        ReturnCodes.check(rc);
+        return new DynamicValue(out[0]);
+    }
+
+    /** Builds a {@code byte} (octet) value. */
+    public static DynamicValue byte8(int value) {
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicValueByte(value, out);
+        ReturnCodes.check(rc);
+        return new DynamicValue(out[0]);
+    }
+
+    /** Builds a {@code char8} value. */
+    public static DynamicValue char8(int value) {
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicValueChar8(value, out);
+        ReturnCodes.check(rc);
+        return new DynamicValue(out[0]);
+    }
+
+    /** Builds an {@code int64} value. */
+    public static DynamicValue i64(long value) {
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicValueI64(value, out);
+        ReturnCodes.check(rc);
+        return new DynamicValue(out[0]);
+    }
+
+    /** Builds a {@code uint64} value. */
+    public static DynamicValue u64(long value) {
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicValueU64(value, out);
+        ReturnCodes.check(rc);
+        return new DynamicValue(out[0]);
+    }
+
+    /** Builds a {@code float32} value. */
+    public static DynamicValue f32(float value) {
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicValueF32(value, out);
+        ReturnCodes.check(rc);
+        return new DynamicValue(out[0]);
+    }
+
+    /** Builds a {@code float64} value. */
+    public static DynamicValue f64(double value) {
+        long[] out = new long[1];
+        int rc = FfiAccess.dynamicValueF64(value, out);
+        ReturnCodes.check(rc);
+        return new DynamicValue(out[0]);
+    }
+
     /** Builds a {@code string} value from UTF-8 bytes. */
     public static DynamicValue string(String value) {
         long[] out = new long[1];
