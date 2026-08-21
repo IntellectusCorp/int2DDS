@@ -18,11 +18,11 @@ use std::ffi::CStr;
 use int2dds::{
     serialize::cdr::ExtensibilityKind,
     xtypes::{
-        plain_collection_equiv_kind, CollectionElementFlag, CommonStructMember, CompleteBitflag,
-        CompleteBitmaskType, CompleteEnumeratedLiteral, CompleteEnumeratedType,
-        CompleteMemberDetail, CompleteStructMember, CompleteStructType, CompleteTypeObject,
-        EnumeratedLiteralFlag, EquivalenceHash, MemberFlag, PlainCollectionHeader,
-        TryConstructKind, TypeFlag, TypeIdentifier, TypeObject,
+        plain_array_identifier, plain_collection_equiv_kind, CollectionElementFlag,
+        CommonStructMember, CompleteBitflag, CompleteBitmaskType, CompleteEnumeratedLiteral,
+        CompleteEnumeratedType, CompleteMemberDetail, CompleteStructMember, CompleteStructType,
+        CompleteTypeObject, EnumeratedLiteralFlag, EquivalenceHash, MemberFlag,
+        PlainCollectionHeader, TryConstructKind, TypeFlag, TypeIdentifier, TypeObject,
     },
 };
 
@@ -403,22 +403,10 @@ fn plain_sequence_id(element: TypeIdentifier, bound: u32) -> TypeIdentifier {
     }
 }
 
-/// Array id: SMALL when `array_size <= 255`, else LARGE.
+/// Array id. The builder API carries one bound, so this is always one-dimensional;
+/// the shared helper still owns the SMALL/LARGE rule and the header.
 fn plain_array_id(element: TypeIdentifier, array_size: u32) -> TypeIdentifier {
-    let header = plain_collection_header(&element);
-    if array_size <= 255 {
-        TypeIdentifier::PlainArraySmall {
-            header,
-            array_bound_seq: vec![array_size as u8],
-            element_identifier: Box::new(element),
-        }
-    } else {
-        TypeIdentifier::PlainArrayLarge {
-            header,
-            array_bound_seq: vec![array_size],
-            element_identifier: Box::new(element),
-        }
-    }
+    plain_array_identifier(element, &[array_size])
 }
 
 /// String id honoring an optional bound: `0` -> unbounded `String8`/`String16`;

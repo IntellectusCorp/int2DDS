@@ -3678,6 +3678,47 @@ pub mod recursion_guard {
     }
 }
 
+/// Build the plain-array `TypeIdentifier` for `dims` over `element`, in declaration
+/// order (`long a[2][3]` -> `[2, 3]`).
+///
+/// A multidimensional IDL array is **one** array of the base element (DDS-XTypes
+/// 7.4.3.4), not an array of arrays, so an `element` that is itself a plain array
+/// contributes its bounds here instead of nesting. That is not cosmetic: the codec
+/// writes the elements flat with a single frame, and a nested identifier describes a
+/// frame per dimension that no int2DDS writer produces.
+///
+/// SMALL when every bound fits `SBound`, else LARGE — the same rule the sequence and
+/// string identifiers use, so the serialized id matches other implementations.
+pub fn plain_array_identifier(element: TypeIdentifier, dims: &[u32]) -> TypeIdentifier {
+    let (element, inner_dims) = match element {
+        TypeIdentifier::PlainArraySmall { array_bound_seq, element_identifier, .. } => {
+            (*element_identifier, array_bound_seq.iter().map(|b| *b as u32).collect())
+        }
+        TypeIdentifier::PlainArrayLarge { array_bound_seq, element_identifier, .. } => {
+            (*element_identifier, array_bound_seq)
+        }
+        other => (other, Vec::new()),
+    };
+    let all_dims: Vec<u32> = dims.iter().copied().chain(inner_dims).collect();
+    let header = PlainCollectionHeader {
+        equiv_kind: plain_collection_equiv_kind(&element),
+        element_flags: CollectionElementFlag::default(),
+    };
+    if all_dims.iter().all(|d| *d <= 255) {
+        TypeIdentifier::PlainArraySmall {
+            header,
+            array_bound_seq: all_dims.iter().map(|d| *d as u8).collect(),
+            element_identifier: Box::new(element),
+        }
+    } else {
+        TypeIdentifier::PlainArrayLarge {
+            header,
+            array_bound_seq: all_dims,
+            element_identifier: Box::new(element),
+        }
+    }
+}
+
 /// Compute the `PlainCollectionHeader.equiv_kind` for a plain collection whose
 /// element id is `element`: `Both` when the element (transitively) is fully
 /// descriptive (primitives/strings/plain collections of the same), else the
@@ -3893,47 +3934,11 @@ macro_rules! impl_array_has_type_object {
         $(
             impl<T: HasTypeObject> HasTypeObject for [T; $n] {
                 fn type_identifier() -> TypeIdentifier {
-                    let element = T::type_identifier();
-                    let header = PlainCollectionHeader {
-                        equiv_kind: plain_collection_equiv_kind(&element),
-                        element_flags: CollectionElementFlag::default(),
-                    };
-                    let n: usize = $n;
-                    if n <= 255 {
-                        TypeIdentifier::PlainArraySmall {
-                            header,
-                            array_bound_seq: vec![n as u8],
-                            element_identifier: Box::new(element),
-                        }
-                    } else {
-                        TypeIdentifier::PlainArrayLarge {
-                            header,
-                            array_bound_seq: vec![n as u32],
-                            element_identifier: Box::new(element),
-                        }
-                    }
+                    plain_array_identifier(T::type_identifier(), &[$n as u32])
                 }
 
                 fn minimal_type_identifier() -> TypeIdentifier {
-                    let element = T::minimal_type_identifier();
-                    let header = PlainCollectionHeader {
-                        equiv_kind: plain_collection_equiv_kind(&element),
-                        element_flags: CollectionElementFlag::default(),
-                    };
-                    let n: usize = $n;
-                    if n <= 255 {
-                        TypeIdentifier::PlainArraySmall {
-                            header,
-                            array_bound_seq: vec![n as u8],
-                            element_identifier: Box::new(element),
-                        }
-                    } else {
-                        TypeIdentifier::PlainArrayLarge {
-                            header,
-                            array_bound_seq: vec![n as u32],
-                            element_identifier: Box::new(element),
-                        }
-                    }
+                    plain_array_identifier(T::minimal_type_identifier(), &[$n as u32])
                 }
 
                 fn minimal_type_object() -> MinimalTypeObject {
@@ -4479,6 +4484,34 @@ mod tests {
             assert_eq!(array_bound_seq, vec![10u8]);
         } else {
             panic!("Expected PlainArraySmall");
+        }
+    }
+
+    /// `long a[2][3]` is one array of the base type (DDS-XTypes 7.4.3.4), so nesting the
+    /// Rust type must not nest the identifier. Asymmetric bounds pin the order: a reversed
+    /// `[3, 2]` keeps the element count and every round-trip green.
+    #[test]
+    fn multidim_array_type_identifier_is_flat() {
+        let arr_id = <[[i32; 3]; 2]>::type_identifier();
+        let TypeIdentifier::PlainArraySmall { array_bound_seq, element_identifier, .. } = arr_id
+        else {
+            panic!("Expected PlainArraySmall");
+        };
+        assert_eq!(array_bound_seq, vec![2u8, 3], "declaration order, outer bound first");
+        assert_eq!(*element_identifier, TypeIdentifier::Int32);
+
+        // One bound over SBound promotes the whole identifier, whichever dimension it is —
+        // testing only the first would let the other truncate into `SBound`.
+        for (id, expected) in [
+            (<[[i32; 2]; 256]>::type_identifier(), vec![256u32, 2]),
+            (<[[i32; 256]; 2]>::type_identifier(), vec![2u32, 256]),
+        ] {
+            let TypeIdentifier::PlainArrayLarge { array_bound_seq, element_identifier, .. } = id
+            else {
+                panic!("Expected PlainArrayLarge for {expected:?}");
+            };
+            assert_eq!(array_bound_seq, expected);
+            assert_eq!(*element_identifier, TypeIdentifier::Int32);
         }
     }
 

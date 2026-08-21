@@ -82,35 +82,14 @@ fn type_to_identifier(
     minimal: bool,
 ) -> proc_macro2::TokenStream {
     if let syn::Type::Array(array) = ty {
+        // `long a[2][3]` parses as `[[i32; 3]; 2]` but is one array of the base element
+        // (DDS-XTypes 7.4.3.4); the helper folds the inner identifier's bounds into this
+        // one. The bound stays an expression because it may be a const.
         let inner_id =
             type_to_identifier(&array.elem, crate_path, as_char, as_uint8, None, minimal);
         let size = &array.len;
         return quote! {
-            {
-                let __elem = #inner_id;
-                let __equiv = #crate_path::xtypes::plain_collection_equiv_kind(&__elem);
-                let __flags = #crate_path::xtypes::CollectionElementFlag::default();
-                let __n: usize = #size;
-                if __n <= 255 {
-                    #crate_path::xtypes::TypeIdentifier::PlainArraySmall {
-                        header: #crate_path::xtypes::PlainCollectionHeader {
-                            equiv_kind: __equiv,
-                            element_flags: __flags,
-                        },
-                        array_bound_seq: vec![__n as u8],
-                        element_identifier: Box::new(__elem),
-                    }
-                } else {
-                    #crate_path::xtypes::TypeIdentifier::PlainArrayLarge {
-                        header: #crate_path::xtypes::PlainCollectionHeader {
-                            equiv_kind: __equiv,
-                            element_flags: __flags,
-                        },
-                        array_bound_seq: vec![__n as u32],
-                        element_identifier: Box::new(__elem),
-                    }
-                }
-            }
+            #crate_path::xtypes::plain_array_identifier(#inner_id, &[(#size) as u32])
         };
     }
 
