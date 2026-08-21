@@ -1378,6 +1378,91 @@ public final class FfiAccess {
         Ffi.int2dds_type_object_destroy(typeObject);
     }
 
+    /**
+     * Reads a struct TypeObject's member count into {@code out[0]} on success.
+     * {@code RET_DYNAMIC_UNSUPPORTED_TYPE} for a non-struct TypeObject.
+     */
+    public static int typeObjectMemberCount(long t, int[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_type_object_member_count(t, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getInt(0); // native writes a u32 (4 bytes)
+        }
+        return rc;
+    }
+
+    /**
+     * Grow-and-retry driver for the member name at {@code index}, mirroring
+     * {@link #dynamicDataGetString} exactly: {@code
+     * int2dds_type_object_member_name} shares the same {@code copy_str_to_c}
+     * contract (out_len excludes the NUL, both on {@code RET_BUFFER_TOO_SMALL}
+     * and on success), so the same regrow-to-{@code outLen + 1} logic applies.
+     */
+    public static int typeObjectMemberName(long t, int index, byte[][] bytesOut) {
+        int cap = 64;
+        while (true) {
+            byte[] buf = new byte[cap];
+            ByteBuffer sizeSlot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+            int rc = Ffi.int2dds_type_object_member_name(
+                    t, index, buf, cap, directBufferAddress(sizeSlot));
+            NativeKeepAlive.keepAlive(sizeSlot);
+            if (rc == DdsException.RET_BUFFER_TOO_SMALL) {
+                cap = (int) sizeSlot.getLong(0) + 1; // out_len excludes the NUL here
+                continue;
+            }
+            if (rc == 0) {
+                int n = (int) sizeSlot.getLong(0); // excludes the NUL -- no -1 needed
+                byte[] out = new byte[n];
+                System.arraycopy(buf, 0, out, 0, n);
+                bytesOut[0] = out;
+            }
+            return rc;
+        }
+    }
+
+    /**
+     * Finds a struct TypeObject member's index by name, writing it to {@code
+     * indexOut[0]} on success. {@code RET_DYNAMIC_FIELD_NOT_FOUND} if no
+     * member has that name; {@code RET_DYNAMIC_UNSUPPORTED_TYPE} for a
+     * non-struct TypeObject.
+     */
+    public static int typeObjectFindMember(long t, byte[] name, int[] indexOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_type_object_find_member(t, name, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            indexOut[0] = slot.getInt(0); // native writes a u32 (4 bytes)
+        }
+        return rc;
+    }
+
+    /**
+     * Reads a struct TypeObject member's info at {@code index} into the
+     * 12-byte {@code Int2DdsMemberInfo} struct at {@code structOutAddr} (a
+     * direct-buffer address, the caller's responsibility to allocate and keep
+     * alive). Thin passthrough -- the caller owns the buffer and decodes it,
+     * the same shape as {@link #datawriterGetPublicationMatchedStatus}.
+     */
+    public static int typeObjectMemberInfo(long t, int index, long structOutAddr) {
+        return Ffi.int2dds_type_object_member_info(t, index, structOutAddr);
+    }
+
+    /**
+     * Reads a struct TypeObject's extensibility into {@code out[0]} on
+     * success: 0 Final, 1 Appendable, 2 Mutable. {@code
+     * RET_DYNAMIC_UNSUPPORTED_TYPE} for a non-struct TypeObject.
+     */
+    public static int typeObjectExtensibility(long t, int[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_type_object_extensibility(t, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getInt(0); // native writes an i32 (4 bytes)
+        }
+        return rc;
+    }
+
     /** Decodes one i32 field out of a serialized sample. */
     public static int dynamicSampleGetI32(long bytes, long len, long typeObj,
             byte[] fieldName, long out) {
