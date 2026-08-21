@@ -250,7 +250,7 @@ enum InFlightAcquisition {
 pub(crate) struct TcpSender {
     domain_id: u32,
     participant_id: u32,
-    working_ip: String,
+    working_ips: Vec<String>,
     listener_port: u16,
     public_addr: Option<SocketAddr>,
     #[allow(dead_code)]
@@ -297,7 +297,7 @@ impl TcpSender {
     pub(crate) fn new(
         domain_id: u32,
         participant_id: u32,
-        working_ip: String,
+        working_ips: Vec<String>,
         listener_port: u16,
         local_guid_prefix: GuidPrefix,
         tls_config: Option<Arc<TlsConfig>>,
@@ -324,7 +324,7 @@ impl TcpSender {
         Arc::new(Self {
             domain_id,
             participant_id,
-            working_ip,
+            working_ips,
             listener_port,
             public_addr,
             local_guid_prefix,
@@ -503,8 +503,8 @@ impl TcpSender {
         self.shared.backoff_remaining(addr)
     }
 
-    fn note_connect_failure(&self, addr: SocketAddr) {
-        self.shared.note_connect_failure(addr);
+    fn note_connect_failure(&self, addr: SocketAddr, err: &io::Error) {
+        self.shared.note_connect_failure(addr, err);
     }
 
     fn note_connect_success(&self, addr: SocketAddr) {
@@ -522,14 +522,16 @@ impl TcpSender {
         &self.cancel
     }
 
-    /// Heuristic: is this address our own listener? Avoids loopback
-    /// self-connections during SPDP fan-out.
-    fn is_self_connection(&self, addr: &SocketAddr) -> bool {
+    /// Heuristic: is this address our own listener? Traffic aimed here never
+    /// reaches a socket — it is either delivered in-process or dropped.
+    pub(crate) fn is_self_connection(&self, addr: &SocketAddr) -> bool {
         if addr.port() != self.listener_port {
             return false;
         }
         match addr.ip() {
-            IpAddr::V4(v4) => v4.is_loopback() || self.working_ip == v4.to_string(),
+            IpAddr::V4(v4) => {
+                v4.is_loopback() || self.working_ips.iter().any(|ip| *ip == v4.to_string())
+            }
             IpAddr::V6(_) => false,
         }
     }
@@ -562,6 +564,13 @@ impl TcpSender {
     ) -> io::Result<()> {
         // A control connection is never a send target.
         if logical_port == CONTROL_LOGICAL_PORT {
+            return Ok(());
+        }
+
+        // Our own listener: user data goes to the receive side in-process, and
+        // anything else (an SPDP announcement that came back to us) is dropped.
+        if self.is_self_connection(&addr) {
+            self.shared.deliver_to_self(addr, logical_port, data)?;
             return Ok(());
         }
 
@@ -850,7 +859,7 @@ async fn background_connect(
                 addr, logical_port, e
             );
             sender.evict_connection(addr, logical_port);
-            sender.note_connect_failure(addr);
+            sender.note_connect_failure(addr, &e);
         }
     }
 }
@@ -1186,7 +1195,7 @@ mod tests {
         let sender = TcpSender::new(
             0,
             participant_id,
-            "127.0.0.1".to_string(),
+            vec!["127.0.0.1".to_string()],
             listener_port,
             guid_prefix,
             None,
@@ -1353,17 +1362,36 @@ mod tests {
 
         assert!(sender.backoff_remaining(addr).is_none(), "no backoff initially");
 
-        sender.note_connect_failure(addr);
+        let unreachable = io::Error::new(io::ErrorKind::TimedOut, "unreachable");
+
+        sender.note_connect_failure(addr, &unreachable);
         let first = sender.backoff_remaining(addr).expect("backoff after first failure");
         assert!(first > Duration::ZERO && first <= BACKOFF_BASE);
 
-        sender.note_connect_failure(addr);
+        sender.note_connect_failure(addr, &unreachable);
         let second = sender.backoff_remaining(addr).expect("backoff after second failure");
         assert!(second > BACKOFF_BASE, "delay must grow on a repeat failure");
         assert!(second <= BACKOFF_BASE * 2);
 
         sender.note_connect_success(addr);
         assert!(sender.backoff_remaining(addr).is_none(), "success clears backoff");
+
+        sender.shutdown().await;
+    }
+
+    /// A refused connect is a peer that has not opened its socket yet, so its
+    /// delay stays at the base however many times it happens.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refused_connect_never_grows_the_backoff() {
+        let (sender, _) = make_sender(0, [0xAB; 12], 12346);
+        let addr: SocketAddr = "192.0.2.2:7400".parse().unwrap();
+        let refused = io::Error::from(io::ErrorKind::ConnectionRefused);
+
+        for _ in 0..8 {
+            sender.note_connect_failure(addr, &refused);
+            let remaining = sender.backoff_remaining(addr).expect("backoff after a refusal");
+            assert!(remaining <= BACKOFF_BASE, "a refusal must not grow the delay");
+        }
 
         sender.shutdown().await;
     }
@@ -1776,7 +1804,11 @@ mod tests {
     /// "the write was not abandoned".
     #[tokio::test(flavor = "multi_thread")]
     async fn cancel_does_not_interrupt_a_write_in_flight() {
-        const FRAME: usize = 64 * 1024;
+        // Bigger than any socket buffer an OS will autotune to, so the frame
+        // cannot fit whole in the peer that never reads it. A frame the peer
+        // swallowed entirely would complete its write and read here as one the
+        // cancel abandoned.
+        const FRAME: usize = 16 * 1024 * 1024;
 
         let cfg =
             TcpConfig { send_deadline: Some(Duration::from_millis(50)), ..TcpConfig::default() };
@@ -1785,10 +1817,6 @@ mod tests {
         // A peer that accepts and never reads: the write cannot finish.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let peer_addr = listener.local_addr().unwrap();
-        // Pin the peer's recv buffer small (accepted sockets inherit it) so an
-        // unread frame stays parked. An OS that autotunes the recv buffer up
-        // would keep swallowing bytes until the frame completes, which reads
-        // here as an abandoned write rather than one still in flight.
         let _ = socket2::SockRef::from(&listener).set_recv_buffer_size(4 * 1024);
         let accepted = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
@@ -1812,7 +1840,7 @@ mod tests {
         let ws = Arc::clone(&write_state);
         tokio::task::spawn_blocking(move || {
             let payload = vec![0xEE; FRAME];
-            for _ in 0..64 {
+            for _ in 0..4 {
                 let _ = s.write_frame(peer_addr, 7400, &handle, &payload);
             }
             // The lock is held by the stalled write; anything else times out.
@@ -2143,7 +2171,7 @@ mod tests {
         );
 
         // Seed a backoff entry so its clearing is observable.
-        sender.note_connect_failure(target);
+        sender.note_connect_failure(target, &io::Error::from(io::ErrorKind::TimedOut));
         assert!(sender.backoff_remaining(target).is_some());
 
         sender.disconnect_peer(target);
