@@ -1090,7 +1090,7 @@ fn key_members_ordered(dynamic_type: &DynamicType) -> Vec<&MemberDescriptor> {
 }
 
 /// True when the sole key member is a `String`. The derive path (`is_unbounded_string`
-/// in `key_methods.rs`) and the field-descriptor raw path (`CdrFieldType::String`) both
+/// in `key_methods.rs`) and the plan raw path (`single_string_key` in `codec_plan.rs`) both
 /// MD5-hash such keys regardless of any `bound`, since neither observes the bound at
 /// this point. The dynamic path matches them so all keyed paths agree. `WString` keys
 /// are not hashed (they stay in the ≤16 raw rule), matching derive.

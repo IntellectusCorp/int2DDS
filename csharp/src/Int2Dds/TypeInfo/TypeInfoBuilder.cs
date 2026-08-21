@@ -35,7 +35,7 @@ namespace Int2Dds.TypeInfo
         /// Adds a scalar field to the type.
         /// </summary>
         /// <param name="fieldName">The field name.</param>
-        /// <param name="fieldType">The field type constant (see <see cref="FieldTypeConstants"/>).</param>
+        /// <param name="fieldType">The field type constant (see <see cref="Int2Dds.Types.FieldType"/>).</param>
         /// <param name="isKey">Whether this field is part of the key.</param>
         /// <returns>This builder for chaining.</returns>
         public unsafe TypeInfoBuilder AddField(string fieldName, int fieldType, bool isKey = false)
