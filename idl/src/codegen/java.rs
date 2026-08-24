@@ -116,13 +116,15 @@ fn package_for(opts: &JavaOptions, qualified_name: &str) -> Option<String> {
     if let Some(base) = &opts.package {
         let base = base.trim();
         if !base.is_empty() {
-            parts.push(base.to_string());
+            for seg in base.split('.') {
+                parts.push(naming::escape_keyword(seg, TargetLang::Java));
+            }
         }
     }
     let mut segs: Vec<&str> = qualified_name.split("::").collect();
     segs.pop(); // drop the leaf type name
     for s in segs {
-        parts.push(s.to_lowercase());
+        parts.push(naming::escape_keyword(&s.to_lowercase(), TargetLang::Java));
     }
     if parts.is_empty() {
         None
@@ -656,6 +658,17 @@ mod tests {
         );
         assert_eq!(files[0].relative_path, "com/intellectus/int2dds/examples/HelloWorld.java");
         assert!(files[0].source.contains("package com.intellectus.int2dds.examples;"));
+    }
+
+    #[test]
+    fn package_segment_matching_a_keyword_gets_escaped() {
+        // "generated.enum" would compile as a syntax error: `enum` is reserved.
+        let files = gen(
+            r#"struct HelloWorld { unsigned long index; };"#,
+            &JavaOptions { package: Some("generated.enum".to_string()) },
+        );
+        assert_eq!(files[0].relative_path, "generated/enum_/HelloWorld.java");
+        assert!(files[0].source.contains("package generated.enum_;"), "{}", files[0].source);
     }
 
     #[test]
