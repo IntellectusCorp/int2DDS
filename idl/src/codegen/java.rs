@@ -78,6 +78,19 @@ fn reject_unsupported(model: &IdlModel) -> Result<(), String> {
                     s.name, m.name
                 ));
             }
+            if let ResolvedType::Sequence { element, .. } | ResolvedType::Array { element, .. } =
+                &m.resolved_type
+            {
+                if matches!(
+                    element.as_ref(),
+                    ResolvedType::Sequence { .. } | ResolvedType::Array { .. }
+                ) {
+                    return Err(format!(
+                        "Java backend does not support a nested collection member '{}.{}'",
+                        s.name, m.name
+                    ));
+                }
+            }
         }
     }
     Ok(())
@@ -755,6 +768,21 @@ mod tests {
         assert!(s.source.contains("public Color[] v = new Color[0];"), "{}", s.source);
         assert!(s.source.contains("writer.writeEnum(v[i0].value());"), "{}", s.source);
         assert!(s.source.contains("v[i0] = Color.fromValue(reader.readEnum());"), "{}", s.source);
+    }
+
+    #[test]
+    fn nested_collections_are_refused() {
+        // Java array creation needs the sized dimension first (`new int[0][]`),
+        // and this backend has no test that a nested encoding round-trips.
+        for src in [
+            r#"@extensibility(FINAL) struct S { sequence<sequence<long> > v; };"#,
+            r#"@extensibility(FINAL) struct S { long m[3][4]; };"#,
+        ] {
+            let defs = parse_idl(src).unwrap();
+            let model = resolve(defs).unwrap();
+            let err = generate(&model, "S.idl", &JavaOptions::default()).unwrap_err();
+            assert!(err.contains("S."), "{}", err);
+        }
     }
 
     #[test]
