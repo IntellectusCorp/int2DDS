@@ -3578,6 +3578,23 @@ public final class FfiAccess {
         return rc;
     }
 
+    /**
+     * Like {@link #takeDiscoveredPublicationsSnapshot} but restricted to entries
+     * whose instance state matches {@code instanceStateMask} (a bitwise-OR of
+     * {@code InstanceState} constants).
+     */
+    public static int takeDiscoveredPublicationsSnapshotFiltered(long participant, int timeoutMs,
+            int instanceStateMask, long[] seqOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_participant_take_discovered_publications_snapshot_filtered(
+                participant, timeoutMs, instanceStateMask, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            seqOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
     /** Entry count of a publication snapshot. Returns rc; writes it to {@code out[0]} on success. */
     public static int pubDataSeqLength(long seq, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
@@ -3758,6 +3775,23 @@ public final class FfiAccess {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_participant_take_discovered_subscriptions_snapshot(
                 participant, timeoutMs, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            seqOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Like {@link #takeDiscoveredSubscriptionsSnapshot} but restricted to entries
+     * whose instance state matches {@code instanceStateMask} (a bitwise-OR of
+     * {@code InstanceState} constants).
+     */
+    public static int takeDiscoveredSubscriptionsSnapshotFiltered(long participant, int timeoutMs,
+            int instanceStateMask, long[] seqOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_participant_take_discovered_subscriptions_snapshot_filtered(
+                participant, timeoutMs, instanceStateMask, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             seqOut[0] = slot.getLong(0);

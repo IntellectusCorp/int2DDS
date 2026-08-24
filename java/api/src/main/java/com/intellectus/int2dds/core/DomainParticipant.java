@@ -333,8 +333,44 @@ public final class DomainParticipant extends NativeEntity {
         long[] seqOut = new long[1];
         int rc = FfiAccess.takeDiscoveredPublicationsSnapshot(h, (int) timeoutMillis, seqOut);
         NativeKeepAlive.keepAlive(this);
+        return materializePublicationSnapshot(rc, seqOut[0]);
+    }
+
+    /**
+     * Takes a snapshot of currently discovered publications restricted to those
+     * whose instance state matches {@code instanceStateMask}, blocking up to
+     * {@code timeoutMillis} (negative = infinite) for the builtin
+     * DCPSPublication reader to have data. Discovery is asynchronous, so an
+     * empty list shortly after matching entities are created does not mean
+     * discovery failed -- callers on a bounded budget should retry.
+     *
+     * <p>Only endpoints whose instance state matches {@code instanceStateMask}
+     * (a bitwise-OR of {@link com.intellectus.int2dds.conditions.InstanceState}
+     * constants -- e.g. {@code InstanceState.ANY} for all, {@code
+     * InstanceState.NOT_ALIVE_DISPOSED} for disposed-only) are returned.
+     *
+     * <p>Materializes each entry into an immutable {@link
+     * PublicationBuiltinTopicData} before releasing the native snapshot: the
+     * per-entry box the core mints (a clone of its stored data) is destroyed,
+     * and the snapshot sequence itself deleted, in {@code finally} blocks, so
+     * an exception mid-read still frees everything already allocated.
+     */
+    public List<PublicationBuiltinTopicData> takeDiscoveredPublications(long timeoutMillis,
+            int instanceStateMask) {
+        long h = handle();
+        long[] seqOut = new long[1];
+        int rc = FfiAccess.takeDiscoveredPublicationsSnapshotFiltered(
+                h, (int) timeoutMillis, instanceStateMask, seqOut);
+        NativeKeepAlive.keepAlive(this);
+        return materializePublicationSnapshot(rc, seqOut[0]);
+    }
+
+    /**
+     * Materializes a publication snapshot sequence into a list, releasing the
+     * per-entry boxes and the sequence itself in {@code finally} blocks.
+     */
+    private static List<PublicationBuiltinTopicData> materializePublicationSnapshot(int rc, long seq) {
         ReturnCodes.check(rc);
-        long seq = seqOut[0];
         List<PublicationBuiltinTopicData> out = new ArrayList<PublicationBuiltinTopicData>();
         try {
             long[] lenOut = new long[1];
@@ -374,8 +410,44 @@ public final class DomainParticipant extends NativeEntity {
         long[] seqOut = new long[1];
         int rc = FfiAccess.takeDiscoveredSubscriptionsSnapshot(h, (int) timeoutMillis, seqOut);
         NativeKeepAlive.keepAlive(this);
+        return materializeSubscriptionSnapshot(rc, seqOut[0]);
+    }
+
+    /**
+     * Takes a snapshot of currently discovered subscriptions restricted to
+     * those whose instance state matches {@code instanceStateMask}, blocking
+     * up to {@code timeoutMillis} (negative = infinite) for the builtin
+     * DCPSSubscription reader to have data. Discovery is asynchronous, so an
+     * empty list shortly after matching entities are created does not mean
+     * discovery failed -- callers on a bounded budget should retry.
+     *
+     * <p>Only endpoints whose instance state matches {@code instanceStateMask}
+     * (a bitwise-OR of {@link com.intellectus.int2dds.conditions.InstanceState}
+     * constants -- e.g. {@code InstanceState.ANY} for all, {@code
+     * InstanceState.NOT_ALIVE_DISPOSED} for disposed-only) are returned.
+     *
+     * <p>Materializes each entry into an immutable {@link
+     * SubscriptionBuiltinTopicData} before releasing the native snapshot: the
+     * per-entry box the core mints (a clone of its stored data) is destroyed,
+     * and the snapshot sequence itself deleted, in {@code finally} blocks, so
+     * an exception mid-read still frees everything already allocated.
+     */
+    public List<SubscriptionBuiltinTopicData> takeDiscoveredSubscriptions(long timeoutMillis,
+            int instanceStateMask) {
+        long h = handle();
+        long[] seqOut = new long[1];
+        int rc = FfiAccess.takeDiscoveredSubscriptionsSnapshotFiltered(
+                h, (int) timeoutMillis, instanceStateMask, seqOut);
+        NativeKeepAlive.keepAlive(this);
+        return materializeSubscriptionSnapshot(rc, seqOut[0]);
+    }
+
+    /**
+     * Materializes a subscription snapshot sequence into a list, releasing the
+     * per-entry boxes and the sequence itself in {@code finally} blocks.
+     */
+    private static List<SubscriptionBuiltinTopicData> materializeSubscriptionSnapshot(int rc, long seq) {
         ReturnCodes.check(rc);
-        long seq = seqOut[0];
         List<SubscriptionBuiltinTopicData> out = new ArrayList<SubscriptionBuiltinTopicData>();
         try {
             long[] lenOut = new long[1];
