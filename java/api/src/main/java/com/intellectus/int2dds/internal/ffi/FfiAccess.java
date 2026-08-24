@@ -692,6 +692,28 @@ public final class FfiAccess {
     }
 
     /**
+     * Looks up an existing topic named {@code topicName} of type {@code
+     * ddsTypeName}, waiting up to {@code timeoutMs} (negative = infinite).
+     * Returns the C ABI status code and, only on success, writes an OWNED
+     * handle (an Arc clone) to {@code handleOut[0]} -- same shape and same
+     * {@link #deleteTopic} lifecycle as {@link #createTopic}, just without
+     * minting a new topic. Failure (timeout or not found) leaves {@code
+     * handleOut} untouched.
+     */
+    public static int participantFindTopic(long participant, byte[] topicName,
+            byte[] ddsTypeName, int timeoutMs, long[] handleOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_participant_find_topic(
+                participant, topicName, ddsTypeName, timeoutMs, directBufferAddress(slot));
+        // Same fence as createTopic.
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            handleOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
      * Creates a topic whose QoS comes from a loaded profile ({@code qosPath}
      * is a {@code "LibraryName::ProfileName"} path). Same {@code (rc,
      * long[] handleOut)} shape as {@link #createTopic}, and the resulting

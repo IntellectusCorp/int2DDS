@@ -134,6 +134,29 @@ public final class DomainParticipant extends NativeEntity {
     }
 
     /**
+     * Finds an existing topic named {@code name} (created elsewhere in this
+     * participant, or discovered), waiting up to {@code timeoutMs}
+     * milliseconds (negative = wait indefinitely). {@code prototype} supplies
+     * the DDS type name the native lookup matches against, and the
+     * compile-time type {@code T} for the returned {@link Topic}. Throws if
+     * no such topic appears within the timeout.
+     *
+     * <p><b>Ownership caveat:</b> this core does not ref-count a topic across
+     * acquisitions, so the returned handle is not an independent second owner
+     * of the underlying topic (despite the DDS spec's multi-acquire
+     * semantics). If you also hold the {@link #createTopic}-returned handle for
+     * the same topic in this participant, close only one of them: closing
+     * either removes the native topic, and closing the other afterward throws
+     * {@code DdsAlreadyDeletedException}. Intended for finding a topic you do
+     * not otherwise hold — one created by another component, or discovered.
+     */
+    public <T extends IDdsType> Topic<T> findTopic(String name, T prototype, int timeoutMs) {
+        Objects.requireNonNull(name, "name");
+        Objects.requireNonNull(prototype, "prototype");
+        return Topic.find(this, name, prototype, timeoutMs);
+    }
+
+    /**
      * Creates a topic named {@code name} backed by {@code support} (an
      * XTypes dynamic type support, from {@link
      * com.intellectus.int2dds.xtypes.XmlTypeRegistry#getTypeSupport}) rather

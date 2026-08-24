@@ -136,6 +136,49 @@ public final class Topic<T extends IDdsType> extends NativeEntity {
         this.extensibility = prototype.extensibility();
     }
 
+    /**
+     * Wraps an already-obtained OWNED handle (an Arc clone from {@code
+     * int2dds_participant_find_topic}) rather than minting one -- the
+     * super-constructor is handed {@code precomputedHandle} directly instead
+     * of a {@code create*()} call, but the handle is released the same way
+     * ({@code FfiAccess::deleteTopic}) as any created topic. {@code name}/
+     * {@code typeName}/{@code extensibility} are set from {@code prototype}
+     * the same way every create-path constructor above does.
+     */
+    private Topic(DomainParticipant participant, String name, T prototype, long precomputedHandle) {
+        super(Objects.requireNonNull(participant, "participant"), precomputedHandle,
+                FfiAccess::deleteTopic);
+        this.name = Objects.requireNonNull(name, "name");
+        this.typeName = Objects.requireNonNull(prototype, "prototype").typeName();
+        this.extensibility = prototype.extensibility();
+    }
+
+    /**
+     * Package-private lookup path, reached only through {@link
+     * DomainParticipant#findTopic}: finds an existing topic named {@code
+     * name} (created elsewhere in this participant, or discovered), waiting
+     * up to {@code timeoutMs} milliseconds (negative = wait indefinitely).
+     * {@code prototype} supplies the DDS type name the native lookup matches
+     * against, and the compile-time type {@code T} for the returned {@link
+     * Topic}. The returned {@code Topic<T>} owns its handle and is released
+     * the same way ({@code FfiAccess::deleteTopic}) as a topic {@code
+     * createTopic} builds.
+     */
+    static <T extends IDdsType> Topic<T> find(
+            DomainParticipant participant, String name, T prototype, int timeoutMs) {
+        Objects.requireNonNull(participant, "participant");
+        Objects.requireNonNull(name, "name");
+        Objects.requireNonNull(prototype, "prototype");
+        long[] out = new long[1];
+        int rc = FfiAccess.participantFindTopic(participant.handle(), utf8(name),
+                utf8(prototype.typeName()), timeoutMs, out);
+        // participant.handle() above returns a bare long, disconnected from
+        // `participant` the moment it is read -- same fence as createNative.
+        NativeKeepAlive.keepAlive(participant);
+        ReturnCodes.check(rc);
+        return new Topic<T>(participant, name, prototype, out[0]);
+    }
+
     /** The topic name this instance was created with. */
     public String name() {
         return name;
