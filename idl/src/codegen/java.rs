@@ -24,7 +24,7 @@ pub fn generate(
     idl_filename: &str,
     opts: &JavaOptions,
 ) -> Result<Vec<GeneratedFile>, String> {
-    reject_unsupported(model)?;
+    reject_unsupported(model, opts)?;
     let mut files = Vec::new();
     for s in &model.structs {
         files.push(emit_struct(model, s, idl_filename, opts)?);
@@ -37,7 +37,7 @@ pub fn generate(
 
 /// Out-of-scope constructs are refused by name. A silently dropped type is a
 /// wire mismatch nobody sees until runtime.
-fn reject_unsupported(model: &IdlModel) -> Result<(), String> {
+fn reject_unsupported(model: &IdlModel, opts: &JavaOptions) -> Result<(), String> {
     if let Some(u) = model.unions.first() {
         return Err(format!("Java backend does not support union '{}'", u.name));
     }
@@ -99,9 +99,64 @@ fn reject_unsupported(model: &IdlModel) -> Result<(), String> {
                     ));
                 }
             }
+            // 참조는 leaf 이름 그대로 나가고 import 도 붙지 않는다. 패키지가
+            // 다르면 javac 이 cannot find symbol 을 낸다.
+            // 후속 작업: 교차 패키지 참조를 fully-qualified 로 내보낸다.
+            if let Some(referenced) = referenced_type_name(&m.resolved_type) {
+                let here = package_for(opts, &s.qualified_name);
+                let there = package_for(opts, &resolve_reference(model, referenced));
+                if here != there {
+                    return Err(format!(
+                        "Java backend does not support the cross-package reference '{}.{}': \
+                         '{}' lands in package {} but '{}' lands in package {}",
+                        s.name,
+                        m.name,
+                        s.qualified_name,
+                        package_label(&here),
+                        referenced,
+                        package_label(&there)
+                    ));
+                }
+            }
         }
     }
     Ok(())
+}
+
+/// The struct/enum a member refers to, looking through one collection level.
+fn referenced_type_name(t: &ResolvedType) -> Option<&str> {
+    match t {
+        ResolvedType::Struct(n) | ResolvedType::Enum(n) => Some(n),
+        ResolvedType::Sequence { element, .. } | ResolvedType::Array { element, .. } => {
+            referenced_type_name(element)
+        }
+        _ => None,
+    }
+}
+
+/// The qualified name a reference resolves to. An `#include`d type is not in
+/// the model, so the reference as written is the best module path we have.
+fn resolve_reference(model: &IdlModel, name: &str) -> String {
+    let leaf = name.rsplit("::").next().unwrap_or(name);
+    let declared = || {
+        model
+            .structs
+            .iter()
+            .map(|s| (s.name.as_str(), s.qualified_name.as_str()))
+            .chain(model.enums.iter().map(|e| (e.name.as_str(), e.qualified_name.as_str())))
+    };
+    // 정확한 qualified 이름이 먼저다. leaf 만 쓴 참조는 그 다음에 찾는다.
+    if let Some((_, q)) = declared().find(|(_, q)| *q == name) {
+        return q.to_string();
+    }
+    if let Some((_, q)) = declared().find(|(n, _)| *n == leaf) {
+        return q.to_string();
+    }
+    name.to_string()
+}
+
+fn package_label(p: &Option<String>) -> &str {
+    p.as_deref().unwrap_or("<unnamed>")
 }
 
 /// True for `wstring` and for a collection whose element is one.
@@ -911,6 +966,46 @@ mod tests {
                 .expect_err(&format!("should reject: {}", src));
             assert!(err.contains(needle), "error {:?} should mention {:?}", err, needle);
         }
+    }
+
+    #[test]
+    fn cross_package_references_are_refused() {
+        // 참조는 leaf 이름으로만 나가고 import 가 없다 — javac 이 cannot find
+        // symbol 을 낸다. 지금은 생성이 성공하고 컴파일만 깨진다.
+        for src in [
+            r#"module a { @extensibility(FINAL) struct X { long v; }; };
+               module b { @extensibility(FINAL) struct Y { a::X x; long t; }; };"#,
+            r#"module a { enum Color { RED }; };
+               module b { @extensibility(FINAL) struct Y { a::Color x; }; };"#,
+            // 컬렉션/배열 원소가 교차 패키지인 경우도 잡아야 한다.
+            r#"module a { @extensibility(FINAL) struct X { long v; }; };
+               module b { @extensibility(FINAL) struct Y { sequence<a::X> x; }; };"#,
+            r#"module a { @extensibility(FINAL) struct X { long v; }; };
+               module b { @extensibility(FINAL) struct Y { a::X x[2]; }; };"#,
+        ] {
+            let defs = parse_idl(src).unwrap();
+            let model = resolve(defs).unwrap();
+            let err = generate(&model, "AB.idl", &JavaOptions::default())
+                .expect_err("should reject the cross-package reference");
+            assert!(err.contains("cross-package reference 'Y.x'"), "{}", err);
+            assert!(err.contains("package a"), "{}", err);
+            assert!(err.contains("package b"), "{}", err);
+        }
+    }
+
+    #[test]
+    fn same_module_references_still_generate() {
+        // 같은 module 이면 같은 패키지다 — 막으면 안 된다.
+        let files = gen(
+            r#"module a {
+                 @extensibility(FINAL) struct X { long v; };
+                 @extensibility(FINAL) struct Y { X x; };
+               };"#,
+            &JavaOptions::default(),
+        );
+        assert!(files.iter().any(|f| f.relative_path == "a/Y.java"), "{:?}", files);
+        let y = files.iter().find(|f| f.relative_path == "a/Y.java").unwrap();
+        assert!(y.source.contains("public X x = new X();"), "{}", y.source);
     }
 
     #[test]
