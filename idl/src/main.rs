@@ -550,8 +550,11 @@ fn main() {
         }
     }
 
+    // Java 는 타입 이름으로 파일 이름을 정하므로 입력 파일이 달라도 경로가
+    // 겹칠 수 있다. 어느 입력이 먼저 썼는지 기억해 두고 덮어쓸 때 알린다.
+    let mut java_written: HashMap<String, String> = HashMap::new();
     for input_file in &args.input_files {
-        process_file(&args, input_file);
+        process_file(&args, input_file, &mut java_written);
     }
 }
 
@@ -582,8 +585,18 @@ fn java_requested_explicitly(java_output: &Option<String>, langs: &Option<[bool;
     java_output.is_some() || langs.is_some_and(|l| l[6])
 }
 
+/// Records `path` as written by `input_file`, returning the earlier input file
+/// when this run already produced that same Java path.
+fn note_java_output(
+    written: &mut HashMap<String, String>,
+    path: &str,
+    input_file: &str,
+) -> Option<String> {
+    written.insert(path.to_string(), input_file.to_string()).filter(|prev| prev != input_file)
+}
+
 /// Generate the selected outputs for a single input IDL file.
-fn process_file(args: &Args, input_file: &str) {
+fn process_file(args: &Args, input_file: &str, java_written: &mut HashMap<String, String>) {
     // Read input, resolving #include directives into a single translation unit.
     let (source, loaded) = match preprocess::load_with_includes_ex(
         std::path::Path::new(input_file),
@@ -793,6 +806,12 @@ fn process_file(args: &Args, input_file: &str) {
         };
         for f in generated.iter().flatten() {
             let path = java_out_path(dir, &f.relative_path);
+            if let Some(prev) = note_java_output(java_written, &path, input_file) {
+                eprintln!(
+                    "warning: '{}' overwrites the file already generated from {}",
+                    path, prev
+                );
+            }
             if let Err(e) = write_file(&path, &f.source) {
                 eprintln!("error: cannot write '{}': {}", path, e);
                 process::exit(1);
@@ -935,6 +954,19 @@ mod tests {
         // -j takes a directory; the backend's relative path is joined under it.
         assert_eq!(java_out_path("out", "HelloWorld.java"), "out/HelloWorld.java");
         assert_eq!(java_out_path("out/", "com/x/HelloWorld.java"), "out/com/x/HelloWorld.java");
+    }
+
+    #[test]
+    fn a_java_path_written_twice_in_one_run_is_reported() {
+        let mut written = HashMap::new();
+        assert_eq!(note_java_output(&mut written, "out/Point2D.java", "Complex_Arrays.idl"), None);
+        // 다른 입력이 같은 경로를 쓰면 앞선 입력을 돌려준다.
+        assert_eq!(
+            note_java_output(&mut written, "out/Point2D.java", "Tuple_Structs.idl").as_deref(),
+            Some("Complex_Arrays.idl")
+        );
+        // 같은 입력을 두 번 준 경우는 덮어쓰기가 아니다.
+        assert_eq!(note_java_output(&mut written, "out/Point2D.java", "Tuple_Structs.idl"), None);
     }
 
     #[test]

@@ -26,11 +26,26 @@ pub fn generate(
 ) -> Result<Vec<GeneratedFile>, String> {
     reject_unsupported(model, opts)?;
     let mut files = Vec::new();
+    let mut owners: Vec<&str> = Vec::new(); // files[i] 를 만든 IDL 타입
     for s in &model.structs {
         files.push(emit_struct(model, s, idl_filename, opts)?);
+        owners.push(&s.qualified_name);
     }
     for e in &model.enums {
         files.push(emit_enum(e, idl_filename, opts));
+        owners.push(&e.qualified_name);
+    }
+    // 두 타입이 같은 경로를 쓰면 하나가 조용히 덮인다. `foo_bar` 와 `FooBar`
+    // 가 둘 다 FooBar.java 로 간다.
+    for i in 0..files.len() {
+        for j in 0..i {
+            if files[i].relative_path == files[j].relative_path {
+                return Err(format!(
+                    "Java backend maps IDL types '{}' and '{}' to the same output file '{}'",
+                    owners[j], owners[i], files[i].relative_path
+                ));
+            }
+        }
     }
     Ok(files)
 }
@@ -965,6 +980,27 @@ mod tests {
             let err = generate(&model, "X.idl", &JavaOptions::default())
                 .expect_err(&format!("should reject: {}", src));
             assert!(err.contains(needle), "error {:?} should mention {:?}", err, needle);
+        }
+    }
+
+    #[test]
+    fn colliding_output_paths_are_refused() {
+        // foo_bar 와 FooBar 는 둘 다 FooBar.java 가 된다 — 예전에는 한쪽이
+        // 조용히 사라지고, 그 타입을 참조하던 필드가 살아남은 클래스에
+        // 붙어 다른 필드 배치를 실어 보냈다.
+        for src in [
+            r#"@extensibility(FINAL) struct foo_bar { long a; };
+               @extensibility(FINAL) struct FooBar { double b; };"#,
+            r#"enum foo_bar { RED };
+               @extensibility(FINAL) struct FooBar { long a; };"#,
+        ] {
+            let defs = parse_idl(src).unwrap();
+            let model = resolve(defs).unwrap();
+            let err = generate(&model, "X.idl", &JavaOptions::default())
+                .expect_err("should reject the colliding path");
+            assert!(err.contains("foo_bar"), "{}", err);
+            assert!(err.contains("FooBar"), "{}", err);
+            assert!(err.contains("FooBar.java"), "{}", err);
         }
     }
 
