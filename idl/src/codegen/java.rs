@@ -150,8 +150,9 @@ fn referenced_type_name(t: &ResolvedType) -> Option<&str> {
     }
 }
 
-/// The qualified name a reference resolves to. An `#include`d type is not in
-/// the model, so the reference as written is the best module path we have.
+/// The qualified name a reference resolves to. An `#include`d type has
+/// already been moved into `model.imported` by the resolver, so it must be
+/// searched too or its reference falls through to the bare name.
 fn resolve_reference(model: &IdlModel, name: &str) -> String {
     let leaf = name.rsplit("::").next().unwrap_or(name);
     let declared = || {
@@ -160,6 +161,12 @@ fn resolve_reference(model: &IdlModel, name: &str) -> String {
             .iter()
             .map(|s| (s.name.as_str(), s.qualified_name.as_str()))
             .chain(model.enums.iter().map(|e| (e.name.as_str(), e.qualified_name.as_str())))
+            .chain(
+                model.imported.structs.iter().map(|s| (s.name.as_str(), s.qualified_name.as_str())),
+            )
+            .chain(
+                model.imported.enums.iter().map(|e| (e.name.as_str(), e.qualified_name.as_str())),
+            )
     };
     // 정확한 qualified 이름이 먼저다. leaf 만 쓴 참조는 그 다음에 찾는다.
     if let Some((_, q)) = declared().find(|(_, q)| *q == name) {
