@@ -339,7 +339,6 @@ fn emit_write(
     ind: &str,
     expr: &str,
     t: &ResolvedType,
-    model: &IdlModel,
     depth: usize,
 ) -> Result<(), String> {
     match t {
@@ -367,7 +366,7 @@ fn emit_write(
                     expr = expr
                 ));
                 let inner = format!("{}    ", ind);
-                emit_write(out, &inner, &format!("{}[{}]", expr, i), element, model, depth + 1)?;
+                emit_write(out, &inner, &format!("{}[{}]", expr, i), element, depth + 1)?;
                 out.push_str(&format!("{}}}\n", ind));
             }
             return Ok(());
@@ -390,7 +389,7 @@ fn emit_write(
                 size = size
             ));
             let inner = format!("{}    ", ind);
-            emit_write(out, &inner, &format!("{}[{}]", expr, i), element, model, depth + 1)?;
+            emit_write(out, &inner, &format!("{}[{}]", expr, i), element, depth + 1)?;
             out.push_str(&format!("{}}}\n", ind));
             return Ok(());
         }
@@ -442,7 +441,6 @@ fn emit_read(
     ind: &str,
     target: &str,
     t: &ResolvedType,
-    model: &IdlModel,
     depth: usize,
 ) -> Result<(), String> {
     match t {
@@ -466,7 +464,7 @@ fn emit_read(
                     t = target
                 ));
                 let inner = format!("{}    ", ind);
-                emit_read(out, &inner, &format!("{}[{}]", target, i), element, model, depth + 1)?;
+                emit_read(out, &inner, &format!("{}[{}]", target, i), element, depth + 1)?;
                 out.push_str(&format!("{}}}\n", ind));
             }
             return Ok(());
@@ -480,7 +478,7 @@ fn emit_read(
                 size = size
             ));
             let inner = format!("{}    ", ind);
-            emit_read(out, &inner, &format!("{}[{}]", target, i), element, model, depth + 1)?;
+            emit_read(out, &inner, &format!("{}[{}]", target, i), element, depth + 1)?;
             out.push_str(&format!("{}}}\n", ind));
             return Ok(());
         }
@@ -660,7 +658,7 @@ fn emit_struct(
         out.push_str("        int token = writer.dheaderBegin();\n");
     }
     for m in &s.members {
-        emit_write(&mut out, "        ", &java_field_name(&m.name), &m.resolved_type, model, 0)?;
+        emit_write(&mut out, "        ", &java_field_name(&m.name), &m.resolved_type, 0)?;
     }
     if appendable {
         out.push_str("        writer.dheaderFinalize(token);\n");
@@ -673,7 +671,7 @@ fn emit_struct(
         out.push_str("        CdrReader.Dheader d = reader.readDheader();\n");
     }
     for m in &s.members {
-        emit_read(&mut out, "        ", &java_field_name(&m.name), &m.resolved_type, model, 0)?;
+        emit_read(&mut out, "        ", &java_field_name(&m.name), &m.resolved_type, 0)?;
     }
     if appendable {
         out.push_str("        reader.readDheaderEnd(d);\n");
