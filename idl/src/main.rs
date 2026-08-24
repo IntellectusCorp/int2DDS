@@ -26,9 +26,11 @@ struct Args {
     ros2_package: Option<String>,
     ros2_kind: Option<String>,
     include_dirs: Vec<PathBuf>,
-    // Restrict auto-naming to these languages (rust, c, python, csharp, xml, rpc).
+    java_output: Option<String>,
+    java_package: Option<String>,
+    // Restrict auto-naming to these languages (rust, c, python, csharp, xml, rpc, java).
     // None = unrestricted (batch -o emits every language).
-    langs: Option<[bool; 6]>,
+    langs: Option<[bool; 7]>,
 }
 
 fn parse_args() -> Args {
@@ -51,6 +53,8 @@ fn parse_args() -> Args {
     let mut ros2_package = None;
     let mut ros2_kind = None;
     let mut include_dirs = Vec::new();
+    let mut java_output = None;
+    let mut java_package: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -70,6 +74,14 @@ fn parse_args() -> Args {
             "-s" | "--csharp" => {
                 i += 1;
                 csharp_output = Some(args.get(i).cloned().unwrap_or_default());
+            }
+            "-j" | "--java" => {
+                i += 1;
+                java_output = Some(args.get(i).cloned().unwrap_or_default());
+            }
+            "--java-package" => {
+                i += 1;
+                java_package = args.get(i).cloned();
             }
             "-x" | "--xml" => {
                 i += 1;
@@ -162,6 +174,8 @@ fn parse_args() -> Args {
         ros2_package,
         ros2_kind,
         include_dirs,
+        java_output,
+        java_package,
         langs: None,
     }
 }
@@ -170,19 +184,23 @@ fn print_usage() {
     eprintln!(
         "Usage: int2dds-idl [OPTIONS] <INPUT.idl>...
 
-Generates Rust, C, Python, and C# code from OMG IDL files.
+Generates Rust, C, Python, C#, and Java code from OMG IDL files.
 
 OPTIONS:
     -r, --rust <PATH>         Generate Rust output to PATH
     -c, --c-header <PATH>     Generate C header output to PATH
     -p, --python <PATH>       Generate Python output to PATH
     -s, --csharp <PATH>       Generate C# output to PATH
+    -j, --java <DIR>          Generate Java output under DIR (a directory: one
+                              file per type)
     -x, --xml <PATH>          Generate XML type representation to PATH
     -o, --output-dir <DIR>    Output directory (auto-names files)
     -I, --include <DIR>       Add a search directory for #include resolution (repeatable)
     --crate-path <PATH>       Rust crate path (default: int2dds)
     --python-module <PATH>    Python module path (default: int2dds)
     --csharp-namespace <NS>   C# namespace (default: GeneratedTypes)
+    --java-package <PKG>      Java package (default: none -- unnamed package,
+                              files land flat in DIR)
     --string-bound <N>        Default unbounded string size in C (default: 256)
     --string-pointer          Use char* pointers for strings (OMG standard)
     --rpc <PATH>            Generate RPC types (includes base types + RPC infrastructure)
@@ -370,8 +388,8 @@ fn run_wizard() -> Args {
     };
 
     // 2) Target languages (checkbox multi-select)
-    let lang_items = ["Rust", "C", "Python", "C#", "XML", "RPC"];
-    let lang_defaults = [true, false, false, false, false, false];
+    let lang_items = ["Rust", "C", "Python", "C#", "XML", "RPC", "Java"];
+    let lang_defaults = [true, false, false, false, false, false, false];
     let chosen = MultiSelect::with_theme(&theme)
         .with_prompt("Languages to generate (↑↓ move, space to toggle, enter to confirm)")
         .items(&lang_items)
@@ -383,8 +401,8 @@ fn run_wizard() -> Args {
         process::exit(1);
     }
     let want = |i: usize| chosen.contains(&i);
-    let (gen_rust, gen_c, gen_python, gen_csharp, gen_xml, gen_rpc) =
-        (want(0), want(1), want(2), want(3), want(4), want(5));
+    let (gen_rust, gen_c, gen_python, gen_csharp, gen_xml, gen_rpc, gen_java) =
+        (want(0), want(1), want(2), want(3), want(4), want(5), want(6));
 
     // 3) Output directory
     let output_dir: String = Input::with_theme(&theme)
@@ -404,6 +422,7 @@ fn run_wizard() -> Args {
     let mut ros2_package = None;
     let mut ros2_kind = None;
     let mut include_dirs = Vec::new();
+    let mut java_package: Option<String> = None;
 
     let advanced = Confirm::with_theme(&theme)
         .with_prompt("Configure advanced options?")
@@ -458,6 +477,16 @@ fn run_wizard() -> Args {
                 .interact_text()
                 .unwrap_or_else(|_| wizard_cancelled());
         }
+        if gen_java {
+            let pkg: String = Input::with_theme(&theme)
+                .with_prompt("Java package (leave empty for the unnamed package)")
+                .allow_empty(true)
+                .default(String::new())
+                .interact_text()
+                .unwrap_or_else(|_| wizard_cancelled());
+            let pkg = pkg.trim().to_string();
+            java_package = if pkg.is_empty() { None } else { Some(pkg) };
+        }
         if gen_c {
             string_pointer = Confirm::with_theme(&theme)
                 .with_prompt("Generate C strings as char* pointers?")
@@ -504,7 +533,9 @@ fn run_wizard() -> Args {
         ros2_package,
         ros2_kind,
         include_dirs,
-        langs: Some([gen_rust, gen_c, gen_python, gen_csharp, gen_xml, gen_rpc]),
+        java_output: None,
+        java_package,
+        langs: Some([gen_rust, gen_c, gen_python, gen_csharp, gen_xml, gen_rpc, gen_java]),
     }
 }
 
@@ -621,6 +652,12 @@ fn process_file(args: &Args, input_file: &str) {
     });
     let xml_path = args.xml_output.clone().or_else(|| auto("xml", 4));
 
+    // Java takes a directory, not a file: the backend returns one file per type.
+    let java_dir = args
+        .java_output
+        .clone()
+        .or_else(|| args.output_dir.as_ref().filter(|_| allowed(6)).cloned());
+
     // If neither -r, -c, -p, nor -o specified, default to generating Rust and C
     let (rust_path, c_path, python_path, rpc_path, csharp_path, xml_path) = if rust_path.is_none()
         && c_path.is_none()
@@ -709,6 +746,26 @@ fn process_file(args: &Args, input_file: &str) {
         eprintln!("generated: {}", path);
     }
 
+    // Generate Java
+    if let Some(dir) = &java_dir {
+        let java_opts = codegen::java::JavaOptions { package: args.java_package.clone() };
+        let files = match codegen::java::generate(&model, idl_filename, &java_opts) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("{}: {}", input_file, e);
+                process::exit(1);
+            }
+        };
+        for f in &files {
+            let path = java_out_path(dir, &f.relative_path);
+            if let Err(e) = write_file(&path, &f.source) {
+                eprintln!("error: cannot write '{}': {}", path, e);
+                process::exit(1);
+            }
+            eprintln!("generated: {}", path);
+        }
+    }
+
     // Generate XML type representation
     if let Some(path) = &xml_path {
         let code = match codegen::xml::generate(
@@ -767,6 +824,11 @@ fn build_import_modules(
         }
     }
     map
+}
+
+/// Join a backend-relative path under the Java output directory.
+fn java_out_path(dir: &str, relative: &str) -> String {
+    format!("{}/{}", dir.trim_end_matches(['/', '\\']), relative)
 }
 
 /// Write file, creating parent directories if needed
@@ -831,5 +893,12 @@ mod tests {
     fn no_match_returns_none() {
         let comp = PathCompletion::default();
         assert!(comp.get("definitely_nonexistent_xyz").is_none());
+    }
+
+    #[test]
+    fn java_relative_paths_join_under_the_output_dir() {
+        // -j takes a directory; the backend's relative path is joined under it.
+        assert_eq!(java_out_path("out", "HelloWorld.java"), "out/HelloWorld.java");
+        assert_eq!(java_out_path("out/", "com/x/HelloWorld.java"), "out/com/x/HelloWorld.java");
     }
 }
