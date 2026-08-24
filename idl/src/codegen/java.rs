@@ -193,6 +193,18 @@ fn enum_default(model: &IdlModel, name: &str) -> Option<String> {
     ))
 }
 
+/// A fixed array of a reference type comes back null-filled from `new T[N]`,
+/// so serializeCdr would throw. Such fields get filled in the constructor.
+fn array_fill(t: &ResolvedType, model: &IdlModel) -> Result<Option<String>, String> {
+    let ResolvedType::Array { element, .. } = t else { return Ok(None) };
+    Ok(match element.as_ref() {
+        ResolvedType::Struct(n) => Some(format!("new {}()", java_type_name(n))),
+        ResolvedType::String { .. } | ResolvedType::WString { .. } => Some("\"\"".to_string()),
+        ResolvedType::Enum(n) => enum_default(model, n),
+        _ => None,
+    })
+}
+
 // ---- serialization ---------------------------------------------------------
 
 /// `octet` and `uint8` both land on Java byte, so a sequence of either takes
@@ -263,6 +275,10 @@ fn emit_write(
             return Ok(());
         }
         _ => {}
+    }
+    if let ResolvedType::Struct(_) = t {
+        out.push_str(&format!("{}{}.serializeCdr(writer);\n", ind, expr));
+        return Ok(());
     }
     let line = match t {
         ResolvedType::Bool => format!("writer.writeBool({});", expr),
@@ -351,6 +367,13 @@ fn emit_read(
         }
         _ => {}
     }
+    if let ResolvedType::Struct(n) = t {
+        // Array/sequence elements are still null here. The field is already
+        // initialized, but reconstructing it is safe since read overwrites everything.
+        out.push_str(&format!("{}{} = new {}();\n", ind, target, java_type_name(n)));
+        out.push_str(&format!("{}{}.deserializeCdr(reader);\n", ind, target));
+        return Ok(());
+    }
     let rhs = match t {
         ResolvedType::Bool => "reader.readBool()".to_string(),
         ResolvedType::U8 | ResolvedType::UInt8 | ResolvedType::Char => {
@@ -419,6 +442,29 @@ fn emit_struct(
         }
     }
     out.push('\n');
+
+    let fills: Vec<(String, String)> = s
+        .members
+        .iter()
+        .filter_map(|m| {
+            array_fill(&m.resolved_type, model)
+                .ok()
+                .flatten()
+                .map(|init| (java_field_name(&m.name), init))
+        })
+        .collect();
+    if !fills.is_empty() {
+        out.push_str(&format!("    public {}() {{\n", class));
+        for (name, init) in &fills {
+            out.push_str(&format!(
+                "        for (int i = 0; i < {name}.length; i++) {{\n\
+                 \x20           {name}[i] = {init};\n        }}\n",
+                name = name,
+                init = init
+            ));
+        }
+        out.push_str("    }\n\n");
+    }
 
     out.push_str("    @Override\n");
     out.push_str(&format!(
@@ -794,5 +840,70 @@ mod tests {
         let model = resolve(defs).unwrap();
         let err = generate(&model, "X.idl", &JavaOptions::default()).unwrap_err();
         assert!(err.contains("Color"), "{}", err);
+    }
+
+    #[test]
+    fn nested_struct_delegates_and_never_starts_null() {
+        let files = gen(
+            r#"struct Inner { long x; };
+               struct Outer { Inner inner; };"#,
+            &JavaOptions::default(),
+        );
+        assert_eq!(files.len(), 2);
+        let o = files.iter().find(|f| f.relative_path == "Outer.java").unwrap();
+        assert!(o.source.contains("public Inner inner = new Inner();"), "{}", o.source);
+        assert!(o.source.contains("inner.serializeCdr(writer);"), "{}", o.source);
+        assert!(o.source.contains("inner.deserializeCdr(reader);"), "{}", o.source);
+    }
+
+    #[test]
+    fn nested_struct_carries_its_own_dheader() {
+        // 기본 extensibility 는 APPENDABLE 이라 @extensibility 표기가 없는 중첩
+        // 타입도 자기 DHEADER 를 쓴다. 부모가 대신 처리하면 안 된다.
+        let files = gen(
+            r#"struct Inner { long x; };
+               struct Outer { Inner inner; };"#,
+            &JavaOptions::default(),
+        );
+        let i = files.iter().find(|f| f.relative_path == "Inner.java").unwrap();
+        assert!(i.source.contains("return Extensibility.APPENDABLE;"), "{}", i.source);
+        assert!(i.source.contains("int token = writer.dheaderBegin();"), "{}", i.source);
+        let o = files.iter().find(|f| f.relative_path == "Outer.java").unwrap();
+        // Outer 는 자기 DHEADER 하나만 연다.
+        assert_eq!(o.source.matches("dheaderBegin()").count(), 1, "{}", o.source);
+    }
+
+    #[test]
+    fn struct_sequence_constructs_each_element_on_read() {
+        let files = gen(
+            r#"struct Inner { long x; };
+               @extensibility(FINAL) struct Outer { sequence<Inner> items; };"#,
+            &JavaOptions::default(),
+        );
+        let o = files.iter().find(|f| f.relative_path == "Outer.java").unwrap();
+        assert!(o.source.contains("public Inner[] items = new Inner[0];"), "{}", o.source);
+        assert!(o.source.contains("items[i0] = new Inner();"), "{}", o.source);
+        assert!(o.source.contains("items[i0].deserializeCdr(reader);"), "{}", o.source);
+    }
+
+    #[test]
+    fn reference_element_fixed_array_is_filled_by_a_constructor() {
+        let files = gen(
+            r#"struct Inner { long x; };
+               @extensibility(FINAL) struct Outer { Inner cells[4]; string names[3]; };"#,
+            &JavaOptions::default(),
+        );
+        let o = files.iter().find(|f| f.relative_path == "Outer.java").unwrap();
+        // new Inner[4] 는 null 로 찬다 — serializeCdr 이 NPE 를 낸다.
+        assert!(o.source.contains("public Outer() {"), "{}", o.source);
+        assert!(o.source.contains("cells[i] = new Inner();"), "{}", o.source);
+        assert!(o.source.contains("names[i] = \"\";"), "{}", o.source);
+    }
+
+    #[test]
+    fn primitive_fixed_array_needs_no_constructor() {
+        let files =
+            gen(r#"@extensibility(FINAL) struct S { long m[4]; };"#, &JavaOptions::default());
+        assert!(!files[0].source.contains("public S() {"), "{}", files[0].source);
     }
 }
