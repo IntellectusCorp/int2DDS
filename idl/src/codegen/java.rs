@@ -543,9 +543,11 @@ fn emit_struct(
     }
 
     out.push_str("    @Override\n");
+    // 등록되는 DDS 타입 이름은 Rust/C# 백엔드와 같은 qualified name 이어야 한다.
+    // 다르면 같은 IDL 로 만든 참가자끼리 디스커버리에서 매칭되지 않는다.
     out.push_str(&format!(
         "    public String typeName() {{\n        return \"{}\";\n    }}\n\n",
-        s.name
+        s.qualified_name
     ));
     out.push_str("    @Override\n");
     out.push_str(&format!(
@@ -756,6 +758,27 @@ mod tests {
         assert!(src.contains("index = reader.readU32();"), "{}", src);
         assert!(src.contains("message = reader.readString();"), "{}", src);
         assert!(src.contains("reader.readDheaderEnd(d);"), "{}", src);
+    }
+
+    #[test]
+    fn module_scoped_struct_advertises_the_qualified_type_name() {
+        // Rust/C# 백엔드는 qualified name 을 등록한다. Java 만 leaf 를 쓰면 같은
+        // IDL 로 만든 참가자끼리 디스커버리 매칭이 안 된다.
+        let files = gen(
+            r#"module app { @extensibility(FINAL) struct Use { long v; }; };"#,
+            &JavaOptions::default(),
+        );
+        let src = &files[0].source;
+        assert!(src.contains("return \"app::Use\";"), "{}", src);
+        // 클래스 이름 자체는 leaf 그대로다 — 패키지가 module 을 담는다.
+        assert!(src.contains("public final class Use implements IDdsType"), "{}", src);
+    }
+
+    #[test]
+    fn module_less_struct_keeps_the_bare_type_name() {
+        // 코퍼스와 java/examples 는 module 이 없다 — 이 경로는 변하면 안 된다.
+        let files = gen(r#"struct HelloWorld { unsigned long index; };"#, &JavaOptions::default());
+        assert!(files[0].source.contains("return \"HelloWorld\";"), "{}", files[0].source);
     }
 
     #[test]
