@@ -6,6 +6,11 @@ import com.intellectus.int2dds.internal.ReturnCodes;
 
 /** A DDS condition: a native handle whose trigger value a WaitSet observes. */
 public abstract class Condition implements AutoCloseable {
+    static {
+        com.intellectus.int2dds.internal.ConditionHandleAccess.setAccessor(
+                c -> ((Condition) c).handle());
+    }
+
     private final NativeHandle handle;
 
     Condition(long rawHandle, NativeCleaner.Deleter deleter) {

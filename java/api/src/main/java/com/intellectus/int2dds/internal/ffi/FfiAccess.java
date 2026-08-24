@@ -2861,6 +2861,38 @@ public final class FfiAccess {
     }
 
     /**
+     * ReadCondition/QueryCondition-filtered counterpart of {@link
+     * #datareaderTakeSerializedBatch}: batch take of samples matching {@code
+     * condition} (its own native handle, from {@link
+     * com.intellectus.int2dds.internal.ConditionHandleAccess#handle}). Same
+     * {@code seqOut} contract.
+     */
+    public static int datareaderTakeSerializedBatchWReadCondition(
+            long reader, long condition, int maxSamples, long[] seqOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_datareader_take_serialized_batch_w_readcondition(
+                reader, condition, maxSamples, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == DdsException.RET_OK || rc == DdsException.RET_NO_DATA) {
+            seqOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /** Non-removing counterpart of {@link #datareaderTakeSerializedBatchWReadCondition}. Same {@code seqOut} contract. */
+    public static int datareaderReadSerializedBatchWReadCondition(
+            long reader, long condition, int maxSamples, long[] seqOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_datareader_read_serialized_batch_w_readcondition(
+                reader, condition, maxSamples, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == DdsException.RET_OK || rc == DdsException.RET_NO_DATA) {
+            seqOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
      * Batch take scoped to the single instance {@code handle} (16 bytes)
      * identifies, filtered by state masks. Same {@code seqOut} contract as
      * {@link #datareaderTakeSerializedBatch}. Note the native parameter

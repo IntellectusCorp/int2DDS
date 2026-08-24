@@ -9,6 +9,7 @@ import com.intellectus.int2dds.conditions.StatusCondition;
 import com.intellectus.int2dds.discovery.PublicationBuiltinTopicData;
 import com.intellectus.int2dds.exceptions.DdsErrorException;
 import com.intellectus.int2dds.exceptions.DdsException;
+import com.intellectus.int2dds.internal.ConditionHandleAccess;
 import com.intellectus.int2dds.internal.NativeKeepAlive;
 import com.intellectus.int2dds.internal.QosMarshal;
 import com.intellectus.int2dds.internal.ReturnCodes;
@@ -924,6 +925,61 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
         int rc = FfiAccess.datareaderReadInstanceSerializedBatch(h, instance.bytes(), maxSamples,
                 sampleStateMask, viewStateMask, instanceStateMask, seqOut);
         NativeKeepAlive.keepAlive(this);
+        return drainSeq(rc, seqOut[0]);
+    }
+
+    /**
+     * ReadCondition/QueryCondition-filtered counterpart of {@link
+     * #takeSerializedBatch(int)}: takes (removes) up to {@code maxSamples}
+     * samples matching {@code condition} as a single native batch call.
+     * {@code condition} may be a plain {@link ReadCondition} (state masks
+     * only) or a {@link QueryCondition} (state masks plus a content filter),
+     * since {@code QueryCondition} extends {@code ReadCondition}. See {@link
+     * #takeSerializedBatch(int)} for how batch matching differs from the
+     * no-arg single-sample {@link #takeSerialized()}. Returns an empty list
+     * when nothing in the cache matches. The native sample sequence backing
+     * the batch is freed before this method returns.
+     *
+     * <p>{@code condition} must have been created from this same reader
+     * (e.g. via {@link #createReadCondition} or {@link
+     * #createQueryCondition}); passing a condition from another reader is
+     * undefined.
+     *
+     * @throws NullPointerException if {@code condition} is null
+     * @throws IllegalArgumentException if {@code maxSamples <= 0}
+     */
+    public List<SerializedSample> takeSerializedBatch(ReadCondition condition, int maxSamples) {
+        Objects.requireNonNull(condition, "condition");
+        if (maxSamples <= 0) {
+            throw new IllegalArgumentException("maxSamples must be > 0: " + maxSamples);
+        }
+        long condH = ConditionHandleAccess.handle(condition);
+        long[] seqOut = new long[1];
+        int rc = FfiAccess.datareaderTakeSerializedBatchWReadCondition(
+                handle(), condH, maxSamples, seqOut);
+        NativeKeepAlive.keepAlive(this);
+        NativeKeepAlive.keepAlive(condition);
+        return drainSeq(rc, seqOut[0]);
+    }
+
+    /**
+     * Non-removing counterpart of {@link #takeSerializedBatch(ReadCondition,
+     * int)}. Same condition-matching semantics.
+     *
+     * @throws NullPointerException if {@code condition} is null
+     * @throws IllegalArgumentException if {@code maxSamples <= 0}
+     */
+    public List<SerializedSample> readSerializedBatch(ReadCondition condition, int maxSamples) {
+        Objects.requireNonNull(condition, "condition");
+        if (maxSamples <= 0) {
+            throw new IllegalArgumentException("maxSamples must be > 0: " + maxSamples);
+        }
+        long condH = ConditionHandleAccess.handle(condition);
+        long[] seqOut = new long[1];
+        int rc = FfiAccess.datareaderReadSerializedBatchWReadCondition(
+                handle(), condH, maxSamples, seqOut);
+        NativeKeepAlive.keepAlive(this);
+        NativeKeepAlive.keepAlive(condition);
         return drainSeq(rc, seqOut[0]);
     }
 
