@@ -555,6 +555,26 @@ fn main() {
     }
 }
 
+/// The Rust+C default fires only when no language flag and no -o resolved a path.
+#[allow(clippy::too_many_arguments)]
+fn wants_default_rust_c(
+    rust: &Option<String>,
+    c: &Option<String>,
+    python: &Option<String>,
+    rpc: &Option<String>,
+    csharp: &Option<String>,
+    xml: &Option<String>,
+    java: &Option<String>,
+) -> bool {
+    rust.is_none()
+        && c.is_none()
+        && python.is_none()
+        && rpc.is_none()
+        && csharp.is_none()
+        && xml.is_none()
+        && java.is_none()
+}
+
 /// Generate the selected outputs for a single input IDL file.
 fn process_file(args: &Args, input_file: &str) {
     // Read input, resolving #include directives into a single translation unit.
@@ -658,14 +678,16 @@ fn process_file(args: &Args, input_file: &str) {
         .clone()
         .or_else(|| args.output_dir.as_ref().filter(|_| allowed(6)).cloned());
 
-    // If neither -r, -c, -p, nor -o specified, default to generating Rust and C
-    let (rust_path, c_path, python_path, rpc_path, csharp_path, xml_path) = if rust_path.is_none()
-        && c_path.is_none()
-        && python_path.is_none()
-        && rpc_path.is_none()
-        && csharp_path.is_none()
-        && xml_path.is_none()
-    {
+    // If no output flag and no -o are given, default to generating Rust and C.
+    let (rust_path, c_path, python_path, rpc_path, csharp_path, xml_path) = if wants_default_rust_c(
+        &rust_path,
+        &c_path,
+        &python_path,
+        &rpc_path,
+        &csharp_path,
+        &xml_path,
+        &java_dir,
+    ) {
         (
             Some(format!("{}.rs", base_name)),
             Some(format!("{}.h", base_name)),
@@ -900,5 +922,40 @@ mod tests {
         // -j takes a directory; the backend's relative path is joined under it.
         assert_eq!(java_out_path("out", "HelloWorld.java"), "out/HelloWorld.java");
         assert_eq!(java_out_path("out/", "com/x/HelloWorld.java"), "out/com/x/HelloWorld.java");
+    }
+
+    #[test]
+    fn java_output_suppresses_the_rust_c_default() {
+        let none = || None::<String>;
+        // Nothing requested -> the Rust+C default fires.
+        assert!(wants_default_rust_c(
+            &none(),
+            &none(),
+            &none(),
+            &none(),
+            &none(),
+            &none(),
+            &none()
+        ));
+        // -j alone requested Java, so the default must not fire.
+        assert!(!wants_default_rust_c(
+            &none(),
+            &none(),
+            &none(),
+            &none(),
+            &none(),
+            &none(),
+            &Some("out".to_string())
+        ));
+        // A non-Java flag suppresses it too, as it always has.
+        assert!(!wants_default_rust_c(
+            &none(),
+            &none(),
+            &none(),
+            &none(),
+            &Some("out.cs".to_string()),
+            &none(),
+            &none()
+        ));
     }
 }
