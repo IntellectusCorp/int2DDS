@@ -67,24 +67,34 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { triple: x86_64-unknown-linux-gnu,        dist: linux-x86_64, runner: ubuntu-latest }
-          - { triple: aarch64-unknown-linux-gnu,       dist: linux-aarch64, runner: ubuntu-24.04-arm }
-          - { triple: armv7-unknown-linux-gnueabihf,   dist: linux-armhf,  runner: ubuntu-latest }
+          # manylinux_2_28 is AlmaLinux 8 (glibc 2.28) — the RHEL 8 ABI itself.
+          # One artifact per arch then covers RHEL 8/9/10 and Ubuntu 20.04+.
+          - { triple: x86_64-unknown-linux-gnu,      dist: linux-x86_64,  runner: ubuntu-latest,    image: "quay.io/pypa/manylinux_2_28_x86_64",  pkg: dnf, max_glibc: "2.28" }
+          - { triple: aarch64-unknown-linux-gnu,     dist: linux-aarch64, runner: ubuntu-24.04-arm, image: "quay.io/pypa/manylinux_2_28_aarch64", pkg: dnf, max_glibc: "2.28" }
+          # armhf keeps the ubuntu 22.04 cross path: manylinux publishes no
+          # armv7 image, and every lower-glibc armhf builder is unmaintained
+          # (debian 10 archived, debian 11 LTS ends 2026-08-31, ubuntu 20.04 EOL).
+          - { triple: armv7-unknown-linux-gnueabihf, dist: linux-armhf,   runner: ubuntu-latest,    image: "ubuntu:22.04", pkg: apt, max_glibc: "2.35" }
     runs-on: ${{ matrix.runner }}
-    container: ubuntu:22.04
+    container: ${{ matrix.image }}
     steps:
-      - name: Install build prerequisites
+      # The manylinux images already ship gcc (via gcc-toolset, ahead of
+      # /usr/bin on PATH), make, cmake, perl, git, curl, file, pkg-config and
+      # binutils — no dnf install is needed. Installing plain `gcc` here would
+      # add an older /usr/bin/gcc and muddy the toolchain, so there is no dnf
+      # prerequisites step for the manylinux entries.
+
+      - name: Install build prerequisites (Ubuntu)
+        if: matrix.pkg == 'apt'
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
             curl ca-certificates build-essential git pkg-config cmake perl file binutils
-          if [ "${{ matrix.triple }}" = "armv7-unknown-linux-gnueabihf" ]; then
-            # libc6-dev-armhf-cross is only a *recommended* dep of the cross gcc,
-            # so --no-install-recommends leaves the armhf libc headers out and
-            # C deps such as ring fail to compile. Name it explicitly.
-            apt-get install -y --no-install-recommends \
-              gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
-          fi
+          # libc6-dev-armhf-cross is only a *recommended* dep of the cross gcc,
+          # so --no-install-recommends leaves the armhf libc headers out and
+          # C deps such as ring fail to compile. Name it explicitly.
+          apt-get install -y --no-install-recommends \
+            gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
 
       - uses: actions/checkout@v4
 
@@ -110,12 +120,26 @@ jobs:
         run: git diff --exit-code ffi/include/int2dds-ffi.h
 
       - name: Stage archive
-        run: ./.github/scripts/ci/stage-native.sh "${{ matrix.triple }}" "${{ matrix.dist }}" "${{ needs.prepare.outputs.version }}" gnu
+        run: ./.github/scripts/ci/stage-native.sh "${{ matrix.triple }}" "${{ matrix.dist }}" "${{ needs.prepare.outputs.version }}" gnu "${{ matrix.max_glibc }}"
 
       - uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.dist }}
           path: dist/int2dds-*-${{ matrix.dist }}.tar.gz
+          if-no-files-found: error
+
+      # Built here, not in verify-glibc-floor, so the loader inherits this
+      # image's glibc 2.28 floor and runs in every target container without a
+      # compiler or python — ubi8 and the ubuntu base images ship neither.
+      - name: Build the glibc floor smoke-test loader
+        if: matrix.triple == 'x86_64-unknown-linux-gnu'
+        run: gcc -O2 -o glibc-floor-check .github/scripts/ci/glibc-floor-check.c -ldl
+
+      - uses: actions/upload-artifact@v4
+        if: matrix.triple == 'x86_64-unknown-linux-gnu'
+        with:
+          name: glibc-floor-check
+          path: glibc-floor-check
           if-no-files-found: error
 
   native-linux-musl:
