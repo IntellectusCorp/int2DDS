@@ -18,8 +18,9 @@ pick whichever matches the shell you are in.
 ## Linux — `build-ffi-linux.sh`
 
 Clean-builds `libint2dds_ffi.so` for every Linux architecture the RMW layer
-needs, in one command. glibc targets are built against **glibc 2.35**
-(Ubuntu 22.04); musl targets against **Alpine 3.20**.
+needs, in one command. The x86_64 and arm64 glibc targets are built against
+**glibc 2.28** (AlmaLinux 8, via `quay.io/pypa/manylinux_2_28_*`); armhf against
+**glibc 2.35** (Ubuntu 22.04); musl targets against **Alpine 3.20**.
 
 ```bash
 ./ffi/docker/build-ffi-linux.sh                      # all 5 targets + tarball
@@ -35,13 +36,45 @@ needs, in one command. glibc targets are built against **glibc 2.35**
 | `--no-package`       | Skip the `.tar.gz` distribution archive                                   |
 | `--no-binfmt`        | Skip the privileged QEMU binfmt registration container                    |
 
-### Why Ubuntu 22.04
+### Why one glibc floor instead of one build per OS
 
 glibc is forward-compatible: a binary linked against an older glibc runs on
-newer ones, but not vice-versa. Building on 22.04 (glibc 2.35) yields a single
-`.so` per arch that runs on **both Ubuntu 22.04 and 24.04**, so we ship one
-shared artifact per arch instead of one per distro. (In practice the libraries
-only require up to `GLIBC_2.34`.)
+newer ones, but not vice-versa. And this library has **no `libstdc++`
+dependency** — `rustls` is pinned to the `ring` feature rather than `aws-lc`,
+so nothing here is C++ and the compiler version does not affect artifact
+compatibility.
+
+That leaves the glibc floor as the only variable. Building at the lowest one
+covers everything above it, so we ship **one `.so` per arch, not one per
+distro**:
+
+| Target | glibc | Covered |
+| ------ | ----- | ------- |
+| RHEL 8 | 2.28 | yes |
+| Ubuntu 20.04 | 2.31 | yes |
+| RHEL 9 | 2.34 | yes |
+| Ubuntu 22.04 | 2.35 | yes |
+| Ubuntu 24.04 | 2.39 | yes |
+
+`manylinux_2_28` is AlmaLinux 8, which is the RHEL 8 ABI itself, and PyPI keeps
+it maintained — building our own CentOS-era image would mean owning an EOL
+package repo.
+
+**armhf is the exception.** manylinux publishes no armv7 image, and every
+lower-glibc armhf builder is unmaintained (debian 10 archived, debian 11 LTS
+ends 2026-08-31, ubuntu 20.04 EOL). armhf therefore keeps its own
+`Dockerfile.armhf` (Ubuntu 22.04) at floor 2.35, which is where it already was.
+This is a deferred improvement, not a regression: armhf has no RHEL and is not
+a ROS 2 tier 1 platform.
+
+| Dockerfile | Targets | Base | Floor |
+| ---------- | ------- | ---- | ----- |
+| `Dockerfile` | `linux/amd64`, `linux/arm64` | `quay.io/pypa/manylinux_2_28_*` | 2.28 |
+| `Dockerfile.armhf` | `linux/arm/v7` | `ubuntu:22.04` | 2.35 |
+| `Dockerfile.musl` | `linux/amd64`, `linux/arm64` | `alpine:3.20` | musl, no glibc |
+
+Both `build-ffi-linux.sh` and `build-ffi-linux.ps1` carry this table in their
+target lists and stay feature-equivalent.
 
 ### Output layout
 
@@ -79,7 +112,10 @@ first and the in-container Cargo target dir is ephemeral.
 - `CARGO_TARGET_DIR` is an ephemeral container path, so the host's `target/`
   directory is never touched and every run is clean.
 - After each compile the container prints the **highest required GLIBC symbol
-  version** — confirm it is `<= GLIBC_2.35` to guarantee 24.04 compatibility.
+  version** — for the x86_64/arm64 `manylinux_2_28` builds confirm it is
+  `<= GLIBC_2.28`; armhf builds separately in its own `Dockerfile.armhf` at the
+  2.35 floor it already had (see the table above). musl builds require no
+  GLIBC symbols at all.
 - The bash script additionally detects the host arch, registers QEMU emulators
   only for the platforms that actually need them, and `chown`s the
   container-written artifacts back to the invoking user (a Linux bind-mount
@@ -191,8 +227,39 @@ MACOSX_DEPLOYMENT_TARGET=12.0 ./ffi/docker/build-ffi-macos.sh
 # DT_SONAME of every built .so (expects libint2dds_ffi.so.<major>)
 ./ffi/docker/check-soname.sh
 ./ffi/docker/check-soname.sh --path ffi/dist/linux-x86_64/libint2dds_ffi.so.0.1.1
+```
 
-# highest required glibc symbol version
-objdump -T ffi/dist/linux-aarch64/libint2dds_ffi.so \
+Static check — the highest GLIBC symbol version the artifact requires:
+
+```bash
+objdump -T ffi/dist/linux-x86_64/libint2dds_ffi.so.0.1.1 \
   | grep -oE 'GLIBC_[0-9.]+' | sort -V | tail -1
 ```
+
+Expect `GLIBC_2.28` or lower. `.github/scripts/ci/stage-native.sh` enforces the
+same ceiling in CI and fails the release if it regresses.
+
+Runtime check — actually load it on each target OS. This matches x86_64,
+the arch `verify-glibc-floor` in `.github/workflows/release.yml` actually
+runs (it builds the loader only for `x86_64-unknown-linux-gnu` and downloads
+the `native-linux-x86_64` artifact); on a non-x86_64 host, substitute
+`manylinux_2_28_aarch64` and `linux-aarch64` below and register QEMU/binfmt
+first (`--refresh-binfmt` on `build-ffi-linux.sh`, or see "Docker
+prerequisites" above), or the containers fail with an exec-format error:
+
+```bash
+docker run --rm -v "$PWD":/w -w /w quay.io/pypa/manylinux_2_28_x86_64 \
+  gcc -O2 -o /w/glibc-floor-check .github/scripts/ci/glibc-floor-check.c -ldl
+for img in redhat/ubi8 ubuntu:20.04 redhat/ubi9 ubuntu:22.04 ubuntu:24.04; do
+  printf '%-16s ' "$img"
+  docker run --rm -v "$PWD":/w -w /w "$img" \
+    ./glibc-floor-check /w/ffi/dist/linux-x86_64/libint2dds_ffi.so.0.1.1 2>&1 | tail -1
+done
+rm -f glibc-floor-check
+```
+
+Expect `OK  dlopen+call rc=0 has_value=0` on all five. Compile the loader in
+the builder image (`manylinux_2_28_*`, which ships gcc), never in a target
+container: none of the five target images ships a compiler, and of the five
+only `ubi9` ships `python3`. `verify-glibc-floor` runs exactly this against
+the x86_64 archive.
