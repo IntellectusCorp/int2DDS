@@ -66,6 +66,18 @@ pub fn to_pascal_case(name: &str) -> String {
         .collect()
 }
 
+/// Convert to camelCase for Java field names.
+/// "bool_seq" -> "boolSeq"
+/// "HTTPServer" -> "httpServer"
+pub fn to_camel_case(name: &str) -> String {
+    let pascal = to_pascal_case(name);
+    let mut chars = pascal.chars();
+    match chars.next() {
+        Some(c) => c.to_lowercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 /// Convert to snake_case for Rust field/module names.
 /// "HelloWorld" -> "hello_world"
 /// "SensorData" -> "sensor_data"
@@ -195,6 +207,7 @@ pub enum TargetLang {
     C,
     CSharp,
     Python,
+    Java,
 }
 
 /// Escape an identifier if it collides with a reserved keyword in the target language.
@@ -205,6 +218,7 @@ pub fn escape_keyword(name: &str, lang: TargetLang) -> String {
         TargetLang::C => keywords::C,
         TargetLang::CSharp => keywords::CSHARP,
         TargetLang::Python => keywords::PYTHON,
+        TargetLang::Java => keywords::JAVA,
     };
 
     if kw_list.contains(&name) {
@@ -216,6 +230,7 @@ pub fn escape_keyword(name: &str, lang: TargetLang) -> String {
             TargetLang::C => format!("{}_", name),
             TargetLang::CSharp => format!("@{}", name),
             TargetLang::Python => format!("{}_", name),
+            TargetLang::Java => format!("{}_", name),
         }
     } else {
         name.to_string()
@@ -422,5 +437,32 @@ mod tests {
         assert_eq!(escape_keyword("class_id", TargetLang::Python), "class_id");
         assert_eq!(escape_keyword("return_value", TargetLang::C), "return_value");
         assert_eq!(escape_keyword("interface_impl", TargetLang::CSharp), "interface_impl");
+    }
+
+    #[test]
+    fn test_to_camel_case() {
+        assert_eq!(to_camel_case("bool_seq"), "boolSeq");
+        assert_eq!(to_camel_case("id"), "id");
+        assert_eq!(to_camel_case("HTTPServer"), "httpServer");
+        assert_eq!(to_camel_case("f32_array"), "f32Array");
+        assert_eq!(to_camel_case("simple_nested"), "simpleNested");
+        assert_eq!(to_camel_case(""), "");
+    }
+
+    #[test]
+    fn test_escape_keyword_java() {
+        // 예약어는 접미사 밑줄 — Java 에는 r# 나 @ 같은 탈출 문법이 없다.
+        assert_eq!(escape_keyword("class", TargetLang::Java), "class_");
+        assert_eq!(escape_keyword("int", TargetLang::Java), "int_");
+        assert_eq!(escape_keyword("synchronized", TargetLang::Java), "synchronized_");
+        // 리터럴도 식별자로 못 쓴다.
+        assert_eq!(escape_keyword("null", TargetLang::Java), "null_");
+        assert_eq!(escape_keyword("true", TargetLang::Java), "true_");
+        // 문맥 키워드는 식별자로 합법이므로 건드리지 않는다.
+        assert_eq!(escape_keyword("var", TargetLang::Java), "var");
+        assert_eq!(escape_keyword("record", TargetLang::Java), "record");
+        assert_eq!(escape_keyword("yield", TargetLang::Java), "yield");
+        // 평범한 이름은 그대로.
+        assert_eq!(escape_keyword("message", TargetLang::Java), "message");
     }
 }

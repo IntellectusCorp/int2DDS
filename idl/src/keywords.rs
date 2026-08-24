@@ -50,3 +50,18 @@ pub const PYTHON: &[&str] = &[
     "object", "property", "super", "tuple", "len", "enumerate", "zip", "filter", "sorted", "reversed", "hash",
     "repr", "open", "input", "frozenset", "isinstance", "issubclass",
 ];
+
+/// Java SE 17 reserved words, plus the three literals (`true`/`false`/`null`)
+/// and the lone `_`, none of which are legal identifiers either. Contextual
+/// keywords (`var`, `record`, `sealed`, `permits`, `yield`) are legal
+/// identifiers and are deliberately absent.
+#[rustfmt::skip]
+pub const JAVA: &[&str] = &[
+    "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class", "const",
+    "continue", "default", "do", "double", "else", "enum", "extends", "final", "finally", "float",
+    "for", "goto", "if", "implements", "import", "instanceof", "int", "interface", "long", "native",
+    "new", "package", "private", "protected", "public", "return", "short", "static", "strictfp",
+    "super", "switch", "synchronized", "this", "throw", "throws", "transient", "try", "void",
+    "volatile", "while",
+    "true", "false", "null", "_",
+];
