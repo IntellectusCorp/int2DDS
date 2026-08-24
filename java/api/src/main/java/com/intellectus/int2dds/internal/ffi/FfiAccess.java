@@ -3199,6 +3199,17 @@ public final class FfiAccess {
         return rc;
     }
 
+    /** Nanosecond-timeout counterpart of {@link #waitsetWaitEx}. */
+    public static int waitsetWaitExNs(long waitset, long timeoutNs, long[] seqOut) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_waitset_wait_ex_ns(waitset, timeoutNs, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            seqOut[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
     /** Releases a condition sequence returned by {@link #waitsetWaitEx}. */
     public static void conditionSeqDelete(long seq) {
         Ffi.int2dds_condition_seq_delete(seq);

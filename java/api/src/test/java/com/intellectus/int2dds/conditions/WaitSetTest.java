@@ -33,6 +33,29 @@ class WaitSetTest {
     }
 
     @Test
+    void awaitNanosReturnsATriggeredGuardCondition() {
+        try (WaitSet ws = new WaitSet(); GuardCondition gc = new GuardCondition()) {
+            ws.attach(gc);
+            gc.setTriggerValue(true);
+            List<Condition> hit = ws.awaitNanos(2_000_000_000L); // 2s in ns
+            assertEquals(1, hit.size(), "the triggered guard condition must be returned");
+            assertTrue(hit.get(0) == gc);
+        }
+    }
+
+    @Test
+    void awaitNanosBlocksUntilTimeoutWhenNoTrigger() {
+        try (WaitSet ws = new WaitSet(); GuardCondition gc = new GuardCondition()) {
+            ws.attach(gc); // trigger stays false
+            long start = System.nanoTime();
+            List<Condition> hit = ws.awaitNanos(200_000_000L); // 200ms in ns
+            long ms = (System.nanoTime() - start) / 1_000_000L;
+            assertTrue(hit.isEmpty(), "no trigger -> empty");
+            assertTrue(ms >= 150, "should have blocked ~200ms, was " + ms);
+        }
+    }
+
+    @Test
     void attachIsIdempotent() {
         try (WaitSet ws = new WaitSet(); GuardCondition gc = new GuardCondition()) {
             ws.attach(gc);

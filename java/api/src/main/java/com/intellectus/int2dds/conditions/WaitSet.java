@@ -114,12 +114,29 @@ public final class WaitSet implements AutoCloseable {
         long[] seqOut = new long[1];
         int rc = FfiAccess.waitsetWaitEx(handle.value(), timeoutMillis, seqOut);
         NativeKeepAlive.keepAlive(this);
+        return collectTriggered(rc, seqOut[0]);
+    }
+
+    /**
+     * Nanosecond-precision counterpart of {@link #await(long)}: blocks up to
+     * {@code timeoutNanos} (negative = infinite) and returns the attached
+     * conditions whose trigger value is set. Empty on timeout. Same
+     * closed-condition handling as {@link #await(long)}.
+     */
+    public List<Condition> awaitNanos(long timeoutNanos) {
+        long[] seqOut = new long[1];
+        int rc = FfiAccess.waitsetWaitExNs(handle.value(), timeoutNanos, seqOut);
+        NativeKeepAlive.keepAlive(this);
+        return collectTriggered(rc, seqOut[0]);
+    }
+
+    private List<Condition> collectTriggered(int rc, long seq) {
         if (rc == DdsException.RET_TIMEOUT) {
             return new ArrayList<Condition>();
         }
         ReturnCodes.check(rc);
-        if (seqOut[0] != 0L) {
-            FfiAccess.conditionSeqDelete(seqOut[0]); // we don't read the seq
+        if (seq != 0L) {
+            FfiAccess.conditionSeqDelete(seq); // we don't read the seq
         }
         List<Condition> triggered = new ArrayList<Condition>();
         for (java.util.Iterator<Condition> it = attached.iterator(); it.hasNext(); ) {
