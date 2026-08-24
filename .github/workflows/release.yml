@@ -183,10 +183,21 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
+          # Pull first, as its own command. A `docker run` that also has to pull
+          # emits progress on the same stream as the command output, and piping
+          # that into `head -1` lets head close the pipe while docker is still
+          # writing — docker then dies on EPIPE ("write /dev/stdout: broken
+          # pipe") and pipefail turns it into a step failure. That is a race, so
+          # it strikes whichever rows happen to lose it. Pulling separately also
+          # tells a registry problem apart from a real load failure.
+          docker pull -q "${{ matrix.image }}"
+
           # Confirm the container really is the glibc version this row claims,
           # so a silently retagged base image cannot turn the test into a no-op.
-          actual="$(docker run --rm "${{ matrix.image }}" \
-                      ldd --version | head -1 | grep -oE '[0-9]+\.[0-9]+$')"
+          # Capture the output whole, then parse the variable, so nothing is
+          # ever piped out of docker.
+          ldd_out="$(docker run --rm "${{ matrix.image }}" ldd --version)"
+          actual="$(printf '%s\n' "$ldd_out" | head -1 | grep -oE '[0-9]+\.[0-9]+$')"
           echo "${{ matrix.image }} reports glibc $actual (expected ${{ matrix.glibc }})"
           if [ "$actual" != "${{ matrix.glibc }}" ]; then
             echo "ERROR: ${{ matrix.image }} is glibc $actual, not ${{ matrix.glibc }} — update the matrix" >&2
