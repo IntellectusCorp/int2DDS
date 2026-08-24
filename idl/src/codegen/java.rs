@@ -24,6 +24,7 @@ pub fn generate(
     idl_filename: &str,
     opts: &JavaOptions,
 ) -> Result<Vec<GeneratedFile>, String> {
+    validate_package(opts)?;
     reject_unsupported(model, opts)?;
     let mut files = Vec::new();
     let mut owners: Vec<&str> = Vec::new(); // files[i] 를 만든 IDL 타입
@@ -172,6 +173,34 @@ fn resolve_reference(model: &IdlModel, name: &str) -> String {
 
 fn package_label(p: &Option<String>) -> &str {
     p.as_deref().unwrap_or("<unnamed>")
+}
+
+/// `--java-package` 는 그대로 `package` 줄과 디렉터리 경로가 된다. 검사하지
+/// 않으면 ".a..b." 가 `package .a..b.;` 로, "com. x" 가 공백 든 디렉터리로 나간다.
+pub fn validate_package(opts: &JavaOptions) -> Result<(), String> {
+    let Some(base) = &opts.package else { return Ok(()) };
+    let base = base.trim();
+    if base.is_empty() {
+        return Ok(()); // 빈 값은 무명 패키지와 같게 다룬다.
+    }
+    for seg in base.split('.') {
+        if !is_java_identifier(seg) {
+            return Err(format!(
+                "invalid --java-package '{}': segment '{}' is not a Java identifier",
+                base, seg
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn is_java_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else { return false };
+    if !(first.is_alphabetic() || first == '_' || first == '$') {
+        return false;
+    }
+    chars.all(|c| c.is_alphanumeric() || c == '_' || c == '$')
 }
 
 /// True for `wstring` and for a collection whose element is one.
@@ -980,6 +1009,25 @@ mod tests {
             let err = generate(&model, "X.idl", &JavaOptions::default())
                 .expect_err(&format!("should reject: {}", src));
             assert!(err.contains(needle), "error {:?} should mention {:?}", err, needle);
+        }
+    }
+
+    #[test]
+    fn malformed_java_packages_are_refused() {
+        let src = r#"@extensibility(FINAL) struct S { long a; };"#;
+        let defs = parse_idl(src).unwrap();
+        let model = resolve(defs).unwrap();
+        // 예전에는 `package .a..b.;` 나 공백 든 디렉터리를 뱉고 exit 0 했다.
+        for bad in [".a..b.", "com. x", "1st.pkg", "a.b-c", "a..b"] {
+            let err = generate(&model, "S.idl", &JavaOptions { package: Some(bad.to_string()) })
+                .expect_err(&format!("{:?} should be refused", bad));
+            assert!(err.contains("--java-package"), "{}", err);
+            assert!(err.contains(bad), "{}", err);
+        }
+        // 정상 패키지와 빈 값(=무명)은 그대로 통과한다.
+        for ok in ["com.intellectus.int2dds.examples", "generated.enum", "_a.$b.c1", ""] {
+            generate(&model, "S.idl", &JavaOptions { package: Some(ok.to_string()) })
+                .unwrap_or_else(|e| panic!("{:?} should be accepted: {}", ok, e));
         }
     }
 

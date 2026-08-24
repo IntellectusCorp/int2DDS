@@ -550,6 +550,16 @@ fn main() {
         }
     }
 
+    // 잘못된 --java-package 는 입력 파일과 무관한 인자 오류다. 배치 모드가
+    // 파일마다 경고하고 넘기는 백엔드 거절과 달리 여기서 바로 멈춘다.
+    if args.java_package.is_some() {
+        let opts = codegen::java::JavaOptions { package: args.java_package.clone() };
+        if let Err(e) = codegen::java::validate_package(&opts) {
+            eprintln!("error: {}", e);
+            process::exit(1);
+        }
+    }
+
     // Java 는 타입 이름으로 파일 이름을 정하므로 입력 파일이 달라도 경로가
     // 겹칠 수 있다. 어느 입력이 먼저 썼는지 기억해 두고 덮어쓸 때 알린다.
     let mut java_written: HashMap<String, String> = HashMap::new();
