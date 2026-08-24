@@ -579,7 +579,7 @@ jobs:
           set -euo pipefail
           python -m venv /tmp/venv
           /tmp/venv/bin/pip install --quiet \
-            dist/wheels/int2dds-*-py3-none-manylinux_2_35_x86_64.whl
+            dist/wheels/int2dds-*-py3-none-manylinux_2_28_x86_64.whl
           env -u INT2DDS_FFI_PATH /tmp/venv/bin/python -c "import int2dds; print('bundled native loaded')"
 
       - uses: actions/upload-artifact@v4

@@ -59,7 +59,7 @@ for f in "Int2Dds.$base_version.nupkg" \
 done
 
 for tag in win_amd64 win_arm64 \
-           manylinux_2_35_x86_64 manylinux_2_35_aarch64 \
+           manylinux_2_28_x86_64 manylinux_2_28_aarch64 \
            macosx_11_0_arm64 macosx_10_12_x86_64 \
            any; do
   if [[ ! -f "$out_dir/int2dds-$base_version-py3-none-$tag.whl" ]]; then
