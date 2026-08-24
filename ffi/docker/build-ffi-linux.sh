@@ -35,6 +35,7 @@ RUST_VERSION="1.89.0"
 ONLY=()
 NO_PACKAGE=0
 NO_BINFMT=0
+REFRESH_BINFMT=0
 
 usage() {
   cat <<'USAGE'
@@ -49,6 +50,11 @@ Usage: build-ffi-linux.sh [options]
   --no-binfmt          Do not (re-)register QEMU emulators. Use when the
                        privileged binfmt container is unavailable and the
                        emulators are already installed.
+  --refresh-binfmt     Force-replace existing QEMU registrations instead of
+                       leaving them alone. Needed when the host already has
+                       emulators from binfmt-support/qemu-user-static and they
+                       are too old to run the build (see the warning this
+                       script prints). Affects the whole host, not just Docker.
   -h, --help           Show this help.
 
 Examples:
@@ -79,6 +85,7 @@ while [ $# -gt 0 ]; do
     --only=*)         split_csv "${1#*=}"; shift ;;
     --no-package)     NO_PACKAGE=1; shift ;;
     --no-binfmt)      NO_BINFMT=1; shift ;;
+    --refresh-binfmt) REFRESH_BINFMT=1; shift ;;
     -h|--help)        usage; exit 0 ;;
     *)                echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -155,9 +162,37 @@ if [ "$NO_BINFMT" -eq 0 ]; then
   done
   if [ -n "$binfmt_arches" ]; then
     echo
-    echo "Refreshing QEMU binfmt emulators ($binfmt_arches) ..."
-    docker run --privileged --rm tonistiigi/binfmt:latest --install "$binfmt_arches" \
-      || die "binfmt registration failed. Re-run with --no-binfmt if the emulators are already installed."
+    echo "Registering QEMU binfmt emulators ($binfmt_arches) ..."
+    # --install SKIPS an arch that is already registered; it never replaces one.
+    # On a Linux host with binfmt-support/qemu-user-static the kernel already
+    # carries a registration, so this is a no-op and the build keeps using the
+    # host's emulator -- which, when it is too old, fails much later as an
+    # opaque apt GPG error or a segfault mid-compile. --refresh-binfmt removes
+    # the existing registration first so the container's newer qemu wins.
+    if [ "$REFRESH_BINFMT" -eq 1 ]; then
+      echo "  (--refresh-binfmt: removing existing registrations first)"
+      docker run --privileged --rm tonistiigi/binfmt:latest --uninstall "$binfmt_arches" \
+        || die "binfmt uninstall failed."
+    fi
+    binfmt_out="$(docker run --privileged --rm tonistiigi/binfmt:latest --install "$binfmt_arches" 2>&1)" \
+      || { echo "$binfmt_out" >&2; die "binfmt registration failed. Re-run with --no-binfmt if the emulators are already installed."; }
+    echo "$binfmt_out" | grep -E '^installing:' || true
+
+    # Warn loudly when nothing was actually refreshed: a stale host emulator is
+    # the single most common cause of a failed emulated build here.
+    if [ "$REFRESH_BINFMT" -eq 0 ] && echo "$binfmt_out" | grep -q 'already registered'; then
+      echo
+      echo "WARNING: an emulator was already registered, so it was NOT refreshed." >&2
+      echo "  The build will use the host's QEMU. If it fails with an apt GPG error" >&2
+      echo "  ('unsupported filetype' / 'is not signed') or a segfault, the host" >&2
+      echo "  emulator is too old. Repair with:" >&2
+      echo "      $0 --refresh-binfmt" >&2
+      echo "  (or manually: docker run --privileged --rm tonistiigi/binfmt --uninstall $binfmt_arches" >&2
+      echo "                docker run --privileged --rm tonistiigi/binfmt --install $binfmt_arches)" >&2
+      echo "  To restore the host's own registrations afterwards:" >&2
+      echo "      sudo systemctl restart systemd-binfmt   # or: sudo update-binfmts --enable" >&2
+      echo
+    fi
   fi
 fi
 
