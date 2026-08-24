@@ -160,6 +160,9 @@ fn field_init(t: &ResolvedType, model: &IdlModel) -> Result<Option<String>, Stri
         ResolvedType::Sequence { element, .. } => {
             Some(format!("new {}[0]", type_to_java(element)?))
         }
+        ResolvedType::Array { element, size } => {
+            Some(format!("new {}[{}]", type_to_java(element)?, size))
+        }
         ResolvedType::Enum(n) => enum_default(model, n),
         _ => None,
     })
@@ -179,6 +182,12 @@ fn enum_default(model: &IdlModel, name: &str) -> Option<String> {
 
 // ---- serialization ---------------------------------------------------------
 
+/// `octet` and `uint8` both land on Java byte, so a sequence of either takes
+/// the bulk writeBytes/readBytes path.
+fn is_byte(t: &ResolvedType) -> bool {
+    matches!(t, ResolvedType::U8 | ResolvedType::UInt8)
+}
+
 /// Emits the statement that writes `expr` (a Java expression of `t`'s type).
 fn emit_write(
     out: &mut String,
@@ -186,7 +195,62 @@ fn emit_write(
     expr: &str,
     t: &ResolvedType,
     model: &IdlModel,
+    depth: usize,
 ) -> Result<(), String> {
+    match t {
+        ResolvedType::Sequence { element, bound } => {
+            if let Some(b) = bound {
+                out.push_str(&format!(
+                    "{ind}if ({expr}.length > {b}) {{\n\
+                     {ind}    throw new IllegalStateException(\
+                     \"{expr} exceeds its IDL bound of {b}\");\n\
+                     {ind}}}\n",
+                    ind = ind,
+                    expr = expr,
+                    b = b
+                ));
+            }
+            out.push_str(&format!("{}writer.writeSeqHeader({}.length);\n", ind, expr));
+            if is_byte(element) {
+                out.push_str(&format!("{}writer.writeBytes({});\n", ind, expr));
+            } else {
+                let i = format!("i{}", depth);
+                out.push_str(&format!(
+                    "{ind}for (int {i} = 0; {i} < {expr}.length; {i}++) {{\n",
+                    ind = ind,
+                    i = i,
+                    expr = expr
+                ));
+                let inner = format!("{}    ", ind);
+                emit_write(out, &inner, &format!("{}[{}]", expr, i), element, model, depth + 1)?;
+                out.push_str(&format!("{}}}\n", ind));
+            }
+            return Ok(());
+        }
+        ResolvedType::Array { element, size } => {
+            out.push_str(&format!(
+                "{ind}if ({expr}.length != {size}) {{\n\
+                 {ind}    throw new IllegalStateException(\
+                 \"{expr} must hold exactly {size} elements\");\n\
+                 {ind}}}\n",
+                ind = ind,
+                expr = expr,
+                size = size
+            ));
+            let i = format!("i{}", depth);
+            out.push_str(&format!(
+                "{ind}for (int {i} = 0; {i} < {size}; {i}++) {{\n",
+                ind = ind,
+                i = i,
+                size = size
+            ));
+            let inner = format!("{}    ", ind);
+            emit_write(out, &inner, &format!("{}[{}]", expr, i), element, model, depth + 1)?;
+            out.push_str(&format!("{}}}\n", ind));
+            return Ok(());
+        }
+        _ => {}
+    }
     let line = match t {
         ResolvedType::Bool => format!("writer.writeBool({});", expr),
         ResolvedType::U8 | ResolvedType::UInt8 | ResolvedType::Char => {
@@ -231,7 +295,49 @@ fn emit_read(
     target: &str,
     t: &ResolvedType,
     model: &IdlModel,
+    depth: usize,
 ) -> Result<(), String> {
+    match t {
+        ResolvedType::Sequence { element, .. } => {
+            if is_byte(element) {
+                out.push_str(&format!(
+                    "{}{} = reader.readBytes(reader.readSeqHeader());\n",
+                    ind, target
+                ));
+            } else {
+                let elem_ty = type_to_java(element)?;
+                out.push_str(&format!(
+                    "{}{} = new {}[reader.readSeqHeader()];\n",
+                    ind, target, elem_ty
+                ));
+                let i = format!("i{}", depth);
+                out.push_str(&format!(
+                    "{ind}for (int {i} = 0; {i} < {t}.length; {i}++) {{\n",
+                    ind = ind,
+                    i = i,
+                    t = target
+                ));
+                let inner = format!("{}    ", ind);
+                emit_read(out, &inner, &format!("{}[{}]", target, i), element, model, depth + 1)?;
+                out.push_str(&format!("{}}}\n", ind));
+            }
+            return Ok(());
+        }
+        ResolvedType::Array { element, size } => {
+            let i = format!("i{}", depth);
+            out.push_str(&format!(
+                "{ind}for (int {i} = 0; {i} < {size}; {i}++) {{\n",
+                ind = ind,
+                i = i,
+                size = size
+            ));
+            let inner = format!("{}    ", ind);
+            emit_read(out, &inner, &format!("{}[{}]", target, i), element, model, depth + 1)?;
+            out.push_str(&format!("{}}}\n", ind));
+            return Ok(());
+        }
+        _ => {}
+    }
     let rhs = match t {
         ResolvedType::Bool => "reader.readBool()".to_string(),
         ResolvedType::U8 | ResolvedType::UInt8 | ResolvedType::Char => {
@@ -318,7 +424,7 @@ fn emit_struct(
         out.push_str("        int token = writer.dheaderBegin();\n");
     }
     for m in &s.members {
-        emit_write(&mut out, "        ", &java_field_name(&m.name), &m.resolved_type, model)?;
+        emit_write(&mut out, "        ", &java_field_name(&m.name), &m.resolved_type, model, 0)?;
     }
     if appendable {
         out.push_str("        writer.dheaderFinalize(token);\n");
@@ -331,7 +437,7 @@ fn emit_struct(
         out.push_str("        CdrReader.Dheader d = reader.readDheader();\n");
     }
     for m in &s.members {
-        emit_read(&mut out, "        ", &java_field_name(&m.name), &m.resolved_type, model)?;
+        emit_read(&mut out, "        ", &java_field_name(&m.name), &m.resolved_type, model, 0)?;
     }
     if appendable {
         out.push_str("        reader.readDheaderEnd(d);\n");
@@ -574,6 +680,81 @@ mod tests {
                 .expect_err(&format!("should reject: {}", src));
             assert!(err.contains(needle), "error {:?} should mention {:?}", err, needle);
         }
+    }
+
+    #[test]
+    fn byte_sequence_uses_the_bulk_path() {
+        let files = gen(
+            r#"@extensibility(FINAL) struct S { sequence<octet> data; };"#,
+            &JavaOptions::default(),
+        );
+        let src = &files[0].source;
+        assert!(src.contains("public byte[] data = new byte[0];"), "{}", src);
+        assert!(src.contains("writer.writeSeqHeader(data.length);"), "{}", src);
+        assert!(src.contains("writer.writeBytes(data);"), "{}", src);
+        assert!(src.contains("data = reader.readBytes(reader.readSeqHeader());"), "{}", src);
+    }
+
+    #[test]
+    fn scalar_sequence_loops_without_boxing() {
+        let files = gen(
+            r#"@extensibility(FINAL) struct S { sequence<long> v; };"#,
+            &JavaOptions::default(),
+        );
+        let src = &files[0].source;
+        assert!(src.contains("public int[] v = new int[0];"), "{}", src);
+        assert!(src.contains("writer.writeSeqHeader(v.length);"), "{}", src);
+        assert!(src.contains("for (int i0 = 0; i0 < v.length; i0++) {"), "{}", src);
+        assert!(src.contains("writer.writeI32(v[i0]);"), "{}", src);
+        assert!(src.contains("v = new int[reader.readSeqHeader()];"), "{}", src);
+        assert!(src.contains("v[i0] = reader.readI32();"), "{}", src);
+    }
+
+    #[test]
+    fn string_sequence_allocates_and_fills_on_read() {
+        let files = gen(
+            r#"@extensibility(FINAL) struct S { sequence<string> v; };"#,
+            &JavaOptions::default(),
+        );
+        let src = &files[0].source;
+        assert!(src.contains("public String[] v = new String[0];"), "{}", src);
+        assert!(src.contains("writer.writeString(v[i0]);"), "{}", src);
+        assert!(src.contains("v[i0] = reader.readString();"), "{}", src);
+    }
+
+    #[test]
+    fn bounded_sequence_is_length_checked_on_write() {
+        let files = gen(
+            r#"@extensibility(FINAL) struct S { sequence<long, 10> v; };"#,
+            &JavaOptions::default(),
+        );
+        assert!(files[0].source.contains("if (v.length > 10)"), "{}", files[0].source);
+    }
+
+    #[test]
+    fn fixed_array_has_no_seq_header_and_checks_its_length() {
+        let files =
+            gen(r#"@extensibility(FINAL) struct S { long m[4]; };"#, &JavaOptions::default());
+        let src = &files[0].source;
+        assert!(src.contains("public int[] m = new int[4];"), "{}", src);
+        assert!(src.contains("if (m.length != 4)"), "{}", src);
+        assert!(!src.contains("writeSeqHeader(m"), "{}", src);
+        assert!(src.contains("for (int i0 = 0; i0 < 4; i0++) {"), "{}", src);
+        assert!(src.contains("writer.writeI32(m[i0]);"), "{}", src);
+        assert!(src.contains("m[i0] = reader.readI32();"), "{}", src);
+    }
+
+    #[test]
+    fn enum_sequence_round_trips() {
+        let files = gen(
+            r#"enum Color { RED, GREEN };
+               @extensibility(FINAL) struct S { sequence<Color> v; };"#,
+            &JavaOptions::default(),
+        );
+        let s = files.iter().find(|f| f.relative_path == "S.java").unwrap();
+        assert!(s.source.contains("public Color[] v = new Color[0];"), "{}", s.source);
+        assert!(s.source.contains("writer.writeEnum(v[i0].value());"), "{}", s.source);
+        assert!(s.source.contains("v[i0] = Color.fromValue(reader.readEnum());"), "{}", s.source);
     }
 
     #[test]
