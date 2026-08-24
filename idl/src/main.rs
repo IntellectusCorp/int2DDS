@@ -575,6 +575,13 @@ fn wants_default_rust_c(
         && java.is_none()
 }
 
+/// True when the user asked for Java by name: `-j`, or the wizard's Java
+/// checkbox (which sets `langs`). `-o` alone only implies Java, so a backend
+/// refusal there is a warning, not a failed run.
+fn java_requested_explicitly(java_output: &Option<String>, langs: &Option<[bool; 7]>) -> bool {
+    java_output.is_some() || langs.is_some_and(|l| l[6])
+}
+
 /// Generate the selected outputs for a single input IDL file.
 fn process_file(args: &Args, input_file: &str) {
     // Read input, resolving #include directives into a single translation unit.
@@ -771,14 +778,20 @@ fn process_file(args: &Args, input_file: &str) {
     // Generate Java
     if let Some(dir) = &java_dir {
         let java_opts = codegen::java::JavaOptions { package: args.java_package.clone() };
-        let files = match codegen::java::generate(&model, idl_filename, &java_opts) {
-            Ok(f) => f,
+        let generated = match codegen::java::generate(&model, idl_filename, &java_opts) {
+            Ok(f) => Some(f),
+            // -o 배치는 Java 를 암시할 뿐이다. 다른 언어는 다 처리하는 구성요소
+            // 하나 때문에 배치 전체를 죽이지 않는다.
+            Err(e) if !java_requested_explicitly(&args.java_output, &args.langs) => {
+                eprintln!("warning: skipping Java for {}: {}", input_file, e);
+                None
+            }
             Err(e) => {
                 eprintln!("{}: {}", input_file, e);
                 process::exit(1);
             }
         };
-        for f in &files {
+        for f in generated.iter().flatten() {
             let path = java_out_path(dir, &f.relative_path);
             if let Err(e) = write_file(&path, &f.source) {
                 eprintln!("error: cannot write '{}': {}", path, e);
@@ -922,6 +935,24 @@ mod tests {
         // -j takes a directory; the backend's relative path is joined under it.
         assert_eq!(java_out_path("out", "HelloWorld.java"), "out/HelloWorld.java");
         assert_eq!(java_out_path("out/", "com/x/HelloWorld.java"), "out/com/x/HelloWorld.java");
+    }
+
+    #[test]
+    fn only_a_named_java_request_is_a_hard_error() {
+        // -j: 사용자가 Java 를 콕 집었다 — 거절이면 실패해야 한다.
+        assert!(java_requested_explicitly(&Some("out".to_string()), &None));
+        // 마법사에서 Java 를 골랐다 — 이것도 명시다.
+        assert!(java_requested_explicitly(
+            &None,
+            &Some([true, false, false, false, false, false, true])
+        ));
+        // -o 배치는 Java 를 암시할 뿐이다 — 경고 후 나머지 언어를 계속 낸다.
+        assert!(!java_requested_explicitly(&None, &None));
+        // 마법사에서 Java 를 고르지 않았으면 명시가 아니다.
+        assert!(!java_requested_explicitly(
+            &None,
+            &Some([true, false, false, false, false, false, false])
+        ));
     }
 
     #[test]
