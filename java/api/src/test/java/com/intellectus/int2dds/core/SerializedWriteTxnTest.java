@@ -110,6 +110,23 @@ class SerializedWriteTxnTest {
             }
             assertNotNull(matched, "writer/reader failed to match within 5s");
 
+            // The warm-up writes one more sample than it takes (each iteration
+            // writes then takes, and the take that finally succeeds returns a
+            // prior write's sample while that iteration's own write is still in
+            // flight). No more writes happen after this point, so once any such
+            // straggler has settled a drain reaches a stable empty cache; drain
+            // until two consecutive settle-and-drain passes find nothing, so
+            // the abort check below cannot see a warm-up straggler.
+            int quiet = 0;
+            while (quiet < 2) {
+                Thread.sleep(POLL_SLEEP_MILLIS);
+                boolean drainedAny = false;
+                while (r.take() != null) {
+                    drainedAny = true;
+                }
+                quiet = drainedAny ? 0 : quiet + 1;
+            }
+
             // Prepare, write into the buffer, but never commit -- close()
             // (via try-with-resources) must abort instead of publishing.
             try (SerializedWriteBuffer buf = w.prepareSerializedWrite(128)) {

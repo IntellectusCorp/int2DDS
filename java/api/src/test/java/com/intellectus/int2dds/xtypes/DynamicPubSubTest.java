@@ -92,9 +92,12 @@ class DynamicPubSubTest {
             data.setBool("active", true);
             data.setString("label", "sensor-A");
             data.setI64("count", -100L);
-            writer.write(data);
-
             for (int i = 0; i < 200 && received == null; i++) {
+                // Re-write each attempt: the default reader is BestEffort, so a
+                // write issued before writer/reader discovery completes is
+                // dropped rather than queued. Rewriting until a sample arrives
+                // establishes the match without a bare sleep as synchronization.
+                writer.write(data);
                 received = reader.take();
                 if (received == null) {
                     Thread.sleep(50);

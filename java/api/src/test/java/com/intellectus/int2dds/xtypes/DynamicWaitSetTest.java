@@ -99,15 +99,17 @@ class DynamicWaitSetTest {
             data.setBool("active", true);
             data.setString("label", "sensor-A");
             data.setI64("count", -100L);
-            writer.write(data);
-
             // Bounded retry: a single await(5000) is the intended path, but
             // guard against a lost wakeup racing sample delivery the same
             // way the polling test bounds its own wait, without using a
-            // bare sleep as the synchronization mechanism.
+            // bare sleep as the synchronization mechanism. Re-write each
+            // attempt: the default reader is BestEffort, so a write issued
+            // before writer/reader discovery completes is dropped rather than
+            // queued, and a single pre-match write would never wake the WaitSet.
             List<Condition> triggered = java.util.Collections.emptyList();
-            for (int i = 0; i < 3 && triggered.isEmpty(); i++) {
-                triggered = ws.await(5000L);
+            for (int i = 0; i < 5 && triggered.isEmpty(); i++) {
+                writer.write(data);
+                triggered = ws.await(2000L);
             }
             assertFalse(triggered.isEmpty(), "WaitSet never woke on the reader's StatusCondition");
             assertTrue(triggered.contains(sc));
