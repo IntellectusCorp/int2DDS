@@ -282,6 +282,11 @@ impl<'a> CGen<'a> {
     }
 
     fn emit_union_functions(&mut self, u: &ResolvedUnion) {
+        if self.opts.string_mode == StringMode::Pointer && self.union_needs_cleanup(u) {
+            self.emit_union_cleanup(u);
+            self.raw("\n");
+        }
+
         let needs_union_dh = !matches!(u.extensibility, ExtensibilityKind::Final);
 
         // serialize_fields (for nested union support - no encapsulation)
@@ -2038,6 +2043,10 @@ impl<'a> CGen<'a> {
                     self.model.structs.iter().find(|s| s.name == *name || s.qualified_name == *name)
                 {
                     self.struct_needs_cleanup(nested)
+                } else if let Some(nested) =
+                    self.model.unions.iter().find(|u| u.name == *name || u.qualified_name == *name)
+                {
+                    self.union_needs_cleanup(nested)
                 } else {
                     false
                 }
@@ -2048,6 +2057,11 @@ impl<'a> CGen<'a> {
 
     fn struct_needs_cleanup(&self, s: &ResolvedStruct) -> bool {
         s.members.iter().any(|m| self.type_needs_cleanup(&m.resolved_type))
+    }
+
+    fn union_needs_cleanup(&self, u: &ResolvedUnion) -> bool {
+        u.cases.iter().any(|c| self.type_needs_cleanup(&c.member.resolved_type))
+            || u.default_case.as_ref().is_some_and(|dc| self.type_needs_cleanup(&dc.resolved_type))
     }
 
     fn emit_struct_init(&mut self, s: &ResolvedStruct) {
@@ -2066,6 +2080,33 @@ impl<'a> CGen<'a> {
         }
 
         self.raw("}\n");
+    }
+
+    fn emit_union_cleanup(&mut self, u: &ResolvedUnion) {
+        self.raw(&format!("static inline void {}_cleanup({} *val) {{\n", u.name, u.name));
+        self.raw("    switch (val->_d) {\n");
+        for case in &u.cases {
+            if !self.type_needs_cleanup(&case.member.resolved_type) {
+                continue;
+            }
+            for label in &case.labels {
+                self.raw(&format!("    case {}:\n", self.union_label_c(label)));
+            }
+            let case_name = naming::escape_keyword(&case.member.name, naming::TargetLang::C);
+            let accessor = format!("val->_u.{}", case_name);
+            self.emit_cleanup_field(&case.member.resolved_type, &accessor, "        ");
+            self.raw("        break;\n");
+        }
+        if let Some(dc) = &u.default_case {
+            if self.type_needs_cleanup(&dc.resolved_type) {
+                self.raw("    default:\n");
+                let dc_name = naming::escape_keyword(&dc.name, naming::TargetLang::C);
+                let accessor = format!("val->_u.{}", dc_name);
+                self.emit_cleanup_field(&dc.resolved_type, &accessor, "        ");
+                self.raw("        break;\n");
+            }
+        }
+        self.raw("    }\n}\n");
     }
 
     fn emit_cleanup_field(&mut self, ty: &ResolvedType, accessor: &str, indent: &str) {
@@ -2131,8 +2172,8 @@ impl<'a> CGen<'a> {
                     self.raw(&format!("{}}}\n", indent));
                 }
             }
-            // A `_cleanup` definition only exists when `struct_needs_cleanup` holds
-            // (and never for unions/bitsets, which also resolve as `Struct`).
+            // A `_cleanup` definition only exists when the struct or union needs one
+            // (never for bitsets, which also resolve as `Struct`).
             ResolvedType::Struct(type_name) if self.type_needs_cleanup(ty) => {
                 let simple = type_name.rsplit("::").next().unwrap_or(type_name);
                 self.raw(&format!("{}{}_cleanup(&{});\n", indent, simple, accessor));

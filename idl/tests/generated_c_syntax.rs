@@ -134,3 +134,44 @@ fn test_generated_c_passes_clang_syntax_check() {
         fs::remove_dir_all(&dir).ok();
     }
 }
+
+/// Pointer-mode strings inside a union are heap-allocated by deserialization, so
+/// the union must get a discriminator-switch `_cleanup` and the enclosing struct
+/// must call it. The clang gate alone cannot catch a regression here: emitting
+/// neither the call nor the definition still compiles (and leaks).
+#[test]
+fn test_pointer_mode_union_string_cleanup() {
+    let defs = parser::parse_idl(FIXTURE).expect("parse fixture");
+    let model = resolver::resolve(defs).expect("resolve fixture");
+
+    let pointer = c::generate(
+        &model,
+        "SyntaxProbe.idl",
+        &COptions { default_string_bound: 64, string_mode: StringMode::Pointer },
+    );
+    let expected_cleanup = "static inline void Choice_cleanup(Choice *val) {
+    switch (val->_d) {
+    case 2:
+        if (val->_u.s) { free(val->_u.s); val->_u.s = NULL; }
+        break;
+    }
+}
+";
+    assert!(
+        pointer.contains(expected_cleanup),
+        "pointer-mode union cleanup missing or reshaped:\n{}",
+        pointer
+    );
+    assert!(
+        pointer.contains("Choice_cleanup(&val->choice);"),
+        "enclosing struct cleanup does not free its union member:\n{}",
+        pointer
+    );
+
+    let fixed = c::generate(
+        &model,
+        "SyntaxProbe.idl",
+        &COptions { default_string_bound: 64, string_mode: StringMode::FixedArray },
+    );
+    assert!(!fixed.contains("Choice_cleanup"), "fixed-array mode must not emit union cleanup");
+}
