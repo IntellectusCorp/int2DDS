@@ -142,6 +142,62 @@ jobs:
           path: glibc-floor-check
           if-no-files-found: error
 
+  # Proves the "build low, run high" claim instead of trusting it: the glibc
+  # 2.28 artifact is loaded on every OS the RMW layer targets. dlopen(RTLD_NOW)
+  # forces full relocation, so a missing symbol version fails here rather than
+  # at a customer's first call.
+  verify-glibc-floor:
+    needs: [prepare, native-linux-gnu]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { image: "redhat/ubi8",  glibc: "2.28" }   # floor boundary itself
+          - { image: "ubuntu:20.04", glibc: "2.31" }   # ROS 2 Foxy / ROS 1 Noetic
+          - { image: "redhat/ubi9",  glibc: "2.34" }   # ROS 2 Jazzy tier 3
+          - { image: "ubuntu:22.04", glibc: "2.35" }   # ROS 2 Humble
+          - { image: "ubuntu:24.04", glibc: "2.39" }   # ROS 2 Jazzy / Kilted / Rolling
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-linux-x86_64
+          path: art
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: glibc-floor-check
+          path: checker
+
+      - name: Unpack the archive
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p unpacked
+          tar -xzf "art/int2dds-$VERSION-linux-x86_64.tar.gz" -C unpacked
+          chmod +x checker/glibc-floor-check
+
+      - name: Load the library on ${{ matrix.image }}
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Confirm the container really is the glibc version this row claims,
+          # so a silently retagged base image cannot turn the test into a no-op.
+          actual="$(docker run --rm "${{ matrix.image }}" \
+                      ldd --version | head -1 | grep -oE '[0-9]+\.[0-9]+$')"
+          echo "${{ matrix.image }} reports glibc $actual (expected ${{ matrix.glibc }})"
+          if [ "$actual" != "${{ matrix.glibc }}" ]; then
+            echo "ERROR: ${{ matrix.image }} is glibc $actual, not ${{ matrix.glibc }} — update the matrix" >&2
+            exit 1
+          fi
+          # Pass the archive-relative path, never an absolute system path: RHEL
+          # uses /lib64 while Ubuntu uses /lib/x86_64-linux-gnu.
+          docker run --rm -v "$PWD":/w -w /w "${{ matrix.image }}" \
+            ./checker/glibc-floor-check \
+            "/w/unpacked/int2dds-$VERSION-linux-x86_64/lib/libint2dds_ffi.so.$VERSION"
+
   native-linux-musl:
     needs: prepare
     strategy:
@@ -588,7 +644,7 @@ jobs:
           python -m pytest python/tests/test_libpath.py -q
 
   release:
-    needs: [prepare, native-linux-gnu, native-linux-musl, native-windows, native-macos, csharp, python, verify-examples]
+    needs: [prepare, native-linux-gnu, native-linux-musl, native-windows, native-macos, csharp, python, verify-examples, verify-glibc-floor]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
