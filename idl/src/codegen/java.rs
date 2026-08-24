@@ -29,6 +29,9 @@ pub fn generate(
     for s in &model.structs {
         files.push(emit_struct(model, s, idl_filename, opts)?);
     }
+    for e in &model.enums {
+        files.push(emit_enum(e, idl_filename, opts));
+    }
     Ok(files)
 }
 
@@ -142,21 +145,40 @@ fn type_to_java(t: &ResolvedType) -> Result<String, String> {
 
 /// A non-null initializer for reference-typed fields, so `serializeCdr` on a
 /// freshly constructed instance never sees null. Primitives return None.
-fn field_init(t: &ResolvedType) -> Result<Option<String>, String> {
+fn field_init(t: &ResolvedType, model: &IdlModel) -> Result<Option<String>, String> {
     Ok(match t {
         ResolvedType::String { .. } | ResolvedType::WString { .. } => Some("\"\"".to_string()),
         ResolvedType::Struct(n) => Some(format!("new {}()", java_type_name(n))),
         ResolvedType::Sequence { element, .. } => {
             Some(format!("new {}[0]", type_to_java(element)?))
         }
+        ResolvedType::Enum(n) => enum_default(model, n),
         _ => None,
     })
+}
+
+/// `Type.FIRST_VARIANT` — a null enum field would NPE inside serializeCdr.
+fn enum_default(model: &IdlModel, name: &str) -> Option<String> {
+    let leaf = name.rsplit("::").next().unwrap_or(name);
+    let e = model.enums.iter().find(|e| e.name == leaf || e.qualified_name == name)?;
+    let first = e.variants.first()?;
+    Some(format!(
+        "{}.{}",
+        java_type_name(&e.name),
+        naming::escape_keyword(&first.name, TargetLang::Java)
+    ))
 }
 
 // ---- serialization ---------------------------------------------------------
 
 /// Emits the statement that writes `expr` (a Java expression of `t`'s type).
-fn emit_write(out: &mut String, ind: &str, expr: &str, t: &ResolvedType) -> Result<(), String> {
+fn emit_write(
+    out: &mut String,
+    ind: &str,
+    expr: &str,
+    t: &ResolvedType,
+    model: &IdlModel,
+) -> Result<(), String> {
     let line = match t {
         ResolvedType::Bool => format!("writer.writeBool({});", expr),
         ResolvedType::U8 | ResolvedType::UInt8 | ResolvedType::Char => {
@@ -187,6 +209,7 @@ fn emit_write(out: &mut String, ind: &str, expr: &str, t: &ResolvedType) -> Resu
             format!("writer.writeString({});", expr)
         }
         ResolvedType::WString { .. } => format!("writer.writeWString({});", expr),
+        ResolvedType::Enum(_) => format!("writer.writeEnum({}.value());", expr),
         other => return Err(format!("unsupported member type in write: {:?}", other)),
     };
     out.push_str(&format!("{}{}\n", ind, line));
@@ -194,7 +217,13 @@ fn emit_write(out: &mut String, ind: &str, expr: &str, t: &ResolvedType) -> Resu
 }
 
 /// Emits the statement that assigns the decoded value into `target`.
-fn emit_read(out: &mut String, ind: &str, target: &str, t: &ResolvedType) -> Result<(), String> {
+fn emit_read(
+    out: &mut String,
+    ind: &str,
+    target: &str,
+    t: &ResolvedType,
+    model: &IdlModel,
+) -> Result<(), String> {
     let rhs = match t {
         ResolvedType::Bool => "reader.readBool()".to_string(),
         ResolvedType::U8 | ResolvedType::UInt8 | ResolvedType::Char => {
@@ -212,6 +241,7 @@ fn emit_read(out: &mut String, ind: &str, target: &str, t: &ResolvedType) -> Res
         ResolvedType::WChar => "(char) reader.readU16()".to_string(),
         ResolvedType::String { .. } => "reader.readString()".to_string(),
         ResolvedType::WString { .. } => "reader.readWString()".to_string(),
+        ResolvedType::Enum(n) => format!("{}.fromValue(reader.readEnum())", java_type_name(n)),
         other => return Err(format!("unsupported member type in read: {:?}", other)),
     };
     out.push_str(&format!("{}{} = {};\n", ind, target, rhs));
@@ -229,7 +259,7 @@ fn extensibility_const(k: ExtensibilityKind) -> &'static str {
 }
 
 fn emit_struct(
-    _model: &IdlModel,
+    model: &IdlModel,
     s: &ResolvedStruct,
     idl_filename: &str,
     opts: &JavaOptions,
@@ -256,7 +286,7 @@ fn emit_struct(
     for m in &s.members {
         let ty = type_to_java(&m.resolved_type)?;
         let name = java_field_name(&m.name);
-        match field_init(&m.resolved_type)? {
+        match field_init(&m.resolved_type, model)? {
             Some(init) => out.push_str(&format!("    public {} {} = {};\n", ty, name, init)),
             None => out.push_str(&format!("    public {} {};\n", ty, name)),
         }
@@ -280,7 +310,7 @@ fn emit_struct(
         out.push_str("        int token = writer.dheaderBegin();\n");
     }
     for m in &s.members {
-        emit_write(&mut out, "        ", &java_field_name(&m.name), &m.resolved_type)?;
+        emit_write(&mut out, "        ", &java_field_name(&m.name), &m.resolved_type, model)?;
     }
     if appendable {
         out.push_str("        writer.dheaderFinalize(token);\n");
@@ -293,7 +323,7 @@ fn emit_struct(
         out.push_str("        CdrReader.Dheader d = reader.readDheader();\n");
     }
     for m in &s.members {
-        emit_read(&mut out, "        ", &java_field_name(&m.name), &m.resolved_type)?;
+        emit_read(&mut out, "        ", &java_field_name(&m.name), &m.resolved_type, model)?;
     }
     if appendable {
         out.push_str("        reader.readDheaderEnd(d);\n");
@@ -303,6 +333,44 @@ fn emit_struct(
     out.push_str("}\n");
 
     Ok(GeneratedFile { relative_path: relative_path(&package, &class), source: out })
+}
+
+fn emit_enum(e: &ResolvedEnum, idl_filename: &str, opts: &JavaOptions) -> GeneratedFile {
+    let class = java_type_name(&e.name);
+    let package = package_for(opts, &e.qualified_name);
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "// Auto-generated by int2dds-idl from {}\n// DO NOT EDIT\n\n",
+        idl_filename
+    ));
+    if let Some(p) = &package {
+        out.push_str(&format!("package {};\n\n", p));
+    }
+    out.push_str(&format!("public enum {} {{\n\n", class));
+
+    for (i, v) in e.variants.iter().enumerate() {
+        let name = naming::escape_keyword(&v.name, TargetLang::Java);
+        let sep = if i + 1 == e.variants.len() { ";" } else { "," };
+        out.push_str(&format!("    {}({}){}\n", name, v.value, sep));
+    }
+
+    // The wire value is explicit, not ordinal(), so reordering the IDL cannot
+    // silently change what goes on the wire.
+    out.push_str(&format!(
+        "\n    private final int value;\n\n\
+         \x20   {class}(int value) {{\n        this.value = value;\n    }}\n\n\
+         \x20   public int value() {{\n        return value;\n    }}\n\n\
+         \x20   public static {class} fromValue(int value) {{\n\
+         \x20       for ({class} v : values()) {{\n\
+         \x20           if (v.value == value) {{\n                return v;\n            }}\n\
+         \x20       }}\n\
+         \x20       throw new IllegalArgumentException(\"unknown {class} value: \" + value);\n\
+         \x20   }}\n}}\n",
+        class = class
+    ));
+
+    GeneratedFile { relative_path: relative_path(&package, &class), source: out }
 }
 
 #[cfg(test)]
@@ -439,6 +507,48 @@ mod tests {
         let files =
             gen(r#"@extensibility(FINAL) struct S { string<256> s; };"#, &JavaOptions::default());
         assert!(files[0].source.contains("if (s.length() > 256)"), "{}", files[0].source);
+    }
+
+    #[test]
+    fn enum_becomes_a_java_enum_with_explicit_values() {
+        let files = gen(
+            r#"enum Color { RED, GREEN, BLUE };
+               @extensibility(FINAL) struct S { Color color; };"#,
+            &JavaOptions::default(),
+        );
+        assert_eq!(files.len(), 2);
+        let e = files.iter().find(|f| f.relative_path == "Color.java").unwrap();
+        assert!(e.source.contains("public enum Color {"), "{}", e.source);
+        assert!(e.source.contains("RED(0),"), "{}", e.source);
+        assert!(e.source.contains("GREEN(1),"), "{}", e.source);
+        assert!(e.source.contains("BLUE(2);"), "{}", e.source);
+        assert!(e.source.contains("public int value()"), "{}", e.source);
+        assert!(e.source.contains("public static Color fromValue(int value)"), "{}", e.source);
+    }
+
+    #[test]
+    fn enum_member_defaults_to_the_first_variant_and_uses_write_enum() {
+        let files = gen(
+            r#"enum Color { RED, GREEN };
+               @extensibility(FINAL) struct S { Color color; };"#,
+            &JavaOptions::default(),
+        );
+        let s = files.iter().find(|f| f.relative_path == "S.java").unwrap();
+        // null 이면 serializeCdr 이 NPE 를 낸다 — 첫 변형으로 초기화한다.
+        assert!(s.source.contains("public Color color = Color.RED;"), "{}", s.source);
+        assert!(s.source.contains("writer.writeEnum(color.value());"), "{}", s.source);
+        assert!(s.source.contains("color = Color.fromValue(reader.readEnum());"), "{}", s.source);
+    }
+
+    #[test]
+    fn enum_shares_the_struct_package() {
+        let files = gen(
+            r#"enum Color { RED };
+               @extensibility(FINAL) struct S { Color color; };"#,
+            &JavaOptions { package: Some("a.b".to_string()) },
+        );
+        assert!(files.iter().any(|f| f.relative_path == "a/b/Color.java"));
+        assert!(files.iter().any(|f| f.relative_path == "a/b/S.java"));
     }
 
     #[test]
