@@ -5,6 +5,7 @@ import com.intellectus.int2dds.discovery.ParticipantBuiltinTopicData;
 import com.intellectus.int2dds.discovery.PublicationBuiltinTopicData;
 import com.intellectus.int2dds.discovery.SubscriptionBuiltinTopicData;
 import com.intellectus.int2dds.exceptions.DdsErrorException;
+import com.intellectus.int2dds.exceptions.DdsException;
 import com.intellectus.int2dds.internal.NativeCleaner;
 import com.intellectus.int2dds.internal.NativeKeepAlive;
 import com.intellectus.int2dds.internal.QosMarshal;
@@ -478,6 +479,38 @@ public final class DomainParticipant extends NativeEntity {
         NativeKeepAlive.keepAlive(type);
         ReturnCodes.check(rc);
         return DynamicData.fromHandle(out[0]);
+    }
+
+    /**
+     * Blocks up to {@code timeoutMs} milliseconds (negative = indefinitely)
+     * until the XTypes TypeObject of the type used on topic {@code
+     * topicName} is discovered from a remote participant, and returns it --
+     * introspect it via {@link TypeObject}'s member methods. Throws on
+     * timeout. Requires a remote participant actually publishing a topic
+     * named {@code topicName}; a purely local topic of that name is not
+     * enough to satisfy this.
+     *
+     * @throws NullPointerException if {@code topicName} is null
+     */
+    public TypeObject waitForTypeObject(String topicName, int timeoutMs) {
+        Objects.requireNonNull(topicName, "topicName");
+        byte[] topicNameBytes = topicName.getBytes(UTF8);
+        long[] typeObjOut = new long[1];
+        long[] outLen = new long[1];
+        int cap = 256;
+        byte[] nameBuf = new byte[cap];
+        while (true) {
+            int rc = FfiAccess.participantWaitForTypeObject(
+                    handle(), topicNameBytes, timeoutMs, typeObjOut, nameBuf, outLen);
+            NativeKeepAlive.keepAlive(this);
+            if (rc == DdsException.RET_BUFFER_TOO_SMALL) {
+                cap = (int) outLen[0] + 1;
+                nameBuf = new byte[cap];
+                continue;
+            }
+            ReturnCodes.check(rc);
+            return TypeObject.fromHandle(typeObjOut[0]);
+        }
     }
 
     /**

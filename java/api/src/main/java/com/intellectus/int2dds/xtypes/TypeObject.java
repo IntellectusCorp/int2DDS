@@ -25,6 +25,16 @@ public final class TypeObject implements AutoCloseable {
         this.handle = NativeCleaner.register(this, rawHandle, TypeObject::deleteVoid);
     }
 
+    /**
+     * Wraps an already-created native TypeObject handle. Public, in the same
+     * style as {@link DynamicData#fromHandle}, so callers outside this
+     * package (namely {@code DomainParticipant}) can hand back a handle
+     * produced by a bridge such as {@link FfiAccess#participantWaitForTypeObject}.
+     */
+    public static TypeObject fromHandle(long rawHandle) {
+        return new TypeObject(rawHandle);
+    }
+
     private static int deleteVoid(long h) {
         FfiAccess.typeObjectDestroy(h);
         return 0;

@@ -18,6 +18,16 @@ public final class DynamicTypeSupport implements AutoCloseable {
         this.handle = NativeCleaner.register(this, rawHandle, DynamicTypeSupport::deleteVoid);
     }
 
+    /**
+     * Wraps an already-created native DynamicTypeSupport handle. Public, in
+     * the same style as {@link DynamicData#fromHandle}, so callers outside
+     * this package (namely {@code DomainParticipantFactory}) can hand back a
+     * handle produced by a bridge such as {@link FfiAccess#getDynamicTypeSupport}.
+     */
+    public static DynamicTypeSupport fromHandle(long rawHandle) {
+        return new DynamicTypeSupport(rawHandle);
+    }
+
     private static int deleteVoid(long h) {
         FfiAccess.dynamicTypeSupportDestroy(h);
         return 0;

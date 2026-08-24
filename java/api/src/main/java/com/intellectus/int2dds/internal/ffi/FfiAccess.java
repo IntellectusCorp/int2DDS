@@ -1805,6 +1805,39 @@ public final class FfiAccess {
         return rc;
     }
 
+    /**
+     * Waits up to {@code timeoutMs} (negative = infinite) for the TypeObject
+     * of the type used on topic {@code topicName} to be discovered, writing a
+     * TypeObject handle to {@code typeObjOut[0]} and the discovered type's
+     * fully-qualified name into {@code nameBuf} on success. {@code nameBuf}
+     * shares {@code copy_str_to_c}'s contract with {@link
+     * #typeObjectMemberName}: the needed length (excluding the NUL) is
+     * written to {@code outLen[0]} on both success and {@code
+     * RET_BUFFER_TOO_SMALL}. Unlike {@link #typeObjectMemberName}, the
+     * grow-and-retry on the name buffer is the caller's responsibility, not
+     * this bridge's -- {@code nameBuf} is caller-supplied so it can be reused
+     * or sized from a prior attempt. Never throws -- policy-free like every
+     * other bridge here.
+     */
+    public static int participantWaitForTypeObject(long participant, byte[] topicName,
+            int timeoutMs, long[] typeObjOut, byte[] nameBuf, long[] outLen) {
+        ByteBuffer typeObjSlot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        ByteBuffer outLenSlot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_participant_wait_for_type_object(participant, topicName, timeoutMs,
+                directBufferAddress(typeObjSlot), nameBuf, nameBuf.length,
+                directBufferAddress(outLenSlot));
+        NativeKeepAlive.keepAlive(typeObjSlot);
+        NativeKeepAlive.keepAlive(outLenSlot);
+        NativeKeepAlive.keepAlive(nameBuf);
+        if (rc == 0) {
+            typeObjOut[0] = typeObjSlot.getLong(0);
+            outLen[0] = outLenSlot.getLong(0);
+        } else if (rc == DdsException.RET_BUFFER_TOO_SMALL) {
+            outLen[0] = outLenSlot.getLong(0);
+        }
+        return rc;
+    }
+
     /** Decodes one i32 field out of a serialized sample. */
     public static int dynamicSampleGetI32(long bytes, long len, long typeObj,
             byte[] fieldName, long out) {
@@ -2534,6 +2567,23 @@ public final class FfiAccess {
     public static int xmlTypeRegistryGetTypeSupport(long registry, byte[] name, long[] out) {
         ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
         int rc = Ffi.int2dds_xml_type_registry_get_type_support(registry, name, directBufferAddress(slot));
+        NativeKeepAlive.keepAlive(slot);
+        if (rc == 0) {
+            out[0] = slot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Builds a DynamicTypeSupport for a type name loaded into the factory
+     * singleton via {@code loadProfiles} (a {@code <types>} XML section),
+     * writing its handle to {@code out[0]} on success. {@code
+     * RET_DYNAMIC_FIELD_NOT_FOUND} (200) for an unknown name -- the
+     * factory-singleton companion to {@link #xmlTypeRegistryGetTypeSupport}.
+     */
+    public static int getDynamicTypeSupport(byte[] typeName, long[] out) {
+        ByteBuffer slot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_get_dynamic_type_support(typeName, directBufferAddress(slot));
         NativeKeepAlive.keepAlive(slot);
         if (rc == 0) {
             out[0] = slot.getLong(0);

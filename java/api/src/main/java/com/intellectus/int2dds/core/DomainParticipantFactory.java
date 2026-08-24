@@ -2,6 +2,7 @@ package com.intellectus.int2dds.core;
 
 import com.intellectus.int2dds.internal.ReturnCodes;
 import com.intellectus.int2dds.internal.ffi.FfiAccess;
+import com.intellectus.int2dds.xtypes.DynamicTypeSupport;
 import java.nio.charset.Charset;
 import java.util.List;
 import java.util.Objects;
@@ -77,5 +78,23 @@ public final class DomainParticipantFactory {
         int rc = FfiAccess.createParticipantFromConfig(handle(), libraryPath.getBytes(UTF8), out);
         ReturnCodes.check(rc);
         return new ConfiguredParticipant(out[0]);
+    }
+
+    /**
+     * Builds a {@link DynamicTypeSupport} for {@code typeName}, a type
+     * declared in a {@code <types>} XML section previously loaded into this
+     * factory singleton via {@link #loadProfiles}. The factory-singleton
+     * companion to {@link
+     * com.intellectus.int2dds.xtypes.XmlTypeRegistry#getTypeSupport}. Throws
+     * if no such type is loaded.
+     *
+     * @throws NullPointerException if {@code typeName} is null
+     */
+    public DynamicTypeSupport getDynamicTypeSupport(String typeName) {
+        Objects.requireNonNull(typeName, "typeName");
+        long[] out = new long[1];
+        int rc = FfiAccess.getDynamicTypeSupport(typeName.getBytes(UTF8), out);
+        ReturnCodes.check(rc);
+        return DynamicTypeSupport.fromHandle(out[0]);
     }
 }
