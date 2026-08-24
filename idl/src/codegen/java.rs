@@ -47,6 +47,14 @@ fn reject_unsupported(model: &IdlModel) -> Result<(), String> {
     if let Some(b) = model.bitsets.first() {
         return Err(format!("Java backend does not support bitset '{}'", b.name));
     }
+    for e in &model.enums {
+        if e.variants.is_empty() {
+            return Err(format!(
+                "Java backend does not support enum '{}' with no variants",
+                e.name
+            ));
+        }
+    }
     for s in &model.structs {
         if s.extensibility == ExtensibilityKind::Mutable {
             return Err(format!("Java backend does not support MUTABLE struct '{}'", s.name));
@@ -566,5 +574,16 @@ mod tests {
                 .expect_err(&format!("should reject: {}", src));
             assert!(err.contains(needle), "error {:?} should mention {:?}", err, needle);
         }
+    }
+
+    #[test]
+    fn zero_variant_enum_is_refused() {
+        // An empty Java enum body has no `;` before the class members, so javac
+        // rejects it -- and enum_default would leave the field null besides.
+        let defs =
+            parse_idl(r#"enum Color { }; @extensibility(FINAL) struct S { long a; };"#).unwrap();
+        let model = resolve(defs).unwrap();
+        let err = generate(&model, "X.idl", &JavaOptions::default()).unwrap_err();
+        assert!(err.contains("Color"), "{}", err);
     }
 }
