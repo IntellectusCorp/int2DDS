@@ -1,3 +1,13 @@
+// HelloWorld.java is generated, not hand-written. To regenerate it after an
+// edit to idl/input/HelloWorld.idl, run from the repository root:
+//
+//   cargo run -p int2dds-idl -- idl/input/HelloWorld.idl \
+//       -j java/examples/src/main/java \
+//       --java-package com.intellectus.int2dds.examples
+//
+// The build does not do this itself: an example that needed a Rust toolchain
+// to compile would not be one anybody could copy.
+
 plugins {
     java
     application
