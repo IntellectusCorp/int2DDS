@@ -1,16 +1,18 @@
 <#
 .SYNOPSIS
-    Clean-build libint2dds_ffi.so for all Linux targets on Ubuntu 22.04.
+    Clean-build libint2dds_ffi.so for all Linux targets.
 
 .DESCRIPTION
-    Produces forward-compatible (glibc 2.35) Linux shared libraries for every
+    Produces forward-compatible Linux shared libraries for every
     architecture the RMW layer needs, in one run:
 
-        x86_64   -> ffi/dist/linux-x86_64/libint2dds_ffi.so
-        arm64    -> ffi/dist/linux-aarch64/libint2dds_ffi.so
-        armhf    -> ffi/dist/linux-armhf/libint2dds_ffi.so   (32-bit ARM)
+        x86_64   -> ffi/dist/linux-x86_64/libint2dds_ffi.so        (glibc 2.28, AlmaLinux 8)
+        arm64    -> ffi/dist/linux-aarch64/libint2dds_ffi.so       (glibc 2.28, AlmaLinux 8)
+        armhf    -> ffi/dist/linux-armhf/libint2dds_ffi.so         (glibc 2.35, Ubuntu 22.04, 32-bit ARM)
 
-    Built on Ubuntu 22.04 (glibc 2.35) -> runs on 22.04 AND 24.04.
+    x86_64/arm64 are built on manylinux_2_28 (AlmaLinux 8, glibc 2.28) so one
+    artifact per arch covers RHEL 8/9/10 and Ubuntu 20.04/22.04/24.04. armhf
+    has no manylinux image, so it stays on Ubuntu 22.04 (glibc 2.35).
 
     Each architecture is compiled NATIVELY inside its own-arch container
     (amd64 native; arm64/armhf via Docker Desktop's QEMU emulation), so the
@@ -73,21 +75,23 @@ function Invoke-Native {
     if ($LASTEXITCODE -ne 0) { throw "$What failed (exit $LASTEXITCODE)" }
 }
 
-# target triple-ish platform -> (docker platform, dist subdir)
-# Musl targets build from the Alpine Dockerfile.musl (native musl); gnu targets
-# from the Ubuntu Dockerfile. Each is compiled in its own-arch container.
+# target triple-ish platform -> (docker platform, dist subdir, Dockerfile, base image)
+# x86_64/aarch64 gnu build from manylinux_2_28 (AlmaLinux 8, glibc 2.28) so one
+# artifact per arch covers RHEL 8/9/10 and Ubuntu 20.04+. manylinux has no armv7
+# image, so armhf keeps its own Ubuntu 22.04 Dockerfile at floor 2.35. Musl
+# targets build from the Alpine Dockerfile.musl (native musl). Each is compiled
+# in its own-arch container.
 $Targets = @(
-    @{ Platform = "linux/amd64";  Dist = "linux-x86_64";       Musl = $false },
-    @{ Platform = "linux/arm64";  Dist = "linux-aarch64";      Musl = $false },
-    @{ Platform = "linux/arm/v7"; Dist = "linux-armhf";        Musl = $false },
-    @{ Platform = "linux/amd64";  Dist = "linux-x86_64-musl";  Musl = $true  },
-    @{ Platform = "linux/arm64";  Dist = "linux-aarch64-musl"; Musl = $true  }
+    @{ Platform = "linux/amd64";  Dist = "linux-x86_64";       File = "Dockerfile";       Base = "quay.io/pypa/manylinux_2_28_x86_64"  },
+    @{ Platform = "linux/arm64";  Dist = "linux-aarch64";      File = "Dockerfile";       Base = "quay.io/pypa/manylinux_2_28_aarch64" },
+    @{ Platform = "linux/arm/v7"; Dist = "linux-armhf";        File = "Dockerfile.armhf"; Base = $null },
+    @{ Platform = "linux/amd64";  Dist = "linux-x86_64-musl";  File = "Dockerfile.musl";  Base = $null },
+    @{ Platform = "linux/arm64";  Dist = "linux-aarch64-musl"; File = "Dockerfile.musl";  Base = $null }
 )
 if ($Only) { $Targets = $Targets | Where-Object { $Only -contains $_.Platform } }
 if (-not $Targets) { throw "No targets selected (check -Only values)." }
 
 $RepoRoot   = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
-$Dockerfile = Join-Path $PSScriptRoot "Dockerfile"
 $DistRoot   = Join-Path $RepoRoot "ffi\dist"
 
 Write-Host "Repo root : $RepoRoot"
@@ -126,15 +130,17 @@ foreach ($t in $Targets) {
 
     Write-Host "`n===== [$i/$($Targets.Count)] $plat -> ffi/dist/$dist =====" -ForegroundColor Cyan
 
-    # Pick the Dockerfile: Alpine (musl) vs Ubuntu (gnu).
-    $df = if ($t.Musl) { Join-Path $PSScriptRoot "Dockerfile.musl" } else { $Dockerfile }
+    $df = Join-Path $PSScriptRoot $t.File
+
+    # manylinux names its image per arch, so the gnu x86_64/aarch64 targets pass
+    # BASE_IMAGE. The armhf and musl Dockerfiles pin their own FROM and take none.
+    $buildArgs = @("--build-arg", "RUST_VERSION=$RustVersion")
+    if ($t.Base) { $buildArgs += @("--build-arg", "BASE_IMAGE=$($t.Base)") }
 
     # Build the per-platform toolchain image (layers cached after first run).
-    Write-Host "[build image] $tag  (from $(Split-Path $df -Leaf))" -ForegroundColor DarkCyan
+    Write-Host "[build image] $tag  (from $($t.File))" -ForegroundColor DarkCyan
     Invoke-Native -What "docker build ($plat)" -Cmd {
-        docker build --platform $plat `
-            --build-arg "RUST_VERSION=$RustVersion" `
-            -t $tag -f $df $PSScriptRoot
+        docker build --platform $plat @buildArgs -t $tag -f $df $PSScriptRoot
     }
 
     # Clean compile inside the container (ephemeral target dir).

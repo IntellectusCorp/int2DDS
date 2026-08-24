@@ -4,9 +4,9 @@
 # Bash port of build-ffi-linux.ps1 — same targets, same output layout, same
 # manifest. Runs on Linux, macOS, WSL and Git Bash; only Docker is required.
 #
-#   x86_64        -> ffi/dist/linux-x86_64/        (glibc 2.35, Ubuntu 22.04)
-#   arm64         -> ffi/dist/linux-aarch64/       (glibc 2.35)
-#   armhf         -> ffi/dist/linux-armhf/         (glibc 2.35, 32-bit ARM)
+#   x86_64        -> ffi/dist/linux-x86_64/        (glibc 2.28, AlmaLinux 8)
+#   arm64         -> ffi/dist/linux-aarch64/       (glibc 2.28, AlmaLinux 8)
+#   armhf         -> ffi/dist/linux-armhf/         (glibc 2.35, Ubuntu 22.04, 32-bit ARM)
 #   x86_64 musl   -> ffi/dist/linux-x86_64-musl/   (Alpine, no glibc)
 #   arm64 musl    -> ffi/dist/linux-aarch64-musl/  (Alpine, no glibc)
 #
@@ -91,14 +91,17 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# "<docker platform>|<dist subdir>|<libc>". Musl targets build from the Alpine
-# Dockerfile.musl (musl-native); gnu targets from the Ubuntu Dockerfile.
+# "<docker platform>|<dist subdir>|<libc>|<dockerfile>|<base image or ->".
+# x86_64/aarch64 gnu build from manylinux_2_28 (AlmaLinux 8, glibc 2.28) so one
+# artifact per arch covers RHEL 8/9/10 and Ubuntu 20.04+. manylinux has no armv7
+# image, so armhf keeps its own Ubuntu 22.04 Dockerfile at floor 2.35. Musl
+# targets build from the Alpine Dockerfile.musl (musl-native).
 ALL_TARGETS="
-linux/amd64|linux-x86_64|gnu
-linux/arm64|linux-aarch64|gnu
-linux/arm/v7|linux-armhf|gnu
-linux/amd64|linux-x86_64-musl|musl
-linux/arm64|linux-aarch64-musl|musl
+linux/amd64|linux-x86_64|gnu|Dockerfile|quay.io/pypa/manylinux_2_28_x86_64
+linux/arm64|linux-aarch64|gnu|Dockerfile|quay.io/pypa/manylinux_2_28_aarch64
+linux/arm/v7|linux-armhf|gnu|Dockerfile.armhf|-
+linux/amd64|linux-x86_64-musl|musl|Dockerfile.musl|-
+linux/arm64|linux-aarch64-musl|musl|Dockerfile.musl|-
 "
 
 in_only() {  # $1 = candidate; true when ONLY is empty or contains it
@@ -226,17 +229,21 @@ RESULTS=()
 i=0
 for entry in "${TARGETS[@]}"; do
   i=$((i + 1))
-  plat="${entry%%|*}"; rest="${entry#*|}"; dist="${rest%%|*}"; libc="${rest#*|}"
+  IFS='|' read -r plat dist libc dfname base <<< "$entry"
   tag="int2dds-ffi-builder:$dist"
-  if [ "$libc" = "musl" ]; then df="$SCRIPT_DIR/Dockerfile.musl"; else df="$SCRIPT_DIR/Dockerfile"; fi
+  df="$SCRIPT_DIR/$dfname"
+
+  # manylinux names its image per arch, so the gnu x86_64/aarch64 targets pass
+  # BASE_IMAGE. The armhf and musl Dockerfiles pin their own FROM and take none.
+  build_args=(--build-arg "RUST_VERSION=$RUST_VERSION")
+  [ "$base" = "-" ] || build_args+=(--build-arg "BASE_IMAGE=$base")
 
   echo
   echo "===== [$i/${#TARGETS[@]}] $plat -> ffi/dist/$dist ====="
 
   # Build the per-platform toolchain image (layers cached after the first run).
-  echo "[build image] $tag  (from $(basename "$df"))"
-  docker build --platform "$plat" \
-    --build-arg "RUST_VERSION=$RUST_VERSION" \
+  echo "[build image] $tag  (from $dfname)"
+  docker build --platform "$plat" "${build_args[@]}" \
     -t "$tag" -f "$df" "$SCRIPT_DIR" \
     || die "docker build failed for $plat"
 
@@ -291,7 +298,7 @@ date_str="$(date +%Y-%m-%d)"
 # pointlessly emulating the packaging step.
 pkg_dist=""; pkg_plat=""; pkg_score=-1
 for entry in "${TARGETS[@]}"; do
-  plat="${entry%%|*}"; rest="${entry#*|}"; dist="${rest%%|*}"; libc="${rest#*|}"
+  IFS='|' read -r plat dist libc dfname base <<< "$entry"
   score=0
   [ "$libc" = "gnu" ] && score=$((score + 2))
   [ "$plat" = "$HOST_PLATFORM" ] && score=$((score + 1))
