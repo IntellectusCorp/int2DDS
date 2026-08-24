@@ -1843,16 +1843,96 @@ public final class FfiAccess {
         return rc;
     }
 
+    /** Decodes one bool field out of a serialized sample. */
+    public static int dynamicSampleGetBool(long bytes, long len, long typeObj,
+            byte[] fieldName, long out) {
+        return Ffi.int2dds_dynamic_sample_get_bool(bytes, len, typeObj, fieldName, out);
+    }
+
+    /** Decodes one int8 field out of a serialized sample. */
+    public static int dynamicSampleGetI8(long bytes, long len, long typeObj,
+            byte[] fieldName, long out) {
+        return Ffi.int2dds_dynamic_sample_get_i8(bytes, len, typeObj, fieldName, out);
+    }
+
+    /** Decodes one uint8 field out of a serialized sample. */
+    public static int dynamicSampleGetU8(long bytes, long len, long typeObj,
+            byte[] fieldName, long out) {
+        return Ffi.int2dds_dynamic_sample_get_u8(bytes, len, typeObj, fieldName, out);
+    }
+
+    /** Decodes one byte (octet) field out of a serialized sample. */
+    public static int dynamicSampleGetByte(long bytes, long len, long typeObj,
+            byte[] fieldName, long out) {
+        return Ffi.int2dds_dynamic_sample_get_byte(bytes, len, typeObj, fieldName, out);
+    }
+
+    /** Decodes one int16 field out of a serialized sample. */
+    public static int dynamicSampleGetI16(long bytes, long len, long typeObj,
+            byte[] fieldName, long out) {
+        return Ffi.int2dds_dynamic_sample_get_i16(bytes, len, typeObj, fieldName, out);
+    }
+
+    /** Decodes one uint16 field out of a serialized sample. */
+    public static int dynamicSampleGetU16(long bytes, long len, long typeObj,
+            byte[] fieldName, long out) {
+        return Ffi.int2dds_dynamic_sample_get_u16(bytes, len, typeObj, fieldName, out);
+    }
+
     /** Decodes one i32 field out of a serialized sample. */
     public static int dynamicSampleGetI32(long bytes, long len, long typeObj,
             byte[] fieldName, long out) {
         return Ffi.int2dds_dynamic_sample_get_i32(bytes, len, typeObj, fieldName, out);
     }
 
+    /** Decodes one uint32 field out of a serialized sample. */
+    public static int dynamicSampleGetU32(long bytes, long len, long typeObj,
+            byte[] fieldName, long out) {
+        return Ffi.int2dds_dynamic_sample_get_u32(bytes, len, typeObj, fieldName, out);
+    }
+
+    /** Decodes one int64 field out of a serialized sample. */
+    public static int dynamicSampleGetI64(long bytes, long len, long typeObj,
+            byte[] fieldName, long out) {
+        return Ffi.int2dds_dynamic_sample_get_i64(bytes, len, typeObj, fieldName, out);
+    }
+
+    /** Decodes one uint64 field out of a serialized sample. */
+    public static int dynamicSampleGetU64(long bytes, long len, long typeObj,
+            byte[] fieldName, long out) {
+        return Ffi.int2dds_dynamic_sample_get_u64(bytes, len, typeObj, fieldName, out);
+    }
+
+    /** Decodes one float32 field out of a serialized sample. */
+    public static int dynamicSampleGetF32(long bytes, long len, long typeObj,
+            byte[] fieldName, long out) {
+        return Ffi.int2dds_dynamic_sample_get_f32(bytes, len, typeObj, fieldName, out);
+    }
+
     /** Decodes one f64 field out of a serialized sample. */
     public static int dynamicSampleGetF64(long bytes, long len, long typeObj,
             byte[] fieldName, long out) {
         return Ffi.int2dds_dynamic_sample_get_f64(bytes, len, typeObj, fieldName, out);
+    }
+
+    /** Decodes one char8 field out of a serialized sample. */
+    public static int dynamicSampleGetChar8(long bytes, long len, long typeObj,
+            byte[] fieldName, long out) {
+        return Ffi.int2dds_dynamic_sample_get_char8(bytes, len, typeObj, fieldName, out);
+    }
+
+    /**
+     * Decodes one string field out of a serialized sample into {@code
+     * outBuf}, writing the copied length (excluding the NUL) to the native
+     * address {@code outLenAddr}. Thin passthrough sharing {@code
+     * copy_str_to_c}'s grow-and-retry contract with {@link
+     * #typeObjectMemberName}: the caller drives the retry on {@code
+     * RET_BUFFER_TOO_SMALL}.
+     */
+    public static int dynamicSampleGetString(long bytes, long len, long typeObj,
+            byte[] fieldName, byte[] outBuf, long bufCap, long outLenAddr) {
+        return Ffi.int2dds_dynamic_sample_get_string(
+                bytes, len, typeObj, fieldName, outBuf, bufCap, outLenAddr);
     }
 
     // --- DynamicData (handle-based, xtypes read path) ---
