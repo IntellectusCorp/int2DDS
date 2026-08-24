@@ -40,6 +40,11 @@ public final class FfiAccess {
         return Ffi.int2dds_last_error_message(buf, buf.length);
     }
 
+    /** Clears this thread's last-error message. */
+    public static void clearLastError() {
+        Ffi.int2dds_clear_last_error();
+    }
+
     /** Native address of a direct ByteBuffer, or 0 if the buffer is not direct. */
     public static long directBufferAddress(ByteBuffer buf) {
         return Ffi.directBufferAddress(buf);

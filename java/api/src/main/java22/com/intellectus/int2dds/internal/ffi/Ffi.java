@@ -40,6 +40,16 @@ public final class Ffi {
         return MemorySegment.ofBuffer(buf).address();
     }
 
+    private static final MethodHandle MH_int2dds_clear_last_error = dc("int2dds_clear_last_error", FunctionDescriptor.ofVoid());
+
+    static void int2dds_clear_last_error() {
+        try {
+            MH_int2dds_clear_last_error.invokeExact();
+        } catch (Throwable __ffi_thrown) {
+            throw new AssertionError("FFM downcall failed: int2dds_clear_last_error", __ffi_thrown);
+        }
+    }
+
     private static final MethodHandle MH_int2dds_condition_delete = dc("int2dds_condition_delete", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
     static int int2dds_condition_delete(long condition) {

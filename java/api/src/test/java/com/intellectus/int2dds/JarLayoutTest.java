@@ -29,11 +29,11 @@ class JarLayoutTest {
 
     @Test
     void ffiDeclaresTheFullGeneratedSurface() {
-        // 453 generated natives + directBufferAddress.
+        // 454 generated natives + directBufferAddress.
         long natives = java.util.Arrays.stream(Ffi.class.getDeclaredMethods())
                 .filter(m -> java.lang.reflect.Modifier.isNative(m.getModifiers()))
                 .count();
-        assertEquals(454, natives, "generated native method count");
+        assertEquals(455, natives, "generated native method count");
     }
 
     @Test

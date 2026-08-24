@@ -29,10 +29,14 @@ class FfiSmokeTest {
 
     @Test
     void writesIntoAByteArrayOutParameter() {
+        // The last-error slot is a per-thread global that any earlier
+        // negative-path test on this thread may have left set; clear it first
+        // so this asserts the genuine no-error behavior, not test ordering.
+        FfiAccess.clearLastError();
         // With no error recorded, the FFI writes "" and returns length 0.
         byte[] buf = new byte[256];
         int len = FfiAccess.lastErrorMessage(buf);
-        assertEquals(0, len, "expected no pending error at test start");
+        assertEquals(0, len, "expected no pending error after clear");
     }
 
     @Test

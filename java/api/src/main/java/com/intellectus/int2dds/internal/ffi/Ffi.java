@@ -20,6 +20,7 @@ public final class Ffi {
     /** Native address of a direct ByteBuffer, or 0 if not direct. */
     static native long directBufferAddress(java.nio.ByteBuffer buf);
 
+    static native void int2dds_clear_last_error();
     static native int int2dds_condition_delete(long condition);
     static native int int2dds_condition_get_trigger_value(long condition, long triggered_out);
     static native int int2dds_condition_seq_delete(long seq);

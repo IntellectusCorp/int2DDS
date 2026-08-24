@@ -9,6 +9,16 @@ use jni::sys::{jboolean, jdouble, jfloat, jint, jlong};
 use jni::JNIEnv;
 
 #[no_mangle]
+pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1clear_1last_1error<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+) {
+    unsafe { int2dds_ffi::last_error::int2dds_clear_last_error() };
+}
+
+#[no_mangle]
 pub extern "system" fn Java_com_intellectus_int2dds_internal_ffi_Ffi_int2dds_1condition_1delete<
     'local,
 >(
