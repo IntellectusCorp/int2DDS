@@ -417,6 +417,85 @@ fn xml_collections_pubsub_loopback() {
     DomainParticipantFactory::get_instance().delete_participant(guard._participant).unwrap();
 }
 
+// A dynamic reader's filters must actually evaluate: `DdsType::has_field` answers
+// from the sample's own type, so a CFT drops non-matching samples and a
+// QueryCondition matches instead of skipping every sample.
+#[test]
+fn xml_dynamic_reader_filters_are_active() {
+    let registry = load(
+        r#"<types><struct name="Scored">
+             <member name="id" type="int32" key="true"/>
+             <member name="score" type="int32"/>
+           </struct></types>"#,
+    );
+    let support = Arc::new(registry.get("Scored").unwrap());
+
+    let (writer, reader, guard) = dynamic_loopback("ScoredTopic", &support);
+
+    let cft = guard
+        ._participant
+        .create_contentfilteredtopic::<DynamicData>(
+            "ScoredFiltered",
+            &guard._topic,
+            "score > 5",
+            vec![],
+        )
+        .unwrap();
+    let cft_reader = guard
+        ._subscriber
+        .create_datareader_dynamic(
+            &cft,
+            support.clone(),
+            DataReaderQos::default(),
+            None,
+            StatusMask::default(),
+        )
+        .unwrap();
+    wait_for_reader_status(
+        &cft_reader,
+        StatusMask::SUBSCRIPTION_MATCHED,
+        Duration::from_seconds(5),
+    )
+    .unwrap();
+
+    for (id, score) in [(1i32, 3i32), (2, 10)] {
+        let mut data = support.create_data();
+        data.set("id", id).unwrap();
+        data.set("score", score).unwrap();
+        writer.write(&data, InstanceHandle::NIL).unwrap();
+    }
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
+    let qc = reader
+        .create_querycondition(
+            &[SampleStateKind::ANY_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::ANY_INSTANCE_STATE],
+            "score > 5",
+            vec![],
+        )
+        .unwrap();
+    let matched = reader.read_w_condition(10, qc).unwrap();
+    let ids: Vec<i32> =
+        matched.iter().map(|s| s.data().unwrap().get::<i32>("id").unwrap()).collect();
+    assert_eq!(ids, vec![2]);
+
+    let filtered = cft_reader
+        .take(
+            10,
+            &[SampleStateKind::ANY_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::ANY_INSTANCE_STATE],
+        )
+        .unwrap();
+    let ids: Vec<i32> =
+        filtered.iter().map(|s| s.data().unwrap().get::<i32>("id").unwrap()).collect();
+    assert_eq!(ids, vec![2]);
+
+    guard._participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance().delete_participant(guard._participant).unwrap();
+}
+
 #[test]
 fn xml_map_pubsub_loopback() {
     let registry = load(

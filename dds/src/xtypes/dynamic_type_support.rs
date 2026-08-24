@@ -174,23 +174,21 @@ impl FieldAccessor for DynamicTypeSupport {
             .downcast_ref::<DynamicData>()
             .ok_or_else(|| DdsError::Error("Expected DynamicData type".to_string()))?;
 
-        let value = dynamic_data
-            .get_value(field_path)
-            .ok_or_else(|| DdsError::Error(format!("Field not found: {}", field_path)))?;
-
-        dynamic_value_to_parameter(value)
+        match dynamic_data.get_value(field_path) {
+            Some(value) => dynamic_value_to_parameter(value),
+            // A member the type has but this sample carries no value for is
+            // absence, not an error: comparisons involving it evaluate false.
+            None if !field_path.contains('.')
+                && dynamic_data.dynamic_type().get_member(field_path).is_some() =>
+            {
+                Ok(Parameter::Unset)
+            }
+            None => Err(DdsError::Error(format!("Field not found: {}", field_path))),
+        }
     }
 
     fn has_field(&self, field_path: &str) -> bool {
-        if let Some(struct_desc) = self.dynamic_type.as_struct() {
-            let parts: Vec<&str> = field_path.split('.').collect();
-            if parts.is_empty() {
-                return false;
-            }
-            struct_desc.get_member(parts[0]).is_some()
-        } else {
-            false
-        }
+        dynamic_type_has_field(&self.dynamic_type, field_path)
     }
 }
 
@@ -334,6 +332,20 @@ impl DdsType for DynamicData {
     fn get_type_name() -> String {
         "DynamicData".to_string()
     }
+
+    fn has_field(&self, field_path: &str) -> DdsResult<bool> {
+        // The default routes through FieldAccessor::default(), an empty
+        // placeholder that knows no members; answer from this instance's type.
+        Ok(dynamic_type_has_field(self.dynamic_type(), field_path))
+    }
+}
+
+/// Shallow member-existence check shared by the accessor and the per-instance
+/// `DdsType::has_field` override: only the first path segment is validated,
+/// matching what the runtime field read can actually resolve.
+fn dynamic_type_has_field(dynamic_type: &DynamicType, field_path: &str) -> bool {
+    let first = field_path.split('.').next().unwrap_or(field_path);
+    dynamic_type.get_member(first).is_some()
 }
 
 /// Convert DynamicValue to SQL Parameter for content filtering.
@@ -449,6 +461,19 @@ mod tests {
         assert!(type_support.has_field("id"));
         assert!(type_support.has_field("message"));
         assert!(!type_support.has_field("nonexistent"));
+
+        // The DdsType instance method must answer from the instance's own type,
+        // not the empty placeholder FieldAccessor::default().
+        let data = type_support.create_data();
+        assert!(DdsType::has_field(&data, "message").unwrap());
+        assert!(!DdsType::has_field(&data, "nonexistent").unwrap());
+
+        // A member with no value reads as Unset; an unknown field stays an error.
+        assert!(matches!(
+            type_support.get_field_value(&data as &dyn Any, "message"),
+            Ok(Parameter::Unset)
+        ));
+        assert!(type_support.get_field_value(&data as &dyn Any, "nonexistent").is_err());
     }
 
     #[test]
