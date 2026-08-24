@@ -107,6 +107,10 @@ public final class ReturnCodes {
             case DdsException.RET_ERROR:
                 return new DdsErrorException(lastErrorMessage());
             case DdsException.RET_TIMEOUT:
+            case DdsException.RET_DYNAMIC_TIMEOUT:
+                // The dynamic (XTypes) timeout (e.g. waitForTypeObject) is a
+                // timeout too — surface it as DdsTimeoutException so callers can
+                // catch it the same way as any other timeout.
                 return new DdsTimeoutException();
             case DdsException.RET_UNSUPPORTED:
                 return new DdsUnsupportedException();

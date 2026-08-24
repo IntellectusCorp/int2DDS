@@ -97,4 +97,11 @@ class QosProfileTest {
                     () -> pub.createDataWriter(topic, "JavaTestLib_QosProfile::NoSuchProfile"));
         }
     }
+
+    @Test
+    void loadProfilesRejectsANullPathElement() {
+        assertThrows(NullPointerException.class,
+                () -> DomainParticipantFactory.getInstance()
+                        .loadProfiles(java.util.Arrays.asList("some.json", null)));
+    }
 }

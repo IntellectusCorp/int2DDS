@@ -368,14 +368,22 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
      *
      * @param cdr the full serialized sample, encapsulation header included
      * @param timestampNanos the source timestamp as epoch nanoseconds, e.g.
-     *     from {@link DomainParticipant#getCurrentTime()}
+     *     from {@link DomainParticipant#getCurrentTime()}. Must be
+     *     non-negative. The C ABI carries the seconds field as a signed 32-bit
+     *     int, so a timestamp at or beyond 2038-01-19 03:14:08 UTC wraps —
+     *     values within that range are exact.
      * @throws NullPointerException if {@code cdr} is null
+     * @throws IllegalArgumentException if {@code timestampNanos} is negative
      */
     public void writeSerialized(byte[] cdr, long timestampNanos) {
         Objects.requireNonNull(cdr, "cdr");
+        if (timestampNanos < 0) {
+            throw new IllegalArgumentException(
+                    "timestampNanos must be non-negative epoch nanoseconds: " + timestampNanos);
+        }
         long h = handle();
-        // The C ABI's timestamp_sec is a 32-bit int, so a timestamp beyond
-        // year 2038 truncates; timestamp_nanosec is the sub-second remainder.
+        // timestampNanos >= 0, so nanosec lands in [0, 1e9). timestamp_sec is a
+        // signed 32-bit int in the C ABI, so a timestamp at/after 2038 wraps.
         int sec = (int) (timestampNanos / 1_000_000_000L);
         int nanosec = (int) (timestampNanos % 1_000_000_000L);
         ByteBuffer buf = ByteBuffer.allocateDirect(cdr.length).order(ByteOrder.nativeOrder());

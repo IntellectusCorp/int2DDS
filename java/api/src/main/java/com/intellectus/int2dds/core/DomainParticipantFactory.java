@@ -55,7 +55,7 @@ public final class DomainParticipantFactory {
         Objects.requireNonNull(paths, "paths");
         byte[][] pathBytes = new byte[paths.size()][];
         for (int i = 0; i < paths.size(); i++) {
-            pathBytes[i] = paths.get(i).getBytes(UTF8);
+            pathBytes[i] = Objects.requireNonNull(paths.get(i), "paths[" + i + "]").getBytes(UTF8);
         }
         int rc = FfiAccess.loadProfiles(pathBytes, pathBytes.length);
         ReturnCodes.check(rc);

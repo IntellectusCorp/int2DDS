@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.intellectus.int2dds.exceptions.DdsException;
+import com.intellectus.int2dds.exceptions.DdsTimeoutException;
 import com.intellectus.int2dds.xtypes.DynamicData;
 import com.intellectus.int2dds.xtypes.DynamicDataWriter;
 import com.intellectus.int2dds.xtypes.DynamicTopic;
@@ -79,7 +80,9 @@ class XTypesDiscoveryTest {
     @Test
     void waitForTypeObjectTimesOutOnUnknownTopic() {
         try (DomainParticipant participant = new DomainParticipant(testDomain())) {
-            assertThrows(DdsException.class,
+            // A timeout must surface as DdsTimeoutException, the same type
+            // findTopic's timeout throws -- not a bare DdsException.
+            assertThrows(DdsTimeoutException.class,
                     () -> participant.waitForTypeObject("XTDNoSuchTopic", 200));
         }
     }

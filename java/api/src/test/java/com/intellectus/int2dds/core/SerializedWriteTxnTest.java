@@ -171,4 +171,18 @@ class SerializedWriteTxnTest {
             buf.close();
         }
     }
+
+    @Test
+    void writeSerializedRejectsANegativeTimestamp() {
+        try (DomainParticipant p = new DomainParticipant(testDomain())) {
+            Topic<ConformanceRecord> topic =
+                    p.createTopic("SerializedWriteTxnNegTs", new ConformanceRecord());
+            Publisher pub = p.createPublisher();
+            DataWriter<ConformanceRecord> w = pub.createDataWriter(topic);
+            // A negative timestamp would marshal a negative nanosec into the
+            // native u32 field; reject it before that can happen.
+            assertThrows(IllegalArgumentException.class,
+                    () -> w.writeSerialized(new byte[] {0, 1, 0, 0}, -1L));
+        }
+    }
 }
