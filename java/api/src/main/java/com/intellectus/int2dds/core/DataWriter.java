@@ -389,6 +389,41 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
         ReturnCodes.check(rc);
     }
 
+    /**
+     * Prepares a DDS-owned buffer of at least {@code capacity} bytes for a
+     * zero-copy transactional serialized write: write the sample's CDR
+     * (encapsulation header included) into the returned {@link
+     * SerializedWriteBuffer#buffer()}, then {@link SerializedWriteBuffer#commit()}
+     * to publish it, or let a try-with-resources close it without committing
+     * to abort. The copy-based alternative is {@link #writeSerialized}, which
+     * takes ownership of a caller-built {@code byte[]} instead of writing
+     * into DDS-owned memory directly.
+     *
+     * @param capacity minimum number of bytes the buffer must hold
+     * @throws IllegalArgumentException if {@code capacity <= 0}
+     * @throws com.intellectus.int2dds.exceptions.DdsException if the native
+     *     prepare fails
+     */
+    public SerializedWriteBuffer prepareSerializedWrite(int capacity) {
+        if (capacity <= 0) {
+            throw new IllegalArgumentException("capacity must be > 0: " + capacity);
+        }
+        long h = handle();
+        long[] d = new long[1];
+        long[] c = new long[1];
+        long[] l = new long[1];
+        int rc = FfiAccess.datawriterPrepareSerializedWrite(h, capacity, d, c, l);
+        NativeKeepAlive.keepAlive(this);
+        ReturnCodes.check(rc);
+        ByteBuffer bb = FfiAccess.addressToDirectByteBuffer(d[0], c[0]);
+        if (bb == null) {
+            FfiAccess.datawriterAbortSerializedWrite(l[0]);
+            throw new DdsErrorException("failed to map the prepared write buffer");
+        }
+        bb.order(ByteOrder.nativeOrder());
+        return new SerializedWriteBuffer(this, l[0], bb);
+    }
+
     /** 16 zero bytes: the NIL instance handle, used to let the core derive an instance from its key. */
     private static final byte[] NIL_HANDLE = new byte[16];
 

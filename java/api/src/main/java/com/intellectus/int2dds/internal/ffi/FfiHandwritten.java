@@ -64,4 +64,17 @@ public final class FfiHandwritten {
      * stays package-private.
      */
     public static native byte[] nativeVersion();
+
+    /**
+     * Wraps the {@code cap}-byte region at native address {@code addr} as a
+     * direct {@link java.nio.ByteBuffer}, the reverse of {@code
+     * Ffi.directBufferAddress}. Used to expose the DDS-owned buffer {@code
+     * int2dds_datawriter_prepare_serialized_write} returns as an address
+     * rather than a {@code JByteBuffer} -- the FFM backend can do this in
+     * pure Java, the JNI backend cannot, hence this hand-written helper.
+     * Returns {@code null} on failure; callers must reject a null result. The
+     * returned buffer is valid only until the loan it came from is committed
+     * or aborted.
+     */
+    static native java.nio.ByteBuffer addressToDirectByteBuffer(long addr, long cap);
 }

@@ -46,6 +46,17 @@ public final class FfiAccess {
     }
 
     /**
+     * Wraps the {@code cap}-byte region at native address {@code addr} as a
+     * direct {@link ByteBuffer}, the reverse of {@link
+     * #directBufferAddress}. Returns {@code null} on failure. Policy-free
+     * passthrough to {@link FfiHandwritten}, exposed here so callers outside
+     * this package (e.g. {@code core.DataWriter}) can reach it.
+     */
+    public static ByteBuffer addressToDirectByteBuffer(long addr, long cap) {
+        return FfiHandwritten.addressToDirectByteBuffer(addr, cap);
+    }
+
+    /**
      * Creates a dynamic value holding {@code value}, writing the handle to the
      * native address {@code out}, which must be at least 8 bytes.
      */
@@ -998,6 +1009,57 @@ public final class FfiAccess {
             int tsSec, int tsNanosec) {
         return Ffi.int2dds_datawriter_write_serialized_w_timestamp(
                 writer, data, dataLen, tsSec, tsNanosec);
+    }
+
+    /**
+     * Prepares a DDS-owned, at-least-{@code capacity}-byte write buffer for a
+     * zero-copy serialized write. On {@code RET_OK} writes the buffer's
+     * native address to {@code dataOut[0]}, its actual capacity to {@code
+     * capOut[0]} (may exceed {@code capacity}), and the loan handle to {@code
+     * loanOut[0]}; on any other code the three arrays are left untouched and
+     * there is no loan to release. Three 8-byte out-slots, one call, the same
+     * multi-out shape {@link #participantGetCurrentTime} uses for two.
+     */
+    public static int datawriterPrepareSerializedWrite(
+            long writer, long capacity, long[] dataOut, long[] capOut, long[] loanOut) {
+        ByteBuffer dataSlot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        ByteBuffer capSlot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        ByteBuffer loanSlot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+        int rc = Ffi.int2dds_datawriter_prepare_serialized_write(writer, capacity,
+                directBufferAddress(dataSlot), directBufferAddress(capSlot),
+                directBufferAddress(loanSlot));
+        // Same fence as createParticipant's slot -- all three were only
+        // handed off by native address above.
+        NativeKeepAlive.keepAlive(dataSlot);
+        NativeKeepAlive.keepAlive(capSlot);
+        NativeKeepAlive.keepAlive(loanSlot);
+        if (rc == 0) {
+            dataOut[0] = dataSlot.getLong(0);
+            capOut[0] = capSlot.getLong(0);
+            loanOut[0] = loanSlot.getLong(0);
+        }
+        return rc;
+    }
+
+    /**
+     * Publishes {@code actualSize} bytes from a loan {@link
+     * #datawriterPrepareSerializedWrite} returned. On {@code RET_OK} the loan
+     * is consumed and freed natively -- the caller must not abort it
+     * afterward. On any other code the loan remains valid and must be
+     * released with {@link #datawriterAbortSerializedWrite} exactly once.
+     */
+    public static int datawriterCommitSerializedWrite(long writer, long loan, long actualSize) {
+        return Ffi.int2dds_datawriter_commit_serialized_write(writer, loan, actualSize);
+    }
+
+    /**
+     * Frees a loan from {@link #datawriterPrepareSerializedWrite} without
+     * publishing it. Must not be called twice on the same loan, and must not
+     * be called on a loan already consumed by a successful {@link
+     * #datawriterCommitSerializedWrite}.
+     */
+    public static int datawriterAbortSerializedWrite(long loan) {
+        return Ffi.int2dds_datawriter_abort_serialized_write(loan);
     }
 
     /**
