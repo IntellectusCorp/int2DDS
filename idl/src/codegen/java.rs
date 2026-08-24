@@ -78,6 +78,14 @@ fn reject_unsupported(model: &IdlModel) -> Result<(), String> {
                     s.name, m.name
                 ));
             }
+            // Java CdrWriter/CdrReader 는 wstring 길이에 NUL 종단자를 포함하지만
+            // Rust 코어는 포함하지 않는다. 인코딩 합의 전까지 거절한다.
+            if mentions_wstring(&m.resolved_type) {
+                return Err(format!(
+                    "Java backend does not support wstring member '{}.{}'",
+                    s.name, m.name
+                ));
+            }
             if let ResolvedType::Sequence { element, .. } | ResolvedType::Array { element, .. } =
                 &m.resolved_type
             {
@@ -94,6 +102,17 @@ fn reject_unsupported(model: &IdlModel) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// True for `wstring` and for a collection whose element is one.
+fn mentions_wstring(t: &ResolvedType) -> bool {
+    match t {
+        ResolvedType::WString { .. } => true,
+        ResolvedType::Sequence { element, .. } | ResolvedType::Array { element, .. } => {
+            mentions_wstring(element)
+        }
+        _ => false,
+    }
 }
 
 // ---- naming ----------------------------------------------------------------
@@ -311,7 +330,6 @@ fn emit_write(
             }
             format!("writer.writeString({});", expr)
         }
-        ResolvedType::WString { .. } => format!("writer.writeWString({});", expr),
         ResolvedType::Enum(_) => format!("writer.writeEnum({}.value());", expr),
         other => return Err(format!("unsupported member type in write: {:?}", other)),
     };
@@ -392,7 +410,6 @@ fn emit_read(
         ResolvedType::F64 => "reader.readF64()".to_string(),
         ResolvedType::WChar => "(char) reader.readU16()".to_string(),
         ResolvedType::String { .. } => "reader.readString()".to_string(),
-        ResolvedType::WString { .. } => "reader.readWString()".to_string(),
         ResolvedType::Enum(n) => format!("{}.fromValue(reader.readEnum())", java_type_name(n)),
         other => return Err(format!("unsupported member type in read: {:?}", other)),
     };
@@ -871,6 +888,33 @@ mod tests {
                 .expect_err(&format!("should reject: {}", src));
             assert!(err.contains(needle), "error {:?} should mention {:?}", err, needle);
         }
+    }
+
+    #[test]
+    fn wstring_is_refused_by_member_name() {
+        // Java 의 writeWString/readWString 은 uint32 길이에 NUL 을 세지만 Rust
+        // 코어는 세지 않는다. 그대로 두면 조용히 한 글자가 잘린다.
+        for src in [
+            r#"@extensibility(FINAL) struct W { wstring ws; long tail; };"#,
+            r#"@extensibility(FINAL) struct W { sequence<wstring> ws; };"#,
+            r#"@extensibility(FINAL) struct W { wstring ws[2]; };"#,
+        ] {
+            let defs = parse_idl(src).unwrap();
+            let model = resolve(defs).unwrap();
+            let err = generate(&model, "W.idl", &JavaOptions::default())
+                .expect_err("should reject wstring");
+            assert!(err.contains("wstring member 'W.ws'"), "{}", err);
+        }
+    }
+
+    #[test]
+    fn wchar_still_round_trips() {
+        // wchar 는 코어와 바이트 단위로 일치한다 — wstring 만 막는다.
+        let files = gen(r#"@extensibility(FINAL) struct S { wchar c; };"#, &JavaOptions::default());
+        let src = &files[0].source;
+        assert!(src.contains("public char c;"), "{}", src);
+        assert!(src.contains("writer.writeU16(c);"), "{}", src);
+        assert!(src.contains("c = (char) reader.readU16();"), "{}", src);
     }
 
     #[test]
