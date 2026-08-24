@@ -633,6 +633,53 @@ mod tests {
     }
 
     #[test]
+    fn every_corpus_file_generates_one_java_file_per_top_level_type() {
+        // Paths are relative to the crate root (idl/).
+        let expected: &[(&str, &[&str])] = &[
+            ("Arrays.idl", &["ArraysType.java"]),
+            (
+                "Complex_Arrays.idl",
+                &["Point2D.java", "ArrayElement.java", "ComplexArraysType.java"],
+            ),
+            ("Enum.idl", &["Color.java", "StatusKind.java", "EnumType.java"]),
+            ("Floats.idl", &["FloatsType.java"]),
+            ("HelloWorld.idl", &["HelloWorld.java"]),
+            ("Integers.idl", &["IntegersType.java"]),
+            ("LatencyTestData.idl", &["LatencyTestData.java"]),
+            (
+                "Nested_Structs.idl",
+                &[
+                    "InnerStruct.java",
+                    "DeepInnerStruct.java",
+                    "MiddleStruct.java",
+                    "NestedStructType.java",
+                ],
+            ),
+            ("PerformanceTestData.idl", &["PerformanceTestData.java"]),
+            ("Primitives.idl", &["PrimitivesType.java"]),
+            ("Sequence_Enum.idl", &["Color.java", "SequenceEnumType.java"]),
+            ("Sequences.idl", &["SequencesType.java"]),
+            ("Strings.idl", &["StringsType.java"]),
+            ("Tuple_Structs.idl", &["Point2D.java", "Point3D.java", "TupleStructType.java"]),
+        ];
+
+        for (file, want) in expected {
+            let src = std::fs::read_to_string(format!("input/{}", file))
+                .unwrap_or_else(|e| panic!("cannot read input/{}: {}", file, e));
+            let defs = parse_idl(&src).unwrap_or_else(|e| panic!("{}: parse: {:?}", file, e));
+            let model = resolve(defs).unwrap_or_else(|e| panic!("{}: resolve: {:?}", file, e));
+            let files = generate(&model, file, &JavaOptions::default())
+                .unwrap_or_else(|e| panic!("{}: generate: {}", file, e));
+
+            let mut got: Vec<&str> = files.iter().map(|f| f.relative_path.as_str()).collect();
+            let mut want: Vec<&str> = want.to_vec();
+            got.sort();
+            want.sort();
+            assert_eq!(got, want, "{}", file);
+        }
+    }
+
+    #[test]
     fn unnamed_package_emits_flat_file_with_no_package_line() {
         let files = gen(
             r#"struct HelloWorld { unsigned long index; string message; };"#,
