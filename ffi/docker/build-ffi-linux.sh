@@ -12,7 +12,7 @@
 #
 # Each architecture is compiled NATIVELY inside its own-arch container: the
 # host's own arch runs native, the rest run under QEMU emulation, so the
-# aws-lc-sys / ring crypto crates build exactly as on real hardware.
+# ring crypto crate builds exactly as on real hardware.
 #
 # Every run is a CLEAN build: ffi/dist is wiped first and the in-container
 # Cargo target dir is ephemeral, so nothing is cached between runs.
@@ -27,7 +27,7 @@
 #       ├── libint2dds_ffi.so.<major> -> libint2dds_ffi.so.<ver>    (soname symlink)
 #       └── libint2dds_ffi.so.<ver>                                 (real file)
 #
-# NOTE: emulated builds are slow (aws-lc-rs + ring under QEMU). Expect ~3 min
+# NOTE: emulated builds are slow (ring under QEMU). Expect ~3 min
 # native, ~15 min arm64, ~23 min armhf.
 set -euo pipefail
 
@@ -293,9 +293,10 @@ commit="$(git -C "$REPO_ROOT" rev-parse --short HEAD)"
 date_str="$(date +%Y-%m-%d)"
 
 # Any builder image carries binutils/tar/coreutils. Score the built images and
-# pick the best packaging host: the Ubuntu (gnu) images carry full GNU coreutils
-# where the Alpine ones only have busybox, and a natively-running image avoids
-# pointlessly emulating the packaging step.
+# pick the best packaging host: the gnu images (AlmaLinux 8 for x86_64/arm64,
+# Ubuntu 22.04 for armhf) carry full GNU coreutils where the Alpine ones only
+# have busybox, and a natively-running image avoids pointlessly emulating the
+# packaging step.
 pkg_dist=""; pkg_plat=""; pkg_score=-1
 for entry in "${TARGETS[@]}"; do
   IFS='|' read -r plat dist libc dfname base <<< "$entry"

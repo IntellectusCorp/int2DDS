@@ -2,9 +2,11 @@
 
 Build scripts that produce the distributable `int2dds-ffi` native libraries.
 Every platform has a **`.sh` (bash)** entry point; the Linux and Windows ones
-also keep their original **`.ps1` (PowerShell)** twin. The pairs are feature-
-equivalent — same targets, same `ffi/dist` layout, same manifest fields — so
-pick whichever matches the shell you are in.
+also keep their original **`.ps1` (PowerShell)** twin. The pairs build the
+same targets into the same `ffi/dist` layout with the same manifest fields,
+but their `--only`/`-Only` flags do not accept identical values (Linux is
+the case that differs — see below), so pick whichever matches the shell you
+are in and check the flag details before scripting against it.
 
 | Platform     | bash                   | PowerShell              | Needs                 |
 | ------------ | ---------------------- | ----------------------- | --------------------- |
@@ -35,6 +37,7 @@ needs, in one command. The x86_64 and arm64 glibc targets are built against
 | `--rust-version <x>` | Override the toolchain (default `1.89.0`)                                 |
 | `--no-package`       | Skip the `.tar.gz` distribution archive                                   |
 | `--no-binfmt`        | Skip the privileged QEMU binfmt registration container                    |
+| `--refresh-binfmt`   | Force-replace existing QEMU registrations instead of leaving them alone   |
 
 ### Why one glibc floor instead of one build per OS
 
@@ -74,7 +77,10 @@ a ROS 2 tier 1 platform.
 | `Dockerfile.musl` | `linux/amd64`, `linux/arm64` | `alpine:3.20` | musl, no glibc |
 
 Both `build-ffi-linux.sh` and `build-ffi-linux.ps1` carry this table in their
-target lists and stay feature-equivalent.
+target lists, but `--only`/`-Only` do not accept the same values on both: the
+bash script accepts docker platforms (`linux/amd64`) or dist dir names
+(`linux-x86_64`), while the PowerShell script accepts docker platforms only —
+passing it a dist dir name throws "No targets selected".
 
 ### Output layout
 
@@ -104,7 +110,7 @@ first and the in-container Cargo target dir is ephemeral.
 
 - Each architecture is compiled **natively inside its own-arch container**
   (`docker build/run --platform ...`): the host's own arch runs native, the rest
-  run under QEMU emulation. This keeps the aws-lc-sys / ring crypto crates
+  run under QEMU emulation. This keeps the `ring` crypto crate
   (cmake + C/asm) building exactly as on real hardware, which is more reliable
   than cross-linking.
 - The repo is bind-mounted at `/src`; only the toolchain lives in the image, so

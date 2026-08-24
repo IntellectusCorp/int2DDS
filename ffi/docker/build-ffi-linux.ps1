@@ -16,7 +16,7 @@
 
     Each architecture is compiled NATIVELY inside its own-arch container
     (amd64 native; arm64/armhf via Docker Desktop's QEMU emulation), so the
-    aws-lc-sys / ring crypto crates build the same way they would on real
+    ring crypto crate builds the same way it would on real
     hardware. This is slower than cross-linking but reliable.
 
     Every run is a CLEAN build: ffi/dist is wiped first and the in-container
@@ -41,7 +41,7 @@
 
 .NOTES
     arm64/armhf builds run under emulation and can take many minutes each
-    (aws-lc-rs + ring compile slowly under QEMU). This is expected.
+    (ring compiles slowly under QEMU). This is expected.
 
 .EXAMPLE
     .\ffi\docker\build-ffi-linux.ps1
