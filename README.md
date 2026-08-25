@@ -300,7 +300,7 @@ The native loader looks in this order: the `INT2DDS_JAVA_LIB` environment variab
 export INT2DDS_JAVA_LIB=/abs/path/to/target/release/int2dds_java.dll
 ```
 
-> **Status:** the Java JNI crate lives on the `feature/java-binding` branch and is being integrated; the API module under [java/int2dds-api/](java/int2dds-api/) compiles independently.
+> **Status:** the Java JNI crate lives on the `feature/java-binding` branch and is being integrated; the API module under [java/api/](java/api/) compiles independently.
 
 ### Running Examples
 
