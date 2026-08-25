@@ -1,8 +1,8 @@
 # int2dds-idl
 
 OMG IDL code generator for int2DDS. Parses `.idl` files and emits ready-to-use type
-definitions for multiple targets — Rust, C, Python, C#, plus an XML type representation
-and RPC scaffolding. Generated types implement int2DDS's `DdsType` (Rust) / equivalents,
+definitions for multiple targets — Rust, C, Python, C#, Java, plus an XML type
+representation and RPC scaffolding. Generated types implement int2DDS's `DdsType` (Rust) / equivalents,
 so they serialize/deserialize over DDS out of the box.
 
 The crate provides both a CLI binary (`int2dds-idl`) and a library (`int2dds_idl`)
@@ -46,12 +46,17 @@ int2dds-idl input/HelloWorld.idl --rust hello_world.rs
 # C header
 int2dds-idl input/HelloWorld.idl --c-header hello_world.h
 
+# Java (a directory, not a file -- one .java per top-level type)
+int2dds-idl input/HelloWorld.idl --java generated/java --java-package com.example
+
 # Several targets at once into a directory (files auto-named from the IDL)
 int2dds-idl input/HelloWorld.idl --output-dir generated/
 ```
 
 If no target flag and no `--output-dir` is given, the generator defaults to writing
-`<name>.rs` and `<name>.h` in the current directory.
+`<name>.rs` and `<name>.h` in the current directory. Batch `--output-dir` emits every
+language, including Java; if the Java backend refuses a construct there it warns and
+skips Java rather than failing the whole run, while an explicit `--java` fails.
 
 ## CLI options
 
@@ -63,12 +68,16 @@ OPTIONS:
     -c, --c-header <PATH>     Generate C header output to PATH
     -p, --python <PATH>       Generate Python output to PATH
     -s, --csharp <PATH>       Generate C# output to PATH
+    -j, --java <DIR>          Generate Java output under DIR (a directory: one
+                              file per type)
     -x, --xml <PATH>          Generate XML type representation to PATH
     -o, --output-dir <DIR>    Output directory (auto-names files)
     -I, --include <DIR>       Add a search dir for #include resolution (repeatable)
     --crate-path <PATH>       Rust crate path (default: int2dds)
     --python-module <PATH>    Python module path (default: int2dds)
     --csharp-namespace <NS>   C# namespace (default: GeneratedTypes)
+    --java-package <PKG>      Java package (default: none -- unnamed package,
+                              files land flat in DIR)
     --string-bound <N>        Default unbounded string size in C (default: 256)
     --string-pointer          Use char* pointers for strings (OMG standard)
     --rpc <PATH>              Generate RPC types (base types + RPC infrastructure)
@@ -87,9 +96,17 @@ int2dds-idl input/Strings.idl \
   --rust   generated/strings.rs \
   --python generated/strings.py \
   --csharp generated/Strings.cs \
+  --java   generated/java \
   --crate-path my_dds \
-  --csharp-namespace MyApp.Types
+  --csharp-namespace MyApp.Types \
+  --java-package myapp.types
 ```
+
+> `-j`/`--java` is the one flag that takes a **directory** rather than a file.
+> Java requires one public top-level class per file, so a single `.idl` declaring
+> several types produces several `.java` files. With `--java-package a.b`, they
+> land under `<DIR>/a/b/`; without it they land flat in `<DIR>` with no `package`
+> declaration.
 
 ## Supported IDL
 
@@ -134,6 +151,12 @@ as a reference to that type in the *dependency's* package, not a re-definition:
   consuming build must bring the dependency type (and, for C/Python, its
   serialization helpers) into scope. Full path/import emission for these backends
   is pending.
+- **Java:** a reference is emitted as the bare leaf name, which resolves only when
+  the referenced type lands in the *same* Java package. A reference that would
+  cross packages is **refused** rather than emitted, because Java would need an
+  import the backend does not yet write. In practice this means an included type
+  used from the same `module` works; one used across modules does not. Generate
+  each file separately into the same output directory and the packages line up.
 
 This contract is the integration point for per-package generators such as the ROS2
 `rmw` layer, which generates each package separately and wires them together.
@@ -184,6 +207,57 @@ pub struct HelloWorld {
 Reference the generated module from your crate and use it with a `DataWriter` /
 `DataReader` as any other `DdsType`. Use `--crate-path` if your int2DDS dependency is
 renamed (the default is `int2dds`).
+
+## Using generated Java types
+
+The Java backend emits classes implementing `com.intellectus.int2dds.types.IDdsType`,
+which is what `DomainParticipant.createTopic` takes:
+
+```java
+// generated HelloWorld.java
+public final class HelloWorld implements IDdsType {
+
+    public int index;
+    public String message = "";
+
+    @Override public String typeName() { return "HelloWorld"; }
+    @Override public Extensibility extensibility() { return Extensibility.APPENDABLE; }
+    @Override public void serializeCdr(CdrWriter writer) { /* ... */ }
+    @Override public void deserializeCdr(CdrReader reader) { /* ... */ }
+}
+```
+
+Fields are public and un-getter'd, and unsigned IDL integers map to the Java
+signed type of the **same width** (`unsigned long` → `int`), wrapping rather than
+widening. Sequences and arrays both map to Java arrays rather than `List<T>`, so
+no element is boxed.
+
+A struct with at least one `@key` member also gets a static `ddsFields()` returning
+the `List<TopicFieldDescriptor>` that the keyed `createTopic` overload needs — that
+overload is the only Java path that resolves instance keys.
+
+See [java/README.md](../java/README.md) for the binding-side workflow.
+
+### What the Java backend refuses
+
+Rather than emit Java that will not compile — or, worse, Java that compiles and
+encodes the wrong bytes — the backend fails with an error naming the offending
+declaration. It refuses:
+
+| Construct | Why |
+|---|---|
+| `union`, `bitmask`, `bitset` | no Java mapping implemented yet |
+| `map<K, V>` | no Java mapping implemented yet |
+| `@optional` members | needs the XCDR2 mutable member encoding |
+| `@extensibility(MUTABLE)` structs | same — EMHEADER framing is not emitted yet |
+| struct inheritance | no Java mapping implemented yet |
+| `enum` with no variants | an empty Java `enum` body is not valid Java |
+| `wstring` | the Java CDR layer and the Rust core disagree on whether the uint32 length counts the NUL terminator; refused until that is settled in one place. `wchar` is fine |
+| nested collections (`sequence<sequence<T>>`, `long m[3][4]`) | Java array creation needs the sized dimension first, and no test exercises a nested encoding against real CDR bytes |
+| cross-package type references | see the reference contract above |
+| a key-descriptor field the native path cannot represent | the keyed-topic path is scalar-only; a `float`, `octet`, `char`, `wstring`, or aggregate at or before the last `@key` field fails rather than silently dropping the key |
+
+Everything else in the [Supported IDL](#supported-idl) table generates.
 
 ## ROS2-compatible naming (`--ros2`)
 
@@ -246,7 +320,7 @@ idl/
 │   ├── types.rs           IdlModel / ResolvedType IR
 │   ├── naming.rs          Name conversions, keyword escaping, ROS2 mangling
 │   ├── keywords.rs        Per-language reserved-word lists
-│   └── codegen/           Backends: rust, c, python, csharp, xml, rpc
+│   └── codegen/           Backends: rust, c, python, csharp, java, xml, rpc
 ├── input/                 Sample .idl files
 ├── output/                Sample generated output
 └── tests/                 Integration tests + fixtures
@@ -257,3 +331,13 @@ idl/
 ```bash
 cargo test -p int2dds-idl
 ```
+
+The Java backend has a second gate, because a Rust string assertion cannot catch a
+malformed brace in emitted Java:
+
+```bash
+./scripts/check-idl-java.sh
+```
+
+It generates every file in `input/` and compiles the result with `javac -Xlint:all`,
+then verifies the committed `CdrGolden.java` still matches the generator.
