@@ -43,6 +43,14 @@ fn main() -> Result<(), String> {
     let fns = parse_ffi_dir(&root.join("ffi/src"))?;
     let total = fns.len();
 
+    // `--count`: print the parsed FFI function count and exit, writing
+    // nothing. Lets CI derive its expected symbol count instead of
+    // hardcoding a copy of it.
+    if std::env::args().nth(1).as_deref() == Some("--count") {
+        println!("{total}");
+        return Ok(());
+    }
+
     let rust_path = root.join("java/native/src/generated.rs");
     let java_path =
         root.join("java/api/src/main/java/com/intellectus/int2dds/internal/ffi/Ffi.java");
