@@ -300,6 +300,8 @@ The native loader looks in this order: the `INT2DDS_JAVA_LIB` environment variab
 export INT2DDS_JAVA_LIB=/abs/path/to/target/release/int2dds_java.dll
 ```
 
+See [java/README.md](java/README.md) for the full guide.
+
 > **Status:** the Java JNI crate lives on the `feature/java-binding` branch and is being integrated; the API module under [java/api/](java/api/) compiles independently.
 
 ### Running Examples
@@ -316,6 +318,10 @@ dotnet run -c Release --project csharp/examples/HelloWorldSub -f net8.0
 # Python
 python python/examples/hello_world_pub.py
 python python/examples/hello_world_sub.py
+
+# Java (requires cargo build --release -p int2dds-java; see step 5)
+(cd java && ./gradlew :examples:run)
+(cd java && ./gradlew :examples:runSub)
 ```
 
 > These are the minimal per-language hello_world smoke examples that ship in the core repo.
