@@ -165,6 +165,12 @@ pub fn is_generatable(f: &FfiFn) -> bool {
     f.params.iter().all(|p| map_type(&p.ty).is_some())
 }
 
+/// How many of `fns` the generator actually emits code for. The emitter
+/// tests derive their expected counts from this, not a hardcoded number.
+pub fn generatable_count(fns: &[FfiFn]) -> usize {
+    fns.iter().filter(|f| is_generatable(f)).count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,12 +351,14 @@ mod tests {
             vec!["int2dds_participant_qos_get_properties_with_prefix"],
             "the set of hand-written functions changed"
         );
-        assert_eq!(fns.iter().filter(|f| is_generatable(f)).count(), 453);
+        // Totality check: generatable_count must equal everything minus the
+        // named skip set above, with no independent magic number.
+        assert_eq!(generatable_count(&fns), fns.len() - skipped.len());
     }
 
     #[test]
     fn every_type_in_the_real_ffi_surface_is_accounted_for() {
-        // Totality check: the only type in the whole 454-function surface that
+        // Totality check: the only type in the whole parsed FFI surface that
         // map_type refuses is the C callback. If a future FFI change introduces
         // another unmapped type this names it, rather than silently shrinking
         // the generated binding.

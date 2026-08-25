@@ -168,8 +168,8 @@ mod tests {
     fn the_real_surface_declares_every_generatable_function() {
         let fns = crate::gen::parse::parse_ffi_dir(std::path::Path::new("../../ffi/src")).unwrap();
         let out = emit_java(&fns);
-        // 453 generated + the hand-written directBufferAddress.
-        assert_eq!(native_decls(&out).len(), 454);
+        // generatable count + the hand-written directBufferAddress.
+        assert_eq!(native_decls(&out).len(), crate::gen::typemap::generatable_count(&fns) + 1);
         // Both emitters must agree on which functions exist, or the JVM fails
         // to bind a native method at load time rather than at build time.
         let rust = crate::gen::emit_rust::emit_rust(&fns);
