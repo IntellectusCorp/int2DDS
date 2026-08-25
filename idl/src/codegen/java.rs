@@ -760,6 +760,7 @@ mod tests {
         // Paths are relative to the crate root (idl/).
         let expected: &[(&str, &[&str])] = &[
             ("Arrays.idl", &["ArraysType.java"]),
+            ("CdrGolden.idl", &["CdrGolden.java"]),
             (
                 "Complex_Arrays.idl",
                 &["Point2D.java", "ArrayElement.java", "ComplexArraysType.java"],
