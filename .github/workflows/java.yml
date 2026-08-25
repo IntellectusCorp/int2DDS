@@ -44,11 +44,12 @@ jobs:
           # forwarders reference them — a linker dead-code pass would drop them
           # again if that ever stopped being true.
           cargo build --release -p int2dds-java
+          expected=$(cargo run --quiet -p int2dds-java --bin gen-jni -- --count)
           count=$(nm -D --defined-only target/release/libint2dds_java.so \
                   | grep -c ' T int2dds_')
-          echo "int2dds_ symbols exported: $count"
-          if [ "$count" -ne 444 ]; then
-            echo "ERROR: expected 444 re-exported C ABI symbols, found $count" >&2
+          echo "int2dds_ symbols exported: $count (expected $expected)"
+          if [ "$count" -ne "$expected" ]; then
+            echo "ERROR: expected $expected re-exported C ABI symbols, found $count" >&2
             exit 1
           fi
 
