@@ -93,7 +93,7 @@ def _read_string(fn, *args) -> str:
     if ret == 0:
         return ffi.string(probe, out_len[0]).decode()
     need = out_len[0]
-    buf = ffi.new(f"char[{need + 1}]")
+    buf = ffi.new("char[]", need + 1)
     check_ret(fn(*args, buf, need + 1, out_len))
     return ffi.string(buf, out_len[0]).decode()
 
@@ -689,7 +689,7 @@ class DynamicValue:
         if ret == INT2DDS_RET_OK:
             return ffi.string(probe, out_len[0]).decode(), out_value[0]
         need = out_len[0]
-        buf = ffi.new(f"char[{need + 1}]")
+        buf = ffi.new("char[]", need + 1)
         check_ret(lib.int2dds_dynamic_value_as_enum(self._handle, buf, need + 1, out_len, out_value))
         return ffi.string(buf, out_len[0]).decode(), out_value[0]
 
