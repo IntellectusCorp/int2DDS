@@ -209,6 +209,77 @@
 #define INT2DDS_MEMBER_EXTERNAL (1 << 3)
 
 /**
+ * Field kinds for [`Int2DdsCFieldLayout`].
+ *
+ * `i32` for the same reason as `Int2DdsQosPolicyId`: the width is part of a
+ * struct layout and must not move under `-fshort-enums`.
+ */
+enum Int2DdsCFieldKind
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : int32_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+  CFieldNone = 0,
+  CFieldBool = 1,
+  CFieldInt8 = 2,
+  CFieldUInt8 = 3,
+  CFieldInt16 = 4,
+  CFieldUInt16 = 5,
+  CFieldInt32 = 6,
+  CFieldUInt32 = 7,
+  CFieldInt64 = 8,
+  CFieldUInt64 = 9,
+  CFieldFloat32 = 10,
+  CFieldFloat64 = 11,
+  CFieldChar8 = 12,
+  /**
+   * C enum member: `size` is its `sizeof` (implementation defined); the wire
+   * width comes from the type's `bit_bound`.
+   */
+  CFieldEnum = 13,
+  /**
+   * Bitmask member: an unsigned integer of `size` bytes.
+   */
+  CFieldBitmask = 14,
+  /**
+   * Inline `char [size]`, NUL-terminated (`size` includes the NUL).
+   */
+  CFieldString = 15,
+  /**
+   * Pointer-mode `char *`.
+   */
+  CFieldStringPtr = 16,
+  /**
+   * Inline `uint16_t [size]`, NUL-terminated UTF-16.
+   */
+  CFieldWString = 17,
+  /**
+   * Nested struct; `nested` points at its table.
+   */
+  CFieldStruct = 18,
+  /**
+   * Inline array; `count` is the flattened element count.
+   */
+  CFieldArray = 19,
+  /**
+   * Bounded `{ T data[count]; uint32_t length; }`: `offset` is `data`,
+   * `length_offset` is `length`, `count` is the bound.
+   */
+  CFieldSequence = 20,
+  /**
+   * Unbounded `{ T *data; uint32_t length; }`: `offset` is the pointer.
+   */
+  CFieldSequencePtr = 21,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum Int2DdsCFieldKind Int2DdsCFieldKind;
+#else
+typedef int32_t Int2DdsCFieldKind;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+/**
  * C-compatible QoS policy ID enum
  *
  * `i32` rather than `C` because this enum is a *field* of two structs the caller
@@ -460,6 +531,37 @@ typedef struct Int2DdsXmlTypeRegistry Int2DdsXmlTypeRegistry;
  * FFI return codes
  */
 typedef int32_t Int2DdsRet;
+
+/**
+ * One member of a C struct, located by `offsetof`/`sizeof`.
+ *
+ * Which of the other fields are meaningful depends on `kind`; see the
+ * [`Int2DdsCFieldKind`] variants. `elem_kind`/`elem_size` describe an
+ * array/sequence element the same way `kind`/`size` describe a member, and
+ * `nested` carries the table of a struct member or struct element.
+ */
+typedef struct Int2DdsCFieldLayout {
+  const char *name;
+  Int2DdsCFieldKind kind;
+  uint32_t offset;
+  uint32_t length_offset;
+  uint32_t size;
+  uint32_t count;
+  Int2DdsCFieldKind elem_kind;
+  uint32_t elem_size;
+  const struct Int2DdsCTypeLayout *nested;
+} Int2DdsCFieldLayout;
+
+/**
+ * A C struct's complete offset layout, members in the type's declaration order
+ * (ancestors first when the IDL type inherits).
+ */
+typedef struct Int2DdsCTypeLayout {
+  const char *type_name;
+  uint32_t struct_size;
+  uint32_t field_count;
+  const struct Int2DdsCFieldLayout *fields;
+} Int2DdsCTypeLayout;
 
 /**
  * C callback invoked on every remote endpoint discovery/dispose.
@@ -906,6 +1008,79 @@ uint32_t int2dds_abi_version(void);
  * calling an entry point that is not there and faulting at the call site.
  */
 uint64_t int2dds_abi_capabilities(void);
+
+/**
+ * Bind a C offset layout to the topic's type.
+ *
+ * Validates `layout` member by member against the type's compiled codec plan
+ * (names, order, widths, collection shapes) and stores the bound result on the
+ * topic. Binding is once per topic: later calls on an already-bound topic
+ * return `INT2DDS_RET_OK` without re-validating, so a generated writer and
+ * reader may both bind the same table.
+ *
+ * Returns `INT2DDS_RET_UNSUPPORTED` when the topic has no compiled plan
+ * (created without a full TypeObject) or the type/layout has a shape this path
+ * does not cover — the caller then keeps its inline generated codec.
+ *
+ * # Safety
+ * - `topic` must be a valid topic
+ * - `layout` must point to a fully initialized layout table whose `name`,
+ *   `fields`, and `nested` pointers stay valid for the duration of this call
+ */
+Int2DdsRet int2dds_topic_bind_c_layout(const struct Int2DdsTopic *topic,
+                                       const struct Int2DdsCTypeLayout *layout);
+
+/**
+ * Serialize the C struct at `sample` into CDR bytes (with encapsulation
+ * header), byte-identical to the generated inline codec for the same value.
+ * `xcdr2` selects the representation; pass the writer's effective one
+ * (`int2dds_datawriter_data_representation`).
+ *
+ * On success copies the bytes into `buffer` and sets `actual_size_out`. When
+ * the buffer is too small, returns `INT2DDS_RET_BUFFER_TOO_SMALL` with the
+ * required size in `actual_size_out` so a retry can succeed. Returns
+ * `INT2DDS_RET_PRECONDITION_NOT_MET` before `int2dds_topic_bind_c_layout`.
+ *
+ * # Safety
+ * - `topic` must be a valid topic
+ * - `sample` must point to a live, initialized value of the bound C layout;
+ *   its pointer members must be valid for their stated lengths
+ * - `buffer` must point to at least `buffer_capacity` writable bytes
+ * - `actual_size_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_topic_c_encode(const struct Int2DdsTopic *topic,
+                                  const void *sample,
+                                  bool xcdr2,
+                                  uint8_t *buffer,
+                                  uintptr_t buffer_capacity,
+                                  uintptr_t *actual_size_out);
+
+/**
+ * Deserialize CDR sample bytes into the caller's buffer as a C struct.
+ *
+ * `buffer[0..struct_size]` receives the struct; variable-sized content
+ * (pointer-mode strings, unbounded sequence data) is appended behind it and the
+ * struct's pointer members point into `buffer` itself. One buffer, freed once,
+ * by the caller — never call the generated `{T}_cleanup` on a sample decoded
+ * this way, its pointers do not come from `malloc`.
+ *
+ * `actual_size_out` always receives the total size required; when it exceeds
+ * `buffer_capacity` the content is unspecified and the return is
+ * `INT2DDS_RET_BUFFER_TOO_SMALL` so a retry can succeed. Returns
+ * `INT2DDS_RET_PRECONDITION_NOT_MET` before `int2dds_topic_bind_c_layout`.
+ *
+ * # Safety
+ * - `topic` must be a valid topic
+ * - `data` must point to at least `data_len` readable bytes
+ * - `buffer` must point to at least `buffer_capacity` writable bytes
+ * - `actual_size_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_topic_c_decode(const struct Int2DdsTopic *topic,
+                                  const uint8_t *data,
+                                  uintptr_t data_len,
+                                  void *buffer,
+                                  uintptr_t buffer_capacity,
+                                  uintptr_t *actual_size_out);
 
 /**
  * Create a new GuardCondition

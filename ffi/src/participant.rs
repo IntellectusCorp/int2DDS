@@ -332,6 +332,8 @@ pub unsafe extern "C" fn int2dds_participant_find_topic(
         inner: Arc::new(topic),
         type_name: dds_type_name_str.to_string(),
         frame_layout: None,
+        plans: None,
+        c_layout: std::sync::OnceLock::new(),
     });
     *topic_out = Box::into_raw(topic_handle);
     INT2DDS_RET_OK

@@ -36,7 +36,7 @@ use super::{error::*, qos::Int2DdsTopicQos, types::*};
 /// Shared tail for topic creation once a `RawTypeSupport` is fully built: register the
 /// type support, resolve QoS (NULL -> default sentinel so profile fallback engages),
 /// create the topic, and hand back a boxed `Int2DdsTopic`.
-unsafe fn finalize_topic(
+pub(crate) unsafe fn finalize_topic(
     participant_ref: &Int2DdsParticipant,
     topic_name_str: &str,
     dds_type_name: &str,
@@ -45,6 +45,7 @@ unsafe fn finalize_topic(
     topic_out: *mut *mut Int2DdsTopic,
 ) -> Int2DdsRet {
     let frame_layout = type_support.frame_layout();
+    let plans = type_support.plans();
     ffi_try!(participant_ref
         .inner
         .register_type_support(type_support as Arc<dyn TypeSupport>, dds_type_name));
@@ -67,6 +68,8 @@ unsafe fn finalize_topic(
         inner: Arc::new(topic),
         type_name: dds_type_name.to_string(),
         frame_layout,
+        plans,
+        c_layout: std::sync::OnceLock::new(),
     });
     *topic_out = Box::into_raw(topic_handle);
     INT2DDS_RET_OK
@@ -234,6 +237,8 @@ pub unsafe extern "C" fn int2dds_create_topic_with_profile(
         inner: Arc::new(topic),
         type_name: dds_type_name_str.to_string(),
         frame_layout: None,
+        plans: None,
+        c_layout: std::sync::OnceLock::new(),
     });
 
     *topic_out = Box::into_raw(topic_handle);

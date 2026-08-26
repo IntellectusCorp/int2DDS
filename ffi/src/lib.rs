@@ -50,6 +50,7 @@
 pub mod error;
 
 pub mod abi;
+pub mod c_layout;
 pub mod condition;
 pub mod config;
 pub mod context;

@@ -17,6 +17,42 @@ import cffi
 ffi = cffi.FFI()
 
 ffi.cdef("""
+enum Int2DdsCFieldKind
+ {
+  CFieldNone = 0,
+  CFieldBool = 1,
+  CFieldInt8 = 2,
+  CFieldUInt8 = 3,
+  CFieldInt16 = 4,
+  CFieldUInt16 = 5,
+  CFieldInt32 = 6,
+  CFieldUInt32 = 7,
+  CFieldInt64 = 8,
+  CFieldUInt64 = 9,
+  CFieldFloat32 = 10,
+  CFieldFloat64 = 11,
+  CFieldChar8 = 12,
+
+  CFieldEnum = 13,
+
+  CFieldBitmask = 14,
+
+  CFieldString = 15,
+
+  CFieldStringPtr = 16,
+
+  CFieldWString = 17,
+
+  CFieldStruct = 18,
+
+  CFieldArray = 19,
+
+  CFieldSequence = 20,
+
+  CFieldSequencePtr = 21,
+};
+typedef int32_t Int2DdsCFieldKind;
+
 enum Int2DdsQosPolicyId
  {
   Invalid = 0,
@@ -132,6 +168,25 @@ typedef struct Int2DdsWaitSet Int2DdsWaitSet;
 typedef struct Int2DdsXmlTypeRegistry Int2DdsXmlTypeRegistry;
 
 typedef int32_t Int2DdsRet;
+
+typedef struct Int2DdsCFieldLayout {
+  const char *name;
+  Int2DdsCFieldKind kind;
+  uint32_t offset;
+  uint32_t length_offset;
+  uint32_t size;
+  uint32_t count;
+  Int2DdsCFieldKind elem_kind;
+  uint32_t elem_size;
+  const struct Int2DdsCTypeLayout *nested;
+} Int2DdsCFieldLayout;
+
+typedef struct Int2DdsCTypeLayout {
+  const char *type_name;
+  uint32_t struct_size;
+  uint32_t field_count;
+  const struct Int2DdsCFieldLayout *fields;
+} Int2DdsCTypeLayout;
 
 typedef void (*Int2DdsEndpointDiscoveryCallback)(void *ctx,
                                                  int32_t is_writer,
@@ -354,6 +409,23 @@ typedef struct Int2DdsInconsistentTopicStatus {
 uint32_t int2dds_abi_version(void);
 
 uint64_t int2dds_abi_capabilities(void);
+
+Int2DdsRet int2dds_topic_bind_c_layout(const struct Int2DdsTopic *topic,
+                                       const struct Int2DdsCTypeLayout *layout);
+
+Int2DdsRet int2dds_topic_c_encode(const struct Int2DdsTopic *topic,
+                                  const void *sample,
+                                  bool xcdr2,
+                                  uint8_t *buffer,
+                                  uintptr_t buffer_capacity,
+                                  uintptr_t *actual_size_out);
+
+Int2DdsRet int2dds_topic_c_decode(const struct Int2DdsTopic *topic,
+                                  const uint8_t *data,
+                                  uintptr_t data_len,
+                                  void *buffer,
+                                  uintptr_t buffer_capacity,
+                                  uintptr_t *actual_size_out);
 
 Int2DdsRet int2dds_guardcondition_new(struct Int2DdsGuardCondition **condition_out);
 

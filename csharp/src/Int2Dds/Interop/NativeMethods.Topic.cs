@@ -43,6 +43,15 @@ namespace Int2Dds.Interop
         internal static unsafe extern int int2dds_topic_frame_decode(IntPtr topic, byte* data, UIntPtr data_len, byte* buffer, UIntPtr buffer_capacity, out UIntPtr actual_size_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_topic_bind_c_layout(IntPtr topic, NativeCTypeLayout* layout);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_topic_c_encode(IntPtr topic, void* sample, [MarshalAs(UnmanagedType.U1)] bool xcdr2, byte* buffer, UIntPtr buffer_capacity, out UIntPtr actual_size_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_topic_c_decode(IntPtr topic, byte* data, UIntPtr data_len, void* buffer, UIntPtr buffer_capacity, out UIntPtr actual_size_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_contentfilteredtopic_set_enabled(IntPtr cft, [MarshalAs(UnmanagedType.U1)] bool enabled);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]

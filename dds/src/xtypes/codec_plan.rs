@@ -37,7 +37,7 @@ use super::dynamic_type::{DynamicType, DynamicTypeKind, PrimitiveKind};
 
 /// A member's wire layout.
 #[derive(Debug)]
-enum Node {
+pub(super) enum Node {
     Prim(PrimitiveKind),
     /// Enum, whose wire width follows its `bit_bound`.
     Enum {
@@ -66,20 +66,23 @@ enum Node {
 }
 
 #[derive(Debug)]
-struct MemberNode {
-    name: Arc<str>,
-    member_id: u32,
+pub(super) struct MemberNode {
+    pub(super) name: Arc<str>,
+    pub(super) member_id: u32,
     /// Only meaningful under `Framing::Plain`/`Delimited`, where an optional member
     /// spends a presence marker. Tagged framings express absence by omitting the
     /// member's header entirely.
-    optional: bool,
-    node: Node,
+    pub(super) optional: bool,
+    /// Read never consults this; the write side (`c_layout`) emits it in the
+    /// tagged member headers exactly as the dynamic serializer does.
+    pub(super) must_understand: bool,
+    pub(super) node: Node,
 }
 
 /// How a struct's members are laid out, which is the one place representation and
 /// extensibility meet.
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Framing {
+pub(super) enum Framing {
     /// Members inline in declaration order: XCDR1 Final/Appendable, XCDR2 Final.
     Plain,
     /// XCDR2 Appendable: a DHEADER, then members inline.
@@ -91,15 +94,15 @@ enum Framing {
 }
 
 #[derive(Debug)]
-struct StructNode {
+pub(super) struct StructNode {
     /// Members in declaration order, which is also wire order unless `framing` is
     /// tagged.
-    members: Vec<MemberNode>,
+    pub(super) members: Vec<MemberNode>,
     /// Indices to project into the key holder. The `@key` members in member_id
     /// order, or — when the struct has none — every member in declaration order,
     /// which is the RTPS key-holder rule for a nested aggregate (DDSI-RTPS 9.6.4.8).
     key_order: Vec<usize>,
-    framing: Framing,
+    pub(super) framing: Framing,
 }
 
 impl StructNode {
@@ -109,7 +112,7 @@ impl StructNode {
 }
 
 /// One tagged member's header.
-struct MemberTag {
+pub(super) struct MemberTag {
     id: u32,
     length: u32,
     must_understand: bool,
@@ -117,7 +120,7 @@ struct MemberTag {
 
 /// One type's layout for one representation.
 pub struct CodecPlan {
-    root: Arc<StructNode>,
+    pub(super) root: Arc<StructNode>,
     /// XTypes 7.6.8 step 5 decides raw-vs-MD5 on the key holder's *maximum* size,
     /// which is a property of the type, not of the sample.
     key_holder_max: Option<usize>,
@@ -127,8 +130,8 @@ pub struct CodecPlan {
 
 /// The plans for one type, indexed by the representation of the sample at hand.
 pub struct TypePlans {
-    xcdr1: Option<CodecPlan>,
-    xcdr2: Option<CodecPlan>,
+    pub(super) xcdr1: Option<CodecPlan>,
+    pub(super) xcdr2: Option<CodecPlan>,
     has_key: bool,
 }
 
@@ -222,7 +225,7 @@ impl TypePlans {
 /// Matches the encapsulation ids the dynamic path treats as XCDR2. A payload too
 /// short to hold one reads as XCDR1, whose first read then fails the bounds check —
 /// the projection must degrade to an error, never panic on the receive path.
-fn is_xcdr2(bytes: &[u8]) -> bool {
+pub(super) fn is_xcdr2(bytes: &[u8]) -> bool {
     bytes.len() >= 2 && matches!(u16::from_be_bytes([bytes[0], bytes[1]]), 0x0006..=0x000B)
 }
 
@@ -274,6 +277,7 @@ fn compile_struct(dynamic_type: &DynamicType, xcdr2: bool) -> Option<Arc<StructN
             name: member.name.clone(),
             member_id: member.member_id,
             optional: member.is_optional,
+            must_understand: member.is_must_understand,
             node: compile_node(&member.member_type, xcdr2)?,
         });
         if member.is_key {
@@ -346,7 +350,9 @@ fn compile_node(kind: &DynamicTypeKind, xcdr2: bool) -> Option<Node> {
 /// The two deserializers, unified for the plan walk. Each method is reached only
 /// from the framing that uses it, so the other side's arm is unreachable rather
 /// than approximate.
-trait PlanReader: ValueDeserializer + DeserializerReader<Error = CdrError> {
+pub(super) trait PlanReader:
+    ValueDeserializer + DeserializerReader<Error = CdrError>
+{
     fn read_dheader(&mut self) -> Result<u32, CdrError>;
 
     /// The next tagged member, or `None` at a terminator the framing carries
@@ -491,7 +497,7 @@ fn skip_struct<R: PlanReader>(reader: &mut R, node: &StructNode) -> DdsResult<()
 ///
 /// This is the single wire walk every consumer shares: key projection seeks back
 /// into it in member_id order, field access seeks to one entry.
-fn locate_members<R: PlanReader>(
+pub(super) fn locate_members<R: PlanReader>(
     reader: &mut R,
     node: &StructNode,
 ) -> DdsResult<(Vec<Option<usize>>, usize)> {

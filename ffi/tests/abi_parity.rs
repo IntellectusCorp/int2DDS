@@ -395,8 +395,17 @@ fn declaration_parts(decl: &str) -> Option<(String, String, Option<String>)> {
         None => (decl, None),
     };
     let mut words: Vec<&str> = head.split_whitespace().collect();
-    let name = words.pop()?.to_owned();
-    Some((words.join(" "), name, extent))
+    let raw_name = words.pop()?;
+    // `const char *name` puts the pointer on the name token; it belongs to the type.
+    let name = raw_name.trim_start_matches('*');
+    if name.is_empty() {
+        return None;
+    }
+    let mut ty = words.join(" ");
+    for _ in 0..raw_name.len() - name.len() {
+        ty.push('*');
+    }
+    Some((ty, name.to_owned(), extent))
 }
 
 /// The C# declaration a header member requires, as a string to compare against
@@ -413,6 +422,10 @@ fn required_csharp(
     // A pointer is a pointer: C# marshals every one as `IntPtr`, and what it
     // points at is no part of the struct's layout.
     if ty == "Int2DdsUserContext" || (ty.starts_with("Int2DdsOn") && ty.ends_with("Callback")) {
+        return format!("IntPtr {name}");
+    }
+    // A pointer field is a pointer whatever it points at; C# marshals it as `IntPtr`.
+    if ty.ends_with('*') {
         return format!("IntPtr {name}");
     }
     let Some(cs) = CSHARP_SCALARS.iter().find(|(c, _)| *c == ty).map(|(_, cs)| *cs) else {
@@ -543,7 +556,7 @@ fn the_csharp_structs_have_the_header_layout() {
     let enums = csharp_composites(b"enum");
     assert_eq!(
         header.len(),
-        17,
+        19,
         "the header's field-bearing struct count moved. That is not a failure by itself, but \
          a struct this test never saw is one it never checked"
     );
@@ -575,7 +588,7 @@ fn the_csharp_enums_have_the_header_enumerators() {
     let declared = csharp_composites(b"enum");
     assert_eq!(
         header.len(),
-        2,
+        3,
         "the header's enum count moved. That is not a failure by itself, but an enum this test \
          never saw is one it never checked"
     );

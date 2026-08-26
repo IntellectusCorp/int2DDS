@@ -153,6 +153,10 @@ impl RawTypeSupport {
     pub fn frame_layout(&self) -> Option<Arc<FrameLayout>> {
         self.frame_layout.clone()
     }
+
+    pub fn plans(&self) -> Option<Arc<TypePlans>> {
+        self.plans.clone()
+    }
 }
 
 impl FieldAccessor for RawTypeSupport {

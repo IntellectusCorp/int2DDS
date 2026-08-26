@@ -80,6 +80,11 @@ pub struct Int2DdsTopic {
     /// ValueFrame layout for `int2dds_topic_frame_*`; `None` when the type has no
     /// full TypeObject or a shape the frame does not represent.
     pub(crate) frame_layout: Option<Arc<int2dds::xtypes::FrameLayout>>,
+    /// Compiled codec plans for `int2dds_topic_bind_c_layout`; `None` when the
+    /// type has no full TypeObject.
+    pub(crate) plans: Option<Arc<int2dds::xtypes::TypePlans>>,
+    /// C offset layout bound by `int2dds_topic_bind_c_layout`, set at most once.
+    pub(crate) c_layout: std::sync::OnceLock<Arc<int2dds::xtypes::BoundCLayout>>,
 }
 
 /// Opaque handle to a ContentFilteredTopic

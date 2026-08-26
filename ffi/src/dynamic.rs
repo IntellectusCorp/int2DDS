@@ -465,7 +465,6 @@ use int2dds::subscription::data_reader::DataReader;
 use int2dds::subscription::sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind};
 use int2dds::topic::TypeSupport;
 
-use crate::data::Int2DdsData;
 use crate::qos::{Int2DdsDataReaderQos, Int2DdsDataWriterQos, Int2DdsTopicQos};
 use crate::raw_type_support::RawTypeSupport;
 use crate::types::{Int2DdsPublisher, Int2DdsSampleInfo, Int2DdsTopic};
@@ -516,36 +515,19 @@ pub unsafe extern "C" fn int2dds_create_topic_with_type_object(
     let hash = to_clone.compute_hash();
     let type_identifier = TypeIdentifier::CompleteTypeId(hash.clone());
 
-    let type_support = Arc::new(RawTypeSupport::with_type_info(
+    // The dependency closure resolves nested members the same way
+    // `int2dds_create_topic_with_type_info` does, and `finalize_topic` stamps the
+    // frame/plan machinery the open-coded tail used to drop.
+    let type_support = Arc::new(RawTypeSupport::with_type_info_and_deps(
         type_name_str.to_string(),
         extensibility,
         has_key,
         type_identifier,
         to_clone,
+        (*type_obj).deps.clone(),
     ));
 
-    ffi_try!(p.inner.register_type_support(type_support as Arc<dyn TypeSupport>, type_name_str));
-
-    // NULL qos → default sentinel (engages the QoS-profile fallback chain).
-    // Non-NULL → use as-is. Mirrors the typed create_topic FFI.
-    let topic_qos =
-        if qos.is_null() { QosKind::Default } else { QosKind::Specific((*qos).inner.clone()) };
-
-    let topic = ffi_try!(p.inner.create_topic::<Int2DdsData>(
-        topic_name_str,
-        type_name_str,
-        topic_qos,
-        None,
-        StatusMask::default(),
-    ));
-
-    let topic_handle = Box::new(Int2DdsTopic {
-        inner: Arc::new(topic),
-        type_name: type_name_str.to_string(),
-        frame_layout: None,
-    });
-    *out = Box::into_raw(topic_handle);
-    INT2DDS_RET_OK
+    crate::topic::finalize_topic(p, topic_name_str, type_name_str, type_support, qos, out)
 }
 
 fn decode_flat(bytes: &[u8], type_obj: &Int2DdsTypeObject) -> Result<DynamicData, Int2DdsRet> {
@@ -939,6 +921,8 @@ pub unsafe extern "C" fn int2dds_create_topic_dynamic(
     };
     let support = (*type_support).inner.clone();
     let type_name = support.get_type_name().to_string();
+    let frame_layout = int2dds::xtypes::FrameLayout::compile(support.dynamic_type()).map(Arc::new);
+    let plans = Some(Arc::new(int2dds::xtypes::TypePlans::compile(support.dynamic_type())));
     // NULL qos → default sentinel (engages the QoS-profile fallback chain).
     // Non-NULL → use as-is. Mirrors the typed create_topic FFI.
     let topic_qos =
@@ -954,7 +938,9 @@ pub unsafe extern "C" fn int2dds_create_topic_dynamic(
     *out = Box::into_raw(Box::new(Int2DdsTopic {
         inner: Arc::new(topic),
         type_name,
-        frame_layout: None,
+        frame_layout,
+        plans,
+        c_layout: std::sync::OnceLock::new(),
     }));
     INT2DDS_RET_OK
 }
