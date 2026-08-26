@@ -59,6 +59,42 @@ const FIXTURE: &str = r#"
         @id(30) double more;
     };
 
+    @extensibility(MUTABLE)
+    struct TaggedPositional {
+        long a;
+        string label;
+    };
+
+    @extensibility(FINAL)
+    struct Covered {
+        @key long id;
+        octet o;
+        boolean flag;
+        char ch;
+        short s16;
+        unsigned short u16v;
+        long long s64;
+        unsigned long long u64v;
+        float f32v;
+        double d;
+        Color c;
+        Flags flags2;
+        string txt;
+        string<32> bounded_txt;
+        wstring<16> wtxt;
+        Inner inner;
+        Derived der;
+        TaggedPositional tp;
+        long grid[2][3];
+        Color palette[2];
+        Inner inner_grid[2];
+        string labels[2];
+        sequence<long, 8> bseq;
+        sequence<long> useq;
+        sequence<string> sseq;
+        sequence<Inner, 4> iseq;
+    };
+
     @extensibility(APPENDABLE)
     struct Holder {
         @key long id;
