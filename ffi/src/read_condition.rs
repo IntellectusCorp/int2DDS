@@ -24,7 +24,6 @@
 //! state filtering has no such requirement and always applies.
 
 use std::os::raw::c_char;
-use std::sync::Arc;
 
 use int2dds::subscription::sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind};
 
@@ -295,7 +294,7 @@ unsafe fn read_or_take_w_readcondition(
     let reader_ref = &*reader;
     let condition_ref = &*condition;
 
-    let result: Result<Vec<(Arc<[u8]>, _)>, _> = match &condition_ref.kind {
+    let result: Result<Vec<(bytes::Bytes, _)>, _> = match &condition_ref.kind {
         // ReadCondition: pure state filter -> apply directly on the serialized cache.
         ReadConditionKind::Read(rc) => {
             let ss = rc.get_sample_state_mask();
@@ -319,13 +318,13 @@ unsafe fn read_or_take_w_readcondition(
                 let mut out = Vec::with_capacity(samples.len());
                 for s in samples {
                     let info = s.sample_info();
-                    let bytes: Arc<[u8]> = match s.data() {
+                    let bytes: bytes::Bytes = match s.data() {
                         Ok(d) => match d.cdr_bytes {
-                            Some(b) => Arc::from(b.as_slice()),
-                            None => Arc::from(&[][..]),
+                            Some(b) => bytes::Bytes::copy_from_slice(b.as_slice()),
+                            None => bytes::Bytes::new(),
                         },
                         // Info-only (invalid-data) sample: no payload.
-                        Err(_) => Arc::from(&[][..]),
+                        Err(_) => bytes::Bytes::new(),
                     };
                     out.push((bytes, info));
                 }

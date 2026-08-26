@@ -2605,6 +2605,11 @@ impl UnicastMessageProcessor for UserLogic {
             return Ok(());
         }
 
+        // Detach from the receive arena before retaining. A `Bytes` slice keeps its
+        // whole arena chunk resident, so copy once here and let every matched reader
+        // share that right-sized copy.
+        let detached_payload = bytes::Bytes::copy_from_slice(&data.serialized_data());
+
         for reader in matched_readers {
             let mut change = match reader.reader_cache().lock() {
                 Ok(mut cache) => cache.acquire_change(),
@@ -2622,10 +2627,9 @@ impl UnicastMessageProcessor for UserLogic {
                 data.writer_sn,
                 message_receiver.get_source_timestamp(),
             );
-            // Zero-copy share of the socket buffer: `data.serialized_data()`
-            // returns a `Bytes` slice of the original socket allocation, so
-            // each reader gets an Arc refcount bump instead of a payload copy.
-            change.set_shared_payload(data.serialized_data());
+            // Every matched reader shares the one detached copy made above, so
+            // fanning out costs a refcount bump per reader, not a payload copy.
+            change.set_shared_payload(detached_payload.clone());
 
             self.apply_writer_attributes_to_change(
                 reader.clone(),
@@ -3181,10 +3185,6 @@ impl UnicastMessageProcessor for UserLogic {
             }
         }
 
-        // Readers completing on this datagram hold byte-identical chunks, so one shared cache
-        // keeps any contiguous fallback to a single materialization.
-        let mut assembled_cache: Option<std::sync::Arc<std::sync::OnceLock<bytes::Bytes>>> = None;
-
         // The key carries the reader, so the fragments go into each matched reader's own
         // buffer. Completion is then single-reader: a buffer belongs to exactly one.
         for reader in &matched_readers {
@@ -3300,11 +3300,9 @@ impl UnicastMessageProcessor for UserLogic {
                 }
             }
 
-            // Scatter-gather: keep the chunks instead of assembling a contiguous buffer.
-            let chunks = buffer.into_chunks();
-            let cached = assembled_cache
-                .get_or_insert_with(|| std::sync::Arc::new(std::sync::OnceLock::new()))
-                .clone();
+            // Fragments were written straight into one buffer, so this is already the
+            // assembled sample and carries no receive-arena chunk with it.
+            let payload = buffer.into_bytes();
 
             let mut assembled_change = match reader.reader_cache().lock() {
                 Ok(mut cache) => cache.acquire_change(),
@@ -3332,7 +3330,7 @@ impl UnicastMessageProcessor for UserLogic {
                 data_frag.writer_sn,
                 assembled_timestamp,
             );
-            assembled_change.set_chained_payload(chunks, cached);
+            assembled_change.set_shared_payload(payload);
             assembled_change.set_ownership_strength(ownership_strength);
 
             let _ = self.deliver_change_to_reader(

@@ -13,6 +13,7 @@
 //! All handle types implement Send and Sync, making them safe to use
 //! across threads in both Rust and C code.
 
+use bytes::Bytes;
 use std::sync::{Arc, RwLock};
 
 use int2dds::{
@@ -190,7 +191,7 @@ impl From<&SampleInfo> for Int2DdsSampleInfo {
 
 /// Opaque sequence of (serialized data, SampleInfo) pairs for batch read/take
 pub struct Int2DdsSampleSeq {
-    pub(crate) samples: Vec<(Arc<[u8]>, SampleInfo)>,
+    pub(crate) samples: Vec<(Bytes, SampleInfo)>,
 }
 
 // Safety: All types use Arc which is thread-safe
