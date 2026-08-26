@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Generic, TypeVar
 
+import os
 import warnings
 
 from int2dds._ffi import CData, ffi, lib
@@ -427,6 +428,8 @@ class Topic(Generic[T]):
         hash comparison turns any divergence into a fallback to the legacy
         codec instead of wrong wire bytes.
         """
+        if os.environ.get("INT2DDS_PY_DISABLE_FRAME") == "1":
+            return
         codec = FrameCodec.build(self._type_class)
         if codec is None:
             return
