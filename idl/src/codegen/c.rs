@@ -1275,6 +1275,9 @@ impl<'a> CGen<'a> {
                     "{}int2dds_cdr_read_seq_header(&r, &{}.length);\n",
                     indent, accessor
                 ));
+                if let Some(max) = bound {
+                    self.emit_bound_check(accessor, *max, indent);
+                }
 
                 let bulk = self.bulk_element(element);
                 let data = format!("{}.data", accessor);
@@ -1371,7 +1374,7 @@ impl<'a> CGen<'a> {
                     self.raw(&format!("{}}}\n", indent));
                 }
             }
-            ResolvedType::Map { key, value, .. } => {
+            ResolvedType::Map { key, value, bound } => {
                 let needs_dh = Self::sequence_element_needs_dheader(key)
                     || Self::sequence_element_needs_dheader(value);
                 if needs_dh {
@@ -1385,6 +1388,9 @@ impl<'a> CGen<'a> {
                     "{}int2dds_cdr_read_seq_header(&r, &{}.length);\n",
                     indent, accessor
                 ));
+                if let Some(max) = bound {
+                    self.emit_bound_check(accessor, *max, indent);
+                }
                 self.raw(&format!(
                     "{}for (uint32_t _i = 0; _i < {}.length; _i++) {{\n",
                     indent, accessor
@@ -1497,6 +1503,17 @@ impl<'a> CGen<'a> {
         self.raw(&format!(
             "{}int2dds_cdr_write_prim_array(&w, {}, {}, {});\n",
             indent, data, count, size
+        ));
+    }
+
+    /// Reject a sample whose decoded collection length exceeds the compile-time bound
+    /// before any element reaches the fixed-capacity inline array. Sets the sticky
+    /// OVERFLOW error (later reads no-op, decode returns failure) and caps the count so
+    /// neither the bulk copy nor the element loop can run past capacity.
+    fn emit_bound_check(&mut self, accessor: &str, bound: u32, indent: &str) {
+        self.raw(&format!(
+            "{}if ({}.length > {}) {{ r.error = INT2DDS_CDR_ERR_OVERFLOW; {}.length = {}; }}\n",
+            indent, accessor, bound, accessor, bound
         ));
     }
 
