@@ -1277,6 +1277,8 @@ impl<'a> CGen<'a> {
                 ));
                 if let Some(max) = bound {
                     self.emit_bound_check(accessor, *max, indent);
+                } else if self.opts.string_mode == StringMode::FixedArray {
+                    self.emit_unbounded_reject(accessor, indent);
                 }
 
                 let bulk = self.bulk_element(element);
@@ -1288,7 +1290,7 @@ impl<'a> CGen<'a> {
                     let elem_c = self.type_to_c_base(element);
                     self.raw(&format!("{}if ({}.length > 0) {{\n", indent, accessor));
                     self.raw(&format!(
-                        "{}    {}.data = ({}*)malloc({}.length * sizeof({}));\n",
+                        "{}    {}.data = ({}*)calloc({}.length, sizeof({}));\n",
                         indent, accessor, elem_c, accessor, elem_c
                     ));
                     self.raw(&format!("{}    if ({}.data) {{\n", indent, accessor));
@@ -1307,7 +1309,10 @@ impl<'a> CGen<'a> {
                         );
                         self.raw(&format!("{}        }}\n", indent));
                     }
-                    self.raw(&format!("{}    }}\n", indent));
+                    self.raw(&format!(
+                        "{}    }} else {{ r.error = INT2DDS_CDR_ERR_OVERFLOW; {}.length = 0; }}\n",
+                        indent, accessor
+                    ));
                     self.raw(&format!("{}}}\n", indent));
                 } else if let Some(kind) = bulk {
                     // Bounded or FixedArray mode: data is inline array or pre-allocated
@@ -1390,16 +1395,39 @@ impl<'a> CGen<'a> {
                 ));
                 if let Some(max) = bound {
                     self.emit_bound_check(accessor, *max, indent);
+                    self.emit_map_read_loop(key, value, accessor, indent);
+                } else if self.opts.string_mode == StringMode::Pointer {
+                    let key_cast = self.map_member_ptr_cast(key);
+                    let val_cast = self.map_member_ptr_cast(value);
+                    self.raw(&format!("{}if ({}.length > 0) {{\n", indent, accessor));
+                    for (fld, cast) in [("keys", key_cast), ("values", val_cast)] {
+                        self.raw(&format!(
+                            "{}    {}.{} = ({})calloc({}.length, sizeof(*{}.{}));\n",
+                            indent, accessor, fld, cast, accessor, accessor, fld
+                        ));
+                    }
+                    self.raw(&format!(
+                        "{}    if ({}.keys && {}.values) {{\n",
+                        indent, accessor, accessor
+                    ));
+                    self.emit_map_read_loop(key, value, accessor, &format!("{}        ", indent));
+                    self.raw(&format!("{}    }} else {{\n", indent));
+                    for fld in ["keys", "values"] {
+                        self.raw(&format!(
+                            "{}        if ({}.{}) {{ free({}.{}); {}.{} = NULL; }}\n",
+                            indent, accessor, fld, accessor, fld, accessor, fld
+                        ));
+                    }
+                    self.raw(&format!(
+                        "{}        r.error = INT2DDS_CDR_ERR_OVERFLOW; {}.length = 0;\n",
+                        indent, accessor
+                    ));
+                    self.raw(&format!("{}    }}\n", indent));
+                    self.raw(&format!("{}}}\n", indent));
+                } else {
+                    self.emit_unbounded_reject(accessor, indent);
+                    self.emit_map_read_loop(key, value, accessor, indent);
                 }
-                self.raw(&format!(
-                    "{}for (uint32_t _i = 0; _i < {}.length; _i++) {{\n",
-                    indent, accessor
-                ));
-                let key_acc = format!("{}.keys[_i]", accessor);
-                let val_acc = format!("{}.values[_i]", accessor);
-                self.emit_read_field_indented(key, &key_acc, &format!("{}    ", indent));
-                self.emit_read_field_indented(value, &val_acc, &format!("{}    ", indent));
-                self.raw(&format!("{}}}\n", indent));
                 if needs_dh {
                     self.raw(&format!(
                         "{}if (r.xcdr2) {{ int2dds_cdr_read_dheader_end(&r, _map_sz, _map_sp); }}\n",
@@ -1517,6 +1545,31 @@ impl<'a> CGen<'a> {
         ));
     }
 
+    /// FixedArray mode declares an unbounded collection as a bare pointer with no
+    /// allocation contract, so a non-empty decode has nowhere safe to write: reject
+    /// the sample. Empty collections stay decodable.
+    fn emit_unbounded_reject(&mut self, accessor: &str, indent: &str) {
+        self.raw(&format!(
+            "{}if ({}.length > 0) {{ r.error = INT2DDS_CDR_ERR_OVERFLOW; {}.length = 0; }}\n",
+            indent, accessor, accessor
+        ));
+    }
+
+    fn emit_map_read_loop(
+        &mut self,
+        key: &ResolvedType,
+        value: &ResolvedType,
+        accessor: &str,
+        indent: &str,
+    ) {
+        self.raw(&format!("{}for (uint32_t _i = 0; _i < {}.length; _i++) {{\n", indent, accessor));
+        let key_acc = format!("{}.keys[_i]", accessor);
+        let val_acc = format!("{}.values[_i]", accessor);
+        self.emit_read_field_indented(key, &key_acc, &format!("{}    ", indent));
+        self.emit_read_field_indented(value, &val_acc, &format!("{}    ", indent));
+        self.raw(&format!("{}}}\n", indent));
+    }
+
     /// Emit the single call that reads a whole bulk-eligible element run.
     fn emit_bulk_read(&mut self, kind: BulkElem, data: &str, count: &str, indent: &str) {
         let call = match kind {
@@ -1598,6 +1651,15 @@ impl<'a> CGen<'a> {
         } else {
             format!("{}* {}", base_c, field_name)
         }
+    }
+
+    /// Pointer-mode cast matching map_member_decl's unbounded member type.
+    fn map_member_ptr_cast(&self, ty: &ResolvedType) -> String {
+        if let ResolvedType::WString { bound } = ty {
+            let ws_size = bound.unwrap_or(self.opts.default_string_bound) + 1;
+            return format!("uint16_t (*)[{}]", ws_size);
+        }
+        format!("{}*", self.type_to_c_base(ty))
     }
 
     /// Check if a type has variable-length serialized representation.
@@ -2149,6 +2211,7 @@ impl<'a> CGen<'a> {
                         "{}if ({}.data) {{ free({}.data); {}.data = NULL; }}\n",
                         indent, accessor, accessor, accessor
                     ));
+                    self.raw(&format!("{}{}.length = 0;\n", indent, accessor));
                 }
             }
             ResolvedType::Map { key, value, bound } => {
@@ -2179,6 +2242,7 @@ impl<'a> CGen<'a> {
                         "{}if ({}.values) {{ free({}.values); {}.values = NULL; }}\n",
                         indent, accessor, accessor, accessor
                     ));
+                    self.raw(&format!("{}{}.length = 0;\n", indent, accessor));
                 }
             }
             ResolvedType::Array { element, size } => {
@@ -2458,8 +2522,8 @@ mod tests {
         assert!(code.contains("int32_t data[10];"));
         assert!(code.contains("void Data_cleanup(Data *val)"));
         assert!(code.contains("if (val->values.data) { free(val->values.data);"));
-        assert!(code.contains("values.data = (int32_t*)malloc("));
-        assert!(code.contains("values.length * sizeof(int32_t)"));
+        assert!(code.contains("values.data = (int32_t*)calloc("));
+        assert!(code.contains("values.length, sizeof(int32_t)"));
     }
 
     #[test]
@@ -2479,6 +2543,9 @@ mod tests {
         assert!(code.contains("int32_t* data;"));
         assert!(!code.contains("Data_cleanup"));
         assert!(!code.contains("malloc("));
+        assert!(!code.contains("calloc("));
+        assert!(code
+            .contains("if (val_out->values.length > 0) { r.error = INT2DDS_CDR_ERR_OVERFLOW; val_out->values.length = 0; }"));
     }
 
     #[test]
