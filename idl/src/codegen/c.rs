@@ -812,9 +812,7 @@ impl<'a> CGen<'a> {
         // {Parent}_serialize_fields would emit a nested DHEADER and desync with Rust.
         if let Some(base) = &s.base_type {
             let simple = base.rsplit("::").next().unwrap_or(base);
-            if let Some(parent_struct) =
-                self.model.structs.iter().find(|st| st.name == simple).cloned()
-            {
+            if let Some(parent_struct) = self.find_struct(simple).cloned() {
                 let parent_var = format!("_p_{}", simple.to_lowercase());
                 self.raw(&format!("    const {} *{} = &{}->parent;\n", simple, parent_var, prefix));
                 self.emit_serialize_fields(&parent_struct, &parent_var);
@@ -827,12 +825,41 @@ impl<'a> CGen<'a> {
         }
     }
 
+    /// Flatten members ancestors-first for the mutable wire, emitting one parent
+    /// pointer declaration per inheritance level. Positional member ids run over
+    /// this flattened list, matching the C#/Python generators and type_info.
+    fn flatten_mutable_members(
+        &mut self,
+        s: &ResolvedStruct,
+        prefix: &str,
+        is_const: bool,
+        out: &mut Vec<(String, ResolvedMember)>,
+    ) {
+        if let Some(base) = &s.base_type {
+            let simple = base.rsplit("::").next().unwrap_or(base).to_string();
+            if let Some(parent_struct) = self.find_struct(&simple).cloned() {
+                let parent_var = format!("_p_{}", simple.to_lowercase());
+                let qual = if is_const { "const " } else { "" };
+                self.raw(&format!(
+                    "    {}{} *{} = &{}->parent;\n",
+                    qual, simple, parent_var, prefix
+                ));
+                self.flatten_mutable_members(&parent_struct, &parent_var, is_const, out);
+            }
+        }
+        for m in &s.members {
+            out.push((prefix.to_string(), m.clone()));
+        }
+    }
+
     fn emit_serialize_fields_mutable(&mut self, s: &ResolvedStruct, prefix: &str) {
-        for (i, m) in s.members.iter().enumerate() {
+        let mut flat = Vec::new();
+        self.flatten_mutable_members(s, prefix, true, &mut flat);
+        for (i, (pfx, m)) in flat.iter().enumerate() {
             let id = m.member_id.unwrap_or(i as u32);
             let mu = if m.must_understand { "true" } else { "false" };
             let field_name = naming::escape_keyword(&m.name, naming::TargetLang::C);
-            let accessor = self.make_field_accessor(m, prefix, &field_name);
+            let accessor = self.make_field_accessor(m, pfx, &field_name);
             self.raw("    {\n");
             self.raw("        size_t em;\n");
             self.raw("        if (w.xcdr2) {\n");
@@ -1117,9 +1144,7 @@ impl<'a> CGen<'a> {
         // Inline parent fields (flat) — see emit_serialize_fields.
         if let Some(base) = &s.base_type {
             let simple = base.rsplit("::").next().unwrap_or(base);
-            if let Some(parent_struct) =
-                self.model.structs.iter().find(|st| st.name == simple).cloned()
-            {
+            if let Some(parent_struct) = self.find_struct(simple).cloned() {
                 let parent_var = format!("_p_{}", simple.to_lowercase());
                 self.raw(&format!("    {} *{} = &{}->parent;\n", simple, parent_var, prefix));
                 self.emit_deserialize_fields(&parent_struct, &parent_var);
@@ -1133,6 +1158,8 @@ impl<'a> CGen<'a> {
     }
 
     fn emit_deserialize_fields_mutable(&mut self, s: &ResolvedStruct, prefix: &str) {
+        let mut flat = Vec::new();
+        self.flatten_mutable_members(s, prefix, false, &mut flat);
         self.raw("    if (r.xcdr2) {\n");
         self.raw("        uint32_t obj_size;\n        size_t start_pos;\n");
         self.raw("        int2dds_cdr_read_dheader(&r, &obj_size, &start_pos);\n");
@@ -1142,7 +1169,7 @@ impl<'a> CGen<'a> {
         self.raw(
             "            if (!int2dds_cdr_read_emheader(&r, &mid, &dlen, &mu))\n                break;\n",
         );
-        self.emit_mutable_member_switch(s, prefix, "            ");
+        self.emit_mutable_member_switch(&flat, "            ");
         self.raw("        }\n");
         self.raw("        int2dds_cdr_read_dheader_end(&r, obj_size, start_pos);\n");
         self.raw("    } else {\n");
@@ -1152,7 +1179,7 @@ impl<'a> CGen<'a> {
             "            if (!int2dds_cdr_read_pid_header(&r, &mid, &dlen, &sen) || sen)\n                break;\n",
         );
         self.raw("            size_t mstart = int2dds_cdr_reader_position(&r);\n");
-        self.emit_mutable_member_switch(s, prefix, "            ");
+        self.emit_mutable_member_switch(&flat, "            ");
         self.raw("            size_t mused = int2dds_cdr_reader_position(&r) - mstart;\n");
         self.raw("            if (mused < dlen) {\n");
         self.raw("                int2dds_cdr_skip_bytes(&r, dlen - mused);\n");
@@ -1161,12 +1188,12 @@ impl<'a> CGen<'a> {
         self.raw("    }\n");
     }
 
-    fn emit_mutable_member_switch(&mut self, s: &ResolvedStruct, prefix: &str, indent: &str) {
+    fn emit_mutable_member_switch(&mut self, flat: &[(String, ResolvedMember)], indent: &str) {
         self.raw(&format!("{}switch (mid) {{\n", indent));
-        for (i, m) in s.members.iter().enumerate() {
+        for (i, (pfx, m)) in flat.iter().enumerate() {
             let id = m.member_id.unwrap_or(i as u32);
             let field_name = naming::escape_keyword(&m.name, naming::TargetLang::C);
-            let accessor = self.make_field_accessor(m, prefix, &field_name);
+            let accessor = self.make_field_accessor(m, pfx, &field_name);
             self.raw(&format!("{}case {}:\n", indent, id));
             self.emit_read_field_indented(&m.resolved_type, &accessor, &format!("{}    ", indent));
             self.raw(&format!("{}    break;\n", indent));
@@ -2416,6 +2443,70 @@ mod tests {
         assert!(code.contains("int2dds_cdr_write_pid_finalize(&w, 1, false, em)"));
         assert!(code.contains("int2dds_cdr_write_pid_sentinel(&w)"));
         assert!(code.contains("int2dds_cdr_read_pid_header(&r, &mid, &dlen, &sen)"));
+    }
+
+    #[test]
+    fn test_mutable_inherited_struct_c() {
+        let defs = parse_idl(
+            r#"
+            @extensibility(MUTABLE)
+            struct MBase {
+                unsigned long a;
+                unsigned short b;
+            };
+            @extensibility(MUTABLE)
+            struct MChild : MBase {
+                double c;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "MChild.idl", &COptions::default());
+
+        // Inherited members serialize ancestors-first; positional ids run over the
+        // flattened list (base 0..1, own continue at 2), matching C#/Python and the
+        // advertised type_info order.
+        assert!(code.contains("const MBase *_p_mbase = &val->parent;"));
+        assert!(code.contains("int2dds_cdr_write_u32(&w, _p_mbase->a)"));
+        assert!(code.contains("int2dds_cdr_write_u16(&w, _p_mbase->b)"));
+        assert!(code.contains("int2dds_cdr_write_emheader_begin(&w, 2, false, &em)"));
+        assert!(code.contains("int2dds_cdr_write_pid_begin(&w, 2, &em)"));
+        assert!(code.contains("MBase *_p_mbase = &val_out->parent;"));
+        assert!(code.contains("int2dds_cdr_read_u32(&r, &_p_mbase->a)"));
+        assert!(code.contains("case 2:"));
+        assert!(code.contains("int2dds_cdr_read_f64(&r, &val_out->c)"));
+    }
+
+    #[test]
+    fn test_imported_base_struct_c() {
+        let defs = parse_idl(
+            r#"
+            struct Base {
+                long id;
+            };
+            struct Derived : Base {
+                double extra;
+            };
+            @extensibility(MUTABLE)
+            struct MDerived : Base {
+                double more;
+            };
+            "#,
+        )
+        .unwrap();
+        let mut model = resolve(defs).unwrap();
+        let pos = model.structs.iter().position(|s| s.name == "Base").unwrap();
+        let base = model.structs.remove(pos);
+        model.imported.structs.push(base);
+        let code = generate(&model, "Derived.idl", &COptions::default());
+
+        // A base resolved from an #include'd file still serializes inline.
+        assert!(code.contains("const Base *_p_base = &val->parent;"));
+        assert!(code.contains("int2dds_cdr_write_i32(&w, _p_base->id)"));
+        assert!(code.contains("int2dds_cdr_read_i32(&r, &_p_base->id)"));
+        // Mutable path: imported base member takes flat id 0, own member follows at 1.
+        assert!(code.contains("int2dds_cdr_write_emheader_begin(&w, 1, false, &em)"));
     }
 
     #[test]

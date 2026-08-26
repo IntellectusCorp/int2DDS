@@ -54,6 +54,11 @@ const FIXTURE: &str = r#"
         @id(20) string label;
     };
 
+    @extensibility(MUTABLE)
+    struct TaggedDerived : Base {
+        @id(30) double more;
+    };
+
     @extensibility(APPENDABLE)
     struct Holder {
         @key long id;
@@ -73,6 +78,7 @@ const FIXTURE: &str = r#"
         Bits bits;
         Derived derived;
         Tagged tagged;
+        TaggedDerived tagged_derived;
         @external long ext;
     };
 "#;
