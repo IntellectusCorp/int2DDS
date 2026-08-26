@@ -626,7 +626,24 @@ INT2DDS_CDR_DEF bool int2dds_cdr_write_emheader_begin(Int2DdsCdrWriter *w, uint3
 INT2DDS_CDR_DEF bool int2dds_cdr_write_emheader_finalize(Int2DdsCdrWriter *w, size_t token) {
     if (!_int2dds_cdr_w_ok(w)) return false;
     uint32_t data_length = (uint32_t)(w->pos - token - 4);
-    _int2dds_put_u32(w->buf + token, data_length, w->little_endian);
+    uint32_t lc_word;
+    switch (data_length) {
+        case 1: lc_word = 0u << 28; break;
+        case 2: lc_word = 1u << 28; break;
+        case 4: lc_word = 2u << 28; break;
+        case 8: lc_word = 3u << 28; break;
+        default:
+            _int2dds_put_u32(w->buf + token, data_length, w->little_endian);
+            return true;
+    }
+    /* Compact LC, matching the Rust writers' Auto policy: rewrite the LC bits
+     * and close the reserved NEXTINT slot. XCDR2 alignment is at most 4, so
+     * shifting the payload down by 4 preserves member alignment. */
+    uint32_t header = _int2dds_get_u32(w->buf + token - 4, w->little_endian);
+    header = (header & ~(7u << 28)) | lc_word;
+    _int2dds_put_u32(w->buf + token - 4, header, w->little_endian);
+    memmove(w->buf + token, w->buf + token + 4, data_length);
+    w->pos -= 4;
     return true;
 }
 
