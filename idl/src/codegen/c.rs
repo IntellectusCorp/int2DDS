@@ -90,11 +90,15 @@ impl<'a> CGen<'a> {
         for e in &self.model.enums {
             self.emit_enum(e);
             self.raw("\n");
+            self.emit_enum_type_info(e);
+            self.raw("\n");
         }
 
         // Bitmasks
         for b in &self.model.bitmasks {
             self.emit_bitmask(b);
+            self.raw("\n");
+            self.emit_bitmask_type_info(b);
             self.raw("\n");
         }
 
@@ -200,6 +204,26 @@ impl<'a> CGen<'a> {
         self.raw(&format!("}} {};\n", e.name));
     }
 
+    /// `{Name}_type_info()` builder mirroring the derive macro's enum TypeObject
+    /// (PascalCase literal names, bit_bound 32) so the content hash matches the
+    /// other bindings and plan-driven consumers resolve the member.
+    fn emit_enum_type_info(&mut self, e: &ResolvedEnum) {
+        self.raw(&format!("static inline Int2DdsTypeInfo* {}_type_info(void) {{\n", e.name));
+        self.raw("    Int2DdsTypeInfo *ti;\n");
+        self.raw(&format!(
+            "    int2dds_type_info_create_enum(\"{}\", 32, &ti);\n",
+            e.qualified_name
+        ));
+        for v in &e.variants {
+            self.raw(&format!(
+                "    int2dds_type_info_add_enum_literal(ti, \"{}\", {}, 0);\n",
+                naming::to_pascal_case(&v.name),
+                v.value
+            ));
+        }
+        self.raw("    return ti;\n}\n");
+    }
+
     // ---- Bitmask ----
 
     fn emit_bitmask(&mut self, b: &ResolvedBitmask) {
@@ -210,6 +234,25 @@ impl<'a> CGen<'a> {
             let flag_name = format!("{}_{}", prefix, flag.name.to_uppercase());
             self.raw(&format!("#define {} (({})1 << {})\n", flag_name, c_type, flag.position));
         }
+    }
+
+    /// `{Name}_type_info()` builder mirroring the derive macro's bitmask TypeObject
+    /// (PascalCase flag names, declared @bit_bound).
+    fn emit_bitmask_type_info(&mut self, b: &ResolvedBitmask) {
+        self.raw(&format!("static inline Int2DdsTypeInfo* {}_type_info(void) {{\n", b.name));
+        self.raw("    Int2DdsTypeInfo *ti;\n");
+        self.raw(&format!(
+            "    int2dds_type_info_create_bitmask(\"{}\", {}, &ti);\n",
+            b.qualified_name, b.bit_bound
+        ));
+        for flag in &b.flags {
+            self.raw(&format!(
+                "    int2dds_type_info_add_bitmask_flag(ti, \"{}\", {});\n",
+                naming::to_pascal_case(&flag.name),
+                flag.position
+            ));
+        }
+        self.raw("    return ti;\n}\n");
     }
 
     // ---- Bitset ----
@@ -1650,7 +1693,11 @@ impl<'a> CGen<'a> {
     /// Look up a bitmask by name, returning it if found.
     fn find_bitmask(&self, name: &str) -> Option<&ResolvedBitmask> {
         let simple = name.rsplit("::").next().unwrap_or(name);
-        self.model.bitmasks.iter().find(|b| b.name == simple)
+        self.model
+            .bitmasks
+            .iter()
+            .chain(self.model.imported.bitmasks.iter())
+            .find(|b| b.name == simple)
     }
 
     /// Generate a C struct member declaration for a map key or value field.
@@ -1858,6 +1905,23 @@ impl<'a> CGen<'a> {
         self.find_struct(name).is_some()
     }
 
+    /// Resolve an enum by qualified or leaf name across the local model and imports.
+    fn find_enum(&self, name: &str) -> Option<&ResolvedEnum> {
+        let simple = name.rsplit("::").next().unwrap_or(name);
+        self.model.enums.iter().chain(self.model.imported.enums.iter()).find(|e| e.name == simple)
+    }
+
+    /// The name behind a member/element that has its own generated `{Name}_type_info()`
+    /// builder to reference by content-hash: a resolvable struct, enum, or bitmask.
+    fn nested_builder_target<'t>(&self, ty: &'t ResolvedType) -> Option<&'t str> {
+        match ty {
+            ResolvedType::Struct(n) if self.is_model_struct(n) => Some(n),
+            ResolvedType::Enum(n) if self.find_enum(n).is_some() => Some(n),
+            ResolvedType::Bitmask(n) if self.find_bitmask(n).is_some() => Some(n),
+            _ => None,
+        }
+    }
+
     /// All members including inherited ones (ancestors first), matching the C#/Python
     /// `collect_all_members` so the type_info metadata (and thus KeyHash) covers base
     /// `@key` members.
@@ -1927,15 +1991,26 @@ impl<'a> CGen<'a> {
         let name = &m.name;
         let var = format!("_nti_{}", name);
         let (nested_name, add_stmt) = match &m.resolved_type {
-            ResolvedType::Struct(sname) if !m.is_external && self.is_model_struct(sname) => (
-                sname,
-                format!(
-                    "int2dds_type_info_add_nested_field(ti, \"{}\", {}, {});",
-                    name, var, flags
-                ),
-            ),
-            ResolvedType::Sequence { element, bound } => match element.as_ref() {
-                ResolvedType::Struct(ename) if self.is_model_struct(ename) => (
+            ResolvedType::Struct(_) | ResolvedType::Enum(_) | ResolvedType::Bitmask(_) => {
+                let Some(sname) = self.nested_builder_target(&m.resolved_type) else {
+                    return false;
+                };
+                if m.is_external {
+                    return false;
+                }
+                (
+                    sname,
+                    format!(
+                        "int2dds_type_info_add_nested_field(ti, \"{}\", {}, {});",
+                        name, var, flags
+                    ),
+                )
+            }
+            ResolvedType::Sequence { element, bound } => {
+                let Some(ename) = self.nested_builder_target(element.as_ref()) else {
+                    return false;
+                };
+                (
                     ename,
                     format!(
                         "int2dds_type_info_add_sequence_of_nested_field(ti, \"{}\", {}, {}, {});",
@@ -1944,28 +2019,27 @@ impl<'a> CGen<'a> {
                         bound.unwrap_or(0),
                         flags
                     ),
-                ),
-                _ => return false,
-            },
+                )
+            }
             ResolvedType::Array { .. } => {
                 let (dims, base) = flatten_array(&m.resolved_type);
-                match base {
-                    ResolvedType::Struct(ename) if self.is_model_struct(ename) => (
-                        ename,
-                        if dims.len() > 1 {
-                            format!(
-                                "const uint32_t _dims_{}[] = {{{}}}; int2dds_type_info_add_array_of_nested_field_nd(ti, \"{}\", {}, _dims_{}, {}, {});",
-                                name, dims_literal(&dims), name, var, name, dims.len(), flags
-                            )
-                        } else {
-                            format!(
-                                "int2dds_type_info_add_array_of_nested_field(ti, \"{}\", {}, {}, {});",
-                                name, var, dims[0], flags
-                            )
-                        },
-                    ),
-                    _ => return false,
-                }
+                let Some(ename) = self.nested_builder_target(base) else {
+                    return false;
+                };
+                (
+                    ename,
+                    if dims.len() > 1 {
+                        format!(
+                            "const uint32_t _dims_{}[] = {{{}}}; int2dds_type_info_add_array_of_nested_field_nd(ti, \"{}\", {}, _dims_{}, {}, {});",
+                            name, dims_literal(&dims), name, var, name, dims.len(), flags
+                        )
+                    } else {
+                        format!(
+                            "int2dds_type_info_add_array_of_nested_field(ti, \"{}\", {}, {}, {});",
+                            name, var, dims[0], flags
+                        )
+                    },
+                )
             }
             _ => return false,
         };
@@ -3457,9 +3531,10 @@ mod tests {
             "{}",
             code
         );
+        assert!(code.contains("Int2DdsTypeInfo *_nti_e = Color_type_info();"), "{}", code);
         assert!(
             code.contains(
-                "{ const uint32_t _dims_e[] = {2, 3}; int2dds_type_info_add_array_of_named_field_nd(ti, \"e\", \"Color\", _dims_e, 2, 0); }"
+                "const uint32_t _dims_e[] = {2, 3}; int2dds_type_info_add_array_of_nested_field_nd(ti, \"e\", _nti_e, _dims_e, 2, 0);"
             ),
             "{}",
             code
@@ -3472,5 +3547,88 @@ mod tests {
             code
         );
         assert!(code.contains("int2dds_type_info_add_named_type_field(ti, \"lists\""), "{}", code);
+    }
+
+    #[test]
+    fn test_enum_bitmask_type_info_c() {
+        let defs = parse_idl(
+            r#"
+            enum Color { RED, GREEN = 5, BLUE };
+            @bit_bound(8)
+            bitmask MyFlags {
+                FLAG_A,
+                @position(3) FLAG_B
+            };
+            bitset Bits { bitfield<3> low; };
+            struct Holder {
+                @key Color c;
+                MyFlags f;
+                sequence<Color, 4> cseq;
+                Color pal[2];
+                Bits b;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Holder.idl", &COptions::default());
+
+        // Enum/bitmask get their own builder fns mirroring the derive TypeObject
+        // (PascalCase literal names, enum bit_bound 32, bitmask @bit_bound).
+        assert!(code.contains("static inline Int2DdsTypeInfo* Color_type_info(void)"), "{}", code);
+        assert!(code.contains("int2dds_type_info_create_enum(\"Color\", 32, &ti);"), "{}", code);
+        assert!(
+            code.contains("int2dds_type_info_add_enum_literal(ti, \"Red\", 0, 0);"),
+            "{}",
+            code
+        );
+        assert!(
+            code.contains("int2dds_type_info_add_enum_literal(ti, \"Green\", 5, 0);"),
+            "{}",
+            code
+        );
+        assert!(
+            code.contains("int2dds_type_info_add_enum_literal(ti, \"Blue\", 6, 0);"),
+            "{}",
+            code
+        );
+        assert!(
+            code.contains("int2dds_type_info_create_bitmask(\"MyFlags\", 8, &ti);"),
+            "{}",
+            code
+        );
+        assert!(code.contains("int2dds_type_info_add_bitmask_flag(ti, \"FlagA\", 0);"), "{}", code);
+        assert!(code.contains("int2dds_type_info_add_bitmask_flag(ti, \"FlagB\", 3);"), "{}", code);
+
+        // Members reference the builders instead of the name-hash fallback.
+        assert!(code.contains("Int2DdsTypeInfo *_nti_c = Color_type_info();"), "{}", code);
+        assert!(
+            code.contains(
+                "int2dds_type_info_add_nested_field(ti, \"c\", _nti_c, INT2DDS_MEMBER_KEY);"
+            ),
+            "{}",
+            code
+        );
+        assert!(
+            code.contains("int2dds_type_info_add_nested_field(ti, \"f\", _nti_f, 0);"),
+            "{}",
+            code
+        );
+        assert!(
+            code.contains(
+                "int2dds_type_info_add_sequence_of_nested_field(ti, \"cseq\", _nti_cseq, 4, 0);"
+            ),
+            "{}",
+            code
+        );
+        assert!(
+            code.contains(
+                "int2dds_type_info_add_array_of_nested_field(ti, \"pal\", _nti_pal, 2, 0);"
+            ),
+            "{}",
+            code
+        );
+        // Bitset still has no builder: name-hash fallback.
+        assert!(code.contains("int2dds_type_info_add_named_type_field(ti, \"b\""), "{}", code);
     }
 }

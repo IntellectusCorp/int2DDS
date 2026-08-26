@@ -87,6 +87,7 @@ const FIXTURE: &str = r#"
         TaggedPositional tp;
         long grid[2][3];
         Color palette[2];
+        sequence<Color, 4> cseq;
         Inner inner_grid[2];
         string labels[2];
         sequence<long, 8> bseq;
