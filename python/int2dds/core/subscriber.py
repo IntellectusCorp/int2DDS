@@ -357,7 +357,7 @@ class DataReader(Generic[T]):
             handle = bytes(ffi.buffer(info.instance_handle, 16))
             if info.valid_data:
                 data_bytes = ffi.buffer(self._buffer, actual_size[0])[:]
-                data = self._topic.type_class._deserialize_cdr(data_bytes)
+                data = self._topic._decode_sample(data_bytes)
                 return Sample(data=data, valid_data=True, instance_handle=handle,
                               instance_state=info.instance_state)
             return Sample(data=None, valid_data=False, instance_handle=handle,
@@ -515,7 +515,7 @@ class DataReader(Generic[T]):
                         continue
                     check_ret(ret)
                 data_bytes = ffi.buffer(self._buffer, actual_size[0])[:]
-                data = self._topic.type_class._deserialize_cdr(data_bytes)
+                data = self._topic._decode_sample(data_bytes)
                 samples.append(Sample(data=data, valid_data=True, instance_handle=handle,
                                       instance_state=info.instance_state))
             return samples
@@ -593,7 +593,7 @@ class DataReader(Generic[T]):
                         continue
                     check_ret(ret)
                 data_bytes = ffi.buffer(self._buffer, actual_size[0])[:]
-                data = self._topic.type_class._deserialize_cdr(data_bytes)
+                data = self._topic._decode_sample(data_bytes)
                 samples.append(Sample(data=data, valid_data=True, instance_handle=handle,
                                       instance_state=info.instance_state))
             return samples
@@ -644,7 +644,7 @@ class DataReader(Generic[T]):
                         continue
                     check_ret(ret)
                 data_bytes = ffi.buffer(self._buffer, actual_size[0])[:]
-                data = self._topic.type_class._deserialize_cdr(data_bytes)
+                data = self._topic._decode_sample(data_bytes)
                 samples.append(Sample(data=data, valid_data=True, instance_handle=handle,
                                       instance_state=info.instance_state))
             return samples

@@ -55,6 +55,29 @@ pub enum SerializationFormat {
     Xcdr { extensibility_kind: crate::serialize::xcdr::ExtensibilityKind, use_delimiters: bool },
 }
 
+impl SerializationFormat {
+    /// The format a writer uses for one representation id and the type's
+    /// extensibility. `None` for representations without a wire codec (XML).
+    pub fn for_representation(
+        representation: crate::infrastructure::qos_policy::DataRepresentationId,
+        extensibility: crate::serialize::xcdr::ExtensibilityKind,
+    ) -> Option<Self> {
+        use crate::infrastructure::qos_policy::DataRepresentationId;
+        use crate::serialize::xcdr::ExtensibilityKind;
+        match representation {
+            DataRepresentationId::XcdrDataRepresentation => Some(Self::Cdr),
+            DataRepresentationId::Xcdr2DataRepresentation => Some(Self::Xcdr {
+                extensibility_kind: extensibility,
+                use_delimiters: matches!(
+                    extensibility,
+                    ExtensibilityKind::Appendable | ExtensibilityKind::Mutable
+                ),
+            }),
+            DataRepresentationId::XmlDataRepresentation => None,
+        }
+    }
+}
+
 pub trait DdsType: 'static + Send + Sync + Clone + Debug {
     type TypeSupport: TypeSupport + Default;
     type FieldAccessor: FieldAccessor + Default;

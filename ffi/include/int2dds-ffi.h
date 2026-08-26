@@ -4481,6 +4481,79 @@ Int2DdsRet int2dds_create_topic_with_field_descriptors(const struct Int2DdsParti
                                                        uintptr_t field_count,
                                                        struct Int2DdsTopic **topic_out);
 
+/**
+ * Report the topic type's ValueFrame layout parameters.
+ *
+ * `fixed_size_out` receives the byte size of the frame's fixed slot region and
+ * `schema_hash_out` the FNV-1a 64 hash of the canonical layout string. A binding
+ * compares the hash against the one it computed from its own generated type
+ * description before using the frame path; a mismatch means the two layout
+ * computations diverged and the frame path must not be used.
+ *
+ * Returns `INT2DDS_RET_UNSUPPORTED` when the topic has no frame layout (created
+ * without a full TypeObject, or the type has a shape the frame does not
+ * represent) — the binding then keeps its own codec path.
+ *
+ * # Safety
+ * - `topic` must be a valid topic
+ * - `fixed_size_out` and `schema_hash_out` must be valid pointers
+ */
+Int2DdsRet int2dds_topic_frame_info(const struct Int2DdsTopic *topic,
+                                    uint32_t *fixed_size_out,
+                                    uint64_t *schema_hash_out);
+
+/**
+ * Encode a ValueFrame into CDR sample bytes (with encapsulation header).
+ *
+ * The kernel converts the frame through the dynamic codec, so the bytes are
+ * identical to what the dynamic path produces for the same values. `xcdr2`
+ * selects the representation the same way a writer's DataRepresentation QoS
+ * does (`false` = XCDR1, `true` = XCDR2); pass the writer's effective
+ * representation (`int2dds_datawriter_data_representation`).
+ *
+ * On success copies the bytes into `buffer` and sets `actual_size_out`. When
+ * the buffer is too small, returns `INT2DDS_RET_BUFFER_TOO_SMALL` with the
+ * required size in `actual_size_out` so a retry can succeed.
+ *
+ * # Safety
+ * - `topic` must be a valid topic
+ * - `frame` must point to at least `frame_len` readable bytes
+ * - `buffer` must point to at least `buffer_capacity` writable bytes
+ * - `actual_size_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_topic_frame_encode(const struct Int2DdsTopic *topic,
+                                      const uint8_t *frame,
+                                      uintptr_t frame_len,
+                                      bool xcdr2,
+                                      uint8_t *buffer,
+                                      uintptr_t buffer_capacity,
+                                      uintptr_t *actual_size_out);
+
+/**
+ * Decode CDR sample bytes (with encapsulation header) into a ValueFrame.
+ *
+ * The counterpart of `int2dds_topic_frame_encode` for the read path: pass the
+ * bytes from `int2dds_datareader_take_serialized` (or a read variant) and
+ * receive the flat frame the binding unpacks with bulk primitives. The
+ * representation is read from the sample's encapsulation header.
+ *
+ * On success copies the frame into `buffer` and sets `actual_size_out`. When
+ * the buffer is too small, returns `INT2DDS_RET_BUFFER_TOO_SMALL` with the
+ * required size in `actual_size_out` so a retry can succeed.
+ *
+ * # Safety
+ * - `topic` must be a valid topic
+ * - `data` must point to at least `data_len` readable bytes
+ * - `buffer` must point to at least `buffer_capacity` writable bytes
+ * - `actual_size_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_topic_frame_decode(const struct Int2DdsTopic *topic,
+                                      const uint8_t *data,
+                                      uintptr_t data_len,
+                                      uint8_t *buffer,
+                                      uintptr_t buffer_capacity,
+                                      uintptr_t *actual_size_out);
+
 Int2DdsRet int2dds_type_info_create(const char *type_name,
                                     int32_t extensibility,
                                     struct Int2DdsTypeInfo **out);

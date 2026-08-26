@@ -1630,6 +1630,25 @@ Int2DdsRet int2dds_create_topic_with_field_descriptors(const struct Int2DdsParti
                                                        uintptr_t field_count,
                                                        struct Int2DdsTopic **topic_out);
 
+Int2DdsRet int2dds_topic_frame_info(const struct Int2DdsTopic *topic,
+                                    uint32_t *fixed_size_out,
+                                    uint64_t *schema_hash_out);
+
+Int2DdsRet int2dds_topic_frame_encode(const struct Int2DdsTopic *topic,
+                                      const uint8_t *frame,
+                                      uintptr_t frame_len,
+                                      bool xcdr2,
+                                      uint8_t *buffer,
+                                      uintptr_t buffer_capacity,
+                                      uintptr_t *actual_size_out);
+
+Int2DdsRet int2dds_topic_frame_decode(const struct Int2DdsTopic *topic,
+                                      const uint8_t *data,
+                                      uintptr_t data_len,
+                                      uint8_t *buffer,
+                                      uintptr_t buffer_capacity,
+                                      uintptr_t *actual_size_out);
+
 Int2DdsRet int2dds_type_info_create(const char *type_name,
                                     int32_t extensibility,
                                     struct Int2DdsTypeInfo **out);

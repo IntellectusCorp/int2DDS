@@ -17,8 +17,8 @@ use int2dds::{
     topic::sql::ast::Parameter,
     topic::type_support::{FieldAccessor, SerializationFormat, TypeSupport},
     xtypes::{
-        deserialize_dynamic_data, DynamicTypeSupport, TypeIdentifier, TypeObject, TypePlans,
-        TypeRegistry,
+        deserialize_dynamic_data, DynamicTypeSupport, FrameLayout, TypeIdentifier, TypeObject,
+        TypePlans, TypeRegistry,
     },
 };
 
@@ -43,6 +43,10 @@ pub struct RawTypeSupport {
     /// members. It is the sole key path: a raw topic without a full TypeObject
     /// yields a NIL InstanceHandle rather than a non-conformant approximation.
     dynamic_key_support: Option<Arc<DynamicTypeSupport>>,
+    /// ValueFrame layout for the frame exchange path (`int2dds_topic_frame_*`).
+    /// `None` when the type has no full TypeObject or a shape the frame does not
+    /// represent; bindings then keep their own codec path.
+    frame_layout: Option<Arc<FrameLayout>>,
 }
 
 impl RawTypeSupport {
@@ -55,6 +59,7 @@ impl RawTypeSupport {
             type_object: None,
             plans: None,
             dynamic_key_support: None,
+            frame_layout: None,
         }
     }
 
@@ -71,6 +76,7 @@ impl RawTypeSupport {
             type_object: None,
             plans: None,
             dynamic_key_support: None,
+            frame_layout: None,
         }
     }
 
@@ -128,6 +134,10 @@ impl RawTypeSupport {
         let plans = dynamic_support
             .as_ref()
             .map(|support| Arc::new(TypePlans::compile(support.dynamic_type())));
+        let frame_layout = dynamic_support
+            .as_ref()
+            .and_then(|support| FrameLayout::compile(support.dynamic_type()))
+            .map(Arc::new);
         Self {
             type_name,
             extensibility,
@@ -136,7 +146,12 @@ impl RawTypeSupport {
             type_object: Some(type_object),
             plans,
             dynamic_key_support: if has_key { dynamic_support } else { None },
+            frame_layout,
         }
+    }
+
+    pub fn frame_layout(&self) -> Option<Arc<FrameLayout>> {
+        self.frame_layout.clone()
     }
 }
 

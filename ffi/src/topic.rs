@@ -18,7 +18,12 @@ use std::os::raw::c_char;
 use std::sync::Arc;
 
 use int2dds::{
-    infrastructure::status::StatusMask, serialize::cdr::ExtensibilityKind, topic::TypeSupport,
+    infrastructure::qos_policy::DataRepresentationId,
+    infrastructure::status::StatusMask,
+    serialize::cdr::ExtensibilityKind,
+    topic::type_support::SerializationFormat,
+    topic::TypeSupport,
+    xtypes::{deserialize_dynamic_data, serialize_dynamic_data},
 };
 
 use crate::data::Int2DdsData;
@@ -35,11 +40,14 @@ unsafe fn finalize_topic(
     participant_ref: &Int2DdsParticipant,
     topic_name_str: &str,
     dds_type_name: &str,
-    type_support: Arc<dyn TypeSupport>,
+    type_support: Arc<RawTypeSupport>,
     qos: *const Int2DdsTopicQos,
     topic_out: *mut *mut Int2DdsTopic,
 ) -> Int2DdsRet {
-    ffi_try!(participant_ref.inner.register_type_support(type_support, dds_type_name));
+    let frame_layout = type_support.frame_layout();
+    ffi_try!(participant_ref
+        .inner
+        .register_type_support(type_support as Arc<dyn TypeSupport>, dds_type_name));
 
     let topic_qos = if qos.is_null() {
         int2dds::infrastructure::qos_kind::QosKind::Default
@@ -55,8 +63,11 @@ unsafe fn finalize_topic(
         StatusMask::default()
     ));
 
-    let topic_handle =
-        Box::new(Int2DdsTopic { inner: Arc::new(topic), type_name: dds_type_name.to_string() });
+    let topic_handle = Box::new(Int2DdsTopic {
+        inner: Arc::new(topic),
+        type_name: dds_type_name.to_string(),
+        frame_layout,
+    });
     *topic_out = Box::into_raw(topic_handle);
     INT2DDS_RET_OK
 }
@@ -150,14 +161,7 @@ pub unsafe extern "C" fn int2dds_create_topic(
     let type_support =
         Arc::new(RawTypeSupport::new_with_key(dds_type_name_str.to_string(), ext_kind, false));
 
-    finalize_topic(
-        participant_ref,
-        topic_name_str,
-        dds_type_name_str,
-        type_support as Arc<dyn TypeSupport>,
-        qos,
-        topic_out,
-    )
+    finalize_topic(participant_ref, topic_name_str, dds_type_name_str, type_support, qos, topic_out)
 }
 
 /// Create a Topic using a QoS profile path
@@ -226,8 +230,11 @@ pub unsafe extern "C" fn int2dds_create_topic_with_profile(
         StatusMask::default()
     ));
 
-    let topic_handle =
-        Box::new(Int2DdsTopic { inner: Arc::new(topic), type_name: dds_type_name_str.to_string() });
+    let topic_handle = Box::new(Int2DdsTopic {
+        inner: Arc::new(topic),
+        type_name: dds_type_name_str.to_string(),
+        frame_layout: None,
+    });
 
     *topic_out = Box::into_raw(topic_handle);
 
@@ -289,7 +296,7 @@ pub unsafe extern "C" fn int2dds_create_topic_with_type_info(
         participant_ref,
         topic_name_str,
         dds_type_name,
-        Arc::new(raw_type_support) as Arc<dyn TypeSupport>,
+        Arc::new(raw_type_support),
         qos,
         topic_out,
     )
@@ -743,7 +750,7 @@ pub unsafe extern "C" fn int2dds_create_topic_with_field_descriptors(
             participant_ref,
             topic_name_str,
             dds_type_name_str,
-            Arc::new(type_support) as Arc<dyn TypeSupport>,
+            Arc::new(type_support),
             qos,
             topic_out,
         );
@@ -793,10 +800,154 @@ pub unsafe extern "C" fn int2dds_create_topic_with_field_descriptors(
         participant_ref,
         topic_name_str,
         dds_type_name_str,
-        Arc::new(type_support) as Arc<dyn TypeSupport>,
+        Arc::new(type_support),
         qos,
         topic_out,
     )
+}
+
+/// Report the topic type's ValueFrame layout parameters.
+///
+/// `fixed_size_out` receives the byte size of the frame's fixed slot region and
+/// `schema_hash_out` the FNV-1a 64 hash of the canonical layout string. A binding
+/// compares the hash against the one it computed from its own generated type
+/// description before using the frame path; a mismatch means the two layout
+/// computations diverged and the frame path must not be used.
+///
+/// Returns `INT2DDS_RET_UNSUPPORTED` when the topic has no frame layout (created
+/// without a full TypeObject, or the type has a shape the frame does not
+/// represent) — the binding then keeps its own codec path.
+///
+/// # Safety
+/// - `topic` must be a valid topic
+/// - `fixed_size_out` and `schema_hash_out` must be valid pointers
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_topic_frame_info(
+    topic: *const Int2DdsTopic,
+    fixed_size_out: *mut u32,
+    schema_hash_out: *mut u64,
+) -> Int2DdsRet {
+    check_null!(topic);
+    check_null!(fixed_size_out);
+    check_null!(schema_hash_out);
+
+    match &(*topic).frame_layout {
+        Some(layout) => {
+            *fixed_size_out = layout.fixed_size();
+            *schema_hash_out = layout.schema_hash();
+            INT2DDS_RET_OK
+        }
+        None => INT2DDS_RET_UNSUPPORTED,
+    }
+}
+
+/// Encode a ValueFrame into CDR sample bytes (with encapsulation header).
+///
+/// The kernel converts the frame through the dynamic codec, so the bytes are
+/// identical to what the dynamic path produces for the same values. `xcdr2`
+/// selects the representation the same way a writer's DataRepresentation QoS
+/// does (`false` = XCDR1, `true` = XCDR2); pass the writer's effective
+/// representation (`int2dds_datawriter_data_representation`).
+///
+/// On success copies the bytes into `buffer` and sets `actual_size_out`. When
+/// the buffer is too small, returns `INT2DDS_RET_BUFFER_TOO_SMALL` with the
+/// required size in `actual_size_out` so a retry can succeed.
+///
+/// # Safety
+/// - `topic` must be a valid topic
+/// - `frame` must point to at least `frame_len` readable bytes
+/// - `buffer` must point to at least `buffer_capacity` writable bytes
+/// - `actual_size_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_topic_frame_encode(
+    topic: *const Int2DdsTopic,
+    frame: *const u8,
+    frame_len: usize,
+    xcdr2: bool,
+    buffer: *mut u8,
+    buffer_capacity: usize,
+    actual_size_out: *mut usize,
+) -> Int2DdsRet {
+    check_null!(topic);
+    check_null!(frame);
+    check_null!(buffer);
+    check_null!(actual_size_out);
+
+    let layout = match &(*topic).frame_layout {
+        Some(layout) => layout,
+        None => return INT2DDS_RET_UNSUPPORTED,
+    };
+
+    let representation = if xcdr2 {
+        DataRepresentationId::Xcdr2DataRepresentation
+    } else {
+        DataRepresentationId::XcdrDataRepresentation
+    };
+    let format = match SerializationFormat::for_representation(
+        representation,
+        layout.root_type().extensibility(),
+    ) {
+        Some(format) => format,
+        None => return INT2DDS_RET_UNSUPPORTED,
+    };
+
+    let frame_bytes = std::slice::from_raw_parts(frame, frame_len);
+    let data = ffi_try!(layout.to_dynamic(frame_bytes));
+    let bytes = ffi_try!(serialize_dynamic_data(&data, &format));
+
+    *actual_size_out = bytes.len();
+    if bytes.len() > buffer_capacity {
+        return INT2DDS_RET_BUFFER_TOO_SMALL;
+    }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer, bytes.len());
+    INT2DDS_RET_OK
+}
+
+/// Decode CDR sample bytes (with encapsulation header) into a ValueFrame.
+///
+/// The counterpart of `int2dds_topic_frame_encode` for the read path: pass the
+/// bytes from `int2dds_datareader_take_serialized` (or a read variant) and
+/// receive the flat frame the binding unpacks with bulk primitives. The
+/// representation is read from the sample's encapsulation header.
+///
+/// On success copies the frame into `buffer` and sets `actual_size_out`. When
+/// the buffer is too small, returns `INT2DDS_RET_BUFFER_TOO_SMALL` with the
+/// required size in `actual_size_out` so a retry can succeed.
+///
+/// # Safety
+/// - `topic` must be a valid topic
+/// - `data` must point to at least `data_len` readable bytes
+/// - `buffer` must point to at least `buffer_capacity` writable bytes
+/// - `actual_size_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_topic_frame_decode(
+    topic: *const Int2DdsTopic,
+    data: *const u8,
+    data_len: usize,
+    buffer: *mut u8,
+    buffer_capacity: usize,
+    actual_size_out: *mut usize,
+) -> Int2DdsRet {
+    check_null!(topic);
+    check_null!(data);
+    check_null!(buffer);
+    check_null!(actual_size_out);
+
+    let layout = match &(*topic).frame_layout {
+        Some(layout) => layout,
+        None => return INT2DDS_RET_UNSUPPORTED,
+    };
+
+    let sample = std::slice::from_raw_parts(data, data_len);
+    let dynamic = ffi_try!(deserialize_dynamic_data(sample, layout.root_type()));
+    let frame = ffi_try!(layout.from_dynamic(&dynamic));
+
+    *actual_size_out = frame.len();
+    if frame.len() > buffer_capacity {
+        return INT2DDS_RET_BUFFER_TOO_SMALL;
+    }
+    std::ptr::copy_nonoverlapping(frame.as_ptr(), buffer, frame.len());
+    INT2DDS_RET_OK
 }
 
 #[cfg(test)]

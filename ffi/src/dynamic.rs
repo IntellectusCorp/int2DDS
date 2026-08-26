@@ -539,8 +539,11 @@ pub unsafe extern "C" fn int2dds_create_topic_with_type_object(
         StatusMask::default(),
     ));
 
-    let topic_handle =
-        Box::new(Int2DdsTopic { inner: Arc::new(topic), type_name: type_name_str.to_string() });
+    let topic_handle = Box::new(Int2DdsTopic {
+        inner: Arc::new(topic),
+        type_name: type_name_str.to_string(),
+        frame_layout: None,
+    });
     *out = Box::into_raw(topic_handle);
     INT2DDS_RET_OK
 }
@@ -948,7 +951,11 @@ pub unsafe extern "C" fn int2dds_create_topic_dynamic(
         None,
         StatusMask::default(),
     ));
-    *out = Box::into_raw(Box::new(Int2DdsTopic { inner: Arc::new(topic), type_name }));
+    *out = Box::into_raw(Box::new(Int2DdsTopic {
+        inner: Arc::new(topic),
+        type_name,
+        frame_layout: None,
+    }));
     INT2DDS_RET_OK
 }
 

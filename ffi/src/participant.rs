@@ -328,8 +328,11 @@ pub unsafe extern "C" fn int2dds_participant_find_topic(
     };
 
     let topic = ffi_try!((*participant).inner.find_topic(topic_name_str, timeout));
-    let topic_handle =
-        Box::new(Int2DdsTopic { inner: Arc::new(topic), type_name: dds_type_name_str.to_string() });
+    let topic_handle = Box::new(Int2DdsTopic {
+        inner: Arc::new(topic),
+        type_name: dds_type_name_str.to_string(),
+        frame_layout: None,
+    });
     *topic_out = Box::into_raw(topic_handle);
     INT2DDS_RET_OK
 }

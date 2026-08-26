@@ -6,10 +6,18 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Generic, TypeVar
 
+import warnings
+
 from int2dds._ffi import CData, ffi, lib
 from int2dds.cdr.writer import Extensibility
 from int2dds.core.conditions import StatusCondition
-from int2dds.exceptions import DdsUnsupported, check_ret
+from int2dds.core.frame import FrameCodec
+from int2dds.exceptions import (
+    INT2DDS_RET_BUFFER_TOO_SMALL,
+    INT2DDS_RET_OK,
+    DdsUnsupported,
+    check_ret,
+)
 
 if TYPE_CHECKING:
     from int2dds.core.participant import DomainParticipant
@@ -206,7 +214,15 @@ class Topic(Generic[T]):
         type_class: The Python type class for serialization
     """
 
-    __slots__ = ("_handle", "_participant", "_name", "_type_name", "_type_class", "_closed")
+    __slots__ = (
+        "_handle",
+        "_participant",
+        "_name",
+        "_type_name",
+        "_type_class",
+        "_closed",
+        "_frame_codec",
+    )
 
     def __init__(
         self,
@@ -220,6 +236,7 @@ class Topic(Generic[T]):
         self._name = topic_name
         self._type_class = type_class
         self._closed = False
+        self._frame_codec = None
 
         # Get type metadata from the type class
         self._type_name: str = getattr(type_class, "_dds_type_name", type_class.__name__)
@@ -360,6 +377,9 @@ class Topic(Generic[T]):
         if qos_handle is not None:
             lib.int2dds_topic_qos_destroy(qos_handle)
 
+        if type_info_fields:
+            self._init_frame_codec()
+
     @classmethod
     def _from_found_handle(
         cls,
@@ -381,6 +401,7 @@ class Topic(Generic[T]):
         obj._type_name = getattr(type_class, "_dds_type_name", type_class.__name__)
         obj._handle = handle
         obj._closed = False
+        obj._frame_codec = None
         return obj
 
     @property
@@ -397,6 +418,77 @@ class Topic(Generic[T]):
     def type_class(self) -> type[T]:
         """Get the Python type class."""
         return self._type_class
+
+    def _init_frame_codec(self) -> None:
+        """Enable the ValueFrame path when the local layout matches the kernel's.
+
+        Both sides compute the layout independently (this binding from
+        ``_dds_type_info_fields``, the kernel from the TypeObject); the schema
+        hash comparison turns any divergence into a fallback to the legacy
+        codec instead of wrong wire bytes.
+        """
+        codec = FrameCodec.build(self._type_class)
+        if codec is None:
+            return
+        fixed_out = ffi.new("uint32_t *")
+        hash_out = ffi.new("uint64_t *")
+        if lib.int2dds_topic_frame_info(self._handle, fixed_out, hash_out) != INT2DDS_RET_OK:
+            return
+        if fixed_out[0] != codec.fixed_size or hash_out[0] != codec.schema_hash:
+            warnings.warn(
+                f"frame layout mismatch for type '{self._type_name}' "
+                f"(kernel {fixed_out[0]}B/{hash_out[0]:#x}, "
+                f"binding {codec.fixed_size}B/{codec.schema_hash:#x}); "
+                "using the legacy codec for this topic"
+            )
+            return
+        self._frame_codec = codec
+
+    def _frame_encode(self, frame, xcdr2: bool) -> bytes:
+        """Encode a packed frame into CDR sample bytes via the kernel."""
+        frame_ptr = ffi.from_buffer(frame)
+        capacity = len(frame) + 64
+        actual = ffi.new("uintptr_t *")
+        while True:
+            buf = ffi.new("uint8_t[]", capacity)
+            ret = lib.int2dds_topic_frame_encode(
+                self._handle, frame_ptr, len(frame), xcdr2, buf, capacity, actual
+            )
+            if ret == INT2DDS_RET_BUFFER_TOO_SMALL:
+                capacity = actual[0]
+                continue
+            check_ret(ret)
+            return bytes(ffi.buffer(buf, actual[0]))
+
+    def _frame_decode(self, data: bytes) -> bytes:
+        """Decode CDR sample bytes into a packed frame via the kernel."""
+        data_ptr = ffi.from_buffer(data)
+        capacity = len(data) + 64
+        actual = ffi.new("uintptr_t *")
+        while True:
+            buf = ffi.new("uint8_t[]", capacity)
+            ret = lib.int2dds_topic_frame_decode(
+                self._handle, data_ptr, len(data), buf, capacity, actual
+            )
+            if ret == INT2DDS_RET_BUFFER_TOO_SMALL:
+                capacity = actual[0]
+                continue
+            check_ret(ret)
+            return bytes(ffi.buffer(buf, actual[0]))
+
+    def _encode_sample(self, sample, xcdr2: bool) -> bytes:
+        """Serialize a sample: frame path when enabled, else the legacy codec."""
+        codec = self._frame_codec
+        if codec is not None:
+            return self._frame_encode(codec.pack(sample), xcdr2)
+        return sample._serialize_cdr(xcdr2)
+
+    def _decode_sample(self, data: bytes):
+        """Deserialize sample bytes: frame path when enabled, else the legacy codec."""
+        codec = self._frame_codec
+        if codec is not None:
+            return codec.unpack(self._frame_decode(data))
+        return self._type_class._deserialize_cdr(data)
 
     def get_inconsistent_topic_status(self) -> dict:
         """Get the inconsistent topic status.

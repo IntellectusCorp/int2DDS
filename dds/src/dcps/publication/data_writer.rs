@@ -566,22 +566,9 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         extensibility: crate::serialize::xcdr::ExtensibilityKind,
     ) -> DdsResult<SerializationFormat> {
         for representation in data_representation {
-            match representation {
-                DataRepresentationId::XcdrDataRepresentation => {
-                    return Ok(SerializationFormat::Cdr);
-                }
-                DataRepresentationId::Xcdr2DataRepresentation => {
-                    let use_delimiters = matches!(
-                        extensibility,
-                        crate::serialize::xcdr::ExtensibilityKind::Appendable
-                            | crate::serialize::xcdr::ExtensibilityKind::Mutable
-                    );
-                    return Ok(SerializationFormat::Xcdr {
-                        extensibility_kind: extensibility,
-                        use_delimiters,
-                    });
-                }
-                DataRepresentationId::XmlDataRepresentation => {
+            match SerializationFormat::for_representation(*representation, extensibility) {
+                Some(format) => return Ok(format),
+                None => {
                     log::warn!(
                         "XML DataRepresentation is not supported; ignoring preference for now"
                     );

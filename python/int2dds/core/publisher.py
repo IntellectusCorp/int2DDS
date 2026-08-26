@@ -364,7 +364,7 @@ class DataWriter(Generic[T]):
             sample: The data sample to write
         """
         # Serialize the sample; the core derives the canonical key/handle from it.
-        data = sample._serialize_cdr(self._xcdr2)
+        data = self._topic._encode_sample(sample, self._xcdr2)
 
         # Write to the FFI
         data_ptr = ffi.from_buffer(data)
@@ -384,7 +384,7 @@ class DataWriter(Generic[T]):
         """
         key: bytes | None = None
         if getattr(sample, "_has_key", False):
-            key = sample._serialize_cdr(self._xcdr2)
+            key = self._topic._encode_sample(sample, self._xcdr2)
 
         if not key:
             return b'\x00' * 16
@@ -413,7 +413,7 @@ class DataWriter(Generic[T]):
         """
         key: bytes | None = None
         if getattr(sample, "_has_key", False):
-            key = sample._serialize_cdr(self._xcdr2)
+            key = self._topic._encode_sample(sample, self._xcdr2)
 
         if not key:
             return
@@ -440,7 +440,7 @@ class DataWriter(Generic[T]):
         """
         key: bytes | None = None
         if getattr(sample, "_has_key", False):
-            key = sample._serialize_cdr(self._xcdr2)
+            key = self._topic._encode_sample(sample, self._xcdr2)
 
         if not key:
             return
@@ -470,7 +470,7 @@ class DataWriter(Generic[T]):
         """
         key: bytes | None = None
         if getattr(sample, "_has_key", False):
-            key = sample._serialize_cdr(self._xcdr2)
+            key = self._topic._encode_sample(sample, self._xcdr2)
 
         if not key:
             return b'\x00' * 16

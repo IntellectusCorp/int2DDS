@@ -48,6 +48,7 @@ mod dynamic_data;
 mod dynamic_serialization;
 mod dynamic_type;
 mod dynamic_type_support;
+mod frame_codec;
 mod type_compatibility;
 mod type_lookup;
 mod type_object;
@@ -76,6 +77,7 @@ pub use dynamic_type::{
     MemberDescriptor, PrimitiveKind, StructDescriptor,
 };
 pub use dynamic_type_support::DynamicTypeSupport;
+pub use frame_codec::FrameLayout;
 pub use type_lookup::{
     chunk_dependencies, continuation_point_for, continuation_point_index, GetTypeDependenciesIn,
     GetTypeDependenciesOut, GetTypesIn, GetTypesOut, ReplyHeader, RequestHeader, SampleIdentity,

@@ -77,6 +77,9 @@ pub struct Int2DdsDataReader {
 pub struct Int2DdsTopic {
     pub(crate) inner: Arc<Topic>,
     pub(crate) type_name: String,
+    /// ValueFrame layout for `int2dds_topic_frame_*`; `None` when the type has no
+    /// full TypeObject or a shape the frame does not represent.
+    pub(crate) frame_layout: Option<Arc<int2dds::xtypes::FrameLayout>>,
 }
 
 /// Opaque handle to a ContentFilteredTopic
