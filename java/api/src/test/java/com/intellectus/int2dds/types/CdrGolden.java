@@ -44,47 +44,47 @@ public final class CdrGolden implements IDdsType {
     @Override
     public void serializeCdr(CdrWriter writer) {
         int token = writer.dheaderBegin();
-        writer.writeI32(id);
-        writer.writeBool(boolVal);
-        writer.writeI8(i8Val);
-        writer.writeU8(u8Val & 0xFF);
-        writer.writeI16(i16Val);
-        writer.writeU16(u16Val & 0xFFFF);
-        writer.writeI32(i32Val);
-        writer.writeU32(u32Val);
-        writer.writeI64(i64Val);
-        writer.writeU64(u64Val);
-        writer.writeString(unboundedStr);
-        if (boundedStr.length() > 64) {
+        writer.writeI32(this.id);
+        writer.writeBool(this.boolVal);
+        writer.writeI8(this.i8Val);
+        writer.writeU8(this.u8Val & 0xFF);
+        writer.writeI16(this.i16Val);
+        writer.writeU16(this.u16Val & 0xFFFF);
+        writer.writeI32(this.i32Val);
+        writer.writeU32(this.u32Val);
+        writer.writeI64(this.i64Val);
+        writer.writeU64(this.u64Val);
+        writer.writeString(this.unboundedStr);
+        if (this.boundedStr.length() > 64) {
             throw new IllegalStateException("boundedStr exceeds its IDL bound of 64");
         }
-        writer.writeString(boundedStr);
-        writer.writeU8(byteVal & 0xFF);
-        writer.writeU8(charVal & 0xFF);
-        writer.writeF32(f32Val);
-        writer.writeF64(f64Val);
+        writer.writeString(this.boundedStr);
+        writer.writeU8(this.byteVal & 0xFF);
+        writer.writeU8(this.charVal & 0xFF);
+        writer.writeF32(this.f32Val);
+        writer.writeF64(this.f64Val);
         writer.dheaderFinalize(token);
     }
 
     @Override
     public void deserializeCdr(CdrReader reader) {
         CdrReader.Dheader d = reader.readDheader();
-        id = reader.readI32();
-        boolVal = reader.readBool();
-        i8Val = reader.readI8();
-        u8Val = (byte) reader.readU8();
-        i16Val = reader.readI16();
-        u16Val = (short) reader.readU16();
-        i32Val = reader.readI32();
-        u32Val = reader.readU32();
-        i64Val = reader.readI64();
-        u64Val = reader.readU64();
-        unboundedStr = reader.readString();
-        boundedStr = reader.readString();
-        byteVal = (byte) reader.readU8();
-        charVal = (byte) reader.readU8();
-        f32Val = reader.readF32();
-        f64Val = reader.readF64();
+        this.id = reader.readI32();
+        this.boolVal = reader.readBool();
+        this.i8Val = reader.readI8();
+        this.u8Val = (byte) reader.readU8();
+        this.i16Val = reader.readI16();
+        this.u16Val = (short) reader.readU16();
+        this.i32Val = reader.readI32();
+        this.u32Val = reader.readU32();
+        this.i64Val = reader.readI64();
+        this.u64Val = reader.readU64();
+        this.unboundedStr = reader.readString();
+        this.boundedStr = reader.readString();
+        this.byteVal = (byte) reader.readU8();
+        this.charVal = (byte) reader.readU8();
+        this.f32Val = reader.readF32();
+        this.f64Val = reader.readF64();
         reader.readDheaderEnd(d);
     }
 

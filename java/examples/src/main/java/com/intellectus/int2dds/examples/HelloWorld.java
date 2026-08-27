@@ -26,16 +26,16 @@ public final class HelloWorld implements IDdsType {
     @Override
     public void serializeCdr(CdrWriter writer) {
         int token = writer.dheaderBegin();
-        writer.writeU32(index);
-        writer.writeString(message);
+        writer.writeU32(this.index);
+        writer.writeString(this.message);
         writer.dheaderFinalize(token);
     }
 
     @Override
     public void deserializeCdr(CdrReader reader) {
         CdrReader.Dheader d = reader.readDheader();
-        index = reader.readU32();
-        message = reader.readString();
+        this.index = reader.readU32();
+        this.message = reader.readString();
         reader.readDheaderEnd(d);
     }
 }

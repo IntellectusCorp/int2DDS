@@ -340,6 +340,11 @@ fn is_byte(t: &ResolvedType) -> bool {
     matches!(t, ResolvedType::U8 | ResolvedType::UInt8)
 }
 
+/// The `this.`-less form of a field expression, for exception text only.
+fn display_expr(expr: &str) -> &str {
+    expr.strip_prefix("this.").unwrap_or(expr)
+}
+
 /// Emits the statement that writes `expr` (a Java expression of `t`'s type).
 fn emit_write(
     out: &mut String,
@@ -354,10 +359,11 @@ fn emit_write(
                 out.push_str(&format!(
                     "{ind}if ({expr}.length > {b}) {{\n\
                      {ind}    throw new IllegalStateException(\
-                     \"{expr} exceeds its IDL bound of {b}\");\n\
+                     \"{name} exceeds its IDL bound of {b}\");\n\
                      {ind}}}\n",
                     ind = ind,
                     expr = expr,
+                    name = display_expr(expr),
                     b = b
                 ));
             }
@@ -382,10 +388,11 @@ fn emit_write(
             out.push_str(&format!(
                 "{ind}if ({expr}.length != {size}) {{\n\
                  {ind}    throw new IllegalStateException(\
-                 \"{expr} must hold exactly {size} elements\");\n\
+                 \"{name} must hold exactly {size} elements\");\n\
                  {ind}}}\n",
                 ind = ind,
                 expr = expr,
+                name = display_expr(expr),
                 size = size
             ));
             let i = format!("i{}", depth);
@@ -426,10 +433,11 @@ fn emit_write(
                 out.push_str(&format!(
                     "{ind}if ({expr}.length() > {b}) {{\n\
                      {ind}    throw new IllegalStateException(\
-                     \"{expr} exceeds its IDL bound of {b}\");\n\
+                     \"{name} exceeds its IDL bound of {b}\");\n\
                      {ind}}}\n",
                     ind = ind,
                     expr = expr,
+                    name = display_expr(expr),
                     b = b
                 ));
             }
@@ -637,8 +645,8 @@ fn emit_struct(
         out.push_str(&format!("    public {}() {{\n", class));
         for (name, init) in &fills {
             out.push_str(&format!(
-                "        for (int i = 0; i < {name}.length; i++) {{\n\
-                 \x20           {name}[i] = {init};\n        }}\n",
+                "        for (int i = 0; i < this.{name}.length; i++) {{\n\
+                 \x20           this.{name}[i] = {init};\n        }}\n",
                 name = name,
                 init = init
             ));
@@ -659,26 +667,29 @@ fn emit_struct(
         extensibility_const(s.extensibility)
     ));
 
-    // serializeCdr
+    // serializeCdr / deserializeCdr 은 필드를 `this.` 로 읽는다. 그러지 않으면
+    // writer/reader/token/d 라는 이름의 멤버가 지역 변수에 가려진다. `token` 은
+    // 컴파일까지 통과하고 DHEADER 토큰을 필드 대신 써 버린다.
     out.push_str("    @Override\n    public void serializeCdr(CdrWriter writer) {\n");
     if appendable {
         out.push_str("        int token = writer.dheaderBegin();\n");
     }
     for m in &s.members {
-        emit_write(&mut out, "        ", &java_field_name(&m.name), &m.resolved_type, 0)?;
+        let field = format!("this.{}", java_field_name(&m.name));
+        emit_write(&mut out, "        ", &field, &m.resolved_type, 0)?;
     }
     if appendable {
         out.push_str("        writer.dheaderFinalize(token);\n");
     }
     out.push_str("    }\n\n");
 
-    // deserializeCdr
     out.push_str("    @Override\n    public void deserializeCdr(CdrReader reader) {\n");
     if appendable {
         out.push_str("        CdrReader.Dheader d = reader.readDheader();\n");
     }
     for m in &s.members {
-        emit_read(&mut out, "        ", &java_field_name(&m.name), &m.resolved_type, 0)?;
+        let field = format!("this.{}", java_field_name(&m.name));
+        emit_read(&mut out, "        ", &field, &m.resolved_type, 0)?;
     }
     if appendable {
         out.push_str("        reader.readDheaderEnd(d);\n");
@@ -856,12 +867,12 @@ mod tests {
         // 기본 extensibility 는 APPENDABLE 이므로 DHEADER 를 감싼다.
         assert!(src.contains("return Extensibility.APPENDABLE;"), "{}", src);
         assert!(src.contains("int token = writer.dheaderBegin();"), "{}", src);
-        assert!(src.contains("writer.writeU32(index);"), "{}", src);
-        assert!(src.contains("writer.writeString(message);"), "{}", src);
+        assert!(src.contains("writer.writeU32(this.index);"), "{}", src);
+        assert!(src.contains("writer.writeString(this.message);"), "{}", src);
         assert!(src.contains("writer.dheaderFinalize(token);"), "{}", src);
         assert!(src.contains("CdrReader.Dheader d = reader.readDheader();"), "{}", src);
-        assert!(src.contains("index = reader.readU32();"), "{}", src);
-        assert!(src.contains("message = reader.readString();"), "{}", src);
+        assert!(src.contains("this.index = reader.readU32();"), "{}", src);
+        assert!(src.contains("this.message = reader.readString();"), "{}", src);
         assert!(src.contains("reader.readDheaderEnd(d);"), "{}", src);
     }
 
@@ -921,21 +932,21 @@ mod tests {
             "public long u64;",
             "public float f;",
             "public double d;",
-            "writer.writeBool(b);",
-            "writer.writeU8(o & 0xFF);",
-            "writer.writeU8(u8 & 0xFF);",
-            "writer.writeI8(i8);",
-            "writer.writeU8(c & 0xFF);",
-            "writer.writeI16(i16);",
-            "writer.writeU16(u16 & 0xFFFF);",
-            "writer.writeI32(i32);",
-            "writer.writeU32(u32);",
-            "writer.writeI64(i64);",
-            "writer.writeU64(u64);",
-            "writer.writeF32(f);",
-            "writer.writeF64(d);",
-            "o = (byte) reader.readU8();",
-            "u16 = (short) reader.readU16();",
+            "writer.writeBool(this.b);",
+            "writer.writeU8(this.o & 0xFF);",
+            "writer.writeU8(this.u8 & 0xFF);",
+            "writer.writeI8(this.i8);",
+            "writer.writeU8(this.c & 0xFF);",
+            "writer.writeI16(this.i16);",
+            "writer.writeU16(this.u16 & 0xFFFF);",
+            "writer.writeI32(this.i32);",
+            "writer.writeU32(this.u32);",
+            "writer.writeI64(this.i64);",
+            "writer.writeU64(this.u64);",
+            "writer.writeF32(this.f);",
+            "writer.writeF64(this.d);",
+            "this.o = (byte) reader.readU8();",
+            "this.u16 = (short) reader.readU16();",
         ] {
             assert!(src.contains(expected), "missing {:?} in\n{}", expected, src);
         }
@@ -956,7 +967,7 @@ mod tests {
     fn bounded_string_is_length_checked_on_write() {
         let files =
             gen(r#"@extensibility(FINAL) struct S { string<256> s; };"#, &JavaOptions::default());
-        assert!(files[0].source.contains("if (s.length() > 256)"), "{}", files[0].source);
+        assert!(files[0].source.contains("if (this.s.length() > 256)"), "{}", files[0].source);
     }
 
     #[test]
@@ -986,8 +997,12 @@ mod tests {
         let s = files.iter().find(|f| f.relative_path == "S.java").unwrap();
         // null 이면 serializeCdr 이 NPE 를 낸다 — 첫 변형으로 초기화한다.
         assert!(s.source.contains("public Color color = Color.RED;"), "{}", s.source);
-        assert!(s.source.contains("writer.writeEnum(color.value());"), "{}", s.source);
-        assert!(s.source.contains("color = Color.fromValue(reader.readEnum());"), "{}", s.source);
+        assert!(s.source.contains("writer.writeEnum(this.color.value());"), "{}", s.source);
+        assert!(
+            s.source.contains("this.color = Color.fromValue(reader.readEnum());"),
+            "{}",
+            s.source
+        );
     }
 
     #[test]
@@ -1121,8 +1136,8 @@ mod tests {
         let files = gen(r#"@extensibility(FINAL) struct S { wchar c; };"#, &JavaOptions::default());
         let src = &files[0].source;
         assert!(src.contains("public char c;"), "{}", src);
-        assert!(src.contains("writer.writeU16(c);"), "{}", src);
-        assert!(src.contains("c = (char) reader.readU16();"), "{}", src);
+        assert!(src.contains("writer.writeU16(this.c);"), "{}", src);
+        assert!(src.contains("this.c = (char) reader.readU16();"), "{}", src);
     }
 
     #[test]
@@ -1133,9 +1148,9 @@ mod tests {
         );
         let src = &files[0].source;
         assert!(src.contains("public byte[] data = new byte[0];"), "{}", src);
-        assert!(src.contains("writer.writeSeqHeader(data.length);"), "{}", src);
-        assert!(src.contains("writer.writeBytes(data);"), "{}", src);
-        assert!(src.contains("data = reader.readBytes(reader.readSeqHeader());"), "{}", src);
+        assert!(src.contains("writer.writeSeqHeader(this.data.length);"), "{}", src);
+        assert!(src.contains("writer.writeBytes(this.data);"), "{}", src);
+        assert!(src.contains("this.data = reader.readBytes(reader.readSeqHeader());"), "{}", src);
     }
 
     #[test]
@@ -1146,11 +1161,11 @@ mod tests {
         );
         let src = &files[0].source;
         assert!(src.contains("public int[] v = new int[0];"), "{}", src);
-        assert!(src.contains("writer.writeSeqHeader(v.length);"), "{}", src);
-        assert!(src.contains("for (int i0 = 0; i0 < v.length; i0++) {"), "{}", src);
-        assert!(src.contains("writer.writeI32(v[i0]);"), "{}", src);
-        assert!(src.contains("v = new int[reader.readSeqHeader()];"), "{}", src);
-        assert!(src.contains("v[i0] = reader.readI32();"), "{}", src);
+        assert!(src.contains("writer.writeSeqHeader(this.v.length);"), "{}", src);
+        assert!(src.contains("for (int i0 = 0; i0 < this.v.length; i0++) {"), "{}", src);
+        assert!(src.contains("writer.writeI32(this.v[i0]);"), "{}", src);
+        assert!(src.contains("this.v = new int[reader.readSeqHeader()];"), "{}", src);
+        assert!(src.contains("this.v[i0] = reader.readI32();"), "{}", src);
     }
 
     #[test]
@@ -1161,8 +1176,8 @@ mod tests {
         );
         let src = &files[0].source;
         assert!(src.contains("public String[] v = new String[0];"), "{}", src);
-        assert!(src.contains("writer.writeString(v[i0]);"), "{}", src);
-        assert!(src.contains("v[i0] = reader.readString();"), "{}", src);
+        assert!(src.contains("writer.writeString(this.v[i0]);"), "{}", src);
+        assert!(src.contains("this.v[i0] = reader.readString();"), "{}", src);
     }
 
     #[test]
@@ -1171,7 +1186,7 @@ mod tests {
             r#"@extensibility(FINAL) struct S { sequence<long, 10> v; };"#,
             &JavaOptions::default(),
         );
-        assert!(files[0].source.contains("if (v.length > 10)"), "{}", files[0].source);
+        assert!(files[0].source.contains("if (this.v.length > 10)"), "{}", files[0].source);
     }
 
     #[test]
@@ -1180,11 +1195,11 @@ mod tests {
             gen(r#"@extensibility(FINAL) struct S { long m[4]; };"#, &JavaOptions::default());
         let src = &files[0].source;
         assert!(src.contains("public int[] m = new int[4];"), "{}", src);
-        assert!(src.contains("if (m.length != 4)"), "{}", src);
-        assert!(!src.contains("writeSeqHeader(m"), "{}", src);
+        assert!(src.contains("if (this.m.length != 4)"), "{}", src);
+        assert!(!src.contains("writeSeqHeader(this.m"), "{}", src);
         assert!(src.contains("for (int i0 = 0; i0 < 4; i0++) {"), "{}", src);
-        assert!(src.contains("writer.writeI32(m[i0]);"), "{}", src);
-        assert!(src.contains("m[i0] = reader.readI32();"), "{}", src);
+        assert!(src.contains("writer.writeI32(this.m[i0]);"), "{}", src);
+        assert!(src.contains("this.m[i0] = reader.readI32();"), "{}", src);
     }
 
     #[test]
@@ -1196,8 +1211,12 @@ mod tests {
         );
         let s = files.iter().find(|f| f.relative_path == "S.java").unwrap();
         assert!(s.source.contains("public Color[] v = new Color[0];"), "{}", s.source);
-        assert!(s.source.contains("writer.writeEnum(v[i0].value());"), "{}", s.source);
-        assert!(s.source.contains("v[i0] = Color.fromValue(reader.readEnum());"), "{}", s.source);
+        assert!(s.source.contains("writer.writeEnum(this.v[i0].value());"), "{}", s.source);
+        assert!(
+            s.source.contains("this.v[i0] = Color.fromValue(reader.readEnum());"),
+            "{}",
+            s.source
+        );
     }
 
     #[test]
