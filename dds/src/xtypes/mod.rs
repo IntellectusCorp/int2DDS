@@ -54,6 +54,9 @@ mod type_object_v1;
 mod type_object_xcdr;
 mod type_registry;
 
+#[cfg(test)]
+mod content_id_tests;
+
 pub use type_compatibility::{
     check_structural_compatibility, complete_key_erased, complete_key_holder,
     evaluate_structural_compatibility, minimal_key_erased, minimal_key_holder, TypeCompatibility,

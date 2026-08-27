@@ -46,6 +46,13 @@ pub(crate) trait Reader: Entity + Endpoint + Debug + Any {
     fn matched_writers_guids(&self) -> Vec<Guid>;
     fn on_change(&self, change: Arc<CacheChange>);
 
+    // Mark that a callback-producing access to this reader has started. Balanced by
+    // `exit_callback`. `remove_reader` waits for `in_flight_callbacks` to reach zero so no
+    // delivery or listener callback runs after deletion returns.
+    fn enter_callback(&self);
+    fn exit_callback(&self);
+    fn in_flight_callbacks(&self) -> usize;
+
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
     fn set_datareader_cache(

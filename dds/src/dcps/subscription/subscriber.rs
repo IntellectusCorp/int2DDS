@@ -589,6 +589,13 @@ impl Subscriber {
         &self,
         datareader: &Arc<dyn DataReaderInternal<Qos = DataReaderQos>>,
     ) -> DdsResult<()> {
+        // Deleting from inside a listener callback would block on the reader's in-flight-callback
+        // drain, which only this thread can release. Refuse instead of deadlocking. The caller must
+        // delete from another thread or after the callback returns.
+        if crate::utils::notify::in_listener_callback() {
+            return Err(DdsError::IllegalOperation);
+        }
+
         self.remove_orphaned_reader(datareader);
         if datareader.get_subscriber()?.get_instance_handle()? != self.get_instance_handle()? {
             return Err(DdsError::PreconditionNotMet);
@@ -1368,6 +1375,246 @@ mod tests {
     pub struct HelloWorld {
         pub index: u32,
         pub message: String,
+    }
+
+    use std::sync::mpsc::SyncSender;
+    use std::sync::{Arc, Mutex};
+
+    const DRAIN_CALLBACK_SLEEP: std::time::Duration = std::time::Duration::from_millis(400);
+    const DRAIN_MIN_BLOCK: std::time::Duration = std::time::Duration::from_millis(250);
+    const DRAIN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
+
+    // Sleeps inside `on_data_available` so a concurrent delete has an in-flight callback to wait
+    // for. Signals entry first, before the sleep, so the deleting thread starts its clock while
+    // the lease is still held.
+    struct SleepingListener {
+        entered: SyncSender<()>,
+    }
+
+    impl DataReaderListener for SleepingListener {
+        type Foo = HelloWorld;
+
+        fn on_data_available(&self, _reader: &DataReader<Self::Foo>) {
+            let _ = self.entered.try_send(());
+            std::thread::sleep(DRAIN_CALLBACK_SLEEP);
+        }
+    }
+
+    // Deletes the reader from inside its own listener and reports the error. The handles are
+    // stored after creation and taken once, so the delete runs on the receive thread.
+    struct SelfDeletingListener {
+        handles: Arc<Mutex<Option<(Subscriber, DataReader<HelloWorld>)>>>,
+        result: SyncSender<DdsError>,
+    }
+
+    impl DataReaderListener for SelfDeletingListener {
+        type Foo = HelloWorld;
+
+        fn on_data_available(&self, _reader: &DataReader<Self::Foo>) {
+            let taken = self.handles.lock().unwrap().take();
+            if let Some((subscriber, reader)) = taken {
+                if let Err(error) = subscriber.delete_datareader(reader) {
+                    let _ = self.result.try_send(error);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn deleting_a_reader_waits_for_its_in_flight_callback() {
+        use crate::{
+            core::time::Duration,
+            infrastructure::{
+                qos_policy::{ReliabilityQosPolicy, ReliabilityQosPolicyKind},
+                wait_set::WaitSet,
+            },
+            publication::qos::{DataWriterQos, PublisherQos},
+            test_utils::unique_domain_id,
+        };
+        use std::time::Instant;
+
+        let reliable = ReliabilityQosPolicy {
+            kind: ReliabilityQosPolicyKind::Reliable,
+            max_blocking_time: Duration::from_millis(100),
+        };
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel::<()>(1);
+
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "DrainTopic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &topic,
+                DataReaderQos { reliability: reliable.clone(), ..Default::default() },
+                Some(Arc::new(SleepingListener { entered: entered_tx })),
+                StatusMask::DATA_AVAILABLE,
+            )
+            .unwrap();
+
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic,
+                DataWriterQos { reliability: reliable, ..Default::default() },
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let wait_set = WaitSet::new();
+        let writer_cond = writer.get_statuscondition().unwrap().clone();
+        writer_cond.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
+        wait_set.attach_condition(writer_cond.clone()).unwrap();
+        wait_set.wait(Duration::from_seconds(5)).expect("writer never matched the reader");
+        wait_set.detach_condition(writer_cond).unwrap();
+
+        let reader_cond = reader.get_statuscondition().unwrap().clone();
+        reader_cond.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
+        wait_set.attach_condition(reader_cond.clone()).unwrap();
+        wait_set.wait(Duration::from_seconds(5)).expect("reader never matched the writer");
+        wait_set.detach_condition(reader_cond).unwrap();
+
+        writer
+            .write(&HelloWorld { index: 1, message: "x".to_string() }, InstanceHandle::NIL)
+            .unwrap();
+
+        // The callback has started and is now sleeping with its lease held.
+        entered_rx.recv_timeout(DRAIN_DEADLINE).expect("listener never ran");
+
+        let start = Instant::now();
+        subscriber.delete_datareader(reader).unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed >= DRAIN_MIN_BLOCK,
+            "delete returned in {elapsed:?}, so it did not wait for the in-flight callback"
+        );
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn deleting_a_reader_from_its_own_listener_is_refused() {
+        use crate::{
+            core::time::Duration,
+            infrastructure::{
+                qos_policy::{ReliabilityQosPolicy, ReliabilityQosPolicyKind},
+                wait_set::WaitSet,
+            },
+            publication::qos::{DataWriterQos, PublisherQos},
+            test_utils::unique_domain_id,
+        };
+
+        let reliable = ReliabilityQosPolicy {
+            kind: ReliabilityQosPolicyKind::Reliable,
+            max_blocking_time: Duration::from_millis(100),
+        };
+
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel::<DdsError>(1);
+        let handles: Arc<Mutex<Option<(Subscriber, DataReader<HelloWorld>)>>> =
+            Arc::new(Mutex::new(None));
+
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "SelfDeleteTopic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &topic,
+                DataReaderQos { reliability: reliable.clone(), ..Default::default() },
+                Some(Arc::new(SelfDeletingListener {
+                    handles: handles.clone(),
+                    result: result_tx,
+                })),
+                StatusMask::DATA_AVAILABLE,
+            )
+            .unwrap();
+
+        // The listener can only reach the reader now that it exists.
+        *handles.lock().unwrap() = Some((subscriber.clone(), reader.clone()));
+
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic,
+                DataWriterQos { reliability: reliable, ..Default::default() },
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let wait_set = WaitSet::new();
+        let writer_cond = writer.get_statuscondition().unwrap().clone();
+        writer_cond.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
+        wait_set.attach_condition(writer_cond.clone()).unwrap();
+        wait_set.wait(Duration::from_seconds(5)).expect("writer never matched the reader");
+        wait_set.detach_condition(writer_cond).unwrap();
+
+        let reader_cond = reader.get_statuscondition().unwrap().clone();
+        reader_cond.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
+        wait_set.attach_condition(reader_cond.clone()).unwrap();
+        wait_set.wait(Duration::from_seconds(5)).expect("reader never matched the writer");
+        wait_set.detach_condition(reader_cond).unwrap();
+
+        writer
+            .write(&HelloWorld { index: 1, message: "x".to_string() }, InstanceHandle::NIL)
+            .unwrap();
+
+        let error =
+            result_rx.recv_timeout(DRAIN_DEADLINE).expect("delete from the listener never ran");
+        assert_eq!(
+            error,
+            DdsError::IllegalOperation,
+            "deleting a reader from its own listener must return IllegalOperation"
+        );
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[test]

@@ -27,7 +27,7 @@ use crate::rtps::entities::history::cache_change::{CacheChange, PresentationInfo
 use crate::rtps::entities::history::history_cache::HistoryCache;
 use crate::rtps::entities::history::writer_history::WriterHistoryCache;
 use crate::rtps::entities::reader::{
-    FragmentInfo, Reader, StatefulReader, StatelessReader, WriterProxy,
+    FragmentInfo, Reader, ReaderCallbackLease, StatefulReader, StatelessReader, WriterProxy,
 };
 use crate::rtps::entities::writer::reader_locator::ReaderLocator;
 use crate::rtps::entities::writer::reader_proxy::ReaderProxy;
@@ -2414,33 +2414,38 @@ impl UserLogic {
         &self,
         remote_writer_guid: Guid,
         reader_entity_id: EntityId,
-    ) -> RtpsResult<Vec<Arc<dyn Reader + Send + Sync>>> {
+    ) -> RtpsResult<Vec<ReaderCallbackLease>> {
         let participant = self.get_upgraded_participant()?;
-        let mut matched_readers: Vec<Arc<dyn Reader + Send + Sync>> = Vec::new();
+        let mut matched_readers: Vec<ReaderCallbackLease> = Vec::new();
 
         if reader_entity_id != EntityId::UNKNOWN {
-            let reader =
-                participant.find_reader_from_entity_id(reader_entity_id).ok_or_else(|| {
+            let reader = participant
+                .find_reader_callback_lease_from_entity_id(reader_entity_id)
+                .ok_or_else(|| {
                     RtpsError::new(
                         RtpsErrorCode::RtpsEntityNotFound,
                         "No reader found for user data".to_string(),
                     )
                 })?;
-            if reader.matched_writer_is_matched(remote_writer_guid) {
-                matched_readers.push(reader.clone());
-            } else if remote_writer_guid.prefix() == participant.guid().prefix()
-                && participant.find_writer_from_entity_id(remote_writer_guid.entity_id()).is_none()
-            {
-                // Intra-participant directed sample whose local writer was already destroyed
-                // while this just-sent sample was still in flight. With the writer gone there
-                // is no reliable retransmit (so no duplicate is possible); deliver the
-                // already-accepted sample instead of dropping it. The matched path and
-                // cross-participant samples are unchanged.
-                matched_readers.push(reader.clone());
+
+            // Intra-participant directed sample whose local writer was already destroyed while
+            // this just-sent sample was still in flight has no reliable retransmit (so no
+            // duplicate is possible); deliver the already-accepted sample instead of dropping it.
+            // The matched path and cross-participant samples are unchanged.
+            let should_deliver = reader.matched_writer_is_matched(remote_writer_guid)
+                || (remote_writer_guid.prefix() == participant.guid().prefix()
+                    && participant
+                        .find_writer_from_entity_id(remote_writer_guid.entity_id())
+                        .is_none());
+
+            if should_deliver {
+                matched_readers.push(reader);
             }
         } else {
-            matched_readers
-                .extend(participant.find_readers_matched_with_remote_writer(remote_writer_guid)?);
+            matched_readers.extend(
+                participant
+                    .find_reader_callback_leases_matched_with_remote_writer(remote_writer_guid)?,
+            );
         }
 
         Ok(matched_readers)
@@ -2590,8 +2595,7 @@ impl UnicastMessageProcessor for UserLogic {
     ) -> RtpsResult<()> {
         let remote_writer_guid = Guid::new(rtps_header.guid_prefix(), data.writer_id);
 
-        let matched_readers: Vec<Arc<dyn Reader + Send + Sync>> =
-            self.get_matched_readers(remote_writer_guid, data.reader_id)?;
+        let matched_readers = self.get_matched_readers(remote_writer_guid, data.reader_id)?;
 
         if matched_readers.is_empty() {
             debug!(
@@ -3120,8 +3124,7 @@ impl UnicastMessageProcessor for UserLogic {
 
         // `reader_id` addresses the datagram, not the sample: UNKNOWN is one burst that reached
         // every matched reader, a directed repair only the reader it names.
-        let matched_readers: Vec<Arc<dyn Reader + Send + Sync>> =
-            self.get_matched_readers(remote_writer_guid, data_frag.reader_id)?;
+        let matched_readers = self.get_matched_readers(remote_writer_guid, data_frag.reader_id)?;
 
         if matched_readers.is_empty() {
             debug!(

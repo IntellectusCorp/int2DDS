@@ -36,7 +36,10 @@ use crate::{
 };
 use std::{
     any::Any,
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, Weak,
+    },
 };
 
 #[derive(Debug)]
@@ -54,6 +57,7 @@ pub(crate) struct SPDPBuiltinParticipantReader {
     nack_frag_retry_delay: RtpsDuration,
     nack_frag_max_retries: u32,
     reader_cache: Arc<Mutex<ReaderHistoryCache>>,
+    in_flight_callbacks: AtomicUsize,
 }
 
 impl SPDPBuiltinParticipantReader {
@@ -82,6 +86,7 @@ impl SPDPBuiltinParticipantReader {
             nack_frag_retry_delay: RtpsDuration::from_millis(200),
             nack_frag_max_retries: 10,
             reader_cache: Arc::new(Mutex::new(ReaderHistoryCache::new(endpoint_id, None))),
+            in_flight_callbacks: AtomicUsize::new(0),
         }
     }
 
@@ -131,6 +136,18 @@ impl Endpoint for SPDPBuiltinParticipantReader {
 }
 
 impl Reader for SPDPBuiltinParticipantReader {
+    fn enter_callback(&self) {
+        self.in_flight_callbacks.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn exit_callback(&self) {
+        self.in_flight_callbacks.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    fn in_flight_callbacks(&self) -> usize {
+        self.in_flight_callbacks.load(Ordering::SeqCst)
+    }
+
     fn reader_cache(&self) -> Arc<Mutex<ReaderHistoryCache>> {
         Arc::clone(&self.reader_cache)
     }
