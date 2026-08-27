@@ -28,7 +28,7 @@ pub fn generate(
     reject_unsupported(model, opts)?;
     reject_name_collisions(model)?;
     let mut files = Vec::new();
-    let mut owners: Vec<&str> = Vec::new(); // files[i] 를 만든 IDL 타입
+    let mut owners: Vec<&str> = Vec::new(); // the IDL type each file came from
     for s in &model.structs {
         files.push(emit_struct(model, s, idl_filename, opts)?);
         owners.push(&s.qualified_name);
@@ -37,8 +37,8 @@ pub fn generate(
         files.push(emit_enum(e, idl_filename, opts));
         owners.push(&e.qualified_name);
     }
-    // 두 타입이 같은 경로를 쓰면 하나가 조용히 덮인다. `foo_bar` 와 `FooBar`
-    // 가 둘 다 FooBar.java 로 간다.
+    // `foo_bar` and `FooBar` both map to FooBar.java. Without this, one would
+    // silently overwrite the other.
     for i in 0..files.len() {
         for j in 0..i {
             if files[i].relative_path == files[j].relative_path {
@@ -108,9 +108,8 @@ fn reject_unsupported(model: &IdlModel, opts: &JavaOptions) -> Result<(), String
                     ));
                 }
             }
-            // 참조는 leaf 이름 그대로 나가고 import 도 붙지 않는다. 패키지가
-            // 다르면 javac 이 cannot find symbol 을 낸다.
-            // 후속 작업: 교차 패키지 참조를 fully-qualified 로 내보낸다.
+            // References go out as bare leaf names with no import, so a different
+            // package means `cannot find symbol` from javac.
             if let Some(referenced) = referenced_type_name(&m.resolved_type) {
                 let here = package_for(opts, &s.qualified_name);
                 let there = package_for(opts, &resolve_reference(model, referenced));
@@ -154,8 +153,8 @@ fn reject_name_collisions(model: &IdlModel) -> Result<(), String> {
         let java: Vec<String> =
             e.variants.iter().map(|v| naming::escape_keyword(&v.name, TargetLang::Java)).collect();
         for i in 0..java.len() {
-            // 상수 `value` 는 아래에서 만드는 `private final int value` 와 겹친다.
-            // `values`/`fromValue` 는 메서드라 이름 공간이 달라 문제없다.
+            // A `value` constant collides with the generated `value` field.
+            // `values`/`fromValue` are methods, a different namespace.
             if java[i] == "value" {
                 return Err(format!(
                     "Java backend cannot emit enumerator '{}.{}': it collides with the \
@@ -206,7 +205,7 @@ fn resolve_reference(model: &IdlModel, name: &str) -> String {
                 model.imported.enums.iter().map(|e| (e.name.as_str(), e.qualified_name.as_str())),
             )
     };
-    // 정확한 qualified 이름이 먼저다. leaf 만 쓴 참조는 그 다음에 찾는다.
+    // Exact qualified name first, then leaf-only references.
     if let Some((_, q)) = declared().find(|(_, q)| *q == name) {
         return q.to_string();
     }
@@ -220,13 +219,14 @@ fn package_label(p: &Option<String>) -> &str {
     p.as_deref().unwrap_or("<unnamed>")
 }
 
-/// `--java-package` 는 그대로 `package` 줄과 디렉터리 경로가 된다. 검사하지
-/// 않으면 ".a..b." 가 `package .a..b.;` 로, "com. x" 가 공백 든 디렉터리로 나간다.
+/// `--java-package` becomes the `package` line and the directory path verbatim,
+/// so unchecked ".a..b." emits `package .a..b.;` and "com. x" a directory with
+/// a space in it.
 pub fn validate_package(opts: &JavaOptions) -> Result<(), String> {
     let Some(base) = &opts.package else { return Ok(()) };
     let base = base.trim();
     if base.is_empty() {
-        return Ok(()); // 빈 값은 무명 패키지와 같게 다룬다.
+        return Ok(()); // empty is the same as no package
     }
     for seg in base.split('.') {
         if !is_java_identifier(seg) {
@@ -343,7 +343,7 @@ fn field_init(t: &ResolvedType, model: &IdlModel) -> Result<Option<String>, Stri
 fn enum_default(model: &IdlModel, name: &str) -> Option<String> {
     let leaf = name.rsplit("::").next().unwrap_or(name);
     let declared = || model.enums.iter().chain(model.imported.enums.iter());
-    // 정확한 qualified 이름이 먼저다. leaf 만 쓴 참조는 그 다음에 찾는다.
+    // Exact qualified name first, then leaf-only references.
     let e = declared()
         .find(|e| e.qualified_name == name)
         .or_else(|| declared().find(|e| e.name == leaf))?;
@@ -711,8 +711,8 @@ fn emit_struct(
     }
 
     out.push_str("    @Override\n");
-    // 등록되는 DDS 타입 이름은 Rust/C# 백엔드와 같은 qualified name 이어야 한다.
-    // 다르면 같은 IDL 로 만든 참가자끼리 디스커버리에서 매칭되지 않는다.
+    // The registered type name must be the qualified name the Rust and C# backends
+    // use, or participants built from the same IDL will not match in discovery.
     out.push_str(&format!(
         "    public String typeName() {{\n        return \"{}\";\n    }}\n\n",
         s.qualified_name
@@ -723,9 +723,9 @@ fn emit_struct(
         extensibility_const(s.extensibility)
     ));
 
-    // serializeCdr / deserializeCdr 은 필드를 `this.` 로 읽는다. 그러지 않으면
-    // writer/reader/token/d 라는 이름의 멤버가 지역 변수에 가려진다. `token` 은
-    // 컴파일까지 통과하고 DHEADER 토큰을 필드 대신 써 버린다.
+    // Fields are read as `this.x` so members named writer/reader/token/d are not
+    // shadowed by the locals. A member named `token` compiles either way and would
+    // write the DHEADER token instead of the field.
     out.push_str("    @Override\n    public void serializeCdr(CdrWriter writer) {\n");
     if appendable {
         out.push_str("        int token = writer.dheaderBegin();\n");
@@ -920,7 +920,7 @@ mod tests {
         assert!(src.contains("public int index;"), "{}", src);
         assert!(src.contains("public String message = \"\";"), "{}", src);
         assert!(src.contains("return \"HelloWorld\";"), "{}", src);
-        // 기본 extensibility 는 APPENDABLE 이므로 DHEADER 를 감싼다.
+        // The default extensibility is APPENDABLE, so a DHEADER wraps the body.
         assert!(src.contains("return Extensibility.APPENDABLE;"), "{}", src);
         assert!(src.contains("int token = writer.dheaderBegin();"), "{}", src);
         assert!(src.contains("writer.writeU32(this.index);"), "{}", src);
@@ -934,21 +934,21 @@ mod tests {
 
     #[test]
     fn module_scoped_struct_advertises_the_qualified_type_name() {
-        // Rust/C# 백엔드는 qualified name 을 등록한다. Java 만 leaf 를 쓰면 같은
-        // IDL 로 만든 참가자끼리 디스커버리 매칭이 안 된다.
+        // The Rust and C# backends register the qualified name. A leaf-only name
+        // here would stop participants built from the same IDL from matching.
         let files = gen(
             r#"module app { @extensibility(FINAL) struct Use { long v; }; };"#,
             &JavaOptions::default(),
         );
         let src = &files[0].source;
         assert!(src.contains("return \"app::Use\";"), "{}", src);
-        // 클래스 이름 자체는 leaf 그대로다 — 패키지가 module 을 담는다.
+        // The class name stays the leaf; the package carries the module.
         assert!(src.contains("public final class Use implements IDdsType"), "{}", src);
     }
 
     #[test]
     fn module_less_struct_keeps_the_bare_type_name() {
-        // 코퍼스와 java/examples 는 module 이 없다 — 이 경로는 변하면 안 된다.
+        // The corpus and java/examples have no module, so this path must not change.
         let files = gen(r#"struct HelloWorld { unsigned long index; };"#, &JavaOptions::default());
         assert!(files[0].source.contains("return \"HelloWorld\";"), "{}", files[0].source);
     }
@@ -1021,8 +1021,8 @@ mod tests {
 
     #[test]
     fn bounded_string_is_byte_checked_on_write() {
-        // 코어는 string<N> 을 UTF-8 바이트로 센다. length() 로 재면 비ASCII 문자열이
-        // 검사를 통과한 뒤 코어에서 거절당한다. wstring 은 반대로 length() 가 맞다.
+        // The core measures string<N> in UTF-8 bytes, so length() would pass a
+        // non-ASCII string the core then rejects. wstring is the opposite.
         let files =
             gen(r#"@extensibility(FINAL) struct S { string<256> s; };"#, &JavaOptions::default());
         let src = &files[0].source;
@@ -1055,7 +1055,7 @@ mod tests {
             &JavaOptions::default(),
         );
         let s = files.iter().find(|f| f.relative_path == "S.java").unwrap();
-        // null 이면 serializeCdr 이 NPE 를 낸다 — 첫 변형으로 초기화한다.
+        // A null field would NPE in serializeCdr, so it starts at the first variant.
         assert!(s.source.contains("public Color color = Color.RED;"), "{}", s.source);
         assert!(s.source.contains("writer.writeEnum(this.color.value());"), "{}", s.source);
         assert!(
@@ -1098,14 +1098,14 @@ mod tests {
         let src = r#"@extensibility(FINAL) struct S { long a; };"#;
         let defs = parse_idl(src).unwrap();
         let model = resolve(defs).unwrap();
-        // 예전에는 `package .a..b.;` 나 공백 든 디렉터리를 뱉고 exit 0 했다.
+        // These used to emit `package .a..b.;` or a directory with a space, exit 0.
         for bad in [".a..b.", "com. x", "1st.pkg", "a.b-c", "a..b"] {
             let err = generate(&model, "S.idl", &JavaOptions { package: Some(bad.to_string()) })
                 .expect_err(&format!("{:?} should be refused", bad));
             assert!(err.contains("--java-package"), "{}", err);
             assert!(err.contains(bad), "{}", err);
         }
-        // 정상 패키지와 빈 값(=무명)은 그대로 통과한다.
+        // Valid packages and the empty (unnamed) case still pass.
         for ok in ["com.intellectus.int2dds.examples", "generated.enum", "_a.$b.c1", ""] {
             generate(&model, "S.idl", &JavaOptions { package: Some(ok.to_string()) })
                 .unwrap_or_else(|e| panic!("{:?} should be accepted: {}", ok, e));
@@ -1114,9 +1114,8 @@ mod tests {
 
     #[test]
     fn colliding_generated_names_are_refused() {
-        // foo_bar 와 FooBar 는 둘 다 FooBar.java 가 된다 — 예전에는 한쪽이
-        // 조용히 사라지고, 그 타입을 참조하던 필드가 살아남은 클래스에
-        // 붙어 다른 필드 배치를 실어 보냈다.
+        // foo_bar and FooBar both map to FooBar.java. One used to vanish silently
+        // and fields referencing it bound to the survivor, sending its layout.
         for src in [
             r#"@extensibility(FINAL) struct foo_bar { long a; };
                @extensibility(FINAL) struct FooBar { double b; };"#,
@@ -1132,15 +1131,15 @@ mod tests {
             assert!(err.contains("FooBar.java"), "{}", err);
         }
 
-        // 같은 파일 안에서 겹치는 이름들. 전부 javac 이 거절하는 코드였다.
+        // Names that collide within one file. Each used to emit code javac rejects.
         let cases = [
-            // camelCase 로 합쳐지는 두 멤버. 중복 멤버 이름은 resolver 가
-            // 거르지 않으므로 정확히 같은 이름도 여기까지 온다.
+            // Two members that merge under camelCase. The resolver does not reject
+            // duplicate member names, so identical ones reach here too.
             (r#"struct S { long my_type; long myType; };"#, "same Java field 'myType'"),
             (r#"struct S { long a; long a; };"#, "same Java field 'a'"),
-            // 키워드 이스케이프가 만들어내는 충돌: int -> int_.
+            // A collision created by keyword escaping: int -> int_.
             (r#"enum E { int, int_ };"#, "same Java constant 'int_'"),
-            // 생성되는 value 필드와 겹치는 열거자.
+            // An enumerator colliding with the generated value field.
             (r#"enum E { value, OTHER };"#, "collides with the generated 'value' field"),
         ];
         for (src, needle) in cases {
@@ -1151,7 +1150,7 @@ mod tests {
             assert!(err.contains(needle), "error {:?} should mention {:?}", err, needle);
         }
 
-        // values/fromValue 는 메서드라 상수와 이름 공간이 다르다. 거절하면 안 된다.
+        // values/fromValue are methods, a different namespace from the constants.
         let defs = parse_idl(r#"enum E { values, fromValue, E };"#).unwrap();
         let model = resolve(defs).unwrap();
         generate(&model, "X.idl", &JavaOptions::default()).expect("method names do not collide");
@@ -1159,14 +1158,14 @@ mod tests {
 
     #[test]
     fn cross_package_references_are_refused() {
-        // 참조는 leaf 이름으로만 나가고 import 가 없다 — javac 이 cannot find
-        // symbol 을 낸다. 지금은 생성이 성공하고 컴파일만 깨진다.
+        // References go out as bare leaf names with no import, so javac reports
+        // `cannot find symbol`. Generation used to succeed and only the compile broke.
         for src in [
             r#"module a { @extensibility(FINAL) struct X { long v; }; };
                module b { @extensibility(FINAL) struct Y { a::X x; long t; }; };"#,
             r#"module a { enum Color { RED }; };
                module b { @extensibility(FINAL) struct Y { a::Color x; }; };"#,
-            // 컬렉션/배열 원소가 교차 패키지인 경우도 잡아야 한다.
+            // Collection and array elements must be caught too.
             r#"module a { @extensibility(FINAL) struct X { long v; }; };
                module b { @extensibility(FINAL) struct Y { sequence<a::X> x; }; };"#,
             r#"module a { @extensibility(FINAL) struct X { long v; }; };
@@ -1184,7 +1183,7 @@ mod tests {
 
     #[test]
     fn same_module_references_still_generate() {
-        // 같은 module 이면 같은 패키지다 — 막으면 안 된다.
+        // The same module is the same package, so this must not be rejected.
         let files = gen(
             r#"module a {
                  @extensibility(FINAL) struct X { long v; };
@@ -1199,7 +1198,7 @@ mod tests {
 
     #[test]
     fn wstring_maps_to_string_and_uses_the_wide_accessors() {
-        // 명세상 string 과 wstring 은 둘 다 java.lang.String 이다.
+        // The spec maps both string and wstring to java.lang.String.
         let files = gen(
             r#"@extensibility(FINAL) struct W { wstring ws; wstring<4> bounded; };"#,
             &JavaOptions::default(),
@@ -1355,8 +1354,8 @@ mod tests {
 
     #[test]
     fn nested_struct_carries_its_own_dheader() {
-        // 기본 extensibility 는 APPENDABLE 이라 @extensibility 표기가 없는 중첩
-        // 타입도 자기 DHEADER 를 쓴다. 부모가 대신 처리하면 안 된다.
+        // The default extensibility is APPENDABLE, so a nested type with no
+        // @extensibility writes its own DHEADER. The parent must not write it.
         let files = gen(
             r#"struct Inner { long x; };
                struct Outer { Inner inner; };"#,
@@ -1366,7 +1365,7 @@ mod tests {
         assert!(i.source.contains("return Extensibility.APPENDABLE;"), "{}", i.source);
         assert!(i.source.contains("int token = writer.dheaderBegin();"), "{}", i.source);
         let o = files.iter().find(|f| f.relative_path == "Outer.java").unwrap();
-        // Outer 는 자기 DHEADER 하나만 연다.
+        // Outer opens exactly one DHEADER of its own.
         assert_eq!(o.source.matches("dheaderBegin()").count(), 1, "{}", o.source);
     }
 
@@ -1391,7 +1390,7 @@ mod tests {
             &JavaOptions::default(),
         );
         let o = files.iter().find(|f| f.relative_path == "Outer.java").unwrap();
-        // new Inner[4] 는 null 로 찬다 — serializeCdr 이 NPE 를 낸다.
+        // new Inner[4] fills with null, which would NPE in serializeCdr.
         assert!(o.source.contains("public Outer() {"), "{}", o.source);
         assert!(o.source.contains("cells[i] = new Inner();"), "{}", o.source);
         assert!(o.source.contains("names[i] = \"\";"), "{}", o.source);
@@ -1422,7 +1421,7 @@ mod tests {
         assert!(src.contains("import com.intellectus.int2dds.xtypes.FieldType;"), "{}", src);
         assert!(src.contains("public static List<TopicFieldDescriptor> ddsFields()"), "{}", src);
         assert!(src.contains("new TopicFieldDescriptor(\"id\", FieldType.INT32, true)"), "{}", src);
-        // prefix 는 마지막 키에서 끝난다 — 뒤의 sequence 는 실릴 수 없다.
+        // The prefix ends at the last key, so the sequence after it cannot ride along.
         assert!(!src.contains("\"payload\""), "{}", src);
     }
 
@@ -1453,8 +1452,8 @@ mod tests {
 
     #[test]
     fn an_undescribable_field_before_a_key_fails_generation() {
-        // float 과 wstring 은 이 네이티브 경로가 표현하지 못한다. 조용히 키를
-        // 버리면 사용자는 키가 안 듣는 이유를 끝까지 모른다.
+        // This native path cannot describe float or wstring. Dropping the key
+        // silently would leave no way to see why keying stopped working.
         for src in [
             r#"@extensibility(FINAL) struct S { float bad; @key long id; };"#,
             r#"@extensibility(FINAL) struct S { wstring bad; @key long id; };"#,

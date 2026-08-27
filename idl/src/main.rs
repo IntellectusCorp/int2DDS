@@ -550,8 +550,8 @@ fn main() {
         }
     }
 
-    // 잘못된 --java-package 는 입력 파일과 무관한 인자 오류다. 배치 모드가
-    // 파일마다 경고하고 넘기는 백엔드 거절과 달리 여기서 바로 멈춘다.
+    // A bad --java-package is an argument error, unrelated to any input file, so
+    // it stops here instead of warning per file the way a backend refusal does.
     if args.java_package.is_some() {
         let opts = codegen::java::JavaOptions { package: args.java_package.clone() };
         if let Err(e) = codegen::java::validate_package(&opts) {
@@ -560,8 +560,8 @@ fn main() {
         }
     }
 
-    // Java 는 타입 이름으로 파일 이름을 정하므로 입력 파일이 달라도 경로가
-    // 겹칠 수 있다. 어느 입력이 먼저 썼는지 기억해 두고 덮어쓸 때 알린다.
+    // Java names files after types, so different inputs can collide on one path.
+    // Remember which input wrote it first and report the overwrite.
     let mut java_written: HashMap<String, String> = HashMap::new();
     for input_file in &args.input_files {
         process_file(&args, input_file, &mut java_written);
@@ -803,8 +803,8 @@ fn process_file(args: &Args, input_file: &str, java_written: &mut HashMap<String
         let java_opts = codegen::java::JavaOptions { package: args.java_package.clone() };
         let generated = match codegen::java::generate(&model, idl_filename, &java_opts) {
             Ok(f) => Some(f),
-            // -o 배치는 Java 를 암시할 뿐이다. 다른 언어는 다 처리하는 구성요소
-            // 하나 때문에 배치 전체를 죽이지 않는다.
+            // A -o batch only implies Java. One construct the other languages
+            // handle fine must not kill the whole batch.
             Err(e) if !java_requested_explicitly(&args.java_output, &args.langs) => {
                 eprintln!("warning: skipping Java for {}: {}", input_file, e);
                 None
@@ -970,27 +970,27 @@ mod tests {
     fn a_java_path_written_twice_in_one_run_is_reported() {
         let mut written = HashMap::new();
         assert_eq!(note_java_output(&mut written, "out/Point2D.java", "Complex_Arrays.idl"), None);
-        // 다른 입력이 같은 경로를 쓰면 앞선 입력을 돌려준다.
+        // A second input on the same path returns the one that wrote it first.
         assert_eq!(
             note_java_output(&mut written, "out/Point2D.java", "Tuple_Structs.idl").as_deref(),
             Some("Complex_Arrays.idl")
         );
-        // 같은 입력을 두 번 준 경우는 덮어쓰기가 아니다.
+        // The same input twice is not an overwrite.
         assert_eq!(note_java_output(&mut written, "out/Point2D.java", "Tuple_Structs.idl"), None);
     }
 
     #[test]
     fn only_a_named_java_request_is_a_hard_error() {
-        // -j: 사용자가 Java 를 콕 집었다 — 거절이면 실패해야 한다.
+        // -j names Java outright, so a refusal must fail.
         assert!(java_requested_explicitly(&Some("out".to_string()), &None));
-        // 마법사에서 Java 를 골랐다 — 이것도 명시다.
+        // Picking Java in the wizard is just as explicit.
         assert!(java_requested_explicitly(
             &None,
             &Some([true, false, false, false, false, false, true])
         ));
-        // -o 배치는 Java 를 암시할 뿐이다 — 경고 후 나머지 언어를 계속 낸다.
+        // A -o batch only implies Java: warn, then emit the other languages.
         assert!(!java_requested_explicitly(&None, &None));
-        // 마법사에서 Java 를 고르지 않았으면 명시가 아니다.
+        // Not picking Java in the wizard is not explicit.
         assert!(!java_requested_explicitly(
             &None,
             &Some([true, false, false, false, false, false, false])

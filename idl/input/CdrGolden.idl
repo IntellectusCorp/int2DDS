@@ -1,6 +1,6 @@
-// 코어가 디코딩할 수 있는 스칼라와 문자열만 모은 적합성 검증용 타입.
-// ddsFields() 는 마지막 @key 까지의 모든 필드를 서술해야 하므로,
-// 서술 가능한 종류를 앞에, octet/char/float/double/wstring 을 뒤에 둔다.
+// Conformance type: the scalars and strings the core can decode.
+// ddsFields() must describe every field up to the last @key, so describable
+// kinds come first and octet/char/float/double/wstring after.
 @extensibility(APPENDABLE)
 struct CdrGolden {
     @key long id;

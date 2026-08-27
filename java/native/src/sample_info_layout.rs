@@ -3,7 +3,7 @@ mod tests {
     use int2dds_ffi::types::Int2DdsSampleInfo;
     use std::mem::{offset_of, size_of};
 
-    // Java SampleInfo.decode()가 하드코딩한 오프셋을 고정한다.
+    // Pins the offsets Java's SampleInfo.decode() hardcodes.
     #[test]
     fn sample_info_layout_is_pinned() {
         assert_eq!(size_of::<Int2DdsSampleInfo>(), 76, "struct size changed");

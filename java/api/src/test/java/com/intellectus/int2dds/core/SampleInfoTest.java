@@ -60,6 +60,6 @@ class SampleInfoTest {
         SampleInfo info = new SampleInfo(0, 0, 0, 0, 0, inst, pub, 0, 0, 0, 0, 0, false);
         assertNotSame(inst, info.instanceHandle());
         info.instanceHandle()[0] = 42;
-        assertEquals(0, info.instanceHandle()[0]);   // 외부 변조 불가
+        assertEquals(0, info.instanceHandle()[0]);   // mutating the copy left the field alone
     }
 }

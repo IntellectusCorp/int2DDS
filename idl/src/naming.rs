@@ -451,18 +451,18 @@ mod tests {
 
     #[test]
     fn test_escape_keyword_java() {
-        // 예약어는 접미사 밑줄 — Java 에는 r# 나 @ 같은 탈출 문법이 없다.
+        // Reserved words take a trailing underscore; Java has no r# or @ escape.
         assert_eq!(escape_keyword("class", TargetLang::Java), "class_");
         assert_eq!(escape_keyword("int", TargetLang::Java), "int_");
         assert_eq!(escape_keyword("synchronized", TargetLang::Java), "synchronized_");
-        // 리터럴도 식별자로 못 쓴다.
+        // Literals are not usable as identifiers either.
         assert_eq!(escape_keyword("null", TargetLang::Java), "null_");
         assert_eq!(escape_keyword("true", TargetLang::Java), "true_");
-        // 문맥 키워드는 식별자로 합법이므로 건드리지 않는다.
+        // Contextual keywords are legal identifiers, so they are left alone.
         assert_eq!(escape_keyword("var", TargetLang::Java), "var");
         assert_eq!(escape_keyword("record", TargetLang::Java), "record");
         assert_eq!(escape_keyword("yield", TargetLang::Java), "yield");
-        // 평범한 이름은 그대로.
+        // Ordinary names pass through.
         assert_eq!(escape_keyword("message", TargetLang::Java), "message");
     }
 }
