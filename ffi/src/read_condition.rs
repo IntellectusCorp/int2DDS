@@ -255,7 +255,7 @@ pub unsafe extern "C" fn int2dds_readcondition_delete(
 /// - `reader` must be a valid datareader
 /// - `condition` must be a valid read condition created from `reader`
 /// - `seq_out` must be a valid pointer to a null pointer
-/// - The returned sequence must be freed with `int2dds_sample_seq_delete`
+/// - On `INT2DDS_RET_OK` the returned sequence must be freed with `int2dds_sample_seq_delete`
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datareader_take_serialized_batch_w_readcondition(
     reader: *const Int2DdsDataReader,
@@ -334,17 +334,16 @@ unsafe fn read_or_take_w_readcondition(
     };
 
     match result {
+        Ok(samples) if samples.is_empty() => {
+            *seq_out = std::ptr::null_mut();
+            INT2DDS_RET_NO_DATA
+        }
         Ok(samples) => {
-            let empty = samples.is_empty();
             *seq_out = Box::into_raw(Box::new(Int2DdsSampleSeq { samples }));
-            if empty {
-                INT2DDS_RET_NO_DATA
-            } else {
-                INT2DDS_RET_OK
-            }
+            INT2DDS_RET_OK
         }
         Err(int2dds::dcps::core::error::DdsError::NoData) => {
-            *seq_out = Box::into_raw(Box::new(Int2DdsSampleSeq { samples: Vec::new() }));
+            *seq_out = std::ptr::null_mut();
             INT2DDS_RET_NO_DATA
         }
         Err(e) => dds_error_to_code(&e),
