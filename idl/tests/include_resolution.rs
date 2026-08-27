@@ -166,11 +166,15 @@ fn test_java_same_module_include_generates() {
     let root = unique_dir("java_same_mod");
     fs::create_dir_all(&root).unwrap();
     let base = root.join("base.idl");
-    fs::write(&base, "module a { struct Point { double x; double y; }; };\n").unwrap();
+    fs::write(
+        &base,
+        "module a { enum Color { RED, GREEN }; struct Point { double x; double y; }; };\n",
+    )
+    .unwrap();
     let same_mod = root.join("same_mod.idl");
     fs::write(
         &same_mod,
-        "#include \"base.idl\"\nmodule a { struct Wrap { Point p; long t; }; };\n",
+        "#include \"base.idl\"\nmodule a { struct Wrap { Point p; Color c; long t; }; };\n",
     )
     .unwrap();
 
@@ -186,6 +190,9 @@ fn test_java_same_module_include_generates() {
     let wrap = files.iter().find(|f| f.relative_path.ends_with("Wrap.java")).unwrap();
     assert!(wrap.source.contains("package a;"), "{}", wrap.source);
     assert!(wrap.source.contains("public Point p"), "{}", wrap.source);
+    // The included enum must still yield a default, or the field stays null and
+    // serializeCdr throws NPE on the first write.
+    assert!(wrap.source.contains("public Color c = Color.RED;"), "{}", wrap.source);
 
     fs::remove_dir_all(&root).ok();
 }

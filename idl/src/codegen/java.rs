@@ -309,9 +309,17 @@ fn field_init(t: &ResolvedType, model: &IdlModel) -> Result<Option<String>, Stri
 }
 
 /// `Type.FIRST_VARIANT` — a null enum field would NPE inside serializeCdr.
+///
+/// Like `resolve_reference`, this must search `model.imported` as well: an
+/// `#include`d enum has been moved out of `model.enums` by the resolver, so
+/// searching only there leaves the field null.
 fn enum_default(model: &IdlModel, name: &str) -> Option<String> {
     let leaf = name.rsplit("::").next().unwrap_or(name);
-    let e = model.enums.iter().find(|e| e.name == leaf || e.qualified_name == name)?;
+    let declared = || model.enums.iter().chain(model.imported.enums.iter());
+    // 정확한 qualified 이름이 먼저다. leaf 만 쓴 참조는 그 다음에 찾는다.
+    let e = declared()
+        .find(|e| e.qualified_name == name)
+        .or_else(|| declared().find(|e| e.name == leaf))?;
     let first = e.variants.first()?;
     Some(format!(
         "{}.{}",
