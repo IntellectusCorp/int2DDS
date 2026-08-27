@@ -516,17 +516,21 @@ impl<'a> CGen<'a> {
         self.emit_deserialize_fields_fn(s);
         self.raw("\n");
 
-        // serialize_cdr
-        self.emit_serialize_cdr(s);
-        self.raw("\n");
+        // Inline codec entry points only for shapes outside plan-driven coverage;
+        // covered shapes go through the facade (c_encode/c_decode).
+        if !self.c_layout_covered(s) {
+            // serialize_cdr
+            self.emit_serialize_cdr(s);
+            self.raw("\n");
 
-        // writer-anchored serialize: xcdr2 follows the writer's effective DataRepresentation
-        self.emit_serialize_for_fn(s);
-        self.raw("\n");
+            // writer-anchored serialize: xcdr2 follows the writer's effective DataRepresentation
+            self.emit_serialize_for_fn(s);
+            self.raw("\n");
 
-        // deserialize_cdr
-        self.emit_deserialize_cdr(s);
-        self.raw("\n");
+            // deserialize_cdr
+            self.emit_deserialize_cdr(s);
+            self.raw("\n");
+        }
 
         // type_info builder (for DDS-XTypes discovery)
         self.emit_type_info_fn(s);
@@ -2213,8 +2217,10 @@ impl<'a> CGen<'a> {
     // ---- Typed facade ({T}Writer / {T}Reader) over the stable FFI ----
     //
     // Covered shapes ride the plan-driven codec: create binds `{T}_c_layout` and
-    // the ops go through `int2dds_topic_c_encode`/`_c_decode`. Non-covered shapes
-    // keep the inline codec (`{T}_serialize_for` / `{T}_deserialize_cdr`).
+    // the ops go through `int2dds_topic_c_encode`/`_c_decode` (their inline codec
+    // entry points are not emitted; the fields helpers stay for nested use).
+    // Non-covered shapes keep the inline codec (`{T}_serialize_for` /
+    // `{T}_deserialize_cdr`).
     // Requires `int2dds-ffi.h` (same prerequisite as `{T}_type_info`).
 
     fn emit_facade(&mut self, s: &ResolvedStruct) {
@@ -2874,19 +2880,20 @@ mod tests {
         assert!(code.contains("struct HelloWorld {"));
         assert!(code.contains("uint32_t index;"));
         assert!(code.contains("char message[257];")); // 256 + 1
-        assert!(code.contains("HelloWorld_serialize_cdr("));
-        assert!(code.contains("int2dds_cdr_write_encapsulation(&w, INT2DDS_CDR_APPENDABLE)"));
-        assert!(code.contains("if (xcdr2)"));
+        assert!(code.contains("HelloWorld_serialize_fields("));
+        assert!(code.contains("HelloWorld_deserialize_fields("));
         assert!(code.contains("int2dds_cdr_write_dheader_begin(&w, &dh)"));
         assert!(code.contains("int2dds_cdr_write_dheader_finalize(&w, dh)"));
         assert!(code.contains("if (w.xcdr2)"));
         assert!(code.contains("if (r.xcdr2)"));
         assert!(code.contains("int2dds_cdr_write_u32(&w, val->index)"));
         assert!(code.contains("int2dds_cdr_write_string(&w, val->message)"));
-        assert!(code.contains("HelloWorld_deserialize_cdr("));
-        assert!(code.contains("HelloWorld_serialize_for("));
+        // covered shape: no inline codec entry points, the facade rides the plan codec
+        assert!(!code.contains("HelloWorld_serialize_cdr("));
+        assert!(!code.contains("HelloWorld_serialize_for("));
+        assert!(!code.contains("HelloWorld_deserialize_cdr("));
         assert!(code.contains(
-            "int2dds_datawriter_data_representation(writer) == INT2DDS_QOS_DATA_REPR_XCDR2"
+            "int2dds_datawriter_data_representation(w->writer) == INT2DDS_QOS_DATA_REPR_XCDR2"
         ));
         // No key helper is emitted: the core derives the canonical key from the
         // full serialized sample (see the Python/C# generators).
@@ -2924,9 +2931,17 @@ mod tests {
         assert!(code.contains("int2dds_topic_c_decode(r->topic, data, n, buf, capacity, &need)"));
         assert!(code.contains("int2dds_datareader_return_serialized_loan(loan)"));
 
+        // covered shape drops the inline codec entry points; fields helpers stay
+        assert!(!code.contains("Point_serialize_cdr("));
+        assert!(!code.contains("Point_serialize_for("));
+        assert!(!code.contains("Point_deserialize_cdr("));
+        assert!(code.contains("Point_serialize_fields("));
+        assert!(code.contains("Point_deserialize_fields("));
+
         // non-covered shape (collection-of-collection): inline codec fallback
         assert!(code.contains("} LookupWriter;"));
         assert!(!code.contains("Lookup_c_layout"));
+        assert!(code.contains("Lookup_serialize_cdr("));
         assert!(code.contains("Lookup_serialize_for(w->writer, sample, stack, stack_cap)"));
         assert!(code.contains("Lookup_deserialize_cdr(data, (size_t)n, (Lookup *)buf)"));
     }
@@ -3128,7 +3143,9 @@ mod tests {
         let model = resolve(defs).unwrap();
         let code = generate(&model, "MutableType.idl", &COptions::default());
 
-        assert!(code.contains("INT2DDS_CDR_MUTABLE"));
+        // covered mutable shape: encapsulation comes from the plan codec, not an
+        // inline entry point
+        assert!(!code.contains("MutableType_serialize_cdr("));
         assert!(code.contains("int2dds_cdr_write_emheader_begin(&w, 0, false, &em)"));
         assert!(code.contains("int2dds_cdr_write_emheader_begin(&w, 1, false, &em)"));
         assert!(code.contains("int2dds_cdr_write_dheader_finalize(&w, dh)"));
@@ -3684,7 +3701,8 @@ mod tests {
         assert!(code.contains("int2dds_cdr_read_dheader_end(&r, _arr_sz, _arr_sp)"), "{}", code);
         // The primitive array is written in bulk with no framing of its own.
         assert!(code.contains("int2dds_cdr_write_prim_array(&w, val->nums, 3, 4)"), "{}", code);
-        assert_eq!(code.matches("_arr_dh = 0").count(), 2, "one framed array per writer: {}", code);
+        // one framed array in the single writer body (covered shape = fields fn only)
+        assert_eq!(code.matches("_arr_dh = 0").count(), 1, "{}", code);
     }
 
     #[test]
