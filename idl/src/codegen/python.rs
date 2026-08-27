@@ -561,17 +561,22 @@ impl<'a> PyGen<'a> {
         }
         self.line("");
 
-        // _serialize_cdr method
-        self.emit_serialize_cdr(s);
-        self.line("");
+        // Legacy codec entry points only for shapes outside frame coverage; covered
+        // shapes ride the runtime frame codec (the _inline helpers stay for nested use).
+        let legacy = !self.frame_covered(s);
+        if legacy {
+            self.emit_serialize_cdr(s);
+            self.line("");
+        }
 
         // _serialize_cdr_inline method (for nested struct serialization)
         self.emit_serialize_cdr_inline(s);
         self.line("");
 
-        // _deserialize_cdr class method
-        self.emit_deserialize_cdr(s);
-        self.line("");
+        if legacy {
+            self.emit_deserialize_cdr(s);
+            self.line("");
+        }
 
         // _deserialize_cdr_inline class method (for nested struct deserialization)
         self.emit_deserialize_cdr_inline(s);
@@ -700,6 +705,103 @@ impl<'a> PyGen<'a> {
         };
         visited.remove(simple);
         ok
+    }
+
+    /// Whether the runtime ValueFrame codec covers this struct. Covered shapes omit the
+    /// legacy `_serialize_cdr`/`_deserialize_cdr` entry points and ride
+    /// `Topic._encode_sample`/`_decode_sample`; the `_inline` helpers stay for nested use.
+    /// Mirrors `core/frame.py` plus the kernel `frame_codec.rs` coverage.
+    fn frame_covered(&self, s: &ResolvedStruct) -> bool {
+        let mut stack = std::collections::HashSet::new();
+        self.frame_struct_covered(s, &mut stack)
+    }
+
+    fn frame_struct_covered(
+        &self,
+        s: &ResolvedStruct,
+        stack: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        if !stack.insert(s.name.clone()) {
+            return false;
+        }
+        let ok = self.frame_struct_covered_inner(s, stack);
+        stack.remove(&s.name);
+        ok
+    }
+
+    fn frame_struct_covered_inner(
+        &self,
+        s: &ResolvedStruct,
+        stack: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        // The kernel dynamic mutable wire diverges from the legacy codec (XCDR1
+        // encapsulation id, EMHEADER LC compaction), so mutable shapes keep the
+        // legacy codec until that parity lands.
+        if s.extensibility == ExtensibilityKind::Mutable {
+            return false;
+        }
+        if let Some(base) = &s.base_type {
+            let simple = base.rsplit("::").next().unwrap_or(base);
+            match self.find_struct(simple) {
+                Some(b) => {
+                    if !self.frame_struct_covered(b, stack) {
+                        return false;
+                    }
+                }
+                None => return false,
+            }
+        }
+        s.members.iter().all(|m| {
+            !m.is_optional && !m.is_external && self.frame_type_covered(&m.resolved_type, stack)
+        })
+    }
+
+    fn frame_type_covered(
+        &self,
+        ty: &ResolvedType,
+        stack: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        match ty {
+            ResolvedType::String { .. } | ResolvedType::Enum(_) => true,
+            ResolvedType::Struct(name) => {
+                let simple = name.rsplit("::").next().unwrap_or(name);
+                match self.find_struct(simple) {
+                    Some(inner) => self.frame_struct_covered(inner, stack),
+                    // Unions, bitsets, and imported names all miss find_struct.
+                    None => false,
+                }
+            }
+            ResolvedType::Sequence { element, .. } => Self::frame_elem_covered(element),
+            ResolvedType::Array { .. } => {
+                let (_, base) = flatten_array(ty);
+                Self::frame_elem_covered(base)
+            }
+            other => Self::frame_scalar_covered(other),
+        }
+    }
+
+    /// Sequence/array elements: fixed-width scalars and enums only.
+    fn frame_elem_covered(ty: &ResolvedType) -> bool {
+        matches!(ty, ResolvedType::Enum(_)) || Self::frame_scalar_covered(ty)
+    }
+
+    /// Fixed-width scalar slots; char/wide/bitmask shapes keep the legacy codec.
+    fn frame_scalar_covered(ty: &ResolvedType) -> bool {
+        matches!(
+            ty,
+            ResolvedType::Bool
+                | ResolvedType::U8
+                | ResolvedType::UInt8
+                | ResolvedType::I8
+                | ResolvedType::I16
+                | ResolvedType::U16
+                | ResolvedType::I32
+                | ResolvedType::U32
+                | ResolvedType::I64
+                | ResolvedType::U64
+                | ResolvedType::F32
+                | ResolvedType::F64
+        )
     }
 
     /// Member flag bitmask (KEY=1, OPTIONAL=2, MUST_UNDERSTAND=4, EXTERNAL=8). The FFI adds
@@ -1681,18 +1783,63 @@ mod tests {
             struct ShapeType {
                 @key long id;
                 long value;
+                char tag;
             };
             "#,
         )
         .unwrap();
         let model = resolve(defs).unwrap();
         let code = generate(&model, "ShapeType.idl", &PythonOptions::new());
+        // char keeps the legacy codec (frame CHAR8 gap), so the entry point is emitted.
         assert!(
             code.contains("def _serialize_cdr(self, xcdr2: bool = False) -> bytes:"),
             "no-arg _serialize_cdr must default to XCDR1 (False): {}",
             code
         );
         assert!(!code.contains("xcdr2: bool = True"), "no XCDR2-default convenience: {}", code);
+    }
+
+    /// Frame-covered shapes omit the legacy `_serialize_cdr`/`_deserialize_cdr` entry
+    /// points (the runtime frame codec carries them); the `_inline` pair stays for
+    /// nested use, and shapes outside coverage keep the full codec.
+    #[test]
+    fn test_frame_covered_struct_omits_legacy_entries() {
+        let defs = parse_idl(
+            r#"
+            enum Color { RED, GREEN };
+            @final struct Inner { long a; string name; };
+            @appendable
+            struct Covered {
+                @key long id;
+                double d;
+                Color c;
+                string txt;
+                Inner inner;
+                long grid[2][3];
+                sequence<long, 8> nums;
+            };
+            "#,
+        )
+        .unwrap();
+        let covered = generate(&resolve(defs).unwrap(), "Covered.idl", &PythonOptions::new());
+        assert!(!covered.contains("def _serialize_cdr("), "{}", covered);
+        assert!(!covered.contains("def _deserialize_cdr("), "{}", covered);
+        assert!(covered.contains("def _serialize_cdr_inline("), "{}", covered);
+        assert!(covered.contains("def _deserialize_cdr_inline("), "{}", covered);
+        assert!(covered.contains("_dds_type_info_fields"), "{}", covered);
+
+        // Mutable shapes and non-scalar collection elements stay legacy.
+        let defs = parse_idl(
+            r#"
+            @mutable
+            struct Tagged { long a; string label; };
+            struct Fallback { long a; sequence<string> notes; };
+            "#,
+        )
+        .unwrap();
+        let legacy = generate(&resolve(defs).unwrap(), "Legacy.idl", &PythonOptions::new());
+        assert_eq!(legacy.matches("def _serialize_cdr(").count(), 2, "{}", legacy);
+        assert_eq!(legacy.matches("def _deserialize_cdr(").count(), 2, "{}", legacy);
     }
 
     #[test]

@@ -403,6 +403,8 @@ class Topic(Generic[T]):
         obj._handle = handle
         obj._closed = False
         obj._frame_codec = None
+        if getattr(type_class, "_dds_type_info_fields", None):
+            obj._init_frame_codec()
         return obj
 
     @property
@@ -424,26 +426,40 @@ class Topic(Generic[T]):
         """Enable the ValueFrame path when the local layout matches the kernel's.
 
         Both sides compute the layout independently (this binding from
-        ``_dds_type_info_fields``, the kernel from the TypeObject); the schema
-        hash comparison turns any divergence into a fallback to the legacy
-        codec instead of wrong wire bytes.
+        ``_dds_type_info_fields``, the kernel from the TypeObject). Divergence
+        falls back to the legacy codec when the type still carries one;
+        frame-covered generated types omit it, so divergence raises instead of
+        producing wrong wire bytes.
         """
-        if os.environ.get("INT2DDS_PY_DISABLE_FRAME") == "1":
+        has_legacy = callable(getattr(self._type_class, "_serialize_cdr", None))
+        if has_legacy and os.environ.get("INT2DDS_PY_DISABLE_FRAME") == "1":
             return
         codec = FrameCodec.build(self._type_class)
         if codec is None:
+            if not has_legacy:
+                raise DdsUnsupported(
+                    f"type '{self._type_name}' has no legacy codec and is not "
+                    "frame-representable; regenerate the type"
+                )
             return
         fixed_out = ffi.new("uint32_t *")
         hash_out = ffi.new("uint64_t *")
         if lib.int2dds_topic_frame_info(self._handle, fixed_out, hash_out) != INT2DDS_RET_OK:
+            if not has_legacy:
+                raise DdsUnsupported(
+                    f"topic '{self._name}' has no kernel frame layout and type "
+                    f"'{self._type_name}' has no legacy codec"
+                )
             return
         if fixed_out[0] != codec.fixed_size or hash_out[0] != codec.schema_hash:
-            warnings.warn(
+            msg = (
                 f"frame layout mismatch for type '{self._type_name}' "
                 f"(kernel {fixed_out[0]}B/{hash_out[0]:#x}, "
-                f"binding {codec.fixed_size}B/{codec.schema_hash:#x}); "
-                "using the legacy codec for this topic"
+                f"binding {codec.fixed_size}B/{codec.schema_hash:#x})"
             )
+            if not has_legacy:
+                raise DdsUnsupported(msg)
+            warnings.warn(msg + "; using the legacy codec for this topic")
             return
         self._frame_codec = codec
 
@@ -484,14 +500,26 @@ class Topic(Generic[T]):
         codec = self._frame_codec
         if codec is not None:
             return self._frame_encode(codec.pack(sample), xcdr2)
-        return sample._serialize_cdr(xcdr2)
+        ser = getattr(sample, "_serialize_cdr", None)
+        if ser is None:
+            raise DdsUnsupported(
+                f"type '{self._type_name}' has no legacy codec and the frame codec "
+                "is not active for this topic"
+            )
+        return ser(xcdr2)
 
     def _decode_sample(self, data: bytes):
         """Deserialize sample bytes: frame path when enabled, else the legacy codec."""
         codec = self._frame_codec
         if codec is not None:
             return codec.unpack(self._frame_decode(data))
-        return self._type_class._deserialize_cdr(data)
+        deser = getattr(self._type_class, "_deserialize_cdr", None)
+        if deser is None:
+            raise DdsUnsupported(
+                f"type '{self._type_name}' has no legacy codec and the frame codec "
+                "is not active for this topic"
+            )
+        return deser(data)
 
     def get_inconsistent_topic_status(self) -> dict:
         """Get the inconsistent topic status.
