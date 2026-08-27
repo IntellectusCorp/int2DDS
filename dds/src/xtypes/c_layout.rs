@@ -1285,10 +1285,7 @@ mod tests {
     }
 
     /// Encode from C memory and compare against the dynamic serializer, the
-    /// kernel's canonical wire form. Mutable XCDR1 is the one deliberate
-    /// difference: this path stamps the PL_CDR encapsulation (0x0003) the derive
-    /// and generated-C writers use, while the dynamic path stamps 0x0001 — the
-    /// bodies must still be identical.
+    /// kernel's canonical wire form.
     fn assert_encodes_like_dynamic(
         label: &str,
         bound: &BoundCLayout,
@@ -1299,12 +1296,7 @@ mod tests {
             let want = serialize_dynamic_data(data, &format).unwrap();
             let got = unsafe { bound.encode(src, xcdr2) }
                 .unwrap_or_else(|e| panic!("{label}/{name}: encode failed: {e:?}"));
-            if !xcdr2 && data.dynamic_type().extensibility() == ExtensibilityKind::Mutable {
-                assert_eq!(&got[..2], &[0x00, 0x03], "{label}/{name}: PL_CDR encapsulation");
-                assert_eq!(&got[4..], &want[4..], "{label}/{name}: body bytes differ");
-            } else {
-                assert_eq!(got, want.as_ref(), "{label}/{name}: bytes differ");
-            }
+            assert_eq!(got, want.as_ref(), "{label}/{name}: bytes differ");
         }
     }
 
@@ -1354,11 +1346,7 @@ mod tests {
                 assert_eq!(&got.name[..6], b"hello\0");
 
                 let again = unsafe { bound.encode(buf.as_ptr(), xcdr2) }.unwrap();
-                if xcdr2 || ext != ExtensibilityKind::Mutable {
-                    assert_eq!(again, bytes.as_ref(), "{ext:?}/{name}: roundtrip bytes");
-                } else {
-                    assert_eq!(&again[4..], &bytes[4..], "{ext:?}/{name}: roundtrip body");
-                }
+                assert_eq!(again, bytes.as_ref(), "{ext:?}/{name}: roundtrip bytes");
             }
         }
     }

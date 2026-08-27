@@ -999,7 +999,12 @@ pub fn deserialize_dynamic_data(
 }
 
 fn serialize_cdr(data: &DynamicData) -> DdsResult<SerializedData> {
-    let mut serializer = CdrSerializer::with_capacity(true, 256);
+    // Mutable stamps the PL_CDR encapsulation (0x0003), like the derive and C writers.
+    let mut serializer = CdrSerializer::with_extensibility_and_buffer(
+        true,
+        data.dynamic_type().extensibility(),
+        Vec::with_capacity(256),
+    );
     serializer.write_encapsulation_header().map_err(cdr_error)?;
     serialize_struct_cdr(&mut serializer, data)?;
     Ok(Arc::from(serializer.into_bytes().into_boxed_slice()))
@@ -2535,6 +2540,13 @@ mod fidelity_tests {
         serializer.into_bytes()
     }
 
+    fn concrete_cdr_ext<T: CdrSerialize>(value: &T, ext: ExtensibilityKind) -> Vec<u8> {
+        let mut serializer = CdrSerializer::with_extensibility(true, ext);
+        serializer.write_encapsulation_header().unwrap();
+        value.serialize_cdr(&mut serializer).unwrap();
+        serializer.into_bytes()
+    }
+
     fn concrete_xcdr<T: XcdrSerialize>(value: &T, ext: ExtensibilityKind) -> Vec<u8> {
         let mut serializer = Xcdr2Serializer::with_capacity(true, ext, 256);
         serializer.write_encapsulation_header().unwrap();
@@ -2719,7 +2731,23 @@ mod fidelity_tests {
         let (outer_dt, inner_dt) = nested_types::<OuterMut, InnerMut>();
         let dynamic = build_dynamic_nested(&outer_dt, &inner_dt);
         let concrete = OuterMut { id: 7, child: InnerMut { a: 1, b: 2 } };
-        assert_eq!(dynamic_bytes(&dynamic, &SerializationFormat::Cdr), concrete_cdr(&concrete));
+        assert_eq!(
+            dynamic_bytes(&dynamic, &SerializationFormat::Cdr),
+            concrete_cdr_ext(&concrete, ExtensibilityKind::Mutable)
+        );
+    }
+
+    #[test]
+    fn cdr_mutable_stamps_pl_cdr_encapsulation() {
+        let (outer_dt, inner_dt) = nested_types::<OuterMut, InnerMut>();
+        let dynamic = build_dynamic_nested(&outer_dt, &inner_dt);
+        let bytes = dynamic_bytes(&dynamic, &SerializationFormat::Cdr);
+        assert_eq!(&bytes[..4], [0x00, 0x03, 0x00, 0x00]);
+
+        let (outer_dt, inner_dt) = nested_types::<OuterFinal, InnerFinal>();
+        let dynamic = build_dynamic_nested(&outer_dt, &inner_dt);
+        let bytes = dynamic_bytes(&dynamic, &SerializationFormat::Cdr);
+        assert_eq!(&bytes[..4], [0x00, 0x01, 0x00, 0x00]);
     }
 
     #[test]
@@ -3181,7 +3209,7 @@ mod fidelity_tests {
             let concrete = OptMut { id: 5, opt };
             assert_eq!(
                 dynamic_bytes(&dynamic, &SerializationFormat::Cdr),
-                concrete_cdr(&concrete),
+                concrete_cdr_ext(&concrete, ExtensibilityKind::Mutable),
                 "CDR (PL_CDR) mutable optional mismatch for {:?}",
                 opt
             );

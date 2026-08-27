@@ -48,7 +48,7 @@ pub use int2dds_derive::DdsType;
 /// Serialization format options for DDS types
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum SerializationFormat {
-    /// CDR
+    /// CDR / XCDR1 — Mutable types stamp the PL_CDR encapsulation themselves
     #[default]
     Cdr,
     /// XCDR
