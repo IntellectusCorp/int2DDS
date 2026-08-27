@@ -555,6 +555,10 @@ impl<'a> CGen<'a> {
             self.raw(&format!("    {} parent;\n", simple));
         }
         for m in &s.members {
+            if m.is_optional {
+                let escaped = naming::escape_keyword(&m.name, naming::TargetLang::C);
+                self.raw(&format!("    bool has_{};\n", escaped));
+            }
             let field_decl = self.field_declaration(m);
             self.raw(&format!("    {};\n", field_decl));
         }
@@ -734,7 +738,7 @@ impl<'a> CGen<'a> {
 
         match s.extensibility {
             ExtensibilityKind::Final => {
-                self.emit_serialize_fields(s, "val");
+                self.emit_serialize_fields(s, "val", &mut 0);
             }
             ExtensibilityKind::Appendable => {
                 // Conditionally write DHEADER based on writer mode (XCDR2 vs XCDR1)
@@ -742,7 +746,7 @@ impl<'a> CGen<'a> {
                 self.raw("    if (w.xcdr2) {\n");
                 self.raw("        int2dds_cdr_write_dheader_begin(&w, &dh);\n");
                 self.raw("    }\n");
-                self.emit_serialize_fields(s, "val");
+                self.emit_serialize_fields(s, "val", &mut 0);
                 self.raw("    if (w.xcdr2) {\n");
                 self.raw("        int2dds_cdr_write_dheader_finalize(&w, dh);\n");
                 self.raw("    }\n");
@@ -815,14 +819,14 @@ impl<'a> CGen<'a> {
 
         match s.extensibility {
             ExtensibilityKind::Final => {
-                self.emit_serialize_fields(s, "val");
+                self.emit_serialize_fields(s, "val", &mut 0);
             }
             ExtensibilityKind::Appendable => {
                 self.raw("    size_t dh = 0;\n");
                 self.raw("    if (xcdr2) {\n");
                 self.raw("        int2dds_cdr_write_dheader_begin(&w, &dh);\n");
                 self.raw("    }\n");
-                self.emit_serialize_fields(s, "val");
+                self.emit_serialize_fields(s, "val", &mut 0);
                 self.raw("    if (xcdr2) {\n");
                 self.raw("        int2dds_cdr_write_dheader_finalize(&w, dh);\n");
                 self.raw("    }\n");
@@ -873,7 +877,7 @@ impl<'a> CGen<'a> {
         }
     }
 
-    fn emit_serialize_fields(&mut self, s: &ResolvedStruct, prefix: &str) {
+    fn emit_serialize_fields(&mut self, s: &ResolvedStruct, prefix: &str, next_id: &mut u32) {
         // Inline parent fields (flat) — a single outer DHEADER bounds the whole
         // struct including inherited fields, matching Rust/C#. Calling
         // {Parent}_serialize_fields would emit a nested DHEADER and desync with Rust.
@@ -882,14 +886,80 @@ impl<'a> CGen<'a> {
             if let Some(parent_struct) = self.find_struct(simple).cloned() {
                 let parent_var = format!("_p_{}", simple.to_lowercase());
                 self.raw(&format!("    const {} *{} = &{}->parent;\n", simple, parent_var, prefix));
-                self.emit_serialize_fields(&parent_struct, &parent_var);
+                self.emit_serialize_fields(&parent_struct, &parent_var, next_id);
             }
         }
         for m in &s.members {
             let field_name = naming::escape_keyword(&m.name, naming::TargetLang::C);
             let accessor = self.make_field_accessor(m, prefix, &field_name);
-            self.emit_write_field(&m.resolved_type, &accessor);
+            let id = m.member_id.unwrap_or(*next_id);
+            *next_id += 1;
+            if m.is_optional {
+                self.emit_write_optional_field(m, prefix, &field_name, &accessor, id);
+            } else {
+                self.emit_write_field(&m.resolved_type, &accessor);
+            }
         }
+    }
+
+    /// Optional member in a Final/Appendable struct: XCDR2 writes a presence
+    /// boolean, XCDR1 always writes a PL_CDR parameter header (length 0 = absent),
+    /// matching the derive/dynamic writers.
+    fn emit_write_optional_field(
+        &mut self,
+        m: &ResolvedMember,
+        prefix: &str,
+        field_name: &str,
+        accessor: &str,
+        id: u32,
+    ) {
+        let mu = if m.must_understand { "true" } else { "false" };
+        self.raw("    {\n");
+        self.raw("        size_t _pt = 0;\n");
+        self.raw("        if (w.xcdr2) {\n");
+        self.raw(&format!(
+            "            int2dds_cdr_write_bool(&w, {}->has_{});\n",
+            prefix, field_name
+        ));
+        self.raw("        } else {\n");
+        self.raw(&format!("            int2dds_cdr_write_pid_begin(&w, {}, &_pt);\n", id));
+        self.raw("        }\n");
+        self.raw(&format!("        if ({}->has_{}) {{\n", prefix, field_name));
+        self.emit_write_field_indented(&m.resolved_type, accessor, "            ");
+        self.raw("        }\n");
+        self.raw("        if (!w.xcdr2) {\n");
+        self.raw(&format!(
+            "            int2dds_cdr_write_pid_finalize(&w, {}, {}, _pt);\n",
+            id, mu
+        ));
+        self.raw("        }\n");
+        self.raw("    }\n");
+    }
+
+    /// Read counterpart: XCDR2 presence boolean, XCDR1 parameter header whose
+    /// length decides presence (the pid itself is ignored, like the Rust readers).
+    fn emit_read_optional_field(
+        &mut self,
+        m: &ResolvedMember,
+        prefix: &str,
+        field_name: &str,
+        accessor: &str,
+    ) {
+        self.raw("    {\n");
+        self.raw("        bool _has = false;\n");
+        self.raw("        if (r.xcdr2) {\n");
+        self.raw("            int2dds_cdr_read_bool(&r, &_has);\n");
+        self.raw("        } else {\n");
+        self.raw("            uint32_t _pmid = 0, _plen = 0;\n");
+        self.raw("            bool _psen = false;\n");
+        self.raw("            int2dds_cdr_read_pid_header(&r, &_pmid, &_plen, &_psen);\n");
+        self.raw("            _has = !_psen && _plen != 0;\n");
+        self.raw("        }\n");
+        self.raw(&format!("        {}->has_{} = _has;\n", prefix, field_name));
+        self.raw("        if (_has) {\n");
+        self.emit_read_field_indented(&m.resolved_type, accessor, "            ");
+        self.raw("        }\n");
+        self.raw("    }\n");
     }
 
     /// Flatten members ancestors-first for the mutable wire, emitting one parent
@@ -927,6 +997,10 @@ impl<'a> CGen<'a> {
             let mu = if m.must_understand { "true" } else { "false" };
             let field_name = naming::escape_keyword(&m.name, naming::TargetLang::C);
             let accessor = self.make_field_accessor(m, pfx, &field_name);
+            // Absent optional members are omitted entirely (no member header).
+            if m.is_optional {
+                self.raw(&format!("    if ({}->has_{}) {{\n", pfx, field_name));
+            }
             self.raw("    {\n");
             self.raw("        size_t em;\n");
             self.raw("        if (w.xcdr2) {\n");
@@ -947,6 +1021,9 @@ impl<'a> CGen<'a> {
             ));
             self.raw("        }\n");
             self.raw("    }\n");
+            if m.is_optional {
+                self.raw("    }\n");
+            }
         }
     }
 
@@ -1220,7 +1297,11 @@ impl<'a> CGen<'a> {
         for m in &s.members {
             let field_name = naming::escape_keyword(&m.name, naming::TargetLang::C);
             let accessor = self.make_field_accessor(m, prefix, &field_name);
-            self.emit_read_field(&m.resolved_type, &accessor);
+            if m.is_optional {
+                self.emit_read_optional_field(m, prefix, &field_name, &accessor);
+            } else {
+                self.emit_read_field(&m.resolved_type, &accessor);
+            }
         }
     }
 
@@ -1262,6 +1343,9 @@ impl<'a> CGen<'a> {
             let field_name = naming::escape_keyword(&m.name, naming::TargetLang::C);
             let accessor = self.make_field_accessor(m, pfx, &field_name);
             self.raw(&format!("{}case {}:\n", indent, id));
+            if m.is_optional {
+                self.raw(&format!("{}    {}->has_{} = true;\n", indent, pfx, field_name));
+            }
             self.emit_read_field_indented(&m.resolved_type, &accessor, &format!("{}    ", indent));
             self.raw(&format!("{}    break;\n", indent));
         }
@@ -3084,6 +3168,46 @@ mod tests {
         assert!(code.contains(
             r#"{"sseq", CFieldSequencePtr, (uint32_t)offsetof(P, sseq.data), (uint32_t)offsetof(P, sseq.length), 0, 0, CFieldStringPtr, 0, NULL},"#
         ));
+    }
+
+    #[test]
+    fn test_optional_members_emit_presence() {
+        let defs = parse_idl(
+            r#"
+            @extensibility(FINAL)
+            struct OptF {
+                long id;
+                @optional long opt_num;
+                @optional string opt_text;
+            };
+            @extensibility(MUTABLE)
+            struct OptM {
+                long id;
+                @optional string opt_label;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(
+            &model,
+            "Opt.idl",
+            &COptions { default_string_bound: 64, string_mode: StringMode::Pointer },
+        );
+
+        // Struct representation: presence flag precedes the member.
+        assert!(code.contains("bool has_opt_num;"), "{}", code);
+        assert!(code.contains("bool has_opt_text;"), "{}", code);
+        // Final/Appendable write: XCDR2 presence bool, XCDR1 parameter header.
+        assert!(code.contains("int2dds_cdr_write_bool(&w, val->has_opt_num);"), "{}", code);
+        assert!(code.contains("int2dds_cdr_write_pid_begin(&w, 1, &_pt);"), "{}", code);
+        assert!(code.contains("int2dds_cdr_write_pid_finalize(&w, 1, false, _pt);"), "{}", code);
+        // Final/Appendable read: header length decides presence.
+        assert!(code.contains("val_out->has_opt_num = _has;"), "{}", code);
+        assert!(code.contains("_has = !_psen && _plen != 0;"), "{}", code);
+        // Mutable: absent members are omitted, present ones set the flag on read.
+        assert!(code.contains("if (val->has_opt_label) {"), "{}", code);
+        assert!(code.contains("val_out->has_opt_label = true;"), "{}", code);
     }
 
     #[test]

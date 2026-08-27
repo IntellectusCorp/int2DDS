@@ -556,8 +556,13 @@ impl<'a> PyGen<'a> {
         for m in &all_members {
             let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
             let py_type = Self::type_to_python(&m.resolved_type);
-            let default = self.default_value(&m.resolved_type);
-            self.line(&format!("{}: {} = {}", field_name, py_type, default));
+            if m.is_optional {
+                // Optional members: None means absent on the wire.
+                self.line(&format!("{}: {} | None = None", field_name, py_type));
+            } else {
+                let default = self.default_value(&m.resolved_type);
+                self.line(&format!("{}: {} = {}", field_name, py_type, default));
+            }
         }
         self.line("");
 
@@ -1014,10 +1019,7 @@ impl<'a> PyGen<'a> {
         match s.extensibility {
             ExtensibilityKind::Final => {
                 // Final: just serialize fields
-                for m in &members {
-                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
-                    self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
-                }
+                self.emit_write_members_py(&members, None);
             }
             ExtensibilityKind::Appendable => {
                 // Appendable: wrap with DHEADER only in XCDR2.
@@ -1027,19 +1029,13 @@ impl<'a> PyGen<'a> {
                 self.indent += 1;
                 self.line("with w.dheader():");
                 self.indent += 1;
-                for m in &members {
-                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
-                    self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
-                }
+                self.emit_write_members_py(&members, Some(true));
                 self.indent -= 1;
                 self.indent -= 1;
                 self.line("else:");
                 self.indent += 1;
                 // XCDR1: flat field order (no DHEADER)
-                for m in &members {
-                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
-                    self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
-                }
+                self.emit_write_members_py(&members, Some(false));
                 self.indent -= 1;
             }
             ExtensibilityKind::Mutable => {
@@ -1049,34 +1045,12 @@ impl<'a> PyGen<'a> {
                 self.indent += 1;
                 self.line("with w.dheader():");
                 self.indent += 1;
-                for (i, m) in members.iter().enumerate() {
-                    let member_id = m.member_id.unwrap_or(i as u32);
-                    let must_understand = if m.must_understand { "True" } else { "False" };
-                    self.line(&format!(
-                        "with w.emheader(member_id={}, must_understand={}):",
-                        member_id, must_understand
-                    ));
-                    self.indent += 1;
-                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
-                    self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
-                    self.indent -= 1;
-                }
+                self.emit_mutable_write_members_py(&members, true);
                 self.indent -= 1;
                 self.indent -= 1;
                 self.line("else:");
                 self.indent += 1;
-                for (i, m) in members.iter().enumerate() {
-                    let member_id = m.member_id.unwrap_or(i as u32);
-                    let must_understand = if m.must_understand { "True" } else { "False" };
-                    self.line(&format!(
-                        "with w.member_v1(member_id={}, must_understand={}):",
-                        member_id, must_understand
-                    ));
-                    self.indent += 1;
-                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
-                    self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
-                    self.indent -= 1;
-                }
+                self.emit_mutable_write_members_py(&members, false);
                 self.line("w.end_mutable_struct()");
                 self.indent -= 1;
             }
@@ -1096,29 +1070,20 @@ impl<'a> PyGen<'a> {
 
         match s.extensibility {
             ExtensibilityKind::Final => {
-                for m in &members {
-                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
-                    self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
-                }
+                self.emit_write_members_py(&members, None);
             }
             ExtensibilityKind::Appendable => {
                 self.line("if w._xcdr2:");
                 self.indent += 1;
                 self.line("with w.dheader():");
                 self.indent += 1;
-                for m in &members {
-                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
-                    self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
-                }
+                self.emit_write_members_py(&members, Some(true));
                 self.indent -= 1;
                 self.indent -= 1;
                 self.line("else:");
                 self.indent += 1;
                 // XCDR1: flat field order (no DHEADER)
-                for m in &members {
-                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
-                    self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
-                }
+                self.emit_write_members_py(&members, Some(false));
                 self.indent -= 1;
             }
             ExtensibilityKind::Mutable => {
@@ -1126,34 +1091,12 @@ impl<'a> PyGen<'a> {
                 self.indent += 1;
                 self.line("with w.dheader():");
                 self.indent += 1;
-                for (i, m) in members.iter().enumerate() {
-                    let member_id = m.member_id.unwrap_or(i as u32);
-                    let must_understand = if m.must_understand { "True" } else { "False" };
-                    self.line(&format!(
-                        "with w.emheader(member_id={}, must_understand={}):",
-                        member_id, must_understand
-                    ));
-                    self.indent += 1;
-                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
-                    self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
-                    self.indent -= 1;
-                }
+                self.emit_mutable_write_members_py(&members, true);
                 self.indent -= 1;
                 self.indent -= 1;
                 self.line("else:");
                 self.indent += 1;
-                for (i, m) in members.iter().enumerate() {
-                    let member_id = m.member_id.unwrap_or(i as u32);
-                    let must_understand = if m.must_understand { "True" } else { "False" };
-                    self.line(&format!(
-                        "with w.member_v1(member_id={}, must_understand={}):",
-                        member_id, must_understand
-                    ));
-                    self.indent += 1;
-                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
-                    self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
-                    self.indent -= 1;
-                }
+                self.emit_mutable_write_members_py(&members, false);
                 self.line("w.end_mutable_struct()");
                 self.indent -= 1;
             }
@@ -1316,6 +1259,139 @@ impl<'a> PyGen<'a> {
         }
     }
 
+    /// Final/Appendable member list. `xcdr2` is `Some` when the emission site sits
+    /// inside a branch where the format is statically known, `None` when the
+    /// generated code must branch at runtime.
+    fn emit_write_members_py(&mut self, members: &[ResolvedMember], xcdr2: Option<bool>) {
+        for (i, m) in members.iter().enumerate() {
+            let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
+            let accessor = format!("self.{}", field_name);
+            if m.is_optional {
+                self.emit_write_optional_py(m, i as u32, &accessor, xcdr2);
+            } else {
+                self.emit_write_field(&m.resolved_type, &accessor);
+            }
+        }
+    }
+
+    /// Optional member in a Final/Appendable struct: XCDR2 writes a presence
+    /// boolean, XCDR1 always writes a PL_CDR parameter header (length 0 = absent),
+    /// matching the Rust derive writer.
+    fn emit_write_optional_py(
+        &mut self,
+        m: &ResolvedMember,
+        index: u32,
+        accessor: &str,
+        xcdr2: Option<bool>,
+    ) {
+        match xcdr2 {
+            Some(true) => self.emit_write_optional_py_xcdr2(m, accessor),
+            Some(false) => self.emit_write_optional_py_xcdr1(m, index, accessor),
+            None => {
+                self.line("if w._xcdr2:");
+                self.indent += 1;
+                self.emit_write_optional_py_xcdr2(m, accessor);
+                self.indent -= 1;
+                self.line("else:");
+                self.indent += 1;
+                self.emit_write_optional_py_xcdr1(m, index, accessor);
+                self.indent -= 1;
+            }
+        }
+    }
+
+    fn emit_write_optional_py_xcdr2(&mut self, m: &ResolvedMember, accessor: &str) {
+        self.line(&format!("w.write_bool({} is not None)", accessor));
+        self.line(&format!("if {} is not None:", accessor));
+        self.indent += 1;
+        self.emit_write_field(&m.resolved_type, accessor);
+        self.indent -= 1;
+    }
+
+    fn emit_write_optional_py_xcdr1(&mut self, m: &ResolvedMember, index: u32, accessor: &str) {
+        let id = m.member_id.unwrap_or(index);
+        let mu = if m.must_understand { "True" } else { "False" };
+        self.line(&format!("with w.member_v1(member_id={}, must_understand={}):", id, mu));
+        self.indent += 1;
+        self.line(&format!("if {} is not None:", accessor));
+        self.indent += 1;
+        self.emit_write_field(&m.resolved_type, accessor);
+        self.indent -= 1;
+        self.indent -= 1;
+    }
+
+    fn emit_read_members_py(&mut self, members: &[ResolvedMember], xcdr2: Option<bool>) {
+        for m in members {
+            let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
+            if m.is_optional {
+                self.emit_read_optional_py(m, &field_name, xcdr2);
+            } else {
+                self.emit_read_field(&m.resolved_type, &field_name);
+            }
+        }
+    }
+
+    /// Read counterpart: XCDR2 presence boolean, XCDR1 parameter header whose
+    /// length decides presence (the pid itself is ignored, like the Rust readers).
+    fn emit_read_optional_py(&mut self, m: &ResolvedMember, name: &str, xcdr2: Option<bool>) {
+        self.line(&format!("{} = None", name));
+        match xcdr2 {
+            Some(true) => self.emit_read_optional_py_xcdr2(m, name),
+            Some(false) => self.emit_read_optional_py_xcdr1(m, name),
+            None => {
+                self.line("if r._xcdr2:");
+                self.indent += 1;
+                self.emit_read_optional_py_xcdr2(m, name);
+                self.indent -= 1;
+                self.line("else:");
+                self.indent += 1;
+                self.emit_read_optional_py_xcdr1(m, name);
+                self.indent -= 1;
+            }
+        }
+    }
+
+    fn emit_read_optional_py_xcdr2(&mut self, m: &ResolvedMember, name: &str) {
+        self.line("if r.read_bool():");
+        self.indent += 1;
+        self.emit_read_field(&m.resolved_type, name);
+        self.indent -= 1;
+    }
+
+    fn emit_read_optional_py_xcdr1(&mut self, m: &ResolvedMember, name: &str) {
+        self.line("_okind, _omid, _olen, _omu = r.read_parameter_header()");
+        self.line("if _okind != \"sentinel\" and _olen != 0:");
+        self.indent += 1;
+        self.emit_read_field(&m.resolved_type, name);
+        self.indent -= 1;
+    }
+
+    /// Mutable member list: absent optional members are omitted entirely
+    /// (no EMHEADER / parameter header).
+    fn emit_mutable_write_members_py(&mut self, members: &[ResolvedMember], xcdr2: bool) {
+        let ctx = if xcdr2 { "emheader" } else { "member_v1" };
+        for (i, m) in members.iter().enumerate() {
+            let member_id = m.member_id.unwrap_or(i as u32);
+            let must_understand = if m.must_understand { "True" } else { "False" };
+            let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
+            let accessor = format!("self.{}", field_name);
+            if m.is_optional {
+                self.line(&format!("if {} is not None:", accessor));
+                self.indent += 1;
+            }
+            self.line(&format!(
+                "with w.{}(member_id={}, must_understand={}):",
+                ctx, member_id, must_understand
+            ));
+            self.indent += 1;
+            self.emit_write_field(&m.resolved_type, &accessor);
+            self.indent -= 1;
+            if m.is_optional {
+                self.indent -= 1;
+            }
+        }
+    }
+
     fn emit_write_field(&mut self, ty: &ResolvedType, accessor: &str) {
         match ty {
             ResolvedType::Bool => self.line(&format!("w.write_bool({})", accessor)),
@@ -1465,10 +1541,7 @@ impl<'a> PyGen<'a> {
         match s.extensibility {
             ExtensibilityKind::Final => {
                 // Final: read fields directly
-                for m in &members {
-                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
-                    self.emit_read_field(&m.resolved_type, &field_name);
-                }
+                self.emit_read_members_py(&members, None);
             }
             ExtensibilityKind::Appendable => {
                 // Appendable: XCDR2 has a single outer DHEADER bounding all fields
@@ -1476,18 +1549,12 @@ impl<'a> PyGen<'a> {
                 self.line("if r._xcdr2:");
                 self.indent += 1;
                 self.line("_dsize, _dstart = r.read_dheader()");
-                for m in &members {
-                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
-                    self.emit_read_field(&m.resolved_type, &field_name);
-                }
+                self.emit_read_members_py(&members, Some(true));
                 self.line("r.read_dheader_end(_dsize, _dstart)");
                 self.indent -= 1;
                 self.line("else:");
                 self.indent += 1;
-                for m in &members {
-                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
-                    self.emit_read_field(&m.resolved_type, &field_name);
-                }
+                self.emit_read_members_py(&members, Some(false));
                 self.indent -= 1;
             }
             ExtensibilityKind::Mutable => {
@@ -1496,6 +1563,10 @@ impl<'a> PyGen<'a> {
                 // terminated by a sentinel.
                 for m in &members {
                     let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
+                    if m.is_optional {
+                        self.line(&format!("{} = None", field_name));
+                        continue;
+                    }
                     let default = self.default_value(&m.resolved_type);
                     // Handle field(default_factory=...) case
                     if default.starts_with("field(") {
@@ -1564,32 +1635,27 @@ impl<'a> PyGen<'a> {
 
         match s.extensibility {
             ExtensibilityKind::Final => {
-                for m in &members {
-                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
-                    self.emit_read_field(&m.resolved_type, &field_name);
-                }
+                self.emit_read_members_py(&members, None);
             }
             ExtensibilityKind::Appendable => {
                 self.line("if r._xcdr2:");
                 self.indent += 1;
                 self.line("_dsize, _dstart = r.read_dheader()");
-                for m in &members {
-                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
-                    self.emit_read_field(&m.resolved_type, &field_name);
-                }
+                self.emit_read_members_py(&members, Some(true));
                 self.line("r.read_dheader_end(_dsize, _dstart)");
                 self.indent -= 1;
                 self.line("else:");
                 self.indent += 1;
-                for m in &members {
-                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
-                    self.emit_read_field(&m.resolved_type, &field_name);
-                }
+                self.emit_read_members_py(&members, Some(false));
                 self.indent -= 1;
             }
             ExtensibilityKind::Mutable => {
                 for m in &members {
                     let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
+                    if m.is_optional {
+                        self.line(&format!("{} = None", field_name));
+                        continue;
+                    }
                     let default = self.default_value(&m.resolved_type);
                     if default.starts_with("field(") {
                         if default.contains("lambda:") {
@@ -1808,6 +1874,45 @@ mod tests {
     /// Frame-covered shapes omit the legacy `_serialize_cdr`/`_deserialize_cdr` entry
     /// points (the runtime frame codec carries them); the `_inline` pair stays for
     /// nested use, and shapes outside coverage keep the full codec.
+    #[test]
+    fn test_optional_members_emit_presence() {
+        let defs = parse_idl(
+            r#"
+            @extensibility(FINAL)
+            struct OptF {
+                long id;
+                @optional long opt_num;
+            };
+            @appendable
+            struct OptA {
+                long id;
+                @optional string opt_text;
+            };
+            @mutable
+            struct OptM {
+                long id;
+                @optional string opt_label;
+            };
+            "#,
+        )
+        .unwrap();
+        let code = generate(&resolve(defs).unwrap(), "Opt.idl", &PythonOptions::new());
+
+        assert!(code.contains("opt_num: int | None = None"), "{}", code);
+        assert!(code.contains("opt_text: str | None = None"), "{}", code);
+        // Final/Appendable: XCDR2 presence bool, XCDR1 parameter header.
+        assert!(code.contains("w.write_bool(self.opt_num is not None)"), "{}", code);
+        assert!(code.contains("with w.member_v1(member_id=1, must_understand=False):"), "{}", code);
+        assert!(
+            code.contains("_okind, _omid, _olen, _omu = r.read_parameter_header()"),
+            "{}",
+            code
+        );
+        assert!(code.contains("if _okind != \"sentinel\" and _olen != 0:"), "{}", code);
+        // Mutable: absent members are omitted entirely.
+        assert!(code.contains("if self.opt_label is not None:"), "{}", code);
+    }
+
     #[test]
     fn test_frame_covered_struct_omits_legacy_entries() {
         let defs = parse_idl(

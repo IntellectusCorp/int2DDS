@@ -129,6 +129,28 @@ const FIXTURE: &str = r#"
         TaggedDerived tagged_derived;
         @external long ext;
     };
+
+    @extensibility(FINAL)
+    struct OptFinalProbe {
+        long id;
+        @optional long opt_num;
+        @optional string opt_text;
+        @optional sequence<double> opt_samples;
+        @optional Inner opt_inner;
+    };
+
+    @extensibility(APPENDABLE)
+    struct OptAppendProbe {
+        long id;
+        @optional string<32> opt_bounded;
+        @optional long opt_arr[2];
+    };
+
+    @extensibility(MUTABLE)
+    struct OptMutProbe {
+        @id(5) long id;
+        @optional @id(9) string opt_label;
+    };
 "#;
 
 fn find_clang() -> Option<&'static str> {

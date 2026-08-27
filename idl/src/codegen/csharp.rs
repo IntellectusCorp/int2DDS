@@ -831,8 +831,11 @@ impl<'a> CsGen<'a> {
         for m in &all_members {
             let prop_name = cs_ident(&m.name);
             let cs_type = Self::type_to_csharp(&m.resolved_type);
-            let default = self.default_value(&m.resolved_type);
-            if self.needs_initializer(&m.resolved_type) {
+            if m.is_optional {
+                // Optional members are nullable; null means absent on the wire.
+                self.line(&format!("public {}? {} {{ get; set; }}", cs_type, prop_name));
+            } else if self.needs_initializer(&m.resolved_type) {
+                let default = self.default_value(&m.resolved_type);
                 self.line(&format!(
                     "public {} {} {{ get; set; }} = {};",
                     cs_type, prop_name, default
@@ -930,6 +933,30 @@ impl<'a> CsGen<'a> {
             ResolvedType::Enum(name) => cs_type_ref(name),
             ResolvedType::Bitmask(name) => cs_type_ref(name),
         }
+    }
+
+    /// Types whose C# mapping is a value type, so an optional member is `T?`
+    /// and serialization must go through `.Value`.
+    fn cs_is_value_type(ty: &ResolvedType) -> bool {
+        matches!(
+            ty,
+            ResolvedType::Bool
+                | ResolvedType::U8
+                | ResolvedType::UInt8
+                | ResolvedType::I8
+                | ResolvedType::I16
+                | ResolvedType::U16
+                | ResolvedType::I32
+                | ResolvedType::U32
+                | ResolvedType::I64
+                | ResolvedType::U64
+                | ResolvedType::F32
+                | ResolvedType::F64
+                | ResolvedType::Char
+                | ResolvedType::WChar
+                | ResolvedType::Enum(_)
+                | ResolvedType::Bitmask(_)
+        )
     }
 
     fn needs_initializer(&self, ty: &ResolvedType) -> bool {
@@ -1046,17 +1073,11 @@ impl<'a> CsGen<'a> {
 
         match s.extensibility {
             ExtensibilityKind::Final => {
-                for m in &s.members {
-                    let accessor = cs_ident(&m.name);
-                    self.emit_write_field(&m.resolved_type, &accessor);
-                }
+                self.emit_write_members_cs(&s.members);
             }
             ExtensibilityKind::Appendable => {
                 self.line("var _dt = w.DheaderBegin();");
-                for m in &s.members {
-                    let accessor = cs_ident(&m.name);
-                    self.emit_write_field(&m.resolved_type, &accessor);
-                }
+                self.emit_write_members_cs(&s.members);
                 self.line("w.DheaderFinalize(_dt);");
             }
             ExtensibilityKind::Mutable => {
@@ -1077,6 +1098,76 @@ impl<'a> CsGen<'a> {
         }
 
         self.line("return w.ToBytes();");
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// Final/Appendable member list; optional members get presence handling.
+    fn emit_write_members_cs(&mut self, members: &[ResolvedMember]) {
+        for (i, m) in members.iter().enumerate() {
+            let prop = cs_ident(&m.name);
+            if m.is_optional {
+                self.emit_write_optional_cs(m, i as u32, &prop);
+            } else {
+                self.emit_write_field(&m.resolved_type, &prop);
+            }
+        }
+    }
+
+    /// Optional member in a Final/Appendable struct: XCDR2 writes a presence
+    /// boolean, XCDR1 always writes a PL_CDR parameter header (length 0 = absent),
+    /// matching the Rust derive writer.
+    fn emit_write_optional_cs(&mut self, m: &ResolvedMember, index: u32, prop: &str) {
+        let id = m.member_id.unwrap_or(index);
+        let mu = if m.must_understand { "true" } else { "false" };
+        let accessor = if Self::cs_is_value_type(&m.resolved_type) {
+            format!("{}.Value", prop)
+        } else {
+            prop.to_string()
+        };
+        self.line("{");
+        self.indent += 1;
+        self.line("int _ot = -1;");
+        self.line(&format!("if (w.IsXcdr2) {{ w.WriteBool({} != null); }}", prop));
+        self.line(&format!("else {{ _ot = w.MemberV1Begin({}); }}", id));
+        self.line(&format!("if ({} != null)", prop));
+        self.line("{");
+        self.indent += 1;
+        self.emit_write_field(&m.resolved_type, &accessor);
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!("if (!w.IsXcdr2) {{ w.MemberV1Finalize(_ot, {}, {}); }}", id, mu));
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    fn emit_read_members_cs(&mut self, members: &[ResolvedMember]) {
+        for m in members {
+            let prop_name = cs_ident(&m.name);
+            if m.is_optional {
+                self.emit_read_optional_cs(m, &prop_name);
+            } else {
+                self.emit_read_field(&m.resolved_type, &prop_name, "obj");
+            }
+        }
+    }
+
+    /// Read counterpart: XCDR2 presence boolean, XCDR1 parameter header whose
+    /// length decides presence (the pid itself is ignored, like the Rust readers).
+    fn emit_read_optional_cs(&mut self, m: &ResolvedMember, prop: &str) {
+        self.line("{");
+        self.indent += 1;
+        self.line("bool _has;");
+        self.line("if (r.IsXcdr2) { _has = r.ReadBool(); }");
+        self.line(
+            "else { var (_, _olen, _, _osen) = r.ReadParameterHeader(); _has = !_osen && _olen != 0; }",
+        );
+        self.line("if (_has)");
+        self.line("{");
+        self.indent += 1;
+        self.emit_read_field(&m.resolved_type, prop, "obj");
+        self.indent -= 1;
+        self.line("}");
         self.indent -= 1;
         self.line("}");
     }
@@ -1199,13 +1290,28 @@ impl<'a> CsGen<'a> {
         for (i, m) in members.iter().enumerate() {
             let member_id = m.member_id.unwrap_or(i as u32);
             let must_understand = if m.must_understand { "true" } else { "false" };
+            let prop = cs_ident(&m.name);
+            let accessor = if m.is_optional && Self::cs_is_value_type(&m.resolved_type) {
+                format!("{}.Value", prop)
+            } else {
+                prop.clone()
+            };
+            // Absent optional members are omitted entirely (no EMHEADER).
+            if m.is_optional {
+                self.line(&format!("if ({} != null)", prop));
+                self.line("{");
+                self.indent += 1;
+            }
             self.line(&format!(
                 "var _et{} = w.EmheaderBegin({}, {});",
                 i, member_id, must_understand
             ));
-            let accessor = cs_ident(&m.name);
             self.emit_write_field(&m.resolved_type, &accessor);
             self.line(&format!("w.EmheaderFinalize(_et{});", i));
+            if m.is_optional {
+                self.indent -= 1;
+                self.line("}");
+            }
         }
         self.line("w.DheaderFinalize(_dt);");
     }
@@ -1215,13 +1321,28 @@ impl<'a> CsGen<'a> {
         for (i, m) in members.iter().enumerate() {
             let member_id = m.member_id.unwrap_or(i as u32);
             let must_understand = if m.must_understand { "true" } else { "false" };
+            let prop = cs_ident(&m.name);
+            let accessor = if m.is_optional && Self::cs_is_value_type(&m.resolved_type) {
+                format!("{}.Value", prop)
+            } else {
+                prop.clone()
+            };
+            // Absent optional members are omitted entirely (no member header).
+            if m.is_optional {
+                self.line(&format!("if ({} != null)", prop));
+                self.line("{");
+                self.indent += 1;
+            }
             self.line(&format!("var _mt{} = w.MemberV1Begin({});", i, member_id));
-            let accessor = cs_ident(&m.name);
             self.emit_write_field(&m.resolved_type, &accessor);
             self.line(&format!(
                 "w.MemberV1Finalize(_mt{}, {}, {});",
                 i, member_id, must_understand
             ));
+            if m.is_optional {
+                self.indent -= 1;
+                self.line("}");
+            }
         }
         self.line("w.EndMutableStruct();");
     }
@@ -1264,17 +1385,11 @@ impl<'a> CsGen<'a> {
 
         match s.extensibility {
             ExtensibilityKind::Final => {
-                for m in &s.members {
-                    let prop_name = cs_ident(&m.name);
-                    self.emit_read_field(&m.resolved_type, &prop_name, "obj");
-                }
+                self.emit_read_members_cs(&s.members);
             }
             ExtensibilityKind::Appendable => {
                 self.line("var (_dSize, _dStart) = r.ReadDheader();");
-                for m in &s.members {
-                    let prop_name = cs_ident(&m.name);
-                    self.emit_read_field(&m.resolved_type, &prop_name, "obj");
-                }
+                self.emit_read_members_cs(&s.members);
                 self.line("r.ReadDheaderEnd(_dSize, _dStart);");
             }
             ExtensibilityKind::Mutable => {
@@ -1332,17 +1447,11 @@ impl<'a> CsGen<'a> {
 
         match s.extensibility {
             ExtensibilityKind::Final => {
-                for m in &s.members {
-                    let prop_name = cs_ident(&m.name);
-                    self.emit_read_field(&m.resolved_type, &prop_name, "obj");
-                }
+                self.emit_read_members_cs(&s.members);
             }
             ExtensibilityKind::Appendable => {
                 self.line("var (_dSize, _dStart) = r.ReadDheader();");
-                for m in &s.members {
-                    let prop_name = cs_ident(&m.name);
-                    self.emit_read_field(&m.resolved_type, &prop_name, "obj");
-                }
+                self.emit_read_members_cs(&s.members);
                 self.line("r.ReadDheaderEnd(_dSize, _dStart);");
             }
             ExtensibilityKind::Mutable => {
@@ -1390,17 +1499,11 @@ impl<'a> CsGen<'a> {
 
         match s.extensibility {
             ExtensibilityKind::Final => {
-                for m in &s.members {
-                    let accessor = cs_ident(&m.name);
-                    self.emit_write_field(&m.resolved_type, &accessor);
-                }
+                self.emit_write_members_cs(&s.members);
             }
             ExtensibilityKind::Appendable => {
                 self.line("var _dt = w.DheaderBegin();");
-                for m in &s.members {
-                    let accessor = cs_ident(&m.name);
-                    self.emit_write_field(&m.resolved_type, &accessor);
-                }
+                self.emit_write_members_cs(&s.members);
                 self.line("w.DheaderFinalize(_dt);");
             }
             ExtensibilityKind::Mutable => {
@@ -1819,6 +1922,50 @@ mod tests {
     /// The no-arg convenience `SerializeCdr()` must default to XCDR1 (spec effective
     /// write default), mirroring the core `int2dds_default_data_representation()`. The
     /// explicit `SerializeCdr(bool xcdr2)` overload stays for the QoS-driven write path.
+    #[test]
+    fn test_optional_members_emit_presence_csharp() {
+        let defs = parse_idl(
+            r#"
+            @extensibility(FINAL)
+            struct OptF {
+                long id;
+                @optional long opt_num;
+                @optional string opt_text;
+            };
+            @mutable
+            struct OptM {
+                long id;
+                @optional string opt_label;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Opt.idl", &CSharpOptions::default());
+
+        // Nullable representation, no initializer.
+        assert!(code.contains("public int? OptNum { get; set; }"), "{}", code);
+        assert!(code.contains("public string? OptText { get; set; }"), "{}", code);
+        // Final/Appendable: XCDR2 presence bool, XCDR1 parameter header.
+        assert!(code.contains("if (w.IsXcdr2) { w.WriteBool(OptNum != null); }"), "{}", code);
+        assert!(code.contains("else { _ot = w.MemberV1Begin(1); }"), "{}", code);
+        assert!(code.contains("w.WriteI32(OptNum.Value);"), "{}", code);
+        assert!(
+            code.contains("if (!w.IsXcdr2) { w.MemberV1Finalize(_ot, 1, false); }"),
+            "{}",
+            code
+        );
+        assert!(
+            code.contains(
+                "else { var (_, _olen, _, _osen) = r.ReadParameterHeader(); _has = !_osen && _olen != 0; }"
+            ),
+            "{}",
+            code
+        );
+        // Mutable: absent members are omitted entirely.
+        assert!(code.contains("if (OptLabel != null)"), "{}", code);
+    }
+
     #[test]
     fn test_serialize_cdr_convenience_defaults_to_xcdr1() {
         let defs = parse_idl(
