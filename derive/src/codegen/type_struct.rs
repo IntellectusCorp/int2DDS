@@ -1517,23 +1517,6 @@ fn generate_cdr_mutable_deserialize_impl(
     }
 }
 
-fn lc_hint_for_method(
-    method: SerializationMethod,
-    crate_path: &proc_macro2::TokenStream,
-) -> proc_macro2::TokenStream {
-    match method {
-        SerializationMethod::VecU32 | SerializationMethod::VecI32 | SerializationMethod::VecF32 => {
-            quote! { #crate_path::serialize::cdr::LcHint::SeqMul4 }
-        }
-        SerializationMethod::VecU64 | SerializationMethod::VecI64 | SerializationMethod::VecF64 => {
-            quote! { #crate_path::serialize::cdr::LcHint::SeqMul8 }
-        }
-        _ => {
-            quote! { #crate_path::serialize::cdr::LcHint::Auto }
-        }
-    }
-}
-
 fn primitive_vec_serialize_method(method: SerializationMethod) -> Option<&'static str> {
     match method {
         SerializationMethod::VecU8 => Some("serialize_byte_sequence"),
@@ -1657,7 +1640,7 @@ fn generate_xcdr_serialize_impl(
 
             Some(if is_mutable {
                 let must_understand = field_config.must_understand;
-                let lc_hint = lc_hint_for_method(method, crate_path);
+                let lc_hint = quote! { #crate_path::serialize::cdr::LcHint::Auto };
 
                 if is_optional {
                     let inner = wrap_with_emheader(

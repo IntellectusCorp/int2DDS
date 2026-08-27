@@ -286,7 +286,8 @@ class CdrWriter:
         self, member_id: int, data_length: int, must_understand: bool = False
     ) -> None:
         """
-        Write an EMHEADER for a mutable type field using LC=4 (NEXTINT) encoding.
+        Write an EMHEADER for a mutable type field: compact LC (0..3) for
+        1/2/4/8-byte payloads, LC=4 (NEXTINT) otherwise.
 
         Args:
             member_id: Field member ID (0..0x0FFFFFFF, 28 bits)
@@ -297,9 +298,11 @@ class CdrWriter:
         if member_id > 0x0FFFFFFF:
             raise ValueError(f"EMHEADER member_id exceeds 28 bits: 0x{member_id:X}")
         mu_bit = 0x80000000 if must_understand else 0
-        header = mu_bit | (4 << 28) | (member_id & 0x0FFFFFFF)
+        lc = {1: 0, 2: 1, 4: 2, 8: 3}.get(data_length, 4)
+        header = mu_bit | (lc << 28) | (member_id & 0x0FFFFFFF)
         self.write_u32(header)
-        self.write_u32(data_length)
+        if lc == 4:
+            self.write_u32(data_length)
 
     @contextmanager
     def emheader(self, member_id: int, must_understand: bool = False) -> Iterator[None]:
@@ -318,7 +321,8 @@ class CdrWriter:
         """
         Begin an EMHEADER block and return a token for finalization.
 
-        Always uses LC=4 format (8 bytes) for easy backpatching.
+        Writes LC=4 with a placeholder NEXTINT; write_emheader_finalize()
+        backpatches it, compacting to LC 0..3 when the payload is 1/2/4/8 bytes.
 
         Returns:
             Token to pass to write_emheader_finalize()
@@ -334,10 +338,19 @@ class CdrWriter:
         return token
 
     def write_emheader_finalize(self, token: int) -> None:
-        """Finalize an EMHEADER block by backpatching the length."""
+        """Finalize an EMHEADER block: compact LC for 1/2/4/8-byte payloads
+        (closing the NEXTINT slot), else backpatch the length. XCDR2 alignment
+        is at most 4, so removing the slot preserves member alignment."""
         data_length = len(self._buf) - token - 4
         fmt = "<I" if self._le else ">I"
-        struct.pack_into(fmt, self._buf, token, data_length)
+        lc = {1: 0, 2: 1, 4: 2, 8: 3}.get(data_length)
+        if lc is None:
+            struct.pack_into(fmt, self._buf, token, data_length)
+            return
+        header = struct.unpack_from(fmt, self._buf, token - 4)[0]
+        header = (header & ~(0x7 << 28)) | (lc << 28)
+        struct.pack_into(fmt, self._buf, token - 4, header)
+        del self._buf[token : token + 4]
 
     def write_sentinel(self) -> None:
         """Write a sentinel marker (end of mutable struct fields)."""

@@ -2750,6 +2750,30 @@ mod fidelity_tests {
         assert_eq!(&bytes[..4], [0x00, 0x01, 0x00, 0x00]);
     }
 
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "int2dds", extensibility = "Mutable")]
+    struct MutSeqHolder {
+        id: i32,
+        values: Vec<u32>,
+        samples: Vec<f64>,
+    }
+
+    #[test]
+    fn mutable_primitive_seq_byte_match_xcdr2() {
+        let dt = standalone_type::<MutSeqHolder>();
+        let mut dynamic = DynamicData::new(dt.clone());
+        dynamic.set("id", 7i32).unwrap();
+        let u = |v: u32| DynamicValue::Uint32(v);
+        let f = |v: f64| DynamicValue::Float64(v);
+        dynamic.set_value("values", DynamicValue::Sequence(vec![u(1), u(2), u(3)])).unwrap();
+        dynamic.set_value("samples", DynamicValue::Sequence(vec![f(1.0), f(2.0)])).unwrap();
+        let concrete = MutSeqHolder { id: 7, values: vec![1, 2, 3], samples: vec![1.0, 2.0] };
+        assert_eq!(
+            dynamic_bytes(&dynamic, &xcdr_format(ExtensibilityKind::Mutable)),
+            concrete_xcdr(&concrete, ExtensibilityKind::Mutable)
+        );
+    }
+
     #[test]
     fn nested_byte_match_xcdr_mixed_final_outer_app_inner() {
         let (outer_dt, inner_dt) = nested_types::<OuterFinalChildApp, InnerApp>();

@@ -484,7 +484,7 @@ mod xcdr2_tests {
     }
 
     #[test]
-    fn test_lc6_u32_sequence_emheader() {
+    fn test_u32_sequence_emheader_auto_lc() {
         use int2dds::serialize::cdr::MemberHeader;
 
         let value = MutableWithSeqU32 { values: vec![1, 2, 3] };
@@ -501,6 +501,7 @@ mod xcdr2_tests {
             MemberHeader::read(emheader_bytes, 0, speedy::Endianness::LittleEndian).unwrap();
 
         assert_eq!(header.member_id, 0);
+        assert_eq!(header.member_length, 16);
 
         let emh_word = u32::from_le_bytes([
             emheader_bytes[0],
@@ -509,11 +510,31 @@ mod xcdr2_tests {
             emheader_bytes[3],
         ]);
         let lc = (emh_word >> 28) & 0x07;
-        assert_eq!(lc, 6);
+        assert_eq!(lc, 4);
 
         let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
         let result = MutableWithSeqU32::deserialize_xcdr(&mut deserializer).unwrap();
         assert_eq!(result.values, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_u32_sequence_emheader_compacts_to_lc3() {
+        // A single-element Vec<u32> payload is 8 bytes (length + element), so the
+        // Auto policy compacts to LC=3 with no NEXTINT.
+        let value = MutableWithSeqU32 { values: vec![7] };
+
+        let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Mutable);
+        serializer.write_encapsulation_header().unwrap();
+        value.serialize_xcdr(&mut serializer).unwrap();
+        let bytes = serializer.into_bytes();
+
+        // 4 encap + 4 struct DHEADER + 4 EMHEADER + 4 length + 4 element = 20
+        assert_eq!(bytes.len(), 20);
+        assert_eq!(u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]), 0x3000_0000);
+
+        let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
+        let result = MutableWithSeqU32::deserialize_xcdr(&mut deserializer).unwrap();
+        assert_eq!(result.values, vec![7]);
     }
 
     #[derive(DdsType)]
@@ -524,7 +545,7 @@ mod xcdr2_tests {
     }
 
     #[test]
-    fn test_lc7_f64_sequence_emheader() {
+    fn test_f64_sequence_emheader_auto_lc() {
         let value = MutableWithSeqF64 { data: vec![1.0, 2.0] };
 
         let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Mutable);
@@ -542,7 +563,7 @@ mod xcdr2_tests {
             emheader_bytes[3],
         ]);
         let lc = (emh_word >> 28) & 0x07;
-        assert_eq!(lc, 7);
+        assert_eq!(lc, 4);
 
         let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
         let result = MutableWithSeqF64::deserialize_xcdr(&mut deserializer).unwrap();
@@ -550,8 +571,9 @@ mod xcdr2_tests {
     }
 
     #[test]
-    fn test_lc6_u32_sequence_wire_bytes() {
-        // Mutable Vec<u32> XCDR2: NEXTINT overlaps with sequence length (LC=6, no extra slot).
+    fn test_u32_sequence_wire_bytes_auto() {
+        // Mutable Vec<u32> XCDR2 under the Auto LC policy: LC=4 owns its NEXTINT,
+        // followed by the sequence's own length word.
         let value = MutableWithSeqU32 { values: vec![1, 2, 3] };
 
         let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Mutable);
@@ -559,20 +581,22 @@ mod xcdr2_tests {
         value.serialize_xcdr(&mut serializer).unwrap();
         let bytes = serializer.into_bytes();
 
-        // 4 encap + 4 struct DHEADER + 4 EMHEADER + 4 NEXTINT/length + 3*4 elements = 28
-        assert_eq!(bytes.len(), 28, "LC=6 wire must not contain an extra NEXTINT slot");
+        // 4 encap + 4 struct DHEADER + 4 EMHEADER + 4 NEXTINT + 4 length + 3*4 elements = 32
+        assert_eq!(bytes.len(), 32);
         // Encap header PL_CDR2_LE
         assert_eq!(&bytes[0..2], &[0x00, 0x0B]);
-        // Struct DHEADER = content size after itself = 20
-        assert_eq!(u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]), 20);
-        // EMHEADER: M=0, LC=6, ID=0 → 0x6000_0000
-        assert_eq!(u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]), 0x6000_0000);
-        // NEXTINT (= sequence length) = 3
-        assert_eq!(u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]), 3);
+        // Struct DHEADER = content size after itself = 24
+        assert_eq!(u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]), 24);
+        // EMHEADER: M=0, LC=4, ID=0 → 0x4000_0000
+        assert_eq!(u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]), 0x4000_0000);
+        // NEXTINT = member length = 16
+        assert_eq!(u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]), 16);
+        // Sequence length = 3
+        assert_eq!(u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]), 3);
         // Elements
-        assert_eq!(u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]), 1);
-        assert_eq!(u32::from_le_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]), 2);
-        assert_eq!(u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]), 3);
+        assert_eq!(u32::from_le_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]), 1);
+        assert_eq!(u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]), 2);
+        assert_eq!(u32::from_le_bytes([bytes[28], bytes[29], bytes[30], bytes[31]]), 3);
 
         // Round-trip
         let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
@@ -581,8 +605,9 @@ mod xcdr2_tests {
     }
 
     #[test]
-    fn test_lc7_f64_sequence_wire_bytes() {
-        // Mutable Vec<f64> XCDR2: NEXTINT overlaps with sequence length (LC=7, no extra slot).
+    fn test_f64_sequence_wire_bytes_auto() {
+        // Mutable Vec<f64> XCDR2 under the Auto LC policy: LC=4 owns its NEXTINT,
+        // followed by the sequence's own length word.
         let value = MutableWithSeqF64 { data: vec![1.0, 2.0] };
 
         let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Mutable);
@@ -590,26 +615,28 @@ mod xcdr2_tests {
         value.serialize_xcdr(&mut serializer).unwrap();
         let bytes = serializer.into_bytes();
 
-        // 4 encap + 4 struct DHEADER + 4 EMHEADER + 4 NEXTINT/length + 2*8 elements = 32
-        assert_eq!(bytes.len(), 32, "LC=7 wire must not contain an extra NEXTINT slot");
-        // Struct DHEADER content = 24
-        assert_eq!(u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]), 24);
-        // EMHEADER: LC=7, ID=0 → 0x7000_0000
-        assert_eq!(u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]), 0x7000_0000);
-        // NEXTINT (= length) = 2
-        assert_eq!(u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]), 2);
-        // Elements
+        // 4 encap + 4 struct DHEADER + 4 EMHEADER + 4 NEXTINT + 4 length + 2*8 elements = 36
+        assert_eq!(bytes.len(), 36);
+        // Struct DHEADER content = 28
+        assert_eq!(u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]), 28);
+        // EMHEADER: M=0, LC=4, ID=0 → 0x4000_0000
+        assert_eq!(u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]), 0x4000_0000);
+        // NEXTINT = member length = 20
+        assert_eq!(u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]), 20);
+        // Sequence length = 2
+        assert_eq!(u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]), 2);
+        // Elements (XCDR2 max alignment is 4, so f64 sits at offset 20)
         assert_eq!(
             f64::from_le_bytes([
-                bytes[16], bytes[17], bytes[18], bytes[19], bytes[20], bytes[21], bytes[22],
-                bytes[23],
+                bytes[20], bytes[21], bytes[22], bytes[23], bytes[24], bytes[25], bytes[26],
+                bytes[27],
             ]),
             1.0
         );
         assert_eq!(
             f64::from_le_bytes([
-                bytes[24], bytes[25], bytes[26], bytes[27], bytes[28], bytes[29], bytes[30],
-                bytes[31],
+                bytes[28], bytes[29], bytes[30], bytes[31], bytes[32], bytes[33], bytes[34],
+                bytes[35],
             ]),
             2.0
         );

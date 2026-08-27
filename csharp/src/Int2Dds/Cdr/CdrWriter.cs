@@ -352,7 +352,8 @@ namespace Int2Dds.Cdr
         // ---- XCDR2 EMHEADER -------------------------------------------------
 
         /// <summary>
-        /// Write an EMHEADER with a known data length using LC=4 (NEXTINT) encoding.
+        /// Write an EMHEADER with a known data length: compact LC (0..3) for
+        /// 1/2/4/8-byte payloads, LC=4 (NEXTINT) otherwise.
         /// </summary>
         public void WriteEmheader(uint memberId, uint dataLength, bool mustUnderstand)
         {
@@ -360,9 +361,20 @@ namespace Int2Dds.Cdr
             if (memberId > 0x0FFFFFFFu)
                 throw new ArgumentOutOfRangeException(nameof(memberId), $"EMHEADER member_id exceeds 28 bits: 0x{memberId:X}");
             uint muBit = mustUnderstand ? 0x80000000u : 0;
-            uint header = muBit | (4u << 28) | (memberId & 0x0FFFFFFFu);
+            uint lcWord;
+            bool needsNextint;
+            switch (dataLength)
+            {
+                case 1: lcWord = 0u << 28; needsNextint = false; break;
+                case 2: lcWord = 1u << 28; needsNextint = false; break;
+                case 4: lcWord = 2u << 28; needsNextint = false; break;
+                case 8: lcWord = 3u << 28; needsNextint = false; break;
+                default: lcWord = 4u << 28; needsNextint = true; break;
+            }
+            uint header = muBit | lcWord | (memberId & 0x0FFFFFFFu);
             WriteU32(header);
-            WriteU32(dataLength);
+            if (needsNextint)
+                WriteU32(dataLength);
         }
 
         /// <summary>
@@ -383,16 +395,40 @@ namespace Int2Dds.Cdr
         }
 
         /// <summary>
-        /// Finalize an EMHEADER by back-patching the actual data length.
+        /// Finalize an EMHEADER: compacts the LC for 1/2/4/8-byte payloads, else
+        /// back-patches the NEXTINT with the actual data length.
         /// </summary>
         /// <param name="token">The token returned by <see cref="EmheaderBegin"/>.</param>
         public void EmheaderFinalize(int token)
         {
             uint dataLength = (uint)(_pos - token - 4);
+            uint lcWord;
+            switch (dataLength)
+            {
+                case 1: lcWord = 0u << 28; break;
+                case 2: lcWord = 1u << 28; break;
+                case 4: lcWord = 2u << 28; break;
+                case 8: lcWord = 3u << 28; break;
+                default:
+                    if (_littleEndian)
+                        BinaryPrimitives.WriteUInt32LittleEndian(_buffer.AsSpan(token), dataLength);
+                    else
+                        BinaryPrimitives.WriteUInt32BigEndian(_buffer.AsSpan(token), dataLength);
+                    return;
+            }
+            // Compact LC, matching the other writers' Auto policy: rewrite the LC
+            // bits and close the reserved NEXTINT slot. XCDR2 alignment is at most
+            // 4, so shifting the payload down by 4 preserves member alignment.
+            uint header = _littleEndian
+                ? BinaryPrimitives.ReadUInt32LittleEndian(_buffer.AsSpan(token - 4))
+                : BinaryPrimitives.ReadUInt32BigEndian(_buffer.AsSpan(token - 4));
+            header = (header & ~(7u << 28)) | lcWord;
             if (_littleEndian)
-                BinaryPrimitives.WriteUInt32LittleEndian(_buffer.AsSpan(token), dataLength);
+                BinaryPrimitives.WriteUInt32LittleEndian(_buffer.AsSpan(token - 4), header);
             else
-                BinaryPrimitives.WriteUInt32BigEndian(_buffer.AsSpan(token), dataLength);
+                BinaryPrimitives.WriteUInt32BigEndian(_buffer.AsSpan(token - 4), header);
+            Buffer.BlockCopy(_buffer, token + 4, _buffer, token, (int)dataLength);
+            _pos -= 4;
         }
 
         /// <summary>

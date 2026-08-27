@@ -734,11 +734,17 @@ impl<'a> PyGen<'a> {
         s: &ResolvedStruct,
         stack: &mut std::collections::HashSet<String>,
     ) -> bool {
-        // The kernel dynamic mutable wire diverges from the legacy codec (XCDR1
-        // encapsulation id, EMHEADER LC compaction), so mutable shapes keep the
-        // legacy codec until that parity lands.
         if s.extensibility == ExtensibilityKind::Mutable {
-            return false;
+            // The kernel wire carries the advertised type_info's positional member
+            // ids, so mutable coverage requires positional ids (like the C layout).
+            if s.base_type.is_some() || s.autoid == Some(AutoIdKind::Hash) {
+                return false;
+            }
+            for (i, m) in s.members.iter().enumerate() {
+                if m.hashid.is_some() || m.member_id.is_some_and(|id| id != i as u32) {
+                    return false;
+                }
+            }
         }
         if let Some(base) = &s.base_type {
             let simple = base.rsplit("::").next().unwrap_or(base);
@@ -1828,16 +1834,22 @@ mod tests {
         assert!(covered.contains("def _deserialize_cdr_inline("), "{}", covered);
         assert!(covered.contains("_dds_type_info_fields"), "{}", covered);
 
-        // Mutable shapes and non-scalar collection elements stay legacy.
+        // Positional-id mutable shapes are covered; sparse-id mutable shapes and
+        // non-scalar collection elements stay legacy.
         let defs = parse_idl(
             r#"
             @mutable
             struct Tagged { long a; string label; };
+            @mutable
+            struct Sparse { @id(5) long a; };
             struct Fallback { long a; sequence<string> notes; };
             "#,
         )
         .unwrap();
         let legacy = generate(&resolve(defs).unwrap(), "Legacy.idl", &PythonOptions::new());
+        let tagged_start = legacy.find("class Tagged").unwrap();
+        let tagged = &legacy[tagged_start..legacy.find("class Sparse").unwrap()];
+        assert!(!tagged.contains("def _serialize_cdr("), "{}", legacy);
         assert_eq!(legacy.matches("def _serialize_cdr(").count(), 2, "{}", legacy);
         assert_eq!(legacy.matches("def _deserialize_cdr(").count(), 2, "{}", legacy);
     }
