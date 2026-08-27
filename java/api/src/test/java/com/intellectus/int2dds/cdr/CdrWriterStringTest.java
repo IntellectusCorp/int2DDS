@@ -95,11 +95,34 @@ class CdrWriterStringTest {
     }
 
     @Test
-    void wstringCountsUtf16UnitsAndTerminates() {
+    void wstringCountsUtf16UnitsAndDoesNotTerminate() {
+        // serialize_wstring16 in the core writes the unit count and the units,
+        // nothing else. A terminator here would be decoded as payload.
         try (CdrWriter w = CdrWriter.acquire(Extensibility.FINAL, true, false)) {
             w.writeWString("ab");
             assertArrayEquals(
-                    new byte[] {0x03, 0x00, 0x00, 0x00, 'a', 0x00, 'b', 0x00, 0x00, 0x00},
+                    new byte[] {0x02, 0x00, 0x00, 0x00, 'a', 0x00, 'b', 0x00},
+                    payload(w));
+        }
+    }
+
+    @Test
+    void emptyWstringIsJustAZeroCount() {
+        try (CdrWriter w = CdrWriter.acquire(Extensibility.FINAL, true, false)) {
+            w.writeWString("");
+            assertArrayEquals(new byte[] {0x00, 0x00, 0x00, 0x00}, payload(w));
+        }
+    }
+
+    @Test
+    void wstringCountsSurrogatePairsAsTwoUnits() {
+        // The count is UTF-16 code units, not characters, matching
+        // encode_utf16().count() on the core side.
+        try (CdrWriter w = CdrWriter.acquire(Extensibility.FINAL, true, false)) {
+            w.writeWString("🌡");   // U+1F321 -> D83C DF21
+            assertArrayEquals(
+                    new byte[] {0x02, 0x00, 0x00, 0x00,
+                            0x3C, (byte) 0xD8, 0x21, (byte) 0xDF},
                     payload(w));
         }
     }

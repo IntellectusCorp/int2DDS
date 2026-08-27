@@ -155,6 +155,39 @@ class CdrConformanceTest {
     }
 
     @Test
+    void theCoreDecodesTheWideStringFieldWeWrote() {
+        // serialize_wstring16 counts UTF-16 units and writes no terminator, so a
+        // count that includes one shifts the field by two bytes and leaves a
+        // trailing unit behind. Our own reader cannot see that -- it makes the
+        // same assumption the writer does.
+        long wideInfo = FfiAccess.typeInfoCreate(utf8("WideRecord"),
+                Extensibility.APPENDABLE.value());
+        assertNotEquals(0L, wideInfo, "type info handle");
+        assertEquals(0, FfiAccess.typeInfoAddWstringField(wideInfo, utf8("label"), 0, 0));
+        long wideObject = FfiAccess.typeInfoToTypeObject(wideInfo);
+        assertNotEquals(0L, wideObject, "type object handle");
+
+        try {
+            // XCDR1 + APPENDABLE, the repository default: no DHEADER.
+            try (CdrWriter w = CdrWriter.acquire(Extensibility.APPENDABLE, true, false)) {
+                w.writeWString("ab한");
+
+                byte[] buf = new byte[64];
+                ByteBuffer lenSlot = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+                int rc = FfiAccess.dynamicSampleGetString(w.address(), w.length(), wideObject,
+                        utf8("label"), buf, buf.length, FfiAccess.directBufferAddress(lenSlot));
+                assertEquals(0, rc, "the core must accept our encoding");
+
+                int n = (int) lenSlot.getLong(0);
+                assertEquals("ab한", new String(buf, 0, n, UTF8));
+            }
+        } finally {
+            FfiAccess.typeObjectDestroy(wideObject);
+            FfiAccess.typeInfoDestroy(wideInfo);
+        }
+    }
+
+    @Test
     void aTruncatedSampleIsRejectedRatherThanMisread() {
         ConformanceRecord r = new ConformanceRecord();
         r.id = 42;

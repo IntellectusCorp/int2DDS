@@ -226,25 +226,24 @@ public final class CdrReader {
     }
 
     /**
-     * Reads a CDR wstring: a uint32 count of UTF-16 units including the
-     * terminator, then that many u16 units, of which the trailing zero is dropped.
+     * Reads a CDR wstring: a uint32 count of UTF-16 units, then that many u16
+     * units. No terminator, unlike {@link #readString}, so a count of zero is
+     * the empty wstring and not a malformed one.
      */
     public String readWString() {
-        int unitsWithNul = readI32();
-        if (unitsWithNul <= 0) {
-            throw new CdrUnderflowException("Invalid wstring length: " + unitsWithNul);
+        int units = readI32();
+        if (units < 0) {
+            throw new CdrUnderflowException("Invalid wstring length: " + units);
         }
-        long needed = 2L * unitsWithNul;
+        long needed = 2L * units;
         if (needed > remaining()) {
             throw new CdrUnderflowException(
-                    "wstring claims " + unitsWithNul + " units but only " + remaining() + " bytes remain");
+                    "wstring claims " + units + " units but only " + remaining() + " bytes remain");
         }
-        int units = unitsWithNul - 1;
         char[] chars = new char[units];
         for (int i = 0; i < units; i++) {
             chars[i] = (char) readU16();
         }
-        readU16();   // terminator
         return new String(chars);
     }
 

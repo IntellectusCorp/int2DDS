@@ -95,8 +95,9 @@ fn reject_unsupported(model: &IdlModel, opts: &JavaOptions) -> Result<(), String
                     s.name, m.name
                 ));
             }
-            // Java CdrWriter/CdrReader 는 wstring 길이에 NUL 종단자를 포함하지만
-            // Rust 코어는 포함하지 않는다. 인코딩 합의 전까지 거절한다.
+            // CdrWriter/CdrReader 의 wstring 인코딩은 코어와 맞췄지만, 이 백엔드에
+            // 아직 wstring write/read 방출 분기가 없다. 타입 이름 대신 멤버 이름으로
+            // 알려주려고 여기서 먼저 거절한다.
             if mentions_wstring(&m.resolved_type) {
                 return Err(format!(
                     "Java backend does not support wstring member '{}.{}'",
@@ -1193,8 +1194,7 @@ mod tests {
 
     #[test]
     fn wstring_is_refused_by_member_name() {
-        // Java 의 writeWString/readWString 은 uint32 길이에 NUL 을 세지만 Rust
-        // 코어는 세지 않는다. 그대로 두면 조용히 한 글자가 잘린다.
+        // 방출 분기가 생기기 전까지는 타입 debug 대신 멤버 이름으로 거절한다.
         for src in [
             r#"@extensibility(FINAL) struct W { wstring ws; long tail; };"#,
             r#"@extensibility(FINAL) struct W { sequence<wstring> ws; };"#,

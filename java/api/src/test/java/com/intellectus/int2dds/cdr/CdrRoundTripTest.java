@@ -63,12 +63,18 @@ class CdrRoundTripTest {
 
     @Test
     void wstringsRoundTrip() {
+        // "" is here because a wstring carries no terminator: its encoding is a
+        // bare zero count, which the reader must accept rather than reject as a
+        // malformed length.
+        String[] cases = {"ab한", "", "🌡"};
         for (boolean le : new boolean[] {true, false}) {
             for (boolean x2 : new boolean[] {true, false}) {
-                try (CdrWriter w = CdrWriter.acquire(Extensibility.FINAL, le, x2)) {
-                    w.writeWString("ab한");
-                    String at = "le=" + le + " xcdr2=" + x2;
-                    assertEquals("ab한", reread(w).readWString(), at);
+                for (String s : cases) {
+                    try (CdrWriter w = CdrWriter.acquire(Extensibility.FINAL, le, x2)) {
+                        w.writeWString(s);
+                        String at = "case: " + s + " (le=" + le + " xcdr2=" + x2 + ")";
+                        assertEquals(s, reread(w).readWString(), at);
+                    }
                 }
             }
         }
