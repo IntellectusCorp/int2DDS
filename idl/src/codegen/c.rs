@@ -641,6 +641,22 @@ impl<'a> CGen<'a> {
                         };
                     }
                 }
+                // wstring elements keep their inline uint16_t[size] row in both string
+                // modes, like the scalar and map declarations.
+                if let ResolvedType::WString { bound: ws_bound } = element.as_ref() {
+                    let ws_size = ws_bound.unwrap_or(self.opts.default_string_bound) + 1;
+                    return if let Some(max) = bound {
+                        format!(
+                            "struct {{ uint16_t data[{}][{}]; uint32_t length; }} {}",
+                            max, ws_size, name
+                        )
+                    } else {
+                        format!(
+                            "struct {{ uint16_t (*data)[{}]; uint32_t length; }} {}",
+                            ws_size, name
+                        )
+                    };
+                }
                 let elem_c = self.type_to_c_base(element);
                 if let Some(max) = bound {
                     // Bounded: inline array + length
@@ -1329,10 +1345,12 @@ impl<'a> CGen<'a> {
                 self.raw(&format!("{}{}[_wlen] = 0;\n", indent, accessor));
                 self.raw(&format!("{}}}\n", indent));
             }
-            ResolvedType::Enum(_) => {
+            ResolvedType::Enum(name) => {
+                // C enum width is implementation-defined; never alias it as int32_t.
+                let simple = name.rsplit("::").next().unwrap_or(name);
                 self.raw(&format!(
-                    "{}int2dds_cdr_read_enum(&r, (int32_t*)&{});\n",
-                    indent, accessor
+                    "{}{{ int32_t _e = 0; int2dds_cdr_read_enum(&r, &_e); {} = ({})_e; }}\n",
+                    indent, accessor, simple
                 ));
             }
             ResolvedType::Bitmask(bitmask_name) => {
@@ -1365,11 +1383,15 @@ impl<'a> CGen<'a> {
 
                 // Pointer mode + unbounded: auto-allocate the data array
                 if self.opts.string_mode == StringMode::Pointer && bound.is_none() {
-                    let elem_c = self.type_to_c_base(element);
+                    let elem_cast = self.map_member_ptr_cast(element);
+                    let elem_size = match element.as_ref() {
+                        ResolvedType::WString { .. } => format!("sizeof(*{}.data)", accessor),
+                        _ => format!("sizeof({})", self.type_to_c_base(element)),
+                    };
                     self.raw(&format!("{}if ({}.length > 0) {{\n", indent, accessor));
                     self.raw(&format!(
-                        "{}    {}.data = ({}*)calloc({}.length, sizeof({}));\n",
-                        indent, accessor, elem_c, accessor, elem_c
+                        "{}    {}.data = ({})calloc({}.length, {});\n",
+                        indent, accessor, elem_cast, accessor, elem_size
                     ));
                     self.raw(&format!("{}    if ({}.data) {{\n", indent, accessor));
                     if let Some(kind) = bulk {
@@ -2654,9 +2676,7 @@ impl<'a> CGen<'a> {
             }
             ResolvedType::Array { element, .. } => self.type_needs_cleanup(element),
             ResolvedType::Struct(name) => {
-                if let Some(nested) =
-                    self.model.structs.iter().find(|s| s.name == *name || s.qualified_name == *name)
-                {
+                if let Some(nested) = self.find_struct(name) {
                     self.struct_needs_cleanup(nested)
                 } else if let Some(nested) =
                     self.model.unions.iter().find(|u| u.name == *name || u.qualified_name == *name)
@@ -2672,6 +2692,10 @@ impl<'a> CGen<'a> {
 
     fn struct_needs_cleanup(&self, s: &ResolvedStruct) -> bool {
         s.members.iter().any(|m| self.type_needs_cleanup(&m.resolved_type))
+            || s.base_type
+                .as_ref()
+                .and_then(|b| self.find_struct(b))
+                .is_some_and(|b| self.struct_needs_cleanup(b))
     }
 
     fn union_needs_cleanup(&self, u: &ResolvedUnion) -> bool {
@@ -2687,6 +2711,17 @@ impl<'a> CGen<'a> {
 
     fn emit_struct_cleanup(&mut self, s: &ResolvedStruct) {
         self.raw(&format!("static inline void {}_cleanup({} *val) {{\n", s.name, s.name));
+
+        // The base's `_cleanup` exists under the same predicate that gates this call.
+        let base_cleanup = s
+            .base_type
+            .as_ref()
+            .and_then(|b| self.find_struct(b))
+            .filter(|b| self.struct_needs_cleanup(b))
+            .map(|b| b.name.clone());
+        if let Some(base_name) = base_cleanup {
+            self.raw(&format!("    {}_cleanup(&val->parent);\n", base_name));
+        }
 
         for m in &s.members {
             let field_name = naming::escape_keyword(&m.name, naming::TargetLang::C);
@@ -3222,6 +3257,94 @@ mod tests {
         assert!(code.contains("int2dds_cdr_read_i32(&r, &_p_base->id)"));
         // Mutable path: imported base member takes flat id 0, own member follows at 1.
         assert!(code.contains("int2dds_cdr_write_emheader_begin(&w, 1, false, &em)"));
+    }
+
+    #[test]
+    fn test_inherited_struct_cleanup_c() {
+        let defs = parse_idl(
+            r#"
+            struct HeapBase { string s; };
+            struct HeapDerived : HeapBase { long x; };
+            struct CleanBase { long id; };
+            struct CleanDerived : CleanBase { string t; };
+            struct Holder { HeapDerived hd; };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let opts = COptions { string_mode: StringMode::Pointer, ..Default::default() };
+        let code = generate(&model, "Inherit.idl", &opts);
+
+        // Heap only in the base: the derived cleanup exists and frees through it.
+        assert!(code.contains("static inline void HeapDerived_cleanup(HeapDerived *val)"));
+        assert!(code.contains("HeapBase_cleanup(&val->parent);"));
+        assert!(code.contains("HeapDerived_cleanup(&val->hd);"));
+        // A heap-free base is never called.
+        assert!(code.contains("static inline void CleanDerived_cleanup(CleanDerived *val)"));
+        assert!(!code.contains("CleanBase_cleanup"));
+    }
+
+    #[test]
+    fn test_imported_nested_cleanup_c() {
+        let defs = parse_idl(
+            r#"
+            struct ExtHeap { string s; };
+            struct Wrap { ExtHeap e; };
+            "#,
+        )
+        .unwrap();
+        let mut model = resolve(defs).unwrap();
+        let pos = model.structs.iter().position(|s| s.name == "ExtHeap").unwrap();
+        let ext = model.structs.remove(pos);
+        model.imported.structs.push(ext);
+        let opts = COptions { string_mode: StringMode::Pointer, ..Default::default() };
+        let code = generate(&model, "Wrap.idl", &opts);
+
+        // An #include'd heap-bearing member is still released.
+        assert!(code.contains("static inline void Wrap_cleanup(Wrap *val)"));
+        assert!(code.contains("ExtHeap_cleanup(&val->e);"));
+    }
+
+    #[test]
+    fn test_wstring_sequence_c() {
+        let defs = parse_idl(
+            r#"
+            struct WsSeqs {
+                sequence<wstring<16>, 4> wss4;
+                sequence<wstring> wss;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        for mode in [StringMode::FixedArray, StringMode::Pointer] {
+            let opts = COptions { default_string_bound: 64, string_mode: mode };
+            let code = generate(&model, "WsSeqs.idl", &opts);
+            // Elements keep their [size] row, like the scalar and map declarations.
+            assert!(code.contains("struct { uint16_t data[4][17]; uint32_t length; } wss4;"));
+            assert!(code.contains("struct { uint16_t (*data)[65]; uint32_t length; } wss;"));
+        }
+        let opts = COptions { default_string_bound: 64, string_mode: StringMode::Pointer };
+        let code = generate(&model, "WsSeqs.idl", &opts);
+        assert!(code.contains(".data = (uint16_t (*)[65])calloc("));
+    }
+
+    #[test]
+    fn test_enum_read_via_temp_c() {
+        let defs = parse_idl(
+            r#"
+            enum Color { RED, GREEN, BLUE };
+            struct Palette { Color c; sequence<Color, 3> cs; };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Palette.idl", &COptions::default());
+
+        // Enum reads go through an int32_t temporary, never a punned pointer.
+        assert!(code.contains("{ int32_t _e = 0; int2dds_cdr_read_enum(&r, &_e); "));
+        assert!(code.contains(" = (Color)_e; }"));
+        assert!(!code.contains("int2dds_cdr_read_enum(&r, (int32_t*)"));
     }
 
     #[test]

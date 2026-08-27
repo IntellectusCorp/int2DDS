@@ -42,6 +42,14 @@ const FIXTURE: &str = r#"
         double extra;
     };
 
+    struct HeapBase {
+        string hs;
+    };
+
+    struct HeapDerived : HeapBase {
+        long hx;
+    };
+
     union Choice switch(long) {
         case 1: long i;
         case 2: string s;
@@ -103,6 +111,9 @@ const FIXTURE: &str = r#"
         string<32> bounded;
         wchar wc;
         wstring<16> ws;
+        sequence<wstring<16>, 4> wss4;
+        sequence<wstring> wss;
+        HeapDerived heap_der;
         sequence<long> lists[2];
         Inner inners[2];
         Inner grid2[2][2];
