@@ -30,6 +30,16 @@ public final class CdrGolden implements IDdsType {
     public byte charVal;
     public float f32Val;
     public double f64Val;
+    public String[] wstrSeq = new String[0];
+    public String[] wstrArr = new String[2];
+    public String unboundedWstr = "";
+    public String boundedWstr = "";
+
+    public CdrGolden() {
+        for (int i = 0; i < this.wstrArr.length; i++) {
+            this.wstrArr[i] = "";
+        }
+    }
 
     @Override
     public String typeName() {
@@ -63,6 +73,21 @@ public final class CdrGolden implements IDdsType {
         writer.writeU8(this.charVal & 0xFF);
         writer.writeF32(this.f32Val);
         writer.writeF64(this.f64Val);
+        writer.writeSeqHeader(this.wstrSeq.length);
+        for (int i0 = 0; i0 < this.wstrSeq.length; i0++) {
+            writer.writeWString(this.wstrSeq[i0]);
+        }
+        if (this.wstrArr.length != 2) {
+            throw new IllegalStateException("wstrArr must hold exactly 2 elements");
+        }
+        for (int i0 = 0; i0 < 2; i0++) {
+            writer.writeWString(this.wstrArr[i0]);
+        }
+        writer.writeWString(this.unboundedWstr);
+        if (this.boundedWstr.length() > 32) {
+            throw new IllegalStateException("boundedWstr exceeds its IDL bound of 32");
+        }
+        writer.writeWString(this.boundedWstr);
         writer.dheaderFinalize(token);
     }
 
@@ -85,6 +110,15 @@ public final class CdrGolden implements IDdsType {
         this.charVal = (byte) reader.readU8();
         this.f32Val = reader.readF32();
         this.f64Val = reader.readF64();
+        this.wstrSeq = new String[reader.readSeqHeader()];
+        for (int i0 = 0; i0 < this.wstrSeq.length; i0++) {
+            this.wstrSeq[i0] = reader.readWString();
+        }
+        for (int i0 = 0; i0 < 2; i0++) {
+            this.wstrArr[i0] = reader.readWString();
+        }
+        this.unboundedWstr = reader.readWString();
+        this.boundedWstr = reader.readWString();
         reader.readDheaderEnd(d);
     }
 

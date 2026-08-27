@@ -1,5 +1,6 @@
 package com.intellectus.int2dds.types;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -36,9 +37,9 @@ import org.junit.jupiter.api.Test;
  *
  * <p>The type object is built mostly from {@link CdrGolden#ddsFields()}, so
  * the generator's own declared {@link FieldType} codes -- not a hand-copied
- * list -- are what the core is asked to decode with. Only the four trailing
- * fields that the keyed-topic path cannot describe (octet, char, float,
- * double) are added explicitly.
+ * list -- are what the core is asked to decode with. Only the trailing fields
+ * that the keyed-topic path cannot describe (octet, char, float, double and the
+ * two wstrings) are added explicitly.
  */
 class GeneratedTypeConformanceTest {
 
@@ -63,14 +64,28 @@ class GeneratedTypeConformanceTest {
             assertEquals(0, FfiAccess.typeInfoAddField(typeInfo, utf8(d.name()), d.fieldType(),
                     d.isKey() ? MEMBER_KEY : 0), d.name());
         }
-        // Declaration order must match serializeCdr; these four sit after the
-        // last @key field, so ddsFields() does not describe them.
+        // Declaration order must match serializeCdr; these sit after the last
+        // @key field, so ddsFields() does not describe them.
         assertEquals(0, FfiAccess.typeInfoAddField(typeInfo, utf8("byte_val"), FieldType.BYTE, 0));
         assertEquals(0, FfiAccess.typeInfoAddField(typeInfo, utf8("char_val"), FieldType.CHAR8, 0));
         assertEquals(0,
                 FfiAccess.typeInfoAddField(typeInfo, utf8("f32_val"), FieldType.FLOAT32, 0));
         assertEquals(0,
                 FfiAccess.typeInfoAddField(typeInfo, utf8("f64_val"), FieldType.FLOAT64, 0));
+        // The two collections carry no assertion of their own: nothing reads a
+        // sequence element back through this path. They are here so the core has
+        // to walk past them to reach the two scalar wstrings after them, which
+        // is what makes those assertions cover the per-element framing too.
+        assertEquals(0, FfiAccess.typeInfoAddSequenceField(
+                typeInfo, utf8("wstr_seq"), FieldType.WSTRING, 0, 0));
+        assertEquals(0, FfiAccess.typeInfoAddArrayField(
+                typeInfo, utf8("wstr_arr"), FieldType.WSTRING, 2, 0));
+        // wstring needs the dedicated adder rather than a FieldType code; 0
+        // means unbounded.
+        assertEquals(0,
+                FfiAccess.typeInfoAddWstringField(typeInfo, utf8("unbounded_wstr"), 0, 0));
+        assertEquals(0,
+                FfiAccess.typeInfoAddWstringField(typeInfo, utf8("bounded_wstr"), 32, 0));
 
         typeObject = FfiAccess.typeInfoToTypeObject(typeInfo);
         assertNotEquals(0L, typeObject, "type object handle");
@@ -113,6 +128,12 @@ class GeneratedTypeConformanceTest {
         g.charVal = (byte) 0x7F;
         g.f32Val = -Float.MAX_VALUE;
         g.f64Val = -1234.5d;
+        // The clef is a surrogate pair: two UTF-16 units for one code point, so
+        // a length written in code points instead of units desynchronizes here.
+        g.wstrSeq = new String[] {"센서 𝄞", "", "é中"};
+        g.wstrArr = new String[] {"𝄞", "arr"};
+        g.unboundedWstr = "센서 é中 𝄞";
+        g.boundedWstr = "wide";
         return g;
     }
 
@@ -135,6 +156,10 @@ class GeneratedTypeConformanceTest {
         g.charVal = 0;
         g.f32Val = 0.0f;
         g.f64Val = 0.0d;
+        g.wstrSeq = new String[0];
+        g.wstrArr = new String[] {"", ""};
+        g.unboundedWstr = "";
+        g.boundedWstr = "";
         return g;
     }
 
@@ -157,6 +182,10 @@ class GeneratedTypeConformanceTest {
         g.charVal = (byte) 'Z';
         g.f32Val = 1.5f;
         g.f64Val = 1e300;
+        g.wstrSeq = new String[] {"one"};
+        g.wstrArr = new String[] {"a", "bb"};
+        g.unboundedWstr = "wide hello";
+        g.boundedWstr = "w";
         return g;
     }
 
@@ -236,6 +265,12 @@ class GeneratedTypeConformanceTest {
             assertEquals(0, FfiAccess.dynamicSampleGetF64(
                     w.address(), w.length(), typeObject, utf8("f64_val"), outAddr), what);
             assertEquals(g.f64Val, out.getDouble(0), 0.0d, what + ": f64_val");
+
+            // The core hands a decoded wstring back as UTF-8 like any other
+            // string, so the same getter reads both.
+            assertEquals(g.unboundedWstr, coreString(w, "unbounded_wstr"),
+                    what + ": unbounded_wstr");
+            assertEquals(g.boundedWstr, coreString(w, "bounded_wstr"), what + ": bounded_wstr");
         }
     }
 
@@ -334,5 +369,9 @@ class GeneratedTypeConformanceTest {
         assertEquals(a.charVal, b.charVal, what + ": char_val");
         assertEquals(a.f32Val, b.f32Val, 0.0f, what + ": f32_val");
         assertEquals(a.f64Val, b.f64Val, 0.0d, what + ": f64_val");
+        assertArrayEquals(a.wstrSeq, b.wstrSeq, what + ": wstr_seq");
+        assertArrayEquals(a.wstrArr, b.wstrArr, what + ": wstr_arr");
+        assertEquals(a.unboundedWstr, b.unboundedWstr, what + ": unbounded_wstr");
+        assertEquals(a.boundedWstr, b.boundedWstr, what + ": bounded_wstr");
     }
 }

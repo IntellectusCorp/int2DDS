@@ -95,15 +95,6 @@ fn reject_unsupported(model: &IdlModel, opts: &JavaOptions) -> Result<(), String
                     s.name, m.name
                 ));
             }
-            // CdrWriter/CdrReader 의 wstring 인코딩은 코어와 맞췄지만, 이 백엔드에
-            // 아직 wstring write/read 방출 분기가 없다. 타입 이름 대신 멤버 이름으로
-            // 알려주려고 여기서 먼저 거절한다.
-            if mentions_wstring(&m.resolved_type) {
-                return Err(format!(
-                    "Java backend does not support wstring member '{}.{}'",
-                    s.name, m.name
-                ));
-            }
             if let ResolvedType::Sequence { element, .. } | ResolvedType::Array { element, .. } =
                 &m.resolved_type
             {
@@ -255,17 +246,6 @@ fn is_java_identifier(s: &str) -> bool {
         return false;
     }
     chars.all(|c| c.is_alphanumeric() || c == '_' || c == '$')
-}
-
-/// True for `wstring` and for a collection whose element is one.
-fn mentions_wstring(t: &ResolvedType) -> bool {
-    match t {
-        ResolvedType::WString { .. } => true,
-        ResolvedType::Sequence { element, .. } | ResolvedType::Array { element, .. } => {
-            mentions_wstring(element)
-        }
-        _ => false,
-    }
 }
 
 // ---- naming ----------------------------------------------------------------
@@ -498,6 +478,23 @@ fn emit_write(
             }
             format!("writer.writeString({});", expr)
         }
+        ResolvedType::WString { bound } => {
+            if let Some(b) = bound {
+                // length() is the UTF-16 unit count writeWString puts on the
+                // wire, so the bound is checked in the unit it is declared in.
+                out.push_str(&format!(
+                    "{ind}if ({expr}.length() > {b}) {{\n\
+                     {ind}    throw new IllegalStateException(\
+                     \"{name} exceeds its IDL bound of {b}\");\n\
+                     {ind}}}\n",
+                    ind = ind,
+                    expr = expr,
+                    name = display_expr(expr),
+                    b = b
+                ));
+            }
+            format!("writer.writeWString({});", expr)
+        }
         ResolvedType::Enum(_) => format!("writer.writeEnum({}.value());", expr),
         other => return Err(format!("unsupported member type in write: {:?}", other)),
     };
@@ -577,6 +574,7 @@ fn emit_read(
         ResolvedType::F64 => "reader.readF64()".to_string(),
         ResolvedType::WChar => "(char) reader.readU16()".to_string(),
         ResolvedType::String { .. } => "reader.readString()".to_string(),
+        ResolvedType::WString { .. } => "reader.readWString()".to_string(),
         ResolvedType::Enum(n) => format!("{}.fromValue(reader.readEnum())", java_type_name(n)),
         other => return Err(format!("unsupported member type in read: {:?}", other)),
     };
@@ -1193,24 +1191,35 @@ mod tests {
     }
 
     #[test]
-    fn wstring_is_refused_by_member_name() {
-        // 방출 분기가 생기기 전까지는 타입 debug 대신 멤버 이름으로 거절한다.
-        for src in [
-            r#"@extensibility(FINAL) struct W { wstring ws; long tail; };"#,
-            r#"@extensibility(FINAL) struct W { sequence<wstring> ws; };"#,
-            r#"@extensibility(FINAL) struct W { wstring ws[2]; };"#,
+    fn wstring_maps_to_string_and_uses_the_wide_accessors() {
+        // 명세상 string 과 wstring 은 둘 다 java.lang.String 이다.
+        let files = gen(
+            r#"@extensibility(FINAL) struct W { wstring ws; wstring<4> bounded; };"#,
+            &JavaOptions::default(),
+        );
+        let src = &files[0].source;
+        assert!(src.contains("public String ws = \"\";"), "{}", src);
+        assert!(src.contains("writer.writeWString(this.ws);"), "{}", src);
+        assert!(src.contains("this.ws = reader.readWString();"), "{}", src);
+        assert!(src.contains("if (this.bounded.length() > 4) {"), "{}", src);
+    }
+
+    #[test]
+    fn wstring_collections_recurse_into_the_element() {
+        for (src, decl) in [
+            (r#"@extensibility(FINAL) struct W { sequence<wstring> ws; };"#, "public String[] ws"),
+            (r#"@extensibility(FINAL) struct W { wstring ws[2]; };"#, "public String[] ws"),
         ] {
-            let defs = parse_idl(src).unwrap();
-            let model = resolve(defs).unwrap();
-            let err = generate(&model, "W.idl", &JavaOptions::default())
-                .expect_err("should reject wstring");
-            assert!(err.contains("wstring member 'W.ws'"), "{}", err);
+            let files = gen(src, &JavaOptions::default());
+            let out = &files[0].source;
+            assert!(out.contains(decl), "{}", out);
+            assert!(out.contains("writer.writeWString(this.ws[i0]);"), "{}", out);
+            assert!(out.contains("this.ws[i0] = reader.readWString();"), "{}", out);
         }
     }
 
     #[test]
     fn wchar_still_round_trips() {
-        // wchar 는 코어와 바이트 단위로 일치한다 — wstring 만 막는다.
         let files = gen(r#"@extensibility(FINAL) struct S { wchar c; };"#, &JavaOptions::default());
         let src = &files[0].source;
         assert!(src.contains("public char c;"), "{}", src);
@@ -1437,13 +1446,17 @@ mod tests {
 
     #[test]
     fn an_undescribable_field_before_a_key_fails_generation() {
-        // float 은 이 네이티브 경로가 표현하지 못한다. 조용히 키를 버리면
-        // 사용자는 키가 안 듣는 이유를 끝까지 모른다.
-        let defs =
-            parse_idl(r#"@extensibility(FINAL) struct S { float bad; @key long id; };"#).unwrap();
-        let model = resolve(defs).unwrap();
-        let err = generate(&model, "S.idl", &JavaOptions::default()).unwrap_err();
-        assert!(err.contains("S.bad"), "{}", err);
-        assert!(err.contains("key"), "{}", err);
+        // float 과 wstring 은 이 네이티브 경로가 표현하지 못한다. 조용히 키를
+        // 버리면 사용자는 키가 안 듣는 이유를 끝까지 모른다.
+        for src in [
+            r#"@extensibility(FINAL) struct S { float bad; @key long id; };"#,
+            r#"@extensibility(FINAL) struct S { wstring bad; @key long id; };"#,
+        ] {
+            let defs = parse_idl(src).unwrap();
+            let model = resolve(defs).unwrap();
+            let err = generate(&model, "S.idl", &JavaOptions::default()).unwrap_err();
+            assert!(err.contains("S.bad"), "{}", err);
+            assert!(err.contains("key"), "{}", err);
+        }
     }
 }
