@@ -3,6 +3,7 @@ package com.intellectus.int2dds.types;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.intellectus.int2dds.cdr.CdrReader;
@@ -338,6 +339,37 @@ class GeneratedTypeConformanceTest {
                 assertFieldsEqual(sent, back, "xcdr2=" + xcdr2);
             }
         }
+    }
+
+    @Test
+    void aBoundedStringIsCheckedInBytesNotUtf16Units() {
+        // boundedStr is string<64>. A Hangul syllable is one UTF-16 unit and
+        // three UTF-8 bytes, so length() accepts 22 of them and writeString
+        // then puts 66 bytes on the wire. The core rejects that on
+        // deserialize -- @try_construct defaults to Discard -- and drops the
+        // sample with nothing logged on the writing side.
+        CdrGolden over = ordinary();
+        over.boundedStr = repeat('센', 22);
+        assertEquals(22, over.boundedStr.length(), "within the bound in UTF-16 units");
+        assertEquals(66, CdrWriter.utf8Length(over.boundedStr), "over it in bytes");
+        try (CdrWriter w = CdrWriter.acquire(Extensibility.APPENDABLE, true, false)) {
+            assertThrows(IllegalStateException.class, () -> over.serializeCdr(w));
+        }
+
+        // 63 bytes still fits, so the check is not merely rejecting non-ASCII.
+        CdrGolden under = ordinary();
+        under.boundedStr = repeat('센', 21);
+        try (CdrWriter w = CdrWriter.acquire(Extensibility.APPENDABLE, true, false)) {
+            under.serializeCdr(w);
+        }
+    }
+
+    private static String repeat(char c, int n) {
+        StringBuilder sb = new StringBuilder(n);
+        for (int i = 0; i < n; i++) {
+            sb.append(c);
+        }
+        return sb.toString();
     }
 
     @Test

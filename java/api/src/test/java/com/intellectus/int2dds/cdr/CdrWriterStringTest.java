@@ -81,6 +81,21 @@ class CdrWriterStringTest {
     }
 
     @Test
+    void utf8LengthMatchesWhatWriteStringEmits() {
+        // The generated string<N> bound check calls this instead of length().
+        // If the two ever disagree, a bounded string passes the check and then
+        // overflows the bound on the wire.
+        for (String s : new String[] {"", "abc", "센서", "🌡", "a\0b", "mixed 센서 x"}) {
+            try (CdrWriter w = CdrWriter.acquire(Extensibility.FINAL, true, false)) {
+                w.writeString(s);
+                // 4-byte length prefix + the bytes + the NUL.
+                assertEquals(4 + CdrWriter.utf8Length(s) + 1, payload(w).length, s);
+            }
+        }
+        assertEquals(0, CdrWriter.utf8Length(null), "null is written as empty");
+    }
+
+    @Test
     void embeddedNulIsPreservedNotTruncated() {
         // CDR strings are length-prefixed, so an interior NUL is legal payload.
         try (CdrWriter w = CdrWriter.acquire(Extensibility.FINAL, true, false)) {

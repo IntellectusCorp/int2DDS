@@ -65,7 +65,7 @@ public final class CdrGolden implements IDdsType {
         writer.writeI64(this.i64Val);
         writer.writeU64(this.u64Val);
         writer.writeString(this.unboundedStr);
-        if (this.boundedStr.length() > 64) {
+        if (CdrWriter.utf8Length(this.boundedStr) > 64) {
             throw new IllegalStateException("boundedStr exceeds its IDL bound of 64");
         }
         writer.writeString(this.boundedStr);

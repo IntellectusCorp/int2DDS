@@ -336,6 +336,27 @@ public final class CdrWriter implements AutoCloseable {
     }
 
     /**
+     * The UTF-8 byte count {@link #writeString} emits for {@code s}, excluding the
+     * terminator. This is the unit an IDL {@code string<N>} bound is measured in --
+     * {@code length()} counts UTF-16 units, which is larger than the bound allows
+     * for any non-ASCII text.
+     *
+     * <p>Takes the same two branches writeString does, so it cannot disagree with
+     * what actually reaches the wire: no allocation for ASCII, and the identical
+     * {@code getBytes} call otherwise.
+     */
+    public static int utf8Length(String s) {
+        if (s == null) {
+            return 0;
+        }
+        int n = s.length();
+        if (asciiPrefixLength(s, n) == n) {
+            return n;
+        }
+        return s.getBytes(UTF8).length;
+    }
+
+    /**
      * Writes a CDR wstring: a uint32 count of UTF-16 code units, then each unit
      * as a u16. Unlike {@link #writeString}, there is no terminator and the
      * count does not include one -- {@code String.length()} is already the

@@ -465,8 +465,11 @@ fn emit_write(
         ResolvedType::WChar => format!("writer.writeU16({});", expr),
         ResolvedType::String { bound } => {
             if let Some(b) = bound {
+                // writeString puts UTF-8 bytes on the wire and the core checks the
+                // bound in bytes, so length() (UTF-16 units) would pass strings the
+                // core then refuses.
                 out.push_str(&format!(
-                    "{ind}if ({expr}.length() > {b}) {{\n\
+                    "{ind}if (CdrWriter.utf8Length({expr}) > {b}) {{\n\
                      {ind}    throw new IllegalStateException(\
                      \"{name} exceeds its IDL bound of {b}\");\n\
                      {ind}}}\n",
@@ -1017,10 +1020,14 @@ mod tests {
     }
 
     #[test]
-    fn bounded_string_is_length_checked_on_write() {
+    fn bounded_string_is_byte_checked_on_write() {
+        // 코어는 string<N> 을 UTF-8 바이트로 센다. length() 로 재면 비ASCII 문자열이
+        // 검사를 통과한 뒤 코어에서 거절당한다. wstring 은 반대로 length() 가 맞다.
         let files =
             gen(r#"@extensibility(FINAL) struct S { string<256> s; };"#, &JavaOptions::default());
-        assert!(files[0].source.contains("if (this.s.length() > 256)"), "{}", files[0].source);
+        let src = &files[0].source;
+        assert!(src.contains("if (CdrWriter.utf8Length(this.s) > 256)"), "{}", src);
+        assert!(!src.contains("this.s.length()"), "{}", src);
     }
 
     #[test]
