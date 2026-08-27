@@ -95,7 +95,7 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
                 create(publisher, Objects.requireNonNull(topic, "topic"), qos),
                 FfiAccess::deleteDataWriter);
         this.topic = topic;
-        this.xcdr2 = resolveXcdr2(qos);
+        this.xcdr2 = resolveXcdr2();
     }
 
     private DataWriter(Publisher publisher, Topic<T> topic, NativeCleaner.Deleter deleter) {
@@ -103,7 +103,7 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
                 create(publisher, Objects.requireNonNull(topic, "topic"), null),
                 deleter);
         this.topic = topic;
-        this.xcdr2 = resolveXcdr2(null);
+        this.xcdr2 = resolveXcdr2();
     }
 
     /**
@@ -120,9 +120,7 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
                         Objects.requireNonNull(profilePath, "profilePath")),
                 FfiAccess::deleteDataWriter);
         this.topic = topic;
-        // Same default resolution as the no-QoS path: the profile's own
-        // data_representation is not reflected in this local encoding choice.
-        this.xcdr2 = resolveXcdr2(null);
+        this.xcdr2 = resolveXcdr2();
     }
 
     /**
@@ -716,23 +714,30 @@ public final class DataWriter<T extends IDdsType> extends NativeEntity {
     }
 
     /**
-     * {@code true} for XCDR2, {@code false} for XCDR1. {@code qos}'s own
-     * {@link com.intellectus.int2dds.qos.DataRepresentation} wins when it was
-     * set; a {@code qos} with no representation set is treated exactly like
-     * {@code qos == null} — both ask the core for its compiled-in default via
-     * {@link FfiAccess#defaultDataRepresentation()} rather than guessing,
-     * matching the C# reference binding's {@code effectiveRepr} resolution
-     * (csharp/src/Int2Dds/Core/DataWriter.cs:40-42). The Java {@code
-     * DataRepresentation} policy's own no-arg-constructor default is {@code
-     * XCDR1} (see that class), matching what the core itself reports here —
-     * confirmed at runtime for this task, not merely read off the Rust
-     * source; see the task report.
+     * {@code true} for XCDR2, {@code false} for XCDR1, read off the writer the
+     * constructor just created rather than resolved from the arguments that
+     * created it.
+     *
+     * <p>This is what makes the three constructors agree. Only one of them has
+     * a {@link DataWriterQos} to inspect: the profile path is handed a profile
+     * name and the core resolves the QoS behind it, so inspecting arguments
+     * left that path resolving to the library default while the writer itself
+     * had the profile's representation — advertising XCDR2 over discovery and
+     * serializing XCDR1. The payload is self-consistent, so nothing rejects
+     * it; only a peer that compares it against what discovery promised, or one
+     * that accepts XCDR2 alone, sees the disagreement.
+     *
+     * <p>{@code int2dds_datawriter_data_representation} is the same source
+     * {@link #getDataRepresentation()} reads, and it resolves an unset policy
+     * to the library default itself, so the default path keeps asking the core
+     * rather than guessing. This is what the C# reference binding already does
+     * on its own profile path (its {@code ResolveEffectiveXcdr2},
+     * csharp/src/Int2Dds/Core/DataWriter.cs:151-161).
      */
-    private static boolean resolveXcdr2(DataWriterQos qos) {
-        DataRepresentationKind kind = (qos != null && qos.getDataRepresentation() != null)
-                ? qos.getDataRepresentation().getKind()
-                : DataRepresentationKind.fromValue(FfiAccess.defaultDataRepresentation());
-        return kind == DataRepresentationKind.XCDR2;
+    private boolean resolveXcdr2() {
+        int v = FfiAccess.datawriterDataRepresentation(handle());
+        NativeKeepAlive.keepAlive(this);
+        return DataRepresentationKind.fromValue(v) == DataRepresentationKind.XCDR2;
     }
 
     /**

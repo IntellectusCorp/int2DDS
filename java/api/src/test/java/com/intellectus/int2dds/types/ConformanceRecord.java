@@ -17,8 +17,8 @@ import com.intellectus.int2dds.cdr.Extensibility;
  * {@code CdrConformanceTest} always serializes this type -- not under XCDR1,
  * where {@link CdrWriter#dheaderBegin()} returns {@code -1} and writes
  * nothing. XCDR1 is what the real write path actually resolves to by
- * default ({@code DataWriter.resolveXcdr2}, unless a writer's QoS
- * explicitly sets an XCDR2 {@code DataRepresentation}), so a plain {@code
+ * default ({@code DataWriter.resolveXcdr2}, unless the writer's effective QoS
+ * -- set directly or through a profile -- selects XCDR2), so a plain {@code
  * publisher.createDataWriter(topic)} publishing this type emits no DHEADER
  * at all.
  */

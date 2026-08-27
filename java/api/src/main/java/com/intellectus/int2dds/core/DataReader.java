@@ -70,10 +70,16 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
     private final Supplier<T> factory;
 
     /**
-     * Resolved once at construction, the same way {@link
-     * DataWriter#resolveXcdr2} is: used only by {@link #lookupInstance},
+     * Resolved once at construction: used only by {@link #lookupInstance},
      * which must serialize {@code sample} identically to how a matching
      * {@link DataWriter#write} on this topic would.
+     *
+     * <p>Resolved from the QoS arguments rather than from the reader itself,
+     * unlike {@link DataWriter}'s, because there is no {@code
+     * int2dds_datareader_data_representation} to read — adding one moves the
+     * exported-symbol count {@code java.yml} gates on. Harmless for now: {@link
+     * #lookupInstance} returns the NIL handle whatever this resolves to, for
+     * the reason its own doc gives.
      */
     private final boolean xcdr2;
 
@@ -131,8 +137,10 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
      * profilePath} (a {@code "LibraryName::ProfileName"} path previously
      * loaded via {@link DomainParticipantFactory#loadProfiles}), released the
      * same way as the default-QoS path ({@code FfiAccess::deleteDataReader}).
-     * No {@code xcdr2} concern here the way {@link DataWriter}'s profile
-     * constructor has one: a reader decodes self-describing CDR.
+     * The profile's own data representation is not reflected in {@link
+     * #xcdr2} here the way {@link DataWriter}'s profile constructor now
+     * reflects it; see that field's doc. Decoding is unaffected either way --
+     * {@code CdrReader.of} takes the version from the encapsulation id.
      */
     DataReader(Subscriber subscriber, Topic<T> topic, Supplier<T> factory, String profilePath) {
         super(Objects.requireNonNull(subscriber, "subscriber"),
@@ -145,7 +153,7 @@ public final class DataReader<T extends IDdsType> extends NativeEntity {
         this.xcdr2 = resolveXcdr2(null);
     }
 
-    /** Same resolution as {@link DataWriter#resolveXcdr2}, for {@link #lookupInstance}. */
+    /** See the {@link #xcdr2} field's doc for why this reads {@code qos} and not the reader. */
     private static boolean resolveXcdr2(DataReaderQos qos) {
         DataRepresentationKind kind = (qos != null && qos.getDataRepresentation() != null)
                 ? qos.getDataRepresentation().getKind()
