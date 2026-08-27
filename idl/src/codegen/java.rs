@@ -26,6 +26,7 @@ pub fn generate(
 ) -> Result<Vec<GeneratedFile>, String> {
     validate_package(opts)?;
     reject_unsupported(model, opts)?;
+    reject_name_collisions(model)?;
     let mut files = Vec::new();
     let mut owners: Vec<&str> = Vec::new(); // files[i] 를 만든 IDL 타입
     for s in &model.structs {
@@ -131,6 +132,51 @@ fn reject_unsupported(model: &IdlModel, opts: &JavaOptions) -> Result<(), String
                         package_label(&here),
                         referenced,
                         package_label(&there)
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Two IDL names that map to one Java name. The names survive `resolve` intact
+/// and only merge in this backend, so javac is the first thing to notice —
+/// report it here with the IDL names the user can act on.
+fn reject_name_collisions(model: &IdlModel) -> Result<(), String> {
+    for s in &model.structs {
+        let java: Vec<String> = s.members.iter().map(|m| java_field_name(&m.name)).collect();
+        for i in 0..java.len() {
+            for j in 0..i {
+                if java[i] == java[j] {
+                    return Err(format!(
+                        "Java backend maps IDL members '{}.{}' and '{}.{}' to the same \
+                         Java field '{}'",
+                        s.name, s.members[j].name, s.name, s.members[i].name, java[i]
+                    ));
+                }
+            }
+        }
+    }
+    for e in &model.enums {
+        let java: Vec<String> =
+            e.variants.iter().map(|v| naming::escape_keyword(&v.name, TargetLang::Java)).collect();
+        for i in 0..java.len() {
+            // 상수 `value` 는 아래에서 만드는 `private final int value` 와 겹친다.
+            // `values`/`fromValue` 는 메서드라 이름 공간이 달라 문제없다.
+            if java[i] == "value" {
+                return Err(format!(
+                    "Java backend cannot emit enumerator '{}.{}': it collides with the \
+                     generated 'value' field; rename it in the IDL",
+                    e.name, e.variants[i].name
+                ));
+            }
+            for j in 0..i {
+                if java[i] == java[j] {
+                    return Err(format!(
+                        "Java backend maps IDL enumerators '{}.{}' and '{}.{}' to the same \
+                         Java constant '{}'",
+                        e.name, e.variants[j].name, e.name, e.variants[i].name, java[i]
                     ));
                 }
             }
@@ -1061,7 +1107,7 @@ mod tests {
     }
 
     #[test]
-    fn colliding_output_paths_are_refused() {
+    fn colliding_generated_names_are_refused() {
         // foo_bar 와 FooBar 는 둘 다 FooBar.java 가 된다 — 예전에는 한쪽이
         // 조용히 사라지고, 그 타입을 참조하던 필드가 살아남은 클래스에
         // 붙어 다른 필드 배치를 실어 보냈다.
@@ -1079,6 +1125,30 @@ mod tests {
             assert!(err.contains("FooBar"), "{}", err);
             assert!(err.contains("FooBar.java"), "{}", err);
         }
+
+        // 같은 파일 안에서 겹치는 이름들. 전부 javac 이 거절하는 코드였다.
+        let cases = [
+            // camelCase 로 합쳐지는 두 멤버. 중복 멤버 이름은 resolver 가
+            // 거르지 않으므로 정확히 같은 이름도 여기까지 온다.
+            (r#"struct S { long my_type; long myType; };"#, "same Java field 'myType'"),
+            (r#"struct S { long a; long a; };"#, "same Java field 'a'"),
+            // 키워드 이스케이프가 만들어내는 충돌: int -> int_.
+            (r#"enum E { int, int_ };"#, "same Java constant 'int_'"),
+            // 생성되는 value 필드와 겹치는 열거자.
+            (r#"enum E { value, OTHER };"#, "collides with the generated 'value' field"),
+        ];
+        for (src, needle) in cases {
+            let defs = parse_idl(src).unwrap();
+            let model = resolve(defs).unwrap();
+            let err = generate(&model, "X.idl", &JavaOptions::default())
+                .expect_err(&format!("should reject: {}", src));
+            assert!(err.contains(needle), "error {:?} should mention {:?}", err, needle);
+        }
+
+        // values/fromValue 는 메서드라 상수와 이름 공간이 다르다. 거절하면 안 된다.
+        let defs = parse_idl(r#"enum E { values, fromValue, E };"#).unwrap();
+        let model = resolve(defs).unwrap();
+        generate(&model, "X.idl", &JavaOptions::default()).expect("method names do not collide");
     }
 
     #[test]
