@@ -256,6 +256,9 @@ namespace Int2Dds.Core
                                 break;
                         }
                         ReturnCodeHelper.CheckReturn(rc);
+                        if (f.MemberId >= 0)
+                            ReturnCodeHelper.CheckReturn(
+                                NativeMethods.int2dds_type_info_set_member_id(ti, (uint)f.MemberId));
                     }
                 }
             }

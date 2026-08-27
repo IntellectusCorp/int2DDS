@@ -65,11 +65,13 @@ pub const INT2DDS_MEMBER_OPTIONAL: i32 = 1 << 1;
 pub const INT2DDS_MEMBER_MUST_UNDERSTAND: i32 = 1 << 2;
 pub const INT2DDS_MEMBER_EXTERNAL: i32 = 1 << 3;
 
-/// Internal field description.
+/// Internal field description. `member_id` is `None` for positional assignment;
+/// `int2dds_type_info_set_member_id` stamps an explicit `@id`/`@hashid` value.
 struct FieldInfo {
     name: String,
     type_id: TypeIdentifier,
     flags: i32,
+    member_id: Option<u32>,
 }
 
 impl FieldInfo {
@@ -180,7 +182,7 @@ impl Int2DdsTypeInfo {
     /// Append a field whose `TypeIdentifier` is already resolved. `flags` uses the
     /// `INT2DDS_MEMBER_*` bitmask (KEY/OPTIONAL/MUST_UNDERSTAND/EXTERNAL).
     pub(crate) fn push_field(&mut self, name: String, type_id: TypeIdentifier, flags: i32) {
-        self.fields.push(FieldInfo { name, type_id, flags });
+        self.fields.push(FieldInfo { name, type_id, flags, member_id: None });
     }
 
     /// Append a nested struct-typed field, referencing `nested` by its content-hash
@@ -189,7 +191,7 @@ impl Int2DdsTypeInfo {
     /// full closure is available for registry-backed key resolution.
     pub(crate) fn push_nested_field(&mut self, name: String, nested: &Int2DdsTypeInfo, flags: i32) {
         let nested_id = self.intern_nested(nested);
-        self.fields.push(FieldInfo { name, type_id: nested_id, flags });
+        self.fields.push(FieldInfo { name, type_id: nested_id, flags, member_id: None });
     }
 
     /// Resolve `nested` to its content-hash `CompleteTypeId` and record its `TypeObject`
@@ -217,7 +219,7 @@ impl Int2DdsTypeInfo {
     ) {
         let element_id = self.intern_nested(element);
         let type_id = plain_sequence_id(element_id, bound);
-        self.fields.push(FieldInfo { name, type_id, flags });
+        self.fields.push(FieldInfo { name, type_id, flags, member_id: None });
     }
 
     /// Append a `Nested[N]` fixed-array field, referencing the element by content-hash
@@ -243,7 +245,7 @@ impl Int2DdsTypeInfo {
     ) {
         let element_id = self.intern_nested(element);
         let type_id = plain_array_identifier(element_id, dims);
-        self.fields.push(FieldInfo { name, type_id, flags });
+        self.fields.push(FieldInfo { name, type_id, flags, member_id: None });
     }
 
     /// Record a nested dependency, de-duplicating by `TypeIdentifier`.
@@ -280,7 +282,7 @@ impl Int2DdsTypeInfo {
                 false, // is_default
             );
             let common = CommonStructMember {
-                member_id: index as u32,
+                member_id: field.member_id.unwrap_or(index as u32),
                 member_flags,
                 member_type_id: field.type_id.clone(),
             };
@@ -559,7 +561,7 @@ pub unsafe extern "C" fn int2dds_type_info_add_field(
         None => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
-    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags });
+    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags, member_id: None });
 
     INT2DDS_RET_OK
 }
@@ -582,7 +584,7 @@ pub unsafe extern "C" fn int2dds_type_info_add_string_field(
     let ti = &mut *type_info;
     let name_str = cstr_arg!(field_name);
     let type_id = string_id(bound, false);
-    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags });
+    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags, member_id: None });
 
     INT2DDS_RET_OK
 }
@@ -601,7 +603,7 @@ pub unsafe extern "C" fn int2dds_type_info_add_wstring_field(
     let ti = &mut *type_info;
     let name_str = cstr_arg!(field_name);
     let type_id = string_id(bound, true);
-    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags });
+    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags, member_id: None });
 
     INT2DDS_RET_OK
 }
@@ -629,7 +631,7 @@ pub unsafe extern "C" fn int2dds_type_info_add_sequence_field(
 
     let type_id = plain_sequence_id(element_id, bound);
 
-    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags });
+    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags, member_id: None });
 
     INT2DDS_RET_OK
 }
@@ -657,7 +659,7 @@ pub unsafe extern "C" fn int2dds_type_info_add_array_field(
 
     let type_id = plain_array_id(element_id, array_size);
 
-    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags });
+    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags, member_id: None });
 
     INT2DDS_RET_OK
 }
@@ -691,7 +693,7 @@ pub unsafe extern "C" fn int2dds_type_info_add_array_field_nd(
 
     let type_id = plain_array_identifier(element_id, std::slice::from_raw_parts(dims, dims_len));
 
-    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags });
+    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags, member_id: None });
 
     INT2DDS_RET_OK
 }
@@ -715,7 +717,7 @@ pub unsafe extern "C" fn int2dds_type_info_add_named_type_field(
 
     let type_id = named_type_identifier(hash_name);
 
-    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags });
+    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags, member_id: None });
 
     INT2DDS_RET_OK
 }
@@ -849,7 +851,7 @@ pub unsafe extern "C" fn int2dds_type_info_add_sequence_of_named_field(
 
     let type_id = plain_sequence_id(named_type_identifier(hash_name), bound);
 
-    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags });
+    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags, member_id: None });
 
     INT2DDS_RET_OK
 }
@@ -873,7 +875,7 @@ pub unsafe extern "C" fn int2dds_type_info_add_array_of_named_field(
 
     let type_id = plain_array_id(named_type_identifier(hash_name), array_size);
 
-    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags });
+    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags, member_id: None });
 
     INT2DDS_RET_OK
 }
@@ -907,9 +909,32 @@ pub unsafe extern "C" fn int2dds_type_info_add_array_of_named_field_nd(
         std::slice::from_raw_parts(dims, dims_len),
     );
 
-    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags });
+    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags, member_id: None });
 
     INT2DDS_RET_OK
+}
+
+/// Stamp an explicit member id (28-bit, XTypes) on the most recently added field,
+/// overriding the positional id the TypeObject build assigns otherwise. Call it right
+/// after the `int2dds_type_info_add_*_field` call for a member declared with
+/// `@id`/`@hashid`/`@autoid(HASH)`, so the advertised ids match the mutable wire.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_type_info_set_member_id(
+    type_info: *mut Int2DdsTypeInfo,
+    member_id: u32,
+) -> Int2DdsRet {
+    check_null!(type_info);
+    if member_id > 0x0FFF_FFFF {
+        return INT2DDS_RET_INVALID_ARGUMENT;
+    }
+    let ti = &mut *type_info;
+    match ti.fields.last_mut() {
+        Some(field) => {
+            field.member_id = Some(member_id);
+            INT2DDS_RET_OK
+        }
+        None => INT2DDS_RET_INVALID_ARGUMENT,
+    }
 }
 
 #[no_mangle]
@@ -968,21 +993,25 @@ mod tests {
             name: "id".to_string(),
             type_id: TypeIdentifier::Int32,
             flags: INT2DDS_MEMBER_KEY,
+            member_id: None,
         });
         ti.fields.push(FieldInfo {
             name: "bool_val".to_string(),
             type_id: TypeIdentifier::Boolean,
             flags: 0,
+            member_id: None,
         });
         ti.fields.push(FieldInfo {
             name: "byte_val".to_string(),
             type_id: TypeIdentifier::Byte,
             flags: 0,
+            member_id: None,
         });
         ti.fields.push(FieldInfo {
             name: "short_val".to_string(),
             type_id: TypeIdentifier::Uint16,
             flags: 0,
+            member_id: None,
         });
 
         let ffi_serialized = match ti.build_type_object() {
@@ -998,6 +1027,78 @@ mod tests {
         assert_eq!(
             ti.build_type_identifier(),
             PrimitivesType::type_identifier(),
+            "TypeIdentifier hashes differ between FFI and derive paths"
+        );
+    }
+
+    /// Sparse `@id` parity: ids stamped through `int2dds_type_info_set_member_id` must make
+    /// the FFI-built TypeObject byte- and hash-identical to the derive macro's, with
+    /// unstamped members keeping their positional ids.
+    #[test]
+    fn test_sparse_member_ids_match_derive_macro() {
+        use int2dds::xtypes::HasTypeObject;
+        use int2dds_derive::DdsType;
+
+        #[derive(DdsType)]
+        #[dds_type(crate_path = "int2dds", extensibility = "Mutable")]
+        struct SparseIdType {
+            #[dds(id = 10)]
+            a: i32,
+            #[dds(id = 20)]
+            label: String,
+            plain: u32,
+        }
+
+        let mut ti = Int2DdsTypeInfo::new("SparseIdType".to_string(), ExtensibilityKind::Mutable);
+        unsafe {
+            assert_eq!(
+                int2dds_type_info_set_member_id(&mut ti, 1),
+                INT2DDS_RET_INVALID_ARGUMENT,
+                "stamping with no fields must be rejected"
+            );
+        }
+        ti.fields.push(FieldInfo {
+            name: "a".to_string(),
+            type_id: TypeIdentifier::Int32,
+            flags: 0,
+            member_id: None,
+        });
+        unsafe {
+            assert_eq!(int2dds_type_info_set_member_id(&mut ti, 10), INT2DDS_RET_OK);
+            assert_eq!(
+                int2dds_type_info_set_member_id(&mut ti, 0x1000_0000),
+                INT2DDS_RET_INVALID_ARGUMENT,
+                "ids above the 28-bit XTypes ceiling must be rejected"
+            );
+        }
+        ti.fields.push(FieldInfo {
+            name: "label".to_string(),
+            type_id: string_id(0, false),
+            flags: 0,
+            member_id: None,
+        });
+        unsafe {
+            assert_eq!(int2dds_type_info_set_member_id(&mut ti, 20), INT2DDS_RET_OK);
+        }
+        ti.fields.push(FieldInfo {
+            name: "plain".to_string(),
+            type_id: TypeIdentifier::Uint32,
+            flags: 0,
+            member_id: None,
+        });
+
+        let ffi_serialized = match ti.build_type_object() {
+            TypeObject::Complete(c) => c.serialize(),
+            _ => panic!("Expected Complete"),
+        };
+        assert_eq!(
+            ffi_serialized,
+            SparseIdType::complete_type_object().serialize(),
+            "Serialized CompleteTypeObject bytes differ between FFI and derive paths"
+        );
+        assert_eq!(
+            ti.build_type_identifier(),
+            SparseIdType::type_identifier(),
             "TypeIdentifier hashes differ between FFI and derive paths"
         );
     }
@@ -1068,26 +1169,31 @@ mod tests {
             name: "id".to_string(),
             type_id: TypeIdentifier::Int32,
             flags: INT2DDS_MEMBER_KEY,
+            member_id: None,
         });
         ti.fields.push(FieldInfo {
             name: "bool_seq".to_string(),
             type_id: plain_sequence_id(TypeIdentifier::Boolean, 0),
             flags: 0,
+            member_id: None,
         });
         ti.fields.push(FieldInfo {
             name: "bounded_seq".to_string(),
             type_id: plain_sequence_id(TypeIdentifier::Int32, 10),
             flags: 0,
+            member_id: None,
         });
         ti.fields.push(FieldInfo {
             name: "payload".to_string(),
             type_id: plain_sequence_id(TypeIdentifier::Uint8, 0),
             flags: 0,
+            member_id: None,
         });
         ti.fields.push(FieldInfo {
             name: "bool_array".to_string(),
             type_id: plain_array_id(TypeIdentifier::Boolean, 4),
             flags: 0,
+            member_id: None,
         });
 
         assert_eq!(

@@ -2168,7 +2168,16 @@ impl<'a> CGen<'a> {
         true
     }
 
-    fn emit_type_info_field(&mut self, m: &ResolvedMember, owner: &str) {
+    fn emit_type_info_field(&mut self, m: &ResolvedMember, owner: &str, index: u32) {
+        self.emit_type_info_field_add(m, owner);
+        // Stamp explicit @id/@hashid/@autoid(HASH) ids so the advertised TypeObject
+        // matches the mutable wire; positional ids need no stamp.
+        if let Some(id) = m.member_id.filter(|&id| id != index) {
+            self.raw(&format!("    int2dds_type_info_set_member_id(ti, {});\n", id));
+        }
+    }
+
+    fn emit_type_info_field_add(&mut self, m: &ResolvedMember, owner: &str) {
         let name = &m.name;
         let ty = &m.resolved_type;
         let flags = Self::member_flags_literal(m);
@@ -2294,8 +2303,8 @@ impl<'a> CGen<'a> {
         ));
 
         let members = self.collect_all_members(s);
-        for m in &members {
-            self.emit_type_info_field(m, &s.name);
+        for (i, m) in members.iter().enumerate() {
+            self.emit_type_info_field(m, &s.name, i as u32);
         }
 
         self.raw("    return ti;\n}\n");
@@ -2537,8 +2546,9 @@ impl<'a> CGen<'a> {
         stack: &mut std::collections::HashSet<String>,
     ) -> bool {
         if s.extensibility == ExtensibilityKind::Mutable {
-            // The advertised TypeObject carries positional ids, so the plan-driven
-            // wire only matches when the type's ids are positional too.
+            // Explicit ids now reach the advertised TypeObject via
+            // int2dds_type_info_set_member_id; coverage stays positional-only until
+            // the sparse-id plan path is proven.
             if s.base_type.is_some() || s.autoid == Some(AutoIdKind::Hash) {
                 return false;
             }
@@ -3168,6 +3178,31 @@ mod tests {
         assert!(code.contains(
             r#"{"sseq", CFieldSequencePtr, (uint32_t)offsetof(P, sseq.data), (uint32_t)offsetof(P, sseq.length), 0, 0, CFieldStringPtr, 0, NULL},"#
         ));
+    }
+
+    #[test]
+    fn test_type_info_stamps_explicit_member_ids() {
+        let defs = parse_idl(
+            r#"
+            @mutable
+            struct SparseIds {
+                @id(5) long a;
+                long b;
+                @id(2) long c;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(
+            &model,
+            "Sparse.idl",
+            &COptions { default_string_bound: 64, string_mode: StringMode::FixedArray },
+        );
+
+        // Only `a` needs a stamp: `b` is positional and `c`'s @id equals its index.
+        assert!(code.contains("int2dds_type_info_set_member_id(ti, 5);"), "{}", code);
+        assert_eq!(code.matches("int2dds_type_info_set_member_id").count(), 1, "{}", code);
     }
 
     #[test]

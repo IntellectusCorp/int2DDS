@@ -110,6 +110,11 @@ class TypeInfoBuilder:
         check_ret(lib.int2dds_type_info_add_field(self._handle, _cstr(name), field_type, flags))
         return self
 
+    def set_member_id(self, member_id: int) -> "TypeInfoBuilder":
+        """Stamp an explicit @id/@hashid member id on the most recently added field."""
+        check_ret(lib.int2dds_type_info_set_member_id(self._handle, member_id))
+        return self
+
     def add_sequence_field(
         self, name: str, element_type: int, bound: int = 0, flags: int = 0
     ) -> "TypeInfoBuilder":

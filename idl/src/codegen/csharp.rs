@@ -572,8 +572,8 @@ impl<'a> CsGen<'a> {
         );
         self.line("{");
         self.indent += 1;
-        for m in members {
-            self.line(&Self::type_info_field_spec(m));
+        for (i, m) in members.iter().enumerate() {
+            self.line(&Self::type_info_field_spec(m, i as u32));
         }
         self.indent -= 1;
         self.line("};");
@@ -699,38 +699,47 @@ impl<'a> CsGen<'a> {
     }
 
     /// One `new DdsTypeInfoField(op, name, type_const, size, flags)` initializer for a member.
-    fn type_info_field_spec(m: &ResolvedMember) -> String {
+    /// Explicit `@id`/`@hashid` ids ride as a named trailing `memberId:` argument.
+    fn type_info_field_spec(m: &ResolvedMember, index: u32) -> String {
         let flags = Self::member_flags(m);
+        let id_arg = match m.member_id {
+            Some(id) if id != index => format!(", memberId: {}", id),
+            _ => String::new(),
+        };
         match &m.resolved_type {
             ResolvedType::String { bound } => format!(
-                "new DdsTypeInfoField(\"string\", \"{}\", 0, {}u, {}),",
+                "new DdsTypeInfoField(\"string\", \"{}\", 0, {}u, {}{}),",
                 m.name,
                 bound.unwrap_or(0),
-                flags
+                flags,
+                id_arg
             ),
             ResolvedType::WString { bound } => format!(
-                "new DdsTypeInfoField(\"wstring\", \"{}\", 0, {}u, {}),",
+                "new DdsTypeInfoField(\"wstring\", \"{}\", 0, {}u, {}{}),",
                 m.name,
                 bound.unwrap_or(0),
-                flags
+                flags,
+                id_arg
             ),
             ResolvedType::Sequence { element, bound } => {
                 if let Some(cls) = Self::element_class_name(element) {
                     format!(
-                        "new DdsTypeInfoField(\"seq_nested\", \"{}\", typeof({}), {}u, {}),",
+                        "new DdsTypeInfoField(\"seq_nested\", \"{}\", typeof({}), {}u, {}{}),",
                         m.name,
                         cls,
                         bound.unwrap_or(0),
-                        flags
+                        flags,
+                        id_arg
                     )
                 } else {
                     let ec = Self::field_constant(element).unwrap_or(0);
                     format!(
-                        "new DdsTypeInfoField(\"seq\", \"{}\", {}, {}u, {}),",
+                        "new DdsTypeInfoField(\"seq\", \"{}\", {}, {}u, {}{}),",
                         m.name,
                         ec,
                         bound.unwrap_or(0),
-                        flags
+                        flags,
+                        id_arg
                     )
                 }
             }
@@ -741,26 +750,26 @@ impl<'a> CsGen<'a> {
                         dims.iter().map(|d| format!("{}u", d)).collect::<Vec<_>>().join(", ");
                     if let Some(cls) = Self::element_class_name(base) {
                         format!(
-                            "new DdsTypeInfoField(\"arr_nested_nd\", \"{}\", typeof({}), new uint[] {{ {} }}, {}),",
-                            m.name, cls, dims_lit, flags
+                            "new DdsTypeInfoField(\"arr_nested_nd\", \"{}\", typeof({}), new uint[] {{ {} }}, {}{}),",
+                            m.name, cls, dims_lit, flags, id_arg
                         )
                     } else {
                         let ec = Self::field_constant(base).unwrap_or(0);
                         format!(
-                            "new DdsTypeInfoField(\"arr_nd\", \"{}\", {}, new uint[] {{ {} }}, {}),",
-                            m.name, ec, dims_lit, flags
+                            "new DdsTypeInfoField(\"arr_nd\", \"{}\", {}, new uint[] {{ {} }}, {}{}),",
+                            m.name, ec, dims_lit, flags, id_arg
                         )
                     }
                 } else if let Some(cls) = Self::element_class_name(base) {
                     format!(
-                        "new DdsTypeInfoField(\"arr_nested\", \"{}\", typeof({}), {}u, {}),",
-                        m.name, cls, dims[0], flags
+                        "new DdsTypeInfoField(\"arr_nested\", \"{}\", typeof({}), {}u, {}{}),",
+                        m.name, cls, dims[0], flags, id_arg
                     )
                 } else {
                     let ec = Self::field_constant(base).unwrap_or(0);
                     format!(
-                        "new DdsTypeInfoField(\"arr\", \"{}\", {}, {}u, {}),",
-                        m.name, ec, dims[0], flags
+                        "new DdsTypeInfoField(\"arr\", \"{}\", {}, {}u, {}{}),",
+                        m.name, ec, dims[0], flags, id_arg
                     )
                 }
             }
@@ -769,13 +778,16 @@ impl<'a> CsGen<'a> {
                 // exact generated class (struct or enum) that declares this member.
                 let cls = cs_type_ref(name);
                 format!(
-                    "new DdsTypeInfoField(\"nested\", \"{}\", typeof({}), {}),",
-                    m.name, cls, flags
+                    "new DdsTypeInfoField(\"nested\", \"{}\", typeof({}), {}{}),",
+                    m.name, cls, flags, id_arg
                 )
             }
             other => {
                 let c = Self::field_constant(other).unwrap_or(0);
-                format!("new DdsTypeInfoField(\"field\", \"{}\", {}, 0u, {}),", m.name, c, flags)
+                format!(
+                    "new DdsTypeInfoField(\"field\", \"{}\", {}, 0u, {}{}),",
+                    m.name, c, flags, id_arg
+                )
             }
         }
     }
@@ -1922,6 +1934,27 @@ mod tests {
     /// The no-arg convenience `SerializeCdr()` must default to XCDR1 (spec effective
     /// write default), mirroring the core `int2dds_default_data_representation()`. The
     /// explicit `SerializeCdr(bool xcdr2)` overload stays for the QoS-driven write path.
+    #[test]
+    fn test_type_info_metadata_stamps_explicit_member_ids() {
+        let defs = parse_idl(
+            r#"
+            @mutable
+            struct SparseIds {
+                @id(5) long a;
+                long b;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Sparse.idl", &CSharpOptions::default());
+
+        let a_line = code.lines().find(|l| l.contains("\"field\", \"a\"")).unwrap();
+        assert!(a_line.contains("memberId: 5"), "{}", a_line);
+        let b_line = code.lines().find(|l| l.contains("\"field\", \"b\"")).unwrap();
+        assert!(!b_line.contains("memberId"), "{}", b_line);
+    }
+
     #[test]
     fn test_optional_members_emit_presence_csharp() {
         let defs = parse_idl(

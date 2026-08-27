@@ -117,7 +117,8 @@ def _walk_class(type_class, prefix: str, cursor: int, canon: list):
         steps.append(("run", st, getter, single, run_offset, convs))
         run_attrs, run_chars, run_convs = [], [], []
 
-    for (op, field_name, type_const, size, _flags), dc_field in zip(meta, dc_fields):
+    for entry, dc_field in zip(meta, dc_fields):
+        op, field_name, type_const, size, _flags = entry[:5]
         attr = dc_field.name
         path = f"{prefix}.{field_name}" if prefix else field_name
 

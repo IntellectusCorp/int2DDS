@@ -4904,6 +4904,14 @@ Int2DdsRet int2dds_type_info_add_array_of_named_field_nd(struct Int2DdsTypeInfo 
                                                          uintptr_t dims_len,
                                                          int32_t flags);
 
+/**
+ * Stamp an explicit member id (28-bit, XTypes) on the most recently added field,
+ * overriding the positional id the TypeObject build assigns otherwise. Call it right
+ * after the `int2dds_type_info_add_*_field` call for a member declared with
+ * `@id`/`@hashid`/`@autoid(HASH)`, so the advertised ids match the mutable wire.
+ */
+Int2DdsRet int2dds_type_info_set_member_id(struct Int2DdsTypeInfo *type_info, uint32_t member_id);
+
 Int2DdsRet int2dds_type_info_to_type_object(const struct Int2DdsTypeInfo *type_info,
                                             struct Int2DdsTypeObject **out);
 

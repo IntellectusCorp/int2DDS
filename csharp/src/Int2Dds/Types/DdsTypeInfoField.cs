@@ -44,7 +44,13 @@ namespace Int2Dds.Types
         /// </summary>
         public uint[]? Dims { get; }
 
-        public DdsTypeInfoField(string op, string name, int typeConst, uint size, int flags)
+        /// <summary>
+        /// Explicit <c>@id</c>/<c>@hashid</c> member id, or -1 for positional assignment.
+        /// The generator passes it as a named <c>memberId:</c> argument.
+        /// </summary>
+        public int MemberId { get; }
+
+        public DdsTypeInfoField(string op, string name, int typeConst, uint size, int flags, int memberId = -1)
         {
             Op = op;
             Name = name;
@@ -53,9 +59,10 @@ namespace Int2Dds.Types
             Flags = flags;
             NestedType = null;
             Dims = null;
+            MemberId = memberId;
         }
 
-        public DdsTypeInfoField(string op, string name, Type nestedType, int flags)
+        public DdsTypeInfoField(string op, string name, Type nestedType, int flags, int memberId = -1)
         {
             Op = op;
             Name = name;
@@ -64,10 +71,11 @@ namespace Int2Dds.Types
             Flags = flags;
             NestedType = nestedType;
             Dims = null;
+            MemberId = memberId;
         }
 
         /// <summary>Collection-of-nested ("seq_nested"/"arr_nested"): element type + bound/size.</summary>
-        public DdsTypeInfoField(string op, string name, Type elementType, uint size, int flags)
+        public DdsTypeInfoField(string op, string name, Type elementType, uint size, int flags, int memberId = -1)
         {
             Op = op;
             Name = name;
@@ -76,10 +84,11 @@ namespace Int2Dds.Types
             Flags = flags;
             NestedType = elementType;
             Dims = null;
+            MemberId = memberId;
         }
 
         /// <summary>Multidimensional array of a primitive/string element ("arr_nd").</summary>
-        public DdsTypeInfoField(string op, string name, int typeConst, uint[] dims, int flags)
+        public DdsTypeInfoField(string op, string name, int typeConst, uint[] dims, int flags, int memberId = -1)
         {
             Op = op;
             Name = name;
@@ -88,10 +97,11 @@ namespace Int2Dds.Types
             Flags = flags;
             NestedType = null;
             Dims = dims;
+            MemberId = memberId;
         }
 
         /// <summary>Multidimensional array of a nested struct/enum element ("arr_nested_nd").</summary>
-        public DdsTypeInfoField(string op, string name, Type elementType, uint[] dims, int flags)
+        public DdsTypeInfoField(string op, string name, Type elementType, uint[] dims, int flags, int memberId = -1)
         {
             Op = op;
             Name = name;
@@ -100,6 +110,7 @@ namespace Int2Dds.Types
             Flags = flags;
             NestedType = elementType;
             Dims = dims;
+            MemberId = memberId;
         }
     }
 }

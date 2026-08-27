@@ -33,6 +33,9 @@ namespace Int2Dds.Interop
         internal static unsafe extern int int2dds_type_info_add_nested_field(IntPtr type_info, byte* field_name, IntPtr nested_type_info, int flags);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_type_info_set_member_id(IntPtr type_info, uint member_id);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static unsafe extern int int2dds_type_info_add_sequence_of_nested_field(IntPtr type_info, byte* field_name, IntPtr element_type_info, uint bound, int flags);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]

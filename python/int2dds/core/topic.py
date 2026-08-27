@@ -79,7 +79,8 @@ def _build_nested_type_info(cls):
 def _build_type_info(type_name: str, extensibility: Extensibility, fields: list):
     """Build a native Int2DdsTypeInfo from generated ``_dds_type_info_fields`` metadata.
 
-    Each entry is ``(op, name, type_const, size, flags)`` where ``op`` selects the
+    Each entry is ``(op, name, type_const, size, flags)`` — optionally with a sixth
+    ``member_id`` slot for explicit ``@id``/``@hashid`` members — where ``op`` selects the
     ``int2dds_type_info_add_*`` call. The returned handle is owned by the caller and must be
     freed with ``int2dds_type_info_destroy`` after ``create_topic_with_type_info``.
     """
@@ -88,7 +89,9 @@ def _build_type_info(type_name: str, extensibility: Extensibility, fields: list)
     check_ret(lib.int2dds_type_info_create(name_c, int(extensibility), ti_ptr))
     ti = ti_ptr[0]
     try:
-        for op, field_name, type_const, size, flags in fields:
+        for entry in fields:
+            op, field_name, type_const, size, flags = entry[:5]
+            member_id = entry[5] if len(entry) > 5 else None
             fname_c = ffi.new("char[]", field_name.encode())
             if op == "field":
                 check_ret(lib.int2dds_type_info_add_field(ti, fname_c, type_const, flags))
@@ -157,6 +160,8 @@ def _build_type_info(type_name: str, extensibility: Extensibility, fields: list)
                     )
                 finally:
                     lib.int2dds_type_info_destroy(elem_ti)
+            if member_id is not None:
+                check_ret(lib.int2dds_type_info_set_member_id(ti, member_id))
     except Exception:
         lib.int2dds_type_info_destroy(ti)
         raise

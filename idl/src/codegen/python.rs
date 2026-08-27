@@ -600,8 +600,8 @@ impl<'a> PyGen<'a> {
         }
         self.line("_dds_type_info_fields: ClassVar[list] = [");
         self.indent += 1;
-        for m in members {
-            self.line(&Self::type_info_field_spec(m));
+        for (i, m) in members.iter().enumerate() {
+            self.line(&Self::type_info_field_spec(m, i as u32));
         }
         self.indent -= 1;
         self.line("]");
@@ -740,8 +740,8 @@ impl<'a> PyGen<'a> {
         stack: &mut std::collections::HashSet<String>,
     ) -> bool {
         if s.extensibility == ExtensibilityKind::Mutable {
-            // The kernel wire carries the advertised type_info's positional member
-            // ids, so mutable coverage requires positional ids (like the C layout).
+            // Explicit ids now reach the advertised type_info (sixth tuple slot);
+            // coverage stays positional-only until the sparse-id frame path is proven.
             if s.base_type.is_some() || s.autoid == Some(AutoIdKind::Hash) {
                 return false;
             }
@@ -835,28 +835,53 @@ impl<'a> PyGen<'a> {
     }
 
     /// One `(op, name, type_const, size, flags)` tuple describing how the runtime should add
-    /// this member to the type_info builder.
-    fn type_info_field_spec(m: &ResolvedMember) -> String {
+    /// this member to the type_info builder. Explicit `@id`/`@hashid` ids ride as an
+    /// optional sixth slot.
+    fn type_info_field_spec(m: &ResolvedMember, index: u32) -> String {
         let flags = Self::member_flags(m);
+        let id_suffix = match m.member_id {
+            Some(id) if id != index => format!(", {}", id),
+            _ => String::new(),
+        };
         match &m.resolved_type {
             ResolvedType::String { bound } => {
-                format!("(\"string\", \"{}\", 0, {}, {}),", m.name, bound.unwrap_or(0), flags)
+                format!(
+                    "(\"string\", \"{}\", 0, {}, {}{}),",
+                    m.name,
+                    bound.unwrap_or(0),
+                    flags,
+                    id_suffix
+                )
             }
             ResolvedType::WString { bound } => {
-                format!("(\"wstring\", \"{}\", 0, {}, {}),", m.name, bound.unwrap_or(0), flags)
+                format!(
+                    "(\"wstring\", \"{}\", 0, {}, {}{}),",
+                    m.name,
+                    bound.unwrap_or(0),
+                    flags,
+                    id_suffix
+                )
             }
             ResolvedType::Sequence { element, bound } => {
                 if let Some(cls) = Self::element_class_name(element) {
                     format!(
-                        "(\"seq_nested\", \"{}\", {}, {}, {}),",
+                        "(\"seq_nested\", \"{}\", {}, {}, {}{}),",
                         m.name,
                         cls,
                         bound.unwrap_or(0),
-                        flags
+                        flags,
+                        id_suffix
                     )
                 } else {
                     let ec = Self::field_constant(element).unwrap_or(0);
-                    format!("(\"seq\", \"{}\", {}, {}, {}),", m.name, ec, bound.unwrap_or(0), flags)
+                    format!(
+                        "(\"seq\", \"{}\", {}, {}, {}{}),",
+                        m.name,
+                        ec,
+                        bound.unwrap_or(0),
+                        flags,
+                        id_suffix
+                    )
                 }
             }
             ResolvedType::Array { .. } => {
@@ -866,29 +891,38 @@ impl<'a> PyGen<'a> {
                         dims.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", ");
                     if let Some(cls) = Self::element_class_name(base) {
                         format!(
-                            "(\"arr_nested_nd\", \"{}\", {}, ({}), {}),",
-                            m.name, cls, dims_lit, flags
+                            "(\"arr_nested_nd\", \"{}\", {}, ({}), {}{}),",
+                            m.name, cls, dims_lit, flags, id_suffix
                         )
                     } else {
                         let ec = Self::field_constant(base).unwrap_or(0);
-                        format!("(\"arr_nd\", \"{}\", {}, ({}), {}),", m.name, ec, dims_lit, flags)
+                        format!(
+                            "(\"arr_nd\", \"{}\", {}, ({}), {}{}),",
+                            m.name, ec, dims_lit, flags, id_suffix
+                        )
                     }
                 } else if let Some(cls) = Self::element_class_name(base) {
-                    format!("(\"arr_nested\", \"{}\", {}, {}, {}),", m.name, cls, dims[0], flags)
+                    format!(
+                        "(\"arr_nested\", \"{}\", {}, {}, {}{}),",
+                        m.name, cls, dims[0], flags, id_suffix
+                    )
                 } else {
                     let ec = Self::field_constant(base).unwrap_or(0);
-                    format!("(\"arr\", \"{}\", {}, {}, {}),", m.name, ec, dims[0], flags)
+                    format!(
+                        "(\"arr\", \"{}\", {}, {}, {}{}),",
+                        m.name, ec, dims[0], flags, id_suffix
+                    )
                 }
             }
             ResolvedType::Struct(name) | ResolvedType::Enum(name) => {
                 // Reference the generated class object (struct/enum) so the runtime recursively
                 // builds its nested type_info by content-hash.
                 let cls = name.rsplit("::").next().unwrap_or(name);
-                format!("(\"nested\", \"{}\", {}, 0, {}),", m.name, cls, flags)
+                format!("(\"nested\", \"{}\", {}, 0, {}{}),", m.name, cls, flags, id_suffix)
             }
             other => {
                 let c = Self::field_constant(other).unwrap_or(0);
-                format!("(\"field\", \"{}\", {}, 0, {}),", m.name, c, flags)
+                format!("(\"field\", \"{}\", {}, 0, {}{}),", m.name, c, flags, id_suffix)
             }
         }
     }
@@ -1874,6 +1908,28 @@ mod tests {
     /// Frame-covered shapes omit the legacy `_serialize_cdr`/`_deserialize_cdr` entry
     /// points (the runtime frame codec carries them); the `_inline` pair stays for
     /// nested use, and shapes outside coverage keep the full codec.
+    #[test]
+    fn test_type_info_metadata_carries_explicit_member_ids() {
+        let defs = parse_idl(
+            r#"
+            @mutable
+            struct SparseIds {
+                @id(5) long a;
+                long b;
+            };
+            "#,
+        )
+        .unwrap();
+        let code = generate(&resolve(defs).unwrap(), "Sparse.idl", &PythonOptions::new());
+
+        // Explicit id rides as the sixth tuple slot; positional members keep 5-tuples.
+        let a_line = code.lines().find(|l| l.contains("(\"field\", \"a\"")).unwrap();
+        assert!(a_line.trim_end().ends_with(", 5),"), "{}", a_line);
+        assert_eq!(a_line.matches(',').count(), 6, "{}", a_line);
+        let b_line = code.lines().find(|l| l.contains("(\"field\", \"b\"")).unwrap();
+        assert_eq!(b_line.matches(',').count(), 5, "{}", b_line);
+    }
+
     #[test]
     fn test_optional_members_emit_presence() {
         let defs = parse_idl(
