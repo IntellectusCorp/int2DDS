@@ -29,15 +29,18 @@ needs, in one command. The x86_64 and arm64 glibc targets are built against
 ./ffi/docker/build-ffi-linux.sh --only linux/arm64   # gnu + musl arm64
 ./ffi/docker/build-ffi-linux.sh --only linux-x86_64  # a single dist dir
 ./ffi/docker/build-ffi-linux.sh --no-package         # build only, no tarball
+./ffi/docker/build-ffi-linux.sh --jobs 1             # sequential, easier to watch
 ```
 
 | Flag                 | Effect                                                                    |
 | -------------------- | ------------------------------------------------------------------------- |
 | `--only <list>`      | Subset by docker platform (`linux/amd64`) **or** dist dir (`linux-armhf`) |
 | `--rust-version <x>` | Override the toolchain (default `1.89.0`)                                 |
+| `--qemu-version <x>` | QEMU tag to register (default `v8.1.5`) — see the emulator gotcha below  |
 | `--no-package`       | Skip the `.tar.gz` distribution archive                                   |
+| `--jobs <n>`         | Build at most n targets at once (default: all of them; `1` = sequential)  |
 | `--no-binfmt`        | Skip the privileged QEMU binfmt registration container                    |
-| `--refresh-binfmt`   | Force-replace existing QEMU registrations instead of leaving them alone   |
+| `--refresh-binfmt`   | Accepted and ignored — refreshing is the default (see below)              |
 
 ### Why one glibc floor instead of one build per OS
 
@@ -113,6 +116,18 @@ first and the in-container Cargo target dir is ephemeral.
   run under QEMU emulation. This keeps the `ring` crypto crate
   (cmake + C/asm) building exactly as on real hardware, which is more reliable
   than cross-linking.
+- All selected targets build **concurrently** (`--jobs` throttles it). The only
+  host paths a container writes are its own `ffi/dist/<arch>` subdir and the
+  arch-independent `int2dds-ffi.h`, which every container copies from the same
+  source file — so the bytes are identical whoever writes last. `cargo` runs
+  `--locked` so no container can rewrite the shared `Cargo.lock`.
+- Because five interleaved live build logs are unreadable, each target streams
+  to `ffi/dist/logs/<arch>.log` and only start/finish lines reach the console.
+  A failed target gets the tail of its log dumped before the script exits.
+- `CARGO_BUILD_JOBS` is set to `nproc / <concurrent targets>`. Without it every
+  container would default to one rustc job per host CPU *simultaneously*, and
+  rustc peaking near 1 GB per process turns that into an OOM rather than a
+  speed-up.
 - The repo is bind-mounted at `/src`; only the toolchain lives in the image, so
   code changes need no image rebuild.
 - `CARGO_TARGET_DIR` is an ephemeral container path, so the host's `target/`
@@ -137,11 +152,45 @@ Emulated builds are slow. Expect roughly:
 | arm64  | QEMU   | ~15 min             |
 | armhf  | QEMU   | ~23 min             |
 
+Targets run concurrently, so the wall clock for a full run is the **slowest
+single target**, not the sum — roughly the armhf figure above, plus contention.
+
 ### Gotchas handled by this setup
 
-- **arm64/armhf `libc-bin` segfault (exit 139)** during apt — a stale bundled
-  QEMU; the script re-registers up-to-date emulators via `tonistiigi/binfmt`
-  each run (registration is not persistent across daemon restarts).
+- **Emulated-guest QEMU failures.** Two opposite traps, and the fix for one is
+  not the fix for the other.
+
+  *Too old* dies early and loudly: `libc-bin`/`ldconfig` segfaulting during apt
+  (exit 139), an apt GPG error, or `QEMU internal SIGSEGV` out of `rustup-init`.
+  `tonistiigi/binfmt --install` **skips** an arch that is already registered
+  rather than replacing it, so on a host carrying distro registrations from
+  `binfmt-support`/`qemu-user-static` a bare install is a silent no-op and the
+  build quietly keeps using the distro emulator. The script therefore
+  **uninstalls before installing on every run**, then reads
+  `/proc/sys/fs/binfmt_misc` to confirm the kernel now points at
+  `/usr/bin/qemu-*` rather than a distro path.
+
+  *Too new* dies late and silently. Measured here, x86_64 gnu `rustc --version`
+  under qemu-user:
+
+  | QEMU | Result |
+  | ---- | ------ |
+  | `v7.0.0`  | OK — warns `MADV_DONTNEED does not work`, jemalloc falls back |
+  | `v8.1.5`  | OK |
+  | `v9.2.2`  | **hangs** |
+  | `v10.2.3` | **hangs** |
+
+  rustc's bundled jemalloc probes `MADV_DONTNEED`. Old QEMU reports it
+  unsupported, so jemalloc takes its memset fallback and lives; newer QEMU
+  claims a support it does not deliver, so jemalloc commits to a path that then
+  hangs. musl targets carry no jemalloc, which is why musl x86_64 builds fine on
+  a QEMU that cannot build gnu x86_64. The version is therefore **pinned**
+  (`--qemu-version`), not tracked to `:latest` — raise it only after re-running
+  an emulated **gnu** target end to end, never on a smoke command alone.
+
+  Registration changes are **host-wide**, not just for Docker; hand the machine
+  back to its own emulators with `sudo systemctl restart systemd-binfmt` (or
+  `sudo update-binfmts --enable`). Use `--no-binfmt` to skip the section.
 - **SIGPIPE (exit 141)** under emulation — diagnostic pipes like `ldd | head`
   raise SIGPIPE when the reader closes early; the container script avoids
   `pipefail` so these never abort the build.
@@ -176,7 +225,9 @@ docker info --format '{{.ServerVersion}}'   # verify
 Multi-arch emulation needs `binfmt_misc`; the script installs the emulators
 itself via `docker run --privileged tonistiigi/binfmt`, which requires the
 privileged flag to be permitted. If it is not, install them once out of band
-and pass `--no-binfmt`.
+and pass `--no-binfmt`. Note that the script replaces any existing registration
+for the arches it needs, with a pinned QEMU version — see the emulator gotcha
+above for why, and for how to restore the distro's own.
 
 ---
 
@@ -250,7 +301,7 @@ the arch `verify-glibc-floor` in `.github/workflows/release.yml` actually
 runs (it builds the loader only for `x86_64-unknown-linux-gnu` and downloads
 the `native-linux-x86_64` artifact); on a non-x86_64 host, substitute
 `manylinux_2_28_aarch64` and `linux-aarch64` below and register QEMU/binfmt
-first (`--refresh-binfmt` on `build-ffi-linux.sh`, or see "Docker
+first (any `build-ffi-linux.sh` run registers them, or see "Docker
 prerequisites" above), or the containers fail with an exec-format error:
 
 ```bash
