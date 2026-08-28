@@ -1,8 +1,14 @@
-//! Length-delimited framing for RTPS messages carried over TCP.
+//! Framing for RTPS messages carried over TCP.
 //!
-//! Wire format:
-//! `[4B body length, BE][4B magic "INT2"][1B kind][payload]`.
-//! The body length covers magic, kind, and payload (`payload.len() + 5`).
+//! The message goes out unchanged apart from an 8-byte vendor length
+//! submessage inserted right after the 20-byte RTPS header, so the stream
+//! stays a valid sequence of RTPS messages. Its length field covers the whole
+//! message including the RTPS header and the length submessage itself.
+//!
+//! The length submessage is kept in the message handed upwards: a capture and
+//! the bytes RTPS processing sees are then the same thing. The submessage
+//! parser skips an unknown vendor id by its octetsToNextHeader, so nothing
+//! above the transport has to know about it.
 
 use std::io::{self, IoSlice};
 use std::sync::{Arc, Mutex};
@@ -10,14 +16,17 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+use crate::rtps::common::types::{PROTOCOL_RTPS, RTPS_HEADER_LENGTH};
+use crate::rtps::messages::submessage_id::SubmessageId;
+use crate::rtps::messages::traffic_class::carries_builtin_writer;
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 
 pub(crate) const MAX_PAYLOAD_SIZE: usize = 16 * 1024 * 1024;
-const FRAME_MAGIC: [u8; 4] = *b"INT2";
-const MAGIC_SIZE: usize = FRAME_MAGIC.len();
-const KIND_SIZE: usize = 1;
-const BODY_PREFIX_SIZE: usize = MAGIC_SIZE + KIND_SIZE;
-const HEADER_SIZE: usize = 4 + BODY_PREFIX_SIZE;
+const RTPS_HEADER_SIZE: usize = RTPS_HEADER_LENGTH as usize;
+const MSG_LEN_SIZE: usize = 8;
+const STREAM_HEADER_SIZE: usize = RTPS_HEADER_SIZE + MSG_LEN_SIZE;
+const MSG_LEN_FLAGS: u8 = 0x01;
+const MSG_LEN_OCTETS_TO_NEXT_HEADER: u16 = 4;
 const MAX_CACHED_BUFFERS: usize = 16;
 const MAX_CACHED_BUFFER_CAPACITY: usize = 256 * 1024;
 
@@ -92,25 +101,13 @@ impl Drop for PooledBuffer {
     }
 }
 
-/// Routing class carried explicitly by every frame.
+/// Routing class of a frame. The send side picks it per target; the receive
+/// side recovers it from the message content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub(crate) enum TcpFrameKind {
     Discovery = 0x01,
     UserData = 0x02,
-}
-
-impl TcpFrameKind {
-    fn from_wire(value: u8) -> io::Result<Self> {
-        match value {
-            0x01 => Ok(Self::Discovery),
-            0x02 => Ok(Self::UserData),
-            other => Err(transport_io_error(
-                TransportErrorCode::TcpFrameInvalidKind,
-                format!("invalid TCP frame kind: 0x{other:02x}"),
-            )),
-        }
-    }
 }
 
 /// Fully decoded TCP frame. The payload is moved to the RTPS listener channel
@@ -131,26 +128,31 @@ pub(crate) fn validate_payload_size(size: usize) -> io::Result<()> {
     Ok(())
 }
 
-/// Write one complete frame. Vectored I/O avoids concatenating the header and
-/// payload into a second allocation on plaintext TCP.
-pub(crate) async fn write_framed_message<W>(
-    stream: &mut W,
-    kind: TcpFrameKind,
-    payload: &[u8],
-) -> io::Result<()>
+/// Write one complete message. Vectored I/O keeps the synthesized length
+/// submessage from forcing a copy of the caller's message.
+pub(crate) async fn write_framed_message<W>(stream: &mut W, message: &[u8]) -> io::Result<()>
 where
     W: AsyncWrite + Unpin + ?Sized,
 {
-    validate_payload_size(payload.len())?;
+    validate_payload_size(message.len())?;
+    if message.len() < RTPS_HEADER_SIZE {
+        return Err(transport_io_error(
+            TransportErrorCode::TcpFrameInvalidLength,
+            format!("message shorter than an RTPS header: {} bytes", message.len()),
+        ));
+    }
 
-    let body_len = BODY_PREFIX_SIZE + payload.len();
-    let len_bytes = (body_len as u32).to_be_bytes();
-    let kind_bytes = [kind as u8];
+    let total_len = (message.len() + MSG_LEN_SIZE) as u32;
+    let mut msg_len = [0u8; MSG_LEN_SIZE];
+    msg_len[0] = SubmessageId::MSG_LEN.as_u8();
+    msg_len[1] = MSG_LEN_FLAGS;
+    msg_len[2..4].copy_from_slice(&MSG_LEN_OCTETS_TO_NEXT_HEADER.to_le_bytes());
+    msg_len[4..].copy_from_slice(&total_len.to_le_bytes());
+
     let mut bufs = [
-        IoSlice::new(&len_bytes),
-        IoSlice::new(&FRAME_MAGIC),
-        IoSlice::new(&kind_bytes),
-        IoSlice::new(payload),
+        IoSlice::new(&message[..RTPS_HEADER_SIZE]),
+        IoSlice::new(&msg_len),
+        IoSlice::new(&message[RTPS_HEADER_SIZE..]),
     ];
     let mut slices: &mut [IoSlice<'_>] = &mut bufs;
     while !slices.is_empty() {
@@ -192,41 +194,86 @@ async fn read_framed_message_inner<R>(
 where
     R: AsyncRead + Unpin + ?Sized,
 {
-    let mut header = [0u8; HEADER_SIZE];
-    stream.read_exact(&mut header).await?;
+    let mut prefix = [0u8; STREAM_HEADER_SIZE];
+    stream.read_exact(&mut prefix).await?;
 
-    let body_len = u32::from_be_bytes(header[..4].try_into().expect("four-byte length")) as usize;
-    if body_len < BODY_PREFIX_SIZE {
-        return Err(transport_io_error(
-            TransportErrorCode::TcpFrameInvalidLength,
-            format!("frame body too short: {body_len} bytes (minimum {BODY_PREFIX_SIZE})"),
-        ));
-    }
-
-    let payload_len = body_len - BODY_PREFIX_SIZE;
-    validate_payload_size(payload_len)?;
-
-    if header[4..8] != FRAME_MAGIC {
+    if prefix[..PROTOCOL_RTPS.len()] != PROTOCOL_RTPS {
         return Err(transport_io_error(
             TransportErrorCode::TcpFrameInvalidMagic,
-            format!("invalid TCP frame magic: {:02x?}", &header[4..8]),
+            format!("stream is not RTPS: {:02x?}", &prefix[..PROTOCOL_RTPS.len()]),
         ));
     }
-    let kind = TcpFrameKind::from_wire(header[8])?;
+    if prefix[RTPS_HEADER_SIZE] != SubmessageId::MSG_LEN.as_u8() {
+        return Err(transport_io_error(
+            TransportErrorCode::TcpFrameMissingMsgLen,
+            format!("leading submessage is 0x{:02x}", prefix[RTPS_HEADER_SIZE]),
+        ));
+    }
+
+    let length_bytes: [u8; 4] =
+        prefix[RTPS_HEADER_SIZE + 4..].try_into().expect("four-byte length");
+    let total_len = if prefix[RTPS_HEADER_SIZE + 1] & 0x01 != 0 {
+        u32::from_le_bytes(length_bytes)
+    } else {
+        u32::from_be_bytes(length_bytes)
+    } as usize;
+    if total_len < STREAM_HEADER_SIZE {
+        return Err(transport_io_error(
+            TransportErrorCode::TcpFrameInvalidLength,
+            format!("message too short: {total_len} bytes (minimum {STREAM_HEADER_SIZE})"),
+        ));
+    }
+    validate_payload_size(total_len - MSG_LEN_SIZE)?;
 
     let payload = match pool {
         Some(pool) => {
-            let mut owner = pool.take_owner(payload_len);
-            stream.read_exact(&mut owner.data).await?;
+            let mut owner = pool.take_owner(total_len);
+            owner.data[..STREAM_HEADER_SIZE].copy_from_slice(&prefix);
+            stream.read_exact(&mut owner.data[STREAM_HEADER_SIZE..]).await?;
             Bytes::from_owner(owner)
         }
         None => {
-            let mut payload = vec![0u8; payload_len];
-            stream.read_exact(&mut payload).await?;
-            Bytes::from(payload)
+            let mut message = vec![0u8; total_len];
+            message[..STREAM_HEADER_SIZE].copy_from_slice(&prefix);
+            stream.read_exact(&mut message[STREAM_HEADER_SIZE..]).await?;
+            Bytes::from(message)
         }
     };
+
+    let kind = if carries_builtin_writer(&payload) {
+        TcpFrameKind::Discovery
+    } else {
+        TcpFrameKind::UserData
+    };
     Ok(TcpFrame { kind, payload })
+}
+
+/// Builds a minimal RTPS message carrying a single DATA submessage whose
+/// `writerId` has the given entity kind.
+#[cfg(test)]
+pub(crate) fn test_message(writer_kind: u8, payload: &[u8]) -> Vec<u8> {
+    let mut message = vec![0u8; RTPS_HEADER_SIZE];
+    message[..PROTOCOL_RTPS.len()].copy_from_slice(&PROTOCOL_RTPS);
+    message.extend_from_slice(&[SubmessageId::DATA.as_u8(), 0x01]);
+    message.extend_from_slice(&((20 + payload.len()) as u16).to_le_bytes());
+    message.extend_from_slice(&[0, 0, 16, 0]); // extraFlags, octetsToInlineQos
+    message.extend_from_slice(&[0, 0, 0, 0]); // readerId
+    message.extend_from_slice(&[0, 1, 0, writer_kind]);
+    message.extend_from_slice(&[0; 8]); // writerSN
+    message.extend_from_slice(payload);
+    message
+}
+
+/// Wraps a message the way the wire carries it, for tests that compare against
+/// what a listener hands out.
+#[cfg(test)]
+pub(crate) fn test_framed(message: &[u8]) -> Vec<u8> {
+    let mut framed = Vec::from(&message[..RTPS_HEADER_SIZE]);
+    framed.extend_from_slice(&[SubmessageId::MSG_LEN.as_u8(), MSG_LEN_FLAGS]);
+    framed.extend_from_slice(&MSG_LEN_OCTETS_TO_NEXT_HEADER.to_le_bytes());
+    framed.extend_from_slice(&((message.len() + MSG_LEN_SIZE) as u32).to_le_bytes());
+    framed.extend_from_slice(&message[RTPS_HEADER_SIZE..]);
+    framed
 }
 
 #[cfg(test)]
@@ -234,73 +281,105 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
+    const BUILTIN_WRITER: u8 = 0xC2;
+    const USER_WRITER: u8 = 0x02;
+
     #[tokio::test]
-    async fn round_trip_both_kinds() {
-        for kind in [TcpFrameKind::Discovery, TcpFrameKind::UserData] {
+    async fn round_trip_recovers_the_kind_from_the_message() {
+        for (writer_kind, expected) in
+            [(BUILTIN_WRITER, TcpFrameKind::Discovery), (USER_WRITER, TcpFrameKind::UserData)]
+        {
+            let message = test_message(writer_kind, b"payload");
             let mut wire = Vec::new();
-            write_framed_message(&mut wire, kind, b"RTPS-payload").await.unwrap();
+            write_framed_message(&mut wire, &message).await.unwrap();
 
-            assert_eq!(&wire[..4], &(5u32 + 12).to_be_bytes());
-            assert_eq!(&wire[4..8], b"INT2");
-            assert_eq!(wire[8], kind as u8);
+            assert_eq!(&wire[..RTPS_HEADER_SIZE], &message[..RTPS_HEADER_SIZE]);
+            assert_eq!(wire[RTPS_HEADER_SIZE], SubmessageId::MSG_LEN.as_u8());
+            assert_eq!(wire[RTPS_HEADER_SIZE + 1], MSG_LEN_FLAGS);
+            assert_eq!(&wire[RTPS_HEADER_SIZE + 2..RTPS_HEADER_SIZE + 4], &4u16.to_le_bytes());
+            assert_eq!(
+                &wire[RTPS_HEADER_SIZE + 4..STREAM_HEADER_SIZE],
+                &((message.len() + MSG_LEN_SIZE) as u32).to_le_bytes()
+            );
+            assert_eq!(wire.len(), message.len() + MSG_LEN_SIZE);
 
-            let frame = read_framed_message(&mut Cursor::new(wire)).await.unwrap();
-            assert_eq!(frame.kind, kind);
-            assert_eq!(frame.payload.as_ref(), b"RTPS-payload");
+            let frame = read_framed_message(&mut Cursor::new(wire.clone())).await.unwrap();
+            assert_eq!(frame.kind, expected);
+            // The length submessage stays in what RTPS processing receives.
+            assert_eq!(frame.payload.as_ref(), wire.as_slice());
         }
     }
 
     #[tokio::test]
-    async fn interleaved_kinds_keep_stream_boundaries() {
+    async fn interleaved_messages_keep_stream_boundaries() {
         let messages = [
-            (TcpFrameKind::Discovery, b"one".as_slice()),
-            (TcpFrameKind::UserData, b"two".as_slice()),
-            (TcpFrameKind::Discovery, b"three".as_slice()),
+            test_message(BUILTIN_WRITER, b"one"),
+            test_message(USER_WRITER, b"two"),
+            test_message(BUILTIN_WRITER, b"three"),
         ];
         let mut wire = Vec::new();
-        for (kind, payload) in messages {
-            write_framed_message(&mut wire, kind, payload).await.unwrap();
+        for message in &messages {
+            write_framed_message(&mut wire, message).await.unwrap();
         }
 
         let mut cursor = Cursor::new(wire);
-        for (kind, payload) in messages {
+        for message in &messages {
             let frame = read_framed_message(&mut cursor).await.unwrap();
-            assert_eq!(frame.kind, kind);
-            assert_eq!(frame.payload.as_ref(), payload);
+            assert_eq!(frame.payload.as_ref(), test_framed(message).as_slice());
         }
     }
 
     #[tokio::test]
-    async fn rejects_invalid_magic_kind_and_length() {
-        let cases = [
-            [0, 0, 0, 5, b'B', b'A', b'D', b'!', 1],
-            [0, 0, 0, 5, b'I', b'N', b'T', b'2', 0xff],
-            [0, 0, 0, 4, b'I', b'N', b'T', b'2', 1],
-        ];
-        for wire in cases {
-            assert!(read_framed_message(&mut Cursor::new(wire)).await.is_err());
-        }
+    async fn a_big_endian_length_submessage_is_accepted() {
+        let message = test_message(USER_WRITER, b"payload");
+        let mut wire = Vec::new();
+        write_framed_message(&mut wire, &message).await.unwrap();
+        wire[RTPS_HEADER_SIZE + 1] = 0x00;
+        wire[RTPS_HEADER_SIZE + 2..RTPS_HEADER_SIZE + 4].copy_from_slice(&4u16.to_be_bytes());
+        let total_len = (message.len() + MSG_LEN_SIZE) as u32;
+        wire[RTPS_HEADER_SIZE + 4..STREAM_HEADER_SIZE].copy_from_slice(&total_len.to_be_bytes());
+
+        let frame = read_framed_message(&mut Cursor::new(wire.clone())).await.unwrap();
+        assert_eq!(frame.payload.as_ref(), wire.as_slice());
     }
 
     #[tokio::test]
-    async fn payload_limit_is_consistent_on_write_and_read() {
-        let oversized = vec![0u8; MAX_PAYLOAD_SIZE + 1];
-        assert!(write_framed_message(&mut Vec::new(), TcpFrameKind::UserData, &oversized)
-            .await
-            .is_err());
+    async fn rejects_a_foreign_stream_and_a_broken_length() {
+        let message = test_message(USER_WRITER, b"payload");
+        let framed = |mutate: fn(&mut Vec<u8>)| async move {
+            let mut wire = Vec::new();
+            write_framed_message(&mut wire, &test_message(USER_WRITER, b"payload")).await.unwrap();
+            mutate(&mut wire);
+            read_framed_message(&mut Cursor::new(wire)).await
+        };
 
-        let body_len = BODY_PREFIX_SIZE + oversized.len();
-        let mut header = Vec::from((body_len as u32).to_be_bytes());
-        header.extend_from_slice(&FRAME_MAGIC);
-        header.push(TcpFrameKind::UserData as u8);
-        assert!(read_framed_message(&mut Cursor::new(header)).await.is_err());
+        assert!(framed(|wire| wire[0] = b'X').await.is_err());
+        assert!(framed(|wire| wire[RTPS_HEADER_SIZE] = SubmessageId::DATA.as_u8()).await.is_err());
+        assert!(framed(|wire| {
+            wire[RTPS_HEADER_SIZE + 4..RTPS_HEADER_SIZE + 8].copy_from_slice(&1u32.to_le_bytes())
+        })
+        .await
+        .is_err());
+        assert!(read_framed_message(&mut Cursor::new(message)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn message_limit_is_consistent_on_write_and_read() {
+        let oversized = test_message(USER_WRITER, &vec![0u8; MAX_PAYLOAD_SIZE]);
+        assert!(write_framed_message(&mut Vec::new(), &oversized).await.is_err());
+
+        let mut prefix = Vec::from(&oversized[..RTPS_HEADER_SIZE]);
+        prefix.extend_from_slice(&[SubmessageId::MSG_LEN.as_u8(), MSG_LEN_FLAGS]);
+        prefix.extend_from_slice(&4u16.to_le_bytes());
+        prefix.extend_from_slice(&((oversized.len() + MSG_LEN_SIZE) as u32).to_le_bytes());
+        assert!(read_framed_message(&mut Cursor::new(prefix)).await.is_err());
     }
 
     #[tokio::test]
     async fn pooled_payload_returns_after_last_bytes_clone_drops() {
         let pool = TcpBufferPool::new();
         let mut wire = Vec::new();
-        write_framed_message(&mut wire, TcpFrameKind::UserData, b"pooled").await.unwrap();
+        write_framed_message(&mut wire, &test_message(USER_WRITER, b"pooled")).await.unwrap();
         let frame = read_framed_message_pooled(&mut Cursor::new(wire), &pool).await.unwrap();
         let clone = frame.payload.clone();
         drop(frame);

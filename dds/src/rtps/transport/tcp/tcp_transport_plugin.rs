@@ -434,6 +434,11 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
 
+    use crate::rtps::transport::tcp::framing::{test_framed, test_message};
+
+    const BUILTIN_WRITER: u8 = 0xC2;
+    const USER_WRITER: u8 = 0x02;
+
     /// Keep domain IDs unique across tests to avoid port collisions when
     /// the test suite runs in parallel.
     fn next_test_domain() -> u32 {
@@ -616,13 +621,13 @@ mod tests {
             receiver.advertised_default_unicast_locators().into_iter().next().expect("locator");
         assert_eq!(loc.port(), recv_port as u32);
 
-        let rtps: &[u8] = b"RTPS\x02\x04\x00\x00\x01\x02\x03\x04\x05\x06\x07\x08";
-        sender.send(rtps, &SendTarget::UserData(&loc)).expect("send");
+        let rtps = test_message(USER_WRITER, b"payload");
+        sender.send(&rtps, &SendTarget::UserData(&loc)).expect("send");
 
         let msg = rx
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("receiver got frame despite pid mismatch");
-        assert_eq!(&msg.data[..rtps.len()], rtps);
+        assert_eq!(msg.data.as_ref(), test_framed(&rtps).as_slice());
 
         sender.close();
         receiver.close();
@@ -673,15 +678,17 @@ mod tests {
         };
         let locator = Locator::from_tcp_v4(Ipv4Addr::LOCALHOST, receiver.listener_port as u32);
 
-        sender.send(b"discovery", &SendTarget::SEDPDiscovery(&locator)).unwrap();
-        sender.send(b"user", &SendTarget::UserData(&locator)).unwrap();
+        let discovery = test_message(BUILTIN_WRITER, b"discovery");
+        let user = test_message(USER_WRITER, b"user");
+        sender.send(&discovery, &SendTarget::SEDPDiscovery(&locator)).unwrap();
+        sender.send(&user, &SendTarget::UserData(&locator)).unwrap();
         assert_eq!(
             discovery_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap().data.as_ref(),
-            b"discovery"
+            test_framed(&discovery).as_slice()
         );
         assert_eq!(
             user_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap().data.as_ref(),
-            b"user"
+            test_framed(&user).as_slice()
         );
         assert_eq!(sender.sender.connection_count(), 2);
         assert_eq!(

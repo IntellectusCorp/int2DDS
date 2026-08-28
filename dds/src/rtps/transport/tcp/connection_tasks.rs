@@ -114,7 +114,7 @@ pub(crate) async fn writer_task(
             if cancel.is_cancelled() {
                 return Ok(());
             }
-            write_framed_message(&mut write_half, frame.kind, &frame.payload).await?;
+            write_framed_message(&mut write_half, &frame.payload).await?;
         }
 
         loop {
@@ -127,8 +127,7 @@ pub(crate) async fn writer_task(
             };
 
             let started = Instant::now();
-            write_framed_message(&mut write_half, command.frame.kind, &command.frame.payload)
-                .await?;
+            write_framed_message(&mut write_half, &command.frame.payload).await?;
             if send_deadline.is_some_and(|deadline| started.elapsed() <= deadline) {
                 health.on_success();
             }

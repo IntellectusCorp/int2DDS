@@ -54,8 +54,8 @@ pub enum TransportErrorCode {
     TcpFrameTooLarge = 741,
     /// Frame length field was zero or otherwise invalid.
     TcpFrameInvalidLength = 742,
-    /// Frame kind is neither discovery nor user data.
-    TcpFrameInvalidKind = 743,
+    /// The submessage following the RTPS header is not the vendor length submessage.
+    TcpFrameMissingMsgLen = 743,
 
     // ── 760: TCP internal channel ───────────────────────────────────────
     /// Internal channel (discovery or user-data) is full; message dropped.
@@ -101,7 +101,7 @@ impl TransportErrorCode {
             Self::TcpFrameInvalidMagic
             | Self::TcpFrameTooLarge
             | Self::TcpFrameInvalidLength
-            | Self::TcpFrameInvalidKind => io::ErrorKind::InvalidData,
+            | Self::TcpFrameMissingMsgLen => io::ErrorKind::InvalidData,
 
             Self::TcpChannelFull | Self::TcpConnectBufferFull => io::ErrorKind::WouldBlock,
 
@@ -127,7 +127,7 @@ impl TransportErrorCode {
             Self::TcpFrameInvalidMagic => "TCP frame invalid magic",
             Self::TcpFrameTooLarge => "TCP frame too large",
             Self::TcpFrameInvalidLength => "TCP frame invalid length",
-            Self::TcpFrameInvalidKind => "TCP frame invalid kind",
+            Self::TcpFrameMissingMsgLen => "TCP frame missing length submessage",
 
             Self::TcpChannelFull => "TCP internal channel full",
             Self::TcpConnectBufferFull => "TCP connect-window buffer full",

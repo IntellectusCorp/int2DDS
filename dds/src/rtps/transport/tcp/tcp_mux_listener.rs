@@ -194,7 +194,10 @@ async fn prepare_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rtps::transport::tcp::framing::{write_framed_message, TcpFrameKind};
+    use crate::rtps::transport::tcp::framing::{test_framed, test_message, write_framed_message};
+
+    const BUILTIN_WRITER: u8 = 0xC2;
+    const USER_WRITER: u8 = 0x02;
 
     fn listener(
         timeout: Duration,
@@ -233,11 +236,19 @@ mod tests {
     async fn one_reader_routes_interleaved_kinds() {
         let (listener, discovery_rx, user_rx) = listener(Duration::from_secs(1));
         let mut client = TcpStream::connect(("127.0.0.1", listener.port())).await.unwrap();
-        write_framed_message(&mut client, TcpFrameKind::UserData, b"user").await.unwrap();
-        write_framed_message(&mut client, TcpFrameKind::Discovery, b"discovery").await.unwrap();
+        let user = test_message(USER_WRITER, b"user");
+        let discovery = test_message(BUILTIN_WRITER, b"discovery");
+        write_framed_message(&mut client, &user).await.unwrap();
+        write_framed_message(&mut client, &discovery).await.unwrap();
 
-        assert_eq!(user_rx.recv_async().await.unwrap().data.as_ref(), b"user");
-        assert_eq!(discovery_rx.recv_async().await.unwrap().data.as_ref(), b"discovery");
+        assert_eq!(
+            user_rx.recv_async().await.unwrap().data.as_ref(),
+            test_framed(&user).as_slice()
+        );
+        assert_eq!(
+            discovery_rx.recv_async().await.unwrap().data.as_ref(),
+            test_framed(&discovery).as_slice()
+        );
         listener.shutdown().await;
     }
 
@@ -247,13 +258,25 @@ mod tests {
         let mut discovery = TcpStream::connect(("127.0.0.1", listener.port())).await.unwrap();
         let mut user = TcpStream::connect(("127.0.0.1", listener.port())).await.unwrap();
 
-        write_framed_message(&mut discovery, TcpFrameKind::Discovery, b"first").await.unwrap();
-        write_framed_message(&mut discovery, TcpFrameKind::Discovery, b"blocked").await.unwrap();
-        write_framed_message(&mut user, TcpFrameKind::UserData, b"independent").await.unwrap();
+        let first = test_message(BUILTIN_WRITER, b"first");
+        let blocked = test_message(BUILTIN_WRITER, b"blocked");
+        let independent = test_message(USER_WRITER, b"independent");
+        write_framed_message(&mut discovery, &first).await.unwrap();
+        write_framed_message(&mut discovery, &blocked).await.unwrap();
+        write_framed_message(&mut user, &independent).await.unwrap();
 
-        assert_eq!(user_rx.recv_async().await.unwrap().data.as_ref(), b"independent");
-        assert_eq!(discovery_rx.recv_async().await.unwrap().data.as_ref(), b"first");
-        assert_eq!(discovery_rx.recv_async().await.unwrap().data.as_ref(), b"blocked");
+        assert_eq!(
+            user_rx.recv_async().await.unwrap().data.as_ref(),
+            test_framed(&independent).as_slice()
+        );
+        assert_eq!(
+            discovery_rx.recv_async().await.unwrap().data.as_ref(),
+            test_framed(&first).as_slice()
+        );
+        assert_eq!(
+            discovery_rx.recv_async().await.unwrap().data.as_ref(),
+            test_framed(&blocked).as_slice()
+        );
         listener.shutdown().await;
     }
 
