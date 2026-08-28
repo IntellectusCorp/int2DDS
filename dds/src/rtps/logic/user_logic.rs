@@ -1749,6 +1749,11 @@ impl UserLogic {
             if !reader_proxy.is_reliable() {
                 continue;
             }
+            // A reader that is already caught up needs no heartbeat. Without this one
+            // unresponsive reader keeps the writer heartbeating every matched participant.
+            if !reader_proxy.unacked_changes(&history_cache) {
+                continue;
+            }
             let participant_guid_prefix = reader_proxy.remote_reader_guid().prefix();
             participant_locators
                 .entry(participant_guid_prefix)
