@@ -19,6 +19,12 @@
     ring crypto crate builds the same way it would on real
     hardware. This is slower than cross-linking but reliable.
 
+    All selected targets build CONCURRENTLY as background jobs (-Jobs throttles
+    it). They share only the bind-mounted source tree; each writes to its own
+    ffi/dist/<arch> subdir with a container-local CARGO_TARGET_DIR, so nothing
+    races. Five interleaved live build logs would be unreadable, so each target
+    streams to ffi/dist/logs/<arch>.log and only start/finish lines are printed.
+
     Every run is a CLEAN build: ffi/dist is wiped first and the in-container
     Cargo target dir is ephemeral, so nothing is cached between runs.
 
@@ -41,7 +47,8 @@
 
 .NOTES
     arm64/armhf builds run under emulation and can take many minutes each
-    (ring compiles slowly under QEMU). This is expected.
+    (ring compiles slowly under QEMU). This is expected. Because targets run
+    concurrently the wall clock is the slowest single target, not the sum.
 
 .EXAMPLE
     .\ffi\docker\build-ffi-linux.ps1
@@ -51,6 +58,9 @@
 
 .EXAMPLE
     .\ffi\docker\build-ffi-linux.ps1 -NoPackage   # build only, skip the tarball
+
+.EXAMPLE
+    .\ffi\docker\build-ffi-linux.ps1 -Jobs 1      # sequential, easier to watch
 #>
 [CmdletBinding()]
 param(
@@ -59,6 +69,8 @@ param(
     [string[]]$Only,
     # Skip assembling the .tar.gz distribution archive.
     [switch]$NoPackage,
+    # Build at most this many targets concurrently. 0 = all of them at once.
+    [int]$Jobs = 0,
     # tonistiigi/binfmt QEMU tag to register. PINNED, not :latest -- see the
     # binfmt section below before changing it.
     [string]$QemuVersion = "v8.1.5"
@@ -150,51 +162,109 @@ if (Test-Path $DistRoot) {
 }
 New-Item -ItemType Directory -Force -Path $DistRoot | Out-Null
 
-$results = @()
-$i = 0
-foreach ($t in $Targets) {
-    $i++
-    $plat = $t.Platform
-    $dist = $t.Dist
-    $tag  = "int2dds-ffi-builder:$dist"
+# One target's whole job: build its image, compile in it, locate the artifact.
+# Runs as a background job, so it cannot touch the caller's variables -- every
+# input arrives through -ArgumentList and the outcome comes back as the single
+# object it returns. All docker chatter goes to the target's own log file;
+# returning it instead would interleave five builds into one unreadable stream.
+$targetJob = {
+    param($Plat, $Dist, $DockerFile, $Base, $RustVersion, $ScriptRoot, $RepoRoot, $DistRoot, $CargoJobs, $LogPath)
 
-    Write-Host "`n===== [$i/$($Targets.Count)] $plat -> ffi/dist/$dist =====" -ForegroundColor Cyan
+    # BuildKit writes progress to stderr; without this PowerShell would wrap each
+    # line as a terminating error. Success is gated on the exit code instead.
+    $ErrorActionPreference = "Continue"
 
-    $df = Join-Path $PSScriptRoot $t.File
+    $tag = "int2dds-ffi-builder:$Dist"
+    $df  = Join-Path $ScriptRoot $DockerFile
+    $fail = { param($m) [pscustomobject]@{ Dist = $Dist; Ok = $false; Message = $m } }
 
     # manylinux names its image per arch, so the gnu x86_64/aarch64 targets pass
     # BASE_IMAGE. The armhf and musl Dockerfiles pin their own FROM and take none.
     $buildArgs = @("--build-arg", "RUST_VERSION=$RustVersion")
-    if ($t.Base) { $buildArgs += @("--build-arg", "BASE_IMAGE=$($t.Base)") }
+    if ($Base) { $buildArgs += @("--build-arg", "BASE_IMAGE=$Base") }
 
-    # Build the per-platform toolchain image (layers cached after first run).
-    Write-Host "[build image] $tag  (from $($t.File))" -ForegroundColor DarkCyan
-    Invoke-Native -What "docker build ($plat)" -Cmd {
-        docker build --platform $plat @buildArgs -t $tag -f $df $PSScriptRoot
-    }
+    "===== $Plat -> ffi/dist/$Dist =====" | Out-File -FilePath $LogPath -Encoding utf8
+    "[build image] $tag  (from $DockerFile)" | Out-File -FilePath $LogPath -Append -Encoding utf8
+    docker build --platform $Plat @buildArgs -t $tag -f $df $ScriptRoot *>&1 |
+        Out-File -FilePath $LogPath -Append -Encoding utf8
+    if ($LASTEXITCODE -ne 0) { return (& $fail "docker build failed (exit $LASTEXITCODE)") }
 
-    # Clean compile inside the container (ephemeral target dir).
-    Write-Host "[compile] $plat (this may take a while under emulation)" -ForegroundColor DarkCyan
-    Invoke-Native -What "container build ($plat / $dist)" -Cmd {
-        docker run --rm --platform $plat `
-            -v "${RepoRoot}:/src" `
-            -e "DIST=$dist" `
-            $tag
-    }
+    "[compile] $Plat (this may take a while under emulation)" | Out-File -FilePath $LogPath -Append -Encoding utf8
+    docker run --rm --platform $Plat `
+        -v "${RepoRoot}:/src" `
+        -e "DIST=$Dist" `
+        -e "CARGO_BUILD_JOBS=$CargoJobs" `
+        $tag *>&1 | Out-File -FilePath $LogPath -Append -Encoding utf8
+    if ($LASTEXITCODE -ne 0) { return (& $fail "container build failed (exit $LASTEXITCODE)") }
 
     # The container now emits a versioned layout: libint2dds_ffi.so.<ver> (real),
     # libint2dds_ffi.so.<major> and libint2dds_ffi.so (soname/dev symlinks).
-    $soLink = Join-Path $DistRoot "$dist\libint2dds_ffi.so"
-    if (-not (Test-Path $soLink)) { throw "Artifact missing for $plat at $soLink" }
+    $soLink = Join-Path $DistRoot "$Dist\libint2dds_ffi.so"
+    if (-not (Test-Path $soLink)) { return (& $fail "artifact missing at $soLink") }
     # Real file is the largest libint2dds_ffi.so.* (the symlinks are tiny).
-    $real = Get-ChildItem (Join-Path $DistRoot $dist) -Filter 'libint2dds_ffi.so.*' |
+    $real = Get-ChildItem (Join-Path $DistRoot $Dist) -Filter 'libint2dds_ffi.so.*' |
             Sort-Object Length -Descending | Select-Object -First 1
-    $results += [pscustomobject]@{
-        Platform = $plat
-        Output   = "ffi/dist/$dist/$($real.Name)"
-        SizeMB   = if ($real) { [math]::Round($real.Length / 1MB, 2) } else { 0 }
+    if (-not $real) { return (& $fail "no real .so under ffi/dist/$Dist") }
+
+    [pscustomobject]@{
+        Dist     = $Dist
+        Ok       = $true
+        Message  = ""
+        Platform = $Plat
+        Output   = "ffi/dist/$Dist/$($real.Name)"
+        SizeMB   = [math]::Round($real.Length / 1MB, 2)
     }
 }
+
+$LogDir = Join-Path $DistRoot "logs"
+New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+
+$maxJobs = if ($Jobs -gt 0) { [math]::Min($Jobs, $Targets.Count) } else { $Targets.Count }
+
+# Cap each container's rustc fan-out. Cargo otherwise defaults to one job per
+# host CPU *in every container at once*, so N concurrent targets oversubscribe
+# the machine N-fold; rustc peaks near 1 GB per process, so on a wide box that is
+# an OOM waiting to happen rather than a speed-up.
+$cargoJobs = [math]::Max(2, [int][math]::Floor([Environment]::ProcessorCount / $maxJobs))
+
+Write-Host "`nBuilding $($Targets.Count) target(s), up to $maxJobs at a time, $cargoJobs cargo job(s) each" -ForegroundColor Cyan
+Write-Host "Logs      : ffi/dist/logs/<target>.log"
+
+$running = @()
+foreach ($t in $Targets) {
+    # Throttle to $maxJobs concurrent targets. Only our own jobs are counted --
+    # the session may hold unrelated ones.
+    while (@($running | Where-Object { $_.State -eq 'Running' }).Count -ge $maxJobs) {
+        Start-Sleep -Seconds 2
+    }
+    Write-Host "  start    $($t.Dist)" -ForegroundColor DarkCyan
+    $running += Start-Job -ScriptBlock $targetJob -ArgumentList @(
+        $t.Platform, $t.Dist, $t.File, $t.Base, $RustVersion,
+        $PSScriptRoot, $RepoRoot, $DistRoot, $cargoJobs,
+        (Join-Path $LogDir "$($t.Dist).log")
+    )
+}
+
+$null = Wait-Job -Job $running
+$outcomes = @($running | ForEach-Object { Receive-Job -Job $_ })
+Remove-Job -Job $running
+
+foreach ($o in $outcomes) {
+    if ($o.Ok) { Write-Host "  ok       $($o.Dist)" -ForegroundColor DarkGreen }
+    else       { Write-Host "  FAILED   $($o.Dist) - $($o.Message)" -ForegroundColor Red }
+}
+
+$failed = @($outcomes | Where-Object { -not $_.Ok })
+if ($failed) {
+    foreach ($f in $failed) {
+        $log = Join-Path $LogDir "$($f.Dist).log"
+        Write-Host "`n===== FAILED: $($f.Dist) - last 40 lines of ffi/dist/logs/$($f.Dist).log =====" -ForegroundColor Red
+        if (Test-Path $log) { Get-Content $log -Tail 40 } else { Write-Host "(no log written)" }
+    }
+    throw "build failed for: $(($failed.Dist) -join ', ')"
+}
+
+$results = $outcomes | Select-Object Platform, Output, SizeMB
 
 Write-Host "`n===== DONE — all targets built =====" -ForegroundColor Green
 $results | Format-Table -AutoSize

@@ -31,6 +31,10 @@ WORKDIR /src
 ENV DIST=unknown \
     CARGO_TARGET_DIR=/tmp/cargo-target
 
+# `--locked` is not just hygiene: every target now builds concurrently against
+# the same bind-mounted /src, and a cargo run that decides to refresh
+# Cargo.lock would have several containers rewriting one host file at once.
+# --locked makes that write impossible and fails loudly on a stale lock.
 # Same emitted layout as the manylinux Dockerfile, so build-ffi-linux.ps1's
 # artifact checks work unchanged. No `pipefail`: diagnostic pipes raise SIGPIPE
 # under QEMU and would be mistaken for a build failure (exit 141).
@@ -38,7 +42,7 @@ CMD ["bash", "-lc", "\
     set -eu; \
     echo \"== platform: $(uname -m)  ->  dist/$DIST ==\"; \
     ldd --version | head -1 || true; rustc -vV | grep host || true; \
-    cargo build --release -p int2dds-ffi; \
+    cargo build --locked --release -p int2dds-ffi; \
     ver=$(grep -m1 '^version' /src/Cargo.toml | cut -d'\"' -f2); \
     maj=${ver%%.*}; \
     real=libint2dds_ffi.so.$ver; son=libint2dds_ffi.so.$maj; \

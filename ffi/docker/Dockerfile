@@ -46,6 +46,10 @@ WORKDIR /src
 ENV DIST=unknown \
     CARGO_TARGET_DIR=/tmp/cargo-target
 
+# `--locked` is not just hygiene: every target now builds concurrently against
+# the same bind-mounted /src, and a cargo run that decides to refresh
+# Cargo.lock would have several containers rewriting one host file at once.
+# --locked makes that write impossible and fails loudly on a stale lock.
 # NOTE: no `pipefail` — diagnostic pipes like `ldd | head` raise SIGPIPE under
 # QEMU (head closes the pipe before the slow emulated writer finishes), which
 # pipefail would wrongly treat as a build failure (exit 141). `set -eu` still
@@ -60,7 +64,7 @@ CMD ["bash", "-lc", "\
     set -eu; \
     echo \"== platform: $(uname -m)  ->  dist/$DIST ==\"; \
     ldd --version | head -1 || true; rustc -vV | grep host || true; \
-    cargo build --release -p int2dds-ffi; \
+    cargo build --locked --release -p int2dds-ffi; \
     ver=$(grep -m1 '^version' /src/Cargo.toml | cut -d'\"' -f2); \
     maj=${ver%%.*}; \
     real=libint2dds_ffi.so.$ver; son=libint2dds_ffi.so.$maj; \

@@ -35,6 +35,10 @@ RUN rustup-init -y --no-modify-path --profile minimal --default-toolchain ${RUST
 
 WORKDIR /src
 
+# `--locked` is not just hygiene: every target now builds concurrently against
+# the same bind-mounted /src, and a cargo run that decides to refresh
+# Cargo.lock would have several containers rewriting one host file at once.
+# --locked makes that write impossible and fails loudly on a stale lock.
 # Native musl build: no --target needed (the host IS *-linux-musl). RUSTFLAGS
 # (crt-static off) makes a cdylib .so come out, dynamically linked to musl.
 CMD ["bash", "-lc", "\
@@ -42,7 +46,7 @@ CMD ["bash", "-lc", "\
     export PATH=/usr/local/cargo/bin:$PATH; \
     echo \"== alpine musl: $(uname -m)  ->  dist/$DIST ==\"; \
     rustc -vV | grep host || true; \
-    cargo build --release -p int2dds-ffi; \
+    cargo build --locked --release -p int2dds-ffi; \
     ver=$(grep -m1 '^version' /src/Cargo.toml | cut -d'\"' -f2); \
     maj=${ver%%.*}; \
     real=libint2dds_ffi.so.$ver; son=libint2dds_ffi.so.$maj; \

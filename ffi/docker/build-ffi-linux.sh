@@ -14,6 +14,12 @@
 # host's own arch runs native, the rest run under QEMU emulation, so the
 # ring crypto crate builds exactly as on real hardware.
 #
+# All selected targets build CONCURRENTLY (--jobs to throttle). They share only
+# the bind-mounted source tree, and each writes to its own ffi/dist/<arch>
+# subdir with a container-local CARGO_TARGET_DIR, so nothing races. Because the
+# live logs of five builds would be unreadable interleaved, each target streams
+# to ffi/dist/logs/<arch>.log and only start/finish lines reach the console.
+#
 # Every run is a CLEAN build: ffi/dist is wiped first and the in-container
 # Cargo target dir is ephemeral, so nothing is cached between runs.
 #
@@ -27,8 +33,9 @@
 #       ├── libint2dds_ffi.so.<major> -> libint2dds_ffi.so.<ver>    (soname symlink)
 #       └── libint2dds_ffi.so.<ver>                                 (real file)
 #
-# NOTE: emulated builds are slow (ring under QEMU). Expect ~3 min
-# native, ~15 min arm64, ~23 min armhf.
+# NOTE: emulated builds are slow (ring under QEMU): roughly ~3 min native,
+# ~15 min arm64, ~23 min armhf. Since targets run concurrently the wall clock
+# is the slowest single target, not the sum.
 set -euo pipefail
 
 RUST_VERSION="1.89.0"
@@ -37,6 +44,7 @@ NO_PACKAGE=0
 NO_BINFMT=0
 # QEMU is PINNED, not tracked to :latest -- see the binfmt section for why.
 QEMU_VERSION="v8.1.5"
+JOBS=0          # 0 = "all selected targets at once"; resolved once TARGETS is known
 
 usage() {
   cat <<'USAGE'
@@ -51,6 +59,9 @@ Usage: build-ffi-linux.sh [options]
                        names (linux-x86_64, linux-aarch64-musl, ...).
                        A platform selects both its gnu and musl targets.
   --no-package         Build only; skip the .tar.gz distribution archive.
+  --jobs <n>           Build at most n targets concurrently (default: all of
+                       them at once). --jobs 1 restores the old one-at-a-time
+                       behaviour, which is easier to watch when debugging.
   --no-binfmt          Do not (re-)register QEMU emulators. Use when the
                        privileged binfmt container is unavailable and the
                        emulators are already known good.
@@ -61,6 +72,7 @@ Examples:
   ./ffi/docker/build-ffi-linux.sh
   ./ffi/docker/build-ffi-linux.sh --only linux/arm64
   ./ffi/docker/build-ffi-linux.sh --only linux-x86_64,linux-x86_64-musl --no-package
+  ./ffi/docker/build-ffi-linux.sh --jobs 1     # sequential, easier to watch
 USAGE
 }
 
@@ -85,6 +97,8 @@ while [ $# -gt 0 ]; do
     --qemu-version=*) QEMU_VERSION="${1#*=}"; shift ;;
     --only)           [ $# -ge 2 ] || die "--only needs a value"; split_csv "$2"; shift 2 ;;
     --only=*)         split_csv "${1#*=}"; shift ;;
+    --jobs)           [ $# -ge 2 ] || die "--jobs needs a value"; JOBS="$2"; shift 2 ;;
+    --jobs=*)         JOBS="${1#*=}"; shift ;;
     --no-package)     NO_PACKAGE=1; shift ;;
     --no-binfmt)      NO_BINFMT=1; shift ;;
     --refresh-binfmt) shift ;;   # kept for compatibility; refreshing is the default now
@@ -123,6 +137,12 @@ for entry in $ALL_TARGETS; do
   fi
 done
 [ ${#TARGETS[@]} -gt 0 ] || die "No targets selected (check --only values)."
+
+case "$JOBS" in
+  ''|*[!0-9]*) die "--jobs must be a non-negative integer (got '$JOBS')." ;;
+esac
+[ "$JOBS" -gt 0 ] || JOBS=${#TARGETS[@]}
+[ "$JOBS" -le ${#TARGETS[@]} ] || JOBS=${#TARGETS[@]}
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -239,9 +259,13 @@ fi
 # --- helpers ----------------------------------------------------------------
 # Containers run as root, so artifacts land root-owned on Linux bind mounts.
 # Hand them back to the invoking user; otherwise the next run cannot wipe them.
-fix_ownership() {  # $1 = image tag, $2 = docker platform
+# Runs once over the whole dist root rather than per target: with targets going
+# concurrently a per-target `chown -R` would repeatedly walk directories other
+# containers are still writing into. A native alpine does the walk, so this also
+# works when the target's own builder image never got built.
+fix_ownership() {
   [ "$(uname -s)" = "Linux" ] || return 0
-  docker run --rm --platform "$2" -v "$DIST_ROOT:/d" "$1" \
+  docker run --rm -v "$DIST_ROOT:/d" alpine:3.20 \
     chown -R "$(id -u):$(id -g)" /d >/dev/null 2>&1 || true
 }
 
@@ -262,10 +286,39 @@ fi
 mkdir -p "$DIST_ROOT"
 
 # --- build ------------------------------------------------------------------
-RESULTS=()
-i=0
-for entry in "${TARGETS[@]}"; do
-  i=$((i + 1))
+# Targets run concurrently. The only host paths a container writes are its own
+# ffi/dist/<dist> subdir and the arch-independent ffi/dist/int2dds-ffi.h -- and
+# every container copies that header from the same source file, so the bytes are
+# identical no matter who wins. CARGO_TARGET_DIR lives inside the container and
+# cargo runs --locked, so neither target/ nor Cargo.lock is shared.
+LOG_DIR="$DIST_ROOT/logs"
+mkdir -p "$LOG_DIR"
+
+# Per-target exit status and summary rows are passed back through files: a
+# background job cannot assign to the parent shell, and reading files avoids
+# depending on which order `wait` happens to reap children in.
+STATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/int2dds-build-state.XXXXXX")"
+pkg_script=""
+cleanup() { rm -rf "$STATE_DIR"; [ -n "$pkg_script" ] && rm -f "$pkg_script"; return 0; }
+trap cleanup EXIT
+
+# Cap each container's rustc fan-out. Cargo otherwise defaults to one job per
+# host CPU *in every container at once*, so N concurrent targets oversubscribe
+# the box N-fold; rustc peaks near 1 GB per process, so on a wide machine that
+# is an OOM waiting to happen rather than a speed-up.
+host_cpus="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+CARGO_JOBS=$(( host_cpus / JOBS ))
+[ "$CARGO_JOBS" -ge 2 ] || CARGO_JOBS=2
+
+echo
+echo "Building ${#TARGETS[@]} target(s), up to $JOBS at a time, $CARGO_JOBS cargo job(s) each"
+echo "Logs      : ffi/dist/logs/<target>.log"
+
+# Everything one target needs. All of its output is redirected by the caller,
+# so it prints freely; a non-zero return marks the target failed.
+run_target() {  # $1 = "<plat>|<dist>|<libc>|<dockerfile>|<base>"
+  local entry="$1" plat dist libc dfname base tag df real="" f size_mb
+  local build_args
   IFS='|' read -r plat dist libc dfname base <<< "$entry"
   tag="int2dds-ffi-builder:$dist"
   df="$SCRIPT_DIR/$dfname"
@@ -275,39 +328,85 @@ for entry in "${TARGETS[@]}"; do
   build_args=(--build-arg "RUST_VERSION=$RUST_VERSION")
   [ "$base" = "-" ] || build_args+=(--build-arg "BASE_IMAGE=$base")
 
-  echo
-  echo "===== [$i/${#TARGETS[@]}] $plat -> ffi/dist/$dist ====="
+  echo "===== $plat -> ffi/dist/$dist ====="
 
   # Build the per-platform toolchain image (layers cached after the first run).
   echo "[build image] $tag  (from $dfname)"
   docker build --platform "$plat" "${build_args[@]}" \
     -t "$tag" -f "$df" "$SCRIPT_DIR" \
-    || die "docker build failed for $plat"
+    || { echo "docker build failed for $plat"; return 1; }
 
   # Clean compile inside the container (ephemeral target dir).
   echo "[compile] $plat (this may take a while under emulation)"
   docker run --rm --platform "$plat" \
     -v "$REPO_ROOT:/src" \
     -e "DIST=$dist" \
+    -e "CARGO_BUILD_JOBS=$CARGO_JOBS" \
     "$tag" \
-    || { fix_ownership "$tag" "$plat"; die "container build failed for $plat / $dist"; }
-
-  fix_ownership "$tag" "$plat"
+    || { echo "container build failed for $plat / $dist"; return 1; }
 
   # The container emits libint2dds_ffi.so.<ver> (real) plus the .so.<major> and
   # .so symlinks. Locate the one regular file among them.
   [ -e "$DIST_ROOT/$dist/libint2dds_ffi.so" ] \
-    || die "Artifact missing for $plat at $DIST_ROOT/$dist/libint2dds_ffi.so"
-  real=""
+    || { echo "Artifact missing for $plat at $DIST_ROOT/$dist/libint2dds_ffi.so"; return 1; }
   for f in "$DIST_ROOT/$dist"/libint2dds_ffi.so.*; do
     [ -L "$f" ] && continue
     [ -f "$f" ] && real="$f"
   done
-  [ -n "$real" ] || die "No real .so found under $DIST_ROOT/$dist"
+  [ -n "$real" ] || { echo "No real .so found under $DIST_ROOT/$dist"; return 1; }
 
   size_mb=$(awk -v b="$(file_size "$real")" 'BEGIN{printf "%.2f", b/1048576}')
-  RESULTS[${#RESULTS[@]}]="$plat|ffi/dist/$dist/$(basename "$real")|$size_mb"
+  printf '%s|ffi/dist/%s/%s|%s\n' "$plat" "$dist" "$(basename "$real")" "$size_mb" \
+    > "$STATE_DIR/$dist.result"
+}
+
+# Wrapper that records the status instead of letting `set -e` kill the job, and
+# keeps the console down to two lines per target.
+build_one() {  # $1 = target entry
+  local entry="$1" dist rc=0
+  dist="$(printf '%s' "$entry" | cut -d'|' -f2)"
+  echo "  start    $dist"
+  run_target "$entry" > "$LOG_DIR/$dist.log" 2>&1 || rc=$?
+  echo "$rc" > "$STATE_DIR/$dist.status"
+  if [ "$rc" -eq 0 ]; then
+    echo "  ok       $dist"
+  else
+    echo "  FAILED   $dist (exit $rc)"
+  fi
+}
+
+for entry in "${TARGETS[@]}"; do
+  # Throttle to $JOBS concurrent targets. `jobs -rp` counts only the ones still
+  # running; statuses come from $STATE_DIR, so nothing here needs to reap a
+  # specific child.
+  while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do sleep 2; done
+  build_one "$entry" &
 done
+wait
+
+fix_ownership
+
+RESULTS=()
+FAILED=()
+for entry in "${TARGETS[@]}"; do
+  dist="$(printf '%s' "$entry" | cut -d'|' -f2)"
+  rc="$(cat "$STATE_DIR/$dist.status" 2>/dev/null || echo 1)"
+  if [ "$rc" = "0" ] && [ -f "$STATE_DIR/$dist.result" ]; then
+    RESULTS[${#RESULTS[@]}]="$(cat "$STATE_DIR/$dist.result")"
+  else
+    FAILED[${#FAILED[@]}]="$dist"
+  fi
+done
+
+if [ ${#FAILED[@]} -gt 0 ]; then
+  for dist in "${FAILED[@]}"; do
+    echo >&2
+    echo "===== FAILED: $dist -- last 40 lines of ffi/dist/logs/$dist.log =====" >&2
+    tail -40 "$LOG_DIR/$dist.log" >&2 2>/dev/null || echo "(no log written)" >&2
+  done
+  echo >&2
+  die "build failed for: ${FAILED[*]}"
+fi
 
 echo
 echo "===== DONE — all targets built ====="
@@ -346,8 +445,8 @@ for entry in "${TARGETS[@]}"; do
 done
 pkg_image="int2dds-ffi-builder:$pkg_dist"
 
+# Cleaned up by the EXIT trap installed above.
 pkg_script="$(mktemp "${TMPDIR:-/tmp}/int2dds-pkg-linux.XXXXXX.sh")"
-trap 'rm -f "$pkg_script"' EXIT
 
 cat > "$pkg_script" <<'PKG'
 set -eu
@@ -421,9 +520,9 @@ docker run --rm --platform "$pkg_plat" \
   -e "GIT_COMMIT=$commit" \
   -e "BUILD_DATE=$date_str" \
   "$pkg_image" bash /pkg.sh \
-  || { fix_ownership "$pkg_image" "$pkg_plat"; die "packaging failed"; }
+  || { fix_ownership; die "packaging failed"; }
 
-fix_ownership "$pkg_image" "$pkg_plat"
+fix_ownership
 
 echo
 echo "Archive : ffi/dist/int2dds-ffi-<version>-linux.tar.gz"
