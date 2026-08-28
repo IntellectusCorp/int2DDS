@@ -35,13 +35,17 @@ RUST_VERSION="1.89.0"
 ONLY=()
 NO_PACKAGE=0
 NO_BINFMT=0
-REFRESH_BINFMT=0
+# QEMU is PINNED, not tracked to :latest -- see the binfmt section for why.
+QEMU_VERSION="v8.1.5"
 
 usage() {
   cat <<'USAGE'
 Usage: build-ffi-linux.sh [options]
 
   --rust-version <x>   Toolchain to install in the builder image (default 1.89.0)
+  --qemu-version <x>   tonistiigi/binfmt QEMU tag to register (default v8.1.5).
+                       Do not raise this without re-testing an emulated gnu
+                       target; 9.2.2 and 10.2.3 hang rustc (see the comments).
   --only <list>        Comma-separated subset. Accepts docker platforms
                        (linux/amd64, linux/arm64, linux/arm/v7) or dist dir
                        names (linux-x86_64, linux-aarch64-musl, ...).
@@ -49,12 +53,8 @@ Usage: build-ffi-linux.sh [options]
   --no-package         Build only; skip the .tar.gz distribution archive.
   --no-binfmt          Do not (re-)register QEMU emulators. Use when the
                        privileged binfmt container is unavailable and the
-                       emulators are already installed.
-  --refresh-binfmt     Force-replace existing QEMU registrations instead of
-                       leaving them alone. Needed when the host already has
-                       emulators from binfmt-support/qemu-user-static and they
-                       are too old to run the build (see the warning this
-                       script prints). Affects the whole host, not just Docker.
+                       emulators are already known good.
+  --refresh-binfmt     Accepted and ignored: refreshing is now the default.
   -h, --help           Show this help.
 
 Examples:
@@ -81,11 +81,13 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --rust-version)   [ $# -ge 2 ] || die "--rust-version needs a value"; RUST_VERSION="$2"; shift 2 ;;
     --rust-version=*) RUST_VERSION="${1#*=}"; shift ;;
+    --qemu-version)   [ $# -ge 2 ] || die "--qemu-version needs a value"; QEMU_VERSION="$2"; shift 2 ;;
+    --qemu-version=*) QEMU_VERSION="${1#*=}"; shift ;;
     --only)           [ $# -ge 2 ] || die "--only needs a value"; split_csv "$2"; shift 2 ;;
     --only=*)         split_csv "${1#*=}"; shift ;;
     --no-package)     NO_PACKAGE=1; shift ;;
     --no-binfmt)      NO_BINFMT=1; shift ;;
-    --refresh-binfmt) REFRESH_BINFMT=1; shift ;;
+    --refresh-binfmt) shift ;;   # kept for compatibility; refreshing is the default now
     -h|--help)        usage; exit 0 ;;
     *)                echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -145,10 +147,30 @@ command -v docker >/dev/null 2>&1 || die "docker not found in PATH. See the inst
 docker info --format '{{.ServerVersion}}' >/dev/null 2>&1 \
   || die "Docker engine not reachable. Start the Docker daemon (sudo systemctl start docker / Docker Desktop) and retry."
 
-# Ensure up-to-date QEMU emulators are registered for every non-native platform.
-# Bundled qemu builds can segfault (exit 139) inside libc-bin/ldconfig during
-# emulated apt installs; refreshing binfmt with tonistiigi/binfmt fixes it.
+# Register a KNOWN-GOOD QEMU for every non-native platform. Two separate traps
+# live here, and the fix for one is not the fix for the other:
+#
+#   1. Too OLD an emulator dies early and loudly -- a distro qemu 8.2.2 takes
+#      "QEMU internal SIGSEGV" while rustup-init is still downloading, and
+#      ldconfig/libc-bin segfault (exit 139) during emulated apt installs.
+#
+#   2. Too NEW an emulator dies late and silently. Measured on this repo,
+#      x86_64 gnu `rustc --version` under qemu-user:
+#          v7.0.0   OK (warns "MADV_DONTNEED does not work", jemalloc falls back)
+#          v8.1.5   OK
+#          v9.2.2   HANGS
+#          v10.2.3  HANGS
+#      rustc's bundled jemalloc probes MADV_DONTNEED. Old QEMU reports it
+#      unsupported, so jemalloc takes its memset fallback and lives; newer QEMU
+#      claims support it does not deliver, so jemalloc commits to a path that
+#      then hangs or faults. musl targets are unaffected because the musl rustc
+#      carries no jemalloc -- which is exactly why musl x86_64 built fine while
+#      gnu x86_64 did not.
+#
+# So the version is PINNED rather than tracking :latest. Raising it requires
+# re-running an emulated gnu target end to end, not just a smoke command.
 # Registration is not persistent across daemon restarts, so re-apply each run.
+BINFMT_IMAGE="tonistiigi/binfmt:qemu-$QEMU_VERSION"
 if [ "$NO_BINFMT" -eq 0 ]; then
   binfmt_arches=""
   for entry in "${TARGETS[@]}"; do
@@ -165,36 +187,51 @@ if [ "$NO_BINFMT" -eq 0 ]; then
   done
   if [ -n "$binfmt_arches" ]; then
     echo
-    echo "Registering QEMU binfmt emulators ($binfmt_arches) ..."
-    # --install SKIPS an arch that is already registered; it never replaces one.
-    # On a Linux host with binfmt-support/qemu-user-static the kernel already
-    # carries a registration, so this is a no-op and the build keeps using the
-    # host's emulator -- which, when it is too old, fails much later as an
-    # opaque apt GPG error or a segfault mid-compile. --refresh-binfmt removes
-    # the existing registration first so the container's newer qemu wins.
-    if [ "$REFRESH_BINFMT" -eq 1 ]; then
-      echo "  (--refresh-binfmt: removing existing registrations first)"
-      docker run --privileged --rm tonistiigi/binfmt:latest --uninstall "$binfmt_arches" \
-        || die "binfmt uninstall failed."
-    fi
-    binfmt_out="$(docker run --privileged --rm tonistiigi/binfmt:latest --install "$binfmt_arches" 2>&1)" \
-      || { echo "$binfmt_out" >&2; die "binfmt registration failed. Re-run with --no-binfmt if the emulators are already installed."; }
+    echo "Registering QEMU binfmt emulators ($binfmt_arches) from $BINFMT_IMAGE ..."
+    # ALWAYS uninstall before installing. tonistiigi/binfmt's --install SKIPS an
+    # arch that is already registered -- it never replaces one. A Linux host with
+    # binfmt-support/qemu-user-static already carries a registration from boot, so
+    # a bare --install is a silent no-op and the build keeps using the distro's
+    # emulator. When that one is too old it does not fail here; it fails minutes
+    # later as an opaque apt GPG error or a QEMU internal SIGSEGV mid-compile.
+    # Starting from a clean registration every run is the only way to make the
+    # emulator a known quantity.
+    #
+    # This affects the WHOLE HOST, not just Docker. To hand the machine back to
+    # the distro's own emulators afterwards:
+    #     sudo systemctl restart systemd-binfmt   # or: sudo update-binfmts --enable
+    # Pass --no-binfmt to skip this section entirely.
+    echo "  clearing any existing registration first"
+    docker run --privileged --rm "$BINFMT_IMAGE" --uninstall "$binfmt_arches" >/dev/null 2>&1 \
+      || echo "  (nothing registered to clear)"
+    binfmt_out="$(docker run --privileged --rm "$BINFMT_IMAGE" --install "$binfmt_arches" 2>&1)" \
+      || { echo "$binfmt_out" >&2; die "binfmt registration failed. Re-run with --no-binfmt if the emulators are already known good."; }
     echo "$binfmt_out" | grep -E '^installing:' || true
 
-    # Warn loudly when nothing was actually refreshed: a stale host emulator is
-    # the single most common cause of a failed emulated build here.
-    if [ "$REFRESH_BINFMT" -eq 0 ] && echo "$binfmt_out" | grep -q 'already registered'; then
-      echo
-      echo "WARNING: an emulator was already registered, so it was NOT refreshed." >&2
-      echo "  The build will use the host's QEMU. If it fails with an apt GPG error" >&2
-      echo "  ('unsupported filetype' / 'is not signed') or a segfault, the host" >&2
-      echo "  emulator is too old. Repair with:" >&2
-      echo "      $0 --refresh-binfmt" >&2
-      echo "  (or manually: docker run --privileged --rm tonistiigi/binfmt --uninstall $binfmt_arches" >&2
-      echo "                docker run --privileged --rm tonistiigi/binfmt --install $binfmt_arches)" >&2
-      echo "  To restore the host's own registrations afterwards:" >&2
-      echo "      sudo systemctl restart systemd-binfmt   # or: sudo update-binfmts --enable" >&2
-      echo
+    # Verify the kernel actually points at the container's emulators now. This is
+    # cheap and catches the exact failure the uninstall above exists to prevent:
+    # tonistiigi/binfmt installs to /usr/bin/qemu-*, while a distro registration
+    # points into /usr/libexec/qemu-binfmt. Linux-only (no /proc elsewhere).
+    if [ -d /proc/sys/fs/binfmt_misc ]; then
+      for a in ${binfmt_arches//,/ }; do
+        case "$a" in
+          amd64) entry=qemu-x86_64  ;;
+          arm64) entry=qemu-aarch64 ;;
+          arm)   entry=qemu-arm     ;;
+          *)     entry=""           ;;
+        esac
+        [ -n "$entry" ] && [ -r "/proc/sys/fs/binfmt_misc/$entry" ] || continue
+        interp="$(sed -n 's/^interpreter //p' "/proc/sys/fs/binfmt_misc/$entry")"
+        case "$interp" in
+          /usr/bin/qemu-*) ;;
+          *)
+            echo "WARNING: $entry still resolves to $interp," >&2
+            echo "  not the emulator tonistiigi/binfmt just installed. The build may die" >&2
+            echo "  with a QEMU internal SIGSEGV. Clear it by hand and retry:" >&2
+            echo "      docker run --privileged --rm $BINFMT_IMAGE --uninstall $a" >&2
+            ;;
+        esac
+      done
     fi
   fi
 fi

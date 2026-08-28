@@ -58,7 +58,10 @@ param(
     # Restrict to a subset, e.g. -Only linux/amd64,linux/arm64
     [string[]]$Only,
     # Skip assembling the .tar.gz distribution archive.
-    [switch]$NoPackage
+    [switch]$NoPackage,
+    # tonistiigi/binfmt QEMU tag to register. PINNED, not :latest -- see the
+    # binfmt section below before changing it.
+    [string]$QemuVersion = "v8.1.5"
 )
 
 $ErrorActionPreference = "Stop"
@@ -101,15 +104,42 @@ Write-Host "Targets   : $($Targets.Platform -join ', ')"
 docker info --format '{{.ServerVersion}}' 2>$null | Out-Null
 if (-not $?) { throw "Docker engine not reachable. Start Docker Desktop and retry." }
 
-# Ensure up-to-date QEMU emulators are registered. Docker Desktop's bundled
-# qemu can segfault (exit 139) inside libc-bin/ldconfig during arm64/armhf apt
-# installs; refreshing binfmt with tonistiigi/binfmt fixes it. Registration is
-# not persistent across Docker Desktop restarts, so we (re)apply it each run.
+# Register a KNOWN-GOOD QEMU. Two separate traps live here, and the fix for one
+# is not the fix for the other:
+#
+#   1. Too OLD an emulator dies early and loudly -- exit 139 out of
+#      ldconfig/libc-bin during an emulated apt install, or "QEMU internal
+#      SIGSEGV" while rustup-init is still downloading.
+#
+#   2. Too NEW an emulator dies late and silently. Measured on the bash side of
+#      this repo, gnu `rustc --version` under qemu-user: v7.0.0 and v8.1.5 OK,
+#      v9.2.2 and v10.2.3 HANG. rustc's bundled jemalloc probes MADV_DONTNEED;
+#      old QEMU reports it unsupported so jemalloc takes its memset fallback,
+#      while newer QEMU claims a support it does not deliver and jemalloc then
+#      hangs. musl targets carry no jemalloc and are unaffected.
+#
+# So $QemuVersion is PINNED rather than tracking :latest. Raising it requires
+# re-running an emulated gnu target end to end, not just a smoke command.
+# Registration is not persistent across Docker Desktop restarts, so we (re)apply
+# it each run.
+#
+# ALWAYS uninstall before installing: --install SKIPS an arch that is already
+# registered, it never replaces one. Where a registration already exists a bare
+# --install is a silent no-op and the build keeps using the old emulator, which
+# does not fail here but minutes later. Uninstall failure is not fatal -- having
+# nothing to remove is the normal case on a fresh machine.
+$binfmtImage = "tonistiigi/binfmt:qemu-$QemuVersion"
 $needsEmulation = $Targets | Where-Object { $_.Platform -ne "linux/amd64" }
 if ($needsEmulation) {
-    Write-Host "`nRefreshing QEMU binfmt emulators (arm64, arm) ..." -ForegroundColor Yellow
+    Write-Host "`nRefreshing QEMU binfmt emulators (arm64, arm) from $binfmtImage ..." -ForegroundColor Yellow
+    Write-Host "  clearing any existing registration first" -ForegroundColor DarkYellow
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try { docker run --privileged --rm $binfmtImage --uninstall arm64,arm *>&1 | Out-Null }
+    finally { $ErrorActionPreference = $prevEap }
+    if ($LASTEXITCODE -ne 0) { Write-Host "  (nothing registered to clear)" -ForegroundColor DarkYellow }
     Invoke-Native -What "binfmt install" -Cmd {
-        docker run --privileged --rm tonistiigi/binfmt:latest --install arm64,arm
+        docker run --privileged --rm $binfmtImage --install arm64,arm
     }
 }
 
