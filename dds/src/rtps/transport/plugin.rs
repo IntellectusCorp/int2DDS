@@ -7,6 +7,8 @@ use std::net::SocketAddr;
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::locator::Locator;
 use crate::rtps::transport::shm::shm_listener::ShmListener;
+use crate::rtps::transport::tcp::connection_registry::ConnectionRegistry;
+use crate::rtps::transport::tcp::tcp_listener::TcpListener;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use bytes::Bytes;
 
@@ -54,8 +56,7 @@ pub(crate) struct IncomingMessage {
 /// Source of incoming messages for a ListeningTask.
 ///
 /// The variant determines the I/O mechanism, not the transport type.
-/// ListeningTask branches on I/O mechanism (2 branches),
-/// not on transport type (which would be N branches).
+/// ListeningTask branches on I/O mechanism rather than transport type.
 pub(crate) enum MessageSource {
     /// Direct mio-based polling — zero channel overhead.
     /// Used when a single listener owns the receive path (e.g., UDP-only mode).
@@ -68,6 +69,9 @@ pub(crate) enum MessageSource {
     /// Used by SHM mode for user data unicast where UDP fallback and SHM are
     /// merged at the listening-task level (no inter-thread channel).
     MioPollWithShm { listener: UdpListener, shm: ShmListener },
+
+    /// Direct polling for a listener that owns accepted stream connections.
+    Stream { listener: TcpListener, shared: std::sync::Arc<ConnectionRegistry> },
 
     /// Channel-based receiving.
     /// Used when the transport internally routes framed streams by message kind
@@ -137,6 +141,10 @@ pub(crate) trait TransportPlugin: Send + Sync {
     /// Called once during initialization. The returned `MessageSource`
     /// is moved into `UserUnicastListeningTask`.
     fn take_user_data_unicast_source(&self) -> Option<MessageSource>;
+
+    fn take_stream_source(&self) -> Option<MessageSource> {
+        None
+    }
 
     /// Get the local port number used by this transport's sender.
     fn port(&self) -> u16;

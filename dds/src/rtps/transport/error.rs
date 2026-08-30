@@ -43,9 +43,9 @@ pub enum TransportErrorCode {
     /// recent connect attempts keep failing). A deferral, not a hard failure —
     /// the triggering connect failure is reported separately.
     TcpReconnectBackoff = 730,
-    /// The previous frame still held the writer admission permit when the send
-    /// deadline expired. No byte of this frame left the socket.
-    TcpSendDeadlineExpired = 731,
+    /// The peer's send queue had no room for the frame. No byte of it left the
+    /// socket, so the frame was dropped rather than waited on.
+    TcpPeerSendQueueFull = 731,
 
     // ── 740: TCP framing ────────────────────────────────────────────────
     /// Frame magic bytes were not "INT2".
@@ -96,7 +96,7 @@ impl TransportErrorCode {
             Self::TcpConnectionRefused => io::ErrorKind::ConnectionRefused,
             Self::TcpBindFailed => io::ErrorKind::AddrInUse,
 
-            Self::TcpReconnectBackoff | Self::TcpSendDeadlineExpired => io::ErrorKind::WouldBlock,
+            Self::TcpReconnectBackoff | Self::TcpPeerSendQueueFull => io::ErrorKind::WouldBlock,
 
             Self::TcpFrameInvalidMagic
             | Self::TcpFrameTooLarge
@@ -122,7 +122,7 @@ impl TransportErrorCode {
             Self::TcpBindFailed => "TCP listener bind failed",
 
             Self::TcpReconnectBackoff => "peer in reconnect backoff",
-            Self::TcpSendDeadlineExpired => "TCP send deadline expired before writer admission",
+            Self::TcpPeerSendQueueFull => "TCP peer send queue full",
 
             Self::TcpFrameInvalidMagic => "TCP frame invalid magic",
             Self::TcpFrameTooLarge => "TCP frame too large",

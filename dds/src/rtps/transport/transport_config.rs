@@ -14,10 +14,10 @@ use std::time::Duration;
 
 use crate::dcps::infrastructure::qos_policy::{
     PropertyQosPolicy, PROP_ACCEPT_UNDEFINED_PEERS, PROP_INITIAL_PEERS, PROP_MULTICAST_TTL,
-    PROP_TCP_ASYNC_WORKERS, PROP_TCP_BIND_PORT, PROP_TCP_CONGESTION_MISS_THRESHOLD,
-    PROP_TCP_CONNECT_TIMEOUT_MS, PROP_TCP_KEEPALIVE_INTERVAL_MS, PROP_TCP_KEEPALIVE_MAX_MISSES,
-    PROP_TCP_KEEPALIVE_TIMEOUT_MS, PROP_TCP_NODELAY, PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS,
-    PROP_TCP_PUBLIC_ADDRESS, PROP_TCP_SEND_DEADLINE_MS, PROP_TCP_SO_RCVBUF, PROP_TCP_SO_SNDBUF,
+    PROP_TCP_ASYNC_WORKERS, PROP_TCP_BIND_PORT, PROP_TCP_CONNECT_TIMEOUT_MS,
+    PROP_TCP_KEEPALIVE_INTERVAL_MS, PROP_TCP_KEEPALIVE_MAX_MISSES, PROP_TCP_KEEPALIVE_TIMEOUT_MS,
+    PROP_TCP_NODELAY, PROP_TCP_PEER_BLOCK_TIMEOUT_MS, PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS,
+    PROP_TCP_PUBLIC_ADDRESS, PROP_TCP_SO_RCVBUF, PROP_TCP_SO_SNDBUF,
     PROP_TCP_TLS_HANDSHAKE_TIMEOUT_MS, PROP_TCP_UNACKED_TIMEOUT_MS, PROP_TRANSPORT,
 };
 use crate::rtps::transport::TransportType;
@@ -83,8 +83,7 @@ pub(crate) struct TcpConfig {
     pub so_rcvbuf: Option<usize>,
     pub so_sndbuf: Option<usize>,
     pub async_workers: Option<usize>,
-    pub send_deadline: Option<Duration>,
-    pub congestion_miss_threshold: u32,
+    pub peer_block_timeout: Option<Duration>,
 }
 
 impl TransportConfig for TcpConfig {
@@ -127,23 +126,10 @@ impl TransportConfig for TcpConfig {
             so_rcvbuf: prop_parse::<usize>(property, PROP_TCP_SO_RCVBUF),
             so_sndbuf: prop_parse::<usize>(property, PROP_TCP_SO_SNDBUF),
             async_workers: prop_parse::<usize>(property, PROP_TCP_ASYNC_WORKERS),
-            send_deadline: match prop_parse::<i64>(property, PROP_TCP_SEND_DEADLINE_MS) {
+            peer_block_timeout: match prop_parse::<i64>(property, PROP_TCP_PEER_BLOCK_TIMEOUT_MS) {
                 Some(v) if v < 0 => None,
                 Some(v) => Some(Duration::from_millis(v as u64)),
-                None => Some(Duration::from_millis(1000)),
-            },
-            congestion_miss_threshold: match prop_parse::<u32>(
-                property,
-                PROP_TCP_CONGESTION_MISS_THRESHOLD,
-            ) {
-                Some(0) => {
-                    log::warn!(
-                        "{PROP_TCP_CONGESTION_MISS_THRESHOLD} = 0 is invalid (min 1); using 1"
-                    );
-                    1
-                }
-                Some(v) => v,
-                None => 1,
+                None => Some(Duration::from_millis(100)),
             },
         }
     }
@@ -270,39 +256,25 @@ mod tests {
     }
 
     #[test]
-    fn tcp_config_send_deadline_default() {
+    fn tcp_config_peer_block_timeout_default() {
         let cfg = TcpConfig::from_property(&PropertyQosPolicy::default());
-        assert_eq!(cfg.send_deadline, Some(Duration::from_millis(1000)));
+        assert_eq!(cfg.peer_block_timeout, Some(Duration::from_millis(100)));
     }
 
     #[test]
-    fn tcp_config_reads_send_deadline_property() {
+    fn tcp_config_reads_peer_block_timeout_property() {
         let mut p = PropertyQosPolicy::default();
-        p.add_property(PROP_TCP_SEND_DEADLINE_MS, "500", false);
-        assert_eq!(TcpConfig::from_property(&p).send_deadline, Some(Duration::from_millis(500)));
+        p.add_property(PROP_TCP_PEER_BLOCK_TIMEOUT_MS, "500", false);
+        assert_eq!(
+            TcpConfig::from_property(&p).peer_block_timeout,
+            Some(Duration::from_millis(500))
+        );
     }
 
     #[test]
-    fn tcp_config_send_deadline_minus_one_blocks() {
+    fn tcp_config_peer_block_timeout_minus_one_blocks() {
         let mut p = PropertyQosPolicy::default();
-        p.add_property(PROP_TCP_SEND_DEADLINE_MS, "-1", false);
-        assert_eq!(TcpConfig::from_property(&p).send_deadline, None);
-    }
-
-    #[test]
-    fn tcp_config_congestion_miss_threshold_default_and_read() {
-        let cfg = TcpConfig::from_property(&PropertyQosPolicy::default());
-        assert_eq!(cfg.congestion_miss_threshold, 1);
-
-        let mut p = PropertyQosPolicy::default();
-        p.add_property(PROP_TCP_CONGESTION_MISS_THRESHOLD, "3", false);
-        assert_eq!(TcpConfig::from_property(&p).congestion_miss_threshold, 3);
-    }
-
-    #[test]
-    fn tcp_config_congestion_miss_threshold_zero_is_clamped_to_one() {
-        let mut p = PropertyQosPolicy::default();
-        p.add_property(PROP_TCP_CONGESTION_MISS_THRESHOLD, "0", false);
-        assert_eq!(TcpConfig::from_property(&p).congestion_miss_threshold, 1);
+        p.add_property(PROP_TCP_PEER_BLOCK_TIMEOUT_MS, "-1", false);
+        assert_eq!(TcpConfig::from_property(&p).peer_block_timeout, None);
     }
 }

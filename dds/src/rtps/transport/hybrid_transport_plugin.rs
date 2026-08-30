@@ -35,9 +35,9 @@ pub(crate) struct HybridTransportPlugin {
     // UDP listeners — multicast is always UDP
     discovery_multicast_listener: Mutex<Option<UdpListener>>,
 
-    // Unicast sources handed straight through from the embedded TCP plugin.
-    discovery_unicast_source: Mutex<Option<MessageSource>>,
-    user_data_unicast_source: Mutex<Option<MessageSource>>,
+    // Unicast reception is one stream source handed straight through from the
+    // embedded TCP plugin; it carries both discovery and user data.
+    stream_source: Mutex<Option<MessageSource>>,
 }
 
 impl HybridTransportPlugin {
@@ -77,8 +77,7 @@ impl HybridTransportPlugin {
             tcp_config,
         )?;
 
-        let tcp_disc_source = tcp_plugin.take_discovery_unicast_source();
-        let tcp_user_source = tcp_plugin.take_user_data_unicast_source();
+        let tcp_stream_source = tcp_plugin.take_stream_source();
 
         info!("[HybridTransportPlugin] Created (domain={}, pid={})", domain_id, participant_id);
 
@@ -89,8 +88,7 @@ impl HybridTransportPlugin {
             participant_id,
             working_ips,
             discovery_multicast_listener: Mutex::new(discovery_mc),
-            discovery_unicast_source: Mutex::new(tcp_disc_source),
-            user_data_unicast_source: Mutex::new(tcp_user_source),
+            stream_source: Mutex::new(tcp_stream_source),
         })
     }
 
@@ -156,11 +154,15 @@ impl TransportPlugin for HybridTransportPlugin {
     }
 
     fn take_discovery_unicast_source(&self) -> Option<MessageSource> {
-        self.discovery_unicast_source.lock().expect("lock poisoned").take()
+        None
     }
 
     fn take_user_data_unicast_source(&self) -> Option<MessageSource> {
-        self.user_data_unicast_source.lock().expect("lock poisoned").take()
+        None
+    }
+
+    fn take_stream_source(&self) -> Option<MessageSource> {
+        self.stream_source.lock().expect("lock poisoned").take()
     }
 
     fn port(&self) -> u16 {

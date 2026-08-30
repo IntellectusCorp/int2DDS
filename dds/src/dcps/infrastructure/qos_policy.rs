@@ -896,18 +896,14 @@ pub const PROP_TCP_SO_RCVBUF: &str = "int2dds.transport.TCPv4.so_rcvbuf";
 pub const PROP_TCP_SO_SNDBUF: &str = "int2dds.transport.TCPv4.so_sndbuf";
 /// Tokio worker thread count for the TCP runtime.
 pub const PROP_TCP_ASYNC_WORKERS: &str = "int2dds.transport.TCPv4.async_workers";
-/// User-data wire-write deadline, milliseconds. A send waits up to this long for
-/// the previous frame's admission permit, then drops the frame rather than
-/// delay sends to other peers. `-1` blocks until it completes (no pre-wire drop,
-/// congestion isolation off); `0` is a try-admit (accept if free, else drop
-/// at once, isolation off). Default `1000` — generous by design; lower it to
-/// trade flow-control fidelity for tighter HOL isolation.
-pub const PROP_TCP_SEND_DEADLINE_MS: &str = "int2dds.transport.TCPv4.send_deadline_ms";
-/// Consecutive send-deadline misses before a connection is marked congested and
-/// its writes drop to the short probe deadline, isolating a slow/stalled peer
-/// from the fan-out. Min 1. Default `1`.
-pub const PROP_TCP_CONGESTION_MISS_THRESHOLD: &str =
-    "int2dds.transport.TCPv4.congestion_miss_threshold";
+/// Longest one peer may hold up a sending thread, in milliseconds. A frame the
+/// peer's socket cannot take at all is dropped rather than waited on, so a
+/// stalled peer cannot delay sends to the others; RTPS reliability repairs the
+/// gap and traffic resumes as soon as the peer reads again. This bound applies
+/// where dropping is not possible -- finishing a frame the socket accepted only
+/// part of, and opening a connection -- and a frame that exceeds it costs the
+/// connection. `-1` waits indefinitely instead. Default `100`.
+pub const PROP_TCP_PEER_BLOCK_TIMEOUT_MS: &str = "int2dds.transport.TCPv4.peer_block_timeout_ms";
 
 /// Generic name/value extension channel for QoS-driven configuration.
 ///

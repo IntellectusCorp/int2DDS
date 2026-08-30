@@ -56,6 +56,9 @@ impl DiscoveryUnicastListeningTask {
             MessageSource::MioPollWithShm { .. } => {
                 unreachable!("MioPollWithShm is only used by user-data unicast")
             }
+            MessageSource::Stream { .. } => {
+                unreachable!("Stream is handled by the stream unicast listening task")
+            }
         }
     }
 
@@ -148,7 +151,11 @@ impl DiscoveryUnicastListeningTask {
         }
     }
 
-    fn process_rtps_message(&mut self, bytes: Bytes, from_addr: SocketAddr) -> RtpsResult<()> {
+    pub(crate) fn process_rtps_message(
+        &mut self,
+        bytes: Bytes,
+        from_addr: SocketAddr,
+    ) -> RtpsResult<()> {
         let mut message_receiver = MessageReceiver::new(self.guid_prefix, &from_addr);
         let rtps_message = message_receiver.init(&bytes)?;
 

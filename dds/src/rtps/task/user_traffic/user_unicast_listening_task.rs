@@ -46,6 +46,9 @@ impl UserUnicastListeningTask {
                 self.listen_mio_poll_with_shm(&mut listener, &mut shm)
             }
             MessageSource::Channel { rx } => self.listen_channel(&rx),
+            MessageSource::Stream { .. } => {
+                unreachable!("Stream is handled by the stream unicast listening task")
+            }
         }
     }
 
@@ -208,7 +211,7 @@ impl UserUnicastListeningTask {
         }
     }
 
-    fn process_rtps_message(&mut self, bytes: Bytes, from_addr: SocketAddr) {
+    pub(crate) fn process_rtps_message(&mut self, bytes: Bytes, from_addr: SocketAddr) {
         let mut message_receiver = MessageReceiver::new(self.guid_prefix, &from_addr);
         let rtps_message = message_receiver.init(&bytes);
         if rtps_message.is_err() {

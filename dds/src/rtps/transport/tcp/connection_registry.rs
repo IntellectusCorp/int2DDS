@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use flume::{Receiver, Sender, TrySendError};
 use log::{debug, warn};
+use mio::Waker;
 use tokio_util::sync::CancellationToken;
 
 use crate::rtps::common::guid::GuidPrefix;
@@ -64,7 +65,7 @@ impl Default for TcpSocketTuning {
     }
 }
 
-pub(crate) fn apply_unacked_timeout(tcp: &tokio::net::TcpStream, timeout: Option<Duration>) {
+pub(crate) fn apply_unacked_timeout(tcp: &std::net::TcpStream, timeout: Option<Duration>) {
     let Some(t) = timeout else { return };
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
@@ -91,7 +92,7 @@ pub(crate) fn apply_unacked_timeout(tcp: &tokio::net::TcpStream, timeout: Option
     }
 }
 
-pub(crate) fn apply_keepalive(tcp: &tokio::net::TcpStream, params: Option<KeepaliveParams>) {
+pub(crate) fn apply_keepalive(tcp: &std::net::TcpStream, params: Option<KeepaliveParams>) {
     let Some(p) = params else { return };
     #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
     {
@@ -118,7 +119,7 @@ pub(crate) fn apply_keepalive(tcp: &tokio::net::TcpStream, params: Option<Keepal
     }
 }
 
-pub(crate) fn apply_socket_tuning(tcp: &tokio::net::TcpStream, tuning: &TcpSocketTuning) {
+pub(crate) fn apply_socket_tuning(tcp: &std::net::TcpStream, tuning: &TcpSocketTuning) {
     let _ = tcp.set_nodelay(tuning.nodelay);
     if let Some(size) = tuning.so_rcvbuf {
         let _ = socket2::SockRef::from(tcp).set_recv_buffer_size(size);
@@ -154,6 +155,7 @@ pub(crate) struct ConnectionRegistry {
     self_delivery_tx: Sender<IncomingMessage>,
     self_delivery_rx: Mutex<Option<Receiver<IncomingMessage>>>,
     self_delivery_bytes: Arc<AtomicUsize>,
+    self_delivery_waker: Mutex<Option<Arc<Waker>>>,
 }
 
 impl ConnectionRegistry {
@@ -177,38 +179,27 @@ impl ConnectionRegistry {
             self_delivery_tx,
             self_delivery_rx: Mutex::new(Some(self_delivery_rx)),
             self_delivery_bytes: Arc::new(AtomicUsize::new(0)),
+            self_delivery_waker: Mutex::new(None),
         }
     }
 
-    pub(crate) fn spawn_self_delivery_task(
-        self: &Arc<Self>,
-        cancel: CancellationToken,
-    ) -> tokio::task::JoinHandle<()> {
-        let shared = Arc::clone(self);
-        let receiver = shared.self_delivery_rx.lock().expect("self_delivery_rx lock").take();
-        tokio::spawn(async move {
-            let Some(receiver) = receiver else { return };
-            loop {
-                let msg = tokio::select! {
-                    _ = cancel.cancelled() => break,
-                    received = receiver.recv_async() => match received {
-                        Ok(msg) => msg,
-                        Err(_) => break,
-                    },
-                };
-                shared.self_delivery_bytes.fetch_sub(msg.data.len(), Ordering::AcqRel);
-                let sent = tokio::select! {
-                    _ = cancel.cancelled() => break,
-                    sent = shared.user_data_tx.send_async(msg) => sent,
-                };
-                if sent.is_err() {
-                    break;
-                }
-            }
-            for msg in receiver.drain() {
-                shared.self_delivery_bytes.fetch_sub(msg.data.len(), Ordering::AcqRel);
-            }
-        })
+    pub(crate) fn set_self_delivery_waker(&self, waker: Arc<Waker>) {
+        if let Ok(mut guard) = self.self_delivery_waker.lock() {
+            *guard = Some(Arc::clone(&waker));
+        }
+        let _ = waker.wake();
+    }
+
+    pub(crate) fn clear_self_delivery_waker(&self) {
+        if let Ok(mut guard) = self.self_delivery_waker.lock() {
+            *guard = None;
+        }
+    }
+
+    pub(crate) fn try_receive_self_delivery(&self) -> Option<IncomingMessage> {
+        let message = self.self_delivery_rx.lock().ok()?.as_ref()?.try_recv().ok()?;
+        self.self_delivery_bytes.fetch_sub(message.data.len(), Ordering::AcqRel);
+        Some(message)
     }
 
     pub(crate) fn connection_count(&self) -> usize {
@@ -278,7 +269,14 @@ impl ConnectionRegistry {
 
         let msg = IncomingMessage { data: self.buffer_pool.copy_from_slice(data), source };
         match self.self_delivery_tx.try_send(msg) {
-            Ok(()) => Ok(true),
+            Ok(()) => {
+                if let Ok(guard) = self.self_delivery_waker.lock() {
+                    if let Some(waker) = guard.as_ref() {
+                        let _ = waker.wake();
+                    }
+                }
+                Ok(true)
+            }
             Err(TrySendError::Full(_)) => {
                 self.self_delivery_bytes.fetch_sub(len, Ordering::AcqRel);
                 Err(transport_io_error(
@@ -362,6 +360,9 @@ impl ConnectionRegistry {
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use mio::{Events, Poll, Waker};
+
+    use crate::rtps::transport::tokens::ListenerToken;
 
     fn registry() -> (Arc<ConnectionRegistry>, Receiver<IncomingMessage>, Receiver<IncomingMessage>)
     {
@@ -440,14 +441,12 @@ mod tests {
         assert_eq!(registry.connection_count(), 1);
     }
 
-    #[tokio::test]
-    async fn socket_qos_is_applied_before_stream_use() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    #[test]
+    fn socket_qos_is_applied_before_stream_use() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        let connect =
-            tokio::spawn(async move { tokio::net::TcpStream::connect(addr).await.unwrap() });
-        let (accepted, _) = listener.accept().await.unwrap();
-        let client = connect.await.unwrap();
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        let (accepted, _) = listener.accept().unwrap();
 
         let tuning = TcpSocketTuning {
             nodelay: true,
@@ -470,5 +469,32 @@ mod tests {
         assert!(socket.send_buffer_size().unwrap() >= 128 * 1024);
         #[cfg(any(target_os = "linux", target_os = "android"))]
         assert_eq!(socket.tcp_user_timeout().unwrap(), Some(Duration::from_secs(7)));
+    }
+
+    #[test]
+    fn self_delivery_wakes_the_poller_and_releases_queued_bytes() {
+        let (registry, _, _) = registry();
+        let source: SocketAddr = "127.0.0.1:7400".parse().unwrap();
+        assert!(!registry.deliver_to_self(source, TcpFrameKind::Discovery, b"discovery").unwrap());
+        assert!(registry.deliver_to_self(source, TcpFrameKind::UserData, b"user").unwrap());
+        assert_eq!(registry.self_delivery_bytes.load(Ordering::Acquire), 4);
+
+        let mut poll = Poll::new().unwrap();
+        let waker =
+            Arc::new(Waker::new(poll.registry(), ListenerToken::Shutdown.to_mio()).unwrap());
+        registry.set_self_delivery_waker(waker);
+        let mut events = Events::with_capacity(2);
+        poll.poll(&mut events, Some(Duration::from_secs(1))).unwrap();
+        assert!(events.iter().any(|event| event.token() == ListenerToken::Shutdown.to_mio()));
+
+        let message = registry.try_receive_self_delivery().unwrap();
+        assert_eq!(message.source, source);
+        assert_eq!(message.data.as_ref(), b"user");
+        assert_eq!(registry.self_delivery_bytes.load(Ordering::Acquire), 0);
+        assert!(registry.try_receive_self_delivery().is_none());
+
+        registry.clear_self_delivery_waker();
+        drop(registry);
+        drop(poll);
     }
 }

@@ -17,4 +17,3 @@ pub mod handshake;
 
 #[allow(unused_imports)]
 pub use config::TlsConfig;
-pub(crate) use handshake::{accept_tls_async, connect_tls_async};

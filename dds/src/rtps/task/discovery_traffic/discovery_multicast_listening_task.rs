@@ -44,6 +44,9 @@ impl DiscoveryMulticastListeningTask {
             MessageSource::MioPollWithShm { .. } => {
                 unreachable!("MioPollWithShm is only used by user-data unicast")
             }
+            MessageSource::Stream { .. } => {
+                unreachable!("Stream is handled by the stream unicast listening task")
+            }
         }
     }
 
