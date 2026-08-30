@@ -21,17 +21,22 @@ use crate::rtps::messages::submessage_id::SubmessageId;
 use crate::rtps::messages::traffic_class::carries_builtin_writer;
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 
-pub(crate) const MAX_PAYLOAD_SIZE: usize = 16 * 1024 * 1024;
+/// Largest RTPS message this transport carries, framing submessage excluded.
+/// The RTPS layer bounds a datagram by `INT2DDS_MAX_MESSAGE_SIZE` (65000 at
+/// most) and only an unfragmented single DATA goes past it, by its submessage
+/// overhead. 64KiB covers that and equals what the UDP receive path accepts,
+/// so a bounded frame never costs a message that would have gone out over UDP.
+pub(crate) const MAX_PAYLOAD_SIZE: usize = 64 * 1024;
 const RTPS_HEADER_SIZE: usize = RTPS_HEADER_LENGTH as usize;
 const MSG_LEN_SIZE: usize = 8;
 const STREAM_HEADER_SIZE: usize = RTPS_HEADER_SIZE + MSG_LEN_SIZE;
 const MSG_LEN_FLAGS: u8 = 0x01;
 const MSG_LEN_OCTETS_TO_NEXT_HEADER: u16 = 4;
 const MAX_CACHED_BUFFERS: usize = 16;
-const MAX_CACHED_BUFFER_CAPACITY: usize = 256 * 1024;
 
 /// Bounded pool for TCP payload allocations. A buffer returns only after every
-/// `Bytes` clone held by RTPS processing has been dropped.
+/// `Bytes` clone held by RTPS processing has been dropped. Every entry point
+/// checks `MAX_PAYLOAD_SIZE` first, so a cached buffer cannot outgrow a frame.
 #[derive(Default)]
 pub(crate) struct TcpBufferPool {
     buffers: Mutex<Vec<Vec<u8>>>,
@@ -62,9 +67,6 @@ impl TcpBufferPool {
     }
 
     fn recycle(&self, mut data: Vec<u8>) {
-        if data.capacity() > MAX_CACHED_BUFFER_CAPACITY {
-            return;
-        }
         data.clear();
         let mut cached = self.buffers.lock().expect("TCP buffer pool lock");
         if cached.len() < MAX_CACHED_BUFFERS {
@@ -365,6 +367,14 @@ mod tests {
 
     #[tokio::test]
     async fn message_limit_is_consistent_on_write_and_read() {
+        // The cap must clear the largest message RTPS can hand down: a 65000-byte
+        // payload stays a single DATA instead of fragmenting.
+        let at_limit = test_message(USER_WRITER, &vec![0u8; 65_000]);
+        assert!(at_limit.len() <= MAX_PAYLOAD_SIZE);
+        let mut wire = Vec::new();
+        write_framed_message(&mut wire, &at_limit).await.unwrap();
+        assert!(read_framed_message(&mut Cursor::new(wire)).await.is_ok());
+
         let oversized = test_message(USER_WRITER, &vec![0u8; MAX_PAYLOAD_SIZE]);
         assert!(write_framed_message(&mut Vec::new(), &oversized).await.is_err());
 
