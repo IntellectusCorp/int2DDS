@@ -14,11 +14,11 @@ use std::time::Duration;
 
 use crate::dcps::infrastructure::qos_policy::{
     PropertyQosPolicy, PROP_ACCEPT_UNDEFINED_PEERS, PROP_INITIAL_PEERS, PROP_MULTICAST_TTL,
-    PROP_TCP_ASYNC_WORKERS, PROP_TCP_BIND_PORT, PROP_TCP_CONNECT_TIMEOUT_MS,
-    PROP_TCP_KEEPALIVE_INTERVAL_MS, PROP_TCP_KEEPALIVE_MAX_MISSES, PROP_TCP_KEEPALIVE_TIMEOUT_MS,
-    PROP_TCP_NODELAY, PROP_TCP_PEER_BLOCK_TIMEOUT_MS, PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS,
-    PROP_TCP_PUBLIC_ADDRESS, PROP_TCP_SO_RCVBUF, PROP_TCP_SO_SNDBUF,
-    PROP_TCP_TLS_HANDSHAKE_TIMEOUT_MS, PROP_TCP_UNACKED_TIMEOUT_MS, PROP_TRANSPORT,
+    PROP_TCP_BIND_PORT, PROP_TCP_CONNECT_TIMEOUT_MS, PROP_TCP_KEEPALIVE_INTERVAL_MS,
+    PROP_TCP_KEEPALIVE_MAX_MISSES, PROP_TCP_KEEPALIVE_TIMEOUT_MS, PROP_TCP_NODELAY,
+    PROP_TCP_PEER_BLOCK_TIMEOUT_MS, PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS, PROP_TCP_PUBLIC_ADDRESS,
+    PROP_TCP_SO_RCVBUF, PROP_TCP_SO_SNDBUF, PROP_TCP_TLS_HANDSHAKE_TIMEOUT_MS,
+    PROP_TCP_UNACKED_TIMEOUT_MS, PROP_TRANSPORT,
 };
 use crate::rtps::transport::TransportType;
 
@@ -82,7 +82,6 @@ pub(crate) struct TcpConfig {
     pub keepalive_max_misses: u32,
     pub so_rcvbuf: Option<usize>,
     pub so_sndbuf: Option<usize>,
-    pub async_workers: Option<usize>,
     pub peer_block_timeout: Option<Duration>,
 }
 
@@ -125,7 +124,6 @@ impl TransportConfig for TcpConfig {
             },
             so_rcvbuf: prop_parse::<usize>(property, PROP_TCP_SO_RCVBUF),
             so_sndbuf: prop_parse::<usize>(property, PROP_TCP_SO_SNDBUF),
-            async_workers: prop_parse::<usize>(property, PROP_TCP_ASYNC_WORKERS),
             peer_block_timeout: match prop_parse::<i64>(property, PROP_TCP_PEER_BLOCK_TIMEOUT_MS) {
                 Some(v) if v < 0 => None,
                 Some(v) => Some(Duration::from_millis(v as u64)),
@@ -221,7 +219,6 @@ mod tests {
         assert_eq!(cfg.keepalive_max_misses, 3);
         assert_eq!(cfg.so_rcvbuf, None);
         assert_eq!(cfg.so_sndbuf, None);
-        assert_eq!(cfg.async_workers, None);
     }
 
     #[test]

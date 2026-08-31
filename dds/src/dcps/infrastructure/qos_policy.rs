@@ -894,8 +894,6 @@ pub const PROP_TCP_KEEPALIVE_MAX_MISSES: &str = "int2dds.transport.TCPv4.keepali
 pub const PROP_TCP_SO_RCVBUF: &str = "int2dds.transport.TCPv4.so_rcvbuf";
 /// Forced `SO_SNDBUF` in bytes. Default OS-managed (absent).
 pub const PROP_TCP_SO_SNDBUF: &str = "int2dds.transport.TCPv4.so_sndbuf";
-/// Tokio worker thread count for the TCP runtime.
-pub const PROP_TCP_ASYNC_WORKERS: &str = "int2dds.transport.TCPv4.async_workers";
 /// Longest one peer may hold up a sending thread, in milliseconds. A frame the
 /// peer's socket cannot take at all is dropped rather than waited on, so a
 /// stalled peer cannot delay sends to the others; RTPS reliability repairs the

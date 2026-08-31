@@ -7,16 +7,15 @@
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use flume::bounded;
 use log::{debug, info};
-use tokio_util::sync::CancellationToken;
 
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::locator::Locator;
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
-use crate::rtps::transport::plugin::{IncomingMessage, MessageSource, SendTarget, TransportPlugin};
+use crate::rtps::transport::plugin::{MessageSource, SendTarget, TransportPlugin};
 use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::tcp::connection_registry::{
     ConnectionRegistry, KeepaliveParams, TcpSocketTuning,
@@ -26,10 +25,6 @@ use crate::rtps::transport::tcp::tcp_listener::TcpListener;
 use crate::rtps::transport::tcp::tcp_sender::TcpSender;
 use crate::rtps::transport::tcp::tls::TlsConfig;
 use crate::rtps::transport::{TcpConfig, TransportType};
-
-/// Capacity of the inbound channel. Single-slot so a full channel
-/// blocks the router at once, pushing backpressure onto the TCP window.
-const TO_RTPS_CHANNEL_CAPACITY: usize = 1;
 
 // ── TcpTransportPlugin ──────────────────────────────────────────────────
 
@@ -53,10 +48,9 @@ pub(crate) struct TcpTransportPlugin {
     /// Dial peers discovered at runtime that are not in `initial_peers`
     accept_undefined_peers: bool,
 
-    /// Root of the whole plugin's cancellation tree. The listener and the
-    /// sender each own a child of it, so one cancel reaches both sides
-    /// regardless of which half is still reachable.
-    cancel: CancellationToken,
+    /// Shared with the sender, so the plugin can mark the transport shut down
+    /// even when an outside `Arc` keeps the sender alive past it.
+    shutdown: Arc<AtomicBool>,
 
     /// Outbound side. `Arc` because send paths and connect tasks hold clones.
     sender: Arc<TcpSender>,
@@ -68,10 +62,6 @@ pub(crate) struct TcpTransportPlugin {
     /// Connection bookkeeping and the self-delivery queue, shared with the
     /// sender and with the stream listening task.
     shared: Arc<ConnectionRegistry>,
-
-    /// Kept alive so the registry's routing senders stay connected.
-    _discovery_rx: flume::Receiver<IncomingMessage>,
-    _user_data_rx: flume::Receiver<IncomingMessage>,
 }
 
 impl TcpTransportPlugin {
@@ -94,9 +84,8 @@ impl TcpTransportPlugin {
         )
     }
 
-    /// Build the plugin. Internally creates a multi-thread runtime, then
-    /// runs `block_on` to spawn the listener + sender within a runtime
-    /// context (required by `tokio::spawn`).
+    /// Build the plugin: bind the listener and create the sender. Neither half
+    /// owns a task runtime, so nothing is spawned here.
     pub(crate) fn new_with_tls(
         domain_id: u32,
         participant_id: u32,
@@ -120,10 +109,6 @@ impl TcpTransportPlugin {
             );
         }
 
-        // Bridge async → sync.
-        let (discovery_tx, discovery_rx) = bounded::<IncomingMessage>(TO_RTPS_CHANNEL_CAPACITY);
-        let (user_data_tx, user_data_rx) = bounded::<IncomingMessage>(TO_RTPS_CHANNEL_CAPACITY);
-
         let tuning = TcpSocketTuning {
             nodelay: tcp_config.nodelay,
             so_rcvbuf: tcp_config.so_rcvbuf,
@@ -136,7 +121,7 @@ impl TcpTransportPlugin {
             }),
         };
 
-        let cancel = CancellationToken::new();
+        let shutdown = Arc::new(AtomicBool::new(false));
 
         let listener = TcpListener::new(
             physical_port,
@@ -164,14 +149,8 @@ impl TcpTransportPlugin {
         })?;
         let listener_port = listener.port();
 
-        let shared = Arc::new(ConnectionRegistry::new(
-            domain_id,
-            participant_id,
-            guid_prefix,
-            tuning,
-            discovery_tx,
-            user_data_tx,
-        ));
+        let shared =
+            Arc::new(ConnectionRegistry::new(domain_id, participant_id, guid_prefix, tuning));
 
         // Every address this participant answers on, so the sender can tell
         // a frame aimed at ourselves from one aimed at a peer.
@@ -189,7 +168,7 @@ impl TcpTransportPlugin {
             tls_config,
             Arc::clone(&shared),
             &tcp_config,
-            cancel.child_token(),
+            Arc::clone(&shutdown),
         );
 
         info!(
@@ -205,12 +184,10 @@ impl TcpTransportPlugin {
             initial_peers,
             public_address: tcp_config.public_address,
             accept_undefined_peers: tcp_config.accept_undefined_peers,
-            cancel,
+            shutdown,
             sender,
             listener: Mutex::new(Some(listener)),
             shared,
-            _discovery_rx: discovery_rx,
-            _user_data_rx: user_data_rx,
         })
     }
 
@@ -338,9 +315,9 @@ impl TransportPlugin for TcpTransportPlugin {
     }
 
     fn close(&self) {
-        // 1. One cancel covers both halves, so every task is told to stop
-        //    before either side is awaited.
-        self.cancel.cancel();
+        // 1. One flag covers both halves, so neither side can be taken for
+        //    live once close() has started.
+        self.shutdown.store(true, Ordering::Release);
 
         // 2. The stream listening task owns the listener once it has taken it,
         //    and has already stopped by the time close() runs. Anything still
@@ -375,13 +352,10 @@ impl TransportPlugin for TcpTransportPlugin {
 
 impl Drop for TcpTransportPlugin {
     fn drop(&mut self) {
-        // Best-effort fallback when close() was not called explicitly.
-        // We cannot `block_on` inside Drop safely (it panics if Drop runs
-        // inside the runtime), so cancellation is all we can do. Firing the
-        // root reaches both halves without depending on the listener still
-        // being in its slot or on the last sender Arc dying here; the
-        // runtime's own Drop then drains or aborts the remaining tasks.
-        self.cancel.cancel();
+        // Best-effort fallback when close() was not called explicitly. The
+        // shared flag reaches the sender without depending on the last sender
+        // Arc dying here.
+        self.shutdown.store(true, Ordering::Release);
 
         if let Ok(mut guard) = self.listener.lock() {
             drop(guard.take());
@@ -389,21 +363,12 @@ impl Drop for TcpTransportPlugin {
     }
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-/// Default tokio worker thread count when `TcpConfig.async_workers` is unset:
-/// `min(4, available_parallelism)`.
-fn default_worker_count() -> usize {
-    let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
-    cpus.min(4).max(1)
-}
-
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::AtomicU32;
 
     use crate::rtps::transport::tcp::framing::{test_framed, test_message};
 
@@ -498,11 +463,11 @@ mod tests {
         plugin.close();
     }
 
-    /// Dropping the plugin cancels the outbound side through the one root, even
-    /// when the sender's own `Drop` cannot do it: an outside `Arc` keeps the
-    /// sender alive past the plugin.
+    /// Dropping the plugin marks the outbound side shut down even when the
+    /// sender's own `Drop` cannot: an outside `Arc` keeps the sender alive
+    /// past the plugin.
     #[test]
-    fn drop_cancels_the_outbound_side_through_the_root() {
+    fn drop_shuts_down_the_outbound_side_through_the_shared_flag() {
         let plugin = make_plugin(next_test_domain());
         let port = plugin.tcp_listener_port().expect("listener port");
 
@@ -510,13 +475,13 @@ mod tests {
             std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).expect("client connect");
 
         let sender = Arc::clone(&plugin.sender);
-        assert!(!sender.cancel_token().is_cancelled());
+        assert!(!sender.is_shut_down());
 
         drop(plugin);
 
         assert!(
-            sender.cancel_token().is_cancelled(),
-            "plugin Drop must cancel the outbound side via the root"
+            sender.is_shut_down(),
+            "plugin Drop must shut the outbound side down via the shared flag"
         );
 
         drop(client);

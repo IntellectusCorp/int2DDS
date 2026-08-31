@@ -6,13 +6,12 @@
 
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use log::{debug, warn};
-use tokio_util::sync::CancellationToken;
 
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
@@ -71,7 +70,7 @@ pub(crate) struct TcpSender {
     tls_config: Option<Arc<TlsConfig>>,
     shared: Arc<ConnectionRegistry>,
     connections: Arc<DashMap<ConnectionKey, Arc<OutboundConnection>>>,
-    cancel: CancellationToken,
+    shutdown: Arc<AtomicBool>,
 }
 
 impl TcpSender {
@@ -85,7 +84,7 @@ impl TcpSender {
         tls_config: Option<Arc<TlsConfig>>,
         shared: Arc<ConnectionRegistry>,
         tcp_config: &TcpConfig,
-        cancel: CancellationToken,
+        shutdown: Arc<AtomicBool>,
     ) -> Arc<Self> {
         Arc::new(Self {
             working_ips,
@@ -97,7 +96,7 @@ impl TcpSender {
             tls_config,
             shared,
             connections: Arc::new(DashMap::new()),
-            cancel,
+            shutdown,
         })
     }
 
@@ -198,11 +197,10 @@ impl TcpSender {
     pub(crate) fn disconnect_peer(&self, addr: SocketAddr) {
         self.connections.retain(|(peer, _), _| *peer != addr);
         self.shared.clear_backoff(addr);
-        self.shared.remove_peer_by_addr(addr);
     }
 
     pub(crate) fn shutdown(&self) {
-        self.cancel.cancel();
+        self.shutdown.store(true, Ordering::Release);
         self.connections.clear();
     }
 
@@ -225,14 +223,14 @@ impl TcpSender {
     }
 
     #[cfg(test)]
-    pub(crate) fn cancel_token(&self) -> &CancellationToken {
-        &self.cancel
+    pub(crate) fn is_shut_down(&self) -> bool {
+        self.shutdown.load(Ordering::Acquire)
     }
 }
 
 impl Drop for TcpSender {
     fn drop(&mut self) {
-        self.cancel.cancel();
+        self.shutdown.store(true, Ordering::Release);
     }
 }
 
@@ -243,8 +241,6 @@ mod tests {
     use crate::rtps::transport::tcp::framing::test_message;
 
     fn make_sender(config: TcpConfig) -> Arc<TcpSender> {
-        let (discovery_tx, _discovery_rx) = flume::bounded(1);
-        let (user_tx, _user_rx) = flume::bounded(1);
         let tuning = TcpSocketTuning {
             nodelay: config.nodelay,
             so_rcvbuf: config.so_rcvbuf,
@@ -252,8 +248,7 @@ mod tests {
             unacked_timeout: config.unacked_timeout,
             keepalive: None,
         };
-        let registry =
-            Arc::new(ConnectionRegistry::new(0, 0, [0; 12], tuning, discovery_tx, user_tx));
+        let registry = Arc::new(ConnectionRegistry::new(0, 0, [0; 12], tuning));
         TcpSender::new(
             0,
             0,
@@ -263,7 +258,7 @@ mod tests {
             None,
             registry,
             &config,
-            CancellationToken::new(),
+            Arc::new(AtomicBool::new(false)),
         )
     }
 

@@ -344,6 +344,7 @@ mod tests {
     use mio::{Events, Poll};
 
     use crate::rtps::transport::tcp::framing::{test_framed, test_message};
+    use crate::rtps::transport::tcp::sync_connection::{OutboundConnection, SendOutcome};
 
     #[test]
     fn bind_creates_a_pollable_nonblocking_listener() {
@@ -540,6 +541,146 @@ mod tests {
         listener.deregister_all(poll.registry()).unwrap();
         let _ = client.shutdown(Shutdown::Both);
         drop(client);
+        drop(listener);
+        drop(poll);
+    }
+
+    #[test]
+    fn tls_roundtrip_from_a_sync_outbound_connection() {
+        const BUILTIN_WRITER: u8 = 0xC2;
+
+        let pem_dir = tempfile::tempdir().unwrap();
+        let tls_config = Arc::new(self_signed_tls_config(pem_dir.path()));
+
+        let mut listener = TcpListener::new(
+            0,
+            TcpSocketTuning::default(),
+            Some(Arc::clone(&tls_config)),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let mut poll = Poll::new().unwrap();
+        let listener_token = listener.register(poll.registry()).unwrap();
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, listener.port));
+
+        let frame = test_framed(&test_message(BUILTIN_WRITER, b"tls-discovery"));
+        let client_frame = frame.clone();
+        let client_config = Arc::clone(&tls_config);
+        // The server half of the handshake only advances while the poll loop
+        // below runs, so the client cannot share this thread.
+        let client = std::thread::spawn(move || {
+            let connection = OutboundConnection::connect(
+                address,
+                &TcpSocketTuning::default(),
+                Some(client_config.as_ref()),
+                Some(Duration::from_secs(5)),
+            )
+            .unwrap();
+            assert_eq!(connection.send(&client_frame).unwrap(), SendOutcome::Sent);
+            connection
+        });
+
+        let mut events = Events::with_capacity(8);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let received = loop {
+            assert!(Instant::now() < deadline, "timed out waiting for the TLS frame");
+            events.clear();
+            poll.poll(&mut events, Some(Duration::from_millis(10))).unwrap();
+            let mut message = None;
+            for event in &events {
+                if event.token() == listener_token {
+                    listener.accept_ready(poll.registry()).unwrap();
+                } else if let Some(ready) =
+                    listener.get_message(event.token(), poll.registry()).unwrap()
+                {
+                    message = Some(ready);
+                }
+            }
+            if let Some(message) = message {
+                break message;
+            }
+        };
+
+        assert_eq!(listener.connection_count(), 1);
+        assert_eq!(received.kind, TcpFrameKind::Discovery);
+        assert_eq!(received.data.as_ref(), frame.as_slice());
+
+        let connection = client.join().unwrap();
+        assert!(!connection.is_failed());
+        listener.deregister_all(poll.registry()).unwrap();
+        drop(connection);
+        drop(listener);
+        drop(poll);
+    }
+
+    /// A self-signed identity written to `dir`, trusting only itself.
+    fn self_signed_tls_config(dir: &std::path::Path) -> TlsConfig {
+        let cert_file = dir.join("cert.pem");
+        let key_file = dir.join("key.pem");
+        let generated = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        std::fs::write(&cert_file, generated.cert.pem()).unwrap();
+        std::fs::write(&key_file, generated.key_pair.serialize_pem()).unwrap();
+        TlsConfig {
+            ca_file: cert_file.clone(),
+            cert_file,
+            key_file,
+            server_name: "localhost".to_string(),
+            verify_peer: false,
+        }
+    }
+
+    #[test]
+    fn tls_connect_rejects_a_server_it_does_not_trust() {
+        let server_dir = tempfile::tempdir().unwrap();
+        let client_dir = tempfile::tempdir().unwrap();
+        let server_config = Arc::new(self_signed_tls_config(server_dir.path()));
+        // A different self-signed identity, so the server's certificate chains
+        // to nothing this client trusts.
+        let client_config = Arc::new(self_signed_tls_config(client_dir.path()));
+
+        let mut listener = TcpListener::new(
+            0,
+            TcpSocketTuning::default(),
+            Some(server_config),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let mut poll = Poll::new().unwrap();
+        let listener_token = listener.register(poll.registry()).unwrap();
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, listener.port));
+
+        let client = std::thread::spawn(move || {
+            OutboundConnection::connect(
+                address,
+                &TcpSocketTuning::default(),
+                Some(client_config.as_ref()),
+                Some(Duration::from_secs(5)),
+            )
+            .err()
+        });
+
+        let mut events = Events::with_capacity(8);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !client.is_finished() {
+            assert!(Instant::now() < deadline, "timed out waiting for the handshake to fail");
+            events.clear();
+            poll.poll(&mut events, Some(Duration::from_millis(10))).unwrap();
+            for event in &events {
+                if event.token() == listener_token {
+                    listener.accept_ready(poll.registry()).unwrap();
+                } else {
+                    // The rejected handshake surfaces here as a read error.
+                    let _ = listener.get_message(event.token(), poll.registry());
+                }
+            }
+        }
+
+        let error = client.join().unwrap().expect("client must reject an untrusted server");
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+
+        listener.deregister_all(poll.registry()).unwrap();
         drop(listener);
         drop(poll);
     }

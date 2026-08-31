@@ -1,8 +1,8 @@
-//! Shared inbound connection bookkeeping and frame routing.
+//! Per-participant state both halves of the TCP transport share.
 //!
-//! The registry deliberately knows nothing about RTPS packet contents. A reader
-//! supplies the kind decoded from the TCP frame header and the registry moves
-//! the owned payload to the matching listening-task channel.
+//! Socket tuning applied to every stream, the reconnect backoff a failed peer
+//! earns, and the queue that carries a participant's own user data past the
+//! socket. The registry knows nothing about RTPS packet contents.
 
 use std::io;
 use std::net::SocketAddr;
@@ -12,28 +12,12 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use flume::{Receiver, Sender, TrySendError};
-use log::{debug, warn};
 use mio::Waker;
-use tokio_util::sync::CancellationToken;
 
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::plugin::IncomingMessage;
-use crate::rtps::transport::tcp::framing::{TcpBufferPool, TcpFrame, TcpFrameKind};
-
-pub(crate) type ConnectionId = usize;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ConnectionDirection {
-    Inbound,
-    Outbound,
-}
-
-pub(crate) struct ConnectionEntry {
-    pub(crate) remote_addr: SocketAddr,
-    pub(crate) direction: ConnectionDirection,
-    pub(crate) cancel: CancellationToken,
-}
+use crate::rtps::transport::tcp::framing::{TcpBufferPool, TcpFrameKind};
 
 /// OS keepalive tuning applied to every inbound and outbound stream.
 #[derive(Debug, Clone, Copy)]
@@ -145,12 +129,7 @@ struct BackoffState {
 pub(crate) struct ConnectionRegistry {
     pub(crate) tuning: TcpSocketTuning,
     buffer_pool: Arc<TcpBufferPool>,
-    pub(crate) connections: DashMap<ConnectionId, ConnectionEntry>,
-    next_conn_id: AtomicUsize,
     backoff: DashMap<SocketAddr, BackoffState>,
-
-    discovery_tx: Sender<IncomingMessage>,
-    user_data_tx: Sender<IncomingMessage>,
 
     self_delivery_tx: Sender<IncomingMessage>,
     self_delivery_rx: Mutex<Option<Receiver<IncomingMessage>>>,
@@ -164,18 +143,12 @@ impl ConnectionRegistry {
         _participant_id: u32,
         _local_guid_prefix: GuidPrefix,
         tuning: TcpSocketTuning,
-        discovery_tx: Sender<IncomingMessage>,
-        user_data_tx: Sender<IncomingMessage>,
     ) -> Self {
         let (self_delivery_tx, self_delivery_rx) = flume::bounded(SELF_DELIVERY_COUNT_BACKSTOP);
         Self {
             tuning,
             buffer_pool: TcpBufferPool::new(),
-            connections: DashMap::new(),
-            next_conn_id: AtomicUsize::new(0),
             backoff: DashMap::new(),
-            discovery_tx,
-            user_data_tx,
             self_delivery_tx,
             self_delivery_rx: Mutex::new(Some(self_delivery_rx)),
             self_delivery_bytes: Arc::new(AtomicUsize::new(0)),
@@ -202,18 +175,8 @@ impl ConnectionRegistry {
         Some(message)
     }
 
-    pub(crate) fn connection_count(&self) -> usize {
-        self.connections.len()
-    }
-
     pub(crate) fn buffer_pool(&self) -> &Arc<TcpBufferPool> {
         &self.buffer_pool
-    }
-
-    #[cfg(test)]
-    fn peer_count(&self) -> usize {
-        use std::collections::HashSet;
-        self.connections.iter().map(|entry| entry.remote_addr).collect::<HashSet<_>>().len()
     }
 
     pub(crate) fn backoff_remaining(&self, addr: SocketAddr) -> Option<Duration> {
@@ -292,130 +255,22 @@ impl ConnectionRegistry {
             }
         }
     }
-
-    pub(crate) fn register_connection(
-        &self,
-        remote_addr: SocketAddr,
-        direction: ConnectionDirection,
-        cancel: CancellationToken,
-    ) -> ConnectionId {
-        let conn_id = self.next_conn_id.fetch_add(1, Ordering::SeqCst);
-        self.connections.insert(conn_id, ConnectionEntry { remote_addr, direction, cancel });
-        conn_id
-    }
-
-    /// Route solely from the explicit wire kind. This is the point at which TCP
-    /// receive backpressure reaches the socket: a full single-slot RTPS channel
-    /// parks this connection's reader task.
-    pub(crate) async fn route_frame(&self, conn_id: ConnectionId, frame: TcpFrame) {
-        let Some(entry) = self.connections.get(&conn_id) else { return };
-        let source = entry.remote_addr;
-        let direction = entry.direction;
-        drop(entry);
-
-        if direction == ConnectionDirection::Outbound {
-            self.clear_backoff(source);
-        }
-
-        let msg = IncomingMessage { data: frame.payload, source };
-        let result = match frame.kind {
-            TcpFrameKind::Discovery => self.discovery_tx.send_async(msg).await,
-            TcpFrameKind::UserData => self.user_data_tx.send_async(msg).await,
-        };
-        if let Err(error) = result {
-            warn!(
-                "TCP reader [{}]: failed to route {:?} frame on connection {}: {}",
-                TransportErrorCode::TcpChannelFull,
-                frame.kind,
-                conn_id,
-                error
-            );
-        }
-    }
-
-    pub(crate) fn remove_connection(&self, conn_id: ConnectionId) {
-        if let Some((_, entry)) = self.connections.remove(&conn_id) {
-            entry.cancel.cancel();
-            debug!("TCP registry: removed conn {} ({:?})", conn_id, entry.remote_addr);
-        }
-    }
-
-    /// Exact-address cleanup reliably covers outbound connections. Accepted
-    /// sockets have ephemeral remote ports and are normally reaped by EOF or
-    /// keepalive instead.
-    pub(crate) fn remove_peer_by_addr(&self, addr: SocketAddr) {
-        let ids: Vec<_> = self
-            .connections
-            .iter()
-            .filter(|entry| entry.remote_addr == addr)
-            .map(|entry| *entry.key())
-            .collect();
-        for id in ids {
-            self.remove_connection(id);
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
     use mio::{Events, Poll, Waker};
 
     use crate::rtps::transport::tokens::ListenerToken;
 
-    fn registry() -> (Arc<ConnectionRegistry>, Receiver<IncomingMessage>, Receiver<IncomingMessage>)
-    {
-        let (discovery_tx, discovery_rx) = flume::bounded(1);
-        let (user_tx, user_rx) = flume::bounded(1);
-        (
-            Arc::new(ConnectionRegistry::new(
-                0,
-                0,
-                [0; 12],
-                TcpSocketTuning::default(),
-                discovery_tx,
-                user_tx,
-            )),
-            discovery_rx,
-            user_rx,
-        )
-    }
-
-    #[tokio::test]
-    async fn routes_arbitrary_payload_only_by_kind() {
-        let (registry, discovery_rx, user_rx) = registry();
-        let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
-        let id = registry.register_connection(
-            peer,
-            ConnectionDirection::Inbound,
-            CancellationToken::new(),
-        );
-
-        registry
-            .route_frame(
-                id,
-                TcpFrame {
-                    kind: TcpFrameKind::Discovery,
-                    payload: Bytes::from_static(b"not RTPS"),
-                },
-            )
-            .await;
-        assert_eq!(discovery_rx.recv().unwrap().data.as_ref(), b"not RTPS");
-        assert!(user_rx.is_empty());
-
-        registry
-            .route_frame(
-                id,
-                TcpFrame { kind: TcpFrameKind::UserData, payload: Bytes::from_static(b"anything") },
-            )
-            .await;
-        assert_eq!(user_rx.recv().unwrap().data.as_ref(), b"anything");
+    fn registry() -> Arc<ConnectionRegistry> {
+        Arc::new(ConnectionRegistry::new(0, 0, [0; 12], TcpSocketTuning::default()))
     }
 
     #[test]
     fn backoff_is_exponential_and_success_clears_it() {
-        let (registry, _, _) = registry();
+        let registry = registry();
         let peer: SocketAddr = "127.0.0.1:7400".parse().unwrap();
         let error = io::Error::from(io::ErrorKind::TimedOut);
         registry.note_connect_failure(peer, &error);
@@ -425,20 +280,6 @@ mod tests {
         assert!(second > first);
         registry.clear_backoff(peer);
         assert!(registry.backoff_remaining(peer).is_none());
-    }
-
-    #[test]
-    fn exact_peer_cleanup_cancels_matching_connections_only() {
-        let (registry, _, _) = registry();
-        let a: SocketAddr = "127.0.0.1:7400".parse().unwrap();
-        let b: SocketAddr = "127.0.0.1:7500".parse().unwrap();
-        let ca = CancellationToken::new();
-        registry.register_connection(a, ConnectionDirection::Outbound, ca.clone());
-        registry.register_connection(b, ConnectionDirection::Outbound, CancellationToken::new());
-        assert_eq!(registry.peer_count(), 2);
-        registry.remove_peer_by_addr(a);
-        assert!(ca.is_cancelled());
-        assert_eq!(registry.connection_count(), 1);
     }
 
     #[test]
@@ -473,7 +314,7 @@ mod tests {
 
     #[test]
     fn self_delivery_wakes_the_poller_and_releases_queued_bytes() {
-        let (registry, _, _) = registry();
+        let registry = registry();
         let source: SocketAddr = "127.0.0.1:7400".parse().unwrap();
         assert!(!registry.deliver_to_self(source, TcpFrameKind::Discovery, b"discovery").unwrap());
         assert!(registry.deliver_to_self(source, TcpFrameKind::UserData, b"user").unwrap());
