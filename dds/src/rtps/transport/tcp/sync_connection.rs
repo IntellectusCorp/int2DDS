@@ -1,9 +1,10 @@
 //! One outbound TCP connection, written from the calling thread.
 //!
-//! The socket is non-blocking, so the write itself is the congestion test: a
-//! frame the send queue cannot take at all is reported as stalled and the
-//! caller drops it, which is what keeps one unresponsive peer from holding up
-//! sends to the others.
+//! The socket is non-blocking and never decides on its own that a frame is
+//! expendable. Bytes the send queue will not take are held in order and go out
+//! as room appears, so a peer that has fallen behind costs latency rather than
+//! data. A frame is refused only once the peer owes more than the queue
+//! budget, which bounds memory rather than answering congestion.
 
 use std::io::{self, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -17,8 +18,19 @@ use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::tcp::connection_registry::{apply_socket_tuning, TcpSocketTuning};
 use crate::rtps::transport::tcp::tls::TlsConfig;
 
-/// How long a frame the socket took only part of may sit unfinished.
-const PENDING_TAIL_DEADLINE: Duration = Duration::from_millis(1000);
+/// How much a peer may owe the stream before frames are refused instead of
+/// queued. This is a bound on memory, not a congestion threshold, so it sits
+/// far above any backlog a peer that is merely behind can build up.
+const SEND_QUEUE_BYTE_BUDGET: usize = 8 * 1024 * 1024;
+
+/// How long a peer may take no bytes at all while it still owes the stream.
+/// Progress of any size resets it, so only a peer that has stopped entirely
+/// costs the connection.
+const SEND_STALL_DEADLINE: Duration = Duration::from_secs(5);
+
+/// How far the queue's read cursor may run before the unsent bytes are moved
+/// to the front, so draining a long backlog does not memmove on every write.
+const QUEUE_COMPACT_THRESHOLD: usize = 64 * 1024;
 
 enum Wire {
     Plain(TcpStream),
@@ -51,10 +63,11 @@ impl Wire {
 /// What one `send` did with the frame.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SendOutcome {
-    /// The whole frame reached the socket.
+    /// The whole frame is on its way: whatever the socket would not take now
+    /// is held in order and goes out as room appears.
     Sent,
-    /// The send queue had no room at all. The frame never started, so nothing
-    /// is half-written and the connection stays usable.
+    /// The peer already owes more than the queue budget. The frame never
+    /// started, so nothing is half-written and the connection stays usable.
     Stalled,
 }
 
@@ -65,10 +78,14 @@ pub(crate) struct OutboundConnection {
 
 struct ConnectionState {
     wire: Wire,
-    /// Tail of a frame the socket accepted only part of. TLS keeps its own
-    /// unsent bytes instead, so this stays empty there.
+    /// Bytes already owed to the stream, in order. TLS keeps its own unsent
+    /// bytes instead, so this stays empty there.
     pending: Vec<u8>,
-    pending_since: Option<Instant>,
+    /// How much of `pending` has reached the socket.
+    pending_start: usize,
+    /// When the socket last took a byte, so a peer that is behind can be told
+    /// apart from one that has stopped.
+    last_progress: Instant,
 }
 
 impl OutboundConnection {
@@ -99,7 +116,12 @@ impl OutboundConnection {
         };
 
         Ok(Self {
-            state: Mutex::new(ConnectionState { wire, pending: Vec::new(), pending_since: None }),
+            state: Mutex::new(ConnectionState {
+                wire,
+                pending: Vec::new(),
+                pending_start: 0,
+                last_progress: Instant::now(),
+            }),
             failed: AtomicBool::new(false),
         })
     }
@@ -108,37 +130,41 @@ impl OutboundConnection {
         self.failed.load(Ordering::Acquire)
     }
 
-    /// Write one already-framed message. Never waits on the peer: a frame the
-    /// socket has no room for at all is refused, and one it takes only part of
-    /// leaves its tail behind for the next call.
+    /// Write one already-framed message. Never waits on the peer: whatever the
+    /// socket will not take now is queued in order and goes out as room
+    /// appears. Nothing but a send drains the queue, so every call pushes the
+    /// backlog before it looks at its own frame.
     pub(crate) fn send(&self, frame: &[u8]) -> io::Result<SendOutcome> {
         let mut state = self.lock();
 
-        match state.drain_pending() {
-            Ok(true) => {}
-            Ok(false) if state.tail_expired() => {
-                return Err(self.fail(transport_io_error(
-                    TransportErrorCode::TcpConnectionTimeout,
-                    format!(
-                        "peer {} left a frame unfinished for over {:?}",
-                        state.peer(),
-                        PENDING_TAIL_DEADLINE
-                    ),
-                )))
-            }
-            Ok(false) => return Ok(SendOutcome::Stalled),
-            Err(error) => return Err(self.fail(error)),
+        if let Err(error) = state.drain_pending() {
+            return Err(self.fail(error));
+        }
+        if state.has_stopped_taking_bytes() {
+            let peer = state.peer();
+            return Err(self.fail(transport_io_error(
+                TransportErrorCode::TcpConnectionTimeout,
+                format!("peer {peer} took no bytes for over {SEND_STALL_DEADLINE:?}"),
+            )));
         }
 
-        let written = match state.wire.write(frame) {
-            Ok(0) if !frame.is_empty() => return Ok(SendOutcome::Stalled),
-            Ok(written) => written,
-            Err(error) if retryable(&error) => return Ok(SendOutcome::Stalled),
-            Err(error) => return Err(self.fail(error)),
+        // Queued bytes own the stream position, so a frame may only go straight
+        // to the socket once they are gone.
+        let written = if state.queued() == 0 {
+            match state.write_some(frame) {
+                Ok(written) => written,
+                Err(error) => return Err(self.fail(error)),
+            }
+        } else {
+            0
         };
-        if written < frame.len() {
-            state.pending.extend_from_slice(&frame[written..]);
-            state.pending_since = Some(Instant::now());
+
+        let tail = &frame[written..];
+        if !tail.is_empty() {
+            if state.queued() + tail.len() > SEND_QUEUE_BYTE_BUDGET {
+                return Ok(SendOutcome::Stalled);
+            }
+            state.pending.extend_from_slice(tail);
         }
 
         match state.wire.flush() {
@@ -161,25 +187,54 @@ impl OutboundConnection {
 }
 
 impl ConnectionState {
-    /// Push out the tail an earlier frame left behind. It owns the stream
-    /// position, so nothing new may go out until it is gone. Reports whether
-    /// the stream is free.
-    fn drain_pending(&mut self) -> io::Result<bool> {
-        while !self.pending.is_empty() {
-            match self.wire.write(&self.pending) {
-                Ok(0) => return Ok(false),
-                Ok(written) => drop(self.pending.drain(..written)),
+    fn queued(&self) -> usize {
+        self.pending.len() - self.pending_start
+    }
+
+    /// Hand the socket as much of `bytes` as it will take, noting any progress.
+    fn write_some(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        loop {
+            match self.wire.write(bytes) {
+                Ok(0) => return Ok(0),
+                Ok(written) => {
+                    self.last_progress = Instant::now();
+                    return Ok(written);
+                }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(0),
                 Err(error) => return Err(error),
             }
         }
-        self.pending_since = None;
-        Ok(true)
     }
 
-    fn tail_expired(&self) -> bool {
-        self.pending_since.is_some_and(|since| since.elapsed() >= PENDING_TAIL_DEADLINE)
+    /// Push out what the peer is already owed. It holds the stream position, so
+    /// nothing new may go out until it is gone.
+    fn drain_pending(&mut self) -> io::Result<()> {
+        while self.pending_start < self.pending.len() {
+            match self.wire.write(&self.pending[self.pending_start..]) {
+                Ok(0) => break,
+                Ok(written) => {
+                    self.pending_start += written;
+                    self.last_progress = Instant::now();
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => return Err(error),
+            }
+        }
+
+        if self.pending_start == self.pending.len() {
+            self.pending.clear();
+            self.pending_start = 0;
+        } else if self.pending_start >= QUEUE_COMPACT_THRESHOLD {
+            self.pending.drain(..self.pending_start);
+            self.pending_start = 0;
+        }
+        Ok(())
+    }
+
+    fn has_stopped_taking_bytes(&self) -> bool {
+        self.queued() > 0 && self.last_progress.elapsed() >= SEND_STALL_DEADLINE
     }
 
     fn peer(&self) -> String {
@@ -234,11 +289,11 @@ mod tests {
     use std::io::Read;
     use std::time::Instant;
 
-    /// A peer that stops reading must be refused rather than waited on, and the
-    /// tail of the frame its socket took only part of must go out on its own
-    /// once the peer reads again.
+    /// A peer that stops reading must cost latency, not data: its frames queue
+    /// instead of being refused, no call waits on it, and every byte arrives
+    /// once it reads again.
     #[test]
-    fn a_refused_peer_recovers_once_it_reads_again() {
+    fn a_peer_that_stops_reading_loses_no_bytes() {
         // The accepted socket inherits this receive buffer, so the peer cannot
         // absorb the traffic in kernel memory and the send queue really fills.
         let listener =
@@ -260,29 +315,31 @@ mod tests {
         .unwrap();
         let (mut accepted, _) = listener.accept().unwrap();
 
-        let frame = vec![0u8; 32 * 1024];
-        let mut refused = false;
-        for _ in 0..64 {
+        const FRAMES: usize = 32;
+        let frame = vec![0x5au8; 32 * 1024];
+        for _ in 0..FRAMES {
             let call = Instant::now();
-            let outcome = connection.send(&frame).unwrap();
+            assert_eq!(connection.send(&frame).unwrap(), SendOutcome::Sent);
             assert!(call.elapsed() < Duration::from_millis(500), "a send waited on the peer");
-            if outcome == SendOutcome::Stalled {
-                refused = true;
-                break;
-            }
         }
-        assert!(refused, "a peer that never reads must eventually refuse frames");
 
-        accepted.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+        // Nothing but a send drains the queue, so each of the peer's reads is
+        // paired with one.
+        accepted.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+        let expected = FRAMES * frame.len();
+        let mut received = 0usize;
         let mut sink = vec![0u8; 64 * 1024];
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            assert!(Instant::now() < deadline, "the connection never recovered");
-            let _ = accepted.read(&mut sink);
-            if connection.send(&frame).unwrap() == SendOutcome::Sent {
-                break;
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while received < expected {
+            assert!(Instant::now() < deadline, "only {received} of {expected} bytes arrived");
+            match accepted.read(&mut sink) {
+                Ok(0) => break,
+                Ok(read) => received += read,
+                Err(_) => {}
             }
+            connection.send(&[]).unwrap();
         }
+        assert_eq!(received, expected, "a peer that fell behind must lose no bytes");
         assert!(!connection.is_failed());
 
         drop(connection);
@@ -290,10 +347,10 @@ mod tests {
         drop(listener);
     }
 
-    /// A peer that never frees room must eventually cost the connection: the
-    /// tail cannot be dropped and cannot be waited on, so the connection goes.
+    /// A backlog on its own must never cost the connection. Only a peer that
+    /// has stopped taking bytes altogether may.
     #[test]
-    fn a_tail_that_never_leaves_costs_the_connection() {
+    fn a_peer_that_takes_nothing_costs_the_connection() {
         let listener =
             socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
         listener.set_recv_buffer_size(2 * 1024).unwrap();
@@ -314,24 +371,18 @@ mod tests {
         let accepted = listener.accept().unwrap().0;
 
         let frame = vec![0u8; 32 * 1024];
-        let mut stalled = false;
+        let mut backlogged = false;
         for _ in 0..64 {
-            if connection.send(&frame).unwrap() == SendOutcome::Stalled {
-                stalled = true;
+            assert_eq!(connection.send(&frame).unwrap(), SendOutcome::Sent);
+            if connection.state.lock().unwrap().queued() > 256 * 1024 {
+                backlogged = true;
                 break;
             }
         }
-        assert!(stalled, "the peer never stopped taking frames");
+        assert!(backlogged, "the peer never stopped taking bytes");
+        assert!(!connection.is_failed(), "a backlog alone must not cost the connection");
 
-        // Whether a full socket takes part of a frame or none of it is the
-        // platform's choice, so the tail is placed directly. What is under test
-        // is what happens to a tail the socket will not take, not how one forms.
-        {
-            let mut state = connection.state.lock().unwrap();
-            state.pending = frame.clone();
-            state.pending_since = Some(Instant::now() - PENDING_TAIL_DEADLINE);
-        }
-
+        connection.state.lock().unwrap().last_progress = Instant::now() - SEND_STALL_DEADLINE;
         let error = connection.send(&frame).expect_err("the connection must be given up");
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(connection.is_failed());

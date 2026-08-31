@@ -302,9 +302,8 @@ mod tests {
     }
 
     /// A peer that never reads must never hold a sending thread. Frames its
-    /// socket cannot take are dropped the way a full UDP socket buffer drops
-    /// them, and a frame it took only part of leaves its tail for the next
-    /// send instead of waiting.
+    /// socket cannot take are queued in order rather than dropped, so falling
+    /// behind costs the peer latency and costs the caller nothing.
     #[test]
     fn a_peer_that_never_reads_cannot_hold_the_caller() {
         // The accepted socket inherits this receive buffer, so the peer cannot
@@ -323,7 +322,6 @@ mod tests {
         let sender = make_sender(config);
         let message = test_message(0x02, &vec![0u8; 32 * 1024]);
 
-        let mut refused = 0;
         for _ in 0..64 {
             let call = Instant::now();
             let result = sender.send_to(peer, TcpFrameKind::UserData, &message);
@@ -332,12 +330,10 @@ mod tests {
                 "one send held the thread for {:?}",
                 call.elapsed()
             );
-            if result.is_err() {
-                refused += 1;
-            }
+            result.expect("a peer that is only behind must not cost a frame");
         }
 
-        assert!(refused > 0, "a peer that never reads must eventually refuse frames");
+        assert_eq!(sender.stats.peer_stalled.count(), 0);
         sender.shutdown();
     }
 }
