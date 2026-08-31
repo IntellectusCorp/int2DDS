@@ -159,7 +159,7 @@ impl TcpSender {
         let (addr, kind) = key;
         self.evict_connection(key);
 
-        if let Some(remaining) = self.shared.backoff_remaining(addr) {
+        if let Some(remaining) = self.shared.backoff_remaining(key) {
             self.stats.backoff.record("reconnect backoff", addr, kind);
             return Err(transport_io_error(
                 TransportErrorCode::TcpReconnectBackoff,
@@ -176,11 +176,11 @@ impl TcpSender {
         )
         .map_err(|error| {
             self.stats.connect_failed.record("connect failed", addr, kind);
-            self.shared.note_connect_failure(addr, &error);
+            self.shared.note_connect_failure(key, &error);
             error
         })?;
 
-        self.shared.clear_backoff(addr);
+        self.shared.clear_backoff(key);
         debug!("TcpSender: established {:?} connection to {}", kind, addr);
 
         let connection = Arc::new(connection);
@@ -194,7 +194,7 @@ impl TcpSender {
 
     pub(crate) fn disconnect_peer(&self, addr: SocketAddr) {
         self.connections.retain(|(peer, _), _| *peer != addr);
-        self.shared.clear_backoff(addr);
+        self.shared.clear_peer_backoff(addr);
     }
 
     pub(crate) fn shutdown(&self) {
@@ -262,6 +262,7 @@ mod tests {
 
     /// A peer that cannot be reached must not leave a slot behind, and the
     /// second attempt must be refused by the backoff instead of waiting again.
+    /// The other frame kind keeps its own slot and is still free to dial.
     #[test]
     fn an_unreachable_peer_leaves_no_connection_and_enters_backoff() {
         let config =
@@ -274,8 +275,12 @@ mod tests {
         assert_ne!(first.kind(), io::ErrorKind::WouldBlock);
         assert_eq!(sender.connection_count(), 0);
 
-        let second = sender.send_to(peer, TcpFrameKind::Discovery, &message).unwrap_err();
+        let second = sender.send_to(peer, TcpFrameKind::UserData, &message).unwrap_err();
         assert_eq!(second.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(sender.stats.backoff.count(), 1);
+
+        let other_kind = sender.send_to(peer, TcpFrameKind::Discovery, &message).unwrap_err();
+        assert_ne!(other_kind.kind(), io::ErrorKind::WouldBlock);
         assert_eq!(sender.stats.backoff.count(), 1);
     }
 

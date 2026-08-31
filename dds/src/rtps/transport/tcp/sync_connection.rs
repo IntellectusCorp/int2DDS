@@ -82,10 +82,11 @@ impl OutboundConnection {
         tls_handshake_timeout: Duration,
     ) -> io::Result<Self> {
         let socket = TcpStream::connect_timeout(&addr, connect_timeout).map_err(|error| {
-            transport_io_error(
-                TransportErrorCode::TcpConnectionTimeout,
-                format!("TCP connect to {addr} failed: {error}"),
-            )
+            let code = match error.kind() {
+                io::ErrorKind::ConnectionRefused => TransportErrorCode::TcpConnectionRefused,
+                _ => TransportErrorCode::TcpConnectionTimeout,
+            };
+            transport_io_error(code, format!("TCP connect to {addr} failed: {error}"))
         })?;
         apply_socket_tuning(&socket, tuning);
 

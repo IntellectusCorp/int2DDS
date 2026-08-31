@@ -126,10 +126,12 @@ struct BackoffState {
     delay: Duration,
 }
 
+type BackoffKey = (SocketAddr, TcpFrameKind);
+
 pub(crate) struct ConnectionRegistry {
     pub(crate) tuning: TcpSocketTuning,
     buffer_pool: Arc<TcpBufferPool>,
-    backoff: DashMap<SocketAddr, BackoffState>,
+    backoff: DashMap<BackoffKey, BackoffState>,
 
     self_delivery_tx: Sender<IncomingMessage>,
     self_delivery_rx: Mutex<Option<Receiver<IncomingMessage>>>,
@@ -179,17 +181,17 @@ impl ConnectionRegistry {
         &self.buffer_pool
     }
 
-    pub(crate) fn backoff_remaining(&self, addr: SocketAddr) -> Option<Duration> {
-        let entry = self.backoff.get(&addr)?;
+    pub(crate) fn backoff_remaining(&self, key: BackoffKey) -> Option<Duration> {
+        let entry = self.backoff.get(&key)?;
         let now = Instant::now();
         (entry.next_attempt > now).then(|| entry.next_attempt - now)
     }
 
-    pub(crate) fn note_connect_failure(&self, addr: SocketAddr, err: &io::Error) {
+    pub(crate) fn note_connect_failure(&self, key: BackoffKey, err: &io::Error) {
         let now = Instant::now();
         let mut entry = self
             .backoff
-            .entry(addr)
+            .entry(key)
             .or_insert(BackoffState { next_attempt: now, delay: Duration::ZERO });
         let delay = if err.kind() == io::ErrorKind::ConnectionRefused || entry.delay.is_zero() {
             BACKOFF_BASE
@@ -200,8 +202,12 @@ impl ConnectionRegistry {
         entry.next_attempt = now + delay;
     }
 
-    pub(crate) fn clear_backoff(&self, addr: SocketAddr) {
-        self.backoff.remove(&addr);
+    pub(crate) fn clear_backoff(&self, key: BackoffKey) {
+        self.backoff.remove(&key);
+    }
+
+    pub(crate) fn clear_peer_backoff(&self, addr: SocketAddr) {
+        self.backoff.retain(|(peer, _), _| *peer != addr);
     }
 
     /// Self-addressed user data bypasses the socket. Local discovery is handled
@@ -272,14 +278,45 @@ mod tests {
     fn backoff_is_exponential_and_success_clears_it() {
         let registry = registry();
         let peer: SocketAddr = "127.0.0.1:7400".parse().unwrap();
+        let key = (peer, TcpFrameKind::Discovery);
         let error = io::Error::from(io::ErrorKind::TimedOut);
-        registry.note_connect_failure(peer, &error);
-        let first = registry.backoff_remaining(peer).unwrap();
-        registry.note_connect_failure(peer, &error);
-        let second = registry.backoff_remaining(peer).unwrap();
+        registry.note_connect_failure(key, &error);
+        let first = registry.backoff_remaining(key).unwrap();
+        registry.note_connect_failure(key, &error);
+        let second = registry.backoff_remaining(key).unwrap();
         assert!(second > first);
-        registry.clear_backoff(peer);
-        assert!(registry.backoff_remaining(peer).is_none());
+        registry.clear_backoff(key);
+        assert!(registry.backoff_remaining(key).is_none());
+    }
+
+    /// A refusal means the peer is not up yet, so the delay stays flat instead
+    /// of growing past the announcement period.
+    #[test]
+    fn a_refusal_does_not_grow_the_delay() {
+        let registry = registry();
+        let peer: SocketAddr = "127.0.0.1:7400".parse().unwrap();
+        let key = (peer, TcpFrameKind::Discovery);
+        let error = io::Error::from(io::ErrorKind::ConnectionRefused);
+        registry.note_connect_failure(key, &error);
+        let first = registry.backoff_remaining(key).unwrap();
+        registry.note_connect_failure(key, &error);
+        let second = registry.backoff_remaining(key).unwrap();
+        assert!(second <= first + Duration::from_millis(5));
+        assert!(second <= BACKOFF_BASE);
+    }
+
+    /// One kind's failed dial must leave the other kind free to connect.
+    #[test]
+    fn a_backoff_is_confined_to_its_frame_kind() {
+        let registry = registry();
+        let peer: SocketAddr = "127.0.0.1:7400".parse().unwrap();
+        let error = io::Error::from(io::ErrorKind::ConnectionRefused);
+        registry.note_connect_failure((peer, TcpFrameKind::UserData), &error);
+        assert!(registry.backoff_remaining((peer, TcpFrameKind::Discovery)).is_none());
+        assert!(registry.backoff_remaining((peer, TcpFrameKind::UserData)).is_some());
+
+        registry.clear_peer_backoff(peer);
+        assert!(registry.backoff_remaining((peer, TcpFrameKind::UserData)).is_none());
     }
 
     #[test]
