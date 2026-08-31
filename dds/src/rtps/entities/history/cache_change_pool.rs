@@ -9,6 +9,11 @@ use std::sync::Arc;
 
 use super::cache_change::CacheChange;
 
+// Upper bound on pooled idle changes. Histories may ask for far more (KEEP_LAST with a large
+// depth, or KEEP_ALL with unlimited resource limits reporting max_samples as i32::MAX), so both
+// the writer and reader histories clamp their requested cap to this.
+pub(crate) const MAX_POOL_CAP: usize = 1024;
+
 #[derive(Debug)]
 pub(crate) struct CacheChangePool {
     idle_changes: Vec<CacheChange>,

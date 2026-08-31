@@ -2597,7 +2597,7 @@ impl<Foo: DdsType> DataReader<Foo> {
         sample_states: &[SampleStateKind],
         view_states: &[ViewStateKind],
         instance_states: &[InstanceStateKind],
-    ) -> DdsResult<Vec<(Arc<[u8]>, SampleInfo)>> {
+    ) -> DdsResult<Vec<(Bytes, SampleInfo)>> {
         self.read_or_take_serialized(
             max_samples,
             sample_states,
@@ -2620,7 +2620,7 @@ impl<Foo: DdsType> DataReader<Foo> {
         sample_states: &[SampleStateKind],
         view_states: &[ViewStateKind],
         instance_states: &[InstanceStateKind],
-    ) -> DdsResult<Vec<(Arc<[u8]>, SampleInfo)>> {
+    ) -> DdsResult<Vec<(Bytes, SampleInfo)>> {
         self.read_or_take_serialized(
             max_samples,
             sample_states,
@@ -2643,7 +2643,7 @@ impl<Foo: DdsType> DataReader<Foo> {
         sample_states: &[SampleStateKind],
         view_states: &[ViewStateKind],
         instance_states: &[InstanceStateKind],
-    ) -> DdsResult<Vec<(Arc<[u8]>, SampleInfo)>> {
+    ) -> DdsResult<Vec<(Bytes, SampleInfo)>> {
         self.read_or_take_serialized(
             max_samples,
             sample_states,
@@ -2667,7 +2667,7 @@ impl<Foo: DdsType> DataReader<Foo> {
         sample_states: &[SampleStateKind],
         view_states: &[ViewStateKind],
         instance_states: &[InstanceStateKind],
-    ) -> DdsResult<Vec<(Arc<[u8]>, SampleInfo)>> {
+    ) -> DdsResult<Vec<(Bytes, SampleInfo)>> {
         self.read_or_take_serialized(
             max_samples,
             sample_states,
@@ -2679,7 +2679,7 @@ impl<Foo: DdsType> DataReader<Foo> {
     }
 
     /// Take a single pre-serialized sample from the cache.
-    pub fn take_next_serialized(&self) -> DdsResult<(Arc<[u8]>, SampleInfo)> {
+    pub fn take_next_serialized(&self) -> DdsResult<(Bytes, SampleInfo)> {
         let results = self.read_or_take_serialized(
             1,
             &[SampleStateKind::NOT_READ_SAMPLE_STATE],
@@ -2786,7 +2786,9 @@ impl<Foo: DdsType> DataReader<Foo> {
         instance_states: &[InstanceStateKind],
         take: bool,
         instance_handle: Option<InstanceHandle>,
-    ) -> DdsResult<Vec<(Arc<[u8]>, SampleInfo)>> {
+    ) -> DdsResult<Vec<(Bytes, SampleInfo)>> {
+        // Hand back the `Bytes` the cache already holds. Rewrapping into a fresh
+        // `Arc<[u8]>` copied every sample in full on the way out.
         self.read_or_take_serialized_bytes(
             max_samples,
             sample_states,
@@ -2796,9 +2798,7 @@ impl<Foo: DdsType> DataReader<Foo> {
             None,
             instance_handle,
         )
-        .map(|(results, _)| {
-            results.into_iter().map(|(data, info)| (Arc::from(data.as_ref()), info)).collect()
-        })
+        .map(|(results, _)| results)
     }
 
     fn read_or_take_serialized_bytes(

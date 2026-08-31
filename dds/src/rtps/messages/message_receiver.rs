@@ -238,11 +238,17 @@ impl MessageReceiver {
 
         // submessage loop
         while !submessages_buffer.is_empty() {
+            let before = submessages_buffer.len();
             if let Ok(Some(submessage)) =
                 Submessage::read_from_buffer(self, &mut submessages_buffer)
             {
                 // info!("#### submessage {:?}", submessage);
                 message.submessages.push(submessage);
+            }
+            // A header whose length runs past the datagram returns before consuming anything,
+            // and this loop would then spin on the same bytes forever.
+            if submessages_buffer.len() == before {
+                break;
             }
         }
 
@@ -735,6 +741,33 @@ mod tests {
 
     fn receiver() -> MessageReceiver {
         MessageReceiver::new(GUIDPREFIX_UNKNOWN, &"127.0.0.1:0".parse().unwrap())
+    }
+
+    /// A datagram whose last submessage header claims more bytes than the datagram holds.
+    /// `read_from_buffer` bails on the bounds check before it splits, so nothing is consumed.
+    fn datagram_with_overlong_submessage_length() -> Bytes {
+        let mut d = Vec::new();
+        d.extend_from_slice(b"RTPS");
+        d.extend_from_slice(&[2, 4]); // protocol version
+        d.extend_from_slice(&[1, 3]); // vendor id
+        d.extend_from_slice(&[0u8; 12]); // guid prefix
+        assert_eq!(d.len(), RTPS_HEADER_LENGTH as usize);
+        d.push(0x07); // HEARTBEAT
+        d.push(0x01); // little endian
+        d.extend_from_slice(&u16::MAX.to_le_bytes()); // octetsToNextHeader, far past the end
+        Bytes::from(d)
+    }
+
+    #[test]
+    fn a_submessage_length_past_the_datagram_does_not_spin_the_loop() {
+        let datagram = datagram_with_overlong_submessage_length();
+        let mut receiver = receiver();
+        // Without the guard in `init` this call never returns.
+        let message = receiver.init(&datagram).expect("the RTPS header itself is well formed");
+        assert!(
+            message.submessages.is_empty(),
+            "the malformed submessage must be dropped, not parsed"
+        );
     }
 
     fn empty_proxy() -> SPDPDiscoveredParticipantData {

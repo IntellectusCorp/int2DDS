@@ -5,8 +5,8 @@
 //! reassembled at the receiver.
 
 use crate::rtps::common::time::RtpsTime;
-use bytes::Bytes;
-use smallvec::SmallVec;
+use bytes::{Bytes, BytesMut};
+
 use speedy::{Context, Error, Readable, Writable, Writer};
 use std::io;
 use std::time::Instant;
@@ -25,11 +25,15 @@ use crate::rtps::{
 const EXTRA_FLAGS: u16 = 0; // 9.4.5.3.2 - extraFlags
 const OCTETS_TO_INLINE_QOS: u16 = 28; // 9.4.5.3.3 - octetsToInlineQos
 
-// Not spec text: bounds FragmentBuffer::new's slot Vec (32 bytes/slot, so this
-// is a 32 MiB worst case). No validity rule bounds total_fragments itself -- a
+// Not spec text: no validity rule bounds total_fragments itself -- a
 // self-consistent sample_size/fragment_size pair can still name far more
 // fragments than any real sample needs (781 is the largest in this file's tests).
+// Caps the fragment count; MAX_SAMPLE_BYTES below caps the bytes.
 const MAX_FRAGMENTS_PER_SAMPLE: u32 = 1_048_576; // 2^20
+
+// Bounds what FragmentBuffer allocates up front -- sample_size bytes, per matched
+// reader. The fragment count cap above does not bound bytes at all.
+const MAX_SAMPLE_BYTES: u32 = 32 * 1024 * 1024; // 32 MiB
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DataFrag<'a> {
@@ -228,6 +232,13 @@ impl<'a> DataFrag<'a> {
             ));
         }
 
+        if sample_size > MAX_SAMPLE_BYTES {
+            return Err(RtpsError::new(
+                RtpsErrorCode::InvalidSubmessageBody,
+                "Sample size exceeds the maximum allowed for a fragmented sample",
+            ));
+        }
+
         // Also enforces 8.3.7.3.3's "fragmentStartingNum ... exceeds the total
         // number of fragments": for fragment_size > 0, offset >= sample_size
         // holds exactly when fragment_starting_num > total_fragments_num.
@@ -312,8 +323,11 @@ impl<C: Context> Writable<C> for DataFrag<'_> {
 pub(crate) struct FragmentBuffer {
     pub sequence_number: SequenceNumber,
     pub total_size: u32,
-    // dense slot array indexed by fragment_num - 1
-    pub fragments: Vec<Option<Bytes>>,
+    // One contiguous buffer for the whole sample. Fragments are written at their
+    // offset, so reassembly costs one allocation instead of one per fragment.
+    pub buf: BytesMut,
+    // Which fragment slots have arrived, so retransmits do not over-count.
+    pub filled: Vec<bool>,
     // number of filled slots, for completion check
     pub received_count: u32,
     pub total_fragments: u32,
@@ -337,7 +351,12 @@ impl FragmentBuffer {
         Self {
             sequence_number,
             total_size,
-            fragments: vec![None; total_fragments as usize],
+            buf: {
+                let mut b = BytesMut::with_capacity(total_size as usize);
+                b.resize(total_size as usize, 0);
+                b
+            },
+            filled: vec![false; total_fragments as usize],
             received_count: 0,
             total_fragments,
             fragment_size,
@@ -351,9 +370,8 @@ impl FragmentBuffer {
         self.received_count == self.total_fragments
     }
 
-    // Store a fragment's payload without copying. `data` is a `Bytes` sub-slice
-    // of the original socket buffer, so storing it is a refcount bump. Returns
-    // false if the fragment number or size is invalid.
+    // Write a fragment into its place in the sample buffer. Copying here detaches
+    // the receive arena, whose chunk would otherwise stay resident until delivery.
     pub(crate) fn copy_fragment_data(&mut self, fragment_num: u32, data: Bytes) -> bool {
         if fragment_num == 0 || fragment_num > self.total_fragments {
             return false;
@@ -364,37 +382,31 @@ impl FragmentBuffer {
         let remaining =
             self.total_size as usize - ((fragment_num - 1) * self.fragment_size as u32) as usize;
         let expected_size = std::cmp::min(expected_max, remaining);
-        if data.len() > expected_size {
+        // Exact, not at-most: a short fragment would still mark its slot filled and
+        // leave a zeroed hole that deserializes as valid data. RTPS 8.3.7.3.
+        if data.len() != expected_size {
             return false;
         }
 
         let idx = (fragment_num - 1) as usize;
-        // count only the first arrival so retransmits do not over-count
-        if self.fragments[idx].is_none() {
+        let off = idx * self.fragment_size as usize;
+        self.buf[off..off + data.len()].copy_from_slice(&data);
+        if !self.filled[idx] {
+            self.filled[idx] = true;
             self.received_count += 1;
         }
-        self.fragments[idx] = Some(data);
         self.last_updated = Instant::now();
         true
     }
 
-    // Assemble all fragments into a contiguous Vec. Slot order is fragment order.
+    // The assembled sample. Fragments were written in place, so this hands the
+    // buffer over without another copy.
     pub(crate) fn assemble(self) -> Vec<u8> {
-        let mut result = Vec::with_capacity(self.total_size as usize);
-        for slot in self.fragments {
-            if let Some(data) = slot {
-                result.extend_from_slice(&data);
-            }
-        }
-        result
+        self.buf.to_vec()
     }
 
-    // Collect fragment chunks in fragment order without copying. Each chunk is a
-    // refcounted slice of the original socket buffer, so this only moves Bytes
-    // handles. Used by the scatter-gather receive path to avoid a per-sample
-    // contiguous reassembly allocation.
-    pub(crate) fn into_chunks(self) -> SmallVec<[Bytes; 16]> {
-        self.fragments.into_iter().flatten().collect()
+    pub(crate) fn into_bytes(self) -> Bytes {
+        self.buf.freeze()
     }
 }
 
@@ -472,8 +484,8 @@ mod tests {
     // A hostile sample_size/fragment_size pair is internally self-consistent --
     // fragment_size (1) does not exceed sample_size (u32::MAX), so the spec's own
     // "fragmentSize exceeds dataSize" rule does not catch it -- but it would ask
-    // FragmentBuffer::new for 4,294,967,295 slots (~128 GiB) from a ~36-byte wire
-    // message carrying a single real byte of payload.
+    // FragmentBuffer::new to track 4,294,967,295 fragments of a 4 GiB sample from
+    // a ~36-byte wire message carrying a single real byte of payload.
     #[test]
     fn test_datafrag_rejects_sample_size_that_would_demand_a_huge_fragment_count() {
         let mut datafrag = create_dummy_datafrag();
@@ -487,6 +499,40 @@ mod tests {
         if let Err(err) = result {
             assert_eq!(err.code, RtpsErrorCode::InvalidSubmessageBody);
         }
+    }
+
+    // A sample_size can clear the fragment-count cap and still be far too large to
+    // hold: 32 MiB + 1 with fragment_size 64 names 524,289 fragments, well under
+    // MAX_FRAGMENTS_PER_SAMPLE, yet asks for a 32 MiB buffer per matched reader.
+    #[test]
+    fn test_datafrag_rejects_sample_size_over_the_byte_cap() {
+        let mut datafrag = create_dummy_datafrag();
+        datafrag.fragment_size = 64;
+        datafrag.sample_size = MAX_SAMPLE_BYTES + 1;
+        datafrag.serialized_data = SubmessagePayload::Owned(Bytes::from(vec![0xAB; 64]));
+
+        let buffer = datafrag.write_to_vec_with_ctx(Endianness::BigEndian).unwrap();
+        let header = create_dummy_submessage_header(buffer.len() as u16);
+
+        let result = DataFrag::deserialize(&Bytes::from(buffer.to_vec()), &header);
+        assert!(result.is_err());
+        if let Err(err) = result {
+            assert_eq!(err.code, RtpsErrorCode::InvalidSubmessageBody);
+        }
+    }
+
+    // The byte cap must not reject a sample that is merely large but legal.
+    #[test]
+    fn test_datafrag_accepts_sample_size_at_the_byte_cap() {
+        let mut datafrag = create_dummy_datafrag();
+        datafrag.fragment_size = 64;
+        datafrag.sample_size = MAX_SAMPLE_BYTES;
+        datafrag.serialized_data = SubmessagePayload::Owned(Bytes::from(vec![0xAB; 64]));
+
+        let buffer = datafrag.write_to_vec_with_ctx(Endianness::BigEndian).unwrap();
+        let header = create_dummy_submessage_header(buffer.len() as u16);
+
+        assert!(DataFrag::deserialize(&Bytes::from(buffer.to_vec()), &header).is_ok());
     }
 
     // 1,048,576 is a multiple of 65,536, so truncating it to u16 (the disabled
@@ -609,21 +655,14 @@ mod tests {
     }
 
     #[test]
-    fn test_fragment_buffer_into_chunks_in_fragment_order() {
+    fn test_fragment_buffer_into_bytes_in_fragment_order() {
         let mut buffer = three_fragment_buffer();
         buffer.copy_fragment_data(3, Bytes::from_static(&[30]));
         buffer.copy_fragment_data(1, Bytes::from_static(&[10, 11]));
         buffer.copy_fragment_data(2, Bytes::from_static(&[20, 21]));
 
-        let chunks = buffer.into_chunks();
-        assert_eq!(chunks.len(), 3);
-        assert_eq!(&chunks[0][..], &[10, 11]);
-        assert_eq!(&chunks[1][..], &[20, 21]);
-        assert_eq!(&chunks[2][..], &[30]);
-
-        // Concatenation must equal the contiguous assembly.
-        let flat: Vec<u8> = chunks.iter().flat_map(|c| c.iter().copied()).collect();
-        assert_eq!(flat, vec![10, 11, 20, 21, 30]);
+        // Fragments land at their offset, so arrival order does not matter.
+        assert_eq!(&buffer.into_bytes()[..], &[10, 11, 20, 21, 30]);
     }
 
     #[test]
@@ -645,6 +684,18 @@ mod tests {
         buffer.copy_fragment_data(2, Bytes::from_static(&[20, 21]));
         // Only 2 distinct fragments; fragment 3 still missing
         assert!(!buffer.all_fragments_received());
+    }
+
+    #[test]
+    fn test_fragment_buffer_rejects_a_short_interior_fragment() {
+        let mut buffer = three_fragment_buffer();
+        // Fragment 1 must carry a full fragment_size (2). One byte would mark the
+        // slot filled and leave buf[1] zeroed, which deserializes as real data.
+        assert!(!buffer.copy_fragment_data(1, Bytes::from_static(&[10])));
+        assert_eq!(buffer.received_count, 0);
+        // The sample's own last fragment is legitimately short (total_size 5).
+        assert!(buffer.copy_fragment_data(3, Bytes::from_static(&[30])));
+        assert_eq!(buffer.received_count, 1);
     }
 
     #[test]

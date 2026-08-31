@@ -1651,78 +1651,20 @@ impl SedpLogic {
             }
         };
 
-        let mut is_sent = false;
-        let mut matched_any = false;
-        let mut is_all_reliable_acked = true;
-
         let participant_guid = {
             let local_participant_data = participant.local_participant_proxy_data();
             local_participant_data.participant_guid()
         };
 
-        match writer.reader_proxies().lock() {
-            Ok(reader_proxies) => {
-                for reader_proxy in reader_proxies.iter() {
-                    if reader_proxy.remote_reader_guid().prefix() != *guid_prefix {
-                        continue;
-                    }
-                    if !reader_proxy.is_active() {
-                        continue;
-                    }
-                    matched_any = true;
+        let reader_proxies = writer.reader_proxies();
+        let reader_proxies = reader_proxies.lock().map_err(|e| {
+            RtpsError::new(RtpsErrorCode::LockError, format!("Failed to get reader proxies: {}", e))
+        })?;
 
-                    if reader_proxy.is_reliable() && reader_proxy.max_acked_sn() < last_sn {
-                        is_all_reliable_acked = false;
-                    }
-
-                    let buffer = MessageCreator::create_heartbeat_message(
-                        participant_guid.prefix(),
-                        reader_proxy.remote_reader_guid().prefix(),
-                        heartbeat_count,
-                        reader_entity_id,
-                        writer_entity_id,
-                        first_sn,
-                        last_sn,
-                        false,
-                        false,
-                    );
-                    match buffer {
-                        Ok(buffer) => {
-                            for locator in reader_proxy.unicast_locator_list() {
-                                // SEDP heartbeat is a UDP/TCP-only path
-                                if !locator.is_udp() && !locator.is_tcp() {
-                                    continue;
-                                }
-                                if !self.transport.can_handle(&locator) {
-                                    continue;
-                                }
-                                match self
-                                    .transport
-                                    .send(&buffer, &SendTarget::SEDPDiscovery(&locator))
-                                {
-                                    Ok(_) => {
-                                        is_sent = true;
-                                    }
-                                    Err(e) => {
-                                        warn!("Failed to send SEDP heartbeat: {:?}", e);
-                                    }
-                                }
-                            }
-                            writer.increase_heartbeat_count();
-                        }
-                        Err(e) => {
-                            warn!("Failed to create SEDP heartbeat message: {:?}", e);
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                return Err(RtpsError::new(
-                    RtpsErrorCode::LockError,
-                    format!("Failed to get reader proxies: {}", e),
-                ));
-            }
-        }
+        // Decide before sending: deciding afterwards only disarmed the next firing, so every
+        // remote still got one heartbeat -- and the ACKNACK answering it -- once it had acked.
+        let (matched_any, is_all_reliable_acked) =
+            reader_backlog_for_remote(&reader_proxies, *guid_prefix, last_sn);
 
         // Stop the periodic heartbeat once no reader remains or every reliable reader
         // behind this remote has acked. A new local change re-arms it.
@@ -1731,15 +1673,68 @@ impl SedpLogic {
                 "Stopping SEDP heartbeat to {:?} for writer {}: matched_any={}, all_reliable_acked={}",
                 *guid_prefix, entity_id, matched_any, is_all_reliable_acked
             );
-            if let Ok(handler) = self.timer_handler.lock() {
-                handler.remove_timer(TimerId::SedpScheduledMessage {
-                    remote_prefix: *guid_prefix,
-                    writer_entity_id: entity_id,
-                });
+            // The timer handler is a separate lock; do not hold the proxies while taking it.
+            drop(reader_proxies);
+            self.disarm_sedp_periodic_heartbeat(*guid_prefix, entity_id);
+            return Ok(false);
+        }
+
+        let mut is_sent = false;
+        for reader_proxy in reader_proxies
+            .iter()
+            .filter(|p| p.remote_reader_guid().prefix() == *guid_prefix && p.is_active())
+        {
+            let buffer = MessageCreator::create_heartbeat_message(
+                participant_guid.prefix(),
+                reader_proxy.remote_reader_guid().prefix(),
+                heartbeat_count,
+                reader_entity_id,
+                writer_entity_id,
+                first_sn,
+                last_sn,
+                false,
+                false,
+            );
+            match buffer {
+                Ok(buffer) => {
+                    for locator in reader_proxy.unicast_locator_list() {
+                        // SEDP heartbeat is a UDP/TCP-only path
+                        if !locator.is_udp() && !locator.is_tcp() {
+                            continue;
+                        }
+                        if !self.transport.can_handle(&locator) {
+                            continue;
+                        }
+                        match self.transport.send(&buffer, &SendTarget::SEDPDiscovery(&locator)) {
+                            Ok(_) => {
+                                is_sent = true;
+                            }
+                            Err(e) => {
+                                warn!("Failed to send SEDP heartbeat: {:?}", e);
+                            }
+                        }
+                    }
+                    writer.increase_heartbeat_count();
+                }
+                Err(e) => {
+                    warn!("Failed to create SEDP heartbeat message: {:?}", e);
+                }
             }
         }
 
         Ok(is_sent)
+    }
+
+    /// Cancel the periodic heartbeat towards `remote_prefix` for one builtin writer. A later
+    /// `register_periodic_send_timer` re-arms it. Hold neither cache nor proxies when calling.
+    fn disarm_sedp_periodic_heartbeat(
+        &self,
+        remote_prefix: GuidPrefix,
+        writer_entity_id: EntityId,
+    ) {
+        if let Ok(handler) = self.timer_handler.lock() {
+            handler.remove_timer(TimerId::SedpScheduledMessage { remote_prefix, writer_entity_id });
+        }
     }
 
     // Register a repeating timer that pushes `message` to the sending queue every `duration`.
@@ -1774,6 +1769,29 @@ impl SedpLogic {
 
         Ok(())
     }
+}
+
+/// `(matched_any, is_all_reliable_acked)` for the readers `remote_prefix` owns. Shared by the
+/// periodic pass and the ACKNACK path so the two cannot drift on what counts as settled.
+fn reader_backlog_for_remote(
+    reader_proxies: &[ReaderProxy],
+    remote_prefix: GuidPrefix,
+    last_sn: SequenceNumber,
+) -> (bool, bool) {
+    let mut matched_any = false;
+    let mut is_all_reliable_acked = true;
+
+    for reader_proxy in reader_proxies
+        .iter()
+        .filter(|p| p.remote_reader_guid().prefix() == remote_prefix && p.is_active())
+    {
+        matched_any = true;
+        if reader_proxy.is_reliable() && reader_proxy.max_acked_sn() < last_sn {
+            is_all_reliable_acked = false;
+        }
+    }
+
+    (matched_any, is_all_reliable_acked)
 }
 
 /// General Message Sending
@@ -2762,7 +2780,48 @@ impl UnicastMessageProcessor for SedpLogic {
         }
         reader_proxy.set_last_acknack_count(acknack.count);
         reader_proxy.set_last_acknack_at(now);
+
+        // RTPS 2.5 8.3.8.1.2: everything below readerSNState.base is confirmed received. Without
+        // this, max_acked_sn never moves and send_sedp_periodic_heartbeat_message never stops.
+        reader_proxy.acked_changes_set(SequenceNumber::from_i64(
+            acknack.reader_sn_state.bitmap_base().to_i64() - 1,
+        ));
+
         drop(reader_proxies_guard);
+
+        // This ACKNACK may settle the remote; disarm now instead of waiting out another period.
+        // Lock order is writer cache then reader proxies, matching the builtin history pump.
+        let last_sn = {
+            let last_change_sn = local_writer.last_change_sequence_number();
+            match local_writer.writer_cache().lock() {
+                Ok(writer_cache) => writer_cache.get_seq_num_max().unwrap_or(last_change_sn),
+                Err(e) => {
+                    return Err(RtpsError::new(
+                        RtpsErrorCode::WriterCacheNotSet,
+                        format!("Failed to get writer cache: {}", e),
+                    ));
+                }
+            }
+        };
+        let (matched_any, is_all_reliable_acked) = match reader_proxies.lock() {
+            Ok(guard) => reader_backlog_for_remote(&guard, remote_reader_guid.prefix(), last_sn),
+            Err(e) => {
+                return Err(RtpsError::new(
+                    RtpsErrorCode::LockError,
+                    format!("Failed to get reader proxies: {}", e),
+                ));
+            }
+        };
+        if !matched_any || is_all_reliable_acked {
+            debug!(
+                "Stopping SEDP heartbeat to {:?} for writer {} on acknack: matched_any={}, all_reliable_acked={}",
+                remote_reader_guid.prefix(),
+                acknack.writer_id,
+                matched_any,
+                is_all_reliable_acked
+            );
+            self.disarm_sedp_periodic_heartbeat(remote_reader_guid.prefix(), acknack.writer_id);
+        }
 
         let missing_sequence_numbers = acknack.reader_sn_state.extract_numbers();
 
@@ -2905,6 +2964,7 @@ mod tests {
     // These will be updated when DcpsBridge migration (Phase 5+) is complete.
 
     use super::*;
+    use crate::rtps::common::sequence::SequenceNumberSet;
     use crate::rtps::common::types::SubmessagePayload;
     use crate::rtps::entities::reader::WriterProxy;
     use crate::rtps::messages::message_receiver::TypedSubmessage;
@@ -3168,6 +3228,200 @@ mod tests {
             data.is_reliable(),
             "a builtin reader proxy built from this would suppress GAPs and piggyback heartbeats"
         );
+    }
+
+    /// One announcement and one reliable reader, caught up or not per `reader_has_acked`. The
+    /// participant comes back because the logic only holds it weakly.
+    fn sedp_publications_writer(
+        reader_has_acked: bool,
+    ) -> (SedpLogic, Arc<Participant>, GuidPrefix, SequenceNumber, Arc<Mutex<usize>>) {
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let transport = Arc::new(CountingTransport::default());
+        let sends = Arc::clone(&transport.sends);
+        let sedp_logic = SedpLogic::new(participant.clone(), transport);
+
+        let remote_prefix: GuidPrefix = [9u8; 12];
+        let writer = participant.sedp_builtin_publications_writer();
+
+        // The announcement lands before any proxy exists, so the builtin pump has nobody to
+        // send it to and the counter still reads what this test put on the wire.
+        let change =
+            Arc::new(writer.new_change(ChangeKind::Alive, vec![0u8; 4], InstanceHandle::NIL, None));
+        let last_sn = change.sequence_number();
+        writer
+            .writer_cache()
+            .lock()
+            .expect("writer cache")
+            .add_change_builtin(change, writer.as_ref())
+            .expect("a builtin history accepts a builtin change");
+
+        let acked_sn = if reader_has_acked { last_sn } else { SequenceNumber::new(0, 0) };
+        writer.matched_reader_add(ReaderProxy::new(
+            Guid::new(remote_prefix, EntityId::SEDP_BUILTIN_PUBLICATIONS_READER),
+            EntityId::UNKNOWN,
+            vec![Locator::from_ip_v4_addr_and_port(&Ipv4Addr::new(127, 0, 0, 1), 8412)],
+            Vec::new(),
+            last_sn,
+            acked_sn,
+            false,
+            true,
+            SubscriptionBuiltinTopicData::builtin_reliable(),
+            SequenceNumber::UNKNOWN,
+        ));
+
+        (sedp_logic, participant, remote_prefix, last_sn, sends)
+    }
+
+    /// An ACKNACK carrying `bitmap_base`, acking everything below it and reporting nothing
+    /// missing -- the shape a settled reader sends.
+    fn plain_acknack(
+        bitmap_base: SequenceNumber,
+        count: u32,
+    ) -> (Header, SubmessageHeader, AckNack) {
+        let mut flag = SubmessageHeaderFlag::new();
+        flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::ACKNACK);
+
+        (
+            Header::new([9u8; 12]),
+            SubmessageHeader::new(SubmessageId::ACKNACK, flag.flag, 0),
+            AckNack::new(
+                EntityId::SEDP_BUILTIN_PUBLICATIONS_READER,
+                EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER,
+                SequenceNumberSet::new_empty_with_base(bitmap_base),
+                count,
+            ),
+        )
+    }
+
+    /// Arms a periodic heartbeat timer under the key the SEDP paths use, with a callback that
+    /// counts firings. Returns the participant's timer handler and that counter.
+    fn arm_periodic_heartbeat_timer(
+        participant: &Participant,
+        remote_prefix: GuidPrefix,
+        period: StdDuration,
+    ) -> (Arc<Mutex<TimerHandler>>, Arc<std::sync::atomic::AtomicUsize>) {
+        let timer_handler = TimerHandler::get_instance(participant.guid().prefix());
+        let fired = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        {
+            let fired = Arc::clone(&fired);
+            timer_handler.lock().expect("timer handler").add_timer(
+                TimerId::SedpScheduledMessage {
+                    remote_prefix,
+                    writer_entity_id: EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER,
+                },
+                period,
+                true,
+                move || {
+                    fired.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                },
+            );
+        }
+
+        (timer_handler, fired)
+    }
+
+    /// Discovery has to go quiet once the remote has acked. The pass used to send one more
+    /// heartbeat and only then disarm its own timer, costing a heartbeat plus its ACKNACK.
+    #[test]
+    fn a_periodic_sedp_heartbeat_is_skipped_once_every_reliable_reader_has_acked() {
+        let (sedp_logic, _participant, remote_prefix, _last_sn, sends) =
+            sedp_publications_writer(true);
+
+        let before = *sends.lock().expect("send counter");
+        sedp_logic
+            .send_sedp_periodic_heartbeat_message(
+                None,
+                StdDuration::from_secs(2),
+                Arc::new(remote_prefix),
+                EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER,
+            )
+            .expect("the periodic pass runs");
+
+        assert_eq!(
+            *sends.lock().expect("send counter") - before,
+            0,
+            "an acked SEDP writer must not put another heartbeat on the wire"
+        );
+    }
+
+    /// The suppression above must not swallow a heartbeat that is still doing work: a reader
+    /// behind the writer's last change has to keep being told what it is missing.
+    #[test]
+    fn a_periodic_sedp_heartbeat_still_goes_out_while_a_reader_lags() {
+        let (sedp_logic, _participant, remote_prefix, _last_sn, sends) =
+            sedp_publications_writer(false);
+
+        let before = *sends.lock().expect("send counter");
+        sedp_logic
+            .send_sedp_periodic_heartbeat_message(
+                None,
+                StdDuration::from_secs(2),
+                Arc::new(remote_prefix),
+                EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER,
+            )
+            .expect("the periodic pass runs");
+
+        assert_eq!(
+            *sends.lock().expect("send counter") - before,
+            1,
+            "a reader that is behind must still receive the heartbeat"
+        );
+    }
+
+    /// The settling ACKNACK already carries the answer, so the timer dies with it. Leaving it
+    /// to the next periodic pass cost a whole heartbeat_period and a timer wakeup for nothing.
+    #[test]
+    fn an_acknack_that_settles_the_remote_disarms_the_periodic_heartbeat() {
+        let (mut sedp_logic, participant, remote_prefix, last_sn, _sends) =
+            sedp_publications_writer(false);
+        let (timer_handler, fired) = arm_periodic_heartbeat_timer(
+            &participant,
+            remote_prefix,
+            StdDuration::from_millis(150),
+        );
+
+        // Acks everything up to and including the writer's last change.
+        let (header, submessage_header, acknack) = plain_acknack(last_sn + 1, 1);
+        sedp_logic
+            .handle_acknack_message(&header, &submessage_header, &acknack)
+            .expect("the acknack is accepted");
+
+        thread::sleep(StdDuration::from_millis(500));
+        assert_eq!(
+            fired.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the settling ACKNACK should have disarmed the heartbeat before it ever fired"
+        );
+
+        timer_handler.lock().expect("timer handler").terminate();
+    }
+
+    /// ...and an ACKNACK that leaves the reader behind must not disarm anything, or the
+    /// announcement it is still missing would never be re-advertised.
+    #[test]
+    fn an_acknack_that_leaves_the_reader_behind_keeps_the_periodic_heartbeat_armed() {
+        let (mut sedp_logic, participant, remote_prefix, _last_sn, _sends) =
+            sedp_publications_writer(false);
+        let (timer_handler, fired) = arm_periodic_heartbeat_timer(
+            &participant,
+            remote_prefix,
+            StdDuration::from_millis(150),
+        );
+
+        // Base 1 acks nothing: the reader is still short of the writer's only change.
+        let (header, submessage_header, acknack) = plain_acknack(SequenceNumber::new(0, 1), 1);
+        sedp_logic
+            .handle_acknack_message(&header, &submessage_header, &acknack)
+            .expect("the acknack is accepted");
+
+        thread::sleep(StdDuration::from_millis(500));
+        assert!(
+            fired.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            "a reader that is still behind must keep its heartbeat timer"
+        );
+
+        timer_handler.lock().expect("timer handler").terminate();
     }
 
     /// A builtin reader carries its reliability twice: as the `reliability_level` its constructor

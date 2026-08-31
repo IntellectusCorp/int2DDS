@@ -1749,6 +1749,11 @@ impl UserLogic {
             if !reader_proxy.is_reliable() {
                 continue;
             }
+            // A reader that is already caught up needs no heartbeat. Without this one
+            // unresponsive reader keeps the writer heartbeating every matched participant.
+            if !reader_proxy.unacked_changes(&history_cache) {
+                continue;
+            }
             let participant_guid_prefix = reader_proxy.remote_reader_guid().prefix();
             participant_locators
                 .entry(participant_guid_prefix)
@@ -2605,6 +2610,11 @@ impl UnicastMessageProcessor for UserLogic {
             return Ok(());
         }
 
+        // Detach from the receive arena before retaining. A `Bytes` slice keeps its
+        // whole arena chunk resident, so copy once here and let every matched reader
+        // share that right-sized copy.
+        let detached_payload = bytes::Bytes::copy_from_slice(&data.serialized_data());
+
         for reader in matched_readers {
             let mut change = match reader.reader_cache().lock() {
                 Ok(mut cache) => cache.acquire_change(),
@@ -2622,10 +2632,9 @@ impl UnicastMessageProcessor for UserLogic {
                 data.writer_sn,
                 message_receiver.get_source_timestamp(),
             );
-            // Zero-copy share of the socket buffer: `data.serialized_data()`
-            // returns a `Bytes` slice of the original socket allocation, so
-            // each reader gets an Arc refcount bump instead of a payload copy.
-            change.set_shared_payload(data.serialized_data());
+            // Every matched reader shares the one detached copy made above, so
+            // fanning out costs a refcount bump per reader, not a payload copy.
+            change.set_shared_payload(detached_payload.clone());
 
             self.apply_writer_attributes_to_change(
                 reader.clone(),
@@ -3181,14 +3190,14 @@ impl UnicastMessageProcessor for UserLogic {
             }
         }
 
-        // Readers completing on this datagram hold byte-identical chunks, so one shared cache
-        // keeps any contiguous fallback to a single materialization.
-        let mut assembled_cache: Option<std::sync::Arc<std::sync::OnceLock<bytes::Bytes>>> = None;
-
         // The key carries the reader, so the fragments go into each matched reader's own
         // buffer. Completion is then single-reader: a buffer belongs to exactly one.
         for reader in &matched_readers {
             let key = (remote_writer_guid, reader.guid().entity_id(), data_frag.writer_sn);
+
+            // Only the fragments the buffer actually took. A submessage may claim more than
+            // its payload holds, and the ledger drives NACK_FRAG.
+            let mut accepted: Vec<u32> = Vec::new();
 
             // Copy fragment data using DashMap entry API
             {
@@ -3211,11 +3220,18 @@ impl UnicastMessageProcessor for UserLogic {
                     for i in 0..data_frag.fragments_in_submessage {
                         let fragment_num = data_frag.fragment_starting_num + i as u32;
                         let frag_data_start = i as usize * frag_size;
+                        // A submessage may claim more fragments than it carries; slicing past
+                        // the payload would panic.
+                        if frag_data_start >= total_len {
+                            break;
+                        }
                         let frag_data_end = std::cmp::min(frag_data_start + frag_size, total_len);
-                        buffer.copy_fragment_data(
+                        if buffer.copy_fragment_data(
                             fragment_num,
                             serialized_bytes.slice(frag_data_start..frag_data_end),
-                        );
+                        ) {
+                            accepted.push(fragment_num);
+                        }
                     }
                 }
             } // buffer RefMut is automatically dropped here
@@ -3239,13 +3255,11 @@ impl UnicastMessageProcessor for UserLogic {
                         .iter_mut()
                         .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
                     {
-                        // Update fragment information with this submessage's range
-                        let frag_start = data_frag.fragment_starting_num;
-                        let frag_end = frag_start + data_frag.fragments_in_submessage as u32;
+                        // Update fragment information with what the buffer took
                         writer_proxy.mark_frag_received(
                             data_frag.writer_sn,
                             total_fragments,
-                            frag_start..frag_end,
+                            accepted.iter().copied(),
                         );
                     }
                 }
@@ -3300,11 +3314,9 @@ impl UnicastMessageProcessor for UserLogic {
                 }
             }
 
-            // Scatter-gather: keep the chunks instead of assembling a contiguous buffer.
-            let chunks = buffer.into_chunks();
-            let cached = assembled_cache
-                .get_or_insert_with(|| std::sync::Arc::new(std::sync::OnceLock::new()))
-                .clone();
+            // Fragments were written straight into one buffer, so this is already the
+            // assembled sample and carries no receive-arena chunk with it.
+            let payload = buffer.into_bytes();
 
             let mut assembled_change = match reader.reader_cache().lock() {
                 Ok(mut cache) => cache.acquire_change(),
@@ -3332,7 +3344,7 @@ impl UnicastMessageProcessor for UserLogic {
                 data_frag.writer_sn,
                 assembled_timestamp,
             );
-            assembled_change.set_chained_payload(chunks, cached);
+            assembled_change.set_shared_payload(payload);
             assembled_change.set_ownership_strength(ownership_strength);
 
             let _ = self.deliver_change_to_reader(
@@ -4553,6 +4565,65 @@ mod tests {
             assert!(buffer.all_fragments_received(), "filler buffers must not be eviction bait");
             user_logic.fragment_buffers.insert((writer_guid, reader_id, sn), buffer);
         }
+    }
+
+    /// A submessage may claim more fragments than its payload holds. The buffer refuses the
+    /// short one, and the ledger must refuse it too: NACK_FRAG is built from the ledger, so
+    /// marking the claimed range would drop the repair request and the sample would be acked
+    /// with a hole in it.
+    #[test]
+    fn a_fragment_the_buffer_rejected_is_not_marked_received() {
+        let (participant, mut user_logic, reader, _reader_b, writer_guid, sn) =
+            two_readers_matched_to_one_fragmented_writer();
+        let prefix = participant.guid().prefix();
+
+        // Claims fragments 1 and 2 but carries six bytes, so fragment 2 is two bytes short.
+        feed_fragment(
+            &mut user_logic,
+            prefix,
+            writer_guid,
+            sn,
+            EntityId::UNKNOWN,
+            1,
+            2,
+            vec![1, 1, 1, 1, 2, 2],
+        );
+
+        assert_eq!(
+            ledger_missing(&reader, writer_guid, sn),
+            vec![2, 3, 4],
+            "the short fragment must still be requested"
+        );
+
+        // The rest arriving must not complete the sample while 2 is still absent.
+        feed_fragment(
+            &mut user_logic,
+            prefix,
+            writer_guid,
+            sn,
+            EntityId::UNKNOWN,
+            3,
+            2,
+            vec![3, 3, 3, 3, 4, 4, 4, 4],
+        );
+        assert_eq!(ledger_missing(&reader, writer_guid, sn), vec![2]);
+        assert!(
+            !ledger_reads_complete(&reader, writer_guid, sn),
+            "a sample with a hole must not read as complete"
+        );
+
+        // The repair carries the full fragment, and only then is the sample whole.
+        feed_fragment(
+            &mut user_logic,
+            prefix,
+            writer_guid,
+            sn,
+            EntityId::UNKNOWN,
+            2,
+            1,
+            vec![2, 2, 2, 2],
+        );
+        assert!(ledger_reads_complete(&reader, writer_guid, sn));
     }
 
     #[test]

@@ -39,7 +39,7 @@ use crate::{
 pub(crate) enum DataPayload {
     Owned(Vec<u8>),
     Shared(Bytes),
-    Chained { chunks: SmallVec<[Bytes; 16]>, cached: Arc<OnceLock<Bytes>> },
+    Chained { chunks: SmallVec<[Bytes; 1]>, cached: Arc<OnceLock<Bytes>> },
 }
 
 impl Clone for DataPayload {
@@ -342,7 +342,7 @@ impl CacheChange {
     // happens at most once globally.
     pub(crate) fn set_chained_payload(
         &mut self,
-        chunks: SmallVec<[Bytes; 16]>,
+        chunks: SmallVec<[Bytes; 1]>,
         cached: Arc<OnceLock<Bytes>>,
     ) {
         self.data_payload = DataPayload::Chained { chunks, cached };
