@@ -3411,7 +3411,7 @@ Int2DdsRet int2dds_readcondition_delete(struct Int2DdsReadCondition *condition);
  * - `reader` must be a valid datareader
  * - `condition` must be a valid read condition created from `reader`
  * - `seq_out` must be a valid pointer to a null pointer
- * - The returned sequence must be freed with `int2dds_sample_seq_delete`
+ * - On `INT2DDS_RET_OK` the returned sequence must be freed with `int2dds_sample_seq_delete`
  */
 Int2DdsRet int2dds_datareader_take_serialized_batch_w_readcondition(const struct Int2DdsDataReader *reader,
                                                                     const struct Int2DdsReadCondition *condition,
@@ -4023,7 +4023,7 @@ Int2DdsRet int2dds_datareader_read_serialized_w_info(const struct Int2DdsDataRea
  * # Safety
  * - `reader` must be a valid datareader
  * - `seq_out` must be a valid pointer to a null pointer
- * - The returned sequence must be freed with `int2dds_sample_seq_delete`
+ * - On `INT2DDS_RET_OK` the returned sequence must be freed with `int2dds_sample_seq_delete`
  */
 Int2DdsRet int2dds_datareader_take_serialized_batch(const struct Int2DdsDataReader *reader,
                                                     int32_t max_samples,
@@ -4035,7 +4035,7 @@ Int2DdsRet int2dds_datareader_take_serialized_batch(const struct Int2DdsDataRead
  * # Safety
  * - `reader` must be a valid datareader
  * - `seq_out` must be a valid pointer to a null pointer
- * - The returned sequence must be freed with `int2dds_sample_seq_delete`
+ * - On `INT2DDS_RET_OK` the returned sequence must be freed with `int2dds_sample_seq_delete`
  */
 Int2DdsRet int2dds_datareader_read_serialized_batch(const struct Int2DdsDataReader *reader,
                                                     int32_t max_samples,
@@ -4053,7 +4053,7 @@ Int2DdsRet int2dds_datareader_read_serialized_batch(const struct Int2DdsDataRead
  * - `reader` must be a valid datareader
  * - `handle` must point to a 16-byte instance handle
  * - `seq_out` must be a valid pointer to a null pointer
- * - The returned sequence must be freed with `int2dds_sample_seq_delete`
+ * - On `INT2DDS_RET_OK` the returned sequence must be freed with `int2dds_sample_seq_delete`
  */
 Int2DdsRet int2dds_datareader_take_instance_serialized_batch(const struct Int2DdsDataReader *reader,
                                                              const uint8_t (*handle)[16],

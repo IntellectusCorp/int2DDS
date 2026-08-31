@@ -24,7 +24,6 @@
 //! state filtering has no such requirement and always applies.
 
 use std::os::raw::c_char;
-use std::sync::Arc;
 
 use int2dds::subscription::sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind};
 
@@ -256,7 +255,7 @@ pub unsafe extern "C" fn int2dds_readcondition_delete(
 /// - `reader` must be a valid datareader
 /// - `condition` must be a valid read condition created from `reader`
 /// - `seq_out` must be a valid pointer to a null pointer
-/// - The returned sequence must be freed with `int2dds_sample_seq_delete`
+/// - On `INT2DDS_RET_OK` the returned sequence must be freed with `int2dds_sample_seq_delete`
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datareader_take_serialized_batch_w_readcondition(
     reader: *const Int2DdsDataReader,
@@ -295,7 +294,7 @@ unsafe fn read_or_take_w_readcondition(
     let reader_ref = &*reader;
     let condition_ref = &*condition;
 
-    let result: Result<Vec<(Arc<[u8]>, _)>, _> = match &condition_ref.kind {
+    let result: Result<Vec<(bytes::Bytes, _)>, _> = match &condition_ref.kind {
         // ReadCondition: pure state filter -> apply directly on the serialized cache.
         ReadConditionKind::Read(rc) => {
             let ss = rc.get_sample_state_mask();
@@ -319,13 +318,13 @@ unsafe fn read_or_take_w_readcondition(
                 let mut out = Vec::with_capacity(samples.len());
                 for s in samples {
                     let info = s.sample_info();
-                    let bytes: Arc<[u8]> = match s.data() {
+                    let bytes: bytes::Bytes = match s.data() {
                         Ok(d) => match d.cdr_bytes {
-                            Some(b) => Arc::from(b.as_slice()),
-                            None => Arc::from(&[][..]),
+                            Some(b) => bytes::Bytes::copy_from_slice(b.as_slice()),
+                            None => bytes::Bytes::new(),
                         },
                         // Info-only (invalid-data) sample: no payload.
-                        Err(_) => Arc::from(&[][..]),
+                        Err(_) => bytes::Bytes::new(),
                     };
                     out.push((bytes, info));
                 }
@@ -335,17 +334,16 @@ unsafe fn read_or_take_w_readcondition(
     };
 
     match result {
+        Ok(samples) if samples.is_empty() => {
+            *seq_out = std::ptr::null_mut();
+            INT2DDS_RET_NO_DATA
+        }
         Ok(samples) => {
-            let empty = samples.is_empty();
             *seq_out = Box::into_raw(Box::new(Int2DdsSampleSeq { samples }));
-            if empty {
-                INT2DDS_RET_NO_DATA
-            } else {
-                INT2DDS_RET_OK
-            }
+            INT2DDS_RET_OK
         }
         Err(int2dds::dcps::core::error::DdsError::NoData) => {
-            *seq_out = Box::into_raw(Box::new(Int2DdsSampleSeq { samples: Vec::new() }));
+            *seq_out = std::ptr::null_mut();
             INT2DDS_RET_NO_DATA
         }
         Err(e) => dds_error_to_code(&e),
