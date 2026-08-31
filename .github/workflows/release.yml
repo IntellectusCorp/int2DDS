@@ -273,6 +273,34 @@ jobs:
           path: dist/int2dds-*-${{ matrix.dist }}.tar.gz
           if-no-files-found: error
 
+  # The tarball published to IntellectusCorp/int2dds_ffi_vendor, which the ROS 2
+  # vendor package in IntellectusCorp/rmw_int2dds downloads. It is deliberately
+  # NOT one of the 24 int2DDS release assets -- collect-assets.sh skips it -- so
+  # publishing to the vendor repo stays a human step rather than something this
+  # workflow does with a cross-repo token.
+  #
+  # Repackaging here instead of rebuilding means the bytes shipped to ROS users
+  # are the same ones verify-glibc-floor loaded on all five target OSes.
+  ffi-vendor:
+    needs: [prepare, native-linux-gnu, native-linux-musl]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: native-linux-*
+
+      - name: Assemble the FFI vendor tarball
+        run: ./.github/scripts/ci/stage-ffi-vendor.sh "${{ needs.prepare.outputs.version }}" artifacts dist/vendor
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffi-vendor
+          path: dist/vendor/int2dds-ffi-*-linux.tar.gz
+          if-no-files-found: error
+
   native-windows:
     needs: prepare
     strategy:

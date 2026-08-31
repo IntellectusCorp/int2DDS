@@ -18,8 +18,12 @@ rm -rf "$out_dir"
 mkdir -p "$out_dir"
 
 # Artifacts arrive as <artifact_root>/<artifact-name>/<file>.
+# int2dds-ffi-*.tar.gz is the vendor tarball built by the ffi-vendor job. It
+# goes to a different repository's releases, not this one's, so it must not land
+# here -- it would be a 25th file and trip the count check below.
 find "$artifact_root" -type f \
   \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.nupkg' -o -name '*.snupkg' -o -name '*.whl' \) \
+  -not -name 'int2dds-ffi-*' \
   -exec cp {} "$out_dir/" \;
 
 expected=24
