@@ -314,17 +314,24 @@ mod tests {
         let accepted = listener.accept().unwrap().0;
 
         let frame = vec![0u8; 32 * 1024];
+        let mut stalled = false;
         for _ in 0..64 {
             if connection.send(&frame).unwrap() == SendOutcome::Stalled {
+                stalled = true;
                 break;
             }
         }
-        assert!(
-            !connection.state.lock().unwrap().pending.is_empty(),
-            "the peer must have taken part of a frame"
-        );
+        assert!(stalled, "the peer never stopped taking frames");
 
-        std::thread::sleep(PENDING_TAIL_DEADLINE + Duration::from_millis(100));
+        // Whether a full socket takes part of a frame or none of it is the
+        // platform's choice, so the tail is placed directly. What is under test
+        // is what happens to a tail the socket will not take, not how one forms.
+        {
+            let mut state = connection.state.lock().unwrap();
+            state.pending = frame.clone();
+            state.pending_since = Some(Instant::now() - PENDING_TAIL_DEADLINE);
+        }
+
         let error = connection.send(&frame).expect_err("the connection must be given up");
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(connection.is_failed());
