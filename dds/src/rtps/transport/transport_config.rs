@@ -16,9 +16,9 @@ use crate::dcps::infrastructure::qos_policy::{
     PropertyQosPolicy, PROP_ACCEPT_UNDEFINED_PEERS, PROP_INITIAL_PEERS, PROP_MULTICAST_TTL,
     PROP_TCP_BIND_PORT, PROP_TCP_CONNECT_TIMEOUT_MS, PROP_TCP_KEEPALIVE_INTERVAL_MS,
     PROP_TCP_KEEPALIVE_MAX_MISSES, PROP_TCP_KEEPALIVE_TIMEOUT_MS, PROP_TCP_NODELAY,
-    PROP_TCP_PEER_BLOCK_TIMEOUT_MS, PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS, PROP_TCP_PUBLIC_ADDRESS,
-    PROP_TCP_SO_RCVBUF, PROP_TCP_SO_SNDBUF, PROP_TCP_TLS_HANDSHAKE_TIMEOUT_MS,
-    PROP_TCP_UNACKED_TIMEOUT_MS, PROP_TRANSPORT,
+    PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS, PROP_TCP_PUBLIC_ADDRESS, PROP_TCP_SO_RCVBUF,
+    PROP_TCP_SO_SNDBUF, PROP_TCP_TLS_HANDSHAKE_TIMEOUT_MS, PROP_TCP_UNACKED_TIMEOUT_MS,
+    PROP_TRANSPORT,
 };
 use crate::rtps::transport::TransportType;
 
@@ -82,7 +82,6 @@ pub(crate) struct TcpConfig {
     pub keepalive_max_misses: u32,
     pub so_rcvbuf: Option<usize>,
     pub so_sndbuf: Option<usize>,
-    pub peer_block_timeout: Option<Duration>,
 }
 
 impl TransportConfig for TcpConfig {
@@ -104,7 +103,7 @@ impl TransportConfig for TcpConfig {
             accept_undefined_peers: prop_parse::<bool>(property, PROP_ACCEPT_UNDEFINED_PEERS)
                 .unwrap_or(false),
             nodelay: prop_parse::<bool>(property, PROP_TCP_NODELAY).unwrap_or(true),
-            connect_timeout: ms(PROP_TCP_CONNECT_TIMEOUT_MS, 5_000),
+            connect_timeout: ms(PROP_TCP_CONNECT_TIMEOUT_MS, 1_000),
             first_frame_timeout: ms(PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS, 20_000),
             tls_handshake_timeout: ms(PROP_TCP_TLS_HANDSHAKE_TIMEOUT_MS, 5_000),
             unacked_timeout: match prop_parse::<u64>(property, PROP_TCP_UNACKED_TIMEOUT_MS) {
@@ -124,11 +123,6 @@ impl TransportConfig for TcpConfig {
             },
             so_rcvbuf: prop_parse::<usize>(property, PROP_TCP_SO_RCVBUF),
             so_sndbuf: prop_parse::<usize>(property, PROP_TCP_SO_SNDBUF),
-            peer_block_timeout: match prop_parse::<i64>(property, PROP_TCP_PEER_BLOCK_TIMEOUT_MS) {
-                Some(v) if v < 0 => None,
-                Some(v) => Some(Duration::from_millis(v as u64)),
-                None => Some(Duration::from_millis(100)),
-            },
         }
     }
 }
@@ -210,7 +204,7 @@ mod tests {
         assert_eq!(cfg.bind_port, None);
         assert_eq!(cfg.public_address, None);
         assert!(cfg.nodelay);
-        assert_eq!(cfg.connect_timeout, Duration::from_millis(5_000));
+        assert_eq!(cfg.connect_timeout, Duration::from_millis(1_000));
         assert_eq!(cfg.first_frame_timeout, Duration::from_millis(20_000));
         assert_eq!(cfg.tls_handshake_timeout, Duration::from_millis(5_000));
         assert_eq!(cfg.unacked_timeout, Some(Duration::from_millis(25_000)));
@@ -226,6 +220,7 @@ mod tests {
         let mut p = PropertyQosPolicy::default();
         p.add_property(PROP_TCP_BIND_PORT, "17400", false);
         p.add_property(PROP_TCP_NODELAY, "false", false);
+        p.add_property(PROP_TCP_CONNECT_TIMEOUT_MS, "1111", false);
         p.add_property(PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS, "2222", false);
         p.add_property(PROP_TCP_TLS_HANDSHAKE_TIMEOUT_MS, "3333", false);
         p.add_property(PROP_TCP_KEEPALIVE_MAX_MISSES, "7", false);
@@ -236,6 +231,7 @@ mod tests {
         let cfg = TcpConfig::from_property(&p);
         assert_eq!(cfg.bind_port, Some(17400));
         assert!(!cfg.nodelay);
+        assert_eq!(cfg.connect_timeout, Duration::from_millis(1111));
         assert_eq!(cfg.first_frame_timeout, Duration::from_millis(2222));
         assert_eq!(cfg.tls_handshake_timeout, Duration::from_millis(3333));
         assert_eq!(cfg.keepalive_max_misses, 7);
@@ -250,28 +246,5 @@ mod tests {
         let mut p = PropertyQosPolicy::default();
         p.add_property(PROP_TCP_KEEPALIVE_MAX_MISSES, "0", false);
         assert_eq!(TcpConfig::from_property(&p).keepalive_max_misses, 1);
-    }
-
-    #[test]
-    fn tcp_config_peer_block_timeout_default() {
-        let cfg = TcpConfig::from_property(&PropertyQosPolicy::default());
-        assert_eq!(cfg.peer_block_timeout, Some(Duration::from_millis(100)));
-    }
-
-    #[test]
-    fn tcp_config_reads_peer_block_timeout_property() {
-        let mut p = PropertyQosPolicy::default();
-        p.add_property(PROP_TCP_PEER_BLOCK_TIMEOUT_MS, "500", false);
-        assert_eq!(
-            TcpConfig::from_property(&p).peer_block_timeout,
-            Some(Duration::from_millis(500))
-        );
-    }
-
-    #[test]
-    fn tcp_config_peer_block_timeout_minus_one_blocks() {
-        let mut p = PropertyQosPolicy::default();
-        p.add_property(PROP_TCP_PEER_BLOCK_TIMEOUT_MS, "-1", false);
-        assert_eq!(TcpConfig::from_property(&p).peer_block_timeout, None);
     }
 }

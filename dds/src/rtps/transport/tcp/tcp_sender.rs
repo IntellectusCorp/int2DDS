@@ -61,10 +61,8 @@ pub(crate) struct TcpSender {
     working_ips: Vec<String>,
     listener_port: u16,
 
-    /// Longest one peer may hold a sending thread: opening its connection, and
-    /// finishing a frame its socket accepted only part of. A frame the socket
-    /// cannot take at all never waits -- it is dropped.
-    peer_block_timeout: Option<Duration>,
+    connect_timeout: Duration,
+    tls_handshake_timeout: Duration,
 
     stats: Arc<SendStats>,
     tls_config: Option<Arc<TlsConfig>>,
@@ -89,9 +87,8 @@ impl TcpSender {
         Arc::new(Self {
             working_ips,
             listener_port,
-            peer_block_timeout: tcp_config
-                .peer_block_timeout
-                .map(|timeout| timeout.min(tcp_config.connect_timeout)),
+            connect_timeout: tcp_config.connect_timeout,
+            tls_handshake_timeout: tcp_config.tls_handshake_timeout,
             stats: Arc::new(SendStats::default()),
             tls_config,
             shared,
@@ -174,7 +171,8 @@ impl TcpSender {
             addr,
             &self.shared.tuning,
             self.tls_config.as_deref(),
-            self.peer_block_timeout,
+            self.connect_timeout,
+            self.tls_handshake_timeout,
         )
         .map_err(|error| {
             self.stats.connect_failed.record("connect failed", addr, kind);
@@ -300,12 +298,12 @@ mod tests {
         sender.shutdown();
     }
 
-    /// A peer that never reads must never hold a sending thread for longer
-    /// than the configured bound. Frames its socket cannot take at all are
-    /// dropped the way a full UDP socket buffer drops them; only a frame the
-    /// socket already started waits, and only up to that bound.
+    /// A peer that never reads must never hold a sending thread. Frames its
+    /// socket cannot take are dropped the way a full UDP socket buffer drops
+    /// them, and a frame it took only part of leaves its tail for the next
+    /// send instead of waiting.
     #[test]
-    fn a_peer_that_never_reads_cannot_hold_the_caller_past_the_bound() {
+    fn a_peer_that_never_reads_cannot_hold_the_caller() {
         // The accepted socket inherits this receive buffer, so the peer cannot
         // absorb the test's traffic in kernel memory and the send queue really
         // does fill up.
@@ -317,12 +315,8 @@ mod tests {
         let listener = std::net::TcpListener::from(listener);
         let peer = listener.local_addr().expect("addr");
         let bound = Duration::from_millis(50);
-        let config = TcpConfig {
-            connect_timeout: Duration::from_millis(500),
-            peer_block_timeout: Some(bound),
-            so_sndbuf: Some(4 * 1024),
-            ..TcpConfig::default()
-        };
+        let config =
+            TcpConfig { connect_timeout: bound, so_sndbuf: Some(4 * 1024), ..TcpConfig::default() };
         let sender = make_sender(config);
         let message = test_message(0x02, &vec![0u8; 32 * 1024]);
 

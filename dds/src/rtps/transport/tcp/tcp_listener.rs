@@ -574,7 +574,8 @@ mod tests {
                 address,
                 &TcpSocketTuning::default(),
                 Some(client_config.as_ref()),
-                Some(Duration::from_secs(5)),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
             )
             .unwrap();
             assert_eq!(connection.send(&client_frame).unwrap(), SendOutcome::Sent);
@@ -656,7 +657,8 @@ mod tests {
                 address,
                 &TcpSocketTuning::default(),
                 Some(client_config.as_ref()),
-                Some(Duration::from_secs(5)),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
             )
             .err()
         });

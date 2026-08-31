@@ -864,7 +864,7 @@ pub const PROP_TCP_BIND_PORT: &str = "int2dds.transport.TCPv4.bind_port";
 pub const PROP_TCP_PUBLIC_ADDRESS: &str = "int2dds.transport.TCPv4.public_address";
 /// Disable Nagle (`TCP_NODELAY`). Default `true`.
 pub const PROP_TCP_NODELAY: &str = "int2dds.transport.TCPv4.nodelay";
-/// Outbound connect timeout, milliseconds. Default `5000`.
+/// Outbound connect timeout, milliseconds. Default `1000`.
 pub const PROP_TCP_CONNECT_TIMEOUT_MS: &str = "int2dds.transport.TCPv4.connect_timeout_ms";
 /// First-frame timeout for an accepted TCP connection, milliseconds.
 ///
@@ -894,14 +894,6 @@ pub const PROP_TCP_KEEPALIVE_MAX_MISSES: &str = "int2dds.transport.TCPv4.keepali
 pub const PROP_TCP_SO_RCVBUF: &str = "int2dds.transport.TCPv4.so_rcvbuf";
 /// Forced `SO_SNDBUF` in bytes. Default OS-managed (absent).
 pub const PROP_TCP_SO_SNDBUF: &str = "int2dds.transport.TCPv4.so_sndbuf";
-/// Longest one peer may hold up a sending thread, in milliseconds. A frame the
-/// peer's socket cannot take at all is dropped rather than waited on, so a
-/// stalled peer cannot delay sends to the others; RTPS reliability repairs the
-/// gap and traffic resumes as soon as the peer reads again. This bound applies
-/// where dropping is not possible -- finishing a frame the socket accepted only
-/// part of, and opening a connection -- and a frame that exceeds it costs the
-/// connection. `-1` waits indefinitely instead. Default `100`.
-pub const PROP_TCP_PEER_BLOCK_TIMEOUT_MS: &str = "int2dds.transport.TCPv4.peer_block_timeout_ms";
 
 /// Generic name/value extension channel for QoS-driven configuration.
 ///
