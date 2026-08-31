@@ -32,10 +32,9 @@ impl UserMulticastListeningTask {
 
     pub(crate) fn multicast_listening(&mut self, source: MessageSource) -> std::io::Result<()> {
         match source {
-            MessageSource::MioPoll { mut listener } => self.listen_mio_poll(&mut listener),
-            MessageSource::Channel { rx } => self.listen_channel(&rx),
-            MessageSource::MioPollWithShm { .. } => {
-                unreachable!("MioPollWithShm is only used by user-data unicast")
+            MessageSource::Udp { mut listener } => self.listen_mio_poll(&mut listener),
+            MessageSource::Shm { .. } => {
+                unreachable!("Shm is only used by user-data unicast")
             }
             MessageSource::Stream { .. } => {
                 unreachable!("Stream is handled by the stream unicast listening task")
@@ -47,7 +46,7 @@ impl UserMulticastListeningTask {
         &mut self,
         listener: &mut crate::rtps::transport::udp::udp_listener::UdpListener,
     ) -> std::io::Result<()> {
-        info!("start user multicast listening (MioPoll)");
+        info!("start user multicast listening (Udp)");
         let mut poll = Poll::new()?;
         let mut events = Events::with_capacity(MAX_EVENTS);
 
@@ -68,25 +67,6 @@ impl UserMulticastListeningTask {
                     while let Some((buffer, from_addr)) = listener.get_message() {
                         self.process_rtps_message(buffer, from_addr);
                     }
-                }
-            }
-        }
-    }
-
-    fn listen_channel(
-        &mut self,
-        rx: &flume::Receiver<crate::rtps::transport::plugin::IncomingMessage>,
-    ) -> std::io::Result<()> {
-        info!("start user multicast listening (Channel)");
-
-        loop {
-            match rx.recv() {
-                Ok(msg) => {
-                    self.process_rtps_message(msg.data, msg.source);
-                }
-                Err(_) => {
-                    info!("[UserMulticast] Channel disconnected, stopping listener");
-                    return Ok(());
                 }
             }
         }

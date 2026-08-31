@@ -150,7 +150,7 @@ impl TransportPlugin for HybridTransportPlugin {
 
     fn take_discovery_multicast_source(&self) -> Option<MessageSource> {
         let listener = self.discovery_multicast_listener.lock().expect("lock poisoned").take()?;
-        Some(MessageSource::MioPoll { listener })
+        Some(MessageSource::Udp { listener })
     }
 
     fn take_discovery_unicast_source(&self) -> Option<MessageSource> {

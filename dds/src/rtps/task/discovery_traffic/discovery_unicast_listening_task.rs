@@ -51,10 +51,9 @@ impl DiscoveryUnicastListeningTask {
 
     pub(crate) fn unicast_listening(&mut self, source: MessageSource) -> std::io::Result<()> {
         match source {
-            MessageSource::MioPoll { mut listener } => self.listen_mio_poll(&mut listener),
-            MessageSource::Channel { rx } => self.listen_channel(&rx),
-            MessageSource::MioPollWithShm { .. } => {
-                unreachable!("MioPollWithShm is only used by user-data unicast")
+            MessageSource::Udp { mut listener } => self.listen_mio_poll(&mut listener),
+            MessageSource::Shm { .. } => {
+                unreachable!("Shm is only used by user-data unicast")
             }
             MessageSource::Stream { .. } => {
                 unreachable!("Stream is handled by the stream unicast listening task")
@@ -66,7 +65,7 @@ impl DiscoveryUnicastListeningTask {
         &mut self,
         listener: &mut crate::rtps::transport::udp::udp_listener::UdpListener,
     ) -> std::io::Result<()> {
-        info!("start discovery unicast listening (MioPoll)");
+        info!("start discovery unicast listening (Udp)");
         let mut poll = Poll::new()?;
         let mut events = Events::with_capacity(MAX_EVENTS);
 
@@ -112,40 +111,6 @@ impl DiscoveryUnicastListeningTask {
                         }
                         let _ = self.process_rtps_message(buffer, from_addr);
                     }
-                }
-            }
-        }
-    }
-
-    fn listen_channel(
-        &mut self,
-        rx: &flume::Receiver<crate::rtps::transport::plugin::IncomingMessage>,
-    ) -> std::io::Result<()> {
-        info!("start discovery unicast listening (Channel)");
-
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or_else(|| std::io::Error::other("Participant already dropped"))?;
-
-        loop {
-            match rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(msg) => {
-                    if participant.is_terminated() {
-                        debug!("Detected global termination flag, discovery unicast channel listening terminating...");
-                        return Ok(());
-                    }
-                    let _ = self.process_rtps_message(msg.data, msg.source);
-                }
-                Err(flume::RecvTimeoutError::Timeout) => {
-                    if participant.is_terminated() {
-                        debug!("Detected global termination flag, discovery unicast channel listening terminating...");
-                        return Ok(());
-                    }
-                }
-                Err(flume::RecvTimeoutError::Disconnected) => {
-                    info!("[DiscoveryUnicast] Channel disconnected, stopping listener");
-                    return Ok(());
                 }
             }
         }

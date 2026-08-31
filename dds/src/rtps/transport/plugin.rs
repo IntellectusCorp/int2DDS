@@ -58,25 +58,18 @@ pub(crate) struct IncomingMessage {
 /// The variant determines the I/O mechanism, not the transport type.
 /// ListeningTask branches on I/O mechanism rather than transport type.
 pub(crate) enum MessageSource {
-    /// Direct mio-based polling — zero channel overhead.
-    /// Used when a single listener owns the receive path (e.g., UDP-only mode).
-    MioPoll { listener: UdpListener },
+    /// A single datagram listener owning the receive path.
+    Udp { listener: UdpListener },
 
-    /// Direct mio polling for a UDP listener combined with direct ring-buffer
-    /// polling for an SHM listener in the same loop.
-    /// SHM has no file descriptor and cannot register with mio, so it is polled
-    /// alongside UDP (zero-timeout poll + brief CPU yield when both are idle).
-    /// Used by SHM mode for user data unicast where UDP fallback and SHM are
-    /// merged at the listening-task level (no inter-thread channel).
-    MioPollWithShm { listener: UdpListener, shm: ShmListener },
+    /// A shared-memory listener polled in the same loop as its datagram
+    /// fallback. SHM has no file descriptor and cannot register with mio, so
+    /// both are polled directly (zero-timeout poll plus a brief yield when
+    /// idle) instead of being merged over a channel.
+    Shm { listener: UdpListener, shm: ShmListener },
 
-    /// Direct polling for a listener that owns accepted stream connections.
+    /// A listener that owns accepted connections and reassembles framed
+    /// streams from them.
     Stream { listener: TcpListener, shared: std::sync::Arc<ConnectionRegistry> },
-
-    /// Channel-based receiving.
-    /// Used when the transport internally routes framed streams by message kind
-    /// (TCP single-port listener).
-    Channel { rx: flume::Receiver<IncomingMessage> },
 }
 
 /// Transport plugin trait — the only interface RTPS logic depends on.
