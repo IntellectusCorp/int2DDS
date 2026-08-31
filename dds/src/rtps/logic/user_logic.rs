@@ -3195,6 +3195,10 @@ impl UnicastMessageProcessor for UserLogic {
         for reader in &matched_readers {
             let key = (remote_writer_guid, reader.guid().entity_id(), data_frag.writer_sn);
 
+            // Only the fragments the buffer actually took. A submessage may claim more than
+            // its payload holds, and the ledger drives NACK_FRAG.
+            let mut accepted: Vec<u32> = Vec::new();
+
             // Copy fragment data using DashMap entry API
             {
                 let mut buffer = self.fragment_buffers.entry(key).or_insert_with(|| {
@@ -3216,11 +3220,18 @@ impl UnicastMessageProcessor for UserLogic {
                     for i in 0..data_frag.fragments_in_submessage {
                         let fragment_num = data_frag.fragment_starting_num + i as u32;
                         let frag_data_start = i as usize * frag_size;
+                        // A submessage may claim more fragments than it carries; slicing past
+                        // the payload would panic.
+                        if frag_data_start >= total_len {
+                            break;
+                        }
                         let frag_data_end = std::cmp::min(frag_data_start + frag_size, total_len);
-                        buffer.copy_fragment_data(
+                        if buffer.copy_fragment_data(
                             fragment_num,
                             serialized_bytes.slice(frag_data_start..frag_data_end),
-                        );
+                        ) {
+                            accepted.push(fragment_num);
+                        }
                     }
                 }
             } // buffer RefMut is automatically dropped here
@@ -3244,13 +3255,11 @@ impl UnicastMessageProcessor for UserLogic {
                         .iter_mut()
                         .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
                     {
-                        // Update fragment information with this submessage's range
-                        let frag_start = data_frag.fragment_starting_num;
-                        let frag_end = frag_start + data_frag.fragments_in_submessage as u32;
+                        // Update fragment information with what the buffer took
                         writer_proxy.mark_frag_received(
                             data_frag.writer_sn,
                             total_fragments,
-                            frag_start..frag_end,
+                            accepted.iter().copied(),
                         );
                     }
                 }
@@ -4556,6 +4565,65 @@ mod tests {
             assert!(buffer.all_fragments_received(), "filler buffers must not be eviction bait");
             user_logic.fragment_buffers.insert((writer_guid, reader_id, sn), buffer);
         }
+    }
+
+    /// A submessage may claim more fragments than its payload holds. The buffer refuses the
+    /// short one, and the ledger must refuse it too: NACK_FRAG is built from the ledger, so
+    /// marking the claimed range would drop the repair request and the sample would be acked
+    /// with a hole in it.
+    #[test]
+    fn a_fragment_the_buffer_rejected_is_not_marked_received() {
+        let (participant, mut user_logic, reader, _reader_b, writer_guid, sn) =
+            two_readers_matched_to_one_fragmented_writer();
+        let prefix = participant.guid().prefix();
+
+        // Claims fragments 1 and 2 but carries six bytes, so fragment 2 is two bytes short.
+        feed_fragment(
+            &mut user_logic,
+            prefix,
+            writer_guid,
+            sn,
+            EntityId::UNKNOWN,
+            1,
+            2,
+            vec![1, 1, 1, 1, 2, 2],
+        );
+
+        assert_eq!(
+            ledger_missing(&reader, writer_guid, sn),
+            vec![2, 3, 4],
+            "the short fragment must still be requested"
+        );
+
+        // The rest arriving must not complete the sample while 2 is still absent.
+        feed_fragment(
+            &mut user_logic,
+            prefix,
+            writer_guid,
+            sn,
+            EntityId::UNKNOWN,
+            3,
+            2,
+            vec![3, 3, 3, 3, 4, 4, 4, 4],
+        );
+        assert_eq!(ledger_missing(&reader, writer_guid, sn), vec![2]);
+        assert!(
+            !ledger_reads_complete(&reader, writer_guid, sn),
+            "a sample with a hole must not read as complete"
+        );
+
+        // The repair carries the full fragment, and only then is the sample whole.
+        feed_fragment(
+            &mut user_logic,
+            prefix,
+            writer_guid,
+            sn,
+            EntityId::UNKNOWN,
+            2,
+            1,
+            vec![2, 2, 2, 2],
+        );
+        assert!(ledger_reads_complete(&reader, writer_guid, sn));
     }
 
     #[test]
