@@ -34,6 +34,10 @@ struct TcpReadConnection {
 pub(crate) struct TcpListener {
     port: u16,
     socket: mio::net::TcpListener,
+    /// What the kernel actually granted the listening socket, which every
+    /// accepted stream inherits. Read back rather than assumed: the request is
+    /// doubled and then clamped to the system maximum.
+    recv_buffer_size: Option<usize>,
     connections: HashMap<Token, TcpReadConnection>,
     next_connection_token: usize,
     buffer_pool: Arc<TcpBufferPool>,
@@ -67,6 +71,8 @@ impl TcpListener {
         socket.bind(&address.into())?;
         socket.listen(128)?;
 
+        let recv_buffer_size = socket.recv_buffer_size().ok();
+
         let std_listener = std::net::TcpListener::from(socket);
         let actual_port = std_listener.local_addr()?.port();
         let socket = mio::net::TcpListener::from_std(std_listener);
@@ -74,6 +80,7 @@ impl TcpListener {
         Ok(Self {
             port: actual_port,
             socket,
+            recv_buffer_size,
             connections: HashMap::new(),
             next_connection_token: FIRST_CONNECTION_TOKEN,
             buffer_pool: TcpBufferPool::new(),
@@ -88,6 +95,10 @@ impl TcpListener {
 
     pub(crate) fn port(&self) -> u16 {
         self.port
+    }
+
+    pub(crate) fn recv_buffer_size(&self) -> Option<usize> {
+        self.recv_buffer_size
     }
 
     pub(crate) fn connection_count(&self) -> usize {
@@ -360,6 +371,49 @@ mod tests {
 
     use crate::rtps::transport::tcp::framing::{test_framed, test_message};
     use crate::rtps::transport::tcp::sync_connection::{OutboundConnection, SendOutcome};
+
+    /// The advertised window is built from this, so it must be what the kernel
+    /// granted rather than what was asked for. An accepted stream inherits the
+    /// listening socket's buffer, so the listener speaks for every connection.
+    #[test]
+    fn recv_buffer_size_reports_the_kernel_grant_not_the_request() {
+        const REQUESTED: usize = 512 * 1024;
+        let tuning = TcpSocketTuning { so_rcvbuf: Some(REQUESTED), ..TcpSocketTuning::default() };
+        let listener =
+            TcpListener::new(0, tuning, None, Duration::from_secs(1), Duration::from_secs(1))
+                .unwrap();
+        let granted = listener.recv_buffer_size().expect("the kernel reported a value");
+
+        // Independent oracle: the same request hand-rolled on a throwaway socket, so a broken
+        // capture cannot also break the comparison. Where the kernel clamps to a system maximum
+        // both land on the clamp, and where it does not both land on the same grant.
+        let oracle = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)
+            .and_then(|socket| {
+                socket.set_recv_buffer_size(REQUESTED)?;
+                socket.recv_buffer_size()
+            })
+            .expect("oracle socket");
+        assert_eq!(granted, oracle);
+
+        drop(listener);
+    }
+
+    /// A default-tuned listener still has to report something, or every peer it
+    /// talks to falls back to the floor.
+    #[test]
+    fn recv_buffer_size_is_reported_without_any_tuning() {
+        let listener = TcpListener::new(
+            0,
+            TcpSocketTuning::default(),
+            None,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(listener.recv_buffer_size().is_some_and(|size| size > 0));
+
+        drop(listener);
+    }
 
     #[test]
     fn bind_creates_a_pollable_nonblocking_listener() {
