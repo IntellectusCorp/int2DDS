@@ -138,7 +138,7 @@ impl TcpSender {
             }
             Err(error) => {
                 if connection.is_failed() {
-                    self.evict_connection(key);
+                    self.evict_connection(key, &connection);
                     self.stats.write_error.record("write error", addr, kind);
                     debug!("TcpSender: write {:?} to {} failed: {}", kind, addr, error);
                 }
@@ -157,8 +157,6 @@ impl TcpSender {
 
     fn open_connection(&self, key: ConnectionKey) -> io::Result<Arc<OutboundConnection>> {
         let (addr, kind) = key;
-        self.evict_connection(key);
-
         if let Some(remaining) = self.shared.backoff_remaining(key) {
             self.stats.backoff.record("reconnect backoff", addr, kind);
             return Err(transport_io_error(
@@ -188,8 +186,8 @@ impl TcpSender {
         Ok(connection)
     }
 
-    fn evict_connection(&self, key: ConnectionKey) {
-        self.connections.remove(&key);
+    fn evict_connection(&self, key: ConnectionKey, connection: &Arc<OutboundConnection>) {
+        self.connections.remove_if(&key, |_, current| Arc::ptr_eq(current, connection));
     }
 
     pub(crate) fn disconnect_peer(&self, addr: SocketAddr) {

@@ -4,6 +4,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use log::warn;
 use mio::Token;
 
 use crate::rtps::transport::tcp::connection_registry::TcpSocketTuning;
@@ -108,7 +109,14 @@ impl TcpListener {
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     return Ok(accepted_count);
                 }
-                Err(error) => return Err(error),
+                Err(error) if error.kind() == io::ErrorKind::ConnectionAborted => {
+                    warn!("TCP accept dropped a pending connection: {error}");
+                    continue;
+                }
+                Err(error) => {
+                    warn!("TCP accept failed: {error}");
+                    return Ok(accepted_count);
+                }
             };
 
             let _ = stream.set_nodelay(self.tuning.nodelay);
@@ -174,9 +182,13 @@ impl TcpListener {
 
             let now = Instant::now();
             let tls = match &self.tls_server_config {
-                Some(config) => Some(
-                    rustls::ServerConnection::new(Arc::clone(config)).map_err(io::Error::other)?,
-                ),
+                Some(config) => match rustls::ServerConnection::new(Arc::clone(config)) {
+                    Ok(session) => Some(session),
+                    Err(error) => {
+                        warn!("TCP TLS session setup for {source} failed: {error}");
+                        continue;
+                    }
+                },
                 None => None,
             };
             let interest = if tls.is_some() {
@@ -186,7 +198,10 @@ impl TcpListener {
             };
             let token = Token(self.next_connection_token);
             self.next_connection_token += 1;
-            registry.register(&mut stream, token, interest)?;
+            if let Err(error) = registry.register(&mut stream, token, interest) {
+                warn!("TCP connection from {source} could not be registered: {error}");
+                continue;
+            }
 
             let tls_handshake_deadline = tls.as_ref().map(|_| now + self.tls_handshake_timeout);
             let first_frame_deadline = tls.is_none().then_some(now + self.first_frame_timeout);
