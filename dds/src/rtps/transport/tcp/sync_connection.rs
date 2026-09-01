@@ -21,7 +21,7 @@ use crate::rtps::transport::tcp::tls::TlsConfig;
 /// How much a peer may owe the stream before frames are refused instead of
 /// queued. This is a bound on memory, not a congestion threshold, so it sits
 /// far above any backlog a peer that is merely behind can build up.
-pub(crate) const SEND_QUEUE_BYTE_BUDGET: usize = 8 * 1024 * 1024;
+const SEND_QUEUE_BYTE_BUDGET: usize = 8 * 1024 * 1024;
 
 /// How long a peer may take no bytes at all while it still owes the stream.
 /// Progress of any size resets it, so only a peer that has stopped entirely

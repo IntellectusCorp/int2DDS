@@ -21,7 +21,6 @@ use crate::rtps::transport::tcp::connection_registry::{
     ConnectionRegistry, KeepaliveParams, TcpSocketTuning,
 };
 use crate::rtps::transport::tcp::framing::TcpFrameKind;
-use crate::rtps::transport::tcp::sync_connection::SEND_QUEUE_BYTE_BUDGET;
 use crate::rtps::transport::tcp::tcp_listener::TcpListener;
 use crate::rtps::transport::tcp::tcp_sender::TcpSender;
 use crate::rtps::transport::tcp::tls::TlsConfig;
@@ -64,6 +63,10 @@ pub(crate) struct TcpTransportPlugin {
     /// sender and with the stream listening task.
     shared: Arc<ConnectionRegistry>,
 }
+
+/// What TCP reports as the traffic it can absorb: the largest an SPDP
+/// announcement can carry, since a stream has no point at which it drops.
+const STREAM_UNBOUNDED_RECEIVE_BYTES: usize = u32::MAX as usize;
 
 impl TcpTransportPlugin {
     pub(crate) fn new(
@@ -241,8 +244,16 @@ impl TcpTransportPlugin {
 }
 
 impl TransportPlugin for TcpTransportPlugin {
+    /// A frame the socket will not take is queued rather than dropped, so no
+    /// amount of traffic has to be held back to keep the peer from losing it.
+    /// Reporting the largest value the announcement can carry is how that is
+    /// said: a sender then never withholds bytes on this transport's account.
+    ///
+    /// The send queue's own budget still bounds memory, but exceeding it
+    /// surfaces as an error the reliable path repairs, not as the silent loss
+    /// a send window exists to avoid.
     fn advertised_receive_buffer_size(&self) -> Option<usize> {
-        Some(SEND_QUEUE_BYTE_BUDGET)
+        Some(STREAM_UNBOUNDED_RECEIVE_BYTES)
     }
 
     fn send(&self, data: &[u8], target: &SendTarget) -> io::Result<()> {
