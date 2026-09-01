@@ -192,6 +192,7 @@ impl DcpsBridge {
             sedp_logic.start_sedp(
                 transport.take_discovery_multicast_source(),
                 transport.take_discovery_unicast_source(),
+                transport.take_stream_source(),
             )?;
         } else {
             log::error!("sedp_logic is not set");

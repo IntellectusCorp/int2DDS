@@ -25,6 +25,11 @@ impl SubmessageId {
     pub(crate) const DATA: Self = Self(0x15);
     pub(crate) const DATA_FRAG: Self = Self(0x16);
 
+    // Vendor-specific range (0x80..=0xff), scoped by the header's vendorId.
+    // Carries the total message length so a byte stream can be cut back into
+    // whole messages.
+    pub(crate) const MSG_LEN: Self = Self(0x80);
+
     pub(crate) fn as_u8(&self) -> u8 {
         self.0
     }

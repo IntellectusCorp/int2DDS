@@ -39,6 +39,7 @@
 //! - [`submessage_header_flag`] - Submessage header flags
 //! - [`submessage_id`] - Submessage type identifiers
 //! - [`submessages`] - Submessage type definitions
+//! - [`traffic_class`] - Discovery/user traffic classification
 
 pub(crate) mod header;
 pub(crate) mod header_extension;
@@ -55,3 +56,4 @@ pub(crate) mod submessage_header;
 pub(crate) mod submessage_header_flag;
 pub(crate) mod submessage_id;
 pub(crate) mod submessages;
+pub(crate) mod traffic_class;
