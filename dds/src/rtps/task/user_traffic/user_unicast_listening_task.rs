@@ -41,11 +41,13 @@ impl UserUnicastListeningTask {
 
     pub(crate) fn unicast_listening(&mut self, source: MessageSource) -> std::io::Result<()> {
         match source {
-            MessageSource::MioPoll { mut listener } => self.listen_mio_poll(&mut listener),
-            MessageSource::MioPollWithShm { mut listener, mut shm } => {
+            MessageSource::Udp { mut listener } => self.listen_mio_poll(&mut listener),
+            MessageSource::Shm { mut listener, mut shm } => {
                 self.listen_mio_poll_with_shm(&mut listener, &mut shm)
             }
-            MessageSource::Channel { rx } => self.listen_channel(&rx),
+            MessageSource::Stream { .. } => {
+                unreachable!("Stream is handled by the stream unicast listening task")
+            }
         }
     }
 
@@ -53,7 +55,7 @@ impl UserUnicastListeningTask {
         &mut self,
         listener: &mut crate::rtps::transport::udp::udp_listener::UdpListener,
     ) -> std::io::Result<()> {
-        info!("start user unicast listening (MioPoll)");
+        info!("start user unicast listening (Udp)");
         let mut poll = Poll::new()?;
         let mut events = Events::with_capacity(MAX_EVENTS);
 
@@ -106,7 +108,7 @@ impl UserUnicastListeningTask {
         listener: &mut crate::rtps::transport::udp::udp_listener::UdpListener,
         shm: &mut ShmListener,
     ) -> std::io::Result<()> {
-        info!("start user unicast listening (MioPoll + SHM)");
+        info!("start user unicast listening (Udp + SHM)");
         let mut poll = Poll::new()?;
         let mut events = Events::with_capacity(MAX_EVENTS);
 
@@ -174,41 +176,7 @@ impl UserUnicastListeningTask {
         }
     }
 
-    fn listen_channel(
-        &mut self,
-        rx: &flume::Receiver<crate::rtps::transport::plugin::IncomingMessage>,
-    ) -> std::io::Result<()> {
-        info!("start user unicast listening (Channel)");
-
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or_else(|| std::io::Error::other("Participant already dropped"))?;
-
-        loop {
-            match rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(msg) => {
-                    if participant.is_terminated() {
-                        debug!("Detected global termination flag, user unicast channel listening terminating...");
-                        return Ok(());
-                    }
-                    self.process_rtps_message(Bytes::from(msg.data), msg.source);
-                }
-                Err(flume::RecvTimeoutError::Timeout) => {
-                    if participant.is_terminated() {
-                        debug!("Detected global termination flag, user unicast channel listening terminating...");
-                        return Ok(());
-                    }
-                }
-                Err(flume::RecvTimeoutError::Disconnected) => {
-                    info!("[UserUnicast] Channel disconnected, stopping listener");
-                    return Ok(());
-                }
-            }
-        }
-    }
-
-    fn process_rtps_message(&mut self, bytes: Bytes, from_addr: SocketAddr) {
+    pub(crate) fn process_rtps_message(&mut self, bytes: Bytes, from_addr: SocketAddr) {
         let mut message_receiver = MessageReceiver::new(self.guid_prefix, &from_addr);
         let rtps_message = message_receiver.init(&bytes);
         if rtps_message.is_err() {
