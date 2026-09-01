@@ -17,7 +17,7 @@ use crate::rtps::transport::UdpConfig;
 /// Owns one UdpSender (for all outgoing traffic) and four UdpListeners
 /// (discovery multicast/unicast, user multicast/unicast).
 /// Each listener is handed out exactly once via `take_*_source()`,
-/// wrapped in `MessageSource::MioPoll` for zero-channel-overhead polling.
+/// wrapped in `MessageSource::Udp` for zero-channel-overhead polling.
 pub(crate) struct UdpTransportPlugin {
     sender: UdpSender,
     domain_id: u32,
@@ -198,17 +198,17 @@ impl TransportPlugin for UdpTransportPlugin {
 
     fn take_discovery_multicast_source(&self) -> Option<MessageSource> {
         let listener = self.discovery_multicast_listener.lock().expect("lock poisoned").take()?;
-        Some(MessageSource::MioPoll { listener })
+        Some(MessageSource::Udp { listener })
     }
 
     fn take_discovery_unicast_source(&self) -> Option<MessageSource> {
         let listener = self.discovery_unicast_listener.lock().expect("lock poisoned").take()?;
-        Some(MessageSource::MioPoll { listener })
+        Some(MessageSource::Udp { listener })
     }
 
     fn take_user_data_unicast_source(&self) -> Option<MessageSource> {
         let listener = self.user_unicast_listener.lock().expect("lock poisoned").take()?;
-        Some(MessageSource::MioPoll { listener })
+        Some(MessageSource::Udp { listener })
     }
 
     fn port(&self) -> u16 {

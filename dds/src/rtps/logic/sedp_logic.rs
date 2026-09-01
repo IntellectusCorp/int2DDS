@@ -83,6 +83,7 @@ use crate::{
                 discovery_unicast_listening_task::DiscoveryUnicastListeningTask,
             },
             sending_handler::{MessageType, SendingHandler},
+            stream_unicast_listening_task::StreamUnicastListeningTask,
         },
         transport::plugin::{MessageSource, SendTarget, TransportPlugin},
     },
@@ -393,6 +394,7 @@ impl SedpLogic {
         &self,
         discovery_multicast_source: Option<MessageSource>,
         discovery_unicast_source: Option<MessageSource>,
+        stream_source: Option<MessageSource>,
     ) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
 
@@ -432,8 +434,36 @@ impl SedpLogic {
             }
         }
 
-        // unicast listening (only if transport provides a unicast source)
-        if let Some(unicast_source) = discovery_unicast_source {
+        if let Some(stream_source) = stream_source {
+            let mut stream_unicast_listening_task =
+                StreamUnicastListeningTask::new(participant.clone());
+            stream_unicast_listening_task.set_shutdown_waker(self.unicast_listening_waker.clone());
+
+            let stream_guid = participant_guid;
+            let stream_handle = thread::Builder::new()
+                .name("stream_unicast_listening".to_string())
+                .spawn(move || {
+                    {
+                        use crate::rtps::task::thread_monitor::ThreadMonitor;
+                        ThreadMonitor::register_current_thread_name_with_guid_prefix(
+                            "stream_unicast_listening",
+                            stream_guid.prefix(),
+                        );
+                    }
+
+                    let _ = stream_unicast_listening_task.stream_listening(stream_source);
+                    {
+                        use crate::rtps::task::thread_monitor::ThreadMonitor;
+                        ThreadMonitor::remove_map_guard();
+                    }
+                    debug!("stream unicast listening thread finished");
+                })
+                .expect("Failed to create stream unicast listening thread");
+
+            if let Ok(mut handle_guard) = self.unicast_listening_handle.lock() {
+                *handle_guard = Some(stream_handle);
+            }
+        } else if let Some(unicast_source) = discovery_unicast_source {
             let mut discovery_unicast_listening_task =
                 DiscoveryUnicastListeningTask::new(participant.clone());
             discovery_unicast_listening_task

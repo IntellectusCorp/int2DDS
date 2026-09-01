@@ -22,10 +22,8 @@ use std::io;
 ///
 /// Code ranges:
 ///   710–719  TCP connection establishment
-///   720–729  TCP handshake (3-step)
 ///   730–739  TCP connection maintenance / monitoring
 ///   740–749  TCP framing
-///   750–759  TCP control protocol
 ///   760–769  TCP internal channel
 ///   770–779  TCP listener / accept
 ///   780–789  TLS configuration and handshake
@@ -40,23 +38,14 @@ pub enum TransportErrorCode {
     /// TCP listener failed to bind the physical port (port already in use, permission denied, etc.).
     TcpBindFailed = 712,
 
-    // ── 720: TCP 3-step handshake ───────────────────────────────────────
-    /// PEER_HELLO was sent but the response was not PEER_HELLO_ACK.
-    TcpHandshakeHelloFailed = 720,
-    /// PORT_RESERVE was rejected or the response was not PORT_RESERVE_ACK.
-    TcpHandshakeReserveFailed = 721,
-    /// PORT_BIND was rejected (invalid/expired cookie) or no PORT_BIND_ACK received.
-    TcpHandshakeBindFailed = 722,
-
     // ── 730: TCP connection maintenance / monitoring ────────────────────
     /// Send skipped because the peer is in exponential reconnect backoff (its
     /// recent connect attempts keep failing). A deferral, not a hard failure —
     /// the triggering connect failure is reported separately.
     TcpReconnectBackoff = 730,
-    /// The previous frame still held the write lock when the send deadline
-    /// expired. Not a byte left the socket, so the frame is refused whole
-    /// rather than half-written.
-    TcpSendDeadlineExpired = 731,
+    /// The peer's send queue had no room for the frame. No byte of it left the
+    /// socket, so the frame was dropped rather than waited on.
+    TcpPeerSendQueueFull = 731,
 
     // ── 740: TCP framing ────────────────────────────────────────────────
     /// Frame magic bytes were not "INT2".
@@ -65,19 +54,13 @@ pub enum TransportErrorCode {
     TcpFrameTooLarge = 741,
     /// Frame length field was zero or otherwise invalid.
     TcpFrameInvalidLength = 742,
-
-    // ── 750: TCP control protocol ───────────────────────────────────────
-    /// Received an unknown or unparseable control message type.
-    TcpControlProtocolError = 750,
-    /// PORT_RESERVE requested a logical port that does not exist.
-    TcpControlInvalidPort = 751,
-    /// PORT_BIND presented an invalid or expired cookie.
-    TcpControlInvalidCookie = 752,
+    /// The submessage following the RTPS header is not the vendor length submessage.
+    TcpFrameMissingMsgLen = 743,
 
     // ── 760: TCP internal channel ───────────────────────────────────────
     /// Internal channel (discovery or user-data) is full; message dropped.
     TcpChannelFull = 760,
-    /// The per-connection buffer holding frames until the handshake completes
+    /// The per-connection buffer holding frames until TCP/TLS connect completes
     /// hit its bound; the frame was dropped.
     TcpConnectBufferFull = 761,
 
@@ -86,8 +69,6 @@ pub enum TransportErrorCode {
     TcpAcceptFailed = 770,
     /// Read error on an accepted connection (RST, EOF, framing error).
     TcpReadError = 771,
-    /// Failed to send a control response to a connected peer.
-    TcpControlSendFailed = 772,
 
     // ── 780: TLS configuration and handshake ────────────────────────────
     /// A required TLS property is missing in the participant QoS.
@@ -115,26 +96,17 @@ impl TransportErrorCode {
             Self::TcpConnectionRefused => io::ErrorKind::ConnectionRefused,
             Self::TcpBindFailed => io::ErrorKind::AddrInUse,
 
-            Self::TcpHandshakeHelloFailed
-            | Self::TcpHandshakeReserveFailed
-            | Self::TcpHandshakeBindFailed => io::ErrorKind::InvalidData,
+            Self::TcpReconnectBackoff | Self::TcpPeerSendQueueFull => io::ErrorKind::WouldBlock,
 
-            Self::TcpReconnectBackoff | Self::TcpSendDeadlineExpired => io::ErrorKind::WouldBlock,
-
-            Self::TcpFrameInvalidMagic | Self::TcpFrameTooLarge | Self::TcpFrameInvalidLength => {
-                io::ErrorKind::InvalidData
-            }
-
-            Self::TcpControlProtocolError
-            | Self::TcpControlInvalidPort
-            | Self::TcpControlInvalidCookie => io::ErrorKind::InvalidData,
+            Self::TcpFrameInvalidMagic
+            | Self::TcpFrameTooLarge
+            | Self::TcpFrameInvalidLength
+            | Self::TcpFrameMissingMsgLen => io::ErrorKind::InvalidData,
 
             Self::TcpChannelFull | Self::TcpConnectBufferFull => io::ErrorKind::WouldBlock,
 
             Self::TcpAcceptFailed => io::ErrorKind::ConnectionAborted,
             Self::TcpReadError => io::ErrorKind::ConnectionReset,
-            Self::TcpControlSendFailed => io::ErrorKind::BrokenPipe,
-
             Self::TlsMissingProperty => io::ErrorKind::InvalidInput,
             Self::TlsFileIoError => io::ErrorKind::NotFound,
             Self::TlsInvalidPem | Self::TlsConfigError => io::ErrorKind::InvalidData,
@@ -149,28 +121,19 @@ impl TransportErrorCode {
             Self::TcpConnectionRefused => "TCP connection refused",
             Self::TcpBindFailed => "TCP listener bind failed",
 
-            Self::TcpHandshakeHelloFailed => "TCP PEER_HELLO handshake failed",
-            Self::TcpHandshakeReserveFailed => "TCP PORT_RESERVE handshake failed",
-            Self::TcpHandshakeBindFailed => "TCP PORT_BIND handshake failed",
-
             Self::TcpReconnectBackoff => "peer in reconnect backoff",
-            Self::TcpSendDeadlineExpired => "TCP send deadline expired before the write lock",
+            Self::TcpPeerSendQueueFull => "TCP peer send queue full",
 
             Self::TcpFrameInvalidMagic => "TCP frame invalid magic",
             Self::TcpFrameTooLarge => "TCP frame too large",
             Self::TcpFrameInvalidLength => "TCP frame invalid length",
-
-            Self::TcpControlProtocolError => "TCP unknown control message",
-            Self::TcpControlInvalidPort => "TCP PORT_RESERVE invalid port",
-            Self::TcpControlInvalidCookie => "TCP PORT_BIND invalid cookie",
+            Self::TcpFrameMissingMsgLen => "TCP frame missing length submessage",
 
             Self::TcpChannelFull => "TCP internal channel full",
             Self::TcpConnectBufferFull => "TCP connect-window buffer full",
 
             Self::TcpAcceptFailed => "TCP accept failed",
             Self::TcpReadError => "TCP read error on accepted connection",
-            Self::TcpControlSendFailed => "TCP control response send failed",
-
             Self::TlsMissingProperty => "TLS required property missing",
             Self::TlsFileIoError => "TLS PEM file I/O error",
             Self::TlsInvalidPem => "TLS PEM contents invalid",
