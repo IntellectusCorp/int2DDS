@@ -468,10 +468,19 @@ mod tests {
         let mut clients: Vec<_> =
             (0..3).map(|_| std::net::TcpStream::connect(address).unwrap()).collect();
         let mut events = Events::with_capacity(8);
-        poll.poll(&mut events, Some(Duration::from_secs(1))).unwrap();
-        assert!(events.iter().any(|event| event.token() == listener_token));
 
-        assert_eq!(listener.accept_ready(poll.registry()).unwrap(), 3);
+        // A readable listening socket means at least one handshake has landed,
+        // never that all three have, so the accepts are gathered until they are.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut accepted = 0;
+        while accepted < 3 {
+            assert!(Instant::now() < deadline, "only {accepted} of 3 connections were accepted");
+            events.clear();
+            poll.poll(&mut events, Some(Duration::from_millis(10))).unwrap();
+            if events.iter().any(|event| event.token() == listener_token) {
+                accepted += listener.accept_ready(poll.registry()).unwrap();
+            }
+        }
         assert_eq!(listener.accept_ready(poll.registry()).unwrap(), 0);
         assert_eq!(listener.connections.len(), 3);
         assert_eq!(listener.next_connection_token, FIRST_CONNECTION_TOKEN + 3);
@@ -552,20 +561,20 @@ mod tests {
 
         client.write_all(&discovery[10..]).unwrap();
         client.write_all(&user).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(1);
-        let first = loop {
-            assert!(Instant::now() < deadline, "timed out waiting for complete frames");
+        // One write does not mean one read: each frame is waited for on its own,
+        // since the bytes of the second need not arrive with those of the first.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut next_message = |listener: &mut TcpListener, poll: &mut Poll, what: &str| loop {
+            assert!(Instant::now() < deadline, "timed out waiting for the {what} frame");
+            if let Some(message) = listener.get_message(connection_token, poll.registry()).unwrap()
+            {
+                break message;
+            }
             events.clear();
             poll.poll(&mut events, Some(Duration::from_millis(10))).unwrap();
-            if events.iter().any(|event| event.token() == connection_token && event.is_readable()) {
-                if let Some(message) =
-                    listener.get_message(connection_token, poll.registry()).unwrap()
-                {
-                    break message;
-                }
-            }
         };
-        let second = listener.get_message(connection_token, poll.registry()).unwrap().unwrap();
+        let first = next_message(&mut listener, &mut poll, "first");
+        let second = next_message(&mut listener, &mut poll, "second");
 
         assert_eq!(first.source, source);
         assert_eq!(first.kind, TcpFrameKind::Discovery);
