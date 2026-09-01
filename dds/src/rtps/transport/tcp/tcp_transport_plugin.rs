@@ -21,6 +21,7 @@ use crate::rtps::transport::tcp::connection_registry::{
     ConnectionRegistry, KeepaliveParams, TcpSocketTuning,
 };
 use crate::rtps::transport::tcp::framing::TcpFrameKind;
+use crate::rtps::transport::tcp::sync_connection::SEND_QUEUE_BYTE_BUDGET;
 use crate::rtps::transport::tcp::tcp_listener::TcpListener;
 use crate::rtps::transport::tcp::tcp_sender::TcpSender;
 use crate::rtps::transport::tcp::tls::TlsConfig;
@@ -58,10 +59,6 @@ pub(crate) struct TcpTransportPlugin {
     /// Inbound side, handed to the stream listening task by
     /// `take_stream_source()`.
     listener: Mutex<Option<TcpListener>>,
-
-    /// Captured before the listener is taken, so peers still learn how much
-    /// this participant can buffer once the inbound side has moved on.
-    advertised_receive_buffer_size: Option<usize>,
 
     /// Connection bookkeeping and the self-delivery queue, shared with the
     /// sender and with the stream listening task.
@@ -152,7 +149,6 @@ impl TcpTransportPlugin {
             )
         })?;
         let listener_port = listener.port();
-        let advertised_receive_buffer_size = listener.recv_buffer_size();
 
         let shared =
             Arc::new(ConnectionRegistry::new(domain_id, participant_id, guid_prefix, tuning));
@@ -192,7 +188,6 @@ impl TcpTransportPlugin {
             shutdown,
             sender,
             listener: Mutex::new(Some(listener)),
-            advertised_receive_buffer_size,
             shared,
         })
     }
@@ -247,7 +242,7 @@ impl TcpTransportPlugin {
 
 impl TransportPlugin for TcpTransportPlugin {
     fn advertised_receive_buffer_size(&self) -> Option<usize> {
-        self.advertised_receive_buffer_size
+        Some(SEND_QUEUE_BYTE_BUDGET)
     }
 
     fn send(&self, data: &[u8], target: &SendTarget) -> io::Result<()> {

@@ -112,6 +112,11 @@ impl HybridTransportPlugin {
 }
 
 impl TransportPlugin for HybridTransportPlugin {
+    /// Unicast rides TCP, so the bound that applies is the TCP one.
+    fn advertised_receive_buffer_size(&self) -> Option<usize> {
+        self.tcp_plugin.advertised_receive_buffer_size()
+    }
+
     fn send(&self, data: &[u8], target: &SendTarget) -> io::Result<()> {
         match target {
             SendTarget::SPDPDiscovery { initial_peers } => {

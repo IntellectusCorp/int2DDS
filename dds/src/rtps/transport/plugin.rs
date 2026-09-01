@@ -106,10 +106,12 @@ pub(crate) trait TransportPlugin: Send + Sync {
     /// participants. Populated into the SPDP announcement.
     fn advertised_default_unicast_locators(&self) -> Vec<Locator>;
 
-    /// This participant's own UDP receive-buffer size as granted by the kernel
-    /// (`getsockopt`, post-bind), for advertising in SPDP under the vendor PID.
-    /// `None` when the transport has no such notion (e.g. TCP) - a peer must
-    /// then treat us as non-advertising, not as advertising zero.
+    /// How many bytes may be in flight toward this participant before they
+    /// start being dropped, for advertising in SPDP under the vendor PID. A
+    /// datagram transport answers with the receive buffer the kernel granted
+    /// it; a stream transport answers with the backlog it will hold. `None`
+    /// when a transport has neither - a peer must then treat us as
+    /// non-advertising, not as advertising zero.
     fn advertised_receive_buffer_size(&self) -> Option<usize> {
         None
     }
