@@ -1,15 +1,22 @@
 #!/usr/bin/env bash
 # Stage the built native artifacts into a release archive (Linux / macOS).
 #
-# Usage: .github/scripts/ci/stage-native.sh <triple> <dist_name> <version> [<libc>]
-#   e.g. .github/scripts/ci/stage-native.sh x86_64-unknown-linux-gnu linux-x86_64 0.1.1 gnu
+# Usage: .github/scripts/ci/stage-native.sh <triple> <dist_name> <version> [<libc>] [<max_glibc>]
+#   e.g. .github/scripts/ci/stage-native.sh x86_64-unknown-linux-gnu linux-x86_64 0.1.1 gnu 2.28
 #        .github/scripts/ci/stage-native.sh aarch64-apple-darwin macos-arm64 0.1.1
+#
+# max_glibc is the highest GLIBC_* symbol version the artifact may require.
+# It differs per architecture because the builder images differ: the x86_64 and
+# aarch64 gnu artifacts come out of manylinux_2_28 (AlmaLinux 8), while armhf is
+# still cross-built on ubuntu 22.04 — every older armhf builder is EOL.
+# Defaulting to 2.35 keeps the macOS and musl callers unchanged.
 set -euo pipefail
 
-triple="${1:?usage: stage-native.sh <triple> <dist_name> <version> [libc]}"
+triple="${1:?usage: stage-native.sh <triple> <dist_name> <version> [libc] [max_glibc]}"
 dist_name="${2:?}"
 version="${3:?}"
 libc="${4:-}"
+max_glibc="${5:-2.35}"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 build_dir="$repo_root/target/$triple/release"
@@ -87,10 +94,9 @@ if [[ "$lib_file" == "libint2dds_ffi.so" ]]; then
       exit 1
     fi
 
-    # glibc baseline regression guard: fail if it exceeds 2.35 (ubuntu 22.04).
-    if [[ "$glibc" != "unknown" ]] && \
-       [[ "$(printf '%s\n2.35\n' "$glibc" | sort -V | tail -1)" != "2.35" ]]; then
-      echo "ERROR: min_glibc $glibc exceeds the 2.35 baseline" >&2
+    # glibc baseline regression guard, per architecture (see max_glibc above).
+    if [[ "$(printf '%s\n%s\n' "$glibc" "$max_glibc" | sort -V | tail -1)" != "$max_glibc" ]]; then
+      echo "ERROR: min_glibc $glibc exceeds the $max_glibc baseline for $dist_name" >&2
       exit 1
     fi
   fi

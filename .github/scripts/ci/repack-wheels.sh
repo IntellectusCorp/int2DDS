@@ -45,8 +45,8 @@ fi
 entries=(
   "windows-x86_64|bin/int2dds_ffi.dll|win_amd64"
   "windows-aarch64|bin/int2dds_ffi.dll|win_arm64"
-  "linux-x86_64|lib/libint2dds_ffi.so.$version|manylinux_2_35_x86_64"
-  "linux-aarch64|lib/libint2dds_ffi.so.$version|manylinux_2_35_aarch64"
+  "linux-x86_64|lib/libint2dds_ffi.so.$version|manylinux_2_28_x86_64"
+  "linux-aarch64|lib/libint2dds_ffi.so.$version|manylinux_2_28_aarch64"
   "macos-arm64|lib/libint2dds_ffi.dylib|macosx_11_0_arm64"
   "macos-x86_64|lib/libint2dds_ffi.dylib|macosx_10_12_x86_64"
 )
