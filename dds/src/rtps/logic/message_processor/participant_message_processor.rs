@@ -157,7 +157,7 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
             spdp_discovered_participant_data.participant_guid().prefix(),
             Some(from_addr),
         );
-        if !same_host {
+        if !same_host || crate::common::env::get_disable_same_host_loopback() {
             return Ok(());
         }
 

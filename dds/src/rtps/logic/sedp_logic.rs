@@ -1180,7 +1180,7 @@ impl SedpLogic {
             return announced;
         };
         let same_host = participant.remote_is_same_host(remote_prefix, None);
-        if !same_host {
+        if !same_host || crate::common::env::get_disable_same_host_loopback() {
             return announced;
         }
 
