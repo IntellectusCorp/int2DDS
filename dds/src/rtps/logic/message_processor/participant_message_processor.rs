@@ -161,22 +161,10 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
             return Ok(());
         }
 
-        let remote_prefix = spdp_discovered_participant_data.participant_guid().prefix();
         let metatraffic =
             loopback_locators(spdp_discovered_participant_data.metatraffic_unicast_locator_list());
         let default =
             loopback_locators(spdp_discovered_participant_data.default_unicast_locator_list());
-
-        participant.record_narrowed_locators(
-            remote_prefix,
-            spdp_discovered_participant_data.metatraffic_unicast_locator_list(),
-            &metatraffic,
-        );
-        participant.record_narrowed_locators(
-            remote_prefix,
-            spdp_discovered_participant_data.default_unicast_locator_list(),
-            &default,
-        );
 
         debug!(
             "Redirected same-host unicast locators of {} to metatraffic [{}], default [{}]",

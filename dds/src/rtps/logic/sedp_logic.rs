@@ -1192,7 +1192,6 @@ impl SedpLogic {
             Guid::guid_prefix_to_string(&remote_prefix),
             redirected.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(", ")
         );
-        participant.record_narrowed_locators(remote_prefix, &announced, &redirected);
         redirected
     }
 
