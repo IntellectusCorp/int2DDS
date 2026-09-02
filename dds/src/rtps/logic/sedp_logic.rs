@@ -1179,9 +1179,7 @@ impl SedpLogic {
         let Ok(participant) = self.get_upgraded_participant() else {
             return announced;
         };
-        let same_host = participant
-            .find_remote_participant_proxy_data(remote_prefix)
-            .is_some_and(|remote| remote.same_host());
+        let same_host = participant.remote_is_same_host(remote_prefix, None);
         if !same_host {
             return announced;
         }

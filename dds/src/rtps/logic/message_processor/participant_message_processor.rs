@@ -27,7 +27,7 @@ use crate::{
             entity_id::EntityId,
             guid::Guid,
             locator::{
-                is_same_host, loopback_locators, Locator, LOCATOR_KIND_TCP_V4, LOCATOR_KIND_TCP_V6,
+                loopback_locators, Locator, LOCATOR_KIND_TCP_V4, LOCATOR_KIND_TCP_V6,
                 LOCATOR_KIND_UDP_V4, LOCATOR_KIND_UDP_V6,
             },
             rtps_error_code::RtpsResult,
@@ -144,19 +144,19 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
         Ok(())
     }
 
-    /// Redirect a co-located peer's unicast locator lists to loopback before
-    /// anything is derived from them, so every proxy, reader locator and SEDP
-    /// announcement downstream carries the one address this host sends to. The
-    /// multicast lists stay untouched - they carry a group address, not one
-    /// entry per interface.
+    /// Narrow a co-located peer's unicast locator lists before anything is
+    /// derived from them. The multicast lists stay untouched - they carry a
+    /// group address, not one entry per interface.
     fn redirect_same_host_locators_to_loopback(
         &self,
         spdp_discovered_participant_data: &mut SPDPDiscoveredParticipantData,
         from_addr: SocketAddr,
     ) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
-        let same_host = is_same_host(&participant.working_ips(), from_addr);
-        spdp_discovered_participant_data.set_same_host(same_host);
+        let same_host = participant.remote_is_same_host(
+            spdp_discovered_participant_data.participant_guid().prefix(),
+            Some(from_addr),
+        );
         if !same_host {
             return Ok(());
         }

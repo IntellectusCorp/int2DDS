@@ -133,6 +133,13 @@ impl DiscoveryUnicastListeningTask {
             return Ok(());
         }
 
+        // Settle where the peer runs from its first datagram, whichever
+        // announcement that one carries: a SEDP can arrive before any SPDP, and
+        // what is derived from it is never revisited.
+        if let Some(participant) = self.participant.upgrade() {
+            participant.remote_is_same_host(rtps_message.header.guid_prefix(), Some(from_addr));
+        }
+
         // Check if this is an SPDP message (TCP mode sends SPDP via unicast)
         if self.is_spdp_message(&message_receiver) {
             let participant_proxy_data =
