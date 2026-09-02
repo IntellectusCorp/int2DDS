@@ -38,7 +38,7 @@ use crate::{
             entity_id::EntityId,
             guid::{Guid, GuidPrefix},
             locator::{
-                narrow_endpoint_locators, Locator, LOCATOR_KIND_SHM, LOCATOR_KIND_TCP_V4,
+                loopback_locators, Locator, LOCATOR_KIND_SHM, LOCATOR_KIND_TCP_V4,
                 LOCATOR_KIND_TCP_V6, LOCATOR_KIND_UDP_V4, LOCATOR_KIND_UDP_V6,
             },
             parameters::ParameterList,
@@ -1165,7 +1165,12 @@ impl SedpLogic {
 
     /// Locator list a proxy for `remote_prefix` should send to. The announced
     /// list is left as the peer published it in the builtin topic data; only
-    /// the routing decision kept in the proxy is narrowed.
+    /// the routing decision kept in the proxy is redirected.
+    ///
+    /// A SEDP announcement carries one locator per interface exactly as SPDP
+    /// does, and no source address reaches this path. It does not have to:
+    /// co-location was proven once from the participant's own announcement and
+    /// holds for every endpoint behind it.
     fn endpoint_unicast_locators(
         &self,
         announced: Vec<Locator>,
@@ -1174,25 +1179,21 @@ impl SedpLogic {
         let Ok(participant) = self.get_upgraded_participant() else {
             return announced;
         };
-        let settled = participant
+        let same_host = participant
             .find_remote_participant_proxy_data(remote_prefix)
-            .map(|remote| remote.default_unicast_locator_list().clone());
-
-        let Some(settled) = settled else {
+            .is_some_and(|remote| remote.same_host());
+        if !same_host {
             return announced;
-        };
-        match narrow_endpoint_locators(&announced, &settled) {
-            Some(narrowed) => {
-                debug!(
-                    "Narrowed same-host endpoint locators of {} to [{}]",
-                    Guid::guid_prefix_to_string(&remote_prefix),
-                    narrowed.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(", ")
-                );
-                participant.record_narrowed_locators(remote_prefix, &announced, &narrowed);
-                narrowed
-            }
-            None => announced,
         }
+
+        let redirected = loopback_locators(&announced);
+        debug!(
+            "Redirected same-host endpoint locators of {} to [{}]",
+            Guid::guid_prefix_to_string(&remote_prefix),
+            redirected.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(", ")
+        );
+        participant.record_narrowed_locators(remote_prefix, &announced, &redirected);
+        redirected
     }
 
     fn handle_empty_locator_lists(

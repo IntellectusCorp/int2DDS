@@ -27,7 +27,7 @@ use crate::{
             entity_id::EntityId,
             guid::Guid,
             locator::{
-                narrow_same_host_locators, Locator, LOCATOR_KIND_TCP_V4, LOCATOR_KIND_TCP_V6,
+                is_same_host, loopback_locators, Locator, LOCATOR_KIND_TCP_V4, LOCATOR_KIND_TCP_V6,
                 LOCATOR_KIND_UDP_V4, LOCATOR_KIND_UDP_V6,
             },
             rtps_error_code::RtpsResult,
@@ -68,7 +68,10 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
             return Ok(());
         }
 
-        self.narrow_locators_to_same_host(&mut spdp_discovered_participant_data, from_addr)?;
+        self.redirect_same_host_locators_to_loopback(
+            &mut spdp_discovered_participant_data,
+            from_addr,
+        )?;
 
         let participant = self.get_upgraded_participant()?;
 
@@ -141,57 +144,48 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
         Ok(())
     }
 
-    /// Collapse a co-located peer's unicast locator lists before anything is
-    /// derived from them, so every proxy, reader locator and SEDP announcement
-    /// downstream carries the one address this host will actually send to.
-    /// The multicast lists stay untouched - they carry a group address, not one
+    /// Redirect a co-located peer's unicast locator lists to loopback before
+    /// anything is derived from them, so every proxy, reader locator and SEDP
+    /// announcement downstream carries the one address this host sends to. The
+    /// multicast lists stay untouched - they carry a group address, not one
     /// entry per interface.
-    fn narrow_locators_to_same_host(
+    fn redirect_same_host_locators_to_loopback(
         &self,
         spdp_discovered_participant_data: &mut SPDPDiscoveredParticipantData,
         from_addr: SocketAddr,
     ) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
-        let local_ips = participant.working_ips();
+        let same_host = is_same_host(&participant.working_ips(), from_addr);
+        spdp_discovered_participant_data.set_same_host(same_host);
+        if !same_host {
+            return Ok(());
+        }
+
         let remote_prefix = spdp_discovered_participant_data.participant_guid().prefix();
+        let metatraffic =
+            loopback_locators(spdp_discovered_participant_data.metatraffic_unicast_locator_list());
+        let default =
+            loopback_locators(spdp_discovered_participant_data.default_unicast_locator_list());
 
-        let metatraffic = narrow_same_host_locators(
+        participant.record_narrowed_locators(
+            remote_prefix,
             spdp_discovered_participant_data.metatraffic_unicast_locator_list(),
-            &local_ips,
-            from_addr,
+            &metatraffic,
         );
-        let default = narrow_same_host_locators(
+        participant.record_narrowed_locators(
+            remote_prefix,
             spdp_discovered_participant_data.default_unicast_locator_list(),
-            &local_ips,
-            from_addr,
+            &default,
         );
 
-        if let Some(locators) = metatraffic {
-            debug!(
-                "Narrowed same-host metatraffic unicast locators of {} to [{}]",
-                spdp_discovered_participant_data.participant_guid(),
-                locators.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(", ")
-            );
-            participant.record_narrowed_locators(
-                remote_prefix,
-                spdp_discovered_participant_data.metatraffic_unicast_locator_list(),
-                &locators,
-            );
-            spdp_discovered_participant_data.set_metatraffic_unicast_locator_list(locators);
-        }
-        if let Some(locators) = default {
-            debug!(
-                "Narrowed same-host default unicast locators of {} to [{}]",
-                spdp_discovered_participant_data.participant_guid(),
-                locators.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(", ")
-            );
-            participant.record_narrowed_locators(
-                remote_prefix,
-                spdp_discovered_participant_data.default_unicast_locator_list(),
-                &locators,
-            );
-            spdp_discovered_participant_data.set_default_unicast_locator_list(locators);
-        }
+        debug!(
+            "Redirected same-host unicast locators of {} to metatraffic [{}], default [{}]",
+            spdp_discovered_participant_data.participant_guid(),
+            metatraffic.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(", "),
+            default.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(", ")
+        );
+        spdp_discovered_participant_data.set_metatraffic_unicast_locator_list(metatraffic);
+        spdp_discovered_participant_data.set_default_unicast_locator_list(default);
 
         Ok(())
     }

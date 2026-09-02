@@ -54,6 +54,10 @@ pub(crate) struct SPDPDiscoveredParticipantData {
     // parameter alike (see message_receiver.rs) - never Some(0), since a
     // later window computation divides by this value.
     receive_buffer_size: Option<usize>,
+    // Proven from the source address of the announcement, never from the
+    // addresses in it. False on a locally built announcement, which is never
+    // sent to.
+    same_host: bool,
 }
 
 impl SPDPDiscoveredParticipantData {
@@ -82,6 +86,7 @@ impl SPDPDiscoveredParticipantData {
             key: BuiltinTopicKey { value: [0; 3] },
             user_data: UserDataQosPolicy::default(),
             receive_buffer_size: None,
+            same_host: false,
         }
     }
 
@@ -146,6 +151,14 @@ impl SPDPDiscoveredParticipantData {
 
     pub(crate) fn lease_duration(&self) -> RtpsDuration {
         self.lease_duration
+    }
+
+    pub(crate) fn same_host(&self) -> bool {
+        self.same_host
+    }
+
+    pub(crate) fn set_same_host(&mut self, same_host: bool) {
+        self.same_host = same_host;
     }
 
     pub(crate) fn receive_buffer_size(&self) -> Option<usize> {
