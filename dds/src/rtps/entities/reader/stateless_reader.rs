@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
+use crate::utils::notify::{callback_handle, notify_user};
 use log::{debug, error};
 
 use crate::{
@@ -22,7 +23,7 @@ use crate::{
     rtps::{
         common::{
             entity_id::EntityId,
-            guid::{Guid, GuidPrefix},
+            guid::Guid,
             locator::Locator,
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
             time::RtpsDuration,
@@ -41,7 +42,10 @@ use crate::{
 use std::{
     any::Any,
     fmt::Debug,
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, Weak,
+    },
 };
 
 use super::{Reader, RemoteWriterInfo};
@@ -57,6 +61,9 @@ pub(crate) struct StatelessReader {
     expects_inline_qos: bool,
     heartbeat_response_delay: RtpsDuration,
     heartbeat_suppression_duration: RtpsDuration,
+    nack_frag_response_delay: RtpsDuration,
+    nack_frag_retry_delay: RtpsDuration,
+    nack_frag_max_retries: u32,
     reader_cache: Arc<Mutex<ReaderHistoryCache>>,
     matched_writers: Arc<Mutex<Vec<RemoteWriterInfo>>>,
     #[allow(clippy::type_complexity)]
@@ -68,6 +75,9 @@ pub(crate) struct StatelessReader {
     subscription_matched_status: Arc<Mutex<SubscriptionMatchedStatus>>,
     requested_incompatible_qos_status: Arc<Mutex<RequestedIncompatibleQosStatus>>,
     requested_incompatible_type_status: Arc<Mutex<RequestedIncompatibleTypeStatus>>,
+    // Callback-producing accesses currently in flight against this reader. `remove_reader`
+    // drains this to zero before returning.
+    in_flight_callbacks: AtomicUsize,
 }
 
 impl StatelessReader {
@@ -96,6 +106,11 @@ impl StatelessReader {
             expects_inline_qos,
             heartbeat_response_delay: RtpsDuration::new(0, 500 * 1000 * 1000),
             heartbeat_suppression_duration: RtpsDuration::new(0, 0),
+            // Tracks `ReaderReliabilityExtensionQosPolicy::DEFAULT`, which a stateless reader
+            // has no QoS path to read.
+            nack_frag_response_delay: RtpsDuration::from_millis(5),
+            nack_frag_retry_delay: RtpsDuration::from_millis(200),
+            nack_frag_max_retries: 10,
             reader_cache: Arc::new(Mutex::new(ReaderHistoryCache::new(endpoint_id, None))),
             matched_writers: Arc::new(Mutex::new(Vec::new())),
             change_callback: Arc::new(Mutex::new(change_callback)),
@@ -108,16 +123,30 @@ impl StatelessReader {
             requested_incompatible_type_status: Arc::new(Mutex::new(
                 RequestedIncompatibleTypeStatus::default(),
             )),
+            in_flight_callbacks: AtomicUsize::new(0),
         }
     }
 
-    pub(crate) fn matched_writer_add(&self, a_writer_proxy: RemoteWriterInfo) {
+    /// Add `a_writer_proxy` unless an entry for the same remote writer is already
+    /// present. Returns whether it was added.
+    ///
+    /// The check happens under the same lock as the insert: SEDP matching can be
+    /// driven concurrently by the local-creation path and the SEDP receive path,
+    /// and a plain `matched_writer_is_matched` guard at the call site leaves a
+    /// window where both callers pass it and push a duplicate entry.
+    pub(crate) fn matched_writer_add(&self, a_writer_proxy: RemoteWriterInfo) -> bool {
         match self.matched_writers.lock() {
             Ok(mut matched_writers) => {
+                let remote_guid = a_writer_proxy.remote_writer_guid();
+                if matched_writers.iter().any(|info| info.remote_writer_guid() == remote_guid) {
+                    return false;
+                }
                 matched_writers.push(a_writer_proxy);
+                true
             }
             Err(e) => {
                 error!("Failed to acquire matched_writers lock: {}", e);
+                false
             }
         }
     }
@@ -275,15 +304,10 @@ impl Entity for StatelessReader {
     }
 
     fn update_status(&self, status: StatusKind, info: Option<Arc<dyn StatusInfo>>) {
-        match self.status_callback.lock() {
-            Ok(callback) => {
-                if let Some(callback) = callback.as_ref() {
-                    callback(status, info.clone());
-                }
-            }
-            Err(e) => {
-                log::error!("Failed to lock callback: {:?}", e);
-            }
+        // Lift the callback out before calling it: the listener it reaches may
+        // re-enter this entity, and an unwind through the call would poison the slot.
+        if let Some(callback) = callback_handle(&self.status_callback) {
+            notify_user("stateless_reader", || callback(status, info.clone()));
         }
     }
 
@@ -291,25 +315,11 @@ impl Entity for StatelessReader {
         &self,
         f: Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>,
     ) {
-        match self.status_callback.lock() {
-            Ok(mut callback) => {
-                callback.replace(f);
-            }
-            Err(e) => {
-                log::error!("Failed to lock callback: {:?}", e);
-            }
-        }
+        self.status_callback.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).replace(f);
     }
 
     fn set_update_change(&self, f: Arc<dyn Fn(Arc<CacheChange>) + Send + Sync>) {
-        match self.change_callback.lock() {
-            Ok(mut callback) => {
-                callback.replace(f);
-            }
-            Err(e) => {
-                log::error!("Failed to lock callback: {:?}", e);
-            }
-        }
+        self.change_callback.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).replace(f);
     }
 
     fn get_update_status_callback(
@@ -339,6 +349,18 @@ impl Endpoint for StatelessReader {
 }
 
 impl Reader for StatelessReader {
+    fn enter_callback(&self) {
+        self.in_flight_callbacks.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn exit_callback(&self) {
+        self.in_flight_callbacks.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    fn in_flight_callbacks(&self) -> usize {
+        self.in_flight_callbacks.load(Ordering::SeqCst)
+    }
+
     fn reader_cache(&self) -> Arc<Mutex<ReaderHistoryCache>> {
         Arc::clone(&self.reader_cache)
     }
@@ -368,6 +390,18 @@ impl Reader for StatelessReader {
         self.heartbeat_suppression_duration
     }
 
+    fn nack_frag_response_delay(&self) -> RtpsDuration {
+        self.nack_frag_response_delay
+    }
+
+    fn nack_frag_retry_delay(&self) -> RtpsDuration {
+        self.nack_frag_retry_delay
+    }
+
+    fn nack_frag_max_retries(&self) -> u32 {
+        self.nack_frag_max_retries
+    }
+
     fn matched_writer_is_matched(&self, writer_guid: Guid) -> bool {
         match self.matched_writers.lock() {
             Ok(matched_writers) => {
@@ -395,27 +429,13 @@ impl Reader for StatelessReader {
     fn on_change(&self, change: Arc<CacheChange>) {
         log::debug!("change: {}", change);
 
-        match self.status_callback.lock() {
-            Ok(callback) => {
-                if let Some(callback) = callback.as_ref() {
-                    callback(StatusKind::DATA_AVAILABLE, None);
-                }
-            }
-            Err(e) => {
-                log::error!("Failed to lock callback: {:?}", e);
-            }
-        };
+        if let Some(callback) = callback_handle(&self.status_callback) {
+            notify_user("stateless_reader", || callback(StatusKind::DATA_AVAILABLE, None));
+        }
 
-        match self.change_callback.lock() {
-            Ok(callback) => {
-                if let Some(callback) = callback.as_ref() {
-                    callback(change);
-                }
-            }
-            Err(e) => {
-                log::error!("Failed to lock callback: {:?}", e);
-            }
-        };
+        if let Some(callback) = callback_handle(&self.change_callback) {
+            notify_user("stateless_reader", || callback(change));
+        }
 
         log::debug!("StatelessReader on_change completed.");
     }
@@ -500,52 +520,5 @@ impl Reader for StatelessReader {
 
         debug!("Removed writer proxy with guid {} from matched writers", writer_guid);
         Ok(true)
-    }
-
-    fn remove_all_matched_writers_with_prefix_and_update_status(
-        &self,
-        prefix: GuidPrefix,
-    ) -> RtpsResult<usize> {
-        let mut remote_writer_info = self
-            .matched_writers
-            .lock()
-            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
-
-        debug!(
-            "Before unmatching with writer, this reader had {:?} matched writer",
-            remote_writer_info.len()
-        );
-        for info in remote_writer_info.iter() {
-            if info.remote_writer_guid().prefix() == prefix {
-                self.update_subscription_matched_status(
-                    -1,
-                    InstanceHandle::from_guid(&info.remote_writer_guid()),
-                );
-            }
-        }
-        let removed_guids: Vec<Guid> = remote_writer_info
-            .iter()
-            .filter(|info| info.remote_writer_guid().prefix() == prefix)
-            .map(|info| info.remote_writer_guid())
-            .collect();
-        let len_before = remote_writer_info.len();
-        remote_writer_info.retain(|info| info.remote_writer_guid().prefix() != prefix);
-        let removed = len_before - remote_writer_info.len();
-        let len_after = remote_writer_info.len();
-        drop(remote_writer_info);
-
-        // Connectivity change: drop any open coherent sets from the removed writers.
-        if let Ok(mut cache) = self.reader_cache.lock() {
-            for writer_guid in &removed_guids {
-                cache.discard_coherent_pending(*writer_guid);
-            }
-        }
-
-        debug!(
-            "Removed all unmatched remote writers from participant: {}",
-            Guid::guid_prefix_to_string(&prefix)
-        );
-        debug!("Current number of matched writer: {:?}", len_after);
-        Ok(removed)
     }
 }

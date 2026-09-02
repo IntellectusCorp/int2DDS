@@ -53,7 +53,7 @@ use crate::{
         entities::{
             entity::Entity,
             history::{cache_change::CacheChange, history_cache::HistoryCache},
-            reader::{Reader, ReaderStore, StatefulReader, StatelessReader},
+            reader::{Reader, ReaderCallbackLease, ReaderStore, StatefulReader, StatelessReader},
             wire_buffer_pool::WireBufferPool,
             writer::{StatefulWriter, StatelessWriter, Writer, WriterStore},
         },
@@ -81,6 +81,10 @@ pub struct Participant {
     #[allow(clippy::type_complexity)]
     callback:
         Arc<ArcSwap<Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>>>,
+
+    // Callback for remote reader/writer discovery events.
+    #[allow(clippy::type_complexity)]
+    endpoint_discovery_cb: Arc<ArcSwap<Option<Arc<dyn Fn(&EndpointDiscoveryEvent) + Send + Sync>>>>,
 
     // RTPS data reader/writer matched with DCPS r/w
     rtps_reader_store: Arc<ReaderStore>,
@@ -133,6 +137,15 @@ impl Entity for Participant {
     }
 }
 
+/// A remote endpoint (SEDP) discovery event.
+/// `*Alive` carries the endpoint's builtin-topic data; `*Disposed` carries only its GUID.
+pub enum EndpointDiscoveryEvent {
+    WriterAlive(PublicationBuiltinTopicData),
+    WriterDisposed(Guid),
+    ReaderAlive(SubscriptionBuiltinTopicData),
+    ReaderDisposed(Guid),
+}
+
 impl Participant {
     /// Create a new Participant.
     ///
@@ -174,6 +187,7 @@ impl Participant {
             local_participant_proxy_data,
             remote_participant_proxy_datas: Arc::new(Mutex::new(vec![])),
             callback: Arc::new(ArcSwap::new(Arc::new(None))),
+            endpoint_discovery_cb: Arc::new(ArcSwap::new(Arc::new(None))),
             rtps_reader_store: Arc::new(ReaderStore::new()),
             rtps_writer_store: Arc::new(WriterStore::new()),
             spdp_logic: OnceLock::new(),
@@ -218,6 +232,18 @@ impl Participant {
         self.local_participant_proxy_data.clone()
     }
 
+    /// Record this participant's own receive-buffer size for SPDP to advertise.
+    /// Called once, right after construction, while the proxy Arc is still
+    /// uniquely owned - `Arc::get_mut` fails silently (a no-op) otherwise.
+    pub(crate) fn set_local_receive_buffer_size(&mut self, size: Option<usize>) {
+        match Arc::get_mut(&mut self.local_participant_proxy_data) {
+            Some(proxy) => proxy.set_receive_buffer_size(size),
+            None => log::warn!(
+                "local_participant_proxy_data already shared; receive buffer size not recorded"
+            ),
+        }
+    }
+
     pub(crate) fn remote_participant_proxy_datas(
         &self,
     ) -> Arc<Mutex<Vec<SPDPDiscoveredParticipantData>>> {
@@ -228,6 +254,20 @@ impl Participant {
         &self,
     ) -> Arc<DashMap<String, HashMap<Guid, PublicationBuiltinTopicData>>> {
         self.remote_publications.clone()
+    }
+
+    pub(crate) fn set_endpoint_discovery_cb(
+        &self,
+        f: Arc<dyn Fn(&EndpointDiscoveryEvent) + Send + Sync>,
+    ) {
+        self.endpoint_discovery_cb.store(Arc::new(Some(f)));
+    }
+
+    pub(crate) fn fire_endpoint_discovery(&self, event: &EndpointDiscoveryEvent) {
+        let cb = self.endpoint_discovery_cb.load();
+        if let Some(cb) = cb.as_ref() {
+            cb(event);
+        }
     }
 
     pub(crate) fn remote_subscriptions(
@@ -285,6 +325,22 @@ impl Participant {
                 }
                 None
             }
+            Err(e) => {
+                log::error!("Failed to lock remote_participant_proxy_datas: {:?}", e);
+                None
+            }
+        }
+    }
+
+    /// The receive-buffer size a discovered participant advertised, or `None` when it did not
+    /// advertise a usable one. Reads under the lock without cloning the whole proxy, because
+    /// the send path asks once per destination on every fragmented send.
+    pub(crate) fn remote_receive_buffer_size(&self, guid_prefix: GuidPrefix) -> Option<usize> {
+        match self.remote_participant_proxy_datas.lock() {
+            Ok(datas) => datas
+                .iter()
+                .find(|data| data.guid_prefix() == guid_prefix)
+                .and_then(|data| data.receive_buffer_size()),
             Err(e) => {
                 log::error!("Failed to lock remote_participant_proxy_datas: {:?}", e);
                 None
@@ -461,7 +517,37 @@ impl Participant {
         &self,
         entity_id: EntityId,
     ) -> Option<Arc<dyn Reader + Send + Sync>> {
-        self.rtps_reader_store.get(entity_id)
+        self.rtps_reader_store.get_reader(entity_id)
+    }
+
+    // Callback-producing lookup: the returned lease keeps the reader's in-flight count raised
+    // until dropped, so deletion drains it instead of racing the delivery.
+    pub(crate) fn find_reader_callback_lease_from_entity_id(
+        &self,
+        entity_id: EntityId,
+    ) -> Option<ReaderCallbackLease> {
+        self.rtps_reader_store.get_reader_callback_lease(entity_id)
+    }
+
+    // Callback-producing variant of `find_readers_matched_with_remote_writer`. Matching reuses the
+    // plain lookup, then each match is re-fetched through the shard lock to raise its in-flight
+    // count. A reader removed in between is dropped from the result.
+    pub(crate) fn find_reader_callback_leases_matched_with_remote_writer(
+        &self,
+        writer_guid: Guid,
+    ) -> RtpsResult<Vec<ReaderCallbackLease>> {
+        let matched = self.find_readers_matched_with_remote_writer(writer_guid)?;
+        let mut leases = Vec::with_capacity(matched.len());
+
+        for reader in matched {
+            if let Some(lease) =
+                self.rtps_reader_store.get_reader_callback_lease(reader.guid().entity_id())
+            {
+                leases.push(lease);
+            }
+        }
+
+        Ok(leases)
     }
 
     /// Function to increment entity_key by 1
@@ -522,21 +608,26 @@ impl Participant {
 
             if let Some((writer_guid, _)) = writer_info {
                 // Bare dispose: instance is identified by PID_KEY_HASH inline QoS only
-                let a_cache_change = self.sedp_builtin_publications_writer().new_change(
+                let sedp_writer = self.sedp_builtin_publications_writer();
+                let a_cache_change = Arc::new(sedp_writer.new_change(
                     ChangeKind::NotAliveDisposedUnregistered,
                     Vec::new(),
                     InstanceHandle::from_guid(&writer_guid),
                     Some(RtpsTime::now()),
-                );
+                ));
 
-                self.sync_send_sedp_terminate_endpoint(
-                    self.sedp_builtin_publications_writer().guid(),
-                    Arc::new(a_cache_change),
-                )?;
-
-                log::info!("Remote writer with GUID {} terminated", writer_guid);
-
-                // Remove builtin topic data from builtin endpoint
+                // The dispose takes the alive announcement's place in the history, and it does so
+                // before it goes on the wire.
+                //
+                // Keeping it is what makes it repairable. This builtin writer is RELIABLE, and a
+                // peer can only ask for a sequence number that a heartbeat still covers -- so a
+                // dispose that exists nowhere but in one already-sent datagram cannot be
+                // recovered, and a peer that missed it keeps the endpoint matched for good.
+                //
+                // Dropping it also stranded the sequence number it consumed. `new_change` moves
+                // the counter whether or not anything is stored, so deleting every endpoint used
+                // to empty the cache while the counter kept climbing, leaving the writer
+                // advertising `firstSN = lastSN + 1` over a range it could not serve.
                 match self.builtin_endpoints.sedp_builtin_publications_writer.writer_cache().lock()
                 {
                     Ok(mut writer_cache) => {
@@ -551,6 +642,8 @@ impl Participant {
                                 }
                             }
                         }
+                        let _ = writer_cache
+                            .add_change_builtin(a_cache_change.clone(), sedp_writer.as_ref());
                     }
                     Err(e) => {
                         log::error!(
@@ -559,6 +652,13 @@ impl Participant {
                         );
                     }
                 }
+
+                self.sync_send_sedp_terminate_endpoint(
+                    self.sedp_builtin_publications_writer().guid(),
+                    a_cache_change,
+                )?;
+
+                log::info!("Remote writer with GUID {} terminated", writer_guid);
             }
         }
 
@@ -581,9 +681,9 @@ impl Participant {
     /// Method to remove RTPS Reader
     pub(crate) fn remove_reader(&self, topic_name: String, entity_id: EntityId) -> RtpsResult<()> {
         // Send Data[r(UD)]
-        let reader_arc = self.rtps_reader_store.get(entity_id);
+        let reader_arc = self.rtps_reader_store.get_reader(entity_id);
 
-        if let Some(reader) = reader_arc {
+        if let Some(reader) = reader_arc.as_ref() {
             // Remove all timers for this reader (acknack, nackfrag)
             if let Ok(handler) = TimerHandler::get_instance(self.guid().prefix()).lock() {
                 handler.remove_timers_by_entity(entity_id);
@@ -604,19 +704,17 @@ impl Participant {
 
             if let Some((reader_guid, _)) = reader_info {
                 // Bare dispose: instance is identified by PID_KEY_HASH inline QoS only
-                let a_cache_change = self.sedp_builtin_subscriptions_writer().new_change(
+                let sedp_writer = self.sedp_builtin_subscriptions_writer();
+                let a_cache_change = Arc::new(sedp_writer.new_change(
                     ChangeKind::NotAliveDisposedUnregistered,
                     Vec::new(),
                     InstanceHandle::from_guid(&reader_guid),
                     Some(RtpsTime::now()),
-                );
+                ));
 
-                self.sync_send_sedp_terminate_endpoint(
-                    self.sedp_builtin_subscriptions_writer().guid(),
-                    Arc::new(a_cache_change),
-                )?;
-
-                // Remove builtin topic data from builtin endpoint
+                // Same reasoning as the publications side in `remove_writer`: the dispose has to
+                // stay in the history to be repairable, and to keep the advertised range in step
+                // with the sequence number it consumed.
                 match self.builtin_endpoints.sedp_builtin_subscriptions_writer.writer_cache().lock()
                 {
                     Ok(mut writer_cache) => {
@@ -631,6 +729,8 @@ impl Participant {
                                 }
                             }
                         }
+                        let _ = writer_cache
+                            .add_change_builtin(a_cache_change.clone(), sedp_writer.as_ref());
                     }
                     Err(e) => {
                         log::error!(
@@ -639,11 +739,46 @@ impl Participant {
                         );
                     }
                 }
+
+                self.sync_send_sedp_terminate_endpoint(
+                    self.sedp_builtin_subscriptions_writer().guid(),
+                    a_cache_change,
+                )?;
             }
         }
 
         // Remove from store
         self.rtps_reader_store.remove(&topic_name, entity_id);
+
+        // Drain in-flight delivery/listener callbacks so none runs against this reader after the
+        // delete call returns. Store removal above stops new callbacks from starting; this waits
+        // out the ones already past the shard lock. A reentrant delete from inside a callback is
+        // refused earlier, but guard the wait too: blocking on our own count would deadlock.
+        if let Some(reader) = reader_arc.as_ref() {
+            if !crate::utils::notify::in_listener_callback() {
+                let drain_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while reader.in_flight_callbacks() > 0 {
+                    if std::time::Instant::now() >= drain_deadline {
+                        log::warn!(
+                            "remove_reader: {} callback(s) still in flight for {} after drain timeout",
+                            reader.in_flight_callbacks(),
+                            entity_id
+                        );
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_micros(50));
+                }
+            }
+        }
+
+        // The reader is gone, so any reassembly still addressed to it can never complete and
+        // will not be reached by the normal completion path -- only by cap-driven eviction,
+        // which may not run again for a long time.
+        if let Some(user_logic_arc) = self.user_logic_if_set() {
+            if let Some(user_logic) = user_logic_arc.as_ref() {
+                user_logic.forget_fragment_buffers_for_reader(entity_id);
+            }
+        }
 
         // Unmatch with intra participant writers
         self.cleanup_resources_for_remote_reader(
@@ -687,6 +822,16 @@ impl Participant {
         writer_guid: Guid,
         topic_name: &str,
     ) -> RtpsResult<()> {
+        // The writer is gone, so no further DATA_FRAG can ever complete or evict a reassembly
+        // still waiting on it. Also reached per-writer from `unmatch_with_remote_participant`
+        // via `remove_all_unmatched_endpoint_from_terminated_participant`, so that path is
+        // covered too without a separate hook there.
+        if let Some(user_logic_arc) = self.user_logic_if_set() {
+            if let Some(user_logic) = user_logic_arc.as_ref() {
+                user_logic.forget_fragment_buffers_for_writer(writer_guid);
+            }
+        }
+
         // Fire LIVELINESS_CHANGED first; it iterates reader's writer_proxies to find matches.
         if writer_guid.entity_id().entity_kind().is_user_defined() {
             if let Some(wlp_logic) = self.wlp_logic() {
@@ -937,6 +1082,15 @@ impl Participant {
             }
         }
 
+        // The peer is gone, so it will never answer to release what is charged against it, and
+        // the entry would sit there until the backstop -- or for good, since a peer that
+        // reconnects comes back under a new prefix.
+        if let Some(user_logic_arc) = self.user_logic_if_set() {
+            if let Some(user_logic) = user_logic_arc.as_ref() {
+                user_logic.forget_send_credit_for_participant(remote_prefix);
+            }
+        }
+
         // Close transport connections to the now-unmatched peer so its per-peer
         // resources are released promptly, rather than lingering until OS keepalive.
         if let (Some(transport), Some(locators)) = (self.transport.get(), peer_locators) {
@@ -1045,6 +1199,31 @@ impl Participant {
 
     /// Initialize all logic instances. Must be called immediately after creating Participant.
     /// This creates SPDP, SEDP, User, and WLP logic instances using the provided transport.
+    /// Point every builtin writer history at this participant: they are built before the owning
+    /// `Arc` exists, so until this runs anything the cache reaches through it silently does nothing.
+    fn wire_builtin_writer_histories(self: &Arc<Self>) {
+        let weak = Arc::downgrade(self);
+        let builtin = &self.builtin_endpoints;
+        for writer in [
+            &builtin.sedp_builtin_publications_writer,
+            &builtin.sedp_builtin_subscriptions_writer,
+            &builtin.sedp_builtin_topics_writer,
+            &builtin.builtin_participant_message_writer,
+            &builtin.type_lookup_request_writer,
+            &builtin.type_lookup_reply_writer,
+        ] {
+            match writer.writer_cache().lock() {
+                Ok(mut cache) => cache.set_participant(weak.clone()),
+                Err(e) => log::error!("Failed to wire builtin writer history: {}", e),
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wire_builtin_writer_histories_for_test(self: &Arc<Self>) {
+        self.wire_builtin_writer_histories();
+    }
+
     pub(crate) fn init_logics(
         self: &Arc<Self>,
         transport: Arc<dyn TransportPlugin>,
@@ -1061,6 +1240,8 @@ impl Participant {
 
         // Keep a handle to the transport so unmatch can close per-peer connections.
         let _ = self.transport.set(transport.clone());
+
+        self.wire_builtin_writer_histories();
 
         // Create SPDP logic
         let spdp_logic =
@@ -1088,6 +1269,12 @@ impl Participant {
         self.wlp_logic.get().cloned()
     }
 
+    /// `get_logics` panics before the logics are installed, and builtin writers can take a change
+    /// that early.
+    pub(crate) fn user_logic_if_set(&self) -> Option<Arc<Option<UserLogic>>> {
+        self.user_logic.get().cloned()
+    }
+
     /// Clear the WlpLogic sender reference to allow Arc cleanup during shutdown.
     pub(crate) fn clear_wlp_logic_sender(&self) {
         if let Some(wlp_logic) = self.wlp_logic.get() {
@@ -1110,5 +1297,108 @@ impl Participant {
             }
             *monitor = None;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::infrastructure::qos_policy::ReliabilityQosPolicyKind;
+    use crate::rtps::common::{entity_kind::EntityKind, types::TopicKind};
+
+    fn participant_with_one_writer() -> (Arc<Participant>, EntityId) {
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let entity_id = EntityId::new([0, 0, 1], EntityKind::USER_DEFINED_WRITER_WITH_KEY);
+
+        let writer = Arc::new(StatefulWriter::new(
+            Guid::new(participant.guid().prefix(), entity_id),
+            Vec::new(),
+            Vec::new(),
+            ReliabilityQosPolicyKind::Reliable,
+            TopicKind::WithKey,
+            entity_id,
+            1024,
+            None,
+            PublicationBuiltinTopicData::default(),
+            Arc::downgrade(&participant),
+        ));
+
+        participant.add_writer("a_topic", writer).expect("the writer must register");
+
+        (participant, entity_id)
+    }
+
+    fn participant_with_one_reader() -> (Arc<Participant>, EntityId) {
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let entity_id = EntityId::new([0, 0, 1], EntityKind::USER_DEFINED_READER_WITH_KEY);
+
+        let reader = Arc::new(StatefulReader::new(
+            Guid::new(participant.guid().prefix(), entity_id),
+            TopicKind::WithKey,
+            ReliabilityQosPolicyKind::Reliable,
+            Vec::new(),
+            Vec::new(),
+            entity_id,
+            false,
+            None,
+            None,
+            SubscriptionBuiltinTopicData::default(),
+            participant.guid(),
+        ));
+
+        participant.add_reader("a_topic", reader);
+
+        (participant, entity_id)
+    }
+
+    /// The subscriptions writer has the same defect as the publications one.
+    #[test]
+    fn deleting_a_reader_leaves_its_dispose_in_the_sedp_history() {
+        let (participant, entity_id) = participant_with_one_reader();
+        let sedp_writer = participant.sedp_builtin_subscriptions_writer();
+
+        participant.remove_reader("a_topic".to_string(), entity_id).expect("removal must succeed");
+
+        let dispose_sn = sedp_writer.last_change_sequence_number();
+        let cache_arc = sedp_writer.writer_cache();
+        let cache = cache_arc.lock().expect("cache lock");
+
+        assert!(
+            cache.get_change(dispose_sn).is_some(),
+            "the dispose took sequence number {dispose_sn} but left no change behind, so nothing \
+             can retransmit it"
+        );
+        assert_eq!(cache.get_seq_num_max(), Some(dispose_sn));
+    }
+
+    /// The SEDP dispose is what tells peers an endpoint is gone, and the builtin writer that
+    /// carries it is RELIABLE. Sending it once and dropping it on the floor leaves no copy to
+    /// retransmit: the heartbeat range never covers that sequence number, so a peer that missed
+    /// the single datagram cannot even ask for it and keeps the endpoint matched forever.
+    ///
+    /// It also strands the sequence number the dispose consumed. Deleting every endpoint then
+    /// leaves the writer advertising `firstSN = lastSN + 1` -- an empty range over a counter that
+    /// kept climbing.
+    #[test]
+    fn deleting_a_writer_leaves_its_dispose_in_the_sedp_history() {
+        let (participant, entity_id) = participant_with_one_writer();
+        let sedp_writer = participant.sedp_builtin_publications_writer();
+
+        participant.remove_writer("a_topic".to_string(), entity_id).expect("removal must succeed");
+
+        let dispose_sn = sedp_writer.last_change_sequence_number();
+        let cache_arc = sedp_writer.writer_cache();
+        let cache = cache_arc.lock().expect("cache lock");
+
+        assert!(
+            cache.get_change(dispose_sn).is_some(),
+            "the dispose took sequence number {dispose_sn} but left no change behind, so nothing \
+             can retransmit it"
+        );
+        assert_eq!(
+            cache.get_seq_num_max(),
+            Some(dispose_sn),
+            "the advertised range has to reach the dispose"
+        );
     }
 }

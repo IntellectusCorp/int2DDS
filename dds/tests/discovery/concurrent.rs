@@ -11,11 +11,9 @@
 //! is deterministic: with NIL instances only 1 relay is created (the last
 //! writer's topic), with per-endpoint instances all N relays are created.
 
-mod common;
-
 use std::{sync::Arc, thread::sleep};
 
-use common::*;
+use crate::common::*;
 use int2dds::{
     core::time::Duration,
     domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},

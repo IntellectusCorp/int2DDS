@@ -342,6 +342,9 @@ impl PlCdrSerializer {
             ParameterValue::MaxSerializedSize(max_size) => {
                 self.write_u32(&mut buffer, *max_size);
             }
+            ParameterValue::ReceiveBufferSize(size) => {
+                self.write_u32(&mut buffer, *size);
+            }
             ParameterValue::DataRepresentation(data_rep) => {
                 // CDR sequence format: length + data
                 self.write_u32(&mut buffer, data_rep.value.len() as u32);
@@ -755,12 +758,14 @@ pub mod discovery_helpers {
     use super::*;
 
     /// Create SPDP participant discovery message
+    #[allow(clippy::too_many_arguments)]
     pub fn create_spdp_participant_message(
         domain_id: u32,
         participant_guid: Guid,
         vendor_id: VendorId,
         entity_name: Option<String>,
         locators: Vec<(ParameterId, i32, u32, [u8; 16])>, // (param_id, kind, port, address)
+        receive_buffer_size: Option<u32>,
     ) -> Result<Vec<u8>, String> {
         let mut builder = RtpsMessageBuilder::new(true) // Little endian
             .add_protocol_version(
@@ -781,6 +786,15 @@ pub mod discovery_helpers {
         // Add locators
         for (param_id, kind, port, address) in locators {
             builder = builder.add_locator(param_id, kind, port, address);
+        }
+
+        // Omitted (not just zero) when the live socket size is unknown, so a peer
+        // can tell "didn't advertise" from "advertised zero".
+        if let Some(size) = receive_buffer_size {
+            builder = builder.add_parameter(PlCdrParameter {
+                id: ParameterId::PidReceiveBufferSize,
+                value: ParameterValue::ReceiveBufferSize(size),
+            });
         }
 
         builder.build()
@@ -1077,5 +1091,59 @@ impl super::ParsedBuiltinTopicData {
                 SerializedData::default()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::serialize::pl_cdr::parse_discovery_data;
+
+    // The plan's own worked example: setsockopt(212992) -> getsockopt reads back 425984.
+    const SAMPLE_RECEIVE_BUFFER_SIZE: u32 = 425984;
+
+    fn sample_guid() -> Guid {
+        Guid::from_bytes([7; 16])
+    }
+
+    #[test]
+    fn receive_buffer_size_survives_pl_cdr_round_trip() {
+        let bytes = discovery_helpers::create_spdp_participant_message(
+            0,
+            sample_guid(),
+            crate::rtps::common::types::VENDORID_INT2,
+            None,
+            Vec::new(),
+            Some(SAMPLE_RECEIVE_BUFFER_SIZE),
+        )
+        .expect("serialize SPDP participant message");
+
+        let parsed = parse_discovery_data(&bytes).expect("parse SPDP participant message");
+        let value = parsed
+            .iter()
+            .find(|p| p.id == ParameterId::PidReceiveBufferSize)
+            .map(|p| &p.value)
+            .expect("PidReceiveBufferSize present after round trip");
+
+        assert_eq!(value, &ParameterValue::ReceiveBufferSize(SAMPLE_RECEIVE_BUFFER_SIZE));
+    }
+
+    #[test]
+    fn receive_buffer_size_omitted_when_none() {
+        let bytes = discovery_helpers::create_spdp_participant_message(
+            0,
+            sample_guid(),
+            crate::rtps::common::types::VENDORID_INT2,
+            None,
+            Vec::new(),
+            None,
+        )
+        .expect("serialize SPDP participant message");
+
+        let parsed = parse_discovery_data(&bytes).expect("parse SPDP participant message");
+        assert!(
+            parsed.iter().all(|p| p.id != ParameterId::PidReceiveBufferSize),
+            "absent receive buffer size must not appear on the wire at all"
+        );
     }
 }

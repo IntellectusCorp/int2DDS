@@ -13,42 +13,8 @@ use crate::rtps::transport::tokens::ListenerToken;
 use log::{debug, error, info, warn};
 use mio::{Events, Interest, Poll, Waker};
 use std::net::SocketAddr;
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc, OnceLock, Weak,
-};
-use std::time::{Duration, Instant};
-
-static USER_PROCESS_PROFILE_COUNT: AtomicU64 = AtomicU64::new(0);
-static USER_PROCESS_PROFILE_PARSE_US: AtomicU64 = AtomicU64::new(0);
-static USER_PROCESS_PROFILE_HANDLE_US: AtomicU64 = AtomicU64::new(0);
-static USER_PROCESS_PROFILE_TOTAL_US: AtomicU64 = AtomicU64::new(0);
-
-fn user_process_profile_enabled() -> bool {
-    std::env::var_os("RMW_INT2DDS_PROFILE").is_some()
-}
-
-fn elapsed_us(start: Instant, end: Instant) -> u64 {
-    end.duration_since(start).as_micros() as u64
-}
-
-fn record_user_process_profile(parse_us: u64, handle_us: u64, total_us: u64) {
-    let n = USER_PROCESS_PROFILE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    USER_PROCESS_PROFILE_PARSE_US.fetch_add(parse_us, Ordering::Relaxed);
-    USER_PROCESS_PROFILE_HANDLE_US.fetch_add(handle_us, Ordering::Relaxed);
-    USER_PROCESS_PROFILE_TOTAL_US.fetch_add(total_us, Ordering::Relaxed);
-
-    if n % 4096 == 0 {
-        let divisor = n as f64;
-        eprintln!(
-            "INT2DDS_USER_PROCESS_PROFILE count={} total_avg_us={:.3} parse_avg_us={:.3} handle_avg_us={:.3}",
-            n,
-            USER_PROCESS_PROFILE_TOTAL_US.load(Ordering::Relaxed) as f64 / divisor,
-            USER_PROCESS_PROFILE_PARSE_US.load(Ordering::Relaxed) as f64 / divisor,
-            USER_PROCESS_PROFILE_HANDLE_US.load(Ordering::Relaxed) as f64 / divisor,
-        );
-    }
-}
+use std::sync::{Arc, OnceLock, Weak};
+use std::time::Duration;
 
 pub(crate) struct UserUnicastListeningTask {
     guid_prefix: GuidPrefix,
@@ -75,11 +41,13 @@ impl UserUnicastListeningTask {
 
     pub(crate) fn unicast_listening(&mut self, source: MessageSource) -> std::io::Result<()> {
         match source {
-            MessageSource::MioPoll { mut listener } => self.listen_mio_poll(&mut listener),
-            MessageSource::MioPollWithShm { mut listener, mut shm } => {
+            MessageSource::Udp { mut listener } => self.listen_mio_poll(&mut listener),
+            MessageSource::Shm { mut listener, mut shm } => {
                 self.listen_mio_poll_with_shm(&mut listener, &mut shm)
             }
-            MessageSource::Channel { rx } => self.listen_channel(&rx),
+            MessageSource::Stream { .. } => {
+                unreachable!("Stream is handled by the stream unicast listening task")
+            }
         }
     }
 
@@ -87,7 +55,7 @@ impl UserUnicastListeningTask {
         &mut self,
         listener: &mut crate::rtps::transport::udp::udp_listener::UdpListener,
     ) -> std::io::Result<()> {
-        info!("start user unicast listening (MioPoll)");
+        info!("start user unicast listening (Udp)");
         let mut poll = Poll::new()?;
         let mut events = Events::with_capacity(MAX_EVENTS);
 
@@ -140,7 +108,7 @@ impl UserUnicastListeningTask {
         listener: &mut crate::rtps::transport::udp::udp_listener::UdpListener,
         shm: &mut ShmListener,
     ) -> std::io::Result<()> {
-        info!("start user unicast listening (MioPoll + SHM)");
+        info!("start user unicast listening (Udp + SHM)");
         let mut poll = Poll::new()?;
         let mut events = Events::with_capacity(MAX_EVENTS);
 
@@ -208,47 +176,9 @@ impl UserUnicastListeningTask {
         }
     }
 
-    fn listen_channel(
-        &mut self,
-        rx: &flume::Receiver<crate::rtps::transport::plugin::IncomingMessage>,
-    ) -> std::io::Result<()> {
-        info!("start user unicast listening (Channel)");
-
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or_else(|| std::io::Error::other("Participant already dropped"))?;
-
-        loop {
-            match rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(msg) => {
-                    if participant.is_terminated() {
-                        debug!("Detected global termination flag, user unicast channel listening terminating...");
-                        return Ok(());
-                    }
-                    self.process_rtps_message(Bytes::from(msg.data), msg.source);
-                }
-                Err(flume::RecvTimeoutError::Timeout) => {
-                    if participant.is_terminated() {
-                        debug!("Detected global termination flag, user unicast channel listening terminating...");
-                        return Ok(());
-                    }
-                }
-                Err(flume::RecvTimeoutError::Disconnected) => {
-                    info!("[UserUnicast] Channel disconnected, stopping listener");
-                    return Ok(());
-                }
-            }
-        }
-    }
-
-    fn process_rtps_message(&mut self, bytes: Bytes, from_addr: SocketAddr) {
-        let profile = user_process_profile_enabled();
-        let total_t0 = Instant::now();
+    pub(crate) fn process_rtps_message(&mut self, bytes: Bytes, from_addr: SocketAddr) {
         let mut message_receiver = MessageReceiver::new(self.guid_prefix, &from_addr);
-        let parse_t0 = Instant::now();
         let rtps_message = message_receiver.init(&bytes);
-        let parse_us = if profile { elapsed_us(parse_t0, Instant::now()) } else { 0 };
         if rtps_message.is_err() {
             error!("Failed to parse RTPS message from {:?}", from_addr);
             return;
@@ -256,16 +186,8 @@ impl UserUnicastListeningTask {
         let mut user_logic =
             self.user_logic.as_ref().as_ref().expect("UserLogic is not initialized").clone();
 
-        let handle_t0 = Instant::now();
         if let Err(e) = user_logic.handle_rtps_message(message_receiver) {
             debug!("Failed to handle user RTPS message from {:?}: {:?}", from_addr, e);
-        }
-        if profile {
-            record_user_process_profile(
-                parse_us,
-                elapsed_us(handle_t0, Instant::now()),
-                elapsed_us(total_t0, Instant::now()),
-            );
         }
     }
 }

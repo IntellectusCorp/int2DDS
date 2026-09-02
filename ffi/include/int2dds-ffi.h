@@ -426,6 +426,20 @@ typedef struct Int2DdsXmlTypeRegistry Int2DdsXmlTypeRegistry;
 typedef int32_t Int2DdsRet;
 
 /**
+ * C callback invoked on every remote endpoint discovery/dispose.
+ * `is_writer`: 1 = publication/writer, 0 = subscription/reader.
+ * `is_alive`:  1 = alive (`pub_data` or `sub_data` valid), 0 = disposed (data null).
+ * `guid` always points to the 16-byte endpoint GUID (valid only during the call).
+ * All pointers are borrowed and must be copied out before returning.
+ */
+typedef void (*Int2DdsEndpointDiscoveryCallback)(void *ctx,
+                                                 int32_t is_writer,
+                                                 int32_t is_alive,
+                                                 const struct Int2DdsPublicationBuiltinTopicData *pub_data,
+                                                 const struct Int2DdsSubscriptionBuiltinTopicData *sub_data,
+                                                 const uint8_t (*guid)[16]);
+
+/**
  * C-visible per-member information returned by `int2dds_type_object_member_info`.
  */
 typedef struct Int2DdsMemberInfo {
@@ -1050,6 +1064,30 @@ Int2DdsRet int2dds_participant_take_discovered_publications_snapshot(const struc
                                                                      int32_t timeout_ms,
                                                                      struct Int2DdsPublicationBuiltinTopicDataSeq **seq_out);
 
+/**
+ * Collect a snapshot of discovered publications restricted to the given instance states.
+ * `instance_state_mask` takes `INT2DDS_INSTANCE_STATE_*` values combined with a bitwise or.
+ */
+Int2DdsRet int2dds_participant_take_discovered_publications_snapshot_filtered(const struct Int2DdsParticipant *participant,
+                                                                              int32_t timeout_ms,
+                                                                              uint32_t instance_state_mask,
+                                                                              struct Int2DdsPublicationBuiltinTopicDataSeq **seq_out);
+
+/**
+ * Instance state of the entry at `index`, as an `INT2DDS_INSTANCE_STATE_*` value.
+ */
+Int2DdsRet int2dds_publication_builtin_topic_data_seq_get_instance_state(const struct Int2DdsPublicationBuiltinTopicDataSeq *seq,
+                                                                         uintptr_t index,
+                                                                         uint32_t *instance_state_out);
+
+/**
+ * Instance handle of the entry at `index`, which is the endpoint GUID.
+ * Present even for an entry with no announcement to read a GUID out of.
+ */
+Int2DdsRet int2dds_publication_builtin_topic_data_seq_get_instance_handle(const struct Int2DdsPublicationBuiltinTopicDataSeq *seq,
+                                                                          uintptr_t index,
+                                                                          uint8_t (*handle_out)[16]);
+
 Int2DdsRet int2dds_publication_builtin_topic_data_seq_length(const struct Int2DdsPublicationBuiltinTopicDataSeq *seq,
                                                              uintptr_t *count_out);
 
@@ -1065,6 +1103,30 @@ Int2DdsRet int2dds_publication_builtin_topic_data_seq_delete(struct Int2DdsPubli
 Int2DdsRet int2dds_participant_take_discovered_subscriptions_snapshot(const struct Int2DdsParticipant *participant,
                                                                       int32_t timeout_ms,
                                                                       struct Int2DdsSubscriptionBuiltinTopicDataSeq **seq_out);
+
+/**
+ * Collect a snapshot of discovered subscriptions restricted to the given instance states.
+ * See `int2dds_participant_take_discovered_publications_snapshot_filtered` for the mask.
+ */
+Int2DdsRet int2dds_participant_take_discovered_subscriptions_snapshot_filtered(const struct Int2DdsParticipant *participant,
+                                                                               int32_t timeout_ms,
+                                                                               uint32_t instance_state_mask,
+                                                                               struct Int2DdsSubscriptionBuiltinTopicDataSeq **seq_out);
+
+/**
+ * Instance state of the entry at `index`, as an `INT2DDS_INSTANCE_STATE_*` value.
+ */
+Int2DdsRet int2dds_subscription_builtin_topic_data_seq_get_instance_state(const struct Int2DdsSubscriptionBuiltinTopicDataSeq *seq,
+                                                                          uintptr_t index,
+                                                                          uint32_t *instance_state_out);
+
+/**
+ * Instance handle of the entry at `index`, which is the endpoint GUID.
+ * See `int2dds_publication_builtin_topic_data_seq_get_instance_handle`.
+ */
+Int2DdsRet int2dds_subscription_builtin_topic_data_seq_get_instance_handle(const struct Int2DdsSubscriptionBuiltinTopicDataSeq *seq,
+                                                                           uintptr_t index,
+                                                                           uint8_t (*handle_out)[16]);
 
 Int2DdsRet int2dds_subscription_builtin_topic_data_seq_length(const struct Int2DdsSubscriptionBuiltinTopicDataSeq *seq,
                                                               uintptr_t *count_out);
@@ -1376,6 +1438,15 @@ Int2DdsRet int2dds_subscription_builtin_topic_data_get_user_data(const struct In
  * Free a SubscriptionBuiltinTopicData obtained from discovery.
  */
 Int2DdsRet int2dds_subscription_builtin_topic_data_destroy(struct Int2DdsSubscriptionBuiltinTopicData *data);
+
+/**
+ * Register a callback for remote endpoint discovery events. `callback` must be
+ * non-null; to disable, register a no-op callback (or destroy the participant)
+ * before freeing `ctx`.
+ */
+Int2DdsRet int2dds_participant_set_endpoint_discovery_callback(const struct Int2DdsParticipant *participant,
+                                                               Int2DdsEndpointDiscoveryCallback callback,
+                                                               void *ctx);
 
 /**
  * Get the builtin subscriber for discovery topics.
@@ -2119,6 +2190,19 @@ Int2DdsRet int2dds_datawriter_get_qos(const struct Int2DdsDataWriter *writer,
                                       struct Int2DdsDataWriterQos **qos_out);
 
 /**
+ * Effective data representation of a DataWriter (`INT2DDS_QOS_DATA_REPR_*`).
+ *
+ * Resolves an unset (empty) DataRepresentation QoS to the library default, so
+ * generated serializers can encode exactly what the writer advertises over
+ * discovery. Falls back to the library default if the writer is null or its
+ * QoS cannot be read.
+ *
+ * # Safety
+ * - `writer` must be null or a valid datawriter
+ */
+int32_t int2dds_datawriter_data_representation(const struct Int2DdsDataWriter *writer);
+
+/**
  * Get the 16-byte RTPS GUID of a DataWriter.
  *
  * Writes the writer's endpoint GUID (the same value advertised over SEDP
@@ -2284,20 +2368,17 @@ Int2DdsRet int2dds_publisher_delete_contained_entities(const struct Int2DdsPubli
  * - `writer`: A valid datawriter
  * - `data`: Pointer to the CDR-serialized byte buffer
  * - `data_len`: Length of the serialized data in bytes
- * - `key`: Ignored, retained for ABI compatibility. The instance key and KeyHash are
- *   derived canonically from `data` (the full serialized sample); pass null/0.
- * - `key_len`: Ignored, retained for ABI compatibility
+ *
+ * The instance key and KeyHash are derived canonically from `data`
+ * (the full serialized sample).
  *
  * # Safety
  * - `writer` must be a valid datawriter
  * - `data` must point to at least `data_len` readable bytes
- * - If `key` is not null, it must point to at least `key_len` readable bytes
  */
 Int2DdsRet int2dds_datawriter_write_serialized(const struct Int2DdsDataWriter *writer,
                                                const uint8_t *data,
-                                               uintptr_t data_len,
-                                               const uint8_t *key,
-                                               uintptr_t key_len);
+                                               uintptr_t data_len);
 
 Int2DdsRet int2dds_datawriter_prepare_serialized_write(const struct Int2DdsDataWriter *writer,
                                                        uintptr_t capacity,
@@ -2322,9 +2403,7 @@ Int2DdsRet int2dds_datawriter_prepare_serialized_write(const struct Int2DdsDataW
  */
 Int2DdsRet int2dds_datawriter_commit_serialized_write(const struct Int2DdsDataWriter *writer,
                                                       struct Int2DdsSerializedWriteLoan *loan,
-                                                      uintptr_t actual_size,
-                                                      const uint8_t *key,
-                                                      uintptr_t key_len);
+                                                      uintptr_t actual_size);
 
 Int2DdsRet int2dds_datawriter_abort_serialized_write(struct Int2DdsSerializedWriteLoan *loan);
 
@@ -2338,22 +2417,19 @@ Int2DdsRet int2dds_datawriter_abort_serialized_write(struct Int2DdsSerializedWri
  * - `writer`: A valid datawriter
  * - `data`: Pointer to the CDR-serialized byte buffer
  * - `data_len`: Length of the serialized data in bytes
- * - `key`: Ignored, retained for ABI compatibility. The instance key and KeyHash are
- *   derived canonically from `data` (the full serialized sample); pass null/0.
- * - `key_len`: Ignored, retained for ABI compatibility
  * - `timestamp_sec`: Seconds component of the source timestamp
  * - `timestamp_nanosec`: Nanoseconds component of the source timestamp
+ *
+ * The instance key and KeyHash are derived canonically from `data`
+ * (the full serialized sample).
  *
  * # Safety
  * - `writer` must be a valid datawriter
  * - `data` must point to at least `data_len` readable bytes
- * - If `key` is not null, it must point to at least `key_len` readable bytes
  */
 Int2DdsRet int2dds_datawriter_write_serialized_w_timestamp(const struct Int2DdsDataWriter *writer,
                                                            const uint8_t *data,
                                                            uintptr_t data_len,
-                                                           const uint8_t *key,
-                                                           uintptr_t key_len,
                                                            int32_t timestamp_sec,
                                                            uint32_t timestamp_nanosec);
 
@@ -2399,9 +2475,14 @@ Int2DdsRet int2dds_datawriter_register_instance(const struct Int2DdsDataWriter *
  * (int2dds_create_topic_with_type_info / _with_field_descriptors), otherwise this
  * returns INT2DDS_RET_PRECONDITION_NOT_MET.
  *
+ * `key` may be null when `handle` carries a valid instance handle (e.g. from
+ * `int2dds_datawriter_register_instance`); the serialized key is then looked up
+ * from the writer's instance registry. A null `key` with a nil/unknown handle
+ * returns INT2DDS_RET_BAD_PARAMETER.
+ *
  * # Safety
  * - `writer` must be a valid datawriter
- * - `key` must point to at least `key_len` readable bytes
+ * - If `key` is not null, it must point to at least `key_len` readable bytes
  * - `handle` must be a valid pointer to a 16-byte instance handle (or null for NIL)
  */
 Int2DdsRet int2dds_datawriter_dispose(const struct Int2DdsDataWriter *writer,
@@ -2416,9 +2497,14 @@ Int2DdsRet int2dds_datawriter_dispose(const struct Int2DdsDataWriter *writer,
  * (int2dds_create_topic_with_type_info / _with_field_descriptors), otherwise this
  * returns INT2DDS_RET_PRECONDITION_NOT_MET.
  *
+ * `key` may be null when `handle` carries a valid instance handle (e.g. from
+ * `int2dds_datawriter_register_instance`); the serialized key is then looked up
+ * from the writer's instance registry. A null `key` with a nil/unknown handle
+ * returns INT2DDS_RET_BAD_PARAMETER.
+ *
  * # Safety
  * - `writer` must be a valid datawriter
- * - `key` must point to at least `key_len` readable bytes
+ * - If `key` is not null, it must point to at least `key_len` readable bytes
  * - `handle` must be a valid pointer to a 16-byte instance handle (or null for NIL)
  */
 Int2DdsRet int2dds_datawriter_unregister_instance(const struct Int2DdsDataWriter *writer,
@@ -2541,8 +2627,9 @@ Int2DdsRet int2dds_datawriter_qos_set_ownership_strength(struct Int2DdsDataWrite
 
 /**
  * Set the DataFrag QoS (per-writer RTPS DATA_FRAG fragment size, in bytes) for
- * DataWriter. Values `> 65000` are clamped and `<= 0` falls back to the 65000
- * default at write time.
+ * DataWriter. Resolved when the writer is created: values `> 65000` are clamped
+ * to 65000, and `<= 0` means unspecified, falling back to the
+ * `INT2DDS_DATA_FRAG_SIZE` environment variable and then to 65000.
  *
  * # Safety
  * - `qos` must be a valid QoS handle
@@ -2651,6 +2738,8 @@ Int2DdsRet int2dds_datawriter_qos_get_ownership_strength(const struct Int2DdsDat
 
 /**
  * Get the DataFrag QoS (fragment size, in bytes) from a DataWriter QoS handle.
+ * Returns the value as set, not the resolved size: `0` means unspecified, so the
+ * writer will use `INT2DDS_DATA_FRAG_SIZE` if set and 65000 otherwise.
  */
 Int2DdsRet int2dds_datawriter_qos_get_data_frag(const struct Int2DdsDataWriterQos *qos,
                                                 int32_t *value_out);
@@ -3322,7 +3411,7 @@ Int2DdsRet int2dds_readcondition_delete(struct Int2DdsReadCondition *condition);
  * - `reader` must be a valid datareader
  * - `condition` must be a valid read condition created from `reader`
  * - `seq_out` must be a valid pointer to a null pointer
- * - The returned sequence must be freed with `int2dds_sample_seq_delete`
+ * - On `INT2DDS_RET_OK` the returned sequence must be freed with `int2dds_sample_seq_delete`
  */
 Int2DdsRet int2dds_datareader_take_serialized_batch_w_readcondition(const struct Int2DdsDataReader *reader,
                                                                     const struct Int2DdsReadCondition *condition,
@@ -3934,7 +4023,7 @@ Int2DdsRet int2dds_datareader_read_serialized_w_info(const struct Int2DdsDataRea
  * # Safety
  * - `reader` must be a valid datareader
  * - `seq_out` must be a valid pointer to a null pointer
- * - The returned sequence must be freed with `int2dds_sample_seq_delete`
+ * - On `INT2DDS_RET_OK` the returned sequence must be freed with `int2dds_sample_seq_delete`
  */
 Int2DdsRet int2dds_datareader_take_serialized_batch(const struct Int2DdsDataReader *reader,
                                                     int32_t max_samples,
@@ -3946,7 +4035,7 @@ Int2DdsRet int2dds_datareader_take_serialized_batch(const struct Int2DdsDataRead
  * # Safety
  * - `reader` must be a valid datareader
  * - `seq_out` must be a valid pointer to a null pointer
- * - The returned sequence must be freed with `int2dds_sample_seq_delete`
+ * - On `INT2DDS_RET_OK` the returned sequence must be freed with `int2dds_sample_seq_delete`
  */
 Int2DdsRet int2dds_datareader_read_serialized_batch(const struct Int2DdsDataReader *reader,
                                                     int32_t max_samples,
@@ -3958,13 +4047,13 @@ Int2DdsRet int2dds_datareader_read_serialized_batch(const struct Int2DdsDataRead
  * `handle` is a 16-byte instance handle (e.g. from `int2dds_datareader_lookup_instance`
  * or a prior sample's info). A nil handle returns `INT2DDS_RET_BAD_PARAMETER`; an
  * unknown handle returns no samples. The mask arguments are bitmasks of the
- * SampleState/ViewState/InstanceState kinds (use 0xFFFF for "any").
+ * SampleState/ViewState/InstanceState kinds; a mask of 0 selects "any".
  *
  * # Safety
  * - `reader` must be a valid datareader
  * - `handle` must point to a 16-byte instance handle
  * - `seq_out` must be a valid pointer to a null pointer
- * - The returned sequence must be freed with `int2dds_sample_seq_delete`
+ * - On `INT2DDS_RET_OK` the returned sequence must be freed with `int2dds_sample_seq_delete`
  */
 Int2DdsRet int2dds_datareader_take_instance_serialized_batch(const struct Int2DdsDataReader *reader,
                                                              const uint8_t (*handle)[16],
@@ -4031,7 +4120,8 @@ Int2DdsRet int2dds_sample_seq_get_info(const struct Int2DdsSampleSeq *seq,
 Int2DdsRet int2dds_sample_seq_delete(struct Int2DdsSampleSeq *seq);
 
 /**
- * Read a single serialized sample with state condition filter
+ * Read a single serialized sample with state condition filter.
+ * A state mask of 0 selects "any".
  *
  * # Safety
  * - Same as `int2dds_datareader_read_serialized_w_info`, plus state masks
@@ -4046,7 +4136,8 @@ Int2DdsRet int2dds_datareader_read_serialized_w_states(const struct Int2DdsDataR
                                                        uint32_t instance_state_mask);
 
 /**
- * Take a single serialized sample with state condition filter
+ * Take a single serialized sample with state condition filter.
+ * A state mask of 0 selects "any".
  *
  * # Safety
  * - Same as `int2dds_datareader_take_serialized_w_info`, plus state masks
@@ -4061,7 +4152,7 @@ Int2DdsRet int2dds_datareader_take_serialized_w_states(const struct Int2DdsDataR
                                                        uint32_t instance_state_mask);
 
 /**
- * Take batch with state condition filter
+ * Take batch with state condition filter. A state mask of 0 selects "any".
  *
  * # Safety
  * - Same as `int2dds_datareader_take_serialized_batch`, plus state masks
@@ -4074,7 +4165,7 @@ Int2DdsRet int2dds_datareader_take_serialized_batch_w_states(const struct Int2Dd
                                                              uint32_t instance_state_mask);
 
 /**
- * Read batch with state condition filter
+ * Read batch with state condition filter. A state mask of 0 selects "any".
  *
  * # Safety
  * - Same as `int2dds_datareader_read_serialized_batch`, plus state masks
@@ -4480,7 +4571,8 @@ Int2DdsRet int2dds_waitset_new(struct Int2DdsWaitSet **waitset_out);
  * # Safety
  * - `waitset` must be a valid waitset
  * - `timeout_ms` is the timeout in milliseconds, or -1 for infinite
- * - `conditions_out` must be a valid pointer to a null pointer
+ * - `conditions_out` must be a valid pointer to a null pointer, or null if the
+ *   caller does not need the triggered conditions
  * - The returned condition sequence must be freed with `int2dds_condition_seq_delete`
  *
  * Returns:
@@ -4498,7 +4590,8 @@ Int2DdsRet int2dds_waitset_wait_ex(const struct Int2DdsWaitSet *waitset,
  * # Safety
  * - `waitset` must be a valid waitset
  * - `timeout_ns` is the timeout in nanoseconds, or -1 for infinite
- * - `conditions_out` must be a valid pointer to a null pointer
+ * - `conditions_out` must be a valid pointer to a null pointer, or null if the
+ *   caller does not need the triggered conditions
  * - The returned condition sequence must be freed with `int2dds_condition_seq_delete`
  *
  * Returns:

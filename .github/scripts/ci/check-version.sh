@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Verify that the tag version matches every version declaration in the repo.
 #
-# Usage: .github/scripts/ci/check-version.sh v0.1.1
-# On success, prints the bare version ("0.1.1") to stdout and exits 0.
+# Usage: .github/scripts/ci/check-version.sh v0.1.3
+# On success, prints the bare version ("0.1.3") to stdout and exits 0.
 # Reads Cargo.toml / python/pyproject.toml relative to the working directory, so
 # it has to be run from the repo root.
 set -euo pipefail

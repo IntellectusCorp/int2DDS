@@ -210,6 +210,55 @@ impl Drop for DomainParticipant {
     }
 }
 
+/// A borrowed participant handle that skips the 25-refcount deep clone `get_participant` performs.
+///
+/// Returned by [`Subscriber::participant_arc`](crate::subscription::subscriber::Subscriber) for
+/// internal hot paths. It exists rather than a bare `Arc<DomainParticipant>` because
+/// `get_participant` force-sets `self_ref` on the value it hands back, so its temporary takes part
+/// in the `Drop` guard above and performs the factory orphan handoff when it is the last reference
+/// standing. A bare `Arc` would instead let the count fall to zero and drop the interior value,
+/// whose `self_ref` is `None` -- the participant would be destroyed rather than orphaned, chosen
+/// nondeterministically by whichever thread released last. The guard here reproduces the original
+/// behaviour for two atomic loads, against the ~52 read-modify-writes the clone cost.
+///
+/// The value behind it has `self_ref: None` (see `DomainParticipant::new`, which builds the `Arc`
+/// from a clone taken before `self_ref` is assigned), so it must not be used to reach
+/// `create_*`/`delete_*`, which read that field.
+pub(crate) struct ParticipantRef(Arc<DomainParticipant>);
+
+impl ParticipantRef {
+    pub(crate) fn new(inner: Arc<DomainParticipant>) -> Self {
+        Self(inner)
+    }
+}
+
+impl std::ops::Deref for ParticipantRef {
+    type Target = DomainParticipant;
+
+    fn deref(&self) -> &DomainParticipant {
+        &self.0
+    }
+}
+
+impl Drop for ParticipantRef {
+    fn drop(&mut self) {
+        if self.0.is_builtin {
+            return;
+        }
+        // Plain loads, not read-modify-writes: this is the whole cost of the parity guard.
+        if Arc::strong_count(&self.0) > 1 {
+            return;
+        }
+        if self.0.deleted.load(Ordering::SeqCst) {
+            return;
+        }
+        if let Ok(guid) = self.0.guid() {
+            DomainParticipantFactory::get_instance()
+                .handle_participant_drop(&self.0.domain_id, &InstanceHandle::from_guid(&guid));
+        }
+    }
+}
+
 #[derive(Default, Clone)]
 struct OrphanedEntities {
     topics: Vec<Arc<Topic>>,
@@ -3018,6 +3067,19 @@ impl DomainParticipant {
             Some(bridge) => bridge.get_participant().map_err(|e| DdsError::Error(e.message)),
             None => Err(DdsError::Error("DCPS Bridge is not initialized".to_string())),
         }
+    }
+
+    /// Register a callback for remote endpoint (SEDP) discovery events.
+    ///
+    /// The callback fires when a remote reader or writer is discovered or disposed.
+    pub fn set_endpoint_discovery_callback(
+        &self,
+        f: std::sync::Arc<
+            dyn Fn(&crate::rtps::entities::participant::EndpointDiscoveryEvent) + Send + Sync,
+        >,
+    ) -> DdsResult<()> {
+        self.get_rtps_participant()?.set_endpoint_discovery_cb(f);
+        Ok(())
     }
 
     fn has_manual_by_participant_writers(&self) -> DdsResult<bool> {

@@ -49,8 +49,9 @@
 //! ```
 
 use log::{debug, info};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Instant;
 
 use crate::{
@@ -58,18 +59,42 @@ use crate::{
         error::{DdsError, DdsResult},
         time::Duration,
     },
-    infrastructure::{condition::Condition, guard_condition::GuardCondition},
+    infrastructure::condition::Condition,
     rtps::common::time::RtpsDuration,
 };
 
 // Global counter for tracking WaitSet instances
 static WAITSET_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
+/// State guarded by [`WaitSet::notify_lock`], the mutex the condvar is paired with.
+///
+/// `notify_lock` is a **leaf**: no other lock may be acquired while it is held. That is what keeps
+/// the notifier deadlock-free. Notifications arrive on the RTPS receive thread, which already
+/// holds the reader's `matched_writers` and `status_callback` locks and the condition's
+/// `waitset_callback` lock, while `attach_condition`/`detach_condition` take `conditions` before
+/// `waitset_callback`. Pairing the condvar with `conditions` instead would invert those two.
+#[derive(Default)]
+struct NotifyState {
+    /// Bumped once per notification. A waiter compares it against the value it snapshotted before
+    /// its last scan; a difference means something may have become triggered and it must look
+    /// again. Unlike a consume-once flag it is not stolen by whichever waiter wakes first, so
+    /// every waiter observes every notification.
+    generation: u64,
+    /// Threads currently blocked inside `condvar.wait*`. Zero means a wake would reach nobody, so
+    /// it is skipped -- this is what collapses a burst of notifications into a single wake.
+    parked: usize,
+}
+
 pub struct WaitSet {
-    conditions: Arc<Mutex<Vec<Arc<dyn Condition + Send + Sync>>>>,
+    // Attached conditions keyed by Condition::identity(), so attach and detach
+    // need no scan over the attached set.
+    conditions: Arc<Mutex<HashMap<usize, Arc<dyn Condition + Send + Sync>>>>,
     condvar: Arc<Condvar>,
     waiting_count: Arc<AtomicUsize>,
-    trigger_flag: Arc<AtomicBool>,
+    notify_lock: Arc<Mutex<NotifyState>>,
+    // Wake-up callback planted into every attached condition. Captures only
+    // per-WaitSet state, so one instance is shared by all attaches.
+    notify: Arc<dyn Fn() + Send + Sync>,
     instance_id: usize,
 }
 
@@ -93,13 +118,28 @@ impl WaitSet {
         let instance_id = WAITSET_COUNTER.fetch_add(1, Ordering::Relaxed);
         debug!("[WaitSet-{}] Creating new WaitSet instance", instance_id);
 
+        let condvar = Arc::new(Condvar::new());
+        let notify_lock = Arc::new(Mutex::new(NotifyState::default()));
+        let notify = Self::make_notify(condvar.clone(), notify_lock.clone(), instance_id);
+
         Self {
-            conditions: Arc::new(Mutex::new(Vec::new())),
-            condvar: Arc::new(Condvar::new()),
+            conditions: Arc::new(Mutex::new(HashMap::new())),
+            condvar,
             waiting_count: Arc::new(AtomicUsize::new(0)),
-            trigger_flag: Arc::new(AtomicBool::new(false)),
+            notify_lock,
+            notify,
             instance_id,
         }
+    }
+
+    fn lock_notify_state(&self) -> DdsResult<MutexGuard<'_, NotifyState>> {
+        self.notify_lock
+            .lock()
+            .map_err(|e| DdsError::Error(format!("Failed to lock notify state: {}", e)))
+    }
+
+    fn notify_generation(&self) -> DdsResult<u64> {
+        Ok(self.lock_notify_state()?.generation)
     }
 
     /// Attaches a condition to this WaitSet.
@@ -133,22 +173,11 @@ impl WaitSet {
             .lock()
             .map_err(|e| DdsError::Error(format!("Failed to lock conditions: {}", e)))?;
 
-        // Check for duplicate condition handles. GuardCondition debug output only reflects
-        // trigger state, so distinct guard conditions can look identical while representing
-        // different waitable entities.
-        for existing_condition in conditions.iter() {
-            if Arc::ptr_eq(existing_condition, &new_condition)
-                || std::ptr::eq(
-                    existing_condition.as_ref() as *const dyn Condition as *const (),
-                    new_condition.as_ref() as *const dyn Condition as *const (),
-                )
-                || (!existing_condition.as_any().is::<GuardCondition>()
-                    && !new_condition.as_any().is::<GuardCondition>()
-                    && format!("{:?}", existing_condition) == format!("{:?}", new_condition))
-            {
-                debug!("[WaitSet-{}] Condition already attached, skipping", self.instance_id);
-                return Ok(());
-            }
+        // Duplicate condition handles are detected by object identity, which is also the map key.
+        let new_identity = new_condition.identity() as usize;
+        if conditions.contains_key(&new_identity) {
+            debug!("[WaitSet-{}] Condition already attached, skipping", self.instance_id);
+            return Ok(());
         }
 
         // Check trigger value and notify only when waiting threads exist
@@ -156,12 +185,8 @@ impl WaitSet {
         let should_notify =
             waiting_threads > 0 && new_condition.get_trigger_value().unwrap_or(false);
 
-        let notify_fn = self.get_notify();
-
-        new_condition.set_waitset_callback(Some(Arc::new(move || {
-            notify_fn();
-        })));
-        conditions.push(new_condition);
+        new_condition.set_waitset_callback(Some(self.notify.clone()));
+        conditions.insert(new_identity, new_condition);
         let condition_count = conditions.len();
         debug!(
             "[WaitSet-{}] Condition attached successfully. Total conditions: {}",
@@ -174,7 +199,10 @@ impl WaitSet {
                 "[WaitSet-{}] Notifying waiting threads - new condition is triggered",
                 self.instance_id
             );
-            self.condvar.notify_one();
+            // Must go through the same path as a status notification. Poking the condvar directly
+            // leaves the generation unchanged, which a waiter cannot tell apart from a spurious
+            // wake-up, so it re-parks without ever looking at the newly attached condition.
+            (self.notify)();
         }
 
         Ok(())
@@ -190,25 +218,12 @@ impl WaitSet {
             .lock()
             .map_err(|e| DdsError::Error(format!("Failed to lock conditions: {}", e)))?;
 
-        // Remove only the same condition handle. GuardCondition debug output is not a stable
-        // identity because two false guard conditions print the same.
-        let pos = conditions.iter().position(|c| {
-            Arc::ptr_eq(c, &remove_condition)
-                || std::ptr::eq(
-                    c.as_ref() as *const dyn Condition as *const (),
-                    remove_condition.as_ref() as *const dyn Condition as *const (),
-                )
-                || (!c.as_any().is::<GuardCondition>()
-                    && !remove_condition.as_any().is::<GuardCondition>()
-                    && format!("{:?}", c) == format!("{:?}", remove_condition))
-        });
-
-        if let Some(pos) = pos {
-            conditions[pos].set_waitset_callback(None);
-            conditions.remove(pos);
-            Ok(())
-        } else {
-            Err(DdsError::PreconditionNotMet)
+        match conditions.remove(&(remove_condition.identity() as usize)) {
+            Some(attached) => {
+                attached.set_waitset_callback(None);
+                Ok(())
+            }
+            None => Err(DdsError::PreconditionNotMet),
         }
     }
 
@@ -260,6 +275,10 @@ impl WaitSet {
         let _guard =
             WaitGuard { waiting_count: &self.waiting_count, instance_id: self.instance_id };
 
+        // Snapshot before the first scan, so a notification racing that scan shows up as a
+        // generation change rather than being missed.
+        let mut snapshot = self.notify_generation()?;
+
         // Check immediately triggered conditions
         let triggered_conditions = self.check_triggered_conditions()?;
         if !triggered_conditions.is_empty() {
@@ -268,7 +287,6 @@ impl WaitSet {
                 self.instance_id,
                 triggered_conditions.len()
             );
-            self.trigger_flag.store(false, Ordering::Release);
             return Ok(triggered_conditions);
         }
 
@@ -283,57 +301,71 @@ impl WaitSet {
 
         // condvar-based waiting loop
         loop {
-            if self.trigger_flag.swap(false, Ordering::AcqRel) {
-                debug!("[WaitSet-{}] trigger_flag detected, checking conditions", self.instance_id);
+            let mut state = self.lock_notify_state()?;
 
-                // Check conditions
-                let triggered_conditions = self.check_triggered_conditions()?;
-                if !triggered_conditions.is_empty() {
-                    debug!(
-                        "[WaitSet-{}] Conditions triggered during wait: {} conditions",
-                        self.instance_id,
-                        triggered_conditions.len()
-                    );
-                    return Ok(triggered_conditions);
-                }
-                // A wake-up can be stale if the condition was cleared before we checked it.
-                // After consuming the flag, fall through to the normal wait/timeout path.
-            }
+            if state.generation == snapshot {
+                // Nothing has been notified since our last scan. Park. The decision to park and
+                // the notifier's generation bump are both made under `notify_lock`, so a
+                // notification cannot slip into the gap between the two and be lost.
+                let timed_out = match deadline {
+                    None => {
+                        state.parked += 1;
+                        let mut guard = self.condvar.wait(state).map_err(|e| {
+                            DdsError::Error(format!("Condition variable wait failed: {}", e))
+                        })?;
+                        guard.parked -= 1;
+                        state = guard;
+                        false
+                    }
+                    Some(deadline_time) => {
+                        let now = Instant::now();
+                        if now >= deadline_time {
+                            debug!("[WaitSet-{}] Wait timeout reached", self.instance_id);
+                            return Err(DdsError::Timeout);
+                        }
+                        let remaining_time = deadline_time - now;
+                        state.parked += 1;
+                        let (mut guard, wait_result) =
+                            self.condvar.wait_timeout(state, remaining_time).map_err(|e| {
+                                DdsError::Error(format!("Condition variable wait failed: {}", e))
+                            })?;
+                        guard.parked -= 1;
+                        state = guard;
+                        wait_result.timed_out()
+                    }
+                };
 
-            let conditions = self
-                .conditions
-                .lock()
-                .map_err(|e| DdsError::Error(format!("Failed to lock conditions: {}", e)))?;
-
-            // trigger_flag is false, wait for notification
-            match deadline {
-                None => {
-                    let _conditions = self.condvar.wait(conditions).map_err(|e| {
-                        DdsError::Error(format!("Condition variable wait failed: {}", e))
-                    })?;
-                }
-                Some(deadline_time) => {
-                    let now = Instant::now();
-                    if now >= deadline_time {
+                if state.generation == snapshot {
+                    // A genuine spurious wake-up: nothing was notified, so nothing can have
+                    // become triggered that the last scan did not already see. Re-park rather
+                    // than pay for another walk over every attached condition.
+                    drop(state);
+                    if timed_out {
                         debug!("[WaitSet-{}] Wait timeout reached", self.instance_id);
                         return Err(DdsError::Timeout);
                     }
-                    let remaining_time = deadline_time - now;
-                    let (_conditions, _wait_result) =
-                        self.condvar.wait_timeout(conditions, remaining_time).map_err(|e| {
-                            DdsError::Error(format!("Condition variable wait failed: {}", e))
-                        })?;
+                    continue;
                 }
-            };
-
-            // After waking, check trigger_flag first before checking timeout
-            // This handles the race condition where notification was sent
-            // between trigger_flag check and condvar.wait() entry
-            if self.trigger_flag.load(Ordering::Acquire) {
-                continue;
             }
 
-            // Only return timeout if trigger_flag is still false
+            // The generation moved, either while we were parked or in the window before we could
+            // park. Either way, rescan.
+            snapshot = state.generation;
+            drop(state); // never hold notify_lock while taking `conditions`
+
+            debug!("[WaitSet-{}] Notification observed, checking conditions", self.instance_id);
+            let triggered_conditions = self.check_triggered_conditions()?;
+            if !triggered_conditions.is_empty() {
+                debug!(
+                    "[WaitSet-{}] Conditions triggered during wait: {} conditions",
+                    self.instance_id,
+                    triggered_conditions.len()
+                );
+                return Ok(triggered_conditions);
+            }
+
+            // A wake-up can be stale if the condition was cleared before we checked it.
+            // Fall through to the normal wait/timeout path.
             if let Some(deadline_time) = deadline {
                 if Instant::now() >= deadline_time {
                     debug!("[WaitSet-{}] Wait timeout reached", self.instance_id);
@@ -348,7 +380,7 @@ impl WaitSet {
             .lock()
             .map_err(|e| DdsError::Error(format!("Failed to lock conditions: {}", e)))?;
 
-        Ok(conditions.clone())
+        Ok(conditions.values().cloned().collect())
     }
 
     /// Function to check and return triggered conditions
@@ -363,7 +395,7 @@ impl WaitSet {
         }
 
         let mut triggered = Vec::new();
-        for (idx, condition) in conditions.iter().enumerate() {
+        for (idx, condition) in conditions.values().enumerate() {
             match condition.get_trigger_value() {
                 Ok(true) => {
                     debug!("[WaitSet-{}] Condition #{} TRIGGERED", self.instance_id, idx + 1);
@@ -394,31 +426,55 @@ impl WaitSet {
         Ok(triggered)
     }
 
-    pub(crate) fn get_notify(&self) -> Arc<dyn Fn() + Send + Sync> {
-        let condvar = self.condvar.clone();
-        let trigger_flag = self.trigger_flag.clone();
-        let instance_id = self.instance_id;
-
+    fn make_notify(
+        condvar: Arc<Condvar>,
+        notify_lock: Arc<Mutex<NotifyState>>,
+        instance_id: usize,
+    ) -> Arc<dyn Fn() + Send + Sync> {
         Arc::new(move || {
-            trigger_flag.store(true, Ordering::Release);
-            debug!("[WaitSet-{}] Notifying waiting threads", instance_id);
-            condvar.notify_all();
+            // Runs on the RTPS receive thread, which is already holding the reader's
+            // `matched_writers` and `status_callback` locks and the condition's
+            // `waitset_callback` lock. Takes exactly one leaf lock, holds it for two field
+            // updates, and releases it before the wake.
+            let should_wake = match notify_lock.lock() {
+                Ok(mut state) => {
+                    // Bumped unconditionally: a waiter that has taken its snapshot but not yet
+                    // parked is not counted in `parked`, and it must still observe this.
+                    state.generation = state.generation.wrapping_add(1);
+                    state.parked > 0
+                }
+                Err(e) => {
+                    log::error!("[WaitSet-{}] Failed to lock notify state: {}", instance_id, e);
+                    // Poisoned: wake unconditionally rather than strand a waiter.
+                    true
+                }
+            };
+
+            if should_wake {
+                debug!("[WaitSet-{}] Notifying waiting threads", instance_id);
+                condvar.notify_all();
+            }
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use crate::{
         common::instance_handle::InstanceHandle,
         core::{error::DdsError, time::Duration},
         domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
         infrastructure::{
+            condition::Condition,
+            guard_condition::GuardCondition,
             qos_policy::{
                 HistoryQosPolicy, HistoryQosPolicyKind, ReliabilityQosPolicy,
                 ReliabilityQosPolicyKind,
             },
             status::StatusMask,
+            status_condition::StatusCondition,
             wait_set::WaitSet,
         },
         publication::qos::{DataWriterQos, PublisherQos},
@@ -432,6 +488,47 @@ mod tests {
     struct HelloWorldType {
         index: u32,
         message: String,
+    }
+
+    /// Two distinct conditions that happen to be in the same state are
+    /// indistinguishable through `Debug`, so identity must come from the
+    /// condition object itself. Detaching one must leave the other attached.
+    #[test]
+    fn detach_removes_the_requested_condition_not_a_look_alike() {
+        let first = StatusCondition::<DataReaderQos>::new(None);
+        let second = StatusCondition::<DataReaderQos>::new(None);
+
+        let wait_set = WaitSet::new();
+        wait_set.attach_condition(first.clone()).unwrap();
+        wait_set.attach_condition(second.clone()).unwrap();
+        assert_eq!(wait_set.get_conditions().unwrap().len(), 2);
+
+        wait_set.detach_condition(second.clone()).unwrap();
+
+        let remaining = wait_set.get_conditions().unwrap();
+        assert_eq!(remaining.len(), 1);
+        let survivor = remaining[0]
+            .as_any()
+            .downcast_ref::<StatusCondition<DataReaderQos>>()
+            .expect("survivor should still be a StatusCondition");
+        assert!(
+            Arc::ptr_eq(&survivor.enabled_statuses, &first.enabled_statuses),
+            "detaching `second` removed `first` instead"
+        );
+    }
+
+    /// The same condition handed in twice must attach once. Every
+    /// `Into<Arc<dyn Condition>>` allocates a fresh Arc, so pointer equality on
+    /// the trait object cannot be what decides this.
+    #[test]
+    fn attaching_the_same_condition_twice_attaches_it_once() {
+        let condition = StatusCondition::<DataReaderQos>::new(None);
+
+        let wait_set = WaitSet::new();
+        wait_set.attach_condition(condition.clone()).unwrap();
+        wait_set.attach_condition(condition.clone()).unwrap();
+
+        assert_eq!(wait_set.get_conditions().unwrap().len(), 1);
     }
 
     #[test]
@@ -979,5 +1076,148 @@ mod tests {
 
         participant.delete_contained_entities().unwrap();
         factory.delete_participant(participant).unwrap();
+    }
+
+    /// Helper: a fresh guard condition already attached to `wait_set`.
+    fn attach_guard(wait_set: &WaitSet) -> Arc<GuardCondition> {
+        let guard = Arc::new(GuardCondition::new());
+        let condition: Arc<dyn Condition + Send + Sync> = guard.clone();
+        wait_set.attach_condition(condition).unwrap();
+        guard
+    }
+
+    /// `attach_condition` notifies when the condition being attached is already triggered. That
+    /// notification used to poke the condvar without touching the notify state, which a waiter
+    /// cannot tell apart from a spurious wake-up, so it re-blocked without ever looking at the
+    /// new condition. With an infinite timeout the waiter never woke at all.
+    #[test]
+    fn attaching_a_triggered_condition_wakes_a_parked_waiter() {
+        let wait_set = Arc::new(WaitSet::new());
+        attach_guard(&wait_set); // attached, never triggered
+
+        let waiter = {
+            let wait_set = wait_set.clone();
+            std::thread::spawn(move || wait_set.wait(Duration::from_seconds(30)))
+        };
+
+        // Far beyond the park latency: the waiter is provably blocked on the condvar.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let late = Arc::new(GuardCondition::new());
+        late.set_trigger_value(true).unwrap();
+        let condition: Arc<dyn Condition + Send + Sync> = late.clone();
+
+        let start = std::time::Instant::now();
+        wait_set.attach_condition(condition).unwrap();
+
+        let triggered = waiter.join().unwrap().expect("attach must wake the parked waiter");
+        assert_eq!(triggered.len(), 1);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "waiter re-blocked instead of rescanning after attach; took {:?}",
+            start.elapsed()
+        );
+    }
+
+    /// The old trigger flag was consume-once: `swap(false)` meant the first waiter to wake took
+    /// the notification and any other waiter on the same WaitSet re-blocked and timed out. The
+    /// generation counter is compared, not consumed, so every waiter observes every notification.
+    #[test]
+    fn every_waiter_observes_the_same_trigger() {
+        let wait_set = Arc::new(WaitSet::new());
+        let guard = attach_guard(&wait_set);
+
+        let waiters: Vec<_> = (0..2)
+            .map(|_| {
+                let wait_set = wait_set.clone();
+                std::thread::spawn(move || wait_set.wait(Duration::from_seconds(10)))
+            })
+            .collect();
+
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        guard.set_trigger_value(true).unwrap();
+
+        for waiter in waiters {
+            let triggered = waiter.join().unwrap().expect("every waiter must be woken");
+            assert_eq!(triggered.len(), 1);
+        }
+    }
+
+    /// A notification landing between the waiter's scan and its park used to be lost: the notifier
+    /// took no lock the waiter parked on, so `notify_all` reached nobody and the waiter slept until
+    /// its timeout -- forever, with an infinite one. The park decision and the generation bump now
+    /// happen under the same lock, so the window is closed.
+    ///
+    /// This races the window deliberately and repeatedly, with 400 attached conditions to stretch
+    /// the scan the trigger has to land inside. It is a cheap guard, not a proof: the pre-fix code
+    /// also passes it on Windows, where `Condvar` wakes spuriously often enough to reach the old
+    /// post-wake recovery path, so the bug shows up there as a stall rather than a hang. The
+    /// deterministic evidence for the notify state being correct is in the two tests above.
+    #[test]
+    fn a_trigger_racing_the_park_is_not_lost() {
+        const ROUNDS: usize = 200;
+        const FILLER: usize = 400;
+
+        for round in 0..ROUNDS {
+            let wait_set = Arc::new(WaitSet::new());
+            for _ in 0..FILLER {
+                attach_guard(&wait_set);
+            }
+            let guard = attach_guard(&wait_set);
+
+            let waiter = {
+                let wait_set = wait_set.clone();
+                std::thread::spawn(move || wait_set.wait(Duration::from_millis(2000)))
+            };
+
+            guard.set_trigger_value(true).unwrap();
+
+            let start = std::time::Instant::now();
+            let triggered = waiter
+                .join()
+                .unwrap()
+                .unwrap_or_else(|e| panic!("round {round}: wake-up lost ({e:?})"));
+            assert_eq!(triggered.len(), 1);
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(1),
+                "round {}: waiter stalled for {:?}",
+                round,
+                start.elapsed()
+            );
+        }
+    }
+
+    /// Production shape: 400 conditions on one WaitSet, all becoming triggered in the same burst.
+    /// Only the first notification finds a parked thread, so the rest are collapsed; the waiter
+    /// still has to come back with everything that is triggered by the time it rescans, and a
+    /// follow-up wait must report the full set.
+    #[test]
+    fn four_hundred_conditions_are_all_reported() {
+        const N: usize = 400;
+
+        let wait_set = Arc::new(WaitSet::new());
+        let guards: Vec<_> = (0..N).map(|_| attach_guard(&wait_set)).collect();
+
+        let waiter = {
+            let wait_set = wait_set.clone();
+            std::thread::spawn(move || wait_set.wait(Duration::from_seconds(30)))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let start = std::time::Instant::now();
+        for guard in &guards {
+            guard.set_trigger_value(true).unwrap();
+        }
+
+        let triggered = waiter.join().unwrap().expect("the burst must wake the waiter");
+        assert!(!triggered.is_empty());
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "burst took {:?}",
+            start.elapsed()
+        );
+
+        // Everything is latched, so the next wait returns the full set from its immediate check.
+        assert_eq!(wait_set.wait(Duration::from_seconds(5)).unwrap().len(), N);
     }
 }

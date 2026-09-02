@@ -16,7 +16,17 @@ This document describes the environment variables available in int2dds.
 | `INT2DDS_FORCE_LOOPBACK_MULTICAST`   | Force multicast egress via 127.0.0.1       | false                   |
 | `INT2DDS_UDP_SOCKET_BUFFER`          | UDP socket buffer size (bytes)             | OS default              |
 | `INT2DDS_SHM_BUFFER_SIZE`            | Shared-memory ring buffer size (bytes)     | 1048576 (1MB)           |
+| `INT2DDS_DATA_FRAG_SIZE`             | DATA_FRAG fragment size (bytes)            | 65000                   |
+| `INT2DDS_MAX_MESSAGE_SIZE`           | Max RTPS message size (bytes)              | 65000                   |
 | `INT2DDS_MULTICAST_TTL`              | IPv4 multicast TTL fallback (0-255)        | 1                       |
+| `INT2DDS_DISABLE_PREEMPTIVE`         | Disable preemptive ACKNACK/HEARTBEAT       | false                   |
+| `INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS` | Reader delay before first NACK_FRAG (ms)  | 5                       |
+| `INT2DDS_NACK_FRAG_RETRY_MS`         | Reader NACK_FRAG retry interval (ms)       | 200                     |
+| `INT2DDS_NACK_FRAG_MAX_RETRIES`      | Reader NACK_FRAG retries before yielding   | 10                      |
+| `INT2DDS_SEND_CREDIT_BACKSTOP_MS`    | Writer send-credit backstop (ms)           | 250                     |
+| `INT2DDS_NACK_RESPONSE_DELAY_MS`     | Writer delay before repair reply (ms)      | 0                       |
+| `INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT` | Writer piggyback HEARTBEAT off    | false                   |
+| `INT2DDS_SEDP_HEARTBEAT_MS`          | SEDP heartbeat period (ms)                 | heartbeat_period (2000) |
 | `INT2DDS_EXTENDED_DISCOVERY`         | Enable extended discovery                  | false                   |
 | `INT2DDS_INITIAL_PEERS`              | Initial peer list                          | none                    |
 | `INT2DDS_THREAD_MONITORING`          | Enable thread monitoring                   | false                   |
@@ -283,6 +293,82 @@ cargo run --example hello_world_pub
 ```
 
 
+### INT2DDS_DATA_FRAG_SIZE
+
+Sets the RTPS DATA_FRAG fragment size, in bytes, used by DataWriters whose QoS
+does not specify one. A `data_frag.max_size` of `1` or greater, set in code or in
+a QoS profile, always wins over this fallback.
+
+- Valid range: `1` - `65000`
+- Values outside the range, or values that do not parse as an integer, are
+  logged at warn level and ignored — the built-in default `65000` is used.
+  The value is **not** clamped.
+
+#### Resolution order
+
+1. DataWriter QoS `data_frag.max_size` (code) / QoS profile entry, when `>= 1`
+2. `INT2DDS_DATA_FRAG_SIZE` env var
+3. Default `65000`
+
+A `max_size` of `0` — the default — means "unspecified". Negative values are
+treated the same way, so they do not override the env var. `int2dds_datawriter_qos_get_data_frag()`
+and the Python/C# `data_frag` accessors return the value as set, not the resolved
+size, so they report `0` for a QoS that never set it.
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_DATA_FRAG_SIZE = "8000"
+
+cargo run --example hello_world_pub
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_DATA_FRAG_SIZE=8000
+
+cargo run --example hello_world_pub
+```
+
+The Rust core consumes the env var inside `DataFragQosPolicy::effective_max_size`
+when the RTPS writer is created, so the value must be set **before** the
+DataWriter is created.
+
+### INT2DDS_MAX_MESSAGE_SIZE
+
+Sets the maximum RTPS message size, in bytes: the threshold above which a
+DataWriter fragments a sample. A sample whose serialized payload exceeds this
+size is split into DATA_FRAG fragments of `INT2DDS_DATA_FRAG_SIZE` bytes each. A
+sample at or below it is sent as a single DATA submessage.
+
+`INT2DDS_DATA_FRAG_SIZE` sizes each fragment. This variable decides when
+fragmentation starts and how much payload one message carries, so keep it at or
+above `INT2DDS_DATA_FRAG_SIZE`.
+
+- Valid range: `1` - `65000`
+- Values outside the range, or values that do not parse as an integer, are
+  logged at warn level and ignored — the built-in default `65000` is used.
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_MAX_MESSAGE_SIZE = "14720"
+
+cargo run --example hello_world_pub
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_MAX_MESSAGE_SIZE=14720
+
+cargo run --example hello_world_pub
+```
+
+The Rust core reads this via `env::get_max_message_size` each time a sample is
+written, so a new value takes effect for samples written afterward.
+
 ### INT2DDS_MULTICAST_TTL
 
 Sets the IPv4 multicast TTL (Time-To-Live) used when no explicit
@@ -331,6 +417,67 @@ Int2Dds.Core.Env.SetMulticastTtl(32);
 The Rust core consumes the env var inside `TransportConfig::from_property` at
 participant creation, so the value must be set **before** the first
 `DomainParticipant` is created.
+
+### INT2DDS_DISABLE_PREEMPTIVE
+
+Disables the two one-shot messages sent when a new endpoint match is made: the
+reader's preemptive ACKNACK and the writer's preemptive HEARTBEAT. Accepts
+`true`/`false`/`1`/`0`, case-insensitive; anything else is logged at warn level
+and treated as `false`.
+
+Both remain enabled by default. Disabling them removes discovery-time traffic at
+the cost of first-sample latency: a reader then learns the writer's sequence
+range from the first periodic HEARTBEAT instead of from an immediate one.
+Reliability is unaffected — periodic HEARTBEAT and the normal
+HEARTBEAT/ACKNACK repair loop still run, and a HEARTBEAT arriving from a peer is
+still answered.
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_DISABLE_PREEMPTIVE = "true"
+
+cargo run --example hello_world_sub
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_DISABLE_PREEMPTIVE=true
+
+cargo run --example hello_world_sub
+```
+
+The Rust core reads the env var when an endpoint match is made, so the value must
+be set **before** the DataReader/DataWriter that should skip it is matched.
+
+### INT2DDS_SEDP_HEARTBEAT_MS
+
+Period of the SEDP heartbeat sent to each discovered participant. A lost
+endpoint announcement waits one period before the peer's reader NACKs for it,
+so a shorter period shortens the worst-case discovery stall at the cost of
+more metatraffic. SPDP keeps its own repeat interval either way.
+
+- Default: the writer's `heartbeat_period` (2000 milliseconds)
+- Values that are not a positive integer are ignored
+- Read once per process, so it must be set before the first participant is
+  created
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_SEDP_HEARTBEAT_MS = "500"
+
+cargo run --example hello_world_pub
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_SEDP_HEARTBEAT_MS=500
+
+cargo run --example hello_world_pub
+```
 
 ### INT2DDS_EXTENDED_DISCOVERY
 
@@ -391,6 +538,169 @@ cargo run --example hello_world_pub
 ```bash
 # Linux/macOS
 export INT2DDS_INITIAL_PEERS="192.168.1.100:17410,192.168.1.100:17412"
+
+cargo run --example hello_world_pub
+```
+
+---
+
+## Reliability Tuning
+
+These control how a reliable pair recovers what was lost. The reader-side
+three tune its NACK_FRAG loop: the request sent to ask a matched writer to
+resend a sample's missing fragments. The writer-side three tune how it
+answers and how hard it pushes.
+
+All but `INT2DDS_SEND_CREDIT_BACKSTOP_MS` map to a
+`ReaderReliabilityExtensionQosPolicy` or `WriterReliabilityExtensionQosPolicy`
+field; an explicit QoS setting always wins over the env fallback, and an
+invalid or out-of-range value is ignored in favor of the default rather than
+propagating.
+
+### INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS
+
+Delay before the reader sends its first NACK_FRAG for a sample reported
+incomplete by a HEARTBEAT. Maps to `nack_frag_response_delay`.
+
+- Default: `5` (milliseconds)
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS = "150"
+
+cargo run --example hello_world_sub
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS=150
+
+cargo run --example hello_world_sub
+```
+
+### INT2DDS_NACK_FRAG_RETRY_MS
+
+Delay before the reader re-asks when a NACK_FRAG produced no fragments. Maps
+to `nack_frag_retry_delay`.
+
+- Default: `200` (milliseconds)
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_NACK_FRAG_RETRY_MS = "300"
+
+cargo run --example hello_world_sub
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_NACK_FRAG_RETRY_MS=300
+
+cargo run --example hello_world_sub
+```
+
+### INT2DDS_NACK_FRAG_MAX_RETRIES
+
+How many times the reader re-asks before handing an incomplete fragmented
+sample back to the writer's periodic HEARTBEAT. Maps to
+`nack_frag_max_retries`.
+
+- Default: `10`
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_NACK_FRAG_MAX_RETRIES = "5"
+
+cargo run --example hello_world_sub
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_NACK_FRAG_MAX_RETRIES=5
+
+cargo run --example hello_world_sub
+```
+
+### INT2DDS_SEND_CREDIT_BACKSTOP_MS
+
+How long wire bytes sent toward a remote participant keep counting against
+that participant's send window when it never answers. A reliable reader's
+ACKNACK or NACK_FRAG hands the window back at once; this covers the peer
+that goes silent. Writer-side, with no QoS field.
+
+Keep it above one whole reader retry cycle -- `INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS`
+plus `INT2DDS_NACK_FRAG_RETRY_MS`, 205 ms at their defaults. Below that, a
+lost round is recovered by this timeout rather than by the reader's answer.
+
+- Default: `250` (milliseconds)
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_SEND_CREDIT_BACKSTOP_MS = "300"
+
+cargo run --example hello_world_pub
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_SEND_CREDIT_BACKSTOP_MS=300
+
+cargo run --example hello_world_pub
+```
+
+### INT2DDS_NACK_RESPONSE_DELAY_MS
+
+Delay before the writer answers a reader's ACKNACK or NACK_FRAG with the
+resend it asked for. Maps to `nack_response_delay`.
+
+- Default: `0` (milliseconds)
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_NACK_RESPONSE_DELAY_MS = "20"
+
+cargo run --example hello_world_pub
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_NACK_RESPONSE_DELAY_MS=20
+
+cargo run --example hello_world_pub
+```
+
+### INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT
+
+Sets the default for the `disable_piggyback_heartbeat` writer QoS. When true,
+a HEARTBEAT no longer rides along with DATA and only the periodic heartbeat
+timer sends one: less traffic, but a reader waits longer to learn what it is
+missing. Must be set before the DataWriter QoS is constructed to take effect.
+
+- Default: `false`
+- Accepts `true`, `false`, `1`, `0` (case-insensitive)
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT = "true"
+
+cargo run --example hello_world_pub
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT=true
 
 cargo run --example hello_world_pub
 ```
@@ -613,4 +923,5 @@ cargo run --example hello_world_pub
 - [dds/src/common/log.rs](../../dds/src/common/log.rs) - Logging configuration
 - [dds/src/rtps/transport/mod.rs](../../dds/src/rtps/transport/mod.rs) - Transport type definition
 - [dds/src/rtps/transport/transport_config.rs](../../dds/src/rtps/transport/transport_config.rs) - Multicast TTL resolution
+- [dds/src/dcps/infrastructure/qos_policy.rs](../../dds/src/dcps/infrastructure/qos_policy.rs) - DATA_FRAG fragment size and NACK_FRAG timing resolution
 - [dds/src/rtps/transport/udp/udp_sender.rs](../../dds/src/rtps/transport/udp/udp_sender.rs) - UDP transport settings

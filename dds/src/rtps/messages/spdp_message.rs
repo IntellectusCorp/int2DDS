@@ -115,6 +115,9 @@ impl SpdpMessage {
 
         let vendor_id = local_participant_proxy_data.vendor_id();
         let entity_name = Some(local_participant_proxy_data.entity_name().to_string());
+        // usize -> u32: receive-buffer sizes never approach u32::MAX in practice.
+        let receive_buffer_size =
+            local_participant_proxy_data.receive_buffer_size().map(|size| size as u32);
 
         // Use pre-computed locators from local_participant_proxy_data
         let mut locators = Vec::with_capacity(
@@ -146,6 +149,7 @@ impl SpdpMessage {
             vendor_id,
             entity_name,
             locators,
+            receive_buffer_size,
         ) {
             Ok(bytes) => Ok(bytes::Bytes::from(bytes)),
             Err(e) => {

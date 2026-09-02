@@ -864,10 +864,18 @@ pub const PROP_TCP_BIND_PORT: &str = "int2dds.transport.TCPv4.bind_port";
 pub const PROP_TCP_PUBLIC_ADDRESS: &str = "int2dds.transport.TCPv4.public_address";
 /// Disable Nagle (`TCP_NODELAY`). Default `true`.
 pub const PROP_TCP_NODELAY: &str = "int2dds.transport.TCPv4.nodelay";
-/// Outbound connect timeout, milliseconds. Default `5000`.
+/// Outbound connect timeout, milliseconds. Default `1000`.
 pub const PROP_TCP_CONNECT_TIMEOUT_MS: &str = "int2dds.transport.TCPv4.connect_timeout_ms";
-/// BIND handshake response timeout, milliseconds. Default `5000`.
-pub const PROP_TCP_BIND_TIMEOUT_MS: &str = "int2dds.transport.TCPv4.bind_timeout_ms";
+/// First-frame timeout for an accepted TCP connection, milliseconds.
+///
+/// The legacy property name is retained for configuration compatibility after
+/// removal of the TCP control handshake. It now bounds the time from TLS
+/// completion (or plain accept) to the first valid framed message. Default `20000`.
+pub const PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS: &str =
+    "int2dds.transport.TCPv4.peer_handshake_timeout_ms";
+/// TLS handshake timeout, milliseconds. Default `5000`.
+pub const PROP_TCP_TLS_HANDSHAKE_TIMEOUT_MS: &str =
+    "int2dds.transport.TCPv4.tls_handshake_timeout_ms";
 /// Max time (ms) unacknowledged data may stay outstanding before the OS drops
 /// the connection (`TCP_USER_TIMEOUT`), so a dead link surfaces as a write error
 /// instead of blocking the sender ~indefinitely. When keepalive is also set,
@@ -886,20 +894,6 @@ pub const PROP_TCP_KEEPALIVE_MAX_MISSES: &str = "int2dds.transport.TCPv4.keepali
 pub const PROP_TCP_SO_RCVBUF: &str = "int2dds.transport.TCPv4.so_rcvbuf";
 /// Forced `SO_SNDBUF` in bytes. Default OS-managed (absent).
 pub const PROP_TCP_SO_SNDBUF: &str = "int2dds.transport.TCPv4.so_sndbuf";
-/// Tokio worker thread count for the TCP runtime.
-pub const PROP_TCP_ASYNC_WORKERS: &str = "int2dds.transport.TCPv4.async_workers";
-/// User-data wire-write deadline, milliseconds. A send waits up to this long for
-/// the previous frame to reach the socket, then drops the frame rather than
-/// delay sends to other peers. `-1` blocks until it completes (no pre-wire drop,
-/// congestion isolation off); `0` is a try-lock (take the lock if free, else drop
-/// at once, isolation off). Default `1000` — generous by design; lower it to
-/// trade flow-control fidelity for tighter HOL isolation.
-pub const PROP_TCP_SEND_DEADLINE_MS: &str = "int2dds.transport.TCPv4.send_deadline_ms";
-/// Consecutive send-deadline misses before a connection is marked congested and
-/// its writes drop to the short probe deadline, isolating a slow/stalled peer
-/// from the fan-out. Min 1. Default `1`.
-pub const PROP_TCP_CONGESTION_MISS_THRESHOLD: &str =
-    "int2dds.transport.TCPv4.congestion_miss_threshold";
 
 /// Generic name/value extension channel for QoS-driven configuration.
 ///
@@ -2303,11 +2297,13 @@ impl QosPolicy for TypeConsistencyEnforcementQosPolicy {
 ///
 /// # Default
 /// - `disable_piggyback_heartbeat: false` - Piggybacked heartbeats are enabled by default.
+///   The default is overridable via the `INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT` env var.
 /// - `heartbeat_period: 2 seconds` - Period for sending periodic heartbeat messages.
 /// - `initial_heartbeat_delay: 10ms` - Delay before sending initial heartbeat after reader discovery.
 /// - `push_mode: true` - (Unsupported) Writer pushes data to readers.
 /// - `nack_suppression_duration: 0` - (Unsupported) Duration to suppress NACKs.
-/// - `nack_response_delay: 10ms` - Delay before responding to a NACK.
+/// - `nack_response_delay: 0` - Delay before responding to a NACK.
+///   Overridable via `INT2DDS_NACK_RESPONSE_DELAY_MS`.
 #[derive(DdsType, Copy, Eq)]
 #[dds_type(crate_path = "crate", no_default)]
 pub struct WriterReliabilityExtensionQosPolicy {
@@ -2333,14 +2329,28 @@ pub struct WriterReliabilityExtensionQosPolicy {
     /// Default: 0 (no suppression)
     pub nack_suppression_duration: Duration,
 
-    /// Delay before responding to a NACK.
-    /// Default: 10ms
+    /// Delay before responding to a NACK, both for a whole-sample ACKNACK and for a NACK_FRAG.
+    ///
+    /// Default: 0. This was a merge window folding several requests into one repair round.
+    /// A fragmented send is now bounded by the peer's receive buffer and carries one heartbeat
+    /// per window, so the reader asks once per round and there is nothing left to merge; the
+    /// delay would only add a fixed cost to every round. Set it back to 100ms to restore the
+    /// merge.
     pub nack_response_delay: Duration,
 }
 
 impl Default for WriterReliabilityExtensionQosPolicy {
     fn default() -> Self {
-        Self::DEFAULT
+        let mut qos = Self::DEFAULT;
+
+        if let Some(is_disabled) = crate::common::env::get_disable_piggyback_heartbeat_default() {
+            qos.disable_piggyback_heartbeat = is_disabled;
+        }
+        if let Some(ms) = crate::common::env::get_nack_response_delay_ms_override() {
+            qos.nack_response_delay = Duration::from_millis(ms.into());
+        }
+
+        qos
     }
 }
 
@@ -2351,7 +2361,7 @@ impl ConstDefault for WriterReliabilityExtensionQosPolicy {
         initial_heartbeat_delay: Duration { sec: 0, nanosec: 10_000_000 },
         push_mode: true,
         nack_suppression_duration: Duration { sec: 0, nanosec: 0 },
-        nack_response_delay: Duration { sec: 0, nanosec: 10_000_000 },
+        nack_response_delay: Duration { sec: 0, nanosec: 0 },
     };
 }
 
@@ -2362,19 +2372,23 @@ impl QosPolicy for WriterReliabilityExtensionQosPolicy {
 }
 
 /// int2DDS extension: per-writer RTPS DATA_FRAG fragment size. Writer-local,
-/// not propagated over the wire. Default `max_size: 65000`.
+/// not propagated over the wire. Unset falls back to env, then `DEFAULT_SIZE`.
 #[derive(DdsType, Copy, Eq)]
 #[dds_type(crate_path = "crate", no_default)]
 pub struct DataFragQosPolicy {
     /// Max serialized payload bytes per DATA_FRAG fragment. Range 1..=65000.
+    /// `UNSET` means unspecified; resolve through `effective_max_size()`.
     pub max_size: i32,
 }
 
 impl DataFragQosPolicy {
     pub const MAX: i32 = 65000;
     pub const DEFAULT_SIZE: i32 = 65000;
+    /// Sentinel meaning "no size specified".
+    pub const UNSET: i32 = 0;
 
-    /// Validated size: clamp `> MAX` to MAX, fall back `<= 0` to DEFAULT_SIZE.
+    /// Validated size: clamp `> MAX` to MAX, fall back `<= 0` to the
+    /// `INT2DDS_DATA_FRAG_SIZE` env override, then to DEFAULT_SIZE.
     pub fn effective_max_size(&self) -> i32 {
         if self.max_size > Self::MAX {
             log::warn!(
@@ -2387,8 +2401,23 @@ impl DataFragQosPolicy {
         } else if self.max_size > 0 {
             self.max_size
         } else {
-            Self::DEFAULT_SIZE
+            Self::env_default_size().unwrap_or(Self::DEFAULT_SIZE)
         }
+    }
+
+    /// `INT2DDS_DATA_FRAG_SIZE`, rejected with a warning when outside `1..=MAX`.
+    /// Out-of-range env values are ignored rather than clamped, unlike an explicit QoS.
+    fn env_default_size() -> Option<i32> {
+        let size = crate::common::env::get_data_frag_size_override()?;
+        if (1..=Self::MAX).contains(&size) {
+            return Some(size);
+        }
+        log::warn!(
+            "INT2DDS_DATA_FRAG_SIZE={} is outside 1..={}, ignoring env override",
+            size,
+            Self::MAX
+        );
+        None
     }
 }
 
@@ -2399,7 +2428,7 @@ impl Default for DataFragQosPolicy {
 }
 
 impl ConstDefault for DataFragQosPolicy {
-    const DEFAULT: Self = Self { max_size: 65000 };
+    const DEFAULT: Self = Self { max_size: Self::UNSET };
 }
 
 impl QosPolicy for DataFragQosPolicy {
@@ -2412,14 +2441,20 @@ impl QosPolicy for DataFragQosPolicy {
 /// This policy provides additional control over reliable communication behavior.
 ///
 /// # Default
-/// - `heartbeat_response_delay: 10ms` - Delay before responding to a heartbeat.
+/// - `heartbeat_response_delay: 80ms` - Delay before responding to a heartbeat.
 /// - `heartbeat_suppression_duration: 0` - (Unsupported) Duration to suppress heartbeats.
 /// - `preemptive_acknack_delay: 80ms` - Delay before sending preemptive ACKNACK.
+/// - `nack_frag_response_delay: 5ms` - Delay before the first NACK_FRAG for missing fragments.
+///   Overridable via `INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS`.
+/// - `nack_frag_retry_delay: 200ms` - Delay before retrying a NACK_FRAG that got no reply.
+///   Overridable via `INT2DDS_NACK_FRAG_RETRY_MS`.
+/// - `nack_frag_max_retries: 10` - Retries before yielding to the periodic heartbeat.
+///   Overridable via `INT2DDS_NACK_FRAG_MAX_RETRIES`.
 #[derive(DdsType, Copy, Eq)]
 #[dds_type(crate_path = "crate", no_default)]
 pub struct ReaderReliabilityExtensionQosPolicy {
     /// Delay before responding to a heartbeat.
-    /// Default: 10ms
+    /// Default: 80ms
     pub heartbeat_response_delay: Duration,
 
     /// (Unsupported) Duration to suppress heartbeats from the same writer.
@@ -2429,19 +2464,55 @@ pub struct ReaderReliabilityExtensionQosPolicy {
     /// Delay before sending preemptive ACKNACK after writer discovery.
     /// Default: 80ms
     pub preemptive_acknack_delay: Duration,
+
+    /// Delay before sending the first NACK_FRAG for a sample's missing fragments.
+    ///
+    /// Default: 0. This was a debounce against one NACK_FRAG per DATA_FRAG. A fragmented send
+    /// is now bounded by the peer's receive buffer and carries one heartbeat per window, so the
+    /// reader is triggered once per window and there is nothing left to collapse. Set it back to
+    /// 80ms to restore the debounce.
+    pub nack_frag_response_delay: Duration,
+
+    /// Delay before retrying a NACK_FRAG that got no reply.
+    /// Default: 200ms
+    pub nack_frag_retry_delay: Duration,
+
+    /// Retries before a stalled fragment repair yields to the periodic heartbeat.
+    /// Default: 10
+    pub nack_frag_max_retries: u32,
 }
 
 impl Default for ReaderReliabilityExtensionQosPolicy {
     fn default() -> Self {
-        Self::DEFAULT
+        let mut qos = Self::DEFAULT;
+
+        if let Some(ms) = crate::common::env::get_nack_frag_response_delay_ms_override() {
+            qos.nack_frag_response_delay = Duration::from_millis(ms.into());
+        }
+        if let Some(ms) = crate::common::env::get_nack_frag_retry_ms_override() {
+            qos.nack_frag_retry_delay = Duration::from_millis(ms.into());
+        }
+        if let Some(retries) = crate::common::env::get_nack_frag_max_retries_override() {
+            qos.nack_frag_max_retries = retries;
+        }
+
+        qos
     }
 }
 
 impl ConstDefault for ReaderReliabilityExtensionQosPolicy {
     const DEFAULT: Self = Self {
-        heartbeat_response_delay: Duration { sec: 0, nanosec: 10_000_000 },
+        heartbeat_response_delay: Duration { sec: 0, nanosec: 80_000_000 },
         heartbeat_suppression_duration: Duration { sec: 0, nanosec: 0 },
         preemptive_acknack_delay: Duration { sec: 0, nanosec: 80_000_000 },
+        // 5ms rather than none: a windowed round already carries one heartbeat, so debouncing
+        // the answer this briefly costs nothing per round and measured far fewer NACK_FRAGs and
+        // far fewer duplicate fragments on a loaded bus.
+        nack_frag_response_delay: Duration { sec: 0, nanosec: 5_000_000 },
+        // Kept at 200ms: when a window's heartbeat is lost the reader has no trigger at all, and
+        // this self-re-arming retry is the only thing that recovers the round.
+        nack_frag_retry_delay: Duration { sec: 0, nanosec: 200_000_000 },
+        nack_frag_max_retries: 10,
     };
 }
 
@@ -2455,21 +2526,222 @@ impl QosPolicy for ReaderReliabilityExtensionQosPolicy {
 mod data_frag_tests {
     use super::*;
 
-    #[test]
-    fn data_frag_clamps_above_max() {
-        let p = DataFragQosPolicy { max_size: 70000 };
-        assert_eq!(p.effective_max_size(), 65000);
+    const ENV_KEY: &str = "INT2DDS_DATA_FRAG_SIZE";
+
+    fn effective(max_size: i32) -> i32 {
+        DataFragQosPolicy { max_size }.effective_max_size()
     }
 
     #[test]
-    fn data_frag_nonpositive_falls_back_to_default() {
-        assert_eq!(DataFragQosPolicy { max_size: 0 }.effective_max_size(), 65000);
-        assert_eq!(DataFragQosPolicy { max_size: -5 }.effective_max_size(), 65000);
+    fn data_frag_explicit_size_ignores_env() {
+        assert_eq!(effective(1344), 1344);
+        assert_eq!(effective(70000), 65000, "above MAX clamps");
     }
 
     #[test]
-    fn data_frag_valid_value_passes_through() {
-        assert_eq!(DataFragQosPolicy { max_size: 1344 }.effective_max_size(), 1344);
+    fn data_frag_default_is_unset() {
+        assert_eq!(DataFragQosPolicy::DEFAULT.max_size, DataFragQosPolicy::UNSET);
+        assert_eq!(DataFragQosPolicy::default().max_size, DataFragQosPolicy::UNSET);
+    }
+
+    // Env is process-global and tests run in parallel: keep every
+    // INT2DDS_DATA_FRAG_SIZE assertion inside this single test.
+    #[test]
+    fn data_frag_unset_resolves_through_env() {
+        unsafe { std::env::remove_var(ENV_KEY) };
+        assert_eq!(effective(0), 65000, "no env -> DEFAULT_SIZE");
+        assert_eq!(effective(-5), 65000, "negative, no env -> DEFAULT_SIZE");
+
+        crate::common::env::set_data_frag_size(8000);
+        assert_eq!(effective(0), 8000, "env applies");
+        assert_eq!(effective(1344), 1344, "explicit qos wins over env");
+
+        for (raw, why) in
+            [("abc", "non-numeric"), ("0", "zero"), ("70000", "above MAX"), ("", "empty")]
+        {
+            unsafe { std::env::set_var(ENV_KEY, raw) };
+            assert_eq!(effective(0), 65000, "{} env is ignored, not clamped", why);
+        }
+
+        for raw in ["1", "65000"] {
+            unsafe { std::env::set_var(ENV_KEY, raw) };
+            assert_eq!(effective(0), raw.parse::<i32>().unwrap(), "boundary accepted");
+        }
+
+        unsafe { std::env::remove_var(ENV_KEY) };
+    }
+}
+
+#[cfg(test)]
+mod writer_reliability_extension_tests {
+    use super::*;
+
+    const ENV_KEY: &str = "INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT";
+
+    // Env is process-global and tests run in parallel: keep every
+    // INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT assertion inside this single test.
+    #[test]
+    fn disable_piggyback_heartbeat_default_resolves_through_env() {
+        unsafe { std::env::remove_var(ENV_KEY) };
+        assert!(!WriterReliabilityExtensionQosPolicy::default().disable_piggyback_heartbeat);
+
+        crate::common::env::set_disable_piggyback_heartbeat_default(true);
+        assert!(WriterReliabilityExtensionQosPolicy::default().disable_piggyback_heartbeat);
+
+        unsafe { std::env::set_var(ENV_KEY, "false") };
+        assert!(!WriterReliabilityExtensionQosPolicy::default().disable_piggyback_heartbeat);
+
+        unsafe { std::env::set_var(ENV_KEY, "yes") };
+        assert!(
+            !WriterReliabilityExtensionQosPolicy::default().disable_piggyback_heartbeat,
+            "unrecognized env is ignored"
+        );
+
+        unsafe { std::env::remove_var(ENV_KEY) };
+    }
+
+    // Env is process-global and tests run in parallel: keep every
+    // INT2DDS_NACK_RESPONSE_DELAY_MS assertion inside this single test.
+    #[test]
+    fn nack_response_delay_defaults_to_zero_and_resolves_through_env() {
+        const DELAY_KEY: &str = "INT2DDS_NACK_RESPONSE_DELAY_MS";
+        unsafe { std::env::remove_var(DELAY_KEY) };
+        assert_eq!(
+            WriterReliabilityExtensionQosPolicy::default().nack_response_delay,
+            Duration::from_millis(0)
+        );
+
+        // The pre-window value, which a deployment can put back.
+        crate::common::env::set_nack_response_delay_ms(100);
+        assert_eq!(
+            WriterReliabilityExtensionQosPolicy::default().nack_response_delay,
+            Duration::from_millis(100)
+        );
+
+        for (raw, why) in [("abc", "non-numeric"), ("-1", "negative"), ("", "empty")] {
+            unsafe { std::env::set_var(DELAY_KEY, raw) };
+            assert_eq!(
+                WriterReliabilityExtensionQosPolicy::default().nack_response_delay,
+                Duration::from_millis(0),
+                "{} env falls back to default",
+                why
+            );
+        }
+
+        unsafe { std::env::remove_var(DELAY_KEY) };
+    }
+}
+
+#[cfg(test)]
+mod reader_reliability_extension_tests {
+    use super::*;
+
+    #[test]
+    /// Zero response delay is what makes a windowed round cost a round trip instead of a round
+    /// trip plus a debounce. The retry pair stays non-zero on purpose: it is the only recovery
+    /// when a window's heartbeat is lost.
+    fn nack_frag_defaults_are_5ms_200ms_10() {
+        let default = ReaderReliabilityExtensionQosPolicy::DEFAULT;
+        assert_eq!(default.nack_frag_response_delay, Duration::from_millis(5));
+        assert_eq!(default.nack_frag_retry_delay, Duration::from_millis(200));
+        assert_eq!(default.nack_frag_max_retries, 10);
+    }
+
+    #[test]
+    fn nack_frag_fields_are_overridable_through_struct() {
+        let qos = ReaderReliabilityExtensionQosPolicy {
+            nack_frag_response_delay: Duration::from_millis(1),
+            nack_frag_retry_delay: Duration::from_millis(2),
+            nack_frag_max_retries: 3,
+            ..ReaderReliabilityExtensionQosPolicy::DEFAULT
+        };
+        assert_eq!(qos.nack_frag_response_delay, Duration::from_millis(1));
+        assert_eq!(qos.nack_frag_retry_delay, Duration::from_millis(2));
+        assert_eq!(qos.nack_frag_max_retries, 3);
+    }
+
+    // Env is process-global and tests run in parallel: keep every
+    // INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS assertion inside this single test.
+    #[test]
+    fn nack_frag_response_delay_resolves_through_env() {
+        const ENV_KEY: &str = "INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS";
+        unsafe { std::env::remove_var(ENV_KEY) };
+        assert_eq!(
+            ReaderReliabilityExtensionQosPolicy::default().nack_frag_response_delay,
+            Duration::from_millis(5)
+        );
+
+        crate::common::env::set_nack_frag_response_delay_ms(500);
+        assert_eq!(
+            ReaderReliabilityExtensionQosPolicy::default().nack_frag_response_delay,
+            Duration::from_millis(500)
+        );
+
+        for (raw, why) in [("abc", "non-numeric"), ("-1", "negative"), ("", "empty")] {
+            unsafe { std::env::set_var(ENV_KEY, raw) };
+            assert_eq!(
+                ReaderReliabilityExtensionQosPolicy::default().nack_frag_response_delay,
+                Duration::from_millis(5),
+                "{} env falls back to default",
+                why
+            );
+        }
+
+        unsafe { std::env::remove_var(ENV_KEY) };
+    }
+
+    // Env is process-global and tests run in parallel: keep every
+    // INT2DDS_NACK_FRAG_RETRY_MS assertion inside this single test.
+    #[test]
+    fn nack_frag_retry_delay_resolves_through_env() {
+        const ENV_KEY: &str = "INT2DDS_NACK_FRAG_RETRY_MS";
+        unsafe { std::env::remove_var(ENV_KEY) };
+        assert_eq!(
+            ReaderReliabilityExtensionQosPolicy::default().nack_frag_retry_delay,
+            Duration::from_millis(200)
+        );
+
+        crate::common::env::set_nack_frag_retry_ms(750);
+        assert_eq!(
+            ReaderReliabilityExtensionQosPolicy::default().nack_frag_retry_delay,
+            Duration::from_millis(750)
+        );
+
+        for (raw, why) in [("abc", "non-numeric"), ("-1", "negative"), ("", "empty")] {
+            unsafe { std::env::set_var(ENV_KEY, raw) };
+            assert_eq!(
+                ReaderReliabilityExtensionQosPolicy::default().nack_frag_retry_delay,
+                Duration::from_millis(200),
+                "{} env falls back to default",
+                why
+            );
+        }
+
+        unsafe { std::env::remove_var(ENV_KEY) };
+    }
+
+    // Env is process-global and tests run in parallel: keep every
+    // INT2DDS_NACK_FRAG_MAX_RETRIES assertion inside this single test.
+    #[test]
+    fn nack_frag_max_retries_resolves_through_env() {
+        const ENV_KEY: &str = "INT2DDS_NACK_FRAG_MAX_RETRIES";
+        unsafe { std::env::remove_var(ENV_KEY) };
+        assert_eq!(ReaderReliabilityExtensionQosPolicy::default().nack_frag_max_retries, 10);
+
+        crate::common::env::set_nack_frag_max_retries(25);
+        assert_eq!(ReaderReliabilityExtensionQosPolicy::default().nack_frag_max_retries, 25);
+
+        for (raw, why) in [("abc", "non-numeric"), ("-1", "negative"), ("", "empty")] {
+            unsafe { std::env::set_var(ENV_KEY, raw) };
+            assert_eq!(
+                ReaderReliabilityExtensionQosPolicy::default().nack_frag_max_retries,
+                10,
+                "{} env falls back to default",
+                why
+            );
+        }
+
+        unsafe { std::env::remove_var(ENV_KEY) };
     }
 }
 

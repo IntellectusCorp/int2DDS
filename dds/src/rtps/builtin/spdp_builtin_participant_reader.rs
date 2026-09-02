@@ -19,7 +19,7 @@ use crate::{
     rtps::{
         common::{
             entity_id::EntityId,
-            guid::{Guid, GuidPrefix},
+            guid::Guid,
             locator::Locator,
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
             time::RtpsDuration,
@@ -36,7 +36,10 @@ use crate::{
 };
 use std::{
     any::Any,
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, Weak,
+    },
 };
 
 #[derive(Debug)]
@@ -50,7 +53,11 @@ pub(crate) struct SPDPBuiltinParticipantReader {
     expects_inline_qos: bool,
     heartbeat_response_delay: RtpsDuration,
     heartbeat_suppression_duration: RtpsDuration,
+    nack_frag_response_delay: RtpsDuration,
+    nack_frag_retry_delay: RtpsDuration,
+    nack_frag_max_retries: u32,
     reader_cache: Arc<Mutex<ReaderHistoryCache>>,
+    in_flight_callbacks: AtomicUsize,
 }
 
 impl SPDPBuiltinParticipantReader {
@@ -73,7 +80,13 @@ impl SPDPBuiltinParticipantReader {
             expects_inline_qos,
             heartbeat_response_delay: RtpsDuration::new(0, 500 * 1000 * 1000),
             heartbeat_suppression_duration: RtpsDuration::new(0, 0),
+            // Tracks `ReaderReliabilityExtensionQosPolicy::DEFAULT`, which a builtin reader has
+            // no QoS path to read.
+            nack_frag_response_delay: RtpsDuration::from_millis(5),
+            nack_frag_retry_delay: RtpsDuration::from_millis(200),
+            nack_frag_max_retries: 10,
             reader_cache: Arc::new(Mutex::new(ReaderHistoryCache::new(endpoint_id, None))),
+            in_flight_callbacks: AtomicUsize::new(0),
         }
     }
 
@@ -123,6 +136,18 @@ impl Endpoint for SPDPBuiltinParticipantReader {
 }
 
 impl Reader for SPDPBuiltinParticipantReader {
+    fn enter_callback(&self) {
+        self.in_flight_callbacks.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn exit_callback(&self) {
+        self.in_flight_callbacks.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    fn in_flight_callbacks(&self) -> usize {
+        self.in_flight_callbacks.load(Ordering::SeqCst)
+    }
+
     fn reader_cache(&self) -> Arc<Mutex<ReaderHistoryCache>> {
         Arc::clone(&self.reader_cache)
     }
@@ -140,6 +165,15 @@ impl Reader for SPDPBuiltinParticipantReader {
     }
     fn heartbeat_suppression_duration(&self) -> RtpsDuration {
         self.heartbeat_suppression_duration
+    }
+    fn nack_frag_response_delay(&self) -> RtpsDuration {
+        self.nack_frag_response_delay
+    }
+    fn nack_frag_retry_delay(&self) -> RtpsDuration {
+        self.nack_frag_retry_delay
+    }
+    fn nack_frag_max_retries(&self) -> u32 {
+        self.nack_frag_max_retries
     }
     fn matched_writer_is_matched(&self, _writer_guid: Guid) -> bool {
         false
@@ -190,12 +224,5 @@ impl Reader for SPDPBuiltinParticipantReader {
 
     fn remove_matched_writer_and_update_status(&self, _writer_guid: Guid) -> RtpsResult<bool> {
         Ok(false)
-    }
-
-    fn remove_all_matched_writers_with_prefix_and_update_status(
-        &self,
-        _prefix: GuidPrefix,
-    ) -> RtpsResult<usize> {
-        Ok(0)
     }
 }

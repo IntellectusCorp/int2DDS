@@ -7,7 +7,7 @@ mod stateless_reader;
 mod writer_proxy;
 
 pub(crate) use reader::Reader;
-pub(crate) use reader_store::ReaderStore;
+pub(crate) use reader_store::{ReaderCallbackLease, ReaderStore};
 pub(crate) use remote_writer_info::RemoteWriterInfo;
 pub(crate) use stateful_reader::StatefulReader;
 pub(crate) use stateless_reader::StatelessReader;

@@ -277,16 +277,8 @@ class DataWriter(Generic[T]):
         # the spec default; re-read it from the created writer so client-side CDR
         # serialization matches what SEDP advertises — a profile may select XCDR2
         # even when the library default is XCDR1 (mirrors the C# binding).
-        wqos_ptr = ffi.new("Int2DdsDataWriterQos **")
-        check_ret(lib.int2dds_datawriter_get_qos(self._handle, wqos_ptr))
-        wqos_handle = wqos_ptr[0]
-        try:
-            repr_out = ffi.new("int32_t *")
-            check_ret(lib.int2dds_datawriter_qos_get_data_representation(wqos_handle, repr_out))
-            # INT2DDS_QOS_DATA_REPR_XCDR2 == 2
-            self._xcdr2 = (repr_out[0] == 2)
-        finally:
-            lib.int2dds_datawriter_qos_destroy(wqos_handle)
+        # INT2DDS_QOS_DATA_REPR_XCDR2 == 2
+        self._xcdr2 = lib.int2dds_datawriter_data_representation(self._handle) == 2
 
         # Clean up QoS handle after use
         if self._qos_handle is not None:
@@ -376,12 +368,9 @@ class DataWriter(Generic[T]):
 
         # Write to the FFI
         data_ptr = ffi.from_buffer(data)
-        key_ptr = ffi.NULL
-        key_len = 0
 
         check_ret(
-            lib.int2dds_datawriter_write_serialized(
-                self._handle, data_ptr, len(data), key_ptr, key_len)
+            lib.int2dds_datawriter_write_serialized(self._handle, data_ptr, len(data))
         )
     def register_instance(self, sample: T) -> bytes:
         """
@@ -587,11 +576,11 @@ class DataWriter(Generic[T]):
         check_ret(lib.int2dds_datawriter_get_guid(self._handle, ffi.cast("uint8_t(*)[16]", buf)))
         return bytes(ffi.buffer(buf, 16))
 
-    def write_serialized_staged(self, data: bytes, key: bytes = b"") -> None:
+    def write_serialized_staged(self, data: bytes) -> None:
         """Write pre-serialized CDR bytes via the zero-copy staging path.
 
         Reserves a native buffer, copies ``data`` in, then commits (or aborts on
-        error). ``key`` is the serialized key for keyed types.
+        error).
         """
         data_out = ffi.new("uint8_t **")
         cap_out = ffi.new("size_t *")
@@ -601,9 +590,8 @@ class DataWriter(Generic[T]):
         loan = loan_out[0]
         try:
             ffi.memmove(data_out[0], data, len(data))
-            key_ptr = ffi.from_buffer(key) if key else ffi.NULL
             check_ret(lib.int2dds_datawriter_commit_serialized_write(
-                self._handle, loan, len(data), key_ptr, len(key)))
+                self._handle, loan, len(data)))
         except BaseException:
             lib.int2dds_datawriter_abort_serialized_write(loan)
             raise

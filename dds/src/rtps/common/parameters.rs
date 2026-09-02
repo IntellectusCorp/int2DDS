@@ -132,6 +132,12 @@ pub enum ParameterId {
     PidTypeInformation = 0x0075,
     PidTypeConsistencyEnforcement = 0x0074,
 
+    /* Vendor-specific (0x8000 range, low bit of the range deliberately skipped).
+     * Carries this participant's UDP receive-buffer size as granted by the kernel,
+     * so a peer can size how much it puts on the wire toward us. An unrecognized
+     * peer just skips it (0x4000 bit is 0). */
+    PidReceiveBufferSize = 0x8001,
+
     UNKNOWN = 0xffff,
 }
 
@@ -390,6 +396,7 @@ pub enum ParameterValue<'a> {
     KeyHash([u8; 16]),
     StatusInfo(StatusInfo),
     MaxSerializedSize(u32),
+    ReceiveBufferSize(u32),
     Sentinel,
     Count(Count),
     Unknown(&'a [u8]),

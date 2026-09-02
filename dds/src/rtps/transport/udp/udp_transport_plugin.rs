@@ -17,7 +17,7 @@ use crate::rtps::transport::UdpConfig;
 /// Owns one UdpSender (for all outgoing traffic) and four UdpListeners
 /// (discovery multicast/unicast, user multicast/unicast).
 /// Each listener is handed out exactly once via `take_*_source()`,
-/// wrapped in `MessageSource::MioPoll` for zero-channel-overhead polling.
+/// wrapped in `MessageSource::Udp` for zero-channel-overhead polling.
 pub(crate) struct UdpTransportPlugin {
     sender: UdpSender,
     domain_id: u32,
@@ -29,6 +29,9 @@ pub(crate) struct UdpTransportPlugin {
     discovery_unicast_listener: Mutex<Option<UdpListener>>,
     user_multicast_listener: Mutex<Option<UdpListener>>,
     user_unicast_listener: Mutex<Option<UdpListener>>,
+
+    // Captured before the unicast listeners are taken (see advertised_receive_buffer_size).
+    advertised_receive_buffer_size: Option<usize>,
 }
 
 impl UdpTransportPlugin {
@@ -86,6 +89,14 @@ impl UdpTransportPlugin {
             }
         };
 
+        // The two unicast sockets are bound moments apart under the same sysctl,
+        // so they normally agree; take the minimum in case a port-conflict retry
+        // left them different.
+        let advertised_receive_buffer_size = [&discovery_uc, &user_uc]
+            .into_iter()
+            .filter_map(|listener| listener.as_ref().and_then(UdpListener::recv_buffer_size))
+            .min();
+
         Ok(Self {
             sender,
             domain_id,
@@ -95,6 +106,7 @@ impl UdpTransportPlugin {
             discovery_unicast_listener: Mutex::new(discovery_uc),
             user_multicast_listener: Mutex::new(user_mc),
             user_unicast_listener: Mutex::new(user_uc),
+            advertised_receive_buffer_size,
         })
     }
 
@@ -180,19 +192,23 @@ impl TransportPlugin for UdpTransportPlugin {
         self.udp_locators(port)
     }
 
+    fn advertised_receive_buffer_size(&self) -> Option<usize> {
+        self.advertised_receive_buffer_size
+    }
+
     fn take_discovery_multicast_source(&self) -> Option<MessageSource> {
         let listener = self.discovery_multicast_listener.lock().expect("lock poisoned").take()?;
-        Some(MessageSource::MioPoll { listener })
+        Some(MessageSource::Udp { listener })
     }
 
     fn take_discovery_unicast_source(&self) -> Option<MessageSource> {
         let listener = self.discovery_unicast_listener.lock().expect("lock poisoned").take()?;
-        Some(MessageSource::MioPoll { listener })
+        Some(MessageSource::Udp { listener })
     }
 
     fn take_user_data_unicast_source(&self) -> Option<MessageSource> {
         let listener = self.user_unicast_listener.lock().expect("lock poisoned").take()?;
-        Some(MessageSource::MioPoll { listener })
+        Some(MessageSource::Udp { listener })
     }
 
     fn port(&self) -> u16 {

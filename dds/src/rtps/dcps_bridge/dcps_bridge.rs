@@ -43,12 +43,15 @@ use crate::{
         },
         logic::{
             common::{JoinAllThread as _, UnicastThreadHandler as _},
-            sedp_logic::SedpLogic,
+            sedp_logic::{SedpLogic, BUILTIN_SEDP_HB_PERIOD},
             spdp_logic::SpdpLogic,
             user_logic::UserLogic,
         },
         messages::sedp_message::SEDPMessage,
-        task::{sending_handler::SendingHandler, thread_monitor::ThreadMonitor},
+        task::{
+            sending_handler::{MessageType, SendingHandler},
+            thread_monitor::ThreadMonitor,
+        },
         transport::{
             plugin::{TransportPlugin, TransportPluginFactory},
             socket::Socket,
@@ -148,13 +151,14 @@ impl DcpsBridge {
         let metatraffic_unicast_locators = transport.advertised_metatraffic_unicast_locators();
         let default_unicast_locators = transport.advertised_default_unicast_locators();
 
-        let participant = Participant::new(
+        let mut participant = Participant::new(
             domain_id,
             participant_id,
             socket.working_ips(),
             metatraffic_unicast_locators,
             default_unicast_locators,
         );
+        participant.set_local_receive_buffer_size(transport.advertised_receive_buffer_size());
         let guid_prefix = participant.guid().prefix();
         let participant = Arc::new(participant);
 
@@ -188,6 +192,7 @@ impl DcpsBridge {
             sedp_logic.start_sedp(
                 transport.take_discovery_multicast_source(),
                 transport.take_discovery_unicast_source(),
+                transport.take_stream_source(),
             )?;
         } else {
             log::error!("sedp_logic is not set");
@@ -303,13 +308,12 @@ impl DcpsBridge {
             Some(RtpsTime::now()),
         );
         let cache_change = Arc::new(change);
-        let _ = self
-            .participant
-            .sedp_builtin_publications_writer()
+        let sedp_writer = self.participant.sedp_builtin_publications_writer();
+        let _ = sedp_writer
             .writer_cache()
             .lock()
             .unwrap()
-            .add_change_builtin(cache_change.clone());
+            .add_change_builtin(cache_change.clone(), sedp_writer.as_ref());
 
         self.participant
             .remote_publications()
@@ -446,13 +450,12 @@ impl DcpsBridge {
             Some(RtpsTime::now()),
         );
         let cache_change = Arc::new(change);
-        let _ = self
-            .participant
-            .sedp_builtin_subscriptions_writer()
+        let sedp_writer = self.participant.sedp_builtin_subscriptions_writer();
+        let _ = sedp_writer
             .writer_cache()
             .lock()
             .unwrap()
-            .add_change_builtin(cache_change.clone());
+            .add_change_builtin(cache_change.clone(), sedp_writer.as_ref());
 
         self.participant
             .remote_subscriptions()
@@ -522,6 +525,29 @@ impl DcpsBridge {
                     remote_guid,
                     reader_id,
                     writer_id,
+                );
+
+                // Re-arm this remote's periodic heartbeat so the new change is
+                // retransmitted until acked. add_timer skips it if still running.
+                let remote_prefix = remote_guid.prefix();
+                let heartbeat_message = if writer_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER {
+                    MessageType::PeriodicPublicationHeartbeat(
+                        None,
+                        BUILTIN_SEDP_HB_PERIOD,
+                        Arc::new(remote_prefix),
+                    )
+                } else {
+                    MessageType::PeriodicSubscriptionHeartbeat(
+                        None,
+                        BUILTIN_SEDP_HB_PERIOD,
+                        Arc::new(remote_prefix),
+                    )
+                };
+                let _ = sedp_logic.register_periodic_send_timer(
+                    remote_prefix,
+                    writer_id,
+                    BUILTIN_SEDP_HB_PERIOD,
+                    heartbeat_message,
                 );
             }
         }
@@ -657,9 +683,8 @@ impl DcpsBridge {
             Some(RtpsTime::now()),
         );
         let cache_change = Arc::new(change);
-        let _ = self
-            .participant
-            .sedp_builtin_subscriptions_writer()
+        let sedp_writer = self.participant.sedp_builtin_subscriptions_writer();
+        let _ = sedp_writer
             .writer_cache()
             .lock()
             .map_err(|e| {
@@ -668,7 +693,7 @@ impl DcpsBridge {
                     format!("Failed to lock history cache: {}", e),
                 )
             })?
-            .add_change_builtin(cache_change.clone());
+            .add_change_builtin(cache_change.clone(), sedp_writer.as_ref());
 
         self.send_sedp_message_and_match(
             cache_change,
@@ -729,9 +754,8 @@ impl DcpsBridge {
             Some(RtpsTime::now()),
         );
         let cache_change = Arc::new(change);
-        let _ = self
-            .participant
-            .sedp_builtin_publications_writer()
+        let sedp_writer = self.participant.sedp_builtin_publications_writer();
+        let _ = sedp_writer
             .writer_cache()
             .lock()
             .map_err(|e| {
@@ -740,7 +764,7 @@ impl DcpsBridge {
                     format!("Failed to lock history cache: {}", e),
                 )
             })?
-            .add_change_builtin(cache_change.clone());
+            .add_change_builtin(cache_change.clone(), sedp_writer.as_ref());
 
         self.send_sedp_message_and_match(
             cache_change,
@@ -883,6 +907,87 @@ mod tests {
                 TimerHandler::get_instance_by_participant_guid(participant_guid).is_none(),
                 "TimerHandler should be removed after disable"
             );
+        }
+    }
+
+    // Env is process-global: serialize the frag-size/message-size overrides
+    // against any other test mutating them concurrently.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Two participants, one host: each must learn the other's advertised
+    /// receive-buffer size over SPDP, and that value must match what a fresh
+    /// socket on this host is actually granted - not what int2dds requested.
+    #[test]
+    fn spdp_advertises_receive_buffer_size_between_peers() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        unsafe {
+            std::env::set_var("INT2DDS_DATA_FRAG_SIZE", "1344");
+            std::env::set_var("INT2DDS_MAX_MESSAGE_SIZE", "13440");
+            // Both peers must take the "double the OS default" branch below,
+            // not an explicit override left set by another test/session.
+            std::env::remove_var("INT2DDS_UDP_SOCKET_BUFFER");
+        }
+
+        // Independent oracle, computed with socket2 directly (not via
+        // UdpListener::new): what any fresh socket on this host is actually
+        // granted after asking to double its default SO_RCVBUF.
+        let probe = socket2::Socket::new(
+            socket2::Domain::IPV4,
+            socket2::Type::DGRAM,
+            Some(socket2::Protocol::UDP),
+        )
+        .expect("probe socket");
+        let current = probe.recv_buffer_size().expect("read default SO_RCVBUF");
+        probe.set_recv_buffer_size(current.saturating_mul(2)).expect("set SO_RCVBUF");
+        let expected = probe.recv_buffer_size().expect("read granted SO_RCVBUF");
+
+        let domain_id = unique_domain_id() as u32;
+        let mut bridge_a = DcpsBridge::new(domain_id, &Default::default()).unwrap();
+        bridge_a.init().unwrap();
+        let mut bridge_b = DcpsBridge::new(domain_id, &Default::default()).unwrap();
+        bridge_b.init().unwrap();
+
+        let guid_a = bridge_a.participant.guid();
+        let guid_b = bridge_b.participant.guid();
+
+        // Each side's own advertised value must already be the granted one,
+        // before either has heard from the other.
+        assert_eq!(
+            bridge_a.participant.local_participant_proxy_data().receive_buffer_size(),
+            Some(expected)
+        );
+        assert_eq!(
+            bridge_b.participant.local_participant_proxy_data().receive_buffer_size(),
+            Some(expected)
+        );
+
+        let deadline = std::time::Instant::now() + StdDuration::from_secs(15);
+        loop {
+            let a_knows_b =
+                bridge_a.participant.find_remote_participant_proxy_data(guid_b.prefix()).is_some();
+            let b_knows_a =
+                bridge_b.participant.find_remote_participant_proxy_data(guid_a.prefix()).is_some();
+            if a_knows_b && b_knows_a {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "participants did not discover each other in time"
+            );
+            thread::sleep(StdDuration::from_millis(50));
+        }
+
+        let a_view_of_b =
+            bridge_a.participant.find_remote_participant_proxy_data(guid_b.prefix()).unwrap();
+        let b_view_of_a =
+            bridge_b.participant.find_remote_participant_proxy_data(guid_a.prefix()).unwrap();
+
+        assert_eq!(a_view_of_b.receive_buffer_size(), Some(expected));
+        assert_eq!(b_view_of_a.receive_buffer_size(), Some(expected));
+
+        unsafe {
+            std::env::remove_var("INT2DDS_DATA_FRAG_SIZE");
+            std::env::remove_var("INT2DDS_MAX_MESSAGE_SIZE");
         }
     }
 
@@ -1031,7 +1136,7 @@ mod tests {
                 );
                 match writer.writer_cache().lock() {
                     Ok(mut writer_cache) => {
-                        let _ = writer_cache.add_change_builtin(Arc::new(change));
+                        let _ = writer_cache.add_change_builtin(Arc::new(change), writer.as_ref());
                     }
                     Err(e) => {
                         log::error!("writer_cache lock error: {:?}", e);
@@ -1122,6 +1227,9 @@ mod tests {
             "HistoryCache Arc should be dropped after removal"
         );
 
+        // Two instances, one change each: the surviving reader's announcement and the deleted
+        // reader's dispose. The dispose stays because this builtin writer is RELIABLE -- a peer
+        // that missed the datagram can only ask for a sequence number the history still holds.
         assert_eq!(
             dcps_bridge
                 .lock()
@@ -1134,7 +1242,7 @@ mod tests {
                 .unwrap()
                 .get_changes()
                 .len(),
-            1
+            2
         );
     }
 
@@ -1214,6 +1322,9 @@ mod tests {
             "HistoryCache Arc should be dropped after removal"
         );
 
+        // Two instances, one change each: the surviving writer's announcement and the deleted
+        // writer's dispose. The dispose stays because this builtin writer is RELIABLE -- a peer
+        // that missed the datagram can only ask for a sequence number the history still holds.
         assert_eq!(
             dcps_bridge
                 .lock()
@@ -1226,7 +1337,7 @@ mod tests {
                 .unwrap()
                 .get_changes()
                 .len(),
-            1
+            2
         );
     }
 

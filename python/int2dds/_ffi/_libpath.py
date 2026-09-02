@@ -80,7 +80,7 @@ def find_library() -> str:
         # at a directory (e.g. CI, the C# binding), that directory would be taken
         # for the library and ffi.dlopen() would break, so only file candidates may
         # be selected. is_file() follows symlinks, so the
-        # libint2dds_ffi.so -> .so.0 -> .so.0.1.1 chain in the Linux release
+        # libint2dds_ffi.so -> .so.0 -> .so.0.1.3 chain in the Linux release
         # archive still resolves.
         if path.is_file():
             return str(path)

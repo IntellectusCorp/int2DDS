@@ -11,6 +11,7 @@
 //! - Ownership strength arbitration for exclusive ownership
 //! - TimeBasedFilter enforcement
 
+use crate::utils::notify::{callback_handle, notify_user};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt::Debug,
@@ -94,6 +95,9 @@ pub(crate) struct DataReaderHistoryCache<Foo> {
     time_based_filter: TimeBasedFilter,
     // Receive-side ContentFilteredTopic hook (type-erased so the trait impl can call it).
     content_filter: Option<Arc<dyn Fn(&CacheChange) -> bool + Send + Sync>>,
+    // Sticky: set once a finite-lifespan sample is stored, so read-time purge
+    // can skip scanning caches that can never hold an expirable sample.
+    seen_finite_lifespan: bool,
 }
 
 // DESTINATION_ORDER comparison key: reception or source timestamp, then sequence number.
@@ -121,6 +125,10 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
 
     // Insert into the change's instance bucket in DESTINATION_ORDER.
     fn insert_change_sorted(&mut self, change: Arc<CacheChange>) {
+        if change.lifespan_duration().is_some_and(|d| !d.is_infinite()) {
+            self.seen_finite_lifespan = true;
+        }
+
         let kind = self.destination_order_kind;
         if let Ok(mut map) = self.instance_map.lock() {
             let bucket = map.entry(change.instance_handle()).or_default();
@@ -222,19 +230,30 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
 
     // Reader override: enforce Lifespan at read time using the live reference mode.
     fn purge_expired_on_read(&mut self) -> DdsResult<()> {
+        // No finite-lifespan sample was ever stored, so nothing can expire.
+        if !self.seen_finite_lifespan {
+            return Ok(());
+        }
+
         let now = RtpsTime::now();
         let reference = self.reader_lifespan_reference();
+
         let mut to_remove = Vec::new();
-        for change in self.get_changes().iter() {
-            let Some(lifespan) = change.lifespan_duration() else { continue };
-            if lifespan.is_infinite() {
-                continue;
-            }
-            let Some(expiry) = sample_expiry(change, lifespan, reference) else { continue };
-            if now >= expiry {
-                to_remove.push(change.clone());
+        if let Ok(map) = self.instance_map.lock() {
+            for bucket in map.values() {
+                for change in bucket.iter() {
+                    let Some(lifespan) = change.lifespan_duration() else { continue };
+                    if lifespan.is_infinite() {
+                        continue;
+                    }
+                    let Some(expiry) = sample_expiry(change, lifespan, reference) else { continue };
+                    if now >= expiry {
+                        to_remove.push(change.clone());
+                    }
+                }
             }
         }
+
         for change in to_remove {
             // Best-effort, matching the generic purge: a read must not fail on a purge hiccup.
             let _ = self.remove_change(change);
@@ -380,7 +399,7 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
 
         let removed_change = self.ensure_capacity(immutable_change.instance_handle())?;
 
-        self.insert_change_sorted(immutable_change.clone());
+        self.insert_change_sorted(immutable_change);
 
         Ok((removed_change, false))
     }
@@ -389,7 +408,7 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
         let data_reader = self
             .data_reader
             .upgrade()
-            .ok_or(DdsError::Error("DataReader has been dropped".to_string()))?;
+            .ok_or_else(|| DdsError::Error("DataReader has been dropped".to_string()))?;
 
         let instance_handle = data_reader.fallback_instance_handle(change)?;
         change.set_instance_handle(instance_handle);
@@ -639,7 +658,16 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
             status_callback: Arc::new(Mutex::new(None)),
             time_based_filter: TimeBasedFilter::new(),
             content_filter: None,
+            seen_finite_lifespan: false,
         }
+    }
+
+    // True when any instance bucket holds a sample, without snapshotting the cache.
+    pub(crate) fn has_changes(&self) -> bool {
+        self.instance_map
+            .lock()
+            .map(|m| m.values().any(|bucket| !bucket.is_empty()))
+            .unwrap_or(false)
     }
 
     // TOPIC ordered_access: merge the per-instance buckets (each already DESTINATION_ORDER
@@ -710,7 +738,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
         let data_reader = self
             .data_reader
             .upgrade()
-            .ok_or(DdsError::Error("DataReader has been dropped".to_string()))?;
+            .ok_or_else(|| DdsError::Error("DataReader has been dropped".to_string()))?;
 
         let change_kind = cache_change.kind();
         let mut state_changed = false;
@@ -829,7 +857,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
         let data_reader = self
             .data_reader
             .upgrade()
-            .ok_or(DdsError::Error("DataReader has been dropped".to_string()))?;
+            .ok_or_else(|| DdsError::Error("DataReader has been dropped".to_string()))?;
         let state_changed = data_reader.update_instance_state(
             instance_handle,
             InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE,
@@ -1026,27 +1054,20 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
         &self,
         f: Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>,
     ) {
-        match self.status_callback.lock() {
-            Ok(mut callback) => {
-                callback.replace(f);
-            }
-            Err(e) => {
-                log::error!("Failed to lock callback: {:?}", e);
-            }
-        }
+        self.status_callback.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).replace(f);
     }
 
     // Invokes the status callback when a sample is rejected.
+    //
+    // This is the only path to the user's `on_sample_rejected`, and it runs on the RTPS receive
+    // thread (via `ensure_capacity`) and on the timer thread (via `deliver_held_sample`), so it
+    // needs the same boundary as the RTPS-side callbacks: lift the callback out before calling
+    // it, and contain a panic rather than letting it end the thread.
     fn on_sample_rejected(&self, info: SampleRejectedStatus) {
-        match self.status_callback.lock() {
-            Ok(callback) => {
-                if let Some(callback) = callback.as_ref() {
-                    callback(StatusKind::SAMPLE_REJECTED, Some(Arc::new(info)));
-                }
-            }
-            Err(e) => {
-                log::error!("Failed to lock callback: {:?}", e);
-            }
+        if let Some(callback) = callback_handle(&self.status_callback) {
+            notify_user("data_reader_history", || {
+                callback(StatusKind::SAMPLE_REJECTED, Some(Arc::new(info)))
+            });
         }
     }
 }
