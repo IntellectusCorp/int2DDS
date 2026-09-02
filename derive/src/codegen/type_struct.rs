@@ -1404,9 +1404,7 @@ fn generate_cdr_mutable_deserialize_impl(
             let field_name_str = field_name.to_string();
             let field_config = parse_field_attributes(field);
             let is_optional = is_option_type(&field.ty);
-            if field_config.non_serialized {
-                quote! { #field_name }
-            } else if is_optional {
+            if field_config.non_serialized || is_optional {
                 quote! { #field_name }
             } else {
                 quote! {
@@ -1622,19 +1620,17 @@ fn generate_xcdr_serialize_impl(
                         field_serialize,
                     )
                 }
-            } else {
-                if is_optional {
-                    quote! {
-                        if let Some(ref opt_value) = self.#field_name {
-                            serializer.serialize_bool(true)?;
-                            #crate_path::serialize::xcdr::XcdrSerialize::serialize_xcdr(opt_value, serializer)?;
-                        } else {
-                            serializer.serialize_bool(false)?;
-                        }
+            } else if is_optional {
+                quote! {
+                    if let Some(ref opt_value) = self.#field_name {
+                        serializer.serialize_bool(true)?;
+                        #crate_path::serialize::xcdr::XcdrSerialize::serialize_xcdr(opt_value, serializer)?;
+                    } else {
+                        serializer.serialize_bool(false)?;
                     }
-                } else {
-                    field_serialize
                 }
+            } else {
+                field_serialize
             })
         })
         .collect();
