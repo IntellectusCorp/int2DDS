@@ -2,7 +2,7 @@
 .SYNOPSIS
     Stage the built Windows native artifacts into a release archive.
 .EXAMPLE
-    .github/scripts/ci/stage-native.ps1 -Triple x86_64-pc-windows-msvc -DistName windows-x86_64 -Version 0.1.1
+    .github/scripts/ci/stage-native.ps1 -Triple x86_64-pc-windows-msvc -DistName windows-x86_64 -Version 0.1.3
 #>
 param(
     [Parameter(Mandatory)][string]$Triple,
