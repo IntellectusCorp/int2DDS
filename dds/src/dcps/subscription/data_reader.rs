@@ -86,7 +86,7 @@ use crate::{
     },
     subscription::{
         data_reader_history::{DataReaderHistoryCache, ReaderChangeId},
-        data_sample::{DataSample, SamplePayload},
+        data_sample::DataSample,
         read_condition::ReadConditionTrait,
         sample_info::{InstanceInfo, SampleInfo, StateMaskExt},
     },
@@ -3269,19 +3269,7 @@ impl<Foo: DdsType> DataReader<Foo> {
             | ChangeKind::NotAliveDisposedUnregistered => false,
         };
 
-        let data = if has_valid_data {
-            // Carry fragment chunks straight through when present, so deserialization
-            // happens across them with no contiguous reassembly.
-            Some(match change.data_chunks() {
-                Some((chunks, cached)) => SamplePayload::Chained {
-                    chunks: chunks.iter().cloned().collect(),
-                    cached: cached.clone(),
-                },
-                None => SamplePayload::Contiguous(change.data_bytes()),
-            })
-        } else {
-            None
-        };
+        let data = if has_valid_data { Some(change.data_bytes()) } else { None };
 
         // Use cached instance_infos if provided, otherwise fetch
         let owned_instance_infos;
