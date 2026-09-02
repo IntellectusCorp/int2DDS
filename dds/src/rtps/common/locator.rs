@@ -5,7 +5,7 @@
 //! transport type and network address for sending and receiving RTPS messages.
 use crate::dcps::topic::type_support::DdsType;
 
-use std::{fmt::Debug, net::IpAddr};
+use std::{fmt::Debug, net::IpAddr, sync::OnceLock};
 
 use network_interface::Addr;
 use speedy::{Endianness, Readable, Writable};
@@ -271,39 +271,49 @@ pub(crate) fn is_same_host(local_ips: &[String], from_addr: std::net::SocketAddr
         || local_ips.iter().any(|ip| ip.parse::<IpAddr>().is_ok_and(|ip| ip == sender_ip))
 }
 
-/// Every UDP or TCP locator rewritten to the loopback address of its own
-/// family, with the duplicates that collapses into removed. Other kinds carry
-/// no routable address and are left alone.
-///
-/// For a co-located peer this is the whole of address selection. Every address
-/// such a peer announced lands in the one socket it opened, and a packet
-/// addressed to a local address travels over loopback anyway, so which of them
-/// is used changes nothing but how many copies are sent. Loopback is used
-/// rather than one of the announced addresses because choosing between those
-/// would mean ranking interfaces, and the pick would as easily land on a
-/// container bridge that disappears on the next restart as on the real NIC.
-///
-/// This relies on the peer accepting traffic on loopback, which holds for a
-/// unicast socket bound to the wildcard address - every implementation's
-/// default. The peer need not have announced a loopback address to be
-/// listening on one.
+/// Every locator whose address this host owns, rewritten to loopback and the
+/// duplicates that collapses into removed. Such an address never reached the
+/// peer anyway, so the rest are left as announced and stay reachable.
 pub(crate) fn loopback_locators(locators: &[Locator]) -> Vec<Locator> {
+    // Read once: an address the host gains later cannot make an announcement
+    // already narrowed wrong, and one it loses was never reachable off-host.
+    static HOST_ADDRESSES: OnceLock<Vec<IpAddr>> = OnceLock::new();
+    let host_addresses = HOST_ADDRESSES.get_or_init(|| {
+        if_addrs::get_if_addrs()
+            .map(|interfaces| interfaces.iter().map(|interface| interface.ip()).collect())
+            .unwrap_or_default()
+    });
+
     let mut redirected: Vec<Locator> = Vec::with_capacity(locators.len());
 
     for locator in locators {
-        let loopback = match locator.kind {
-            LOCATOR_KIND_UDP_V4 => {
+        let announced = match locator.kind {
+            LOCATOR_KIND_UDP_V4 | LOCATOR_KIND_TCP_V4 => Some(IpAddr::V4(locator.to_ip_v4_addr())),
+            LOCATOR_KIND_UDP_V6 | LOCATOR_KIND_TCP_V6 => {
+                Some(IpAddr::V6(std::net::Ipv6Addr::from(locator.address)))
+            }
+            _ => None,
+        };
+        let owned_by_this_host = announced
+            .is_some_and(|address| address.is_loopback() || host_addresses.contains(&address));
+
+        let resolved = match locator.kind {
+            LOCATOR_KIND_UDP_V4 if owned_by_this_host => {
                 Locator::from_ip_v4_addr_and_port(&Ipv4Addr::LOCALHOST, locator.port)
             }
-            LOCATOR_KIND_TCP_V4 => Locator::from_tcp_v4(Ipv4Addr::LOCALHOST, locator.port),
-            LOCATOR_KIND_UDP_V6 => Locator::from_ip(std::net::Ipv6Addr::LOCALHOST, locator.port),
-            LOCATOR_KIND_TCP_V6 => {
+            LOCATOR_KIND_TCP_V4 if owned_by_this_host => {
+                Locator::from_tcp_v4(Ipv4Addr::LOCALHOST, locator.port)
+            }
+            LOCATOR_KIND_UDP_V6 if owned_by_this_host => {
+                Locator::from_ip(std::net::Ipv6Addr::LOCALHOST, locator.port)
+            }
+            LOCATOR_KIND_TCP_V6 if owned_by_this_host => {
                 Locator::from_tcp_v6(std::net::Ipv6Addr::LOCALHOST, locator.port)
             }
             _ => locator.clone(),
         };
-        if !redirected.contains(&loopback) {
-            redirected.push(loopback);
+        if !redirected.contains(&resolved) {
+            redirected.push(resolved);
         }
     }
 
@@ -342,5 +352,89 @@ impl LocatorUDPv4 {
         }
 
         Locator { kind: LOCATOR_KIND_UDP_V4, port: self.port, address }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reserved for documentation by RFC 5737 and therefore never assigned to
+    /// an interface, which is what makes it a peer address this host cannot own.
+    const OFF_HOST_ADDRESS: Ipv4Addr = Ipv4Addr::new(203, 0, 113, 1);
+
+    fn interface_address_of_this_host() -> Option<Ipv4Addr> {
+        if_addrs::get_if_addrs().ok()?.into_iter().find_map(|interface| match interface.ip() {
+            IpAddr::V4(address) if !address.is_loopback() => Some(address),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn addresses_of_this_host_collapse_into_one_destination() {
+        let announced = vec![
+            Locator::from_ip_v4_addr_and_port(&Ipv4Addr::new(127, 0, 0, 1), 7410),
+            Locator::from_ip_v4_addr_and_port(&Ipv4Addr::new(127, 0, 0, 5), 7410),
+        ];
+
+        assert_eq!(
+            loopback_locators(&announced),
+            vec![Locator::from_ip_v4_addr_and_port(&Ipv4Addr::LOCALHOST, 7410)]
+        );
+    }
+
+    #[test]
+    fn an_interface_address_of_this_host_is_narrowed() {
+        // Nothing to narrow on a host whose only address is the loopback one.
+        let Some(address) = interface_address_of_this_host() else {
+            return;
+        };
+        let announced = vec![
+            Locator::from_ip_v4_addr_and_port(&address, 7410),
+            Locator::from_tcp_v4(address, 7410),
+        ];
+
+        assert_eq!(
+            loopback_locators(&announced),
+            vec![
+                Locator::from_ip_v4_addr_and_port(&Ipv4Addr::LOCALHOST, 7410),
+                Locator::from_tcp_v4(Ipv4Addr::LOCALHOST, 7410),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_address_this_host_does_not_own_is_left_as_announced() {
+        let announced = vec![
+            Locator::from_ip_v4_addr_and_port(&OFF_HOST_ADDRESS, 7410),
+            Locator::from_tcp_v4(OFF_HOST_ADDRESS, 7410),
+        ];
+
+        assert_eq!(loopback_locators(&announced), announced);
+    }
+
+    /// The point of narrowing one locator at a time: a peer wrongly taken for a
+    /// co-located one keeps every address that can still reach it.
+    #[test]
+    fn an_unreachable_address_is_narrowed_without_costing_the_reachable_one() {
+        let announced = vec![
+            Locator::from_ip_v4_addr_and_port(&OFF_HOST_ADDRESS, 7410),
+            Locator::from_ip_v4_addr_and_port(&Ipv4Addr::new(127, 0, 0, 1), 7410),
+        ];
+
+        assert_eq!(
+            loopback_locators(&announced),
+            vec![
+                Locator::from_ip_v4_addr_and_port(&OFF_HOST_ADDRESS, 7410),
+                Locator::from_ip_v4_addr_and_port(&Ipv4Addr::LOCALHOST, 7410),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_locator_without_a_routable_address_is_left_alone() {
+        let announced = vec![Locator::from_shm(&Ipv4Addr::LOCALHOST, 7410)];
+
+        assert_eq!(loopback_locators(&announced), announced);
     }
 }
