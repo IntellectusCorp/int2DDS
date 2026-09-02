@@ -261,28 +261,31 @@ impl Locator {
     }
 }
 
-/// Whether the peer that sent `from_addr` is running on this host.
-///
-/// Read from the datagram's source address, never from the addresses it
-/// announced: an announcement can be wrong, a source address cannot.
-pub(crate) fn is_same_host(local_ips: &[String], from_addr: std::net::SocketAddr) -> bool {
+/// Every address this host answers on. Read once: an address gained later
+/// cannot undo a decision already taken, and one lost was never reachable from
+/// off-host anyway.
+fn host_addresses() -> &'static [IpAddr] {
+    static HOST_ADDRESSES: OnceLock<Vec<IpAddr>> = OnceLock::new();
+    HOST_ADDRESSES.get_or_init(|| {
+        if_addrs::get_if_addrs()
+            .map(|interfaces| interfaces.iter().map(|interface| interface.ip()).collect())
+            .unwrap_or_default()
+    })
+}
+
+/// Whether the peer that sent `from_addr` runs on this host. Every address of
+/// the host counts, not just the ones this participant sends through: the
+/// interface chosen for egress says nothing about where a peer runs.
+pub(crate) fn is_same_host(from_addr: std::net::SocketAddr) -> bool {
     let sender_ip = from_addr.ip();
-    sender_ip.is_loopback()
-        || local_ips.iter().any(|ip| ip.parse::<IpAddr>().is_ok_and(|ip| ip == sender_ip))
+    sender_ip.is_loopback() || host_addresses().contains(&sender_ip)
 }
 
 /// Every locator whose address this host owns, rewritten to loopback and the
 /// duplicates that collapses into removed. Such an address never reached the
 /// peer anyway, so the rest are left as announced and stay reachable.
 pub(crate) fn loopback_locators(locators: &[Locator]) -> Vec<Locator> {
-    // Read once: an address the host gains later cannot make an announcement
-    // already narrowed wrong, and one it loses was never reachable off-host.
-    static HOST_ADDRESSES: OnceLock<Vec<IpAddr>> = OnceLock::new();
-    let host_addresses = HOST_ADDRESSES.get_or_init(|| {
-        if_addrs::get_if_addrs()
-            .map(|interfaces| interfaces.iter().map(|interface| interface.ip()).collect())
-            .unwrap_or_default()
-    });
+    let host_addresses = host_addresses();
 
     let mut redirected: Vec<Locator> = Vec::with_capacity(locators.len());
 
@@ -358,6 +361,7 @@ impl LocatorUDPv4 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::SocketAddr;
 
     /// Reserved for documentation by RFC 5737 and therefore never assigned to
     /// an interface, which is what makes it a peer address this host cannot own.
@@ -368,6 +372,23 @@ mod tests {
             IpAddr::V4(address) if !address.is_loopback() => Some(address),
             _ => None,
         })
+    }
+
+    #[test]
+    fn a_peer_reaching_us_from_any_address_of_this_host_is_co_located() {
+        assert!(is_same_host(SocketAddr::from((Ipv4Addr::LOCALHOST, 7410))));
+
+        // The address a peer sends from need not be the one this participant
+        // sends through, so every interface of the host has to count.
+        let Some(address) = interface_address_of_this_host() else {
+            return;
+        };
+        assert!(is_same_host(SocketAddr::from((address, 7410))));
+    }
+
+    #[test]
+    fn a_peer_reaching_us_from_elsewhere_is_not_co_located() {
+        assert!(!is_same_host(SocketAddr::from((OFF_HOST_ADDRESS, 7410))));
     }
 
     #[test]

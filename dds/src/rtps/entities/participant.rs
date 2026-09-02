@@ -319,7 +319,7 @@ impl Participant {
             Some(from_addr) => *self
                 .remote_same_host
                 .entry(remote_prefix)
-                .or_insert_with(|| is_same_host(&self.working_ips, from_addr)),
+                .or_insert_with(|| is_same_host(from_addr)),
             None => self.remote_same_host.get(&remote_prefix).is_some_and(|held| *held),
         }
     }
