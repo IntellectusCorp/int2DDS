@@ -1058,7 +1058,7 @@ mod tests {
                 let mut i = 0;
                 loop {
                     let changes = reader.available_changes();
-                    if changes.len() > 0 {
+                    if !changes.is_empty() {
                         for change in changes {
                             log::info!("change: {}", change);
                         }
@@ -1849,7 +1849,7 @@ mod tests {
             "Stateful writer 1's reader proxy list should contain 1 elements after removal"
         );
         assert!(
-            stateful_writer_2.reader_proxies().lock().unwrap().len() == 0,
+            stateful_writer_2.reader_proxies().lock().unwrap().is_empty(),
             "Stateful writer 2's reader proxy list should contain 0 after removal"
         );
     }
