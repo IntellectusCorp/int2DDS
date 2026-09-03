@@ -769,6 +769,8 @@ pub(crate) struct DataRepresentationQosPolicy {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+// Variant names mirror the DDS-XTypes spec; renaming them would change the config file keys.
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum DataRepresentationId {
     #[default]
     XcdrDataRepresentation,

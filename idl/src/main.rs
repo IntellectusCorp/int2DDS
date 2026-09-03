@@ -686,7 +686,9 @@ fn process_file(args: &Args, input_file: &str) {
     if let Some(path) = &rpc_path {
         let rust_opts = codegen::rust::RustOptions { crate_path: args.crate_path.clone() };
         let rpc_opts = codegen::rpc::RpcOptions { crate_path: args.crate_path.clone() };
-        let mut code = String::from("#![allow(non_camel_case_types, dead_code, unused_imports, unreachable_patterns, unused_variables)]\n\n");
+        let mut code = String::from(
+            "#![allow(non_camel_case_types, dead_code, unused_imports, unreachable_patterns, unused_variables)]\n#![allow(clippy::useless_conversion, clippy::clone_on_copy, clippy::redundant_field_names)]\n\n",
+        );
         code.push_str(&codegen::rust::generate(&model, idl_filename, &rust_opts));
         code.push('\n');
         code.push_str(&codegen::rpc::generate(&model, &rpc_opts));

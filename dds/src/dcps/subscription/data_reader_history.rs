@@ -94,6 +94,7 @@ pub(crate) struct DataReaderHistoryCache<Foo> {
     // sample so a runtime QoS change takes effect immediately.
     time_based_filter: TimeBasedFilter,
     // Receive-side ContentFilteredTopic hook (type-erased so the trait impl can call it).
+    #[allow(clippy::type_complexity)]
     content_filter: Option<Arc<dyn Fn(&CacheChange) -> bool + Send + Sync>>,
     // Sticky: set once a finite-lifespan sample is stored, so read-time purge
     // can skip scanning caches that can never hold an expirable sample.
@@ -1675,8 +1676,10 @@ mod tests {
     fn by_source_timestamp_orders_bucket_by_source_not_arrival() {
         // BY_SOURCE_TIMESTAMP: a sample with a smaller source_timestamp arriving later still
         // sorts ahead of an earlier-arriving sample with a larger source_timestamp.
-        let mut reader_qos = DataReaderQos::default();
-        reader_qos.history = HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true };
+        let mut reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            ..Default::default()
+        };
         reader_qos.destination_order.kind = DestinationOrderQosPolicyKind::BySourceTimestamp;
 
         let (participant, data_reader) = create_with_key_datareader(reader_qos);
@@ -1754,8 +1757,10 @@ mod tests {
         // Two instances A,B interleaved by ascending source timestamp: A0,B0,A1,B1.
         // get_changes() returns instance blocks; get_changes_for_topic_scoped_ordered_access()
         // k-way merges the buckets into one globally source-ordered list.
-        let mut reader_qos = DataReaderQos::default();
-        reader_qos.history = HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true };
+        let mut reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
+            ..Default::default()
+        };
         reader_qos.destination_order.kind = DestinationOrderQosPolicyKind::BySourceTimestamp;
 
         let (participant, data_reader) = create_with_key_datareader(reader_qos);

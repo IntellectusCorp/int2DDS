@@ -1217,13 +1217,11 @@ impl UserLogic {
                         &mut send_buffer,
                     )
                     .is_ok()
+                        && self.send_rtps_message_to_locators(locators.iter(), &send_buffer).is_ok()
                     {
-                        if self.send_rtps_message_to_locators(locators.iter(), &send_buffer).is_ok()
-                        {
-                            is_any_fragment_sent = true;
-                            if heartbeat_info.is_some() {
-                                writer.increase_heartbeat_count();
-                            }
+                        is_any_fragment_sent = true;
+                        if heartbeat_info.is_some() {
+                            writer.increase_heartbeat_count();
                         }
                     }
                 }

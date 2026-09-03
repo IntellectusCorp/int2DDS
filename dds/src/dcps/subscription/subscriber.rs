@@ -1401,6 +1401,7 @@ mod tests {
     // Deletes the reader from inside its own listener and reports the error. The handles are
     // stored after creation and taken once, so the delete runs on the receive thread.
     struct SelfDeletingListener {
+        #[allow(clippy::type_complexity)]
         handles: Arc<Mutex<Option<(Subscriber, DataReader<HelloWorld>)>>>,
         result: SyncSender<DdsError>,
     }
@@ -1533,6 +1534,7 @@ mod tests {
         };
 
         let (result_tx, result_rx) = std::sync::mpsc::sync_channel::<DdsError>(1);
+        #[allow(clippy::type_complexity)]
         let handles: Arc<Mutex<Option<(Subscriber, DataReader<HelloWorld>)>>> =
             Arc::new(Mutex::new(None));
 

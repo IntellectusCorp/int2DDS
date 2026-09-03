@@ -52,8 +52,10 @@ fn autoenable_created_entities_false_direct_parent() {
         .unwrap();
 
     // Publisher with autoenable_created_entities = false
-    let mut publisher_qos = PublisherQos::default();
-    publisher_qos.entity_factory = EntityFactoryQosPolicy { autoenable_created_entities: false };
+    let publisher_qos = PublisherQos {
+        entity_factory: EntityFactoryQosPolicy { autoenable_created_entities: false },
+        ..Default::default()
+    };
 
     let publisher =
         participant.create_publisher(publisher_qos, None, StatusMask::default()).unwrap();
@@ -87,9 +89,10 @@ fn autoenable_created_entities_false_dp() {
     let domain_id = next_domain_id();
     let factory = DomainParticipantFactory::get_instance();
 
-    let mut domain_participant_qos = DomainParticipantQos::default();
-    domain_participant_qos.entity_factory =
-        EntityFactoryQosPolicy { autoenable_created_entities: false };
+    let domain_participant_qos = DomainParticipantQos {
+        entity_factory: EntityFactoryQosPolicy { autoenable_created_entities: false },
+        ..Default::default()
+    };
 
     let participant = factory
         .create_participant(domain_id, domain_participant_qos, None, StatusMask::default())
