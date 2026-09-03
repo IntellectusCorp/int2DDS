@@ -97,7 +97,104 @@ impl UdpListener {
         interface_address_list.clone().map(|a| Locator::from_ip_and_port(&a, port as u32)).collect()
     }
 
-    pub(crate) fn new_multicast(port: u16, working_ips: &[String]) -> std::io::Result<Self> {
+    /// Multicast listener for discovery traffic.
+    ///
+    /// Every participant needs discovery reception, so a failed join on the
+    /// sending interface is reported but still leaves the remaining interfaces
+    /// receiving.
+    pub(crate) fn new_discovery_multicast(
+        port: u16,
+        working_ips: &[String],
+        send_interface_ip: Option<Ipv4Addr>,
+    ) -> std::io::Result<Self> {
+        Self::new_multicast(port, working_ips, send_interface_ip, false, Some(&MULTICAST_IP))
+    }
+
+    /// Multicast listener for user data, one per group.
+    ///
+    /// Windows and macOS filter by the socket's own membership, while Linux
+    /// hands a socket bound to `0.0.0.0` every group joined anywhere on the
+    /// host until `IP_MULTICAST_ALL` is turned off.
+    pub(crate) fn new_user_multicast(
+        port: u16,
+        group: &Ipv4Addr,
+        working_ips: &[String],
+        send_interface_ip: Ipv4Addr,
+    ) -> std::io::Result<Self> {
+        let socket = Socket2::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+        socket.set_reuse_address(true)?;
+        #[cfg(unix)]
+        socket.set_reuse_port(true)?;
+
+        if let Some(size) = Self::get_socket_buffer_size() {
+            let _ = socket.set_recv_buffer_size(size);
+        } else if let Ok(current) = socket.recv_buffer_size() {
+            let _ = socket.set_recv_buffer_size(current.saturating_mul(2));
+        }
+        let recv_buffer_size = socket.recv_buffer_size().ok();
+
+        #[cfg(target_os = "linux")]
+        socket.set_multicast_all_v4(false)?;
+
+        let addr: SocketAddr = format!("0.0.0.0:{}", port).parse().unwrap();
+        socket.bind(&SockAddr::from(addr))?;
+
+        Self::join_multicast_group(&socket, group, working_ips, Some(send_interface_ip), true)?;
+
+        socket.set_nonblocking(true)?;
+        let socket = mio::net::UdpSocket::from_std(socket.into());
+
+        Ok(Self { socket: Some(socket), port, recv_arena: new_recv_arena(), recv_buffer_size })
+    }
+
+    /// Joining on the interface multicast is sent from matters for the
+    /// self-transmission case: sending and receiving on different interfaces
+    /// looks like a successful send that nobody ever receives. The remaining
+    /// working interfaces are joined individually so reception does not depend
+    /// on the OS default route being usable.
+    pub(crate) fn join_multicast_group(
+        socket: &Socket2,
+        group: &Ipv4Addr,
+        working_ips: &[String],
+        send_interface_ip: Option<Ipv4Addr>,
+        send_interface_required: bool,
+    ) -> std::io::Result<()> {
+        if let Some(addr) = send_interface_ip {
+            if let Err(e) = socket.join_multicast_v4(group, &addr) {
+                if send_interface_required {
+                    return Err(e);
+                }
+                error!("Fail - join_multicast_v4 on sending interface : {:?} {:?}", e, addr);
+            }
+        }
+
+        for ip in working_ips {
+            match ip.parse::<std::net::Ipv4Addr>() {
+                Ok(addr) => {
+                    // Joining twice on one interface fails; it is already done above.
+                    if Some(addr) == send_interface_ip {
+                        continue;
+                    }
+                    socket.join_multicast_v4(group, &addr).unwrap_or_else(|e| {
+                        error!("Fail - join_multicast_v4 : {:?} {:?}", e, addr);
+                    });
+                }
+                Err(e) => {
+                    log::warn!("Skipping non-IPv4 address: {} ({})", ip, e);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn new_multicast(
+        port: u16,
+        working_ips: &[String],
+        send_interface_ip: Option<Ipv4Addr>,
+        send_interface_required: bool,
+        group: Option<&Ipv4Addr>,
+    ) -> std::io::Result<Self> {
         let socket = Socket2::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
         socket.set_reuse_address(true)?;
         socket.set_broadcast(true)?;
@@ -112,19 +209,14 @@ impl UdpListener {
         }
         let recv_buffer_size = socket.recv_buffer_size().ok();
 
-        // Join multicast group on each working interface individually,
-        // so multicast works regardless of OS default route availability.
-        for ip in working_ips {
-            match ip.parse::<std::net::Ipv4Addr>() {
-                Ok(addr) => {
-                    socket.join_multicast_v4(&MULTICAST_IP, &addr).unwrap_or_else(|e| {
-                        error!("Fail - join_multicast_v4 : {:?} {:?}", e, addr);
-                    });
-                }
-                Err(e) => {
-                    log::warn!("Skipping non-IPv4 address: {} ({})", ip, e);
-                }
-            }
+        if let Some(group) = group {
+            Self::join_multicast_group(
+                &socket,
+                group,
+                working_ips,
+                send_interface_ip,
+                send_interface_required,
+            )?;
         }
 
         let addr: SocketAddr = format!("0.0.0.0:{}", port).parse().unwrap();

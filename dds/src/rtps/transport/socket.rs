@@ -1,3 +1,4 @@
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::vec;
 
@@ -158,7 +159,13 @@ impl Socket {
     // to send multicast out of all NICs simultaneously.
     // 0.0.0.0 relies on default route, which doesn't exist in gateway-less environments,
     // and multicast addresses (e.g. 239.x) don't match any subnet route.
-    pub(crate) fn get_sender_multicast_if_addr(&self) -> String {
+    pub(crate) fn get_sender_multicast_if_addr(&self, configured_if: Option<Ipv4Addr>) -> String {
+        // A per-participant property beats every process-wide source below it.
+        if let Some(ip) = configured_if {
+            log::debug!("Using property-configured multicast interface IP: {}", ip);
+            return ip.to_string();
+        }
+
         // From enterprise hooks: use the hook-specified IP directly
         if self.working_ips.from_feature {
             log::debug!(
@@ -224,7 +231,7 @@ mod tests {
             0,
             socket.participant_id(),
             socket.get_sender_bind_addr(),
-            socket.get_sender_multicast_if_addr(),
+            socket.get_sender_multicast_if_addr(None),
             socket.working_ips(),
             [0u8; 12],
             None,

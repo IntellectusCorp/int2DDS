@@ -4,6 +4,8 @@
 //! managing participant lifecycles, entity creation, and message routing between
 //! the two layers.
 
+use std::collections::HashMap;
+use std::net::Ipv4Addr;
 use std::sync::{Arc, RwLock, Weak};
 
 use log::debug;
@@ -55,6 +57,7 @@ use crate::{
         transport::{
             plugin::{TransportPlugin, TransportPluginFactory},
             socket::Socket,
+            TransportConfig as _, UdpConfig,
         },
     },
     utils::timer::timer_handler::TimerHandler,
@@ -71,6 +74,8 @@ pub(crate) struct DcpsBridge {
     sedp_logic: Arc<Option<SedpLogic>>,
     user_logic: Arc<Option<UserLogic>>,
     thread_monitor: Option<ThreadMonitor>,
+
+    user_multicast_reader_counts: HashMap<Ipv4Addr, usize>,
 }
 
 pub(crate) static PARTICIPANTS: RwLock<Vec<Weak<Participant>>> = RwLock::new(Vec::new());
@@ -111,7 +116,8 @@ impl DcpsBridge {
         };
 
         let bind_ip = socket.get_sender_bind_addr();
-        let multicast_if_ip = socket.get_sender_multicast_if_addr();
+        let multicast_if_ip = socket
+            .get_sender_multicast_if_addr(UdpConfig::from_property(property).multicast_interface);
         let working_ips: Vec<String> =
             socket.working_ips().iter().map(|ip| ip.to_string()).collect();
 
@@ -181,6 +187,7 @@ impl DcpsBridge {
             sedp_logic,
             user_logic,
             thread_monitor: None,
+            user_multicast_reader_counts: HashMap::new(),
         })
     }
 
@@ -228,17 +235,58 @@ impl DcpsBridge {
         Ok(())
     }
 
+    pub(crate) fn ensure_user_multicast_traffic(&mut self, group: Ipv4Addr) -> RtpsResult<()> {
+        let Some(user_logic) = self.user_logic.as_ref() else {
+            return Err(RtpsError::new(RtpsErrorCode::NotInitialized, "user_logic is not set"));
+        };
+
+        let transport = self.socket.transport();
+        transport.ensure_user_multicast_listener(group).map_err(|e| {
+            RtpsError::new(
+                RtpsErrorCode::Io,
+                format!("Failed to enable user data multicast reception: {e}"),
+            )
+        })?;
+
+        // A source only appears for a group whose socket was just created, so a
+        // group that is already being listened to starts no second thread.
+        while let Some((group_locator, source)) = transport.take_user_data_multicast_source() {
+            user_logic.start_user_multicast_traffic(group_locator, source)?;
+        }
+
+        *self.user_multicast_reader_counts.entry(group).or_insert(0) += 1;
+        Ok(())
+    }
+
+    pub(crate) fn release_user_multicast_traffic(&mut self, group: Ipv4Addr) -> RtpsResult<()> {
+        let Some(count) = self.user_multicast_reader_counts.get_mut(&group) else {
+            return Ok(());
+        };
+
+        *count = count.saturating_sub(1);
+        if *count > 0 {
+            return Ok(());
+        }
+        self.user_multicast_reader_counts.remove(&group);
+
+        if let Some(user_logic) = self.user_logic.as_ref() {
+            user_logic.stop_user_multicast_traffic(group)?;
+        }
+        self.socket.transport().release_user_multicast_listener(group);
+
+        Ok(())
+    }
+
     pub(crate) fn next_entity_guid(&self, entity_kind: EntityKind) -> Guid {
         let next_entity_id = self.participant.next_entity_key(entity_kind);
         Guid::new(self.guid_prefix, next_entity_id)
     }
 
-    fn default_endpoint_info(&self) -> RtpsResult<(Vec<Locator>, Vec<Locator>)> {
+    /// Multicast is excluded here: a group is chosen per DataReader through QoS,
+    /// and no endpoint advertises one by default.
+    fn default_unicast_locators(&self) -> RtpsResult<Vec<Locator>> {
         let local_participant_data = self.participant.local_participant_proxy_data();
-        Ok((
-            local_participant_data.default_unicast_locator_list().clone(),
-            local_participant_data.default_multicast_locator_list().clone(),
-        ))
+        Ok(local_participant_data.default_unicast_locator_list().clone())
     }
 
     #[allow(clippy::type_complexity)]
@@ -257,7 +305,7 @@ impl DcpsBridge {
             return Err(RtpsError::new(RtpsErrorCode::InvalidEntityKind, "Invalid entity kind"));
         };
 
-        let (unicast_locator_list, multicast_locator_list) = self.default_endpoint_info()?;
+        let unicast_locator_list = self.default_unicast_locators()?;
 
         for locator in &unicast_locator_list {
             publication_builtin_topic_data.add_unicast_locator(locator.clone());
@@ -269,8 +317,8 @@ impl DcpsBridge {
         {
             Arc::new(StatefulWriter::new(
                 datawriter_guid,
-                unicast_locator_list,
-                multicast_locator_list,
+                unicast_locator_list.clone(),
+                Vec::new(),
                 ReliabilityQosPolicyKind::Reliable,
                 topic_kind,
                 datawriter_guid.entity_id(),
@@ -282,8 +330,8 @@ impl DcpsBridge {
         } else {
             Arc::new(StatelessWriter::new(
                 datawriter_guid,
-                unicast_locator_list,
-                multicast_locator_list,
+                unicast_locator_list.clone(),
+                Vec::new(),
                 ReliabilityQosPolicyKind::BestEffort,
                 topic_kind,
                 datawriter_guid.entity_id(),
@@ -368,7 +416,17 @@ impl DcpsBridge {
         topic_name: String,
         entity_id: EntityId,
     ) -> Result<(), RtpsError> {
+        let group = self
+            .participant
+            .find_reader_from_entity_id(entity_id)
+            .and_then(|reader| reader.get_subscription_builtin_topic_data().ok())
+            .and_then(|data| data.reader_multicast_extension().group_ipv4());
+
         let _ = self.participant.remove_reader(topic_name, entity_id);
+
+        if let Some(group) = group {
+            self.release_user_multicast_traffic(group)?;
+        }
         Ok(())
     }
 
@@ -390,19 +448,24 @@ impl DcpsBridge {
             return Err(RtpsError::new(RtpsErrorCode::InvalidEntityKind, "Invalid entity kind"));
         };
 
-        let (unicast_locator_list, multicast_locator_list) = self.default_endpoint_info()?;
+        let unicast_locator_list = self.default_unicast_locators()?;
 
-        // Clone locator lists before using them in Reader constructors
-        let unicast_locator_list_clone = unicast_locator_list.clone();
-        let multicast_locator_list_clone = multicast_locator_list.clone();
-
-        for locator in &unicast_locator_list_clone {
+        for locator in &unicast_locator_list {
             subscription_builtin_topic_data.add_unicast_locator(locator.clone());
         }
 
-        for locator in &multicast_locator_list_clone {
-            subscription_builtin_topic_data.add_multicast_locator(locator.clone());
-        }
+        let multicast_locator_list =
+            match subscription_builtin_topic_data.reader_multicast_extension().group_ipv4() {
+                Some(group) => {
+                    let locators =
+                        self.socket.transport().advertised_default_multicast_locators(vec![group]);
+                    for locator in &locators {
+                        subscription_builtin_topic_data.add_multicast_locator(locator.clone());
+                    }
+                    locators
+                }
+                None => Vec::new(),
+            };
 
         let reader: Arc<dyn Reader + Send + Sync> = if subscription_builtin_topic_data.is_reliable()
         {
@@ -410,8 +473,8 @@ impl DcpsBridge {
                 datareader_guid,
                 topic_kind,
                 ReliabilityQosPolicyKind::Reliable,
-                unicast_locator_list_clone,
-                multicast_locator_list_clone,
+                unicast_locator_list.clone(),
+                multicast_locator_list.clone(),
                 datareader_guid.entity_id(),
                 false,
                 change_callback,
@@ -424,8 +487,8 @@ impl DcpsBridge {
                 datareader_guid,
                 topic_kind,
                 ReliabilityQosPolicyKind::BestEffort,
-                unicast_locator_list_clone,
-                multicast_locator_list_clone,
+                unicast_locator_list.clone(),
+                multicast_locator_list.clone(),
                 datareader_guid.entity_id(),
                 false,
                 change_callback,
@@ -617,6 +680,9 @@ impl DcpsBridge {
         if let Some(user_logic) = self.user_logic.as_ref() {
             user_logic.wake_unicast_listening_thread();
             user_logic.join_unicast_listening_thread()?;
+
+            user_logic.wake_multicast_listening_thread();
+            user_logic.join_multicast_listening_thread()?;
         }
 
         // Shutdown participant liveliness monitor
@@ -792,13 +858,13 @@ impl DcpsBridge {
 #[cfg(test)]
 mod tests {
     use log::debug;
-    use std::{sync::Mutex, thread, time::Duration as StdDuration};
+    use std::{net::Ipv4Addr, sync::Mutex, thread, time::Duration as StdDuration};
 
     use super::*;
     use crate::{
         core::time::Duration,
         infrastructure::{
-            qos_policy::ReliabilityQosPolicy,
+            qos_policy::{ReaderMulticastExtensionQosPolicy, ReliabilityQosPolicy},
             status::{PublicationMatchedStatus, StatusInfo, StatusKind, SubscriptionMatchedStatus},
         },
         publication::qos::{DataWriterQos, PublisherQos},
@@ -810,6 +876,7 @@ mod tests {
                 writer::{reader_locator::ReaderLocator, reader_proxy::ReaderProxy},
             },
             logic::common::MulticastThreadHandler as _,
+            transport::port_manager::PortManager,
         },
         subscription::qos::{DataReaderQos, SubscriberQos},
         test_utils::unique_domain_id,
@@ -1586,6 +1653,200 @@ mod tests {
             stateful_reader.writer_proxies().lock().unwrap().is_empty(),
             "WriterProxy list should be empty after removal"
         );
+    }
+
+    fn create_reader_and_take_subscription_data(
+        bridge: &mut DcpsBridge,
+        topic_name: &str,
+        group_address: Option<&str>,
+    ) -> SubscriptionBuiltinTopicData {
+        let reader_qos = DataReaderQos {
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration { sec: 0, nanosec: 100_000_000 },
+            },
+            reader_multicast_extension: ReaderMulticastExtensionQosPolicy {
+                group_address: group_address.map(str::to_string),
+            },
+            ..Default::default()
+        };
+
+        let mut subscription_builtin_topic_data = SubscriptionBuiltinTopicData::new(
+            &reader_qos,
+            &SubscriberQos::default(),
+            &TopicQos::default(),
+        );
+        subscription_builtin_topic_data.set_topic_name(topic_name.to_string());
+        subscription_builtin_topic_data.set_type_name("HelloWorld".to_string());
+        subscription_builtin_topic_data
+            .set_endpoint_guid(bridge.next_entity_guid(EntityKind::USER_DEFINED_READER_NO_KEY));
+
+        let reader = bridge
+            .create_rtps_reader(
+                subscription_builtin_topic_data,
+                None,
+                Some(Arc::new(tests::change_callback)),
+                Some(Arc::new(tests::status_callback)),
+            )
+            .unwrap();
+
+        reader
+            .as_any()
+            .downcast_ref::<StatefulReader>()
+            .unwrap()
+            .subscription_builtin_topic_data()
+            .unwrap()
+    }
+
+    /// The group address is what tells a remote writer that multicast delivery is
+    /// possible, so SEDP must carry exactly the address the reader asked for.
+    #[test]
+    fn test_reader_advertises_the_group_address_from_its_qos() {
+        let domain_id = unique_domain_id();
+        let dcps_bridge =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default()).unwrap()));
+
+        let mut guard = dcps_bridge.lock().unwrap();
+        guard.init().unwrap();
+
+        let expected_group = Locator::from_ip_v4_addr_and_port(
+            &Ipv4Addr::new(239, 255, 12, 7),
+            PortManager::get_user_traffic_multicast_port(domain_id as u32) as u32,
+        );
+
+        let opted_in = create_reader_and_take_subscription_data(
+            &mut guard,
+            "multicast_on_topic",
+            Some("239.255.12.7"),
+        );
+        assert_eq!(
+            opted_in.multicast_locator_list(),
+            vec![expected_group],
+            "A reader must advertise the group its QoS selected, at the domain port"
+        );
+
+        let opted_out =
+            create_reader_and_take_subscription_data(&mut guard, "multicast_off_topic", None);
+        assert!(
+            opted_out.multicast_locator_list().is_empty(),
+            "A reader that did not opt in must not advertise any multicast locator"
+        );
+
+        assert!(
+            !opted_in.unicast_locator_list().is_empty()
+                && !opted_out.unicast_locator_list().is_empty(),
+            "Unicast advertisement must stay untouched in both cases"
+        );
+
+        let _ = guard.disable();
+    }
+
+    #[test]
+    fn test_every_reader_gets_a_listener_for_its_group() {
+        let domain_id = unique_domain_id();
+        let dcps_bridge =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default()).unwrap()));
+
+        let mut guard = dcps_bridge.lock().unwrap();
+        guard.init().unwrap();
+
+        guard.ensure_user_multicast_traffic(Ipv4Addr::new(239, 255, 12, 7)).unwrap();
+        guard
+            .ensure_user_multicast_traffic(Ipv4Addr::new(239, 255, 12, 8))
+            .expect("a second group must get a listener of its own");
+        guard
+            .ensure_user_multicast_traffic(Ipv4Addr::new(239, 255, 12, 7))
+            .expect("a group already served must be accepted without opening a second socket");
+
+        // A unicast address cannot be joined. Reaching that failure proves the
+        // join runs on every call instead of being skipped once a thread is up.
+        assert!(
+            guard.ensure_user_multicast_traffic(Ipv4Addr::new(10, 0, 0, 1)).is_err(),
+            "the join path must still be reached after the listening threads started"
+        );
+
+        let _ = guard.disable();
+    }
+
+    #[test]
+    fn test_stopping_one_group_leaves_the_other_listening() {
+        let domain_id = unique_domain_id();
+        let dcps_bridge =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default()).unwrap()));
+
+        let mut guard = dcps_bridge.lock().unwrap();
+        guard.init().unwrap();
+
+        let stopped = Ipv4Addr::new(239, 255, 12, 9);
+        let kept = Ipv4Addr::new(239, 255, 12, 10);
+        guard.ensure_user_multicast_traffic(stopped).unwrap();
+        guard.ensure_user_multicast_traffic(kept).unwrap();
+
+        let user_logic =
+            guard.user_logic.as_ref().as_ref().expect("user_logic must be set").clone();
+        assert_eq!(user_logic.multicast_listening_groups(), vec![stopped, kept]);
+
+        // The join inside stop only returns once the thread has read the stop
+        // flag, so an unread flag hangs here instead of passing quietly.
+        user_logic.stop_user_multicast_traffic(stopped).unwrap();
+        assert_eq!(
+            user_logic.multicast_listening_groups(),
+            vec![kept],
+            "Stopping one group must not disturb the groups still in use"
+        );
+
+        user_logic
+            .stop_user_multicast_traffic(stopped)
+            .expect("stopping a group that is already gone must be accepted");
+
+        let _ = guard.disable();
+    }
+
+    #[test]
+    fn test_group_is_released_only_when_its_last_reader_is_gone() {
+        let domain_id = unique_domain_id();
+        let dcps_bridge =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default()).unwrap()));
+
+        let mut guard = dcps_bridge.lock().unwrap();
+        guard.init().unwrap();
+
+        let address = "239.255.12.11";
+        let group = Ipv4Addr::new(239, 255, 12, 11);
+
+        // Mirrors the DataReader path: reception is ensured, then the reader is made.
+        guard.ensure_user_multicast_traffic(group).unwrap();
+        let first = create_reader_and_take_subscription_data(&mut guard, "first", Some(address));
+        guard.ensure_user_multicast_traffic(group).unwrap();
+        let second = create_reader_and_take_subscription_data(&mut guard, "second", Some(address));
+
+        let user_logic =
+            guard.user_logic.as_ref().as_ref().expect("user_logic must be set").clone();
+        assert_eq!(user_logic.multicast_listening_groups(), vec![group]);
+
+        guard.delete_rtps_reader("first".to_string(), first.endpoint_guid().entity_id()).unwrap();
+        assert_eq!(
+            user_logic.multicast_listening_groups(),
+            vec![group],
+            "A group still carrying a reader must keep receiving"
+        );
+
+        guard.delete_rtps_reader("second".to_string(), second.endpoint_guid().entity_id()).unwrap();
+        assert!(
+            user_logic.multicast_listening_groups().is_empty(),
+            "The last reader leaving must end the reception"
+        );
+
+        // The transport has to forget the group as well, or this call would be
+        // taken as already served and leave the participant deaf to it.
+        guard.ensure_user_multicast_traffic(group).unwrap();
+        assert_eq!(
+            user_logic.multicast_listening_groups(),
+            vec![group],
+            "A released group must be joinable again"
+        );
+
+        let _ = guard.disable();
     }
 
     #[test]

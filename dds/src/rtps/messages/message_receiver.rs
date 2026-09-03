@@ -81,6 +81,7 @@ pub(crate) struct MessageReceiver {
     timestamp: RtpsTime,
     rtps_message: Option<Arc<RtpsMessage<'static>>>,
     sender_addr: SocketAddr, // for extended discovery message
+    arrival_multicast_group: Option<Locator>,
 }
 
 #[allow(dead_code)]
@@ -106,7 +107,23 @@ impl MessageReceiver {
             timestamp: RtpsTime::INVALID,
             rtps_message: None,
             sender_addr: *from_addr,
+            arrival_multicast_group: None,
         }
+    }
+
+    pub(crate) fn new_multicast(
+        participant_guid_prefix: GuidPrefix,
+        from_addr: &SocketAddr,
+        group_locator: Locator,
+    ) -> Self {
+        Self {
+            arrival_multicast_group: Some(group_locator),
+            ..Self::new(participant_guid_prefix, from_addr)
+        }
+    }
+
+    pub(crate) fn arrival_multicast_group(&self) -> Option<&Locator> {
+        self.arrival_multicast_group.as_ref()
     }
 
     pub(crate) fn get_source_timestamp(&self) -> Option<RtpsTime> {

@@ -763,6 +763,25 @@ impl From<qos_policy::ReaderReliabilityExtensionQosPolicy> for ReaderReliability
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
+pub(crate) struct ReaderMulticastExtensionQosPolicy {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) group_address: Option<String>,
+}
+
+impl From<ReaderMulticastExtensionQosPolicy> for qos_policy::ReaderMulticastExtensionQosPolicy {
+    fn from(external: ReaderMulticastExtensionQosPolicy) -> Self {
+        Self { group_address: external.group_address }
+    }
+}
+
+impl From<qos_policy::ReaderMulticastExtensionQosPolicy> for ReaderMulticastExtensionQosPolicy {
+    fn from(internal: qos_policy::ReaderMulticastExtensionQosPolicy) -> Self {
+        Self { group_address: internal.group_address }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub(crate) struct DataRepresentationQosPolicy {
     pub(crate) value: Vec<DataRepresentationId>,
 }

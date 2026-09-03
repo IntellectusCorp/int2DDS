@@ -1121,35 +1121,10 @@ impl SedpLogic {
                 added_locators += 1;
             }
         }
-        for locator in subscription_builtin_topic_data.multicast_locator_list() {
-            // Note: Currently, builtin_topic_data is sent via unicast only.
-            // Multicast support for builtin topics may be added in the future if needed.
-            // The following code is kept for reference:
-            // if !writer.multicast_locator_list().contains(&locator) {
-            //     writer.add_multicast_locator(locator.clone());
-            // }
-            if !(locator.kind() == LOCATOR_KIND_UDP_V4
-                || locator.kind() == LOCATOR_KIND_UDP_V6
-                || locator.kind() == LOCATOR_KIND_TCP_V4
-                || locator.kind() == LOCATOR_KIND_TCP_V6
-                || locator.kind() == LOCATOR_KIND_SHM)
-            {
-                continue;
-            }
-
-            let reader_locator = ReaderLocator::new(
-                locator.clone(),
-                highest_sent_change_sn,
-                false,
-                subscription_builtin_topic_data.endpoint_guid().prefix(),
-                subscription_builtin_topic_data.endpoint_guid().entity_id(),
-                subscription_builtin_topic_data.clone(),
-            );
-            attempted_locators += 1;
-            if writer.reader_locator_add(reader_locator) {
-                added_locators += 1;
-            }
-        }
+        // A group address is not a ReaderLocator: one entry per address would make the
+        // writer send the same sample twice, once to the group and once to the unicast
+        // address. The group is read off the subscription data when the send path
+        // decides between the two.
 
         if attempted_locators > 0 && added_locators == 0 {
             return Ok(());
@@ -1198,9 +1173,7 @@ impl SedpLogic {
         subscription_builtin_topic_data: &mut SubscriptionBuiltinTopicData,
         participant_guard: &Participant,
     ) {
-        if subscription_builtin_topic_data.unicast_locator_list().is_empty()
-        // || subscription_builtin_topic_data.multicast_locator_list().is_empty()
-        {
+        if subscription_builtin_topic_data.unicast_locator_list().is_empty() {
             let remote_participant_data = participant_guard.find_remote_participant_proxy_data(
                 subscription_builtin_topic_data.endpoint_guid().prefix(),
             );
@@ -3055,6 +3028,12 @@ mod tests {
     }
 
     impl TransportPlugin for CountingTransport {
+        fn advertised_default_multicast_locators(&self, _groups: Vec<Ipv4Addr>) -> Vec<Locator> {
+            Vec::new()
+        }
+        fn ensure_user_multicast_listener(&self, _group: Ipv4Addr) -> std::io::Result<()> {
+            Ok(())
+        }
         fn send(&self, data: &[u8], _target: &SendTarget) -> std::io::Result<()> {
             *self.sends.lock().expect("send counter") += 1;
             self.buffers.lock().expect("send buffers").push(data.to_vec());

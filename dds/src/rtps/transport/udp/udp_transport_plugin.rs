@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Mutex;
@@ -23,12 +24,18 @@ pub(crate) struct UdpTransportPlugin {
     domain_id: u32,
     participant_id: u32,
     working_ips: Vec<String>,
+    multicast_if_ip: Ipv4Addr,
 
     // Listeners created during construction, taken once during init.
     discovery_multicast_listener: Mutex<Option<UdpListener>>,
     discovery_unicast_listener: Mutex<Option<UdpListener>>,
-    user_multicast_listener: Mutex<Option<UdpListener>>,
     user_unicast_listener: Mutex<Option<UdpListener>>,
+
+    // One listener per joined group, created on demand and handed out once.
+    // `joined_user_multicast_groups` outlives the handout, so a group that
+    // already has a listening thread is not opened a second time.
+    user_multicast_listeners: Mutex<HashMap<Ipv4Addr, UdpListener>>,
+    joined_user_multicast_groups: Mutex<HashSet<Ipv4Addr>>,
 
     // Captured before the unicast listeners are taken (see advertised_receive_buffer_size).
     advertised_receive_buffer_size: Option<usize>,
@@ -47,13 +54,18 @@ impl UdpTransportPlugin {
         working_ips: Vec<String>,
         udp_config: UdpConfig,
     ) -> io::Result<Self> {
+        let egress_if: Ipv4Addr = multicast_if_ip.parse().map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid multicast interface address '{multicast_if_ip}': {e}"),
+            )
+        })?;
         let sender = UdpSender::new(bind_ip, multicast_if_ip, udp_config)?;
 
-        // Create multicast listeners (shared ports, no conflict)
         let discovery_mc_port = PortManager::get_discovery_traffic_multicast_port(domain_id);
-        let user_mc_port = PortManager::get_user_traffic_multicast_port(domain_id);
-        let discovery_mc = UdpListener::new_multicast(discovery_mc_port, &working_ips).ok();
-        let user_mc = UdpListener::new_multicast(user_mc_port, &working_ips).ok();
+        let discovery_mc =
+            UdpListener::new_discovery_multicast(discovery_mc_port, &working_ips, Some(egress_if))
+                .ok();
 
         // Create unicast listeners — both discovery_uc and user_uc must bind at
         // the same participant_id (matches develop's Socket contract). If either
@@ -102,29 +114,14 @@ impl UdpTransportPlugin {
             domain_id,
             participant_id,
             working_ips,
+            multicast_if_ip: egress_if,
             discovery_multicast_listener: Mutex::new(discovery_mc),
             discovery_unicast_listener: Mutex::new(discovery_uc),
-            user_multicast_listener: Mutex::new(user_mc),
             user_unicast_listener: Mutex::new(user_uc),
+            user_multicast_listeners: Mutex::new(HashMap::new()),
+            joined_user_multicast_groups: Mutex::new(HashSet::new()),
             advertised_receive_buffer_size,
         })
-    }
-
-    /// Take the discovery multicast listener (UDP-specific).
-    ///
-    /// Multicast listening is a UDP concept — not part of TransportPlugin trait.
-    /// Called once during initialization by DcpsBridge to create
-    /// the DiscoveryMulticastListeningTask.
-    pub(crate) fn take_discovery_multicast_listener(&self) -> Option<UdpListener> {
-        self.discovery_multicast_listener.lock().expect("lock poisoned").take()
-    }
-
-    /// Take the user data multicast listener (UDP-specific).
-    ///
-    /// Called once during initialization by DcpsBridge to create
-    /// the UserMulticastListeningTask.
-    pub(crate) fn take_user_multicast_listener(&self) -> Option<UdpListener> {
-        self.user_multicast_listener.lock().expect("lock poisoned").take()
     }
 
     /// Expand a single UDP port into per-NIC IPv4 locators using the
@@ -192,6 +189,11 @@ impl TransportPlugin for UdpTransportPlugin {
         self.udp_locators(port)
     }
 
+    fn advertised_default_multicast_locators(&self, groups: Vec<Ipv4Addr>) -> Vec<Locator> {
+        let port = PortManager::get_user_traffic_multicast_port(self.domain_id) as u32;
+        groups.iter().map(|group| Locator::from_ip_v4_addr_and_port(group, port)).collect()
+    }
+
     fn advertised_receive_buffer_size(&self) -> Option<usize> {
         self.advertised_receive_buffer_size
     }
@@ -209,6 +211,56 @@ impl TransportPlugin for UdpTransportPlugin {
     fn take_user_data_unicast_source(&self) -> Option<MessageSource> {
         let listener = self.user_unicast_listener.lock().expect("lock poisoned").take()?;
         Some(MessageSource::Udp { listener })
+    }
+
+    fn take_user_data_multicast_source(&self) -> Option<(Locator, MessageSource)> {
+        let mut listeners = self.user_multicast_listeners.lock().expect("lock poisoned");
+        let group = *listeners.keys().next()?;
+        let listener = listeners.remove(&group)?;
+        let port = PortManager::get_user_traffic_multicast_port(self.domain_id) as u32;
+        Some((Locator::from_ip_v4_addr_and_port(&group, port), MessageSource::Udp { listener }))
+    }
+
+    fn ensure_user_multicast_listener(&self, group: Ipv4Addr) -> io::Result<()> {
+        let mut joined = self.joined_user_multicast_groups.lock().expect("lock poisoned");
+        if joined.contains(&group) {
+            return Ok(());
+        }
+
+        // A group nobody can receive on is worse than a refused DataReader, so a
+        // failed join on the sending interface is fatal here.
+        let user_mc_port = PortManager::get_user_traffic_multicast_port(self.domain_id);
+        let listener = UdpListener::new_user_multicast(
+            user_mc_port,
+            &group,
+            &self.working_ips,
+            self.multicast_if_ip,
+        )?;
+
+        self.user_multicast_listeners.lock().expect("lock poisoned").insert(group, listener);
+        joined.insert(group);
+
+        log::info!(
+            "[UdpTransportPlugin] user data multicast group {group} listening on port {user_mc_port}"
+        );
+        Ok(())
+    }
+
+    fn release_user_multicast_listener(&self, group: Ipv4Addr) {
+        let mut joined = self.joined_user_multicast_groups.lock().expect("lock poisoned");
+        if !joined.remove(&group) {
+            return;
+        }
+
+        // Only a group refused before its source was ever taken still has a
+        // listener here; the rest live in their listening task.
+        if let Ok(mut listeners) = self.user_multicast_listeners.lock() {
+            if let Some(mut listener) = listeners.remove(&group) {
+                listener.close();
+            }
+        }
+
+        log::info!("[UdpTransportPlugin] user data multicast group {group} released");
     }
 
     fn port(&self) -> u16 {
@@ -232,8 +284,8 @@ impl TransportPlugin for UdpTransportPlugin {
                 listener.close();
             }
         }
-        if let Ok(mut guard) = self.user_multicast_listener.lock() {
-            if let Some(mut listener) = guard.take() {
+        if let Ok(mut guard) = self.user_multicast_listeners.lock() {
+            for (_, mut listener) in guard.drain() {
                 listener.close();
             }
         }
@@ -242,5 +294,90 @@ impl TransportPlugin for UdpTransportPlugin {
                 listener.close();
             }
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dcps::infrastructure::qos_policy::PropertyQosPolicy;
+    use crate::rtps::transport::socket::Socket;
+    use crate::rtps::transport::transport_config::TransportConfig;
+    use crate::test_utils::unique_domain_id;
+
+    fn plugin(domain_id: u32) -> UdpTransportPlugin {
+        let socket = Socket::new(domain_id);
+        UdpTransportPlugin::new(
+            domain_id,
+            socket.participant_id(),
+            socket.get_sender_bind_addr(),
+            socket.get_sender_multicast_if_addr(None),
+            socket.working_ips(),
+            UdpConfig::from_property(&PropertyQosPolicy::default()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn each_group_gets_its_own_labelled_listener() {
+        let domain_id = unique_domain_id() as u32;
+        let plugin = plugin(domain_id);
+        let port = PortManager::get_user_traffic_multicast_port(domain_id) as u32;
+        let first = Ipv4Addr::new(239, 255, 13, 1);
+        let second = Ipv4Addr::new(239, 255, 13, 2);
+
+        plugin.ensure_user_multicast_listener(first).unwrap();
+        plugin.ensure_user_multicast_listener(second).unwrap();
+
+        let mut handed_out: Vec<Locator> = Vec::new();
+        while let Some((locator, _source)) = plugin.take_user_data_multicast_source() {
+            handed_out.push(locator);
+        }
+        handed_out.sort_by_key(|locator| locator.to_ip_v4_addr().octets());
+
+        assert_eq!(
+            handed_out,
+            vec![
+                Locator::from_ip_v4_addr_and_port(&first, port),
+                Locator::from_ip_v4_addr_and_port(&second, port),
+            ],
+            "Every group must come back as its own source, labelled with the group it receives"
+        );
+
+        plugin.close();
+    }
+
+    #[test]
+    fn readers_sharing_a_group_share_one_listener() {
+        let domain_id = unique_domain_id() as u32;
+        let plugin = plugin(domain_id);
+        let group = Ipv4Addr::new(239, 255, 13, 3);
+
+        plugin.ensure_user_multicast_listener(group).unwrap();
+        assert!(plugin.take_user_data_multicast_source().is_some());
+
+        // Two sockets on one group would each read the same datagram, so a
+        // second reader on a group already served must open nothing.
+        plugin.ensure_user_multicast_listener(group).unwrap();
+        assert!(
+            plugin.take_user_data_multicast_source().is_none(),
+            "A group that is already listened to must not open a second socket"
+        );
+
+        plugin.close();
+    }
+
+    #[test]
+    fn a_group_that_cannot_be_joined_is_refused() {
+        let domain_id = unique_domain_id() as u32;
+        let plugin = plugin(domain_id);
+        let not_a_group = Ipv4Addr::new(10, 0, 0, 1);
+
+        assert!(plugin.ensure_user_multicast_listener(not_a_group).is_err());
+        assert!(
+            plugin.take_user_data_multicast_source().is_none(),
+            "A refused group must leave no listener behind"
+        );
+
+        plugin.close();
     }
 }

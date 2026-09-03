@@ -18,6 +18,7 @@
 pub(crate) mod common;
 pub(crate) mod data;
 pub(crate) mod message_processor;
+pub(crate) mod multicast_eligibility;
 pub(crate) mod sedp_logic;
 pub(crate) mod spdp_logic;
 pub(crate) mod type_lookup_logic;

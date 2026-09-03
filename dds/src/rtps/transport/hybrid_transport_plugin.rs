@@ -50,11 +50,13 @@ impl HybridTransportPlugin {
         guid_prefix: GuidPrefix,
         hybrid_config: HybridConfig,
     ) -> io::Result<Self> {
+        let egress_if = multicast_if_ip.parse::<Ipv4Addr>().ok();
         let udp_sender = UdpSender::new(bind_ip.clone(), multicast_if_ip, hybrid_config.udp)?;
 
         // Multicast first (domain-wide port, no per-participant collision).
         let discovery_mc_port = PortManager::get_discovery_traffic_multicast_port(domain_id);
-        let discovery_mc = UdpListener::new_multicast(discovery_mc_port, &working_ips).ok();
+        let discovery_mc =
+            UdpListener::new_discovery_multicast(discovery_mc_port, &working_ips, egress_if).ok();
 
         // Create TCP plugin (handles its own mux listener thread). The TCP listen
         // port comes from the per-participant TcpConfig (bind_port property, else
@@ -151,6 +153,18 @@ impl TransportPlugin for HybridTransportPlugin {
     fn advertised_default_unicast_locators(&self) -> Vec<Locator> {
         // user data rides TCP.
         self.tcp_plugin.advertised_default_unicast_locators()
+    }
+
+    fn advertised_default_multicast_locators(&self, _groups: Vec<Ipv4Addr>) -> Vec<Locator> {
+        // User data rides TCP; the UDP side carries multicast SPDP only.
+        Vec::new()
+    }
+
+    fn ensure_user_multicast_listener(&self, _group: Ipv4Addr) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "user data rides TCP, which cannot receive multicast",
+        ))
     }
 
     fn take_discovery_multicast_source(&self) -> Option<MessageSource> {

@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
-use std::io;
 use std::net::SocketAddr;
+use std::{io, net::Ipv4Addr};
 
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::locator::Locator;
@@ -106,6 +106,11 @@ pub(crate) trait TransportPlugin: Send + Sync {
     /// participants. Populated into the SPDP announcement.
     fn advertised_default_unicast_locators(&self) -> Vec<Locator>;
 
+    /// Group locators a DataReader advertises so remote writers can reach it
+    /// over multicast. Empty for a transport that cannot carry user data over
+    /// multicast.
+    fn advertised_default_multicast_locators(&self, groups: Vec<Ipv4Addr>) -> Vec<Locator>;
+
     /// How many bytes may be in flight toward this participant before they
     /// start being dropped, for advertising in SPDP under the vendor PID. A
     /// datagram transport answers with the receive buffer the kernel granted
@@ -139,6 +144,38 @@ pub(crate) trait TransportPlugin: Send + Sync {
 
     fn take_stream_source(&self) -> Option<MessageSource> {
         None
+    }
+
+    /// Take ownership of one user data multicast source together with the group
+    /// locator it receives.
+    ///
+    /// Returns `None` once every listener created so far has been handed out.
+    /// Each returned `MessageSource` is moved into its own
+    /// `UserMulticastListeningTask`, and the locator is the label that task
+    /// stamps on everything it reads.
+    fn take_user_data_multicast_source(&self) -> Option<(Locator, MessageSource)> {
+        None
+    }
+
+    /// Create the user data multicast listener for `group` unless it already
+    /// exists.
+    ///
+    /// Called once per DataReader that asks for multicast reception. Readers
+    /// sharing a group share one listener, since two sockets on the same group
+    /// would each read the same datagram. A transport that cannot carry user
+    /// data over multicast rejects here, so the DataReader fails to be created
+    /// instead of silently falling back to unicast.
+    fn ensure_user_multicast_listener(&self, group: Ipv4Addr) -> io::Result<()>;
+
+    /// Forget `group`, so a later reader on it is served by a freshly created
+    /// listener.
+    ///
+    /// Called once the last DataReader on the group is gone. The socket itself
+    /// belongs to the listening task by then, so the caller must have ended that
+    /// task first; releasing while it still reads leaves two sockets on one
+    /// group, each taking a copy of every datagram.
+    fn release_user_multicast_listener(&self, group: Ipv4Addr) {
+        let _ = group;
     }
 
     /// Get the local port number used by this transport's sender.

@@ -411,6 +411,36 @@ impl MessageCreator {
         Ok(())
     }
 
+    /// One DATA datagram addressed to a multicast group rather than to a participant.
+    ///
+    /// No INFO_DST: a group datagram has no single destination Participant, and every
+    /// receiver in the group would drop a message addressed to someone else. No
+    /// HEARTBEAT either: one shared heartbeat would draw an ACKNACK from every reader
+    /// in the group at once, so reliability is served over unicast instead. And no
+    /// ContentFilterInfo, since the readers sharing this datagram do not share a filter.
+    pub(crate) fn create_data_msg_multicast(
+        cache_change: &CacheChange,
+        writer_entity_id: EntityId,
+        use_inline_qos: bool,
+        send_buffer: &mut Vec<u8>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        debug!("Creating multicast RTPS message from cache change: {}", cache_change);
+
+        let mut rtps_message = RtpsMessage::new(Header::new(cache_change.writer_guid().prefix()));
+        rtps_message.add_submessage(SubmessageCreator::create_info_ts_submessage(Utc::now()));
+        rtps_message.add_submessage(Self::build_data_submessage(
+            cache_change,
+            EntityId::UNKNOWN,
+            writer_entity_id,
+            use_inline_qos,
+            None,
+        ));
+
+        send_buffer.clear();
+        rtps_message.write_to_stream_with_ctx(Endianness::LittleEndian, &mut *send_buffer)?;
+        Ok(())
+    }
+
     // Pack several DATA changes bound for the same reader into as few datagrams as fit under
     // INT2DDS_MAX_MESSAGE_SIZE. Each datagram is Header, INFO_DST, INFO_TS, then DATA submessages.
     pub(crate) fn create_multiple_data_msgs(

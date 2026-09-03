@@ -407,14 +407,33 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
             // Use Weak to avoid lifetime issues in closure
             let mut dcps_bridge = participant.get_dcps_bridge()?;
             let rtps_reader = match dcps_bridge.as_mut() {
-                Some(dcps_bridge) => dcps_bridge
-                    .create_rtps_reader(
+                Some(dcps_bridge) => {
+                    let group =
+                        subscription_builtin_topic_data.reader_multicast_extension().group_ipv4();
+                    if let Some(group) = group {
+                        dcps_bridge.ensure_user_multicast_traffic(group).map_err(|e| {
+                            DdsError::Error(format!(
+                                "Failed to start multicast reception for this reader: {}",
+                                e.message
+                            ))
+                        })?;
+                    }
+
+                    match dcps_bridge.create_rtps_reader(
                         subscription_builtin_topic_data,
                         content_filter_property,
                         Some(change_callback),
                         Some(status_callback),
-                    )
-                    .map_err(|e| DdsError::Error(e.message))?,
+                    ) {
+                        Ok(rtps_reader) => rtps_reader,
+                        Err(e) => {
+                            if let Some(group) = group {
+                                let _ = dcps_bridge.release_user_multicast_traffic(group);
+                            }
+                            return Err(DdsError::Error(e.message));
+                        }
+                    }
+                }
                 None => return Err(DdsError::Error("DCPS Bridge is not initialized".to_string())),
             };
 
