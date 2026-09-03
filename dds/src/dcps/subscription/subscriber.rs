@@ -1466,7 +1466,7 @@ mod tests {
         let reader = subscriber
             .create_datareader::<HelloWorld>(
                 &topic,
-                DataReaderQos { reliability: reliable.clone(), ..Default::default() },
+                DataReaderQos { reliability: reliable, ..Default::default() },
                 Some(Arc::new(SleepingListener { entered: entered_tx })),
                 StatusMask::DATA_AVAILABLE,
             )
@@ -1564,7 +1564,7 @@ mod tests {
         let reader = subscriber
             .create_datareader::<HelloWorld>(
                 &topic,
-                DataReaderQos { reliability: reliable.clone(), ..Default::default() },
+                DataReaderQos { reliability: reliable, ..Default::default() },
                 Some(Arc::new(SelfDeletingListener {
                     handles: handles.clone(),
                     result: result_tx,
@@ -1680,7 +1680,7 @@ mod tests {
         let writer = publisher
             .create_datawriter::<HelloWorld>(
                 &topic1,
-                DataWriterQos { reliability: reliable_qos.clone(), ..Default::default() },
+                DataWriterQos { reliability: reliable_qos, ..Default::default() },
                 None,
                 StatusMask::default(),
             )

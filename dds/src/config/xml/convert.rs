@@ -231,28 +231,28 @@ fn rewrite_id(
     let rebuilt = match id {
         TypeIdentifier::PlainSequenceSmall { header, bound, element_identifier } => {
             TypeIdentifier::PlainSequenceSmall {
-                header: header.clone(),
+                header: *header,
                 bound: *bound,
                 element_identifier: Box::new(rewrite_id(element_identifier, resolver)),
             }
         }
         TypeIdentifier::PlainSequenceLarge { header, bound, element_identifier } => {
             TypeIdentifier::PlainSequenceLarge {
-                header: header.clone(),
+                header: *header,
                 bound: *bound,
                 element_identifier: Box::new(rewrite_id(element_identifier, resolver)),
             }
         }
         TypeIdentifier::PlainArraySmall { header, array_bound_seq, element_identifier } => {
             TypeIdentifier::PlainArraySmall {
-                header: header.clone(),
+                header: *header,
                 array_bound_seq: array_bound_seq.clone(),
                 element_identifier: Box::new(rewrite_id(element_identifier, resolver)),
             }
         }
         TypeIdentifier::PlainArrayLarge { header, array_bound_seq, element_identifier } => {
             TypeIdentifier::PlainArrayLarge {
-                header: header.clone(),
+                header: *header,
                 array_bound_seq: array_bound_seq.clone(),
                 element_identifier: Box::new(rewrite_id(element_identifier, resolver)),
             }
@@ -264,7 +264,7 @@ fn rewrite_id(
             key_identifier,
             element_identifier,
         } => TypeIdentifier::PlainMapSmall {
-            header: header.clone(),
+            header: *header,
             bound: *bound,
             key_flags: *key_flags,
             key_identifier: Box::new(rewrite_id(key_identifier, resolver)),
@@ -277,7 +277,7 @@ fn rewrite_id(
             key_identifier,
             element_identifier,
         } => TypeIdentifier::PlainMapLarge {
-            header: header.clone(),
+            header: *header,
             bound: *bound,
             key_flags: *key_flags,
             key_identifier: Box::new(rewrite_id(key_identifier, resolver)),

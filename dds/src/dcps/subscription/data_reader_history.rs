@@ -2128,7 +2128,7 @@ mod tests {
             // Add instance A, B (max_instances reached)
             let change_a = CacheChange::new(
                 ChangeKind::Alive,
-                writer_1.clone(),
+                writer_1,
                 instance_a, // different instance
                 SequenceNumber::from_i64(1),
                 vec![
@@ -2140,7 +2140,7 @@ mod tests {
 
             let change_b = CacheChange::new(
                 ChangeKind::Alive,
-                writer_1.clone(),
+                writer_1,
                 instance_b, // different instance
                 SequenceNumber::from_i64(2),
                 vec![
@@ -2159,7 +2159,7 @@ mod tests {
 
             let change_c = CacheChange::new(
                 ChangeKind::Alive,
-                writer_1.clone(),
+                writer_1,
                 instance_c, // different instance
                 SequenceNumber::from_i64(3),
                 vec![
@@ -2177,7 +2177,7 @@ mod tests {
             // Make instance A enter NOT_ALIVE_NO_WRITERS state
             let change_a_unregister = CacheChange::new(
                 ChangeKind::NotAliveUnregistered,
-                writer_1.clone(),
+                writer_1,
                 instance_a,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -2328,7 +2328,7 @@ mod tests {
 
             let mut change_a = CacheChange::new(
                 ChangeKind::Alive,
-                writer_1.clone(),
+                writer_1,
                 instance_a, // different instance
                 SequenceNumber::from_i64(1),
                 vec![
@@ -2340,7 +2340,7 @@ mod tests {
 
             let mut change_b = CacheChange::new(
                 ChangeKind::Alive,
-                writer_1.clone(),
+                writer_1,
                 instance_b, // different instance
                 SequenceNumber::from_i64(1),
                 vec![
@@ -2401,7 +2401,7 @@ mod tests {
 
             let mut change_a = CacheChange::new(
                 ChangeKind::Alive,
-                writer_a.clone(), // different writer
+                writer_a, // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -2413,7 +2413,7 @@ mod tests {
 
             let mut change_b = CacheChange::new(
                 ChangeKind::Alive,
-                writer_b.clone(), // different writer
+                writer_b, // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -2470,7 +2470,7 @@ mod tests {
 
             let mut change_a = CacheChange::new(
                 ChangeKind::Alive,
-                writer_a.clone(), // different writer
+                writer_a, // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -2482,7 +2482,7 @@ mod tests {
 
             let mut change_b = CacheChange::new(
                 ChangeKind::Alive,
-                writer_b.clone(), // different writer
+                writer_b, // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -2547,7 +2547,7 @@ mod tests {
 
             let mut change_a = CacheChange::new(
                 ChangeKind::Alive,
-                writer_a.clone(), // different writer
+                writer_a, // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -2560,7 +2560,7 @@ mod tests {
 
             let mut change_b = CacheChange::new(
                 ChangeKind::Alive,
-                writer_b.clone(), // different writer
+                writer_b, // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -2626,7 +2626,7 @@ mod tests {
 
             let mut change_a = CacheChange::new(
                 ChangeKind::Alive,
-                writer_a.clone(), // different writer
+                writer_a, // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![1, 2, 3],
@@ -2635,7 +2635,7 @@ mod tests {
 
             let mut change_b = CacheChange::new(
                 ChangeKind::Alive,
-                writer_b.clone(), // different writer
+                writer_b, // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![1, 2, 3],
@@ -2664,7 +2664,7 @@ mod tests {
             // Writer A cannot add change again
             let mut change_a_2 = CacheChange::new(
                 ChangeKind::Alive,
-                writer_a.clone(), // different writer
+                writer_a, // different writer
                 instance_handle,
                 SequenceNumber::from_i64(2),
                 vec![],
@@ -2705,7 +2705,7 @@ mod tests {
 
             let mut change_a = CacheChange::new(
                 ChangeKind::Alive,
-                writer_a.clone(), // different writer
+                writer_a, // different writer
                 InstanceHandle::NIL,
                 SequenceNumber::from_i64(1),
                 vec![1, 2, 3],
@@ -2714,7 +2714,7 @@ mod tests {
 
             let mut change_b = CacheChange::new(
                 ChangeKind::Alive,
-                writer_b.clone(), // different writer
+                writer_b, // different writer
                 InstanceHandle::NIL,
                 SequenceNumber::from_i64(1),
                 vec![1, 2, 3],
@@ -2743,7 +2743,7 @@ mod tests {
             // Writer A cannot add change again
             let mut change_a_2 = CacheChange::new(
                 ChangeKind::Alive,
-                writer_a.clone(), // different writer
+                writer_a, // different writer
                 instance_handle,
                 SequenceNumber::from_i64(2),
                 vec![],
@@ -2780,7 +2780,7 @@ mod tests {
 
             let mut change = CacheChange::new(
                 ChangeKind::Alive,
-                writer_guid.clone(),
+                writer_guid,
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -2801,7 +2801,7 @@ mod tests {
             // Owner disposes the instance
             let mut change_disposed = CacheChange::new(
                 ChangeKind::NotAliveDisposed,
-                writer_guid.clone(),
+                writer_guid,
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![],
@@ -2847,7 +2847,7 @@ mod tests {
 
             let mut change_a = CacheChange::new(
                 ChangeKind::Alive,
-                writer_a.clone(),
+                writer_a,
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -2859,7 +2859,7 @@ mod tests {
 
             let mut change_b = CacheChange::new(
                 ChangeKind::Alive,
-                writer_b.clone(),
+                writer_b,
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -2889,7 +2889,7 @@ mod tests {
             // Writer A cannot add change again
             let mut change_disposed = CacheChange::new(
                 ChangeKind::NotAliveDisposed,
-                writer_a.clone(),
+                writer_a,
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![],
@@ -2932,7 +2932,7 @@ mod tests {
 
             let mut change = CacheChange::new(
                 ChangeKind::Alive,
-                writer_guid.clone(),
+                writer_guid,
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -2953,7 +2953,7 @@ mod tests {
             // Owner disposes the instance
             let mut change_disposed = CacheChange::new(
                 ChangeKind::NotAliveDisposed,
-                writer_guid.clone(),
+                writer_guid,
                 instance_handle,
                 SequenceNumber::from_i64(2),
                 vec![],
@@ -2972,7 +2972,7 @@ mod tests {
 
             let mut change_2 = CacheChange::new(
                 ChangeKind::Alive,
-                writer_guid.clone(),
+                writer_guid,
                 instance_handle,
                 SequenceNumber::from_i64(3),
                 vec![
@@ -3016,7 +3016,7 @@ mod tests {
 
             let mut change = CacheChange::new(
                 ChangeKind::Alive,
-                writer_guid.clone(),
+                writer_guid,
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -3037,7 +3037,7 @@ mod tests {
             // Owner disposes the instance
             let mut change_disposed = CacheChange::new(
                 ChangeKind::NotAliveDisposed,
-                writer_guid.clone(),
+                writer_guid,
                 instance_handle,
                 SequenceNumber::from_i64(2),
                 vec![],
@@ -3062,7 +3062,7 @@ mod tests {
 
             let mut change_2 = CacheChange::new(
                 ChangeKind::Alive,
-                writer_b.clone(),
+                writer_b,
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -3107,7 +3107,7 @@ mod tests {
 
             let mut change = CacheChange::new(
                 ChangeKind::Alive,
-                writer_guid.clone(),
+                writer_guid,
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -3128,7 +3128,7 @@ mod tests {
             // Disposes the instance with lesser strength
             let mut change_disposed = CacheChange::new(
                 ChangeKind::NotAliveDisposed,
-                writer_guid.clone(),
+                writer_guid,
                 instance_handle,
                 SequenceNumber::from_i64(2),
                 vec![],
@@ -3153,7 +3153,7 @@ mod tests {
 
             let mut change_2 = CacheChange::new(
                 ChangeKind::Alive,
-                writer_b.clone(),
+                writer_b,
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -3201,7 +3201,7 @@ mod tests {
 
             let mut change_a = CacheChange::new(
                 ChangeKind::Alive,
-                writer_a.clone(),
+                writer_a,
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -3213,7 +3213,7 @@ mod tests {
 
             let mut change_b = CacheChange::new(
                 ChangeKind::Alive,
-                writer_b.clone(),
+                writer_b,
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -3243,7 +3243,7 @@ mod tests {
             // Writer B now unregister
             let mut change_unregistered = CacheChange::new(
                 ChangeKind::NotAliveUnregistered,
-                writer_b.clone(),
+                writer_b,
                 instance_handle,
                 SequenceNumber::from_i64(2),
                 vec![],
@@ -3295,7 +3295,7 @@ mod tests {
 
             let mut change_a = CacheChange::new(
                 ChangeKind::Alive,
-                writer_a.clone(),
+                writer_a,
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -3307,7 +3307,7 @@ mod tests {
 
             let mut change_b = CacheChange::new(
                 ChangeKind::Alive,
-                writer_b.clone(),
+                writer_b,
                 instance_handle,
                 SequenceNumber::from_i64(1),
                 vec![
@@ -3337,7 +3337,7 @@ mod tests {
             // Writer A, B all unregister
             let mut change_unregistered_a = CacheChange::new(
                 ChangeKind::NotAliveUnregistered,
-                writer_a.clone(),
+                writer_a,
                 instance_handle,
                 SequenceNumber::from_i64(2),
                 vec![],
@@ -3346,7 +3346,7 @@ mod tests {
 
             let mut change_unregistered_b = CacheChange::new(
                 ChangeKind::NotAliveUnregistered,
-                writer_b.clone(),
+                writer_b,
                 instance_handle,
                 SequenceNumber::from_i64(2),
                 vec![],
@@ -3406,7 +3406,7 @@ mod tests {
             // Same writer owns both instances
             let mut alive_a = CacheChange::new(
                 ChangeKind::Alive,
-                writer.clone(),
+                writer,
                 instance_a,
                 SequenceNumber::from_i64(1),
                 data.clone(),
@@ -3417,7 +3417,7 @@ mod tests {
 
             let mut alive_b = CacheChange::new(
                 ChangeKind::Alive,
-                writer.clone(),
+                writer,
                 instance_b,
                 SequenceNumber::from_i64(2),
                 data.clone(),
@@ -3429,7 +3429,7 @@ mod tests {
             // Writer unregisters only instance A
             let mut unregister_a = CacheChange::new(
                 ChangeKind::NotAliveUnregistered,
-                writer.clone(),
+                writer,
                 instance_a,
                 SequenceNumber::from_i64(3),
                 vec![],
@@ -3475,7 +3475,7 @@ mod tests {
 
             let alive = CacheChange::new(
                 ChangeKind::Alive,
-                writer.clone(),
+                writer,
                 instance,
                 SequenceNumber::from_i64(1),
                 data,
@@ -3486,7 +3486,7 @@ mod tests {
             // The remote disposes the same instance twice; the second moves no state.
             let dispose1 = CacheChange::new(
                 ChangeKind::NotAliveDisposed,
-                writer.clone(),
+                writer,
                 instance,
                 SequenceNumber::from_i64(2),
                 vec![],
@@ -3496,7 +3496,7 @@ mod tests {
 
             let dispose2 = CacheChange::new(
                 ChangeKind::NotAliveDisposed,
-                writer.clone(),
+                writer,
                 instance,
                 SequenceNumber::from_i64(3),
                 vec![],
