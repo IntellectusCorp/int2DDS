@@ -361,7 +361,7 @@ fn cdr_parse_field_value(
 
     // Skip encapsulation header (4 bytes)
     let encoding_id = u16::from_be_bytes([cdr_bytes[0], cdr_bytes[1]]);
-    let is_xcdr2 = matches!(encoding_id, 0x0006 | 0x0007 | 0x0008 | 0x0009 | 0x000A | 0x000B);
+    let is_xcdr2 = matches!(encoding_id, 0x0006..=0x000B);
     let src_le = (encoding_id & 1) == 1;
     let base = 4;
     let mut pos = base;
@@ -369,10 +369,9 @@ fn cdr_parse_field_value(
     // Skip DHEADER for Appendable/Mutable XCDR2
     if is_xcdr2
         && matches!(extensibility, ExtensibilityKind::Appendable | ExtensibilityKind::Mutable)
+        && pos + 4 <= cdr_bytes.len()
     {
-        if pos + 4 <= cdr_bytes.len() {
-            pos += 4;
-        }
+        pos += 4;
     }
 
     // Parse fields sequentially until we find the target
