@@ -283,13 +283,13 @@ MACOSX_DEPLOYMENT_TARGET=12.0 ./ffi/docker/build-ffi-macos.sh
 ```bash
 # DT_SONAME of every built .so (expects libint2dds_ffi.so.<major>)
 ./ffi/docker/check-soname.sh
-./ffi/docker/check-soname.sh --path ffi/dist/linux-x86_64/libint2dds_ffi.so.0.1.1
+./ffi/docker/check-soname.sh --path ffi/dist/linux-x86_64/libint2dds_ffi.so.0.1.3
 ```
 
 Static check — the highest GLIBC symbol version the artifact requires:
 
 ```bash
-objdump -T ffi/dist/linux-x86_64/libint2dds_ffi.so.0.1.1 \
+objdump -T ffi/dist/linux-x86_64/libint2dds_ffi.so.0.1.3 \
   | grep -oE 'GLIBC_[0-9.]+' | sort -V | tail -1
 ```
 
@@ -310,7 +310,7 @@ docker run --rm -v "$PWD":/w -w /w quay.io/pypa/manylinux_2_28_x86_64 \
 for img in redhat/ubi8 ubuntu:20.04 redhat/ubi9 ubuntu:22.04 ubuntu:24.04; do
   printf '%-16s ' "$img"
   docker run --rm -v "$PWD":/w -w /w "$img" \
-    ./glibc-floor-check /w/ffi/dist/linux-x86_64/libint2dds_ffi.so.0.1.1 2>&1 | tail -1
+    ./glibc-floor-check /w/ffi/dist/linux-x86_64/libint2dds_ffi.so.0.1.3 2>&1 | tail -1
 done
 rm -f glibc-floor-check
 ```

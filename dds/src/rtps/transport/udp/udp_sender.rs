@@ -54,7 +54,7 @@ impl UdpSender {
             socket.set_send_buffer_size(size)?;
         }
 
-        crate::common::int2dds_feature_ffi::init_extended_discovery(&socket)?;
+        crate::common::enterprise_hooks::call_extended_discovery_init(&socket)?;
 
         Ok(Self { socket: Mutex::new(Some(socket)) })
     }
@@ -93,7 +93,7 @@ impl UdpSender {
         let result = socket.send_to(data, &sock_addr);
         debug!("UDP multicast send (domain {}): {:?}", domain_id, result);
 
-        if let Err(e) = crate::common::int2dds_feature_ffi::send_extended_discovery(
+        if let Err(e) = crate::common::enterprise_hooks::call_extended_discovery_send(
             socket, port, data, domain_id,
         ) {
             log::warn!("[udp_sender] Extended discovery send failed: {}", e);
