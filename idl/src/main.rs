@@ -595,7 +595,7 @@ fn process_file(args: &Args, input_file: &str) {
     let base_name = naming::idl_to_output_name(idl_filename);
 
     // Auto-name into output_dir for languages allowed by `langs` (None = all).
-    let allowed = |i: usize| args.langs.map_or(true, |s| s[i]);
+    let allowed = |i: usize| args.langs.is_none_or(|s| s[i]);
     let auto = |ext: &str, i: usize| {
         args.output_dir
             .as_ref()
