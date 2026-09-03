@@ -253,12 +253,10 @@ impl Publisher {
                     self.default_datawriter_qos.lock().ok().and_then(|g| g.clone())
                 {
                     registered
-                } else if let Ok(profile_qos) =
-                    DomainParticipantFactory::get_instance().get_datawriter_qos_from_profile("")
-                {
-                    profile_qos
                 } else {
-                    DataWriterQos::default()
+                    DomainParticipantFactory::get_instance()
+                        .get_datawriter_qos_from_profile("")
+                        .unwrap_or_default()
                 }
             }
         }
@@ -1346,7 +1344,7 @@ mod tests {
         let writer = publisher
             .create_datawriter::<HelloWorld>(
                 &topic1,
-                DataWriterQos { reliability: reliable_qos.clone(), ..Default::default() },
+                DataWriterQos { reliability: reliable_qos, ..Default::default() },
                 None,
                 StatusMask::default(),
             )

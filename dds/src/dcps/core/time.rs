@@ -562,12 +562,12 @@ mod tests {
     fn test_dur_addition() {
         let d1 = Duration::new(1, 500_000_000);
         let d2 = Duration::new(2, 700_000_000);
-        let result = d1.clone() + &d2;
+        let result = d1 + &d2;
         assert_eq!(result.sec, 4);
         assert_eq!(result.nanosec, 200_000_000);
 
         let zero = Duration::zero();
-        let result = d1.clone() + &zero;
+        let result = d1 + &zero;
         assert_eq!(result.sec, d1.sec);
         assert_eq!(result.nanosec, d1.nanosec);
 
@@ -580,11 +580,11 @@ mod tests {
     fn test_dur_subtraction() {
         let d1 = Duration::new(5, 200_000_000);
         let d2 = Duration::new(2, 700_000_000);
-        let result = d1.clone() - &d2;
+        let result = d1 - &d2;
         assert_eq!(result.sec, 2);
         assert_eq!(result.nanosec, 500_000_000);
 
-        let result = d2.clone() - &d1;
+        let result = d2 - &d1;
         assert_eq!(result.sec, -3);
         assert_eq!(result.nanosec, 500_000_000);
     }
@@ -592,11 +592,11 @@ mod tests {
     #[test]
     fn test_dur_multiplication() {
         let d = Duration::new(2, 500_000_000);
-        let result = d.clone() * 2.0;
+        let result = d * 2.0;
         assert_eq!(result.sec, 5);
         assert_eq!(result.nanosec, 0);
 
-        let result = d.clone() * 0.5;
+        let result = d * 0.5;
         assert_eq!(result.sec, 1);
         assert_eq!(result.nanosec, 250_000_000);
     }
@@ -604,11 +604,11 @@ mod tests {
     #[test]
     fn test_dur_division() {
         let d = Duration::new(5, 0);
-        let result = d.clone() / 2.0;
+        let result = d / 2.0;
         assert_eq!(result.sec, 2);
         assert_eq!(result.nanosec, 500_000_000);
 
-        let result = d.clone() / 0.5;
+        let result = d / 0.5;
         assert_eq!(result.sec, 10);
         assert_eq!(result.nanosec, 0);
     }

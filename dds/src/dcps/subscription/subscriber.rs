@@ -267,12 +267,10 @@ impl Subscriber {
                     self.default_datareader_qos.lock().ok().and_then(|g| g.clone())
                 {
                     registered
-                } else if let Ok(profile_qos) =
-                    DomainParticipantFactory::get_instance().get_datareader_qos_from_profile("")
-                {
-                    profile_qos
                 } else {
-                    DataReaderQos::default()
+                    DomainParticipantFactory::get_instance()
+                        .get_datareader_qos_from_profile("")
+                        .unwrap_or_default()
                 }
             }
         }
@@ -1466,7 +1464,7 @@ mod tests {
         let reader = subscriber
             .create_datareader::<HelloWorld>(
                 &topic,
-                DataReaderQos { reliability: reliable.clone(), ..Default::default() },
+                DataReaderQos { reliability: reliable, ..Default::default() },
                 Some(Arc::new(SleepingListener { entered: entered_tx })),
                 StatusMask::DATA_AVAILABLE,
             )
@@ -1564,7 +1562,7 @@ mod tests {
         let reader = subscriber
             .create_datareader::<HelloWorld>(
                 &topic,
-                DataReaderQos { reliability: reliable.clone(), ..Default::default() },
+                DataReaderQos { reliability: reliable, ..Default::default() },
                 Some(Arc::new(SelfDeletingListener {
                     handles: handles.clone(),
                     result: result_tx,
@@ -1680,7 +1678,7 @@ mod tests {
         let writer = publisher
             .create_datawriter::<HelloWorld>(
                 &topic1,
-                DataWriterQos { reliability: reliable_qos.clone(), ..Default::default() },
+                DataWriterQos { reliability: reliable_qos, ..Default::default() },
                 None,
                 StatusMask::default(),
             )
