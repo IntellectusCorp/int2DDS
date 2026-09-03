@@ -89,6 +89,25 @@ fn dialled_addresses(listen_ports: &[u16]) -> std::collections::BTreeSet<std::ne
     addresses
 }
 
+/// Holds `INT2DDS_USE_LOOPBACK_INTERFACE` for as long as it is in scope and puts
+/// back whatever was there before. The variable is process-wide, so a test that
+/// panicked while it was set would otherwise leave it behind for the rest.
+struct LoopbackInterface(bool);
+
+impl LoopbackInterface {
+    fn enabled() -> Self {
+        let restore = int2dds::common::env::get_use_loopback_interface();
+        int2dds::common::env::set_use_loopback_interface(true);
+        Self(restore)
+    }
+}
+
+impl Drop for LoopbackInterface {
+    fn drop(&mut self) {
+        int2dds::common::env::set_use_loopback_interface(self.0);
+    }
+}
+
 /// Write `SAMPLES` samples between two participants of this host and report how
 /// many loopback datagrams that took per sample.
 fn loopback_datagrams_per_sample(
@@ -200,7 +219,7 @@ fn same_host_reliable_writer_sends_one_datagram_per_sample() {
 /// costs there is a whole extra connection per interface address. Discovery
 /// stays on UDP multicast (hybrid) because pure TCP has none.
 #[test]
-fn same_host_tcp_peer_is_dialled_once() {
+fn same_host_hybrid_peer_is_dialled_once() {
     let _measuring = MEASUREMENT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
     const WRITER_PORT: u16 = 17410;
@@ -281,6 +300,101 @@ fn same_host_tcp_peer_is_dialled_once() {
         dialled.len(),
         1,
         "tcp: the same-host peer was dialled at {:?} - one connection per interface address \
+         instead of one connection",
+        dialled
+    );
+}
+
+/// Pure TCP has no multicast, so the peer is named outright and loopback has to
+/// be a working interface for `127.0.0.1` to be listened on, announced and then
+/// dialled. Without it the initial peer answers nowhere and nothing is reached.
+#[test]
+fn same_host_tcp_peer_is_dialled_once() {
+    let _measuring = MEASUREMENT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    const WRITER_PORT: u16 = 17420;
+    const READER_PORT: u16 = 17421;
+
+    let tcp_participant = |bind_port: u16, peer_port: u16| {
+        let mut property = PropertyQosPolicy::default();
+        property.add_property("int2dds.transport", "tcp", false);
+        property.add_property("int2dds.initial_peers", format!("127.0.0.1:{}", peer_port), false);
+        property.set_tcp_bind_port(bind_port);
+        DomainParticipantQos { property, ..Default::default() }
+    };
+
+    // Read while a participant builds its interface list, so the setting only
+    // has to hold until both exist.
+    let loopback_interface = LoopbackInterface::enabled();
+    let domain_id = next_domain_id();
+    let factory = DomainParticipantFactory::get_instance();
+    let writer_participant = factory
+        .create_participant(
+            domain_id,
+            tcp_participant(WRITER_PORT, READER_PORT),
+            None,
+            StatusMask::default(),
+        )
+        .unwrap();
+    let reader_participant = factory
+        .create_participant(
+            domain_id,
+            tcp_participant(READER_PORT, WRITER_PORT),
+            None,
+            StatusMask::default(),
+        )
+        .unwrap();
+    drop(loopback_interface);
+
+    let reliable = ReliabilityQosPolicy {
+        kind: ReliabilityQosPolicyKind::Reliable,
+        max_blocking_time: Duration { sec: 1, nanosec: 0 },
+    };
+    let writer_qos = DataWriterQos {
+        history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepLast(1), ..Default::default() },
+        reliability: reliable.clone(),
+        ..Default::default()
+    };
+    let reader_qos = DataReaderQos { reliability: reliable, ..Default::default() };
+
+    let data_writer = create_datawriter(&writer_participant, PublisherQos::default(), writer_qos);
+    let data_reader = create_datareader(&reader_participant, SubscriberQos::default(), reader_qos);
+
+    wait_for_reader_status(
+        &data_reader,
+        StatusMask::SUBSCRIPTION_MATCHED,
+        Duration::from_seconds(30),
+    )
+    .unwrap();
+    wait_for_writer_status(
+        &data_writer,
+        StatusMask::PUBLICATION_MATCHED,
+        Duration::from_seconds(30),
+    )
+    .unwrap();
+
+    for value in 0..SAMPLES {
+        data_writer.write(&KeyedDataType::new(1, value), InstanceHandle::NIL).unwrap();
+    }
+    wait_for_reader_status(&data_reader, StatusMask::DATA_AVAILABLE, Duration::from_seconds(10))
+        .unwrap();
+
+    let dialled = dialled_addresses(&[WRITER_PORT, READER_PORT]);
+    println!("tcp only: peer reached at {:?}", dialled);
+
+    writer_participant.delete_contained_entities().unwrap();
+    reader_participant.delete_contained_entities().unwrap();
+    factory.delete_participant(writer_participant).unwrap();
+    factory.delete_participant(reader_participant).unwrap();
+
+    assert!(
+        !dialled.is_empty(),
+        "tcp only: nothing was dialled, so this measurement proves nothing"
+    );
+    assert_eq!(
+        dialled.len(),
+        1,
+        "tcp only: the same-host peer was dialled at {:?} - one connection per interface address \
          instead of one connection",
         dialled
     );
