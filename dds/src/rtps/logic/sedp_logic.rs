@@ -38,8 +38,8 @@ use crate::{
             entity_id::EntityId,
             guid::{Guid, GuidPrefix},
             locator::{
-                Locator, LOCATOR_KIND_SHM, LOCATOR_KIND_TCP_V4, LOCATOR_KIND_TCP_V6,
-                LOCATOR_KIND_UDP_V4, LOCATOR_KIND_UDP_V6,
+                loopback_locators, Locator, LOCATOR_KIND_SHM, LOCATOR_KIND_TCP_V4,
+                LOCATOR_KIND_TCP_V6, LOCATOR_KIND_UDP_V4, LOCATOR_KIND_UDP_V6,
             },
             parameters::ParameterList,
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
@@ -929,7 +929,10 @@ impl SedpLogic {
         let reader_proxy = ReaderProxy::new(
             subscription_builtin_topic_data.endpoint_guid(),
             subscription_builtin_topic_data.endpoint_guid().entity_id(),
-            subscription_builtin_topic_data.unicast_locator_list(),
+            self.endpoint_unicast_locators(
+                subscription_builtin_topic_data.unicast_locator_list(),
+                endpoint_guid.prefix(),
+            ),
             subscription_builtin_topic_data.multicast_locator_list(),
             highest_sent_change_sn,
             SequenceNumber::UNKNOWN,
@@ -1093,7 +1096,11 @@ impl SedpLogic {
         let mut attempted_locators = 0usize;
         let mut added_locators = 0usize;
 
-        for locator in subscription_builtin_topic_data.unicast_locator_list() {
+        let unicast_locator_list = self.endpoint_unicast_locators(
+            subscription_builtin_topic_data.unicast_locator_list(),
+            subscription_builtin_topic_data.endpoint_guid().prefix(),
+        );
+        for locator in unicast_locator_list {
             if !(locator.kind() == LOCATOR_KIND_UDP_V4
                 || locator.kind() == LOCATOR_KIND_UDP_V6
                 || locator.kind() == LOCATOR_KIND_TCP_V4
@@ -1154,6 +1161,36 @@ impl SedpLogic {
         );
 
         Ok(())
+    }
+
+    /// Locator list a proxy for `remote_prefix` should send to. The announced
+    /// list is left as the peer published it in the builtin topic data; only
+    /// the routing decision kept in the proxy is redirected.
+    ///
+    /// A SEDP announcement carries one locator per interface exactly as SPDP
+    /// does, and no source address reaches this path. It does not have to:
+    /// co-location was proven once from the participant's own announcement and
+    /// holds for every endpoint behind it.
+    fn endpoint_unicast_locators(
+        &self,
+        announced: Vec<Locator>,
+        remote_prefix: GuidPrefix,
+    ) -> Vec<Locator> {
+        let Ok(participant) = self.get_upgraded_participant() else {
+            return announced;
+        };
+        let same_host = participant.remote_is_same_host(remote_prefix, None);
+        if !same_host || crate::common::env::get_disable_same_host_loopback() {
+            return announced;
+        }
+
+        let redirected = loopback_locators(&announced);
+        debug!(
+            "Redirected same-host endpoint locators of {} to [{}]",
+            Guid::guid_prefix_to_string(&remote_prefix),
+            redirected.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(", ")
+        );
+        redirected
     }
 
     fn handle_empty_locator_lists(
@@ -1390,7 +1427,10 @@ impl SedpLogic {
         let writer_proxy = WriterProxy::new(
             publication_builtin_topic_data.endpoint_guid(),
             publication_builtin_topic_data.endpoint_guid().entity_id(),
-            publication_builtin_topic_data.unicast_locator_list(),
+            self.endpoint_unicast_locators(
+                publication_builtin_topic_data.unicast_locator_list(),
+                endpoint_guid.prefix(),
+            ),
             publication_builtin_topic_data.multicast_locator_list(),
             0, // data_max_size_serialized
             publication_builtin_topic_data.clone(),
@@ -2617,7 +2657,10 @@ impl UnicastMessageProcessor for SedpLogic {
                 let _ = participant
                     .unmatch_with_remote_participant(&terminated_participant_guid.to_guid());
             } else {
-                return self.handle_discovered_participant_data(participant_proxy_data.clone());
+                return self.handle_discovered_participant_data(
+                    participant_proxy_data.clone(),
+                    message_receiver.sender_addr(),
+                );
             }
         }
 

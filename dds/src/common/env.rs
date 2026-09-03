@@ -38,6 +38,7 @@ pub fn init_from_env() {
     // - INT2DDS_NETWORK_IP: Set network IP address directly (e.g., 192.168.1.100) - Default: automatic selection
     // - INT2DDS_USE_LOOPBACK_INTERFACE: Enable loopback interface for discovery and endpoint communication (true, false) - Default: false
     // - INT2DDS_FORCE_LOOPBACK_MULTICAST: Force multicast egress through the loopback interface (127.0.0.1) for local-only testing (true, false) - Default: false
+    // - INT2DDS_DISABLE_SAME_HOST_LOOPBACK: Address a co-located peer at every address it announced instead of 127.0.0.1 (true, false) - Default: false
     // - INT2DDS_UDP_SOCKET_BUFFER: Set UDP socket buffer size (bytes) - Default: OS default
     // - INT2DDS_SHM_BUFFER_SIZE: Set shared memory buffer size (bytes) - Default: 1048576 (1MB)
     // - INT2DDS_DATA_FRAG_SIZE: Set DATA_FRAG fragment size (1-65000) when the writer QoS specifies none - Default: 65000
@@ -221,6 +222,17 @@ pub fn get_force_loopback_multicast() -> bool {
 pub fn set_force_loopback_multicast(enabled: bool) {
     log::info!("Environment variable set: INT2DDS_FORCE_LOOPBACK_MULTICAST = {}", enabled);
     unsafe { std::env::set_var("INT2DDS_FORCE_LOOPBACK_MULTICAST", enabled.to_string()) };
+}
+
+/// Read the same-host loopback gate from `INT2DDS_DISABLE_SAME_HOST_LOOPBACK`
+pub fn get_disable_same_host_loopback() -> bool {
+    get_bool_env("INT2DDS_DISABLE_SAME_HOST_LOOPBACK").unwrap_or(false)
+}
+
+/// Set the same-host loopback gate via environment variable
+pub fn set_disable_same_host_loopback(is_disabled: bool) {
+    log::info!("Environment variable set: INT2DDS_DISABLE_SAME_HOST_LOOPBACK = {}", is_disabled);
+    unsafe { std::env::set_var("INT2DDS_DISABLE_SAME_HOST_LOOPBACK", is_disabled.to_string()) };
 }
 
 /// Set the UDP socket buffer size via environment variable
