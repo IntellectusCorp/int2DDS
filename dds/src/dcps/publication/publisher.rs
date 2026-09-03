@@ -253,12 +253,10 @@ impl Publisher {
                     self.default_datawriter_qos.lock().ok().and_then(|g| g.clone())
                 {
                     registered
-                } else if let Ok(profile_qos) =
-                    DomainParticipantFactory::get_instance().get_datawriter_qos_from_profile("")
-                {
-                    profile_qos
                 } else {
-                    DataWriterQos::default()
+                    DomainParticipantFactory::get_instance()
+                        .get_datawriter_qos_from_profile("")
+                        .unwrap_or_default()
                 }
             }
         }

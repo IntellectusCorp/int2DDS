@@ -1955,7 +1955,7 @@ mod tests {
 
             let changes = datareader_cache.get_changes();
             assert!(changes.len() == 3);
-            assert!(changes.get(0).unwrap().sequence_number().to_i64() == 2);
+            assert!(changes.first().unwrap().sequence_number().to_i64() == 2);
             assert!(changes.get(1).unwrap().sequence_number().to_i64() == 3);
             assert!(changes.get(2).unwrap().sequence_number().to_i64() == 4);
 
@@ -2047,7 +2047,7 @@ mod tests {
             let changes = datareader_cache.get_changes();
             assert_eq!(changes.len(), 2);
             // The oldest change (seq=1) should be removed, leaving only seq=2,3
-            assert_eq!(changes.get(0).unwrap().sequence_number().to_i64(), 2);
+            assert_eq!(changes.first().unwrap().sequence_number().to_i64(), 2);
             assert_eq!(changes.get(1).unwrap().sequence_number().to_i64(), 3);
 
             drop(datareader_cache);
@@ -2249,7 +2249,7 @@ mod tests {
             let changes = datareader_cache.get_changes();
             assert_eq!(changes.len(), 3);
             // The oldest change (seq=1) should be removed, leaving only seq=2,3,4
-            assert_eq!(changes.get(0).unwrap().sequence_number().to_i64(), 2);
+            assert_eq!(changes.first().unwrap().sequence_number().to_i64(), 2);
             assert_eq!(changes.get(1).unwrap().sequence_number().to_i64(), 3);
             assert_eq!(changes.get(2).unwrap().sequence_number().to_i64(), 4);
 

@@ -267,12 +267,10 @@ impl Subscriber {
                     self.default_datareader_qos.lock().ok().and_then(|g| g.clone())
                 {
                     registered
-                } else if let Ok(profile_qos) =
-                    DomainParticipantFactory::get_instance().get_datareader_qos_from_profile("")
-                {
-                    profile_qos
                 } else {
-                    DataReaderQos::default()
+                    DomainParticipantFactory::get_instance()
+                        .get_datareader_qos_from_profile("")
+                        .unwrap_or_default()
                 }
             }
         }
