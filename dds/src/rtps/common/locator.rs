@@ -5,7 +5,12 @@
 //! transport type and network address for sending and receiving RTPS messages.
 use crate::dcps::topic::type_support::DdsType;
 
-use std::{fmt::Debug, net::IpAddr, sync::OnceLock};
+use std::{
+    collections::HashSet,
+    fmt::Debug,
+    net::IpAddr,
+    sync::{OnceLock, RwLock},
+};
 
 use network_interface::Addr;
 use speedy::{Endianness, Readable, Writable};
@@ -261,31 +266,48 @@ impl Locator {
     }
 }
 
-/// Every address this host answers on. Read once: an address gained later
-/// cannot undo a decision already taken, and one lost was never reachable from
-/// off-host anyway.
-fn host_addresses() -> &'static [IpAddr] {
-    static HOST_ADDRESSES: OnceLock<Vec<IpAddr>> = OnceLock::new();
-    HOST_ADDRESSES.get_or_init(|| {
-        if_addrs::get_if_addrs()
-            .map(|interfaces| interfaces.iter().map(|interface| interface.ip()).collect())
-            .unwrap_or_default()
-    })
+fn interface_addresses() -> HashSet<IpAddr> {
+    if_addrs::get_if_addrs()
+        .map(|interfaces| interfaces.iter().map(|interface| interface.ip()).collect())
+        .unwrap_or_default()
+}
+
+/// Every address this host answers on.
+fn host_addresses() -> &'static RwLock<HashSet<IpAddr>> {
+    static HOST_ADDRESSES: OnceLock<RwLock<HashSet<IpAddr>>> = OnceLock::new();
+    HOST_ADDRESSES.get_or_init(|| RwLock::new(interface_addresses()))
+}
+
+/// Fold the interfaces this host currently has into the remembered set. The set
+/// only ever grows.
+fn remember_current_interfaces() {
+    if let Ok(mut host_addresses) = host_addresses().write() {
+        host_addresses.extend(interface_addresses());
+    }
 }
 
 /// Whether the peer that sent `from_addr` runs on this host. Every address of
 /// the host counts, not just the ones this participant sends through: the
 /// interface chosen for egress says nothing about where a peer runs.
+///
+/// The scan happens here rather than where the set is read because this is the
+/// one call the verdict cache lets through once per remote participant, and it
+/// runs immediately before that peer's locators are narrowed.
 pub(crate) fn is_same_host(from_addr: std::net::SocketAddr) -> bool {
+    remember_current_interfaces();
+
     let sender_ip = from_addr.ip();
-    sender_ip.is_loopback() || host_addresses().contains(&sender_ip)
+    sender_ip.is_loopback()
+        || host_addresses().read().is_ok_and(|host_addresses| host_addresses.contains(&sender_ip))
 }
 
 /// Every locator whose address this host owns, rewritten to loopback and the
 /// duplicates that collapses into removed. Such an address never reached the
 /// peer anyway, so the rest are left as announced and stay reachable.
 pub(crate) fn loopback_locators(locators: &[Locator]) -> Vec<Locator> {
-    let host_addresses = host_addresses();
+    let Ok(host_addresses) = host_addresses().read() else {
+        return locators.to_vec();
+    };
 
     let mut redirected: Vec<Locator> = Vec::with_capacity(locators.len());
 
