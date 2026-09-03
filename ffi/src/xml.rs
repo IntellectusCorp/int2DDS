@@ -23,6 +23,9 @@ unsafe impl Sync for Int2DdsXmlTypeRegistry {}
 
 /// Create an empty XML type registry. Destroy with
 /// `int2dds_xml_type_registry_destroy`.
+///
+/// # Safety
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_xml_type_registry_create(
     out: *mut *mut Int2DdsXmlTypeRegistry,
@@ -33,6 +36,10 @@ pub unsafe extern "C" fn int2dds_xml_type_registry_create(
 }
 
 /// Create an XML type registry and load `path` into it in one step.
+///
+/// # Safety
+/// - `path` must be a valid null-terminated C string
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_xml_type_registry_from_file(
     path: *const c_char,
@@ -50,6 +57,10 @@ pub unsafe extern "C" fn int2dds_xml_type_registry_from_file(
 }
 
 /// Load additional types from an XML file into an existing registry.
+///
+/// # Safety
+/// - `registry` must be a valid XML type registry
+/// - `path` must be a valid null-terminated C string
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_xml_type_registry_load_file(
     registry: *mut Int2DdsXmlTypeRegistry,
@@ -66,6 +77,10 @@ pub unsafe extern "C" fn int2dds_xml_type_registry_load_file(
 }
 
 /// Load additional types from an in-memory XML string into an existing registry.
+///
+/// # Safety
+/// - `registry` must be a valid XML type registry
+/// - `xml` must be a valid null-terminated C string
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_xml_type_registry_load_str(
     registry: *mut Int2DdsXmlTypeRegistry,
@@ -84,6 +99,11 @@ pub unsafe extern "C" fn int2dds_xml_type_registry_load_str(
 /// Look up a loaded type by name and build a dynamic type support (with its full
 /// dependency closure). Destroy the result with
 /// `int2dds_dynamic_type_support_destroy`.
+///
+/// # Safety
+/// - `registry` must be a valid XML type registry
+/// - `name` must be a valid null-terminated C string
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_xml_type_registry_get_type_support(
     registry: *const Int2DdsXmlTypeRegistry,
@@ -104,6 +124,11 @@ pub unsafe extern "C" fn int2dds_xml_type_registry_get_type_support(
 
 /// Look up a loaded type by name and return its top-level TypeObject for
 /// introspection. Destroy the result with `int2dds_type_object_destroy`.
+///
+/// # Safety
+/// - `registry` must be a valid XML type registry
+/// - `name` must be a valid null-terminated C string
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_xml_type_registry_get_type_object(
     registry: *const Int2DdsXmlTypeRegistry,
@@ -127,6 +152,10 @@ pub unsafe extern "C" fn int2dds_xml_type_registry_get_type_object(
 }
 
 /// Number of types loaded in the registry.
+///
+/// # Safety
+/// - `registry` must be a valid XML type registry
+/// - `out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_xml_type_registry_type_count(
     registry: *const Int2DdsXmlTypeRegistry,
@@ -139,6 +168,11 @@ pub unsafe extern "C" fn int2dds_xml_type_registry_type_count(
 }
 
 /// Copy the fully-qualified name of the type at `index` into `buf`.
+///
+/// # Safety
+/// - `registry` must be a valid XML type registry
+/// - `buf` must point to at least `buf_len` writable bytes
+/// - `out_len` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_xml_type_registry_type_name(
     registry: *const Int2DdsXmlTypeRegistry,
@@ -159,6 +193,10 @@ pub unsafe extern "C" fn int2dds_xml_type_registry_type_name(
 }
 
 /// Destroy an XML type registry handle. Safe to call with null.
+///
+/// # Safety
+/// - `registry` must be a valid XML type registry, or null (null is a no-op)
+/// - `registry` must not be used after this call
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_xml_type_registry_destroy(registry: *mut Int2DdsXmlTypeRegistry) {
     if !registry.is_null() {

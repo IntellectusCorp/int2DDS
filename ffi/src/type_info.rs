@@ -501,6 +501,9 @@ fn string_id(bound: u32, wide: bool) -> TypeIdentifier {
     }
 }
 
+/// # Safety
+/// - `type_name` must be a valid null-terminated C string
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_create(
     type_name: *const std::os::raw::c_char,
@@ -527,6 +530,10 @@ pub unsafe extern "C" fn int2dds_type_info_create(
 /// are i32 -> 32). Populate literals with `int2dds_type_info_add_enum_literal`, then pass
 /// the builder to `int2dds_type_info_add_nested_field` (or a collection-of-nested variant)
 /// on the parent so an enum-typed member resolves and computes native-Rust keys.
+///
+/// # Safety
+/// - `type_name` must be a valid null-terminated C string
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_create_enum(
     type_name: *const std::os::raw::c_char,
@@ -543,6 +550,10 @@ pub unsafe extern "C" fn int2dds_type_info_create_enum(
 
 /// Append a literal to an enum builder. `is_default` marks the `@default` literal (0/1);
 /// no-op on a non-enum builder.
+///
+/// # Safety
+/// - `type_info` must be a valid type info builder
+/// - `literal_name` must be a valid null-terminated C string
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_add_enum_literal(
     type_info: *mut Int2DdsTypeInfo,
@@ -559,6 +570,10 @@ pub unsafe extern "C" fn int2dds_type_info_add_enum_literal(
 }
 
 /// Create a bitmask type info builder. `bit_bound` is the flag storage bit width (default 32).
+///
+/// # Safety
+/// - `type_name` must be a valid null-terminated C string
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_create_bitmask(
     type_name: *const std::os::raw::c_char,
@@ -574,6 +589,10 @@ pub unsafe extern "C" fn int2dds_type_info_create_bitmask(
 }
 
 /// Append a flag to a bitmask builder. `position` is the bit index; no-op on a non-bitmask.
+///
+/// # Safety
+/// - `type_info` must be a valid type info builder
+/// - `flag_name` must be a valid null-terminated C string
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_add_bitmask_flag(
     type_info: *mut Int2DdsTypeInfo,
@@ -589,6 +608,10 @@ pub unsafe extern "C" fn int2dds_type_info_add_bitmask_flag(
 }
 
 /// Add a primitive-typed field to the type info builder.
+///
+/// # Safety
+/// - `type_info` must be a valid type info builder
+/// - `field_name` must be a valid null-terminated C string
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_add_field(
     type_info: *mut Int2DdsTypeInfo,
@@ -621,6 +644,10 @@ pub unsafe extern "C" fn int2dds_type_info_add_field(
 /// Prefer this over `int2dds_type_info_add_field(.., INT2DDS_FIELD_STRING, ..)` when the
 /// IDL declares `string<N>`, so the emitted TypeIdentifier carries the bound and matches
 /// strict XTypes peers byte-for-byte.
+///
+/// # Safety
+/// - `type_info` must be a valid type info builder
+/// - `field_name` must be a valid null-terminated C string
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_add_string_field(
     type_info: *mut Int2DdsTypeInfo,
@@ -640,6 +667,10 @@ pub unsafe extern "C" fn int2dds_type_info_add_string_field(
 }
 
 /// Add a (possibly bounded) wide-string (`wstring<N>`) field. `bound == 0` means unbounded.
+///
+/// # Safety
+/// - `type_info` must be a valid type info builder
+/// - `field_name` must be a valid null-terminated C string
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_add_wstring_field(
     type_info: *mut Int2DdsTypeInfo,
@@ -659,6 +690,10 @@ pub unsafe extern "C" fn int2dds_type_info_add_wstring_field(
 }
 
 /// Add a sequence field to the type info builder.
+///
+/// # Safety
+/// - `type_info` must be a valid type info builder
+/// - `field_name` must be a valid null-terminated C string
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_add_sequence_field(
     type_info: *mut Int2DdsTypeInfo,
@@ -687,6 +722,10 @@ pub unsafe extern "C" fn int2dds_type_info_add_sequence_field(
 }
 
 /// Add an array field to the type info builder.
+///
+/// # Safety
+/// - `type_info` must be a valid type info builder
+/// - `field_name` must be a valid null-terminated C string
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_add_array_field(
     type_info: *mut Int2DdsTypeInfo,
@@ -715,6 +754,11 @@ pub unsafe extern "C" fn int2dds_type_info_add_array_field(
 }
 
 /// Add a named (complex) type field to the type info builder.
+///
+/// # Safety
+/// - `type_info` must be a valid type info builder
+/// - `field_name` must be a valid null-terminated C string
+/// - `type_hash_name` must be a valid null-terminated C string
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_add_named_type_field(
     type_info: *mut Int2DdsTypeInfo,
@@ -746,6 +790,12 @@ pub unsafe extern "C" fn int2dds_type_info_add_named_type_field(
 /// `TypeObject` so composite (nested-struct) key members resolve and compute native-Rust
 /// InstanceHandles. `nested_type_info` is borrowed, not consumed: the caller still owns
 /// it and must destroy it.
+///
+/// # Safety
+/// - `type_info` must be a valid type info builder
+/// - `field_name` must be a valid null-terminated C string
+/// - `nested_type_info` must be a valid type info builder; it is borrowed, not
+///   consumed, and the caller still owns it
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_add_nested_field(
     type_info: *mut Int2DdsTypeInfo,
@@ -770,6 +820,12 @@ pub unsafe extern "C" fn int2dds_type_info_add_nested_field(
 /// the element's own builder. References the element by content-hash `CompleteTypeId`
 /// (matching the derive macro) so sequence-of-nested key members resolve and compute
 /// native-Rust InstanceHandles. `element_type_info` is borrowed, not consumed.
+///
+/// # Safety
+/// - `type_info` must be a valid type info builder
+/// - `field_name` must be a valid null-terminated C string
+/// - `element_type_info` must be a valid type info builder; it is borrowed, not
+///   consumed, and the caller still owns it
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_add_sequence_of_nested_field(
     type_info: *mut Int2DdsTypeInfo,
@@ -793,6 +849,12 @@ pub unsafe extern "C" fn int2dds_type_info_add_sequence_of_nested_field(
 
 /// Add a `Nested[N]` fixed-array field whose element is a nested struct/enum/bitmask,
 /// supplying the element's own builder. `element_type_info` is borrowed, not consumed.
+///
+/// # Safety
+/// - `type_info` must be a valid type info builder
+/// - `field_name` must be a valid null-terminated C string
+/// - `element_type_info` must be a valid type info builder; it is borrowed, not
+///   consumed, and the caller still owns it
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_add_array_of_nested_field(
     type_info: *mut Int2DdsTypeInfo,
@@ -814,6 +876,10 @@ pub unsafe extern "C" fn int2dds_type_info_add_array_of_nested_field(
     INT2DDS_RET_OK
 }
 
+/// # Safety
+/// - `type_info` must be a valid type info builder
+/// - `field_name` must be a valid null-terminated C string
+/// - `element_hash_name` must be a valid null-terminated C string
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_add_sequence_of_named_field(
     type_info: *mut Int2DdsTypeInfo,
@@ -838,6 +904,10 @@ pub unsafe extern "C" fn int2dds_type_info_add_sequence_of_named_field(
     INT2DDS_RET_OK
 }
 
+/// # Safety
+/// - `type_info` must be a valid type info builder
+/// - `field_name` must be a valid null-terminated C string
+/// - `element_hash_name` must be a valid null-terminated C string
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_add_array_of_named_field(
     type_info: *mut Int2DdsTypeInfo,
@@ -862,6 +932,9 @@ pub unsafe extern "C" fn int2dds_type_info_add_array_of_named_field(
     INT2DDS_RET_OK
 }
 
+/// # Safety
+/// - `type_info` must be a valid type info builder
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_to_type_object(
     type_info: *const Int2DdsTypeInfo,
@@ -878,6 +951,10 @@ pub unsafe extern "C" fn int2dds_type_info_to_type_object(
 }
 
 /// Destroy a type info builder.
+///
+/// # Safety
+/// - `type_info` must be a valid type info builder, or null (null is a no-op)
+/// - `type_info` must not be used after this call
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_destroy(type_info: *mut Int2DdsTypeInfo) {
     if !type_info.is_null() {
