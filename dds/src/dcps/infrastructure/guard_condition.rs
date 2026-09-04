@@ -28,9 +28,6 @@ pub struct GuardCondition {
     trigger_value: Arc<AtomicBool>,
     #[allow(clippy::type_complexity)]
     waitset_callback: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
-    // A guard condition has no owning entity, so this stays false; it exists for the shared
-    // condition macro.
-    is_dead: Arc<AtomicBool>,
 }
 
 impl From<GuardCondition> for Arc<dyn Condition + Send + Sync>
@@ -66,7 +63,6 @@ impl GuardCondition {
         Self {
             trigger_value: Arc::new(AtomicBool::new(false)),
             waitset_callback: Arc::new(Mutex::new(None)),
-            is_dead: Arc::new(AtomicBool::new(false)),
         }
     }
 

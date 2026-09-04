@@ -142,14 +142,6 @@ impl WaitSet {
         Ok(self.lock_notify_state()?.generation)
     }
 
-    fn has_no_conditions(&self) -> DdsResult<bool> {
-        Ok(self
-            .conditions
-            .lock()
-            .map_err(|e| DdsError::Error(format!("Failed to lock conditions: {}", e)))?
-            .is_empty())
-    }
-
     /// Attaches a condition to this WaitSet.
     ///
     /// Once attached, the WaitSet will wake up when this condition becomes true (triggered).
@@ -298,12 +290,6 @@ impl WaitSet {
             return Ok(triggered_conditions);
         }
 
-        // An empty set has nothing to wait for; a deleted condition drains its way here.
-        if self.has_no_conditions()? {
-            debug!("[WaitSet-{}] No conditions attached, returning empty", self.instance_id);
-            return Ok(Vec::new());
-        }
-
         // Set timeout
         let deadline = if timeout.is_infinite() {
             None
@@ -378,13 +364,6 @@ impl WaitSet {
                 return Ok(triggered_conditions);
             }
 
-            // A deleted condition drains the set. With nothing left to wait for, return empty
-            // instead of re-parking until timeout.
-            if self.has_no_conditions()? {
-                debug!("[WaitSet-{}] All conditions gone, returning empty", self.instance_id);
-                return Ok(Vec::new());
-            }
-
             // A wake-up can be stale if the condition was cleared before we checked it.
             // Fall through to the normal wait/timeout path.
             if let Some(deadline_time) = deadline {
@@ -406,7 +385,7 @@ impl WaitSet {
 
     /// Function to check and return triggered conditions
     fn check_triggered_conditions(&self) -> DdsResult<Vec<Arc<dyn Condition + Send + Sync>>> {
-        let mut conditions = self
+        let conditions = self
             .conditions
             .lock()
             .map_err(|e| DdsError::Error(format!("Failed to lock conditions: {}", e)))?;
@@ -416,34 +395,14 @@ impl WaitSet {
         }
 
         let mut triggered = Vec::new();
-        // Conditions whose entity was deleted: never reported as triggered, just dropped from the
-        // set below. Draining the set is what lets a parked waiter return.
-        let mut dead_keys = Vec::new();
 
-        for (key, condition) in conditions.iter() {
-            if condition.is_dead() {
-                dead_keys.push(*key);
-                continue;
-            }
+        for condition in conditions.values() {
             match condition.get_trigger_value() {
                 Ok(true) => triggered.push(Arc::clone(condition)),
                 Ok(false) => {}
                 Err(e) => {
                     debug!("[WaitSet-{}] Condition check failed: {:?}", self.instance_id, e);
                 }
-            }
-        }
-
-        if !dead_keys.is_empty() {
-            debug!(
-                "[WaitSet-{}] dropping {} condition(s) whose entity was deleted",
-                self.instance_id,
-                dead_keys.len()
-            );
-        }
-        for key in dead_keys {
-            if let Some(condition) = conditions.remove(&key) {
-                condition.set_waitset_callback(None);
             }
         }
 
@@ -1243,72 +1202,5 @@ mod tests {
 
         // Everything is latched, so the next wait returns the full set from its immediate check.
         assert_eq!(wait_set.wait(Duration::from_seconds(5)).unwrap().len(), N);
-    }
-
-    /// Deleting the entity a condition belongs to must wake a thread parked in `wait` on it,
-    /// rather than leaving it hung. The enabled status never fires, so without the fix the waiter
-    /// would block until the timeout.
-    #[test]
-    fn deleting_a_reader_wakes_a_waiter_on_its_status_condition() {
-        let domain_id = unique_domain_id();
-        let factory = DomainParticipantFactory::get_instance();
-        let participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let topic = participant
-            .create_topic::<HelloWorldType>(
-                "wake_on_delete",
-                "HelloWorld",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let subscriber = participant
-            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
-            .unwrap();
-        let reader = subscriber
-            .create_datareader::<HelloWorldType>(
-                &topic,
-                DataReaderQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let condition = reader.get_statuscondition().unwrap().clone();
-        // A status that will not fire, so the condition stays untriggered.
-        condition.set_enabled_statuses(StatusMask::DATA_AVAILABLE).unwrap();
-
-        let wait_set = Arc::new(WaitSet::new());
-        wait_set.attach_condition(condition).unwrap();
-
-        let waiter = {
-            let wait_set = wait_set.clone();
-            std::thread::spawn(move || wait_set.wait(Duration::from_seconds(10)))
-        };
-
-        // Far beyond the park latency: the waiter is provably blocked on the condvar.
-        std::thread::sleep(std::time::Duration::from_millis(300));
-
-        let start = std::time::Instant::now();
-        subscriber.delete_datareader(reader).unwrap();
-        let result = waiter.join().unwrap();
-        let elapsed = start.elapsed();
-
-        assert!(
-            elapsed < std::time::Duration::from_secs(5),
-            "deleting the reader did not wake the waiter; it blocked for {elapsed:?}"
-        );
-        let conditions = result.expect("wait should wake and return rather than time out");
-        assert!(conditions.is_empty(), "the deleted condition must not be reported as triggered");
-
-        participant.delete_contained_entities().unwrap();
-        factory.delete_participant(participant).unwrap();
     }
 }

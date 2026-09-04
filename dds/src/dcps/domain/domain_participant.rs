@@ -3120,11 +3120,6 @@ impl DomainParticipant {
         *bridge_guard = None;
         self.self_ref = None;
 
-        // Wake any WaitSet parked on this participant's status condition and let it drop it.
-        if let Ok(status_condition) = self.status_condition.lock() {
-            status_condition.mark_dead();
-        }
-
         self.lifecycle.mark_deleted_and_await_operation_completion();
         Ok(())
     }

@@ -15,7 +15,7 @@ use std::{
     any::Any,
     fmt::Debug,
     sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicU32, Ordering},
         Arc, Mutex, Weak,
     },
 };
@@ -58,9 +58,6 @@ pub struct StatusCondition<Q> {
     pub(crate) status_changes: Arc<AtomicU32>,
     #[allow(clippy::type_complexity)]
     waitset_callback: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
-    // Set true when the owning entity is deleted, so a WaitSet reports this condition as
-    // triggered and drops it instead of leaving a waiter hung.
-    is_dead: Arc<AtomicBool>,
 }
 
 impl<Q> PartialEq for StatusCondition<Q> {
@@ -120,7 +117,6 @@ impl<Q: Debug> StatusCondition<Q> {
             enabled_statuses: Arc::new(AtomicU32::new(StatusMask::default().bits())),
             status_changes: Arc::new(AtomicU32::new(StatusMask::empty().bits())),
             waitset_callback: Arc::new(Mutex::new(None)),
-            is_dead: Arc::new(AtomicBool::new(false)),
         }
     }
 

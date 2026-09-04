@@ -3858,16 +3858,6 @@ impl<Foo: 'static + Clone + Debug> DataReaderInternal for DataReader<Foo> {
         let value_to_drop = self.self_ref.lock().ok().and_then(|mut guard| guard.take());
         drop(value_to_drop);
 
-        // Wake any WaitSet parked on this reader's conditions and let it drop them.
-        if let Ok(status_condition) = self.status_condition.lock() {
-            status_condition.mark_dead();
-        }
-        if let Ok(read_conditions) = self.read_conditions.lock() {
-            for read_condition in read_conditions.iter() {
-                read_condition.mark_dead();
-            }
-        }
-
         self.lifecycle.mark_deleted_and_await_operation_completion();
     }
 
