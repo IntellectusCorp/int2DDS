@@ -15,10 +15,7 @@
 
 use std::{
     fmt::Debug,
-    sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc,
-    },
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 use crate::{
@@ -29,49 +26,53 @@ use crate::{
 
 use super::{status::StatusKind, status_condition::StatusCondition};
 
-// Serializes an entity's teardown against its in-flight public operations. begin_operation
-// admits an operation and refuses once the entity is marked deleted; delete marks deleted then
-// drains the count, so no admitted operation is aborted mid-way or outlived by teardown.
+#[derive(Debug, Default)]
+struct LifecycleState {
+    is_deleted: bool,
+    active_operation_count: usize,
+}
+
+// Serializes an entity's teardown against its in-flight public operations. Delete marks the
+// entity deleted, then drains the count before teardown proceeds.
 #[derive(Debug, Default)]
 pub(crate) struct EntityLifecycle {
-    deleted: AtomicBool,
-    active_operation_count: AtomicUsize,
+    state: Mutex<LifecycleState>,
 }
 
 impl EntityLifecycle {
     pub(crate) fn is_deleted(&self) -> DdsResult<()> {
-        if self.deleted.load(Ordering::SeqCst) {
+        if self.lock_state().is_deleted {
             Err(DdsError::AlreadyDeleted)
         } else {
             Ok(())
         }
     }
 
-    // Admit one public operation, or refuse with AlreadyDeleted if teardown already began. The
-    // returned guard holds the in-flight count raised until it drops.
+    // Admits one public operation and raises the in-flight count until the guard drops. Refuses
+    // with AlreadyDeleted once the entity is deleted and no operation is in flight.
     pub(crate) fn begin_operation(&self) -> DdsResult<OperationGuard<'_>> {
-        self.active_operation_count.fetch_add(1, Ordering::SeqCst);
-        debug!(
-            "EntityLifecycle::begin_operation() - active_operation_count = {}",
-            self.active_operation_count.load(Ordering::SeqCst)
-        );
+        let mut state = self.lock_state();
 
-        if self.deleted.load(Ordering::SeqCst) {
-            self.active_operation_count.fetch_sub(1, Ordering::SeqCst);
+        if state.is_deleted && state.active_operation_count == 0 {
             debug!(
-                "EntityLifecycle::begin_operation() - operation refused, entity already deleted, active_operation_count = {}",
-                self.active_operation_count.load(Ordering::SeqCst)
+                "EntityLifecycle::begin_operation() - operation refused, entity already deleted"
             );
             return Err(DdsError::AlreadyDeleted);
         }
 
+        state.active_operation_count += 1;
+        debug!(
+            "EntityLifecycle::begin_operation() - active_operation_count = {}",
+            state.active_operation_count
+        );
+
         Ok(OperationGuard { lifecycle: self })
     }
 
-    // Close the entity to new operations, then block until admitted ones finish. A listener
+    // Marks the entity deleted, then blocks until admitted operations finish. A listener
     // callback caller skips the wait, since it holds a lease only it could release.
     pub(crate) fn mark_deleted_and_await_operation_completion(&self) {
-        self.deleted.store(true, Ordering::SeqCst);
+        self.lock_state().is_deleted = true;
         debug!("Marked entity as deleted, waiting for operations to complete");
 
         if crate::utils::notify::in_listener_callback() {
@@ -80,11 +81,19 @@ impl EntityLifecycle {
         }
 
         // Poll cadence matches the rtps callback drain.
-        while self.active_operation_count.load(Ordering::SeqCst) > 0 {
+        while self.get_active_operation_count() > 0 {
             std::thread::sleep(std::time::Duration::from_micros(50));
         }
 
         debug!("All operations completed, entity can be safely deleted");
+    }
+
+    fn get_active_operation_count(&self) -> usize {
+        self.lock_state().active_operation_count
+    }
+
+    fn lock_state(&self) -> MutexGuard<'_, LifecycleState> {
+        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -96,7 +105,8 @@ pub(crate) struct OperationGuard<'a> {
 
 impl Drop for OperationGuard<'_> {
     fn drop(&mut self) {
-        self.lifecycle.active_operation_count.fetch_sub(1, Ordering::SeqCst);
+        let mut state = self.lifecycle.lock_state();
+        state.active_operation_count = state.active_operation_count.saturating_sub(1);
     }
 }
 
@@ -353,13 +363,13 @@ mod tests {
 
         {
             let _first = lifecycle.begin_operation().expect("admitted while alive");
-            assert_eq!(lifecycle.active_operation_count.load(Ordering::SeqCst), 1);
+            assert_eq!(lifecycle.get_active_operation_count(), 1);
 
             let _second = lifecycle.begin_operation().expect("admitted while alive");
-            assert_eq!(lifecycle.active_operation_count.load(Ordering::SeqCst), 2);
+            assert_eq!(lifecycle.get_active_operation_count(), 2);
         }
 
-        assert_eq!(lifecycle.active_operation_count.load(Ordering::SeqCst), 0);
+        assert_eq!(lifecycle.get_active_operation_count(), 0);
     }
 
     #[test]
@@ -368,7 +378,33 @@ mod tests {
         lifecycle.mark_deleted_and_await_operation_completion();
 
         assert!(matches!(lifecycle.begin_operation(), Err(DdsError::AlreadyDeleted)));
-        assert_eq!(lifecycle.active_operation_count.load(Ordering::SeqCst), 0);
+        assert_eq!(lifecycle.get_active_operation_count(), 0);
+    }
+
+    #[test]
+    fn an_operation_reached_from_inside_another_is_admitted_after_deletion_begins() {
+        let lifecycle = Arc::new(EntityLifecycle::default());
+        let outer = lifecycle.begin_operation().expect("admitted while alive");
+
+        let deleter_lifecycle = lifecycle.clone();
+        let deleter = thread::spawn(move || {
+            deleter_lifecycle.mark_deleted_and_await_operation_completion();
+        });
+
+        // Let the deleter mark deleted and settle into its drain before the nested call.
+        thread::sleep(Duration::from_millis(20));
+
+        let nested = lifecycle
+            .begin_operation()
+            .expect("a call reached from inside an admitted operation must not be refused");
+        assert_eq!(lifecycle.get_active_operation_count(), 2);
+
+        drop(nested);
+        drop(outer);
+        deleter.join().expect("deleter thread panicked");
+
+        assert_eq!(lifecycle.get_active_operation_count(), 0);
+        assert!(matches!(lifecycle.begin_operation(), Err(DdsError::AlreadyDeleted)));
     }
 
     #[test]
