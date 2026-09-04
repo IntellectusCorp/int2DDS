@@ -1961,21 +1961,21 @@ impl DomainParticipant {
            Regardless of whether the middleware provides Topic propagation, the delete_topic operation only deletes the local proxy object.
            If the operation reaches a timeout, it returns a platform-defined .nil. value.
         */
-        let _operation = self.lifecycle.begin_operation()?;
-
-        if let Ok(Some(topic)) = self.find_topic_by_name(topic_name) {
-            return Ok((*topic).clone());
-        }
-
-        if timeout.is_zero() {
-            return Err(DdsError::Timeout);
-        }
-
         let start_time = Time::now();
 
         loop {
-            if let Ok(Some(topic)) = self.find_topic_by_name(topic_name) {
-                return Ok((*topic).clone());
+            // Held only for the probe. Keeping it across the sleep would pin the participant
+            // open, so a concurrent delete could never drain and the topic could never be created.
+            {
+                let _operation = self.lifecycle.begin_operation()?;
+
+                if let Ok(Some(topic)) = self.find_topic_by_name(topic_name) {
+                    return Ok((*topic).clone());
+                }
+            }
+
+            if timeout.is_zero() {
+                return Err(DdsError::Timeout);
             }
 
             if !timeout.is_infinite() {
@@ -3387,6 +3387,45 @@ mod domain_participant_tests {
     pub struct TestData {
         #[dds(key)]
         id: u32,
+    }
+
+    // find_topic must not hold the participant's lifecycle open across its wait. If it did, a
+    // concurrent delete could never drain and the topic that ends the wait could never be created.
+    #[test]
+    fn find_topic_does_not_hold_the_participant_open_against_a_delete() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        // A name nothing creates, so every probe misses and the wait runs its full course.
+        let searcher_participant = participant.clone();
+        let searcher = thread::spawn(move || {
+            searcher_participant.find_topic("NeverCreatedTopic", Duration::from_seconds(10))
+        });
+
+        // Let the searcher reach its poll loop.
+        thread::sleep(StdDuration::from_millis(100));
+
+        participant.delete_contained_entities().unwrap();
+
+        let start = Instant::now();
+        factory.delete_participant(participant).unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < StdDuration::from_secs(5),
+            "delete waited {elapsed:?} for find_topic to release the participant"
+        );
+        assert!(
+            matches!(searcher.join().unwrap(), Err(DdsError::AlreadyDeleted)),
+            "find_topic did not observe the deletion"
+        );
     }
 
     #[test]

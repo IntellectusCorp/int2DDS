@@ -15,7 +15,9 @@
 
 use std::{
     fmt::Debug,
+    marker::PhantomData,
     sync::{Arc, Mutex, MutexGuard},
+    thread::ThreadId,
 };
 
 use crate::{
@@ -29,11 +31,12 @@ use super::{status::StatusKind, status_condition::StatusCondition};
 #[derive(Debug, Default)]
 struct LifecycleState {
     is_deleted: bool,
-    active_operation_count: usize,
+    // The thread of every admitted operation, one entry per nesting level.
+    holder_threads: Vec<ThreadId>,
 }
 
 // Serializes an entity's teardown against its in-flight public operations. Delete marks the
-// entity deleted, then drains the count before teardown proceeds.
+// entity deleted, then drains the holders before teardown proceeds.
 #[derive(Debug, Default)]
 pub(crate) struct EntityLifecycle {
     state: Mutex<LifecycleState>,
@@ -48,25 +51,26 @@ impl EntityLifecycle {
         }
     }
 
-    // Admits one public operation and raises the in-flight count until the guard drops. Refuses
-    // with AlreadyDeleted once the entity is deleted and no operation is in flight.
+    // Admits one public operation and records its thread until the guard drops. Once the entity
+    // is deleted only a thread already holding an operation is admitted, so the holders drain.
     pub(crate) fn begin_operation(&self) -> DdsResult<OperationGuard<'_>> {
         let mut state = self.lock_state();
+        let current_thread = std::thread::current().id();
 
-        if state.is_deleted && state.active_operation_count == 0 {
+        if state.is_deleted && !state.holder_threads.contains(&current_thread) {
             debug!(
                 "EntityLifecycle::begin_operation() - operation refused, entity already deleted"
             );
             return Err(DdsError::AlreadyDeleted);
         }
 
-        state.active_operation_count += 1;
+        state.holder_threads.push(current_thread);
         debug!(
             "EntityLifecycle::begin_operation() - active_operation_count = {}",
-            state.active_operation_count
+            state.holder_threads.len()
         );
 
-        Ok(OperationGuard { lifecycle: self })
+        Ok(OperationGuard { lifecycle: self, thread: current_thread, _not_send: PhantomData })
     }
 
     // Marks the entity deleted, then blocks until admitted operations finish. A listener
@@ -89,7 +93,7 @@ impl EntityLifecycle {
     }
 
     fn get_active_operation_count(&self) -> usize {
-        self.lock_state().active_operation_count
+        self.lock_state().holder_threads.len()
     }
 
     fn lock_state(&self) -> MutexGuard<'_, LifecycleState> {
@@ -97,16 +101,22 @@ impl EntityLifecycle {
     }
 }
 
-// Raises the entity's in-flight count for one public operation. Drop lowers it, so every early
-// return (including `?`) releases the entity to a waiting delete.
+// Holds this thread's entry for one public operation. Drop removes it, so every early return
+// (including `?`) releases the entity to a waiting delete.
 pub(crate) struct OperationGuard<'a> {
     lifecycle: &'a EntityLifecycle,
+    thread: ThreadId,
+    // Keeps the guard on the thread that took it, so Drop removes that thread's entry.
+    _not_send: PhantomData<*const ()>,
 }
 
 impl Drop for OperationGuard<'_> {
     fn drop(&mut self) {
         let mut state = self.lifecycle.lock_state();
-        state.active_operation_count = state.active_operation_count.saturating_sub(1);
+
+        if let Some(position) = state.holder_threads.iter().position(|id| *id == self.thread) {
+            state.holder_threads.swap_remove(position);
+        }
     }
 }
 
@@ -405,6 +415,32 @@ mod tests {
 
         assert_eq!(lifecycle.get_active_operation_count(), 0);
         assert!(matches!(lifecycle.begin_operation(), Err(DdsError::AlreadyDeleted)));
+    }
+
+    #[test]
+    fn an_operation_from_another_thread_is_refused_after_deletion_begins() {
+        let lifecycle = Arc::new(EntityLifecycle::default());
+        let held = lifecycle.begin_operation().expect("admitted while alive");
+
+        let deleter_lifecycle = lifecycle.clone();
+        let deleter = thread::spawn(move || {
+            deleter_lifecycle.mark_deleted_and_await_operation_completion();
+        });
+
+        // Our guard keeps the deleter in its drain while the outsider tries to enter.
+        thread::sleep(Duration::from_millis(20));
+
+        let outsider_lifecycle = lifecycle.clone();
+        let outsider = thread::spawn(move || outsider_lifecycle.begin_operation().map(|_| ()));
+        let outcome = outsider.join().expect("outsider thread panicked");
+
+        assert!(
+            matches!(outcome, Err(DdsError::AlreadyDeleted)),
+            "a call from another thread was admitted after deletion began, so the drain has no guaranteed end"
+        );
+
+        drop(held);
+        deleter.join().expect("deleter thread panicked");
     }
 
     #[test]
