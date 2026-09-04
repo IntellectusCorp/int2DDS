@@ -314,7 +314,7 @@ unsafe fn read_or_take_w_readcondition(
             } else {
                 reader_ref.inner.read_w_condition(max_samples, qc.clone())
             };
-            typed.and_then(|samples| {
+            typed.map(|samples| {
                 let mut out = Vec::with_capacity(samples.len());
                 for s in samples {
                     let info = s.sample_info();
@@ -328,7 +328,7 @@ unsafe fn read_or_take_w_readcondition(
                     };
                     out.push((bytes, info));
                 }
-                Ok(out)
+                out
             })
         }
     };

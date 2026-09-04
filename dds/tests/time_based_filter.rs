@@ -24,22 +24,25 @@ use std::thread;
 
 // Reliable + KEEP_ALL so every sample that passes the filter is retained for take().
 fn reliable_keep_all_writer_qos() -> DataWriterQos {
-    let mut qos = DataWriterQos::default();
-    qos.reliability = ReliabilityQosPolicy {
-        kind: ReliabilityQosPolicyKind::Reliable,
-        max_blocking_time: Duration { sec: 0, nanosec: 100_000_000 },
-    };
-    qos.history = HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, ..Default::default() };
-    qos
+    DataWriterQos {
+        reliability: ReliabilityQosPolicy {
+            kind: ReliabilityQosPolicyKind::Reliable,
+            max_blocking_time: Duration { sec: 0, nanosec: 100_000_000 },
+        },
+        history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, ..Default::default() },
+        ..Default::default()
+    }
 }
 
 fn reliable_keep_all_reader_qos(min_separation: Duration) -> DataReaderQos {
-    let mut qos = DataReaderQos::default();
-    qos.reliability = ReliabilityQosPolicy {
-        kind: ReliabilityQosPolicyKind::Reliable,
-        max_blocking_time: Duration { sec: 0, nanosec: 100_000_000 },
+    let mut qos = DataReaderQos {
+        reliability: ReliabilityQosPolicy {
+            kind: ReliabilityQosPolicyKind::Reliable,
+            max_blocking_time: Duration { sec: 0, nanosec: 100_000_000 },
+        },
+        history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, ..Default::default() },
+        ..Default::default()
     };
-    qos.history = HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, ..Default::default() };
     qos.time_based_filter.minimum_separation = min_separation;
     qos
 }

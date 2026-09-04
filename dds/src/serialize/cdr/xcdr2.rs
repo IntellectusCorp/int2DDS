@@ -185,7 +185,7 @@ impl Xcdr2Serializer {
                 self.write_dheader_at(emh_pos + 4, ni);
             }
             // LC=5/6/7: NEXTINT overlaps with payload's first 4 bytes
-            5 | 6 | 7 => {
+            5..=7 => {
                 self.write_dheader_at(emh_pos, emh);
             }
             // LC=0..=3: no NEXTINT
@@ -208,10 +208,10 @@ impl Xcdr2Serializer {
             4 => (2u32 << 28, None),
             8 => (3u32 << 28, None),
             _ => match hint {
-                LcHint::SeqMul4 if len >= 4 && (len - 4) % 4 == 0 => {
+                LcHint::SeqMul4 if len >= 4 && (len - 4).is_multiple_of(4) => {
                     (6u32 << 28, Some((len - 4) / 4))
                 }
-                LcHint::SeqMul8 if len >= 4 && (len - 4) % 8 == 0 => {
+                LcHint::SeqMul8 if len >= 4 && (len - 4).is_multiple_of(8) => {
                     (7u32 << 28, Some((len - 4) / 8))
                 }
                 _ => (4u32 << 28, Some(len)),
@@ -500,6 +500,7 @@ mod xcdr2_tests {
     };
     use speedy::Endianness;
     use std::collections::HashMap;
+    use std::f64::consts::{E, PI};
     #[derive(DdsType)]
     #[dds_type(crate_path = "int2dds", extensibility = "Final")]
     struct SimpleStruct {
@@ -662,7 +663,7 @@ mod xcdr2_tests {
 
     #[test]
     fn test_mutable_struct_xcdr2() {
-        let value = MutableStruct { id: 42, name: "test_mutable".to_string(), value: 3.14159 };
+        let value = MutableStruct { id: 42, name: "test_mutable".to_string(), value: PI };
 
         // Serialize
         let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Mutable);
@@ -681,12 +682,12 @@ mod xcdr2_tests {
 
         assert_eq!(result.id, 42);
         assert_eq!(result.name, "test_mutable");
-        assert!((result.value - 3.14159).abs() < 1e-10);
+        assert!((result.value - PI).abs() < 1e-10);
     }
 
     #[test]
     fn test_mutable_struct_big_endian() {
-        let value = MutableStruct { id: 100, name: "big_endian".to_string(), value: 2.71828 };
+        let value = MutableStruct { id: 100, name: "big_endian".to_string(), value: E };
 
         // Serialize in big-endian
         let mut serializer = XcdrSerializer::new(false, ExtensibilityKind::Mutable);
@@ -705,7 +706,7 @@ mod xcdr2_tests {
 
         assert_eq!(result.id, 100);
         assert_eq!(result.name, "big_endian");
-        assert!((result.value - 2.71828).abs() < 1e-10);
+        assert!((result.value - E).abs() < 1e-10);
     }
 
     // =============================================================================

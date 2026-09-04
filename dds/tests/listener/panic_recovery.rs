@@ -113,11 +113,7 @@ fn a_panicking_listener_does_not_stop_delivery() {
             let reader = subscriber
                 .create_datareader::<KeyedDataType>(
                     &topic,
-                    DataReaderQos {
-                        reliability: reliability.clone(),
-                        history: history.clone(),
-                        ..DataReaderQos::default()
-                    },
+                    DataReaderQos { reliability, history, ..DataReaderQos::default() },
                     Some(Arc::new(PanicOnceListener { calls })),
                     StatusMask::DATA_AVAILABLE,
                 )

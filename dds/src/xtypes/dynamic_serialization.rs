@@ -285,10 +285,10 @@ fn discriminator_as_i64(value: &DynamicValue) -> DdsResult<i64> {
     })
 }
 
-fn select_union_member<'a>(
-    union_desc: &'a UnionDescriptor,
+fn select_union_member(
+    union_desc: &UnionDescriptor,
     discriminator: i64,
-) -> DdsResult<&'a super::dynamic_type::UnionMemberDescriptor> {
+) -> DdsResult<&super::dynamic_type::UnionMemberDescriptor> {
     union_desc.select_member(discriminator).ok_or_else(|| {
         DdsError::Error(format!("no union member matches discriminator {}", discriminator))
     })
@@ -1738,8 +1738,8 @@ mod tests {
             let items: Vec<DynamicValue> = (0..2)
                 .map(|i| {
                     let mut inner = DynamicData::new(inner_dt.clone());
-                    inner.set("a", i as i32).unwrap();
-                    inner.set("b", (i as i32) + 100).unwrap();
+                    inner.set("a", i).unwrap();
+                    inner.set("b", i + 100).unwrap();
                     DynamicValue::Struct(Box::new(inner))
                 })
                 .collect();
