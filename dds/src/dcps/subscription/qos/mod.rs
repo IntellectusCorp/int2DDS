@@ -165,7 +165,6 @@ impl Qos for DataReaderQos {
 
     fn is_consistent(&self) -> DdsResult<()> {
         self.resource_limits.is_consistent()?;
-        self.reader_multicast_extension.is_consistent()?;
         if self.resource_limits.max_samples_per_instance != LENGTH_UNLIMITED
             && self.history.depth() > Some(self.resource_limits.max_samples_per_instance)
             || self.time_based_filter.minimum_separation > self.deadline.period
@@ -226,16 +225,12 @@ mod data_reader_qos_tests {
         }
     }
 
-    /// Reaching the transport with a bad group address costs a listener and a
-    /// thread, so `create_datareader` has to reject it up front.
+    /// The group address is a preference resolved at creation, so no value of it makes the
+    /// reader QoS inconsistent.
     #[test]
-    fn multicast_group_address_is_validated_by_the_reader_qos() {
-        assert!(qos_with_group(None).is_consistent().is_ok());
-        assert!(qos_with_group(Some("239.255.12.7")).is_consistent().is_ok());
-        assert_eq!(
-            qos_with_group(Some("10.0.0.1")).is_consistent(),
-            Err(DdsError::InconsistentPolicy)
-        );
-        assert_eq!(qos_with_group(Some("")).is_consistent(), Err(DdsError::InconsistentPolicy));
+    fn multicast_group_address_never_makes_the_reader_qos_inconsistent() {
+        for group in [None, Some("239.255.12.7"), Some("10.0.0.1"), Some("")] {
+            assert!(qos_with_group(group).is_consistent().is_ok(), "{group:?}");
+        }
     }
 }

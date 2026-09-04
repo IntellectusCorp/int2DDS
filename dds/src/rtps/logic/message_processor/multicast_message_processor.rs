@@ -7,7 +7,7 @@ use crate::rtps::{
     messages::{
         header::Header,
         message_receiver::{MessageReceiver, TypedSubmessage},
-        submessages::data::Data,
+        submessages::{data::Data, data_frag::DataFrag},
     },
 };
 
@@ -42,10 +42,17 @@ pub(crate) trait MulticastMessageProcessor: ParticipantAccessor {
                 TypedSubmessage::Data(_header, data) => {
                     self.handle_multicast_data_message(&rtps_header, data, &message_receiver)?;
                 }
+                TypedSubmessage::DataFrag(_header, data_frag) => {
+                    self.handle_multicast_datafrag_message(
+                        &rtps_header,
+                        data_frag,
+                        &message_receiver,
+                    )?;
+                }
                 // Samples are the only thing ever multicast. Everything else
                 // belongs to a conversation with one endpoint, and honouring it
                 // here would let an unaddressed datagram drive that state.
-                _ => trace!("[UserMulticast] Ignoring a non-DATA submessage on a group socket"),
+                _ => trace!("[UserMulticast] Ignoring a non-sample submessage on a group socket"),
             }
         }
 
@@ -56,6 +63,13 @@ pub(crate) trait MulticastMessageProcessor: ParticipantAccessor {
         &mut self,
         rtps_header: &Header,
         data: &Data,
+        message_receiver: &MessageReceiver,
+    ) -> RtpsResult<()>;
+
+    fn handle_multicast_datafrag_message(
+        &mut self,
+        rtps_header: &Header,
+        data_frag: &DataFrag,
         message_receiver: &MessageReceiver,
     ) -> RtpsResult<()>;
 }

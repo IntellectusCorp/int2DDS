@@ -258,6 +258,10 @@ const UDP_IP_HEADER_BYTES: usize = 28;
 /// and its fixed fields (32). `data_frag_datagram_bytes_match_the_builder` pins this down.
 const DATA_FRAG_FIXED_BYTES: usize = 20 + 16 + 12 + 4 + 32;
 
+/// The same for `create_data_frag_msg_multicast`, which writes no INFO_DST.
+/// `multicast_data_frag_datagram_bytes_match_the_builder` pins this down.
+const DATA_FRAG_MULTICAST_FIXED_BYTES: usize = DATA_FRAG_FIXED_BYTES - 16;
+
 /// A piggybacked HEARTBEAT: submessage header (4) plus its fixed body (28).
 const HEARTBEAT_SUBMESSAGE_BYTES: usize = 32;
 
@@ -279,6 +283,12 @@ fn data_frag_datagram_bytes(payload_bytes: usize, with_heartbeat: bool) -> usize
         + UDP_IP_HEADER_BYTES
 }
 
+/// What one multicast DATA_FRAG datagram costs each member's receive buffer. No heartbeat is
+/// ever piggybacked on it; members get theirs over unicast.
+fn multicast_data_frag_datagram_bytes(payload_bytes: usize) -> usize {
+    DATA_FRAG_MULTICAST_FIXED_BYTES + payload_bytes.next_multiple_of(4) + UDP_IP_HEADER_BYTES
+}
+
 /// The leading part of `plan` that fits in `window_remaining` wire bytes, with the heartbeat
 /// flag moved onto the last entry kept. Returns that prefix and the bytes it costs.
 ///
@@ -298,6 +308,7 @@ fn bound_fragment_plan(
     window_remaining: usize,
     at_least_one: bool,
     with_heartbeat: bool,
+    is_multicast: bool,
 ) -> (Vec<(u32, u32, bool)>, usize) {
     let heartbeat_bytes =
         if with_heartbeat { HEARTBEAT_SUBMESSAGE_BYTES * locator_count } else { 0 };
@@ -308,7 +319,12 @@ fn bound_fragment_plan(
         let offset = (fragment_num.saturating_sub(1) as usize).saturating_mul(fragment_size);
         let payload =
             sample_size.saturating_sub(offset).min((count as usize).saturating_mul(fragment_size));
-        let cost = data_frag_datagram_bytes(payload, false).saturating_mul(locator_count);
+        let cost = if is_multicast {
+            multicast_data_frag_datagram_bytes(payload)
+        } else {
+            data_frag_datagram_bytes(payload, false)
+        }
+        .saturating_mul(locator_count);
 
         if charged + cost + heartbeat_bytes > window_remaining && !(at_least_one && kept == 0) {
             break;
@@ -512,6 +528,60 @@ impl SendWindows {
             None => charged,
         };
         (window.saturating_sub(carried), charged == 0)
+    }
+
+    /// The window one multicast datagram has to fit, over the participants behind `members`.
+    ///
+    /// The group runs at the pace of its slowest member, so the result is the smallest
+    /// remaining window -- except for members with less room than `min_datagram_bytes`. Those
+    /// are returned in `excluded` and left out of the minimum: keeping them in would hold the
+    /// whole group to one datagram per backstop period, while dropping them only costs those
+    /// members a fragment repair they already know how to ask for. The datagram still lands
+    /// in their sockets, so the caller charges them all the same.
+    ///
+    /// With every member excluded the group has no window to run on, and the `untouched` flag
+    /// is what lets a single datagram through, exactly as it does for one starved reader.
+    fn group_remaining(
+        &mut self,
+        participant: &Participant,
+        members: &[Guid],
+        min_datagram_bytes: usize,
+        reliable: bool,
+    ) -> (usize, Vec<GuidPrefix>, bool) {
+        let mut prefixes: Vec<GuidPrefix> = members.iter().map(|guid| guid.prefix()).collect();
+        prefixes.sort_unstable();
+        prefixes.dedup();
+
+        let mut min_remaining: Option<usize> = None;
+        let mut all_untouched = true;
+        let mut excluded = Vec::new();
+        for prefix in prefixes {
+            let (remaining, untouched) = self.remaining(participant, prefix, reliable);
+            if remaining < min_datagram_bytes {
+                excluded.push(prefix);
+                continue;
+            }
+            min_remaining = Some(min_remaining.map_or(remaining, |min| min.min(remaining)));
+            all_untouched &= untouched;
+        }
+
+        match min_remaining {
+            Some(min) => (min, excluded, all_untouched),
+            None => (0, excluded, true),
+        }
+    }
+
+    /// Charge one multicast datagram of `bytes` to every participant behind `members`.
+    ///
+    /// Every member's socket takes the datagram, whether or not it had room for it, so the
+    /// members `group_remaining` excluded are charged like the rest.
+    fn charge_group(&mut self, members: &[Guid], bytes: usize, reliable: bool) {
+        let mut prefixes: Vec<GuidPrefix> = members.iter().map(|guid| guid.prefix()).collect();
+        prefixes.sort_unstable();
+        prefixes.dedup();
+        for prefix in prefixes {
+            self.charge(prefix, bytes, reliable);
+        }
     }
 
     fn charge(&mut self, dst: GuidPrefix, bytes: usize, reliable: bool) {
@@ -938,6 +1008,7 @@ impl UserLogic {
                     remaining,
                     untouched,
                     piggyback,
+                    false,
                 );
                 windows.charge(dst_prefix, charged, reliable);
 
@@ -1134,6 +1205,7 @@ impl UserLogic {
                 remaining,
                 untouched,
                 piggyback,
+                false,
             );
             windows.charge(dst_prefix, charged, reliable);
 
@@ -1259,6 +1331,7 @@ impl UserLogic {
                             remaining,
                             untouched,
                             reliable && piggyback,
+                            false,
                         );
                         windows.charge(reader_guid.prefix(), charged, reliable);
 
@@ -1374,6 +1447,23 @@ impl UserLogic {
             max_message_size,
         )?);
 
+        // The window's charge is released by an ACKNACK, which only a reliable member sends. A
+        // group with a best-effort member keeps the per-call accounting so that member's share
+        // does not sit unreleased on the shared budget.
+        let group_reliable = {
+            let reader_proxies_lock = writer.reader_proxies();
+            let reader_proxies = reader_proxies_lock.lock().map_err(|_| {
+                RtpsError::new(
+                    RtpsErrorCode::LockError,
+                    "[Data] Failed to acquire reader proxies lock",
+                )
+            })?;
+            reader_proxies
+                .iter()
+                .filter(|rp| member_guids.contains(&rp.remote_reader_guid()))
+                .all(|rp| rp.is_reliable())
+        };
+
         let mut group_sent_sn = group_start;
         while let Some(change) = history_cache.next_change_after(group_sent_sn) {
             let change_sn = change.sequence_number();
@@ -1401,21 +1491,61 @@ impl UserLogic {
                 continue;
             }
 
-            match MessageCreator::create_data_msg_multicast(
-                &change,
-                writer.endpoint_id(),
-                true, // Use inline QoS (default)
-                send_buffer,
-            ) {
-                Ok(()) => {
-                    if let Err(e) = self.send_rtps_message_to_locators(
-                        std::slice::from_ref(group_locator),
-                        send_buffer,
-                    ) {
-                        warn!("[Data] Failed to send multicast DATA message: {:?}", e);
+            if change.is_fragmented() {
+                let fragment_size = change.fragment_size() as usize;
+                let sample_size = change.data_value().len();
+                let frags_per_msg: NonZeroU32 =
+                    change.fragments_per_submessage(max_message_size).into();
+                let plan = fragment_send_plan(&[(1, change.total_fragments())], frags_per_msg);
+
+                // Bound the burst by the slowest member that can still take a datagram; what
+                // is left over is dropped and re-asked off the unicast heartbeats that follow.
+                let first_datagram_bytes = multicast_data_frag_datagram_bytes(
+                    (frags_per_msg.get() as usize).saturating_mul(fragment_size).min(sample_size),
+                );
+                let (remaining, _excluded, untouched) = windows.group_remaining(
+                    participant,
+                    member_guids,
+                    first_datagram_bytes,
+                    group_reliable,
+                );
+                let (plan, charged) = bound_fragment_plan(
+                    &plan,
+                    fragment_size,
+                    sample_size,
+                    1,
+                    remaining,
+                    untouched,
+                    false,
+                    true,
+                );
+                windows.charge_group(member_guids, charged, group_reliable);
+
+                self.send_data_frag_to_group(
+                    &change,
+                    writer.endpoint_id(),
+                    group_locator,
+                    &plan,
+                    Utc::now(),
+                    send_buffer,
+                );
+            } else {
+                match MessageCreator::create_data_msg_multicast(
+                    &change,
+                    writer.endpoint_id(),
+                    true, // Use inline QoS (default)
+                    send_buffer,
+                ) {
+                    Ok(()) => {
+                        if let Err(e) = self.send_rtps_message_to_locators(
+                            std::slice::from_ref(group_locator),
+                            send_buffer,
+                        ) {
+                            warn!("[Data] Failed to send multicast DATA message: {:?}", e);
+                        }
                     }
+                    Err(e) => warn!("[Data] Failed to create multicast DATA message: {}", e),
                 }
-                Err(e) => warn!("[Data] Failed to create multicast DATA message: {}", e),
             }
 
             group_sent_sn = change_sn;
@@ -1424,7 +1554,7 @@ impl UserLogic {
         self.advance_group_highest_sent_change_sn(writer, member_guids, group_sent_sn)?;
 
         if group_sent_sn > group_start {
-            self.send_group_heartbeats(writer, history_cache, member_guids)?;
+            self.send_group_heartbeats(writer, history_cache, member_guids, windows)?;
         }
 
         Ok(readers_with_sent_data)
@@ -1511,14 +1641,19 @@ impl UserLogic {
 
     /// A multicast DATA carries no HEARTBEAT, so each reliable member is told over
     /// unicast what the writer now holds.
+    /// One unicast HEARTBEAT per reliable member after a group burst.
+    ///
+    /// The multicast datagrams reserved no heartbeat room, so each member is charged its own
+    /// heartbeat datagram here, once per locator it is written to.
     fn send_group_heartbeats(
         &self,
         writer: &StatefulWriter,
         history_cache: &WriterHistoryCache,
         member_guids: &[Guid],
+        windows: &mut SendWindows,
     ) -> RtpsResult<()> {
         // Built under the lock but sent outside it, so no send runs while reader_proxies is held.
-        let heartbeats: Vec<(Vec<Locator>, Arc<Vec<u8>>)> = {
+        let heartbeats: Vec<(GuidPrefix, Vec<Locator>, Arc<Vec<u8>>)> = {
             let reader_proxies_lock = writer.reader_proxies();
             let mut reader_proxies = reader_proxies_lock.lock().map_err(|_| {
                 RtpsError::new(
@@ -1556,13 +1691,22 @@ impl UserLogic {
                     reader_proxy.set_first_hb_sent();
                 }
 
-                heartbeats.push((reader_proxy.unicast_locator_list().to_vec(), buffer));
+                heartbeats.push((
+                    reader_proxy.remote_reader_guid().prefix(),
+                    reader_proxy.unicast_locator_list().to_vec(),
+                    buffer,
+                ));
             }
 
             heartbeats
         };
 
-        for (locators, buffer) in heartbeats {
+        for (dst_prefix, locators, buffer) in heartbeats {
+            windows.charge(
+                dst_prefix,
+                (buffer.len() + UDP_IP_HEADER_BYTES).saturating_mul(locators.len()),
+                true,
+            );
             if let Err(e) = self.send_rtps_message_to_locators(locators.iter(), &buffer) {
                 warn!("[Data] Failed to send HEARTBEAT to a multicast group member: {:?}", e);
             }
@@ -1789,6 +1933,7 @@ impl UserLogic {
                     remaining,
                     untouched,
                     is_piggyback_wanted,
+                    false,
                 );
                 windows.charge(dst_prefix, charged, is_reliable_batch);
 
@@ -2246,6 +2391,52 @@ impl UserLogic {
             }
         }
         false
+    }
+
+    /// Send the planned fragment runs of one change to a multicast group, one datagram per run.
+    /// Returns whether every planned datagram went out; a run that cannot be built or sent is
+    /// skipped, and the members ask for it off the heartbeat that follows the burst.
+    fn send_data_frag_to_group(
+        &self,
+        change: &CacheChange,
+        writer_id: EntityId,
+        group_locator: &Locator,
+        plan: &[(u32, u32, bool)],
+        timestamp: DateTime<Utc>,
+        send_buffer: &mut Vec<u8>,
+    ) -> bool {
+        let mut all_sent = true;
+        for &(fragment_num, count, _) in plan {
+            let Some(fragment_data) = change.get_fragment_range_data(fragment_num, count as u16)
+            else {
+                all_sent = false;
+                continue;
+            };
+
+            if let Err(e) = MessageCreator::create_data_frag_msg_multicast(
+                change,
+                writer_id,
+                fragment_num,
+                count as u16,
+                change.fragment_size() as u16,
+                change.data_value().len() as u32,
+                fragment_data,
+                timestamp,
+                send_buffer,
+            ) {
+                warn!("[Data] Failed to create multicast DATA_FRAG message: {}", e);
+                all_sent = false;
+                continue;
+            }
+
+            if let Err(e) =
+                self.send_rtps_message_to_locators(std::slice::from_ref(group_locator), send_buffer)
+            {
+                warn!("[Data] Failed to send multicast DATA_FRAG message: {:?}", e);
+                all_sent = false;
+            }
+        }
+        all_sent
     }
 
     // Sending heartbeat message to all matched reader proxies of the given writer
@@ -3175,6 +3366,235 @@ impl UserLogic {
             writer_proxy.forget_fragments(seq_num);
         }
     }
+
+    /// Files the fragments of one DATA_FRAG into each given reader's own buffer and delivers
+    /// every sample that becomes complete. Which readers the datagram reaches is the caller's
+    /// decision, so unicast and multicast arrivals share this path.
+    fn store_fragments_for_readers(
+        &mut self,
+        readers: &[ReaderCallbackLease],
+        remote_writer_guid: Guid,
+        data_frag: &DataFrag,
+        message_receiver: &MessageReceiver,
+    ) -> RtpsResult<()> {
+        let source_timestamp = message_receiver.get_source_timestamp();
+        let total_size = data_frag.sample_size;
+
+        // DashMap is thread-safe, so no explicit lock is needed
+        //println!("[DEBUG] FragmentBuffer count: {}, size: {}", self.fragment_buffers.len(), self.fragment_buffers.iter().map(|entry| entry.value().total_size as usize).sum::<usize>());
+        // Raised with the per-reader key: the same workload now needs one buffer per reader,
+        // and evicting an in-progress one is the very loss this key change removes.
+        if self.fragment_buffers.len() > FRAGMENT_BUFFER_LIMIT {
+            debug!(
+                "[UserLogic] Fragment buffer count exceeded threshold ({}), cleaning up old buffers.",
+                self.fragment_buffers.len()
+            );
+            // This datagram is about to write one key per matched reader below; excluding all
+            // of them is what stops the arriving fragment from evicting its own buffer.
+            let arriving_keys: Vec<(Guid, EntityId, SequenceNumber)> = readers
+                .iter()
+                .map(|reader| (remote_writer_guid, reader.guid().entity_id(), data_frag.writer_sn))
+                .collect();
+            for (evicted_writer_guid, evicted_reader_id, evicted_sn) in
+                self.cleanup_old_fragment_buffers(FRAGMENT_BUFFER_LIMIT, &arriving_keys)
+            {
+                // The bytes are gone, so the ledger must stop claiming them. The key names the
+                // one reader that lost them; every other reader's buffer is still whole.
+                let Ok(owners) = self.get_matched_readers(evicted_writer_guid, evicted_reader_id)
+                else {
+                    continue;
+                };
+                for reader in owners {
+                    let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>()
+                    else {
+                        continue;
+                    };
+                    let writer_proxies = stateful_reader.writer_proxies();
+                    let Ok(mut matched_writers) = writer_proxies.lock() else {
+                        continue;
+                    };
+                    if let Some(writer_proxy) = matched_writers
+                        .iter_mut()
+                        .find(|proxy| proxy.remote_writer_guid() == evicted_writer_guid)
+                    {
+                        // A complete ledger means the sample was already delivered and a late
+                        // repair merely recreated the buffer. Only a stranded one is retracted.
+                        if !writer_proxy.all_fragments_received(evicted_sn) {
+                            writer_proxy.forget_fragments(evicted_sn);
+                        }
+                    }
+                }
+            }
+        }
+
+        // The key carries the reader, so the fragments go into each matched reader's own
+        // buffer. Completion is then single-reader: a buffer belongs to exactly one.
+        for reader in readers {
+            let key = (remote_writer_guid, reader.guid().entity_id(), data_frag.writer_sn);
+
+            // Only the fragments the buffer actually took. A submessage may claim more than
+            // its payload holds, and the ledger drives NACK_FRAG.
+            let mut accepted: Vec<u32> = Vec::new();
+
+            // Copy fragment data using DashMap entry API
+            {
+                let mut buffer = self.fragment_buffers.entry(key).or_insert_with(|| {
+                    FragmentBuffer::new(data_frag.writer_sn, total_size, data_frag.fragment_size)
+                });
+
+                if buffer.source_timestamp.is_none() {
+                    // timestamp does not be set in buffer.source_timestmap yet
+                    if let Some(ts) = source_timestamp {
+                        buffer.source_timestamp = Some(ts); // store source_timestamp from first fragment that equals to INFO_TS
+                    }
+                }
+
+                // Zero-copy: per-fragment slices are refcount bumps on the socket buffer, so
+                // fanning the write out across readers costs slot arrays, not payload copies.
+                if let Some(serialized_bytes) = data_frag.serialized_bytes() {
+                    let frag_size = data_frag.fragment_size as usize;
+                    let total_len = serialized_bytes.len();
+                    for i in 0..data_frag.fragments_in_submessage {
+                        let fragment_num = data_frag.fragment_starting_num + i as u32;
+                        let frag_data_start = i as usize * frag_size;
+                        // A submessage may claim more fragments than it carries; slicing past
+                        // the payload would panic.
+                        if frag_data_start >= total_len {
+                            break;
+                        }
+                        let frag_data_end = std::cmp::min(frag_data_start + frag_size, total_len);
+                        if buffer.copy_fragment_data(
+                            fragment_num,
+                            serialized_bytes.slice(frag_data_start..frag_data_end),
+                        ) {
+                            accepted.push(fragment_num);
+                        }
+                    }
+                }
+            } // buffer RefMut is automatically dropped here
+
+            // Update this reader's ChangeFromWriter state from the buffer that just took them.
+            if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
+                // Query buffer information from DashMap again
+                if let Some(buffer_ref) = self.fragment_buffers.get(&key) {
+                    let total_fragments = buffer_ref.total_fragments;
+                    drop(buffer_ref);
+
+                    let writer_proxies = stateful_reader.writer_proxies();
+                    let mut matched_writers = writer_proxies.lock().map_err(|e| {
+                        RtpsError::new(
+                            RtpsErrorCode::LockError,
+                            format!("Failed to acquire writer_proxies lock: {}", e),
+                        )
+                    })?;
+
+                    if let Some(writer_proxy) = matched_writers
+                        .iter_mut()
+                        .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
+                    {
+                        // Update fragment information with what the buffer took
+                        writer_proxy.mark_frag_received(
+                            data_frag.writer_sn,
+                            total_fragments,
+                            accepted.iter().copied(),
+                        );
+                    }
+                }
+            }
+
+            // Check if all fragments have been received and process
+            let Some(buffer_ref) = self.fragment_buffers.get(&key) else {
+                continue;
+            };
+            if !buffer_ref.all_fragments_received() {
+                continue;
+            }
+            let total_fragments = buffer_ref.total_fragments;
+            // complete here; delivery FragmentInfo's set is unused when is_complete
+            let received_fragments: std::collections::HashSet<u32> =
+                std::collections::HashSet::new();
+
+            // Drop buffer_ref to release DashMap lock
+            drop(buffer_ref);
+
+            // Move payload from buffer without cloning
+            let Some((_, buffer)) = self.fragment_buffers.remove(&key) else {
+                continue;
+            };
+            // Use timestamp from first fragment, fallback to current message
+            let assembled_timestamp = buffer.source_timestamp.or(source_timestamp);
+            if assembled_timestamp.is_none() {
+                // Nothing to stamp the change with. The buffer is already gone, so retract the
+                // ledger too and move on to the next reader rather than aborting the datagram --
+                // an interop peer that never sends INFO_TS would otherwise strand every reader
+                // this loop has not reached yet.
+                debug!(
+                    "[UserLogic] No source timestamp for assembled DataFrag sn={:?} reader={}; \
+                     retracting its ledger instead of delivering",
+                    data_frag.writer_sn,
+                    reader.guid()
+                );
+                Self::forget_reader_frag_ledger(reader, remote_writer_guid, data_frag.writer_sn);
+                continue;
+            }
+
+            let mut ownership_strength = None;
+            if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
+                let writer_proxies = stateful_reader.writer_proxies();
+                let matched_writers = writer_proxies.lock().ok();
+                if let Some(guard) = matched_writers {
+                    if let Some(writer_proxy) =
+                        guard.iter().find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
+                    {
+                        ownership_strength = Some(writer_proxy.get_ownership_strength());
+                    }
+                }
+            }
+
+            // Fragments were written straight into one buffer, so this is already the
+            // assembled sample and carries no receive-arena chunk with it.
+            let payload = buffer.into_bytes();
+
+            let mut assembled_change = match reader.reader_cache().lock() {
+                Ok(mut cache) => cache.acquire_change(),
+                Err(_) => {
+                    // The buffer is already gone; retract the ledger so this reader re-asks
+                    // instead of acknowledging a sample it never actually received.
+                    debug!(
+                        "[UserLogic] Poisoned reader cache for reader={} sn={:?}; retracting its \
+                         fragment ledger",
+                        reader.guid(),
+                        data_frag.writer_sn
+                    );
+                    Self::forget_reader_frag_ledger(
+                        reader,
+                        remote_writer_guid,
+                        data_frag.writer_sn,
+                    );
+                    continue;
+                }
+            };
+            assembled_change.reset(
+                ChangeKind::Alive,
+                remote_writer_guid,
+                InstanceHandle::NIL,
+                data_frag.writer_sn,
+                assembled_timestamp,
+            );
+            assembled_change.set_shared_payload(payload);
+            assembled_change.set_ownership_strength(ownership_strength);
+
+            let _ = self.deliver_change_to_reader(
+                assembled_change,
+                reader.as_ref(),
+                data_frag.writer_sn,
+                remote_writer_guid,
+                Some(FragmentInfo { total_fragments, received_fragments, is_complete: true }),
+            );
+        }
+
+        Ok(())
+    }
 }
 
 impl_participant_accessor!(UserLogic);
@@ -3687,9 +4107,7 @@ impl UnicastMessageProcessor for UserLogic {
         data_frag: &DataFrag,
         message_receiver: &MessageReceiver,
     ) -> RtpsResult<()> {
-        let source_timestamp = message_receiver.get_source_timestamp();
         let remote_writer_guid = Guid::new(rtps_header.guid_prefix(), data_frag.writer_id);
-        let total_size = data_frag.sample_size;
 
         // `reader_id` addresses the datagram, not the sample: UNKNOWN is one burst that reached
         // every matched reader, a directed repair only the reader it names.
@@ -3703,220 +4121,12 @@ impl UnicastMessageProcessor for UserLogic {
             return Ok(());
         }
 
-        // DashMap is thread-safe, so no explicit lock is needed
-        //println!("[DEBUG] FragmentBuffer count: {}, size: {}", self.fragment_buffers.len(), self.fragment_buffers.iter().map(|entry| entry.value().total_size as usize).sum::<usize>());
-        // Raised with the per-reader key: the same workload now needs one buffer per reader,
-        // and evicting an in-progress one is the very loss this key change removes.
-        if self.fragment_buffers.len() > FRAGMENT_BUFFER_LIMIT {
-            debug!(
-                "[UserLogic] Fragment buffer count exceeded threshold ({}), cleaning up old buffers.",
-                self.fragment_buffers.len()
-            );
-            // This datagram is about to write one key per matched reader below; excluding all
-            // of them is what stops the arriving fragment from evicting its own buffer.
-            let arriving_keys: Vec<(Guid, EntityId, SequenceNumber)> = matched_readers
-                .iter()
-                .map(|reader| (remote_writer_guid, reader.guid().entity_id(), data_frag.writer_sn))
-                .collect();
-            for (evicted_writer_guid, evicted_reader_id, evicted_sn) in
-                self.cleanup_old_fragment_buffers(FRAGMENT_BUFFER_LIMIT, &arriving_keys)
-            {
-                // The bytes are gone, so the ledger must stop claiming them. The key names the
-                // one reader that lost them; every other reader's buffer is still whole.
-                let Ok(readers) = self.get_matched_readers(evicted_writer_guid, evicted_reader_id)
-                else {
-                    continue;
-                };
-                for reader in readers {
-                    let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>()
-                    else {
-                        continue;
-                    };
-                    let writer_proxies = stateful_reader.writer_proxies();
-                    let Ok(mut matched_writers) = writer_proxies.lock() else {
-                        continue;
-                    };
-                    if let Some(writer_proxy) = matched_writers
-                        .iter_mut()
-                        .find(|proxy| proxy.remote_writer_guid() == evicted_writer_guid)
-                    {
-                        // A complete ledger means the sample was already delivered and a late
-                        // repair merely recreated the buffer. Only a stranded one is retracted.
-                        if !writer_proxy.all_fragments_received(evicted_sn) {
-                            writer_proxy.forget_fragments(evicted_sn);
-                        }
-                    }
-                }
-            }
-        }
-
-        // The key carries the reader, so the fragments go into each matched reader's own
-        // buffer. Completion is then single-reader: a buffer belongs to exactly one.
-        for reader in &matched_readers {
-            let key = (remote_writer_guid, reader.guid().entity_id(), data_frag.writer_sn);
-
-            // Only the fragments the buffer actually took. A submessage may claim more than
-            // its payload holds, and the ledger drives NACK_FRAG.
-            let mut accepted: Vec<u32> = Vec::new();
-
-            // Copy fragment data using DashMap entry API
-            {
-                let mut buffer = self.fragment_buffers.entry(key).or_insert_with(|| {
-                    FragmentBuffer::new(data_frag.writer_sn, total_size, data_frag.fragment_size)
-                });
-
-                if buffer.source_timestamp.is_none() {
-                    // timestamp does not be set in buffer.source_timestmap yet
-                    if let Some(ts) = source_timestamp {
-                        buffer.source_timestamp = Some(ts); // store source_timestamp from first fragment that equals to INFO_TS
-                    }
-                }
-
-                // Zero-copy: per-fragment slices are refcount bumps on the socket buffer, so
-                // fanning the write out across readers costs slot arrays, not payload copies.
-                if let Some(serialized_bytes) = data_frag.serialized_bytes() {
-                    let frag_size = data_frag.fragment_size as usize;
-                    let total_len = serialized_bytes.len();
-                    for i in 0..data_frag.fragments_in_submessage {
-                        let fragment_num = data_frag.fragment_starting_num + i as u32;
-                        let frag_data_start = i as usize * frag_size;
-                        // A submessage may claim more fragments than it carries; slicing past
-                        // the payload would panic.
-                        if frag_data_start >= total_len {
-                            break;
-                        }
-                        let frag_data_end = std::cmp::min(frag_data_start + frag_size, total_len);
-                        if buffer.copy_fragment_data(
-                            fragment_num,
-                            serialized_bytes.slice(frag_data_start..frag_data_end),
-                        ) {
-                            accepted.push(fragment_num);
-                        }
-                    }
-                }
-            } // buffer RefMut is automatically dropped here
-
-            // Update this reader's ChangeFromWriter state from the buffer that just took them.
-            if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
-                // Query buffer information from DashMap again
-                if let Some(buffer_ref) = self.fragment_buffers.get(&key) {
-                    let total_fragments = buffer_ref.total_fragments;
-                    drop(buffer_ref);
-
-                    let writer_proxies = stateful_reader.writer_proxies();
-                    let mut matched_writers = writer_proxies.lock().map_err(|e| {
-                        RtpsError::new(
-                            RtpsErrorCode::LockError,
-                            format!("Failed to acquire writer_proxies lock: {}", e),
-                        )
-                    })?;
-
-                    if let Some(writer_proxy) = matched_writers
-                        .iter_mut()
-                        .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
-                    {
-                        // Update fragment information with what the buffer took
-                        writer_proxy.mark_frag_received(
-                            data_frag.writer_sn,
-                            total_fragments,
-                            accepted.iter().copied(),
-                        );
-                    }
-                }
-            }
-
-            // Check if all fragments have been received and process
-            let Some(buffer_ref) = self.fragment_buffers.get(&key) else {
-                continue;
-            };
-            if !buffer_ref.all_fragments_received() {
-                continue;
-            }
-            let total_fragments = buffer_ref.total_fragments;
-            // complete here; delivery FragmentInfo's set is unused when is_complete
-            let received_fragments: std::collections::HashSet<u32> =
-                std::collections::HashSet::new();
-
-            // Drop buffer_ref to release DashMap lock
-            drop(buffer_ref);
-
-            // Move payload from buffer without cloning
-            let Some((_, buffer)) = self.fragment_buffers.remove(&key) else {
-                continue;
-            };
-            // Use timestamp from first fragment, fallback to current message
-            let assembled_timestamp = buffer.source_timestamp.or(source_timestamp);
-            if assembled_timestamp.is_none() {
-                // Nothing to stamp the change with. The buffer is already gone, so retract the
-                // ledger too and move on to the next reader rather than aborting the datagram --
-                // an interop peer that never sends INFO_TS would otherwise strand every reader
-                // this loop has not reached yet.
-                debug!(
-                    "[UserLogic] No source timestamp for assembled DataFrag sn={:?} reader={}; \
-                     retracting its ledger instead of delivering",
-                    data_frag.writer_sn,
-                    reader.guid()
-                );
-                Self::forget_reader_frag_ledger(reader, remote_writer_guid, data_frag.writer_sn);
-                continue;
-            }
-
-            let mut ownership_strength = None;
-            if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
-                let writer_proxies = stateful_reader.writer_proxies();
-                let matched_writers = writer_proxies.lock().ok();
-                if let Some(guard) = matched_writers {
-                    if let Some(writer_proxy) =
-                        guard.iter().find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
-                    {
-                        ownership_strength = Some(writer_proxy.get_ownership_strength());
-                    }
-                }
-            }
-
-            // Fragments were written straight into one buffer, so this is already the
-            // assembled sample and carries no receive-arena chunk with it.
-            let payload = buffer.into_bytes();
-
-            let mut assembled_change = match reader.reader_cache().lock() {
-                Ok(mut cache) => cache.acquire_change(),
-                Err(_) => {
-                    // The buffer is already gone; retract the ledger so this reader re-asks
-                    // instead of acknowledging a sample it never actually received.
-                    debug!(
-                        "[UserLogic] Poisoned reader cache for reader={} sn={:?}; retracting its \
-                         fragment ledger",
-                        reader.guid(),
-                        data_frag.writer_sn
-                    );
-                    Self::forget_reader_frag_ledger(
-                        reader,
-                        remote_writer_guid,
-                        data_frag.writer_sn,
-                    );
-                    continue;
-                }
-            };
-            assembled_change.reset(
-                ChangeKind::Alive,
-                remote_writer_guid,
-                InstanceHandle::NIL,
-                data_frag.writer_sn,
-                assembled_timestamp,
-            );
-            assembled_change.set_shared_payload(payload);
-            assembled_change.set_ownership_strength(ownership_strength);
-
-            let _ = self.deliver_change_to_reader(
-                assembled_change,
-                reader.as_ref(),
-                data_frag.writer_sn,
-                remote_writer_guid,
-                Some(FragmentInfo { total_fragments, received_fragments, is_complete: true }),
-            );
-        }
-
-        Ok(())
+        self.store_fragments_for_readers(
+            &matched_readers,
+            remote_writer_guid,
+            data_frag,
+            message_receiver,
+        )
     }
 
     fn handle_nackfrag_message(
@@ -4316,6 +4526,45 @@ mod tests {
     /// The window is charged in wire bytes, so `data_frag_datagram_bytes` has to agree with what
     /// the builder actually emits. Any drift in the message shape shows up here first.
     #[test]
+    fn multicast_data_frag_datagram_bytes_match_the_builder() {
+        let sample_size = 3 * WINDOW_TEST_FRAG_SIZE + 7;
+        let change = CacheChange::create_fragmented(
+            ChangeKind::Alive,
+            Guid::new([0xC0; 12], EntityId::new([1, 0, 0], EntityKind::USER_DEFINED_WRITER_NO_KEY)),
+            InstanceHandle::NIL,
+            SequenceNumber::new(0, 1),
+            &vec![0xA5; sample_size],
+            None,
+            WINDOW_TEST_FRAG_SIZE,
+            WINDOW_TEST_FRAG_SIZE,
+        );
+
+        let mut buffer = Vec::new();
+        for (fragment_num, count) in [(1u32, 2u16), (4, 1)] {
+            let fragment_data = change.get_fragment_range_data(fragment_num, count).unwrap();
+            MessageCreator::create_data_frag_msg_multicast(
+                &change,
+                change.writer_guid().entity_id(),
+                fragment_num,
+                count,
+                WINDOW_TEST_FRAG_SIZE as u16,
+                sample_size as u32,
+                fragment_data,
+                Utc::now(),
+                &mut buffer,
+            )
+            .unwrap();
+
+            assert_eq!(
+                multicast_data_frag_datagram_bytes(fragment_data.len()),
+                buffer.len() + UDP_IP_HEADER_BYTES,
+                "modelled multicast size disagrees with the builder for {count} fragments at \
+                 {fragment_num}"
+            );
+        }
+    }
+
+    #[test]
     fn data_frag_datagram_bytes_match_the_builder() {
         let sample_size = 3 * WINDOW_TEST_FRAG_SIZE + 7; // a ragged final fragment
         let change = CacheChange::create_fragmented(
@@ -4374,8 +4623,16 @@ mod tests {
         let plan = whole_sample_plan(sample_size);
         let window = receive_window_bytes(Some(WINDOW_TEST_ADVERTISED), None);
 
-        let (bounded, charged) =
-            bound_fragment_plan(&plan, WINDOW_TEST_FRAG_SIZE, sample_size, 1, window, true, true);
+        let (bounded, charged) = bound_fragment_plan(
+            &plan,
+            WINDOW_TEST_FRAG_SIZE,
+            sample_size,
+            1,
+            window,
+            true,
+            true,
+            false,
+        );
 
         assert!(bounded.len() < plan.len(), "a 1 MiB sample must not fit in one window");
         assert!(charged <= window, "charged {charged} bytes into a {window}-byte window");
@@ -4414,6 +4671,7 @@ mod tests {
                 window,
                 true,
                 true,
+                false,
             );
             assert!(!bounded.is_empty(), "a window that carries nothing cannot make progress");
             assert!(charged <= window, "round {rounds} charged {charged} into {window}");
@@ -4446,6 +4704,7 @@ mod tests {
             receive_window_bytes(Some(WINDOW_TEST_ADVERTISED), None),
             true,
             true,
+            false,
         );
         assert_eq!(bounded.len(), plan.len(), "a small sample must not be truncated");
         assert_eq!(bounded.iter().filter(|&&(_, _, is_last)| is_last).count(), 1);
@@ -4457,10 +4716,26 @@ mod tests {
         let plan = whole_sample_plan(sample_size);
         let window = receive_window_bytes(Some(WINDOW_TEST_ADVERTISED), None);
 
-        let one =
-            bound_fragment_plan(&plan, WINDOW_TEST_FRAG_SIZE, sample_size, 1, window, true, true);
-        let four =
-            bound_fragment_plan(&plan, WINDOW_TEST_FRAG_SIZE, sample_size, 4, window, true, true);
+        let one = bound_fragment_plan(
+            &plan,
+            WINDOW_TEST_FRAG_SIZE,
+            sample_size,
+            1,
+            window,
+            true,
+            true,
+            false,
+        );
+        let four = bound_fragment_plan(
+            &plan,
+            WINDOW_TEST_FRAG_SIZE,
+            sample_size,
+            4,
+            window,
+            true,
+            true,
+            false,
+        );
 
         assert_eq!(
             four.0.len(),
@@ -4476,11 +4751,19 @@ mod tests {
         let plan = whole_sample_plan(sample_size);
 
         let (forced, _) =
-            bound_fragment_plan(&plan, WINDOW_TEST_FRAG_SIZE, sample_size, 1, 0, true, true);
+            bound_fragment_plan(&plan, WINDOW_TEST_FRAG_SIZE, sample_size, 1, 0, true, true, false);
         assert_eq!(forced.len(), 1, "a burst must always make progress on its first datagram");
 
-        let (nothing, charged) =
-            bound_fragment_plan(&plan, WINDOW_TEST_FRAG_SIZE, sample_size, 1, 0, false, true);
+        let (nothing, charged) = bound_fragment_plan(
+            &plan,
+            WINDOW_TEST_FRAG_SIZE,
+            sample_size,
+            1,
+            0,
+            false,
+            true,
+            false,
+        );
         assert!(nothing.is_empty(), "a window already spent must send nothing more");
         assert_eq!(charged, 0);
     }
@@ -6306,6 +6589,105 @@ mod tests {
             "a builtin writer's send left a charge on the shared budget"
         );
     }
+
+    /// A participant with an advertised receive buffer plus one reader whose GUID lives behind
+    /// it, so a group of several such members spans several windows.
+    fn group_member(participant: &Participant, byte: u8, advertised: usize) -> Guid {
+        let prefix: GuidPrefix = [byte; 12];
+        let mut proxy_data = SPDPDiscoveredParticipantData::new(
+            0,
+            prefix,
+            crate::rtps::builtin::data::builtin_endpoint_set::BuiltinEndpointSet::new(),
+        );
+        proxy_data.set_receive_buffer_size(Some(advertised));
+        participant.add_remote_participant_proxy_data(proxy_data);
+        Guid::new(prefix, EntityId::new([0x20, 0x00, 0x00], EntityKind::USER_DEFINED_READER_NO_KEY))
+    }
+
+    #[test]
+    fn a_starved_group_member_is_excluded_without_dragging_the_minimum() {
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let wide = group_member(&participant, 0xA1, 300_000);
+        let narrow = group_member(&participant, 0xA2, 150_000);
+        let starved = group_member(&participant, 0xA3, 150_000);
+        let datagram = 1_500;
+
+        let mut windows = SendWindows::new(&NullTransport, None);
+        // Spend the starved member's window down to less than one datagram in this call.
+        let (starved_window, _) = windows.remaining(&participant, starved.prefix(), true);
+        windows.charge(starved.prefix(), starved_window - datagram / 2, true);
+
+        let (min, excluded, untouched) =
+            windows.group_remaining(&participant, &[wide, narrow, starved], datagram, true);
+
+        assert_eq!(excluded, vec![starved.prefix()], "only the member short of one datagram");
+        assert_eq!(
+            min,
+            receive_window_bytes(Some(150_000), None),
+            "the minimum is the narrowest member still able to take a datagram"
+        );
+        assert!(untouched, "nothing has gone out to the members that set the minimum");
+    }
+
+    #[test]
+    fn a_group_with_every_member_starved_still_lets_one_datagram_through() {
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let first = group_member(&participant, 0xB1, 150_000);
+        let second = group_member(&participant, 0xB2, 150_000);
+        // Two readers behind one participant count once: the window is the socket's.
+        let second_twin = Guid::new(
+            second.prefix(),
+            EntityId::new([0x21, 0x00, 0x00], EntityKind::USER_DEFINED_READER_NO_KEY),
+        );
+        let datagram = 1_500;
+
+        let mut windows = SendWindows::new(&NullTransport, None);
+        for prefix in [first.prefix(), second.prefix()] {
+            let (window, _) = windows.remaining(&participant, prefix, true);
+            windows.charge(prefix, window, true);
+        }
+
+        let (min, excluded, untouched) =
+            windows.group_remaining(&participant, &[first, second, second_twin], datagram, true);
+
+        assert_eq!(min, 0);
+        assert_eq!(excluded, vec![first.prefix(), second.prefix()], "each participant once");
+        assert!(untouched, "an all-starved group must not stall the burst outright");
+    }
+
+    #[test]
+    fn a_group_charge_lands_once_per_participant_including_excluded_members() {
+        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
+        let wide = group_member(&participant, 0xC1, 300_000);
+        let starved = group_member(&participant, 0xC2, 150_000);
+        let starved_twin = Guid::new(
+            starved.prefix(),
+            EntityId::new([0x21, 0x00, 0x00], EntityKind::USER_DEFINED_READER_NO_KEY),
+        );
+        let datagram = 1_500;
+
+        let mut windows = SendWindows::new(&NullTransport, None);
+        let (starved_window, _) = windows.remaining(&participant, starved.prefix(), true);
+        windows.charge(starved.prefix(), starved_window, true);
+        let (wide_window, _) = windows.remaining(&participant, wide.prefix(), true);
+
+        let members = [wide, starved, starved_twin];
+        let (_, excluded, _) = windows.group_remaining(&participant, &members, datagram, true);
+        assert_eq!(excluded, vec![starved.prefix()]);
+
+        windows.charge_group(&members, datagram, true);
+
+        let (wide_after, wide_untouched) = windows.remaining(&participant, wide.prefix(), true);
+        assert_eq!(wide_after, wide_window - datagram);
+        assert!(!wide_untouched);
+        let (starved_after, _) = windows.remaining(&participant, starved.prefix(), true);
+        assert_eq!(starved_after, 0, "the excluded member's socket took the datagram too");
+        assert_eq!(
+            windows.state[&starved.prefix()].1,
+            starved_window + datagram,
+            "two readers behind one participant are one socket, charged once"
+        );
+    }
 }
 
 impl MulticastMessageProcessor for UserLogic {
@@ -6342,6 +6724,49 @@ impl MulticastMessageProcessor for UserLogic {
                 remote_writer_guid,
                 data,
                 &detached_payload,
+                message_receiver,
+            )?;
+        }
+
+        // The writer proved itself alive by sending, whether or not this
+        // participant has a reader in the group it sent to.
+        if let Some(wlp) = self.get_upgraded_participant()?.wlp_logic() {
+            wlp.mark_monitored_writer_alive(remote_writer_guid)?;
+        }
+
+        Ok(())
+    }
+
+    fn handle_multicast_datafrag_message(
+        &mut self,
+        rtps_header: &Header,
+        data_frag: &DataFrag,
+        message_receiver: &MessageReceiver,
+    ) -> RtpsResult<()> {
+        let arrival_group = message_receiver.arrival_multicast_group().ok_or_else(|| {
+            RtpsError::new(
+                RtpsErrorCode::InvalidDestinationGuid,
+                "A multicast DATA_FRAG message carries no arrival group",
+            )
+        })?;
+
+        let remote_writer_guid = Guid::new(rtps_header.guid_prefix(), data_frag.writer_id);
+        let matched_readers = self.get_matched_readers(remote_writer_guid, data_frag.reader_id)?;
+
+        // The lease travels with the reader through the filter: dropping it early
+        // would reopen the reader to deletion mid-delivery.
+        let mut candidates = Vec::with_capacity(matched_readers.len());
+        for reader in matched_readers {
+            let subscription = reader.get_subscription_builtin_topic_data()?;
+            candidates.push((reader, subscription));
+        }
+
+        let readers = readers_listening_on(candidates, arrival_group);
+        if !readers.is_empty() {
+            self.store_fragments_for_readers(
+                &readers,
+                remote_writer_guid,
+                data_frag,
                 message_receiver,
             )?;
         }

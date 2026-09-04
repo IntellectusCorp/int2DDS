@@ -2536,8 +2536,13 @@ impl QosPolicy for ReaderReliabilityExtensionQosPolicy {
 
 /// Extension for int2DDS-specific user-data multicast reception on a DataReader.
 ///
-/// The group is selected per reader. The port is not: it is derived from the
-/// domain, so a single listening socket serves every group of a participant.
+/// `group_address` holds one or more IPv4 multicast addresses separated by commas; the first
+/// valid one is joined and advertised. The group is selected per reader. The port is not: it is
+/// derived from the domain, so a single listening socket serves every group of a participant.
+///
+/// The policy is a preference, never a hard requirement: a list with no valid address, or a
+/// transport that cannot carry multicast, leaves the reader on unicast instead of failing its
+/// creation.
 ///
 /// # Default
 /// - `group_address: None` - multicast reception disabled; user data is received on unicast only.
@@ -2548,18 +2553,24 @@ pub struct ReaderMulticastExtensionQosPolicy {
 }
 
 impl ReaderMulticastExtensionQosPolicy {
+    /// The first entry of `group_address` that is an IPv4 multicast address.
     pub(crate) fn group_ipv4(&self) -> Option<Ipv4Addr> {
-        self.group_address.as_deref().and_then(resolve_group_address)
+        self.group_entries().find_map(resolve_group_address)
     }
 
-    pub(crate) fn is_consistent(&self) -> DdsResult<()> {
-        if self.group_address.is_none() {
-            return Ok(());
-        }
-        match self.group_ipv4() {
-            Some(_) => Ok(()),
-            None => Err(DdsError::InconsistentPolicy),
-        }
+    /// Whether the policy names any group at all, valid or not. Distinguishes "nothing asked
+    /// for" from "asked for, but nothing usable", which is what deserves a warning.
+    pub(crate) fn requests_multicast(&self) -> bool {
+        self.group_entries().next().is_some()
+    }
+
+    fn group_entries(&self) -> impl Iterator<Item = &str> {
+        self.group_address
+            .as_deref()
+            .into_iter()
+            .flat_map(|list| list.split(','))
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
     }
 }
 
@@ -2638,29 +2649,31 @@ mod reader_multicast_extension_tests {
     }
 
     #[test]
-    fn absent_group_address_is_consistent() {
-        assert!(policy(None).is_consistent().is_ok());
+    fn absent_group_address_requests_nothing() {
+        assert!(!policy(None).requests_multicast());
+        assert_eq!(policy(None).group_ipv4(), None);
+        assert!(!policy(Some("")).requests_multicast());
+        assert!(!policy(Some(" , ")).requests_multicast());
     }
 
     #[test]
-    fn multicast_group_address_is_consistent() {
-        assert!(policy(Some("239.255.12.7")).is_consistent().is_ok());
+    fn a_single_multicast_group_address_resolves() {
         assert_eq!(policy(Some("239.255.12.7")).group_ipv4(), Some(Ipv4Addr::new(239, 255, 12, 7)));
     }
 
     #[test]
-    fn unicast_group_address_is_rejected() {
-        assert_eq!(policy(Some("10.0.0.1")).is_consistent(), Err(DdsError::InconsistentPolicy));
+    fn the_first_valid_entry_of_a_comma_list_is_chosen() {
+        let list = policy(Some("10.0.0.1, not an address ,239.255.12.7,239.255.12.8"));
+        assert!(list.requests_multicast());
+        assert_eq!(list.group_ipv4(), Some(Ipv4Addr::new(239, 255, 12, 7)));
     }
 
     #[test]
-    fn malformed_group_address_is_rejected() {
-        for bad in ["", "239.255.12", "999.1.1.1", "not an address"] {
-            assert_eq!(
-                policy(Some(bad)).is_consistent(),
-                Err(DdsError::InconsistentPolicy),
-                "{bad} should be rejected"
-            );
+    fn a_list_without_a_valid_entry_requests_multicast_but_resolves_to_none() {
+        for bad in ["10.0.0.1", "239.255.12", "999.1.1.1", "not an address", "10.0.0.1,10.0.0.2"] {
+            let list = policy(Some(bad));
+            assert!(list.requests_multicast(), "{bad} names a group");
+            assert_eq!(list.group_ipv4(), None, "{bad} should not resolve");
         }
     }
 }

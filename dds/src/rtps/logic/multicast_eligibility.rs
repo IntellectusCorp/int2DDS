@@ -1,6 +1,6 @@
 use std::net::Ipv4Addr;
 
-use log::{debug, trace, warn};
+use log::{debug, trace};
 
 use crate::{
     common::builtin::topic::subscription_builtin_topic_data::SubscriptionBuiltinTopicData,
@@ -17,18 +17,10 @@ pub(crate) enum ReaderMulticastVerdict {
     Ineligible,
 }
 
+/// The IPv4 multicast address `group_address` names, if it names one. Silent on purpose: the
+/// caller resolves a whole list and reports once, only when nothing in it was usable.
 pub(crate) fn resolve_group_address(group_address: &str) -> Option<Ipv4Addr> {
-    let Ok(address) = group_address.parse::<Ipv4Addr>() else {
-        warn!("[Multicast] Group address '{}' is not an IPv4 address", group_address);
-        return None;
-    };
-
-    if !address.is_multicast() {
-        warn!("[Multicast] Group address {} is not a multicast address", address);
-        return None;
-    }
-
-    Some(address)
+    group_address.parse::<Ipv4Addr>().ok().filter(Ipv4Addr::is_multicast)
 }
 
 pub(crate) fn evaluate_reader_multicast(
@@ -183,23 +175,14 @@ pub(crate) fn group_can_carry_change(change: &CacheChange, group_sent_sn: Sequen
 /// NACK_FRAG, so it goes back over that reader's unicast locators and never reaches
 /// here.
 pub(crate) fn sample_allows_multicast(change: &CacheChange) -> bool {
-    if change.is_fragmented() {
+    // A writer-level coherent set needs no rule here: every member of the group already holds,
+    // or was GAPped past, everything below the group's position, and a reader that lacks a
+    // set's start discards that set when it closes. A group-level set spans several writers,
+    // so no single send loop can tell whether the group holds all of it; it stays on the
+    // per-reader path.
+    if change.presentation_info().group_coherent_set.is_some() {
         trace!(
-            "[Multicast] SN {} not eligible: fragmented into {} piece(s)",
-            change.sequence_number(),
-            change.total_fragments()
-        );
-        return false;
-    }
-
-    let presentation_info = change.presentation_info();
-    let in_coherent_set = presentation_info.coherent_set.is_some()
-        || presentation_info.group_coherent_set.is_some()
-        || change.is_coherent_end_marker();
-
-    if in_coherent_set {
-        trace!(
-            "[Multicast] SN {} not eligible: belongs to a coherent set",
+            "[Multicast] SN {} not eligible: belongs to a group coherent set",
             change.sequence_number()
         );
         return false;
@@ -461,22 +444,22 @@ mod tests {
     }
 
     #[test]
-    fn fragmented_sample_is_denied() {
+    fn fragmented_first_sample_allows_multicast() {
         let mut change = plain_change();
         change.apply_fragmentation(4, 4);
 
-        assert!(!sample_allows_multicast(&change));
+        assert!(sample_allows_multicast(&change));
     }
 
     #[test]
-    fn coherent_set_member_is_denied() {
+    fn coherent_set_member_allows_multicast() {
         let mut change = plain_change();
         change.set_presentation_info(PresentationInfo {
             coherent_set: Some(SequenceNumber::from_i64(1)),
             ..Default::default()
         });
 
-        assert!(!sample_allows_multicast(&change));
+        assert!(sample_allows_multicast(&change));
     }
 
     #[test]
@@ -491,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn coherent_end_marker_is_denied() {
+    fn coherent_end_marker_allows_multicast() {
         let marker = CacheChange::new(
             ChangeKind::Alive,
             writer_guid(),
@@ -501,7 +484,7 @@ mod tests {
             None,
         );
 
-        assert!(!sample_allows_multicast(&marker));
+        assert!(sample_allows_multicast(&marker));
     }
 
     #[test]
@@ -535,21 +518,21 @@ mod tests {
     }
 
     #[test]
-    fn group_refuses_a_fragmented_change_it_stands_right_below() {
+    fn group_carries_a_fragmented_change_it_stands_right_below() {
         let mut change = change_with_sn(5);
         change.apply_fragmentation(4, 4);
 
-        assert!(!group_can_carry_change(&change, sn(4)));
+        assert!(group_can_carry_change(&change, sn(4)));
     }
 
     #[test]
-    fn group_refuses_a_coherent_set_member_it_stands_right_below() {
+    fn group_carries_a_coherent_set_member_it_stands_right_below() {
         let mut change = change_with_sn(5);
         change.set_presentation_info(PresentationInfo {
             coherent_set: Some(SequenceNumber::from_i64(5)),
             ..Default::default()
         });
 
-        assert!(!group_can_carry_change(&change, sn(4)));
+        assert!(group_can_carry_change(&change, sn(4)));
     }
 }

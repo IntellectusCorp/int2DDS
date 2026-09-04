@@ -242,10 +242,12 @@ impl DcpsBridge {
 
         let transport = self.socket.transport();
         transport.ensure_user_multicast_listener(group).map_err(|e| {
-            RtpsError::new(
-                RtpsErrorCode::Io,
-                format!("Failed to enable user data multicast reception: {e}"),
-            )
+            let code = if e.kind() == std::io::ErrorKind::Unsupported {
+                RtpsErrorCode::MulticastUnsupported
+            } else {
+                RtpsErrorCode::Io
+            };
+            RtpsError::new(code, format!("Failed to enable user data multicast reception: {e}"))
         })?;
 
         // A source only appears for a group whose socket was just created, so a

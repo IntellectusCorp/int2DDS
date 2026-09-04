@@ -77,7 +77,9 @@ use crate::{
     },
     rtps::{
         builtin::data::content_filtered_topic::ContentFilterProperty,
-        common::{guid::Guid, sequence::SequenceNumber, types::ChangeKind},
+        common::{
+            guid::Guid, rtps_error_code::RtpsErrorCode, sequence::SequenceNumber, types::ChangeKind,
+        },
         entities::{
             history::{cache_change::CacheChange, history_cache::HistoryCache as _},
             reader::Reader as RtpsReader,
@@ -408,15 +410,38 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
             let mut dcps_bridge = participant.get_dcps_bridge()?;
             let rtps_reader = match dcps_bridge.as_mut() {
                 Some(dcps_bridge) => {
-                    let group =
-                        subscription_builtin_topic_data.reader_multicast_extension().group_ipv4();
-                    if let Some(group) = group {
-                        dcps_bridge.ensure_user_multicast_traffic(group).map_err(|e| {
-                            DdsError::Error(format!(
-                                "Failed to start multicast reception for this reader: {}",
-                                e.message
-                            ))
-                        })?;
+                    // The multicast group is a preference: a list with nothing usable, or a
+                    // transport without multicast, leaves the reader on unicast. Only a
+                    // failure to join a group the transport does support is a real error.
+                    let multicast_policy =
+                        subscription_builtin_topic_data.reader_multicast_extension();
+                    let mut group = multicast_policy.group_ipv4();
+                    if group.is_none() && multicast_policy.requests_multicast() {
+                        log::warn!(
+                            "[DataReader] No valid IPv4 multicast address in group_address {:?}; \
+                             receiving user data over unicast only",
+                            multicast_policy.group_address
+                        );
+                    }
+                    if let Some(requested) = group {
+                        match dcps_bridge.ensure_user_multicast_traffic(requested) {
+                            Ok(()) => {}
+                            Err(e) if e.code == RtpsErrorCode::MulticastUnsupported => {
+                                log::warn!(
+                                    "[DataReader] Ignoring multicast group {}: {}; receiving user \
+                                     data over unicast only",
+                                    requested,
+                                    e.message
+                                );
+                                group = None;
+                            }
+                            Err(e) => {
+                                return Err(DdsError::Error(format!(
+                                    "Failed to start multicast reception for this reader: {}",
+                                    e.message
+                                )))
+                            }
+                        }
                     }
 
                     match dcps_bridge.create_rtps_reader(

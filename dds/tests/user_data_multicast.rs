@@ -14,7 +14,8 @@ use int2dds::{
         },
         infrastructure::{
             qos_policy::{
-                HistoryQosPolicy, HistoryQosPolicyKind, ReaderMulticastExtensionQosPolicy,
+                HistoryQosPolicy, HistoryQosPolicyKind, PresentationQosAccessScopeKind,
+                PresentationQosPolicy, PropertyQosPolicy, ReaderMulticastExtensionQosPolicy,
                 ReliabilityQosPolicy, ReliabilityQosPolicyKind,
             },
             status::StatusMask,
@@ -473,6 +474,271 @@ fn fragmented_samples_reach_every_group_member() {
             position
         );
     }
+
+    cleanup(factory, vec![writer_participant, reader_participant]);
+}
+
+fn topic_coherent() -> PresentationQosPolicy {
+    PresentationQosPolicy {
+        access_scope: PresentationQosAccessScopeKind::Topic,
+        coherent_access: true,
+        ordered_access: false,
+    }
+}
+
+fn coherent_publisher_qos() -> PublisherQos {
+    PublisherQos { presentation: topic_coherent(), ..Default::default() }
+}
+
+fn coherent_subscriber_qos() -> SubscriberQos {
+    SubscriberQos { presentation: topic_coherent(), ..Default::default() }
+}
+
+/// Everything a Reader takes over `window`, without stopping early: the point is to see what
+/// does NOT arrive as much as what does.
+fn take_values_for(
+    data_reader: &DataReader<KeyedDataType>,
+    window: std::time::Duration,
+) -> Vec<i16> {
+    let deadline = std::time::Instant::now() + window;
+    let mut values: Vec<i16> = Vec::new();
+    while std::time::Instant::now() < deadline {
+        let samples = data_reader
+            .take(
+                64,
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+            .unwrap_or_default();
+        values.extend(samples.iter().filter_map(|sample| sample.data().ok().map(|d| d.value)));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    values
+}
+
+#[test]
+fn a_coherent_set_completes_on_every_group_member_with_coherent_access() {
+    let domain_id = next_domain_id();
+    let factory = DomainParticipantFactory::get_instance();
+
+    let writer_participant = factory
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+    let first_participant = factory
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+    let second_participant = factory
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+
+    let data_writer =
+        create_datawriter(&writer_participant, coherent_publisher_qos(), reliable_writer_qos());
+    let first_reader = create_datareader(
+        &first_participant,
+        coherent_subscriber_qos(),
+        reliable_group_reader_qos(),
+    );
+    let second_reader = create_datareader(
+        &second_participant,
+        coherent_subscriber_qos(),
+        reliable_group_reader_qos(),
+    );
+
+    wait_until_matched(&first_reader);
+    wait_until_matched(&second_reader);
+    wait_for_writer_match_count(&data_writer, 2);
+
+    let publisher = data_writer.get_publisher().unwrap();
+    publisher.begin_coherent_changes().unwrap();
+    for (key, value) in [(1, 10), (2, 20), (3, 30)] {
+        data_writer.write(&KeyedDataType::new(key, value), InstanceHandle::NIL).unwrap();
+    }
+    publisher.end_coherent_changes().unwrap();
+
+    for (position, reader) in [&first_reader, &second_reader].into_iter().enumerate() {
+        let mut values = take_values(reader, 3);
+        values.sort_unstable();
+        assert_eq!(
+            values,
+            vec![10, 20, 30],
+            "group member {} must see the whole coherent set, and nothing else",
+            position
+        );
+    }
+
+    cleanup(factory, vec![writer_participant, first_participant, second_participant]);
+}
+
+#[test]
+fn a_volatile_member_matched_mid_set_sees_none_of_that_set() {
+    let domain_id = next_domain_id();
+    let factory = DomainParticipantFactory::get_instance();
+
+    let writer_participant = factory
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+    let early_participant = factory
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+    let late_participant = factory
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+
+    let data_writer =
+        create_datawriter(&writer_participant, coherent_publisher_qos(), reliable_writer_qos());
+    let early_reader = create_datareader(
+        &early_participant,
+        coherent_subscriber_qos(),
+        reliable_group_reader_qos(),
+    );
+    wait_until_matched(&early_reader);
+    wait_for_writer_match_count(&data_writer, 1);
+
+    // The set opens with one member in the group. The late Reader then joins the same group
+    // and is matched before the set's last member and end marker go out.
+    let publisher = data_writer.get_publisher().unwrap();
+    publisher.begin_coherent_changes().unwrap();
+    for (key, value) in [(1, 10), (2, 20)] {
+        data_writer.write(&KeyedDataType::new(key, value), InstanceHandle::NIL).unwrap();
+    }
+
+    let late_reader = create_datareader(
+        &late_participant,
+        coherent_subscriber_qos(),
+        reliable_group_reader_qos(),
+    );
+    wait_until_matched(&late_reader);
+    wait_for_writer_match_count(&data_writer, 2);
+
+    data_writer.write(&KeyedDataType::new(3, 30), InstanceHandle::NIL).unwrap();
+    publisher.end_coherent_changes().unwrap();
+
+    let mut early_values = take_values(&early_reader, 3);
+    early_values.sort_unstable();
+    assert_eq!(early_values, vec![10, 20, 30], "the member present from the start sees the set");
+
+    let leaked = take_values_for(&late_reader, std::time::Duration::from_millis(500));
+    assert!(
+        leaked.is_empty(),
+        "a volatile Reader matched mid-set must see none of it, got {:?}",
+        leaked
+    );
+
+    // A set that opens after the match proves the late Reader is served, not merely silent.
+    publisher.begin_coherent_changes().unwrap();
+    for (key, value) in [(4, 40), (5, 50)] {
+        data_writer.write(&KeyedDataType::new(key, value), InstanceHandle::NIL).unwrap();
+    }
+    publisher.end_coherent_changes().unwrap();
+
+    let mut late_values = take_values(&late_reader, 2);
+    late_values.sort_unstable();
+    assert_eq!(late_values, vec![40, 50], "the late Reader must see the next set whole");
+    let mut early_values = take_values(&early_reader, 2);
+    early_values.sort_unstable();
+    assert_eq!(early_values, vec![40, 50]);
+
+    cleanup(factory, vec![writer_participant, early_participant, late_participant]);
+}
+
+/// A group address is a preference. A list with nothing usable and a list whose first usable
+/// entry comes after a bad one both have to yield a working Reader.
+#[test]
+fn a_comma_separated_group_list_is_resolved_to_its_first_valid_entry() {
+    let domain_id = next_domain_id();
+    let factory = DomainParticipantFactory::get_instance();
+
+    let writer_participant = factory
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+    let reader_participant = factory
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+
+    let data_writer =
+        create_datawriter(&writer_participant, PublisherQos::default(), reliable_writer_qos());
+    // Nothing in this list is a multicast address, so this Reader stays on unicast.
+    let unicast_only_reader = create_datareader(
+        &reader_participant,
+        SubscriberQos::default(),
+        reader_qos_on_group("10.0.0.1, not an address"),
+    );
+    // The first entry is unusable; the second is the group the Reader joins.
+    let listed_group_reader = create_datareader(
+        &reader_participant,
+        SubscriberQos::default(),
+        reader_qos_on_group(&format!("10.0.0.1,{GROUP_ADDRESS}")),
+    );
+
+    wait_until_matched(&unicast_only_reader);
+    wait_until_matched(&listed_group_reader);
+    wait_for_writer_match_count(&data_writer, 2);
+
+    for value in 1..=SAMPLE_COUNT {
+        data_writer.write(&KeyedDataType::new(1, value), InstanceHandle::NIL).unwrap();
+    }
+
+    let expected: Vec<i16> = (1..=SAMPLE_COUNT).collect();
+    assert_eq!(
+        take_values(&unicast_only_reader, expected.len()),
+        expected,
+        "a Reader whose list names no valid group must still receive everything"
+    );
+    assert_eq!(
+        take_values(&listed_group_reader, expected.len()),
+        expected,
+        "a Reader whose list starts with a bad entry must still receive everything"
+    );
+
+    cleanup(factory, vec![writer_participant, reader_participant]);
+}
+
+/// A transport that carries user data over TCP has no multicast to offer. The group address is
+/// then ignored rather than refused, and the Reader is served over unicast like any other.
+#[test]
+fn a_group_reader_on_a_transport_without_multicast_falls_back_to_unicast() {
+    const WRITER_PORT: u16 = 17420;
+    const READER_PORT: u16 = 17421;
+
+    // Two participants in one process cannot share a TCP listen port.
+    let hybrid_participant = |bind_port: u16| {
+        let mut property = PropertyQosPolicy::default();
+        property.add_property("int2dds.transport", "hybrid", false);
+        property.set_tcp_bind_port(bind_port);
+        DomainParticipantQos { property, ..Default::default() }
+    };
+
+    let domain_id = next_domain_id();
+    let factory = DomainParticipantFactory::get_instance();
+    let writer_participant = factory
+        .create_participant(domain_id, hybrid_participant(WRITER_PORT), None, StatusMask::default())
+        .unwrap();
+    let reader_participant = factory
+        .create_participant(domain_id, hybrid_participant(READER_PORT), None, StatusMask::default())
+        .unwrap();
+
+    let data_writer =
+        create_datawriter(&writer_participant, PublisherQos::default(), reliable_writer_qos());
+    let data_reader = create_datareader(
+        &reader_participant,
+        SubscriberQos::default(),
+        reliable_group_reader_qos(),
+    );
+
+    wait_until_matched(&data_reader);
+    wait_for_writer_match_count(&data_writer, 1);
+
+    for value in 1..=SAMPLE_COUNT {
+        data_writer.write(&KeyedDataType::new(1, value), InstanceHandle::NIL).unwrap();
+    }
+
+    let expected: Vec<i16> = (1..=SAMPLE_COUNT).collect();
+    assert_eq!(
+        take_values(&data_reader, expected.len()),
+        expected,
+        "the group address must be ignored on a transport without multicast"
+    );
 
     cleanup(factory, vec![writer_participant, reader_participant]);
 }

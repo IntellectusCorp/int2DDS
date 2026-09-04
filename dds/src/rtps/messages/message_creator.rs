@@ -684,6 +684,53 @@ impl MessageCreator {
         Ok(())
     }
 
+    /// A DATA_FRAG for a multicast group: no INFO_DST and an unknown readerId, since the
+    /// datagram is addressed to every member at once, and no piggybacked HEARTBEAT, which each
+    /// member receives over unicast instead.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn create_data_frag_msg_multicast(
+        cache_change: &CacheChange,
+        writer_entity_id: EntityId,
+        fragment_starting_num: u32,
+        fragments_in_submessage: u16,
+        fragment_size: u16,
+        sample_size: u32,
+        fragment_data: &[u8],
+        timestamp: DateTime<Utc>,
+        send_buffer: &mut Vec<u8>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut rtps_message = RtpsMessage::new(Header::new(cache_change.writer_guid().prefix()));
+        rtps_message.add_submessage(SubmessageCreator::create_info_ts_submessage(timestamp));
+
+        let mut data_frag_header_flag = SubmessageHeaderFlag::new();
+        data_frag_header_flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::DATA_FRAG);
+        data_frag_header_flag.add_flag(SubmessageFlagType::DataFlag, SubmessageId::DATA_FRAG);
+
+        let mut data_frag = DataFrag::new(
+            EntityId::UNKNOWN,
+            writer_entity_id,
+            cache_change.sequence_number(),
+            fragment_starting_num,
+            fragments_in_submessage,
+            fragment_size,
+            sample_size,
+        );
+        data_frag.add_serialized_data(SubmessagePayload::Borrowed(fragment_data));
+
+        rtps_message.add_submessage(Submessage {
+            header: SubmessageHeader::new(
+                SubmessageId::DATA_FRAG,
+                data_frag_header_flag.flag,
+                data_frag.octets_to_next_header(),
+            ),
+            body: SubmessageBody::DataFrag(data_frag),
+        });
+
+        send_buffer.clear();
+        rtps_message.write_to_stream_with_ctx(Endianness::LittleEndian, &mut *send_buffer)?;
+        Ok(())
+    }
+
     pub(crate) fn create_gap_msg_consecutive(
         local_participant_guid: Guid,
         remote_guid: Guid,
