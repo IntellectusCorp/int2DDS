@@ -9,17 +9,19 @@ fn main() {
     // Emit a portable deprecation attribute so C consumers get a compiler
     // warning when they call a deprecated entry point. cbindgen does not emit
     // anything for #[deprecated] unless `deprecated_with_note` is set.
-    let mut config = cbindgen::Config::default();
-    config.after_includes = Some(
-        "\n#if defined(__GNUC__) || defined(__clang__)\n\
-         #define INT2DDS_DEPRECATED(msg) __attribute__((deprecated(msg)))\n\
-         #elif defined(_MSC_VER)\n\
-         #define INT2DDS_DEPRECATED(msg) __declspec(deprecated(msg))\n\
-         #else\n\
-         #define INT2DDS_DEPRECATED(msg)\n\
-         #endif"
-            .to_string(),
-    );
+    let mut config = cbindgen::Config {
+        after_includes: Some(
+            "\n#if defined(__GNUC__) || defined(__clang__)\n\
+             #define INT2DDS_DEPRECATED(msg) __attribute__((deprecated(msg)))\n\
+             #elif defined(_MSC_VER)\n\
+             #define INT2DDS_DEPRECATED(msg) __declspec(deprecated(msg))\n\
+             #else\n\
+             #define INT2DDS_DEPRECATED(msg)\n\
+             #endif"
+                .to_string(),
+        ),
+        ..Default::default()
+    };
     config.function.deprecated_with_note = Some("INT2DDS_DEPRECATED({})".to_string());
 
     // Generate C header file using cbindgen

@@ -46,7 +46,7 @@ const BUILTIN_TOPIC_NAMES: &[&str] = &[
 ];
 
 fn is_builtin_topic(name: &str) -> bool {
-    BUILTIN_TOPIC_NAMES.iter().any(|n| *n == name)
+    BUILTIN_TOPIC_NAMES.contains(&name)
 }
 
 /// Simple glob-style topic filter. Supports "*" as match-all and a single

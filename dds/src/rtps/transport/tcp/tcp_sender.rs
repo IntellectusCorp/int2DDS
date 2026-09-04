@@ -35,7 +35,7 @@ impl DropCounter {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if last.map_or(true, |previous| now.duration_since(previous) >= Duration::from_secs(1)) {
+        if last.is_none_or(|previous| now.duration_since(previous) >= Duration::from_secs(1)) {
             *last = Some(now);
             warn!("TcpSender: dropped {:?} frame to {}: {} ({} total)", kind, addr, cause, total);
         }
@@ -172,10 +172,9 @@ impl TcpSender {
             self.connect_timeout,
             self.tls_handshake_timeout,
         )
-        .map_err(|error| {
+        .inspect_err(|error| {
             self.stats.connect_failed.record("connect failed", addr, kind);
-            self.shared.note_connect_failure(key, &error);
-            error
+            self.shared.note_connect_failure(key, error);
         })?;
 
         self.shared.clear_backoff(key);

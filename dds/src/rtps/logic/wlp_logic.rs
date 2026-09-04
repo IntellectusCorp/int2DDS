@@ -663,7 +663,7 @@ impl WlpLogic {
                     if remote_participant_data.participant_guid().prefix() == remote_guid.prefix() {
                         for locator in remote_participant_data.metatraffic_unicast_locator_list() {
                             let _ =
-                                self.transport.send(buffer, &SendTarget::SEDPDiscovery(&locator));
+                                self.transport.send(buffer, &SendTarget::SEDPDiscovery(locator));
                             debug!(
                                 "[{}] WLP Logic: {} message sent to {}",
                                 message_type, message_type, locator
@@ -1593,7 +1593,7 @@ impl UnicastMessageProcessor for WlpLogic {
 
                 for locator in reader_proxy.unicast_locator_list() {
                     if let Err(e) =
-                        self.transport.send(&send_buffer, &SendTarget::SEDPDiscovery(&locator))
+                        self.transport.send(&send_buffer, &SendTarget::SEDPDiscovery(locator))
                     {
                         warn!("[WLP] Failed to send DATA message to locator {}: {:?}", locator, e);
                     }

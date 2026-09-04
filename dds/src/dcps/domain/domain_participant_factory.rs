@@ -148,10 +148,8 @@ impl DomainParticipantFactory {
                     self.default_participant_qos.lock().ok().and_then(|g| g.clone())
                 {
                     registered
-                } else if let Ok(profile_qos) = self.get_participant_qos_from_profile("") {
-                    profile_qos
                 } else {
-                    DomainParticipantQos::default()
+                    self.get_participant_qos_from_profile("").unwrap_or_default()
                 }
             }
         };

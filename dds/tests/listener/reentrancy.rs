@@ -155,7 +155,7 @@ fn run_probe(probe: Probe, reliability: ReliabilityQosPolicyKind) {
             let reader = subscriber
                 .create_datareader::<KeyedDataType>(
                     &topic,
-                    DataReaderQos { reliability: qos.clone(), ..DataReaderQos::default() },
+                    DataReaderQos { reliability: qos, ..DataReaderQos::default() },
                     Some(Arc::new(ProbingListener { probe, tx })),
                     StatusMask::DATA_AVAILABLE,
                 )

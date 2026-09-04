@@ -121,6 +121,10 @@ impl MessageReceiver {
         self.source_guid_prefix
     }
 
+    pub(crate) fn sender_addr(&self) -> SocketAddr {
+        self.sender_addr
+    }
+
     // 8.3.6.4 Change in state of Receiver
     #[allow(clippy::wrong_self_convention)]
     pub(crate) fn from_header(mut self, header: Header) {

@@ -197,7 +197,8 @@ pub fn generate_union_cdr_deserialize_impl(
 ///  - Final     : discriminant + selected branch value (no DHEADER, no EMHEADER)
 ///  - Appendable: DHEADER + (discriminant + value)
 ///  - Mutable   : DHEADER + EMHEADER(0)+discriminant + EMHEADER(branch_id)+value
-///                 (branch_id = variant_index + 1; 0 is reserved for the discriminant)
+///
+/// branch_id = variant_index + 1; 0 is reserved for the discriminant.
 pub fn generate_union_xcdr_serialize_impl(
     name: &syn::Ident,
     variants: &Punctuated<Variant, Comma>,
