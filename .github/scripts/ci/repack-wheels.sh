@@ -60,7 +60,7 @@ for entry in "${entries[@]}"; do
   fi
 
   # When bundling, restore the standard filename the loader looks for
-  # (the version-suffixed .so.0.1.1 -> libint2dds_ffi.so).
+  # (the version-suffixed .so.0.1.3 -> libint2dds_ffi.so).
   case "$tag" in
     win_*)    dest_name="int2dds_ffi.dll" ;;
     macosx_*) dest_name="libint2dds_ffi.dylib" ;;

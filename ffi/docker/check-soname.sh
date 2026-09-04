@@ -7,7 +7,7 @@
 # 32-bit (armhf) objects.
 #
 # The soname is embedded by ffi/build.rs as libint2dds_ffi.so.<major>, derived
-# from the workspace version in the repo-root Cargo.toml. For version 0.1.1 the
+# from the workspace version in the repo-root Cargo.toml. For version 0.1.3 the
 # expected soname is therefore "libint2dds_ffi.so.0".
 #
 # Uses readelf when binutils is installed and falls back to a pure-python ELF
@@ -29,7 +29,7 @@ Usage: check-soname.sh [options]
 
 Examples:
   ./ffi/docker/check-soname.sh
-  ./ffi/docker/check-soname.sh --path ffi/dist/linux-x86_64/libint2dds_ffi.so.0.1.1
+  ./ffi/docker/check-soname.sh --path ffi/dist/linux-x86_64/libint2dds_ffi.so.0.1.3
 USAGE
 }
 

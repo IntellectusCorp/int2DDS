@@ -2,8 +2,8 @@
 # Stage the built native artifacts into a release archive (Linux / macOS).
 #
 # Usage: .github/scripts/ci/stage-native.sh <triple> <dist_name> <version> [<libc>] [<max_glibc>]
-#   e.g. .github/scripts/ci/stage-native.sh x86_64-unknown-linux-gnu linux-x86_64 0.1.1 gnu 2.28
-#        .github/scripts/ci/stage-native.sh aarch64-apple-darwin macos-arm64 0.1.1
+#   e.g. .github/scripts/ci/stage-native.sh x86_64-unknown-linux-gnu linux-x86_64 0.1.3 gnu 2.28
+#        .github/scripts/ci/stage-native.sh aarch64-apple-darwin macos-arm64 0.1.3
 #
 # max_glibc is the highest GLIBC_* symbol version the artifact may require.
 # It differs per architecture because the builder images differ: the x86_64 and
