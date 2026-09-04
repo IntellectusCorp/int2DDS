@@ -160,13 +160,11 @@ impl TcpListener {
                     target_os = "windows"
                 ))]
                 {
-                    let mut params = socket2::TcpKeepalive::new()
+                    let params = socket2::TcpKeepalive::new()
                         .with_time(keepalive.time)
                         .with_interval(keepalive.interval);
                     #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
-                    {
-                        params = params.with_retries(keepalive.retries);
-                    }
+                    let params = params.with_retries(keepalive.retries);
                     let _ = socket2::SockRef::from(&stream).set_tcp_keepalive(&params);
                 }
                 #[cfg(not(any(
