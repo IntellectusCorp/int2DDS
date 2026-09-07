@@ -86,7 +86,7 @@ use crate::{
     },
     subscription::{
         data_reader_history::{DataReaderHistoryCache, ReaderChangeId},
-        data_sample::{DataSample, SamplePayload},
+        data_sample::DataSample,
         read_condition::ReadConditionTrait,
         sample_info::{InstanceInfo, SampleInfo, StateMaskExt},
     },
@@ -3271,19 +3271,7 @@ impl<Foo: DdsType> DataReader<Foo> {
             | ChangeKind::NotAliveDisposedUnregistered => false,
         };
 
-        let data = if has_valid_data {
-            // Carry fragment chunks straight through when present, so deserialization
-            // happens across them with no contiguous reassembly.
-            Some(match change.data_chunks() {
-                Some((chunks, cached)) => SamplePayload::Chained {
-                    chunks: chunks.iter().cloned().collect(),
-                    cached: cached.clone(),
-                },
-                None => SamplePayload::Contiguous(change.data_bytes()),
-            })
-        } else {
-            None
-        };
+        let data = if has_valid_data { Some(change.data_bytes()) } else { None };
 
         // Use cached instance_infos if provided, otherwise fetch
         let owned_instance_infos;
@@ -4200,7 +4188,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubListener { counter_sender: counter_sender };
+        let read_listener = SubListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorld>(
                 &topic,
@@ -4231,7 +4219,7 @@ pub(crate) mod tests {
         writer.write(&data2, InstanceHandle::NIL).unwrap();
 
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 2 {
@@ -4308,11 +4296,7 @@ pub(crate) mod tests {
         let writer = publisher
             .create_datawriter::<HelloWorld>(
                 &topic,
-                DataWriterQos {
-                    history: history.clone(),
-                    reliability: reliability.clone(),
-                    ..Default::default()
-                },
+                DataWriterQos { history, reliability, ..Default::default() },
                 None,
                 StatusMask::default(),
             )
@@ -4497,7 +4481,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubListener { counter_sender: counter_sender };
+        let read_listener = SubListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorld>(
                 &topic,
@@ -4529,7 +4513,7 @@ pub(crate) mod tests {
         writer.write(&data2, InstanceHandle::NIL).unwrap();
 
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 2 {
@@ -4621,7 +4605,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubListener { counter_sender: counter_sender };
+        let read_listener = SubListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorld>(
                 &topic,
@@ -4652,7 +4636,7 @@ pub(crate) mod tests {
         writer.write(&data2, InstanceHandle::NIL).unwrap();
 
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 2 {
@@ -4742,7 +4726,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubListener { counter_sender: counter_sender };
+        let read_listener = SubListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorld>(
                 &topic,
@@ -4774,7 +4758,7 @@ pub(crate) mod tests {
         writer.write(&data2, InstanceHandle::NIL).unwrap();
 
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 2 {
@@ -4864,7 +4848,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubListener { counter_sender: counter_sender };
+        let read_listener = SubListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorld>(
                 &topic,
@@ -4896,7 +4880,7 @@ pub(crate) mod tests {
         writer.write(&data2, InstanceHandle::NIL).unwrap();
 
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 2 {
@@ -4970,7 +4954,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubListener { counter_sender: counter_sender };
+        let read_listener = SubListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorld>(
                 &topic,
@@ -5002,7 +4986,7 @@ pub(crate) mod tests {
         writer.write(&data2, InstanceHandle::NIL).unwrap();
 
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 2 {
@@ -5131,7 +5115,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubKeyListener { counter_sender: counter_sender };
+        let read_listener = SubKeyListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorldWithKey>(
                 &topic,
@@ -5167,7 +5151,7 @@ pub(crate) mod tests {
         writer.write(&data3, instance_handle_1).unwrap();
         writer.write(&data4, instance_handle_3).unwrap();
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 4 {
@@ -5259,7 +5243,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubKeyListener { counter_sender: counter_sender };
+        let read_listener = SubKeyListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorldWithKey>(
                 &topic,
@@ -5296,7 +5280,7 @@ pub(crate) mod tests {
         writer.write(&data4, instance_handle_3).unwrap();
 
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 4 {
@@ -5409,7 +5393,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, _counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubKeyListener { counter_sender: counter_sender };
+        let read_listener = SubKeyListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorldWithKey>(
                 &topic,
@@ -5490,7 +5474,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubKeyListener { counter_sender: counter_sender };
+        let read_listener = SubKeyListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorldWithKey>(
                 &topic,
@@ -5527,7 +5511,7 @@ pub(crate) mod tests {
         writer.write(&data4, instance_handle_3).unwrap();
 
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 4 {
@@ -5608,7 +5592,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubKeyListener { counter_sender: counter_sender };
+        let read_listener = SubKeyListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorldWithKey>(
                 &topic,
@@ -5645,7 +5629,7 @@ pub(crate) mod tests {
         writer.write(&data4, instance_handle_3).unwrap();
 
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 4 {
@@ -5741,7 +5725,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubKeyListener { counter_sender: counter_sender };
+        let read_listener = SubKeyListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorldWithKey>(
                 &topic,
@@ -5778,7 +5762,7 @@ pub(crate) mod tests {
         writer.write(&data4, instance_handle_3).unwrap();
 
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 4 {
@@ -5885,7 +5869,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubKeyListener { counter_sender: counter_sender };
+        let read_listener = SubKeyListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorldWithKey>(
                 &topic,
@@ -5922,7 +5906,7 @@ pub(crate) mod tests {
         writer.write(&data4, instance_handle_3).unwrap();
 
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 4 {
@@ -6002,7 +5986,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubKeyListener { counter_sender: counter_sender };
+        let read_listener = SubKeyListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorldWithKey>(
                 &topic,
@@ -6039,7 +6023,7 @@ pub(crate) mod tests {
         writer.write(&data4, instance_handle_3).unwrap();
 
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 4 {
@@ -6401,7 +6385,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubKeyListener { counter_sender: counter_sender };
+        let read_listener = SubKeyListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorldWithKey>(
                 &topic,
@@ -6438,7 +6422,7 @@ pub(crate) mod tests {
         writer.write(&data4, instance_handle_3).unwrap();
 
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 4 {
@@ -6537,7 +6521,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubKeyListener { counter_sender: counter_sender };
+        let read_listener = SubKeyListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorldWithKey>(
                 &topic,
@@ -6574,7 +6558,7 @@ pub(crate) mod tests {
         writer.write(&data4, instance_handle_3).unwrap();
 
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 4 {
@@ -6688,7 +6672,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubKeyListener { counter_sender: counter_sender };
+        let read_listener = SubKeyListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorldWithKey>(
                 &topic,
@@ -6725,7 +6709,7 @@ pub(crate) mod tests {
         writer.write(&data4, instance_handle_3).unwrap();
 
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 4 {
@@ -6805,7 +6789,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubKeyListener { counter_sender: counter_sender };
+        let read_listener = SubKeyListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorldWithKey>(
                 &topic,
@@ -6842,7 +6826,7 @@ pub(crate) mod tests {
         writer.write(&data4, instance_handle_3).unwrap();
 
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 4 {

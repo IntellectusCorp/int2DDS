@@ -155,7 +155,7 @@ impl NackFragRequest {
 
         for buffer in &messages {
             for locator in &chosen {
-                match self.transport.send(buffer, &SendTarget::UserData(*locator)) {
+                match self.transport.send(buffer, &SendTarget::UserData(locator)) {
                     Ok(_) => {}
                     Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
                         warn!("[UserLogic] {} locator found but no {} sender available", e, e);
@@ -1194,8 +1194,13 @@ impl UserLogic {
 
                     // The heartbeat rides the last datagram of the window, not only the last of
                     // the sample: without it the reader has no trigger to ask for the rest.
-                    let heartbeat_info = (is_piggyback_wanted && is_last)
-                        .then(|| (heartbeat_count, first, last, false, false));
+                    let heartbeat_info = (is_piggyback_wanted && is_last).then_some((
+                        heartbeat_count,
+                        first,
+                        last,
+                        false,
+                        false,
+                    ));
 
                     if MessageCreator::create_data_frag_msg(
                         &a_change,
@@ -1212,13 +1217,11 @@ impl UserLogic {
                         &mut send_buffer,
                     )
                     .is_ok()
+                        && self.send_rtps_message_to_locators(locators.iter(), &send_buffer).is_ok()
                     {
-                        if self.send_rtps_message_to_locators(locators.iter(), &send_buffer).is_ok()
-                        {
-                            is_any_fragment_sent = true;
-                            if heartbeat_info.is_some() {
-                                writer.increase_heartbeat_count();
-                            }
+                        is_any_fragment_sent = true;
+                        if heartbeat_info.is_some() {
+                            writer.increase_heartbeat_count();
                         }
                     }
                 }
@@ -1236,7 +1239,7 @@ impl UserLogic {
             let is_piggyback_wanted =
                 members.iter().any(|(_, plan)| plan.reliable && plan.piggyback);
             let heartbeat_info =
-                is_piggyback_wanted.then(|| (heartbeat_count, first, last, false, false));
+                is_piggyback_wanted.then_some((heartbeat_count, first, last, false, false));
 
             debug!(
                 "[Data] Batched DATA sn={} to {} readers behind one participant",

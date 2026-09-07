@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-09-04
+
+Same-host communication now settles on a single loopback address, plus a
+workspace-wide clippy pass.
+
+### Added
+
+- `INT2DDS_DISABLE_SAME_HOST_LOOPBACK` to turn the same-host narrowing off and
+  address a co-located peer at every address it announced
+- Integration coverage for the pure-TCP path, where the peer is named rather
+  than discovered
+
+### Changed
+
+- A co-located peer is reached at one loopback address instead of one locator
+  per interface; co-location is judged against every address of this host, and
+  locators are narrowed one at a time rather than by replacing the list
+- The same-host locator fallback table was dropped
+- The unused chained payload path was dropped from `CacheChange` and
+  `DataSample`
+- QoS default resolution simplified, and clippy findings cleared across the
+  CDR, XTypes, derive, DCPS, RTPS, FFI and IDL paths
+
+### Fixed
+
+- Same-host is settled from the first datagram instead of the SPDP that may
+  follow it
+- Interfaces that appear after the address set was first read are now learned
+
 ## [0.1.3] - 2026-09-02
 
 Large-data and discovery hardening, a redesigned TCP transport, and the first
@@ -304,7 +333,8 @@ repository were migrated together.
 - Unused C code-generation output in `idl` and unused declarations in the
   `hello_world` FFI example header.
 
-[unreleased]: https://github.com/IntellectusCorp/int2DDS/compare/v0.1.3...HEAD
+[unreleased]: https://github.com/IntellectusCorp/int2DDS/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/IntellectusCorp/int2DDS/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/IntellectusCorp/int2DDS/compare/v0.1.1...v0.1.3
 [0.1.1]: https://github.com/IntellectusCorp/int2DDS/releases/tag/v0.1.1
 

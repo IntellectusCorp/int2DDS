@@ -797,12 +797,10 @@ impl DomainParticipant {
                     self.default_publisher_qos.lock().ok().and_then(|g| g.clone())
                 {
                     registered
-                } else if let Ok(profile_qos) =
-                    DomainParticipantFactory::get_instance().get_publisher_qos_from_profile("")
-                {
-                    profile_qos
                 } else {
-                    PublisherQos::default()
+                    DomainParticipantFactory::get_instance()
+                        .get_publisher_qos_from_profile("")
+                        .unwrap_or_default()
                 }
             }
         };
@@ -1013,12 +1011,10 @@ impl DomainParticipant {
                     self.default_subscriber_qos.lock().ok().and_then(|g| g.clone())
                 {
                     registered
-                } else if let Ok(profile_qos) =
-                    DomainParticipantFactory::get_instance().get_subscriber_qos_from_profile("")
-                {
-                    profile_qos
                 } else {
-                    SubscriberQos::default()
+                    DomainParticipantFactory::get_instance()
+                        .get_subscriber_qos_from_profile("")
+                        .unwrap_or_default()
                 }
             }
         };
@@ -1626,12 +1622,10 @@ impl DomainParticipant {
                 if let Some(registered) = self.default_topic_qos.lock().ok().and_then(|g| g.clone())
                 {
                     registered
-                } else if let Ok(profile_qos) =
-                    DomainParticipantFactory::get_instance().get_topic_qos_from_profile("")
-                {
-                    profile_qos
                 } else {
-                    TopicQos::default()
+                    DomainParticipantFactory::get_instance()
+                        .get_topic_qos_from_profile("")
+                        .unwrap_or_default()
                 }
             }
         }
@@ -3204,7 +3198,7 @@ mod domain_participant_tests {
         assert!(participant1 != participant4);
 
         // Test 5: Search test in participant vector
-        let participants = vec![participant1.clone(), participant3.clone()];
+        let participants = [participant1.clone(), participant3.clone()];
 
         assert!(participants.contains(&participant1), "Should find the participant in the vector");
 
@@ -4110,10 +4104,7 @@ mod domain_participant_tests {
         #[cfg(test)]
         pub fn get_topic_strong_count(&self, topic_name: &str) -> Option<usize> {
             let topics_by_name = self.find_topic_by_name(topic_name).unwrap();
-            match topics_by_name {
-                Some(topic) => Some(Arc::strong_count(&topic)),
-                None => None,
-            }
+            topics_by_name.map(|topic| Arc::strong_count(&topic))
         }
     }
 
@@ -4248,7 +4239,7 @@ mod domain_participant_tests {
             .unwrap();
 
         // Attempt to delete non-existent topic
-        assert!(matches!(participant.delete_topic(topic), Err(_)));
+        assert!(participant.delete_topic(topic).is_err());
 
         participant.delete_contained_entities().unwrap();
         factory.delete_participant(participant).unwrap();

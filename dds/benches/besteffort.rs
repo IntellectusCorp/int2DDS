@@ -50,11 +50,9 @@ fn create_no_key_datareader(data_reader_qos: DataReaderQos) -> DataReader<HelloW
         .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
         .unwrap();
 
-    let reader = subscriber
+    subscriber
         .create_datareader::<HelloWorldType>(&topic, data_reader_qos, None, StatusMask::default())
-        .unwrap();
-
-    reader
+        .unwrap()
 }
 
 fn create_no_key_datawriter(data_writer_qos: DataWriterQos) -> DataWriter<HelloWorldType> {
@@ -77,11 +75,9 @@ fn create_no_key_datawriter(data_writer_qos: DataWriterQos) -> DataWriter<HelloW
         .create_publisher(PublisherQos::default(), None, StatusMask::default())
         .unwrap();
 
-    let writer = publisher
+    publisher
         .create_datawriter::<HelloWorldType>(&topic, data_writer_qos, None, StatusMask::default())
-        .unwrap();
-
-    writer
+        .unwrap()
 }
 
 fn besteffort_pubsub_roundtrip(c: &mut Criterion) {

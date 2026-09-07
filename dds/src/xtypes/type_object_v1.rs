@@ -201,7 +201,7 @@ mod tests {
         buf.extend_from_slice(&len.to_le_bytes());
         buf.extend_from_slice(s.as_bytes());
         buf.push(0);
-        while buf.len() % 4 != 0 {
+        while !buf.len().is_multiple_of(4) {
             buf.push(0);
         }
     }
@@ -221,7 +221,7 @@ mod tests {
         buf.extend_from_slice(&0u32.to_le_bytes());
         buf.extend_from_slice(&(member.len() as u32).to_le_bytes());
         buf.extend_from_slice(&member);
-        while buf.len() % 4 != 0 {
+        while !buf.len().is_multiple_of(4) {
             buf.push(0);
         }
         // Sentinel.

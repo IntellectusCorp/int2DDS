@@ -5,6 +5,7 @@
 
 use log::debug;
 use speedy::{Endianness, Writable};
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use crate::{
@@ -26,8 +27,8 @@ use crate::{
             entity_id::EntityId,
             guid::Guid,
             locator::{
-                Locator, LOCATOR_KIND_TCP_V4, LOCATOR_KIND_TCP_V6, LOCATOR_KIND_UDP_V4,
-                LOCATOR_KIND_UDP_V6,
+                loopback_locators, Locator, LOCATOR_KIND_TCP_V4, LOCATOR_KIND_TCP_V6,
+                LOCATOR_KIND_UDP_V4, LOCATOR_KIND_UDP_V6,
             },
             rtps_error_code::RtpsResult,
             sequence::SequenceNumber,
@@ -55,7 +56,8 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
     /// Handle discovered participant data (renamed from handle_multicast_spdp_message)
     fn handle_discovered_participant_data(
         &self,
-        spdp_discovered_participant_data: SPDPDiscoveredParticipantData,
+        mut spdp_discovered_participant_data: SPDPDiscoveredParticipantData,
+        from_addr: SocketAddr,
     ) -> RtpsResult<()> {
         if spdp_discovered_participant_data.participant_guid().entity_id() != EntityId::PARTICIPANT
         {
@@ -66,12 +68,18 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
             return Ok(());
         }
 
+        self.redirect_same_host_locators_to_loopback(
+            &mut spdp_discovered_participant_data,
+            from_addr,
+        )?;
+
         let participant = self.get_upgraded_participant()?;
 
         let participant_guid = spdp_discovered_participant_data.participant_guid();
         log::debug!(
-            "Start handling DiscoveredParticipantData {} / [{}]",
+            "Start handling DiscoveredParticipantData {} from {} / [{}]",
             participant_guid,
+            from_addr,
             spdp_discovered_participant_data
                 .metatraffic_unicast_locator_list()
                 .iter()
@@ -132,6 +140,40 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
 
         // Trigger SEDP message
         self.trigger_send_sedp_message(Arc::new(spdp_discovered_participant_data.clone()))?;
+
+        Ok(())
+    }
+
+    /// Narrow a co-located peer's unicast locator lists before anything is
+    /// derived from them. The multicast lists stay untouched - they carry a
+    /// group address, not one entry per interface.
+    fn redirect_same_host_locators_to_loopback(
+        &self,
+        spdp_discovered_participant_data: &mut SPDPDiscoveredParticipantData,
+        from_addr: SocketAddr,
+    ) -> RtpsResult<()> {
+        let participant = self.get_upgraded_participant()?;
+        let same_host = participant.remote_is_same_host(
+            spdp_discovered_participant_data.participant_guid().prefix(),
+            Some(from_addr),
+        );
+        if !same_host || crate::common::env::get_disable_same_host_loopback() {
+            return Ok(());
+        }
+
+        let metatraffic =
+            loopback_locators(spdp_discovered_participant_data.metatraffic_unicast_locator_list());
+        let default =
+            loopback_locators(spdp_discovered_participant_data.default_unicast_locator_list());
+
+        debug!(
+            "Redirected same-host unicast locators of {} to metatraffic [{}], default [{}]",
+            spdp_discovered_participant_data.participant_guid(),
+            metatraffic.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(", "),
+            default.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(", ")
+        );
+        spdp_discovered_participant_data.set_metatraffic_unicast_locator_list(metatraffic);
+        spdp_discovered_participant_data.set_default_unicast_locator_list(default);
 
         Ok(())
     }

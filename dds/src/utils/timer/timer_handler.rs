@@ -417,7 +417,7 @@ mod tests {
 
         // Verify executed at least 3 times, at most 8 times (accounting for timing variations)
         println!("Repeating timer count: {}", final_count);
-        assert!(final_count >= 3 && final_count <= 8);
+        assert!((3..=8).contains(&final_count));
 
         // Cleanup
         {
@@ -602,7 +602,7 @@ mod tests {
 
         let final_count = execution_count.load(std::sync::atomic::Ordering::SeqCst);
         println!("Total execution count: {}", final_count);
-        assert!(final_count >= 4 && final_count <= 10);
+        assert!((4..=10).contains(&final_count));
 
         // Cleanup
         {
@@ -614,7 +614,7 @@ mod tests {
 
     #[test]
     fn test_example_multiple_participants() {
-        let participants = vec![
+        let participants = [
             create_mock_participant(0, 200),
             create_mock_participant(0, 201),
             create_mock_participant(0, 202),
@@ -823,7 +823,7 @@ mod tests {
         // Verify keep_timer executed but delete_timer did not
         // Total time: 600ms, keep_timer at 100ms = ~6 executions
         println!("Timer deletion test count: {}", final_count);
-        assert!(final_count >= 3 && final_count <= 15); // With timing margin
+        assert!((3..=15).contains(&final_count)); // With timing margin
         assert!(final_count < 100); // Verify delete_timer was not executed
 
         // Cleanup

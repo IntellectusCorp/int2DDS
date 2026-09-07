@@ -25,7 +25,7 @@ fn qos_pair() -> (DataWriterQos, DataReaderQos) {
         lease_duration: DdsDuration::from_seconds(LEASE),
     };
     (
-        DataWriterQos { liveliness: liveliness.clone(), ..Default::default() },
+        DataWriterQos { liveliness, ..Default::default() },
         DataReaderQos { liveliness, ..Default::default() },
     )
 }

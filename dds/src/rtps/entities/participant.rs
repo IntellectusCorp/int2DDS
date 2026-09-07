@@ -10,6 +10,7 @@
 use std::{
     collections::HashMap,
     fmt::Debug,
+    net::SocketAddr,
     sync::{atomic::AtomicBool, Arc, Mutex, OnceLock},
 };
 
@@ -44,7 +45,7 @@ use crate::{
             entity_id::EntityId,
             entity_kind::EntityKind,
             guid::{Guid, GuidPrefix},
-            locator::Locator,
+            locator::{is_same_host, Locator},
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
             sequence::SequenceNumber,
             time::RtpsTime,
@@ -108,6 +109,7 @@ pub struct Participant {
 
     liveliness_monitor: Arc<Mutex<Option<LivelinessMonitor>>>,
     working_ips: Vec<String>,
+    remote_same_host: Arc<DashMap<GuidPrefix, bool>>,
     terminated: Arc<AtomicBool>,
     wire_buffer_pool: Arc<Mutex<WireBufferPool>>,
 }
@@ -200,6 +202,7 @@ impl Participant {
             remote_subscriptions: Arc::new(DashMap::new()),
             type_registry: new_shared_registry(),
             working_ips,
+            remote_same_host: Arc::new(DashMap::new()),
             terminated: Arc::new(AtomicBool::new(false)),
             liveliness_monitor: Arc::new(Mutex::new(None)),
             wire_buffer_pool: Arc::new(Mutex::new(WireBufferPool::new())),
@@ -301,6 +304,23 @@ impl Participant {
             if let Some(sedp_logic) = sedp_logic.as_ref().as_ref() {
                 let _ = sedp_logic.request_get_types(remote_prefix, vec![type_id]);
             }
+        }
+    }
+
+    /// Whether the peer behind `remote_prefix` runs on this host. A source
+    /// address decides and keeps the verdict, `None` only reads one, so the
+    /// answer does not depend on which announcement arrived first.
+    pub(crate) fn remote_is_same_host(
+        &self,
+        remote_prefix: GuidPrefix,
+        from_addr: Option<SocketAddr>,
+    ) -> bool {
+        match from_addr {
+            Some(from_addr) => *self
+                .remote_same_host
+                .entry(remote_prefix)
+                .or_insert_with(|| is_same_host(from_addr)),
+            None => self.remote_same_host.get(&remote_prefix).is_some_and(|held| *held),
         }
     }
 
@@ -1106,6 +1126,8 @@ impl Participant {
                 });
             }
         }
+
+        self.remote_same_host.remove(&remote_prefix);
 
         // The peer is gone, so it will never answer to release what is charged against it, and
         // the entry would sit there until the backstop -- or for good, since a peer that
