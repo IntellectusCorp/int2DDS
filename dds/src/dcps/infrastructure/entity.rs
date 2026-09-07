@@ -65,10 +65,10 @@ impl EntityLifecycle {
         }
 
         state.holder_threads.push(current_thread);
-        debug!(
-            "EntityLifecycle::begin_operation() - active_operation_count = {}",
-            state.holder_threads.len()
-        );
+        // debug!(
+        //     "EntityLifecycle::begin_operation() - active_operation_count = {}",
+        //     state.holder_threads.len()
+        // );
 
         Ok(OperationGuard { lifecycle: self, thread: current_thread, _not_send: PhantomData })
     }
