@@ -478,6 +478,113 @@ fn fragmented_samples_reach_every_group_member() {
     cleanup(factory, vec![writer_participant, reader_participant]);
 }
 
+/// BestEffort has no unicast repair, so a fragmented sample reaches a group member only if the
+/// group send itself carries every fragment. A single oversized DATA would be refused by the
+/// socket and the sample lost outright.
+#[test]
+fn best_effort_fragmented_samples_reach_every_group_member_over_multicast_alone() {
+    let domain_id = next_domain_id();
+    let factory = DomainParticipantFactory::get_instance();
+
+    let writer_participant = factory
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+    let reader_participant = factory
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+
+    let writer_topic = writer_participant
+        .create_topic::<LargeData>(
+            "multicast_large_best_effort_topic",
+            "LargeData",
+            TopicQos::default(),
+            None,
+            StatusMask::default(),
+        )
+        .unwrap();
+    let reader_topic = reader_participant
+        .create_topic::<LargeData>(
+            "multicast_large_best_effort_topic",
+            "LargeData",
+            TopicQos::default(),
+            None,
+            StatusMask::default(),
+        )
+        .unwrap();
+
+    let publisher = writer_participant
+        .create_publisher(PublisherQos::default(), None, StatusMask::default())
+        .unwrap();
+    let data_writer = publisher
+        .create_datawriter::<LargeData>(
+            &writer_topic,
+            best_effort_writer_qos(),
+            None,
+            StatusMask::default(),
+        )
+        .unwrap();
+
+    let readers: Vec<DataReader<LargeData>> = (0..2)
+        .map(|_| {
+            let subscriber = reader_participant
+                .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+                .unwrap();
+            subscriber
+                .create_datareader::<LargeData>(
+                    &reader_topic,
+                    best_effort_reader_qos_on_group(GROUP_ADDRESS),
+                    None,
+                    StatusMask::default(),
+                )
+                .unwrap()
+        })
+        .collect();
+
+    for reader in &readers {
+        wait_until_matched(reader);
+    }
+    wait_for_writer_match_count(&data_writer, 2);
+
+    for index in 0..3 {
+        data_writer
+            .write(&LargeData { index, data: vec![7; 256 * 1024] }, InstanceHandle::NIL)
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    for (position, reader) in readers.iter().enumerate() {
+        let mut indices: Vec<i32> = Vec::new();
+
+        for _ in 0..60 {
+            let samples = reader
+                .take(
+                    16,
+                    &[SampleStateKind::ANY_SAMPLE_STATE],
+                    &[ViewStateKind::ANY_VIEW_STATE],
+                    &[InstanceStateKind::ANY_INSTANCE_STATE],
+                )
+                .unwrap_or_default();
+
+            indices.extend(samples.iter().filter_map(|sample| sample.data().ok().map(|d| d.index)));
+
+            if indices.len() >= 3 {
+                break;
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        assert_eq!(
+            indices,
+            vec![0, 1, 2],
+            "BestEffort group member {} must receive every fragmented sample",
+            position
+        );
+    }
+
+    cleanup(factory, vec![writer_participant, reader_participant]);
+}
+
 fn topic_coherent() -> PresentationQosPolicy {
     PresentationQosPolicy {
         access_scope: PresentationQosAccessScopeKind::Topic,

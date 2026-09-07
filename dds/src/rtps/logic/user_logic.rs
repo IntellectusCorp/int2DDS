@@ -2173,12 +2173,17 @@ impl UserLogic {
 
     /// One datagram per multicast group for the samples a group can carry, one per
     /// reader locator for everything else.
+    ///
+    /// A fragmented sample goes out as one DATA_FRAG burst covering every fragment. No
+    /// receive window bounds it: a best-effort reader never asks for what it missed, so a
+    /// fragment held back here would be lost outright rather than deferred.
     fn send_change_to_multicast_group(
         &self,
         change: &CacheChange,
         group_locator: &Locator,
         writer_entity_id: EntityId,
         participant: &Participant,
+        max_message_size: usize,
     ) -> RtpsResult<()> {
         let mut send_buffer = participant
             .wire_buffer_pool()
@@ -2188,21 +2193,35 @@ impl UserLogic {
             })?
             .acquire();
 
-        match MessageCreator::create_data_msg_multicast(
-            change,
-            writer_entity_id,
-            true, // Use inline QoS (default)
-            &mut send_buffer,
-        ) {
-            Ok(()) => {
-                if let Err(e) = self.send_rtps_message_to_locators(
-                    std::slice::from_ref(group_locator),
-                    &send_buffer,
-                ) {
-                    warn!("[Data] Failed to send multicast DATA message: {:?}", e);
+        if change.is_fragmented() {
+            let frags_per_msg: NonZeroU32 =
+                change.fragments_per_submessage(max_message_size).into();
+            let plan = fragment_send_plan(&[(1, change.total_fragments())], frags_per_msg);
+            self.send_data_frag_to_group(
+                change,
+                writer_entity_id,
+                group_locator,
+                &plan,
+                Utc::now(),
+                &mut send_buffer,
+            );
+        } else {
+            match MessageCreator::create_data_msg_multicast(
+                change,
+                writer_entity_id,
+                true, // Use inline QoS (default)
+                &mut send_buffer,
+            ) {
+                Ok(()) => {
+                    if let Err(e) = self.send_rtps_message_to_locators(
+                        std::slice::from_ref(group_locator),
+                        &send_buffer,
+                    ) {
+                        warn!("[Data] Failed to send multicast DATA message: {:?}", e);
+                    }
                 }
+                Err(e) => warn!("[Data] Failed to create multicast DATA message: {}", e),
             }
-            Err(e) => warn!("[Data] Failed to create multicast DATA message: {}", e),
         }
 
         participant
@@ -2291,6 +2310,7 @@ impl UserLogic {
                         &group.locator,
                         writer_entity_id,
                         &participant,
+                        max_message_size,
                     )?;
                 } else {
                     for &index in &group.reader_list {
