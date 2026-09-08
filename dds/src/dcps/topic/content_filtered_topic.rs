@@ -72,7 +72,7 @@ impl Drop for ContentFilteredTopic {
             return; // Never fully initialized
         }
 
-        if self.lifecycle.is_deleted().is_ok() {
+        if !self.lifecycle.is_deleted() {
             if let Ok(ref participant) = self.get_participant() {
                 if let Ok(topic) = self.get_related_topic() {
                     if let Ok(topic_handle) = topic.get_instance_handle() {

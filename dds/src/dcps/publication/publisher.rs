@@ -105,7 +105,7 @@ impl Debug for Publisher {
             .field("status_condition", &self.status_condition.lock().unwrap())
             .field("self_ref", &self.self_ref.as_ref().map(|_| "Arc<Publisher>"))
             .field("enabled", &self.enabled.load(std::sync::atomic::Ordering::Acquire))
-            .field("deleted", &self.lifecycle.is_deleted().is_err())
+            .field("deleted", &self.lifecycle.is_deleted())
             .finish()
     }
 }
@@ -133,7 +133,7 @@ impl Drop for Publisher {
             return; // Never fully initialized
         }
 
-        if self.lifecycle.is_deleted().is_ok() {
+        if !self.lifecycle.is_deleted() {
             if let Some(ref participant_weak) = self.participant {
                 if let Some(participant) = participant_weak.upgrade() {
                     let publisher_handle = InstanceHandle::from_guid(&self.guid);

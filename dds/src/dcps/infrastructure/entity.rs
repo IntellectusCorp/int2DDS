@@ -43,12 +43,8 @@ pub(crate) struct EntityLifecycle {
 }
 
 impl EntityLifecycle {
-    pub(crate) fn is_deleted(&self) -> DdsResult<()> {
-        if self.lock_state().is_deleted {
-            Err(DdsError::AlreadyDeleted)
-        } else {
-            Ok(())
-        }
+    pub(crate) fn is_deleted(&self) -> bool {
+        self.lock_state().is_deleted
     }
 
     // Admits one public operation and records its thread until the guard drops. Once the entity

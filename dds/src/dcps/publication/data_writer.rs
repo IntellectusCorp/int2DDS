@@ -186,7 +186,7 @@ impl<Foo> Debug for DataWriter<Foo> {
             .field("status_condition", &self.status_condition.lock().unwrap())
             .field("self_ref", &self.self_ref.lock().unwrap().as_ref().map(|_| "Arc<DataWriter>"))
             .field("enabled", &self.enabled.load(std::sync::atomic::Ordering::Acquire))
-            .field("deleted", &self.lifecycle.is_deleted().is_err())
+            .field("deleted", &self.lifecycle.is_deleted())
             .field("topic", &self.topic.as_ref().map(|_| "Weak<Topic>"))
             .field("type_support", &"Arc<dyn TypeSupport>")
             .field("publisher", &self.publisher.as_ref().map(|_| "Weak<Publisher>"))
@@ -266,7 +266,7 @@ impl<Foo> Drop for DataWriter<Foo> {
             return; // Never fully initialized
         }
 
-        if self.lifecycle.is_deleted().is_ok() {
+        if !self.lifecycle.is_deleted() {
             if let Some(ref publisher_weak) = self.publisher {
                 if let Some(publisher) = publisher_weak.upgrade() {
                     if let Some(ref topic_weak) = self.topic {

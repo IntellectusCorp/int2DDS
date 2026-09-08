@@ -200,7 +200,7 @@ impl Drop for DomainParticipant {
             return; // Never fully initialized
         }
 
-        if self.lifecycle.is_deleted().is_ok() {
+        if !self.lifecycle.is_deleted() {
             let factory = DomainParticipantFactory::get_instance();
             factory.handle_participant_drop(
                 &self.domain_id,
@@ -249,7 +249,7 @@ impl Drop for ParticipantRef {
         if Arc::strong_count(&self.0) > 1 {
             return;
         }
-        if self.0.lifecycle.is_deleted().is_err() {
+        if self.0.lifecycle.is_deleted() {
             return;
         }
         if let Ok(guid) = self.0.guid() {

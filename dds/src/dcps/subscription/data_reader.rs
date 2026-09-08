@@ -215,7 +215,7 @@ impl<Foo> Debug for DataReader<Foo> {
             .field("status_condition", &self.status_condition.lock().unwrap())
             .field("self_ref", &self.self_ref.lock().unwrap().as_ref().map(|_| "Arc<DataReader>"))
             .field("enabled", &self.enabled.load(std::sync::atomic::Ordering::Acquire))
-            .field("deleted", &self.lifecycle.is_deleted().is_err())
+            .field("deleted", &self.lifecycle.is_deleted())
             .field("topic", &self.topic.as_ref().map(|_| "Weak<Topic>"))
             .field("type_support", &"Arc<dyn TypeSupport>")
             .field("publisher", &self.subscriber.as_ref().map(|_| "Weak<Subscriber>"))
@@ -300,7 +300,7 @@ impl<Foo> Drop for DataReader<Foo> {
             return; // Never fully initialized
         }
 
-        if self.lifecycle.is_deleted().is_ok() {
+        if !self.lifecycle.is_deleted() {
             if let Some(ref subscriber_weak) = self.subscriber {
                 if let Some(subscriber) = subscriber_weak.upgrade() {
                     if let Some(ref topic_weak) = self.topic {
