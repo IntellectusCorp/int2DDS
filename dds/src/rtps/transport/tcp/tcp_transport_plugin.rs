@@ -7,14 +7,14 @@
 
 use std::collections::HashSet;
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use log::{debug, info};
 
 use crate::rtps::common::guid::GuidPrefix;
-use crate::rtps::common::locator::Locator;
+use crate::rtps::common::locator::{is_same_host, Locator};
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::plugin::{MessageSource, SendTarget, TransportPlugin};
 use crate::rtps::transport::port_manager::PortManager;
@@ -37,11 +37,13 @@ pub(crate) struct TcpTransportPlugin {
     working_ips: Vec<String>,
     listener_port: u16,
 
-    /// Configured SPDP initial peers — the dial gate. When non-empty, only
-    /// these operator-declared addresses are dialed; a peer's other advertised
-    /// locators are ignored. Empty falls back to dialing every advertised
-    /// locator. Expects one reachable address per peer.
+    /// Configured SPDP initial peers, as the operator declared them.
     initial_peers: Vec<SocketAddr>,
+
+    /// The dial gate. When non-empty, only these addresses are dialed; a peer's
+    /// other advertised locators are ignored. Empty falls back to dialing every
+    /// advertised locator.
+    dial_allowed: Vec<SocketAddr>,
 
     /// Public endpoint advertised in SPDP for WAN/NAT traversal (per participant).
     public_address: Option<SocketAddr>,
@@ -105,6 +107,7 @@ impl TcpTransportPlugin {
         tcp_config: TcpConfig,
     ) -> io::Result<Self> {
         let initial_peers = tcp_config.initial_peers.clone();
+        let dial_allowed = Self::allowed_dial_addresses(&initial_peers);
 
         if tcp_config.transport_type == TransportType::TCP && initial_peers.is_empty() {
             log::warn!(
@@ -171,6 +174,7 @@ impl TcpTransportPlugin {
             working_ips,
             listener_port,
             initial_peers,
+            dial_allowed,
             public_address: tcp_config.public_address,
             accept_undefined_peers: tcp_config.accept_undefined_peers,
             reported_unreachable: Mutex::new(HashSet::new()),
@@ -311,9 +315,35 @@ impl TcpTransportPlugin {
             .collect()
     }
 
+    /// Every address an outbound dial is permitted to reach: the configured
+    /// peers, plus the loopback address discovery substitutes for the ones that
+    /// live on this host.
+    ///
+    /// A same-host peer's advertised locators are rewritten to loopback before
+    /// anything is sent to them, so a peer named by its LAN address is reached
+    /// under an address that never appears in the configuration. Without the
+    /// substituted form the gate rejects it, and the peer is discovered over
+    /// SPDP and then never spoken to again.
+    fn allowed_dial_addresses(initial_peers: &[SocketAddr]) -> Vec<SocketAddr> {
+        let mut allowed = initial_peers.to_vec();
+        for peer in initial_peers {
+            if !is_same_host(*peer) {
+                continue;
+            }
+            let loopback = match peer.ip() {
+                IpAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), peer.port()),
+                IpAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), peer.port()),
+            };
+            if !allowed.contains(&loopback) {
+                allowed.push(loopback);
+            }
+        }
+        allowed
+    }
+
     /// Whether an outbound dial to `addr` is permitted. Restricted to
-    /// `initial_peers` unless `accept_undefined_peers` is set
-    /// or `initial_peers` is empty (dial-all fallback).
+    /// `dial_allowed` unless `accept_undefined_peers` is set or no peer was
+    /// configured at all (dial-all fallback).
     ///
     /// Our own listener is exempt: nobody lists themselves as an initial peer,
     /// and what a Reader and a Writer of this participant exchange is not a dial
@@ -321,21 +351,23 @@ impl TcpTransportPlugin {
     fn should_dial(&self, addr: &SocketAddr) -> bool {
         self.sender.is_self_connection(addr)
             || self.accept_undefined_peers
-            || self.initial_peers.is_empty()
-            || self.initial_peers.contains(addr)
+            || self.dial_allowed.is_empty()
+            || self.dial_allowed.contains(addr)
     }
 
     /// Report a peer this participant has discovered but is not allowed to
     /// answer, once per address.
     ///
-    /// Only an address whose host is already configured is reported. That host
-    /// was meant to be reachable, so a port outside the list means a participant
-    /// landed on a slot the list does not cover and the two will never match. A
-    /// locator on an unlisted host is the dial gate doing its job — a peer with
-    /// several NICs advertises one locator per NIC, and skipping the ones not
-    /// named is expected rather than a fault.
+    /// Only an address on a host this participant was meant to reach is
+    /// reported — one already named in the configuration, or this host itself.
+    /// A port outside the list there means a participant landed on a slot the
+    /// list does not cover and the two will never match. A locator on any other
+    /// host is the dial gate doing its job: a peer with several NICs advertises
+    /// one locator per NIC, and skipping the ones not named is expected rather
+    /// than a fault.
     fn report_unreachable_peer(&self, addr: &SocketAddr) {
-        if !self.initial_peers.iter().any(|peer| peer.ip() == addr.ip()) {
+        let host_is_configured = self.initial_peers.iter().any(|peer| peer.ip() == addr.ip());
+        if !host_is_configured && !is_same_host(*addr) {
             return;
         }
         let first_report = match self.reported_unreachable.lock() {
@@ -344,10 +376,10 @@ impl TcpTransportPlugin {
         };
         if first_report {
             log::error!(
-                "[TcpTransportPlugin] Discovered a participant at {} but it is not in \
-                 int2dds.initial_peers, so nothing will be sent to it and the two will not \
-                 match. The host is configured, so a participant landed on a port the list \
-                 does not cover: add {} to the list.",
+                "[TcpTransportPlugin] Discovered a participant at {} but it is not reachable \
+                 through int2dds.initial_peers, so nothing will be sent to it and the two will \
+                 not match. That host was meant to be reachable, so a participant landed on a \
+                 port the list does not cover: add {} to the list.",
                 addr,
                 addr
             );
@@ -578,6 +610,27 @@ mod tests {
             [0u8; 12],
             cfg,
         )
+    }
+
+    /// A peer named by an address this host owns is also reachable at the
+    /// loopback address discovery substitutes for it.
+    #[test]
+    fn a_same_host_peer_is_also_allowed_at_its_loopback_form() {
+        let configured: SocketAddr = "127.0.0.2:8650".parse().unwrap();
+
+        let allowed = TcpTransportPlugin::allowed_dial_addresses(&[configured]);
+
+        assert!(allowed.contains(&configured));
+        assert!(allowed.contains(&"127.0.0.1:8650".parse().unwrap()));
+    }
+
+    /// A peer on another host is never rewritten, so the gate stays exactly as
+    /// the operator declared it.
+    #[test]
+    fn a_peer_on_another_host_is_left_as_configured() {
+        let configured: SocketAddr = "203.0.113.7:8650".parse().unwrap();
+
+        assert_eq!(TcpTransportPlugin::allowed_dial_addresses(&[configured]), vec![configured]);
     }
 
     /// Two participants on one host and domain both come up, on adjacent slots
