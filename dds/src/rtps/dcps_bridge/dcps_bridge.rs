@@ -96,19 +96,9 @@ impl DcpsBridge {
 
         let participant_id = socket.participant_id();
 
-        // For TCP/Hybrid, we need guid_prefix before creating the transport.
-        // Only guid() is used from this temporary participant, so locator
-        // lists are left empty.
-        let guid_prefix = {
-            let temp = Participant::new(
-                domain_id,
-                participant_id,
-                socket.working_ips(),
-                Vec::new(),
-                Vec::new(),
-            );
-            temp.guid().prefix()
-        };
+        // Minted here rather than by `Participant`: the transport is built
+        // first, since it supplies the locators the participant advertises.
+        let guid_prefix = Guid::generate_unique_guid_prefix();
 
         let bind_ip = socket.get_sender_bind_addr();
         let multicast_if_ip = socket.get_sender_multicast_if_addr();
@@ -151,7 +141,8 @@ impl DcpsBridge {
         let metatraffic_unicast_locators = transport.advertised_metatraffic_unicast_locators();
         let default_unicast_locators = transport.advertised_default_unicast_locators();
 
-        let mut participant = Participant::new(
+        let mut participant = Participant::with_guid_prefix(
+            guid_prefix,
             domain_id,
             participant_id,
             socket.working_ips(),
@@ -159,7 +150,6 @@ impl DcpsBridge {
             default_unicast_locators,
         );
         participant.set_local_receive_buffer_size(transport.advertised_receive_buffer_size());
-        let guid_prefix = participant.guid().prefix();
         let participant = Arc::new(participant);
 
         participant.init_logics(transport.clone(), property);
