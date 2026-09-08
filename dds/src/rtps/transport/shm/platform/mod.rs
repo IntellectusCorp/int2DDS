@@ -70,6 +70,11 @@ impl SharedMemory {
     pub fn is_creator(&self) -> bool {
         self.inner.is_creator()
     }
+
+    /// Give up unlinking on drop. See the platform implementations.
+    pub fn disown_creation(&mut self) {
+        self.inner.disown_creation();
+    }
 }
 
 impl Drop for SharedMemory {

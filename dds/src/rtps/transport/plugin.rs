@@ -163,6 +163,11 @@ pub(crate) trait TransportPlugin: Send + Sync {
     /// of lingering until OS keepalive. Connectionless transports have nothing
     /// to close — default no-op; only the TCP plugin overrides this.
     fn disconnect_peer(&self, _locators: &[Locator]) {}
+
+    /// A remote participant is gone. Transports that key per-peer resources by
+    /// GUID prefix release them here; `disconnect_peer` covers the ones keyed
+    /// by locator.
+    fn peer_lost(&self, _prefix: GuidPrefix) {}
 }
 
 /// Factory for creating transport plugin instances.
@@ -232,6 +237,7 @@ impl TransportPluginFactory {
                     bind_ip,
                     multicast_if_ip,
                     working_ips,
+                    guid_prefix,
                     UdpConfig::from_property(property),
                 )?;
                 Ok(Box::new(plugin))

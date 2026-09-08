@@ -3,18 +3,43 @@
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use log::{debug, info};
 
+use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::locator::Locator;
 use crate::rtps::transport::plugin::{MessageSource, SendTarget, TransportPlugin};
 use crate::rtps::transport::port_manager::PortManager;
+use crate::rtps::transport::shm::runtime::ShmRuntime;
 use crate::rtps::transport::shm::shm_listener::ShmListener;
 use crate::rtps::transport::shm::shm_sender::ShmSender;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use crate::rtps::transport::udp::udp_sender::UdpSender;
 use crate::rtps::transport::UdpConfig;
+
+/// Spec §8: an SHM locator names a segment on the host that advertised it, so
+/// only our own are reachable. Without this a peer on another machine that
+/// also runs SHM is "reached" by writing into our own ring, and the sample
+/// is lost -- `user_logic`'s SHM > TCP > UDP filter tries SHM first and
+/// relies on `can_handle` to rule out what is not local.
+///
+/// `ours` must be real NIC addresses, never `INT2DDS_EXTERNAL_ADDRESS`: every
+/// host behind the same NAT advertises that same external address, so
+/// comparing against it would accept a remote peer's SHM locator as our own
+/// and silently drop all user data between the two hosts. This still
+/// misjudges when two hosts behind different NATs share a private IP (e.g.
+/// both 192.168.1.10) -- closing that requires a host/boot id, not an IP
+/// comparison.
+///
+/// A free function so it is testable without a plugin instance, and so it
+/// stays independent of the zero-copy runtime: the legacy SHM data path
+/// (`shm_sender`/`shm_listener`/`ring_buffer`) works whether or not
+/// `ShmRuntime` started, so gating this on the runtime would turn
+/// `INT2DDS_SHM_ZERO_COPY=0` into "no SHM at all" instead of "no zero-copy".
+fn shm_locator_is_local(locator: &Locator, ours: &[Ipv4Addr]) -> bool {
+    locator.is_shm() && ours.contains(&locator.to_ip_v4_addr())
+}
 
 /// SHM transport plugin — UDP for discovery, SHM for user data.
 ///
@@ -33,6 +58,17 @@ pub(crate) struct ShmTransportPlugin {
     domain_id: u32,
     participant_id: u32,
     working_ips: Vec<String>,
+    /// What we advertise as reachable from anywhere: the external address
+    /// when one is configured, otherwise our own NIC addresses. UDP locators
+    /// use it.
+    advertised_ip_addrs: Vec<Ipv4Addr>,
+    /// Our real NIC addresses. An SHM segment only exists on this machine,
+    /// so these are the only addresses an SHM locator of ours may carry, and
+    /// the only ones we accept in one. Never the external address: every
+    /// host behind the same NAT would advertise it and we would take a
+    /// remote peer's SHM locator for our own.
+    host_ip_addrs: Vec<Ipv4Addr>,
+    runtime: Option<Arc<ShmRuntime>>,
 
     // UDP listeners — discovery is always UDP
     discovery_multicast_listener: Mutex<Option<UdpListener>>,
@@ -51,10 +87,22 @@ impl ShmTransportPlugin {
         bind_ip: String,
         multicast_if_ip: String,
         working_ips: Vec<String>,
+        guid_prefix: GuidPrefix,
         udp_config: UdpConfig,
     ) -> io::Result<Self> {
         let udp_sender = UdpSender::new(bind_ip, multicast_if_ip, udp_config)?;
         let shm_sender = ShmSender::new(domain_id)?;
+        // UDP-facing set: external override, else each parsed working_ip.
+        let advertised_ip_addrs: Vec<Ipv4Addr> = match crate::common::env::get_external_address() {
+            Some(ext_ip) => vec![ext_ip],
+            None => working_ips.iter().filter_map(|s| s.parse::<Ipv4Addr>().ok()).collect(),
+        };
+        // SHM-facing set: always the parsed working_ips, never the external
+        // override. `can_handle` is on the send path and must not rebuild
+        // this `Vec` per call, so it is computed once here.
+        let host_ip_addrs: Vec<Ipv4Addr> =
+            working_ips.iter().filter_map(|s| s.parse::<Ipv4Addr>().ok()).collect();
+        let runtime = ShmRuntime::start(domain_id, guid_prefix);
 
         // Create UDP multicast listeners (shared ports, no per-pid collision).
         let discovery_mc_port = PortManager::get_discovery_traffic_multicast_port(domain_id);
@@ -108,6 +156,9 @@ impl ShmTransportPlugin {
             domain_id,
             participant_id,
             working_ips,
+            advertised_ip_addrs,
+            host_ip_addrs,
+            runtime,
             discovery_multicast_listener: Mutex::new(discovery_mc),
             discovery_unicast_listener: Mutex::new(discovery_uc),
             user_multicast_listener: Mutex::new(user_mc),
@@ -134,14 +185,12 @@ impl ShmTransportPlugin {
         locators
     }
 
-    /// Resolve the IPs to advertise — `INT2DDS_EXTERNAL_ADDRESS` override, or
-    /// the parsed working_ips. Used by `advertised_default_unicast_locators`
-    /// to emit per-NIC SHM + UDP locators in develop's order.
+    /// The IPs to advertise for UDP locators — `INT2DDS_EXTERNAL_ADDRESS`
+    /// override, or the parsed working_ips. SHM locators use `host_ip_addrs`
+    /// instead (see its doc): an external address does not identify this
+    /// machine, so it must never appear in an SHM locator.
     fn advertised_ips(&self) -> Vec<Ipv4Addr> {
-        if let Some(ext_ip) = crate::common::env::get_external_address() {
-            return vec![ext_ip];
-        }
-        self.working_ips.iter().filter_map(|s| s.parse::<Ipv4Addr>().ok()).collect()
+        self.advertised_ip_addrs.clone()
     }
 }
 
@@ -189,9 +238,13 @@ impl TransportPlugin for ShmTransportPlugin {
     }
 
     fn can_handle(&self, locator: &Locator) -> bool {
-        // SHM plugin owns both a SHM ring buffer and a UDP fallback for
-        // non-SHM peers, so it claims both kinds.
-        locator.is_shm() || locator.is_udp()
+        if locator.is_shm() {
+            // Independent of the zero-copy runtime: the legacy SHM path works
+            // whether or not `ShmRuntime` started, so gating on it would turn
+            // `INT2DDS_SHM_ZERO_COPY=0` into "no SHM at all".
+            return shm_locator_is_local(locator, &self.host_ip_addrs);
+        }
+        locator.is_udp()
     }
 
     fn advertised_metatraffic_unicast_locators(&self) -> Vec<Locator> {
@@ -202,15 +255,17 @@ impl TransportPlugin for ShmTransportPlugin {
     }
 
     fn advertised_default_unicast_locators(&self) -> Vec<Locator> {
-        // Mirrors develop's `add_locators_for_ip` for SHM mode: for every
-        // advertised IP (env override or each working_ip), emit an SHM
-        // locator and a UDP locator at user_port — SHM first so peers'
-        // SHM > UDP priority filter picks SHM when reachable.
         let user_port =
             PortManager::get_user_traffic_unicast_port(self.domain_id, self.participant_id) as u32;
         let mut locators = Vec::new();
+        // SHM locators carry our NIC addresses, not the external one: a
+        // segment name means nothing off this machine, and every host behind
+        // the same NAT advertises the same external address. Order is not
+        // load-bearing -- a peer picks by kind, not by position.
+        for ip in &self.host_ip_addrs {
+            locators.push(Locator::from_shm(ip, user_port));
+        }
         for ip in self.advertised_ips() {
-            locators.push(Locator::from_shm(&ip, user_port));
             locators.push(Locator::from_ip_v4_addr_and_port(&ip, user_port));
         }
         locators
@@ -266,5 +321,33 @@ impl TransportPlugin for ShmTransportPlugin {
         }
 
         debug!("[ShmTransportPlugin] Closed");
+    }
+
+    fn peer_lost(&self, prefix: GuidPrefix) {
+        if let Some(rt) = &self.runtime {
+            rt.peer_lost(prefix);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shm_locator_is_local_accepts_our_own_ip_and_rejects_others() {
+        let ip: Ipv4Addr = "127.0.0.1".parse().unwrap();
+        let ours = vec![ip];
+
+        let mine = Locator::from_shm(&ip, 7410);
+        let theirs = Locator::from_shm(&"192.168.1.50".parse().unwrap(), 7410);
+        let udp = Locator::from_ip_v4_addr_and_port(&ip, 7410);
+
+        assert!(shm_locator_is_local(&mine, &ours));
+        assert!(
+            !shm_locator_is_local(&theirs, &ours),
+            "a remote host's SHM locator must be rejected"
+        );
+        assert!(!shm_locator_is_local(&udp, &ours), "a UDP locator is not an SHM target");
     }
 }

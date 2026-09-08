@@ -89,7 +89,11 @@ pub(crate) struct Pool {
 }
 
 // Safety: the pointer addresses a shared mapping whose geometry is written
-// once before publication; slot state is mutated only through atomics.
+// once before publication. `slot_mut` does hand out a non-atomic `&mut [u8]`
+// into slot data, but the `SLOT_WRITING` state plus the owner-only bit in
+// `refs` (see the module doc) gate that: a slice is only live while the slot
+// is in that state and only the leasing side touches it, so no other party
+// may read or write the same bytes concurrently.
 unsafe impl Send for Pool {}
 unsafe impl Sync for Pool {}
 

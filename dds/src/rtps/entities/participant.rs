@@ -1139,6 +1139,10 @@ impl Participant {
             transport.disconnect_peer(&locators);
         }
 
+        if let Some(transport) = self.transport.get() {
+            transport.peer_lost(remote_prefix);
+        }
+
         info!("Successfully unmatched with remote participant: {}", terminated_participant_guid);
         Ok(())
     }

@@ -95,23 +95,38 @@ impl Notifier {
         }
     }
 
-    pub(crate) fn wait(&self, timeout: Duration) {
+    /// Sample the wakeup state before testing the condition. Pass the result to
+    /// `wait_if`: a signal that lands in between changes the word, and the
+    /// kernel then refuses to sleep instead of losing the wakeup.
+    pub(crate) fn prepare_wait(&self) -> u32 {
+        #[cfg(all(unix, target_os = "linux"))]
+        // Safety: `self.futex` is valid for the same reason as in `signal`.
+        unsafe {
+            (*self.futex).load(Ordering::Acquire)
+        }
+        #[cfg(not(all(unix, target_os = "linux")))]
+        0
+    }
+
+    /// Sleep until signalled or `timeout` elapses. `expected` must come from a
+    /// `prepare_wait` taken before the caller tested its condition.
+    pub(crate) fn wait_if(&self, expected: u32, timeout: Duration) {
         #[cfg(windows)]
         // Safety: same handle-validity argument as in `signal`; the timeout is
-        // a plain millisecond count, not a pointer.
+        // a plain millisecond count, not a pointer. The event is auto-reset and
+        // holds a signal that arrived before this call, so `expected` is not
+        // needed on this backend.
         unsafe {
+            let _ = expected;
             winapi::um::synchapi::WaitForSingleObject(self.handle, timeout.as_millis() as u32);
         }
         #[cfg(all(unix, target_os = "linux"))]
-        // Safety: `self.futex` is valid for the same reason as in `signal`.
-        // The word is loaded before the syscall so a signal that lands
-        // between the load and the syscall changes the word's value; the
-        // kernel re-checks the word against `expected` atomically before
-        // sleeping and returns immediately on a mismatch instead of missing
-        // the wakeup. `ts` is a local, stack-allocated timespec kept alive for
-        // the call, so passing its address is sound.
+        // Safety: `self.futex` is valid for the same reason as in `signal`. The
+        // kernel compares the word against `expected` atomically before
+        // sleeping and returns immediately on a mismatch, so a signal that
+        // landed any time after the caller's `prepare_wait` is not lost. `ts`
+        // is a local kept alive for the call, so passing its address is sound.
         unsafe {
-            let expected = (*self.futex).load(Ordering::Acquire);
             let ts = libc::timespec {
                 tv_sec: timeout.as_secs() as libc::time_t,
                 tv_nsec: timeout.subsec_nanos() as libc::c_long,
@@ -128,6 +143,7 @@ impl Notifier {
         }
         #[cfg(not(any(windows, target_os = "linux")))]
         {
+            let _ = expected;
             std::thread::sleep(timeout);
         }
     }
@@ -160,9 +176,10 @@ mod tests {
         let producer = Notifier::create(&name, word.as_ref() as *const AtomicU32).unwrap();
         let consumer = Notifier::open(&name, word.as_ref() as *const AtomicU32).unwrap();
 
+        let token = consumer.prepare_wait();
         let handle = std::thread::spawn(move || {
             let start = std::time::Instant::now();
-            consumer.wait(Duration::from_secs(5));
+            consumer.wait_if(token, Duration::from_secs(5));
             start.elapsed()
         });
         std::thread::sleep(Duration::from_millis(50));
@@ -181,8 +198,9 @@ mod tests {
         let word = AtomicU32::new(0);
         let name = format!("int2dds_test_timeout_{}", std::process::id());
         let n = Notifier::create(&name, &word as *const AtomicU32).unwrap();
+        let token = n.prepare_wait();
         let start = std::time::Instant::now();
-        n.wait(Duration::from_millis(50));
+        n.wait_if(token, Duration::from_millis(50));
         assert!(start.elapsed() >= Duration::from_millis(40));
     }
 }

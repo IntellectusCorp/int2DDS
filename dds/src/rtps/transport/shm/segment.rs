@@ -3,6 +3,8 @@
 //! the pool.
 
 use std::io;
+use std::sync::atomic::Ordering;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use crate::rtps::transport::shm::layout::{LayoutError, SegmentView};
@@ -11,7 +13,7 @@ use crate::rtps::transport::shm::platform::SharedMemory;
 use crate::rtps::transport::shm::pool::{Pool, PoolLayout};
 use crate::rtps::transport::shm::pool_owner::PoolOwner;
 use crate::rtps::transport::shm::pool_reader::PoolReader;
-use crate::rtps::transport::shm::ring::Ring;
+use crate::rtps::transport::shm::ring::{Ring, RingError};
 
 const HEADER_RESERVE: u64 = 64;
 
@@ -28,10 +30,13 @@ pub(crate) fn event_name(domain: u32, slot: u32) -> String {
 }
 
 pub(crate) struct OwnedSegment {
-    owner: std::cell::RefCell<PoolOwner>,
-    // `Ring::pop` takes `&mut self` (single consumer), so the consumer needs
-    // mutable reach through a shared `OwnedSegment`. Same shape as `owner`.
-    ring: std::cell::RefCell<Ring>,
+    owner: Mutex<PoolOwner>,
+    // Mutual exclusion between threads sharing this `OwnedSegment`, not a
+    // borrow-checker workaround. Re-locking from the same thread while a guard
+    // is held will not reliably panic the way `RefCell` does -- `Mutex::lock`
+    // leaves that case unspecified, and both backends here deadlock instead.
+    // Same shape as `owner`.
+    ring: Mutex<Ring>,
     pub(crate) notifier: Notifier,
     pub(crate) slot: u32,
     pub(crate) epoch: u64,
@@ -84,8 +89,8 @@ impl OwnedSegment {
 
         let notifier = Notifier::create(&event_name(domain, slot), ring.futex_ptr())?;
         Ok(OwnedSegment {
-            owner: std::cell::RefCell::new(PoolOwner::new(pool, slot, epoch)),
-            ring: std::cell::RefCell::new(ring),
+            owner: Mutex::new(PoolOwner::new(pool, slot, epoch)),
+            ring: Mutex::new(ring),
             notifier,
             slot,
             epoch,
@@ -93,12 +98,43 @@ impl OwnedSegment {
         })
     }
 
-    pub(crate) fn owner_mut(&self) -> std::cell::RefMut<'_, PoolOwner> {
-        self.owner.borrow_mut()
+    pub(crate) fn owner_mut(&self) -> MutexGuard<'_, PoolOwner> {
+        // Poison is ignored on purpose: every shared field lives in the mapping
+        // as an atomic, and the process-local free list cannot tear during an
+        // unwind. Honouring poison would turn one recoverable panic into a
+        // participant that can never touch its own pool again.
+        self.owner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    pub(crate) fn ring_mut(&self) -> std::cell::RefMut<'_, Ring> {
-        self.ring.borrow_mut()
+    pub(crate) fn ring_mut(&self) -> MutexGuard<'_, Ring> {
+        // Same reasoning as `owner_mut`.
+        self.ring.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Sleeps until a message may be waiting or `timeout` elapses. A return is
+    /// not a promise: a signal that arrives as this returns early leaves the
+    /// wakeup latched, so the next call returns at once with nothing to pop.
+    /// Callers must re-check the ring after every return.
+    pub(crate) fn wait_for_message(&self, timeout: Duration) {
+        // Sample before testing the condition, or a signal landing between the
+        // test and the sleep is lost on the futex backend.
+        let token = self.notifier.prepare_wait();
+        {
+            let ring = self.ring_mut();
+            ring.waiters().fetch_add(1, Ordering::SeqCst);
+            // Store-buffering pair with `push_and_signal`: without a total
+            // order over `waiters` and the ring, both sides may read stale and
+            // no signal is ever sent.
+            std::sync::atomic::fence(Ordering::SeqCst);
+            // Re-check after registering: a producer that pushed while we were
+            // not yet visible as a waiter sends no signal at all.
+            if !ring.is_empty() {
+                ring.waiters().fetch_sub(1, Ordering::SeqCst);
+                return;
+            }
+        }
+        self.notifier.wait_if(token, timeout);
+        self.ring_mut().waiters().fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -188,6 +224,17 @@ impl PeerSegment {
             _shm: shm,
         })
     }
+
+    /// Pushes into the owner's ring and wakes it only if it is waiting.
+    pub(crate) fn push_and_signal(&self, payload: &[u8], spill: u32) -> Result<(), RingError> {
+        self.ring.push(payload, spill)?;
+        // Pairs with the fence in `wait_for_message`; see the note there.
+        std::sync::atomic::fence(Ordering::SeqCst);
+        if self.ring.waiters().load(Ordering::SeqCst) > 0 {
+            self.notifier.signal();
+        }
+        Ok(())
+    }
 }
 
 pub(crate) fn unlink_segment(domain: u32, slot: u32) {
@@ -244,5 +291,72 @@ mod tests {
     #[test]
     fn attach_to_missing_segment_fails() {
         assert!(PeerSegment::attach(DOMAIN, 63, 1).is_err());
+    }
+
+    #[test]
+    fn a_peer_push_wakes_the_owner() {
+        unlink_segment(DOMAIN, 2);
+        let owned = std::sync::Arc::new(OwnedSegment::create(DOMAIN, 2, 1, &[(64, 2)], 4).unwrap());
+        let peer = PeerSegment::attach(DOMAIN, 2, 3).unwrap();
+
+        let waiter = {
+            let owned = std::sync::Arc::clone(&owned);
+            std::thread::spawn(move || {
+                let start = std::time::Instant::now();
+                owned.wait_for_message(Duration::from_secs(5));
+                start.elapsed()
+            })
+        };
+        std::thread::sleep(Duration::from_millis(50));
+        peer.push_and_signal(b"wake", SPILL_NONE).unwrap();
+
+        let waited = waiter.join().unwrap();
+        assert!(waited < Duration::from_secs(1), "owner was not woken: {waited:?}");
+
+        let mut out = [0u8; RING_INLINE];
+        let (len, _) = owned.ring_mut().pop(&mut out).unwrap();
+        assert_eq!(&out[..len as usize], b"wake");
+        assert_eq!(owned.ring_mut().waiters().load(Ordering::SeqCst), 0);
+
+        drop(peer);
+        drop(owned);
+        unlink_segment(DOMAIN, 2);
+    }
+
+    #[test]
+    fn waiting_returns_immediately_when_the_ring_already_has_a_message() {
+        unlink_segment(DOMAIN, 4);
+        let owned = OwnedSegment::create(DOMAIN, 4, 1, &[(64, 2)], 4).unwrap();
+        let peer = PeerSegment::attach(DOMAIN, 4, 5).unwrap();
+        peer.push_and_signal(b"early", SPILL_NONE).unwrap();
+
+        let start = std::time::Instant::now();
+        owned.wait_for_message(Duration::from_secs(5));
+        assert!(start.elapsed() < Duration::from_secs(1), "wait did not re-check the ring");
+        assert_eq!(owned.ring_mut().waiters().load(Ordering::SeqCst), 0);
+
+        drop(peer);
+        drop(owned);
+        unlink_segment(DOMAIN, 4);
+    }
+
+    #[test]
+    fn waiting_times_out_on_an_empty_ring_and_leaves_no_waiter() {
+        unlink_segment(DOMAIN, 6);
+        let owned = OwnedSegment::create(DOMAIN, 6, 1, &[(64, 2)], 4).unwrap();
+
+        let start = Instant::now();
+        owned.wait_for_message(Duration::from_millis(50));
+        assert!(start.elapsed() >= Duration::from_millis(40), "should have slept");
+        assert_eq!(owned.ring_mut().waiters().load(Ordering::SeqCst), 0);
+
+        drop(owned);
+        unlink_segment(DOMAIN, 6);
+    }
+
+    #[test]
+    fn owned_segment_is_sync() {
+        fn assert_sync<T: Sync + Send>() {}
+        assert_sync::<OwnedSegment>();
     }
 }

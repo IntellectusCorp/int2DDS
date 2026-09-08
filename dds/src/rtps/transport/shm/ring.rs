@@ -41,7 +41,12 @@ pub(crate) struct Ring {
 }
 
 // Safety: the pointer addresses a shared mapping whose geometry is written
-// once before publication; every mutable field is touched only through atomics.
+// once before publication. `push` writes non-atomic cell fields (`len`,
+// `spill`, `inline`) and `pop` reads them, but each cell's `seq` marker gates
+// both:
+// a producer only touches a cell it has just claimed via CAS on `enqueue_pos`,
+// and a consumer only reads a cell after `seq` proves that write is published
+// and before any producer may claim it again.
 unsafe impl Send for Ring {}
 unsafe impl Sync for Ring {}
 
@@ -168,9 +173,13 @@ impl Ring {
         Ok(())
     }
 
-    /// Single consumer. `&mut self` enforces that rather than documenting it:
-    /// `Ring` is `Sync`, so a `&self` pop would let two threads race on
-    /// `dequeue_pos` and hand the same cell out twice.
+    /// `&mut self` no longer means exactly one thread ever calls this: a
+    /// caller behind a `Mutex<Ring>` may hand it to several threads, one at a
+    /// time. That keeps the ring's own invariants intact -- `&mut` still rules
+    /// out two calls racing on `dequeue_pos` -- but with more than one
+    /// consumer the wakeup does not scale with them: `Notifier::signal` wakes
+    /// one sleeper, so a second consumer waiting at the same time sleeps until
+    /// its own timeout instead of being woken.
     pub(crate) fn pop(&mut self, out: &mut [u8; RING_INLINE]) -> Option<(u32, u32)> {
         let header = self.header();
         let pos = header.dequeue_pos.load(Ordering::Relaxed);
@@ -203,6 +212,12 @@ impl Ring {
 
     pub(crate) fn waiters(&self) -> &AtomicU32 {
         &self.header().waiters
+    }
+
+    /// Whether the consumer would find nothing to pop right now.
+    pub(crate) fn is_empty(&self) -> bool {
+        let pos = self.header().dequeue_pos.load(Ordering::Relaxed);
+        self.seq_of(pos).load(Ordering::Acquire) != pos + 1
     }
 }
 
