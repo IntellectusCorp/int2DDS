@@ -452,7 +452,7 @@ impl TcpTransportPlugin {
     fn should_dial(&self, addr: &SocketAddr) -> bool {
         self.sender.is_self_connection(addr)
             || self.accept_undefined_peers
-            || self.dial_allowed.is_empty()
+            || (self.dial_allowed.is_empty() && self.dial_allowed_hosts.is_empty())
             || self.dial_allowed.contains(addr)
             || (self.dial_allowed_hosts.contains(&addr.ip())
                 && self.is_in_domain_block(addr.port()))
@@ -865,6 +865,37 @@ mod tests {
         assert!(
             !plugin.should_dial(&format!("203.0.113.7:{other_slot}").parse().unwrap()),
             "an unconfigured host stays out regardless of the port"
+        );
+
+        plugin.close();
+    }
+
+    /// A configuration written only with the wildcard port carries no address at
+    /// all, and the gate has to read that as a host list rather than as nothing
+    /// configured.
+    #[test]
+    fn a_host_named_only_by_the_wildcard_still_closes_the_gate() {
+        const DOMAIN: u32 = 4;
+        let cfg = TcpConfig {
+            bind_port: Some(0),
+            initial_peers: vec!["127.0.0.1:0".parse().unwrap()],
+            ..TcpConfig::default()
+        };
+        let plugin = TcpTransportPlugin::new(
+            DOMAIN,
+            0,
+            "127.0.0.1".to_string(),
+            vec!["127.0.0.1".to_string()],
+            [0u8; 12],
+            cfg,
+        )
+        .expect("plugin creation");
+
+        let slot = PortManager::get_tcp_physical_port(DOMAIN, 5);
+        assert!(plugin.should_dial(&format!("127.0.0.1:{slot}").parse().unwrap()));
+        assert!(
+            !plugin.should_dial(&format!("203.0.113.7:{slot}").parse().unwrap()),
+            "a host nobody named stays out"
         );
 
         plugin.close();
