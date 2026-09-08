@@ -142,7 +142,7 @@ impl TcpTransportPlugin {
         let dial_allowed = Self::allowed_dial_addresses(&peers);
         let dial_allowed_hosts: HashSet<IpAddr> = peers.iter().map(|peer| peer.ip).collect();
         let announce_targets = Mutex::new(AnnounceTargets::new(
-            Self::candidates(domain_id, &peers),
+            Self::candidates(domain_id, &peers, tcp_config.peer_search_slots),
             Some(PEER_PRUNE_DELAY),
             Instant::now(),
         ));
@@ -411,15 +411,15 @@ impl TcpTransportPlugin {
     ///
     /// A peer declared with a port is one address and is marked as such, so the
     /// list keeps it whatever happens. A peer named by host alone becomes one
-    /// address per participant slot of this domain, which is guesswork the list
-    /// is free to narrow down.
-    fn candidates(domain_id: u32, peers: &[PeerSpec]) -> Vec<(SocketAddr, bool)> {
+    /// address per participant slot the configuration says a host may hold,
+    /// which is guesswork the list is free to narrow down.
+    fn candidates(domain_id: u32, peers: &[PeerSpec], slots: u32) -> Vec<(SocketAddr, bool)> {
         let slot = |index: u32| PortManager::get_tcp_physical_port(domain_id, index);
         peers
             .iter()
             .flat_map(|peer| {
                 let declared = peer.port.is_some();
-                peer.expand(slot).into_iter().map(move |addr| (addr, declared))
+                peer.expand(slot, slots).into_iter().map(move |addr| (addr, declared))
             })
             .collect()
     }
@@ -661,7 +661,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicU32;
 
-    use crate::rtps::transport::peer_spec::MAX_PARTICIPANTS_PER_HOST;
+    use crate::rtps::transport::peer_spec::DEFAULT_PARTICIPANTS_PER_HOST;
     use crate::rtps::transport::tcp::framing::{test_framed, test_message};
 
     fn take_listener(plugin: &TcpTransportPlugin) -> TcpListener {
@@ -764,7 +764,7 @@ mod tests {
 
         assert_eq!(peers, vec![declared]);
         assert_eq!(
-            TcpTransportPlugin::candidates(0, &peers),
+            TcpTransportPlugin::candidates(0, &peers, DEFAULT_PARTICIPANTS_PER_HOST),
             vec![("192.168.0.5:7400".parse().unwrap(), true)]
         );
     }
@@ -774,10 +774,13 @@ mod tests {
     fn a_host_given_the_wildcard_is_the_whole_domain_range() {
         let named: PeerSpec = "192.168.0.5:0".parse().unwrap();
 
-        let candidates =
-            TcpTransportPlugin::candidates(0, &TcpTransportPlugin::resolve_peers(&[named]));
+        let candidates = TcpTransportPlugin::candidates(
+            0,
+            &TcpTransportPlugin::resolve_peers(&[named]),
+            DEFAULT_PARTICIPANTS_PER_HOST,
+        );
 
-        assert_eq!(candidates.len(), MAX_PARTICIPANTS_PER_HOST as usize);
+        assert_eq!(candidates.len(), DEFAULT_PARTICIPANTS_PER_HOST as usize);
         assert!(candidates.iter().all(|(_, declared)| !declared), "a guess is not declared");
         assert_eq!(
             candidates[0].0,

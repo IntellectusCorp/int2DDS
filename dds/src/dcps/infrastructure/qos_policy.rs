@@ -852,6 +852,12 @@ pub const PROP_TRANSPORT: &str = "int2dds.transport";
 /// `INT2DDS_INITIAL_PEERS` env var when absent.
 pub const PROP_INITIAL_PEERS: &str = "int2dds.initial_peers";
 
+/// How many participant slots a host named with the wildcard port stands for.
+/// Default `16`. Raise it on a host that runs more participants than that, lower
+/// it to cut the addresses a fresh participant announces to before the list
+/// settles. Clamped to the number of slots the domain's port block holds.
+pub const PROP_PEER_SEARCH_SLOTS: &str = "int2dds.peer_search_slots";
+
 /// Whether to dial peers discovered at runtime that are NOT in `initial_peers`.
 /// `false` (default): only dial `initial_peers` (or every advertised locator when
 /// `initial_peers` is empty).

@@ -9,12 +9,12 @@
 
 use std::net::{IpAddr, SocketAddr};
 
-/// How many participants one host is assumed to hold, which is how far a peer
-/// named without a port is expanded. Small enough that a host nobody runs on
-/// costs little, and well past what one machine normally carries. A participant
-/// that settles past it is still reached: it announces itself, and the peer that
-/// hears it admits the address.
-pub(crate) const MAX_PARTICIPANTS_PER_HOST: u32 = 16;
+/// How many participants one host is assumed to hold when the configuration does
+/// not say, which is how far a peer named without a port is expanded. Small
+/// enough that a host nobody runs on costs little, and well past what one
+/// machine normally carries. A participant that settles past it is still
+/// reached: it announces itself, and the peer that hears it admits the address.
+pub(crate) const DEFAULT_PARTICIPANTS_PER_HOST: u32 = 16;
 
 /// The port that stands for "every slot of the domain" rather than one address.
 pub(crate) const WILDCARD_PORT: u16 = 0;
@@ -39,13 +39,11 @@ impl PeerSpec {
     }
 
     /// The addresses this entry stands for. An entry with a real port is itself;
-    /// a wildcard is `slot(0) ..= slot(MAX_PARTICIPANTS_PER_HOST - 1)`.
-    pub(crate) fn expand(&self, slot: impl Fn(u32) -> u16) -> Vec<SocketAddr> {
+    /// a wildcard is `slot(0) ..= slot(slots - 1)`.
+    pub(crate) fn expand(&self, slot: impl Fn(u32) -> u16, slots: u32) -> Vec<SocketAddr> {
         match self.port {
             Some(port) => vec![SocketAddr::new(self.ip, port)],
-            None => {
-                (0..MAX_PARTICIPANTS_PER_HOST).map(|i| SocketAddr::new(self.ip, slot(i))).collect()
-            }
+            None => (0..slots).map(|i| SocketAddr::new(self.ip, slot(i))).collect(),
         }
     }
 }
@@ -122,21 +120,33 @@ mod tests {
     fn a_pinned_entry_stands_for_itself_alone() {
         let spec = PeerSpec::new("192.168.0.5".parse().unwrap(), Some(7400));
 
-        assert_eq!(spec.expand(|i| 100 + i as u16), vec!["192.168.0.5:7400".parse().unwrap()]);
+        assert_eq!(
+            spec.expand(|i| 100 + i as u16, DEFAULT_PARTICIPANTS_PER_HOST),
+            vec!["192.168.0.5:7400".parse().unwrap()]
+        );
     }
 
     #[test]
     fn the_wildcard_stands_for_every_slot_of_the_domain() {
         let spec: PeerSpec = "127.0.0.1:0".parse().unwrap();
 
-        let expanded = spec.expand(|i| 7400 + 2 * i as u16);
+        let expanded = spec.expand(|i| 7400 + 2 * i as u16, DEFAULT_PARTICIPANTS_PER_HOST);
 
-        assert_eq!(expanded.len(), MAX_PARTICIPANTS_PER_HOST as usize);
+        assert_eq!(expanded.len(), DEFAULT_PARTICIPANTS_PER_HOST as usize);
         assert_eq!(expanded[0], "127.0.0.1:7400".parse().unwrap());
         assert_eq!(expanded[1], "127.0.0.1:7402".parse().unwrap());
         assert_eq!(
-            expanded[MAX_PARTICIPANTS_PER_HOST as usize - 1],
-            format!("127.0.0.1:{}", 7400 + 2 * (MAX_PARTICIPANTS_PER_HOST - 1)).parse().unwrap()
+            expanded[DEFAULT_PARTICIPANTS_PER_HOST as usize - 1],
+            format!("127.0.0.1:{}", 7400 + 2 * (DEFAULT_PARTICIPANTS_PER_HOST - 1))
+                .parse()
+                .unwrap()
         );
+    }
+
+    #[test]
+    fn the_wildcard_follows_the_configured_slot_count() {
+        let spec: PeerSpec = "127.0.0.1:0".parse().unwrap();
+
+        assert_eq!(spec.expand(|i| 7400 + 2 * i as u16, 3).len(), 3);
     }
 }
