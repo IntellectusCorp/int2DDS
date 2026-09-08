@@ -5,6 +5,7 @@
 //! which writes from whichever thread called it. Neither half owns a task
 //! runtime.
 
+use std::collections::HashSet;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -47,6 +48,10 @@ pub(crate) struct TcpTransportPlugin {
 
     /// Dial peers discovered at runtime that are not in `initial_peers`
     accept_undefined_peers: bool,
+
+    /// Addresses already named by `report_unreachable_peer`, so one
+    /// misconfigured peer is reported once instead of every announcement.
+    reported_unreachable: Mutex<HashSet<SocketAddr>>,
 
     /// Shared with the sender, so the plugin can mark the transport shut down
     /// even when an outside `Arc` keeps the sender alive past it.
@@ -99,9 +104,6 @@ impl TcpTransportPlugin {
         tls_config: Option<Arc<TlsConfig>>,
         tcp_config: TcpConfig,
     ) -> io::Result<Self> {
-        let physical_port =
-            tcp_config.bind_port.unwrap_or_else(|| PortManager::get_tcp_physical_port(domain_id));
-
         let initial_peers = tcp_config.initial_peers.clone();
 
         if tcp_config.transport_type == TransportType::TCP && initial_peers.is_empty() {
@@ -127,30 +129,13 @@ impl TcpTransportPlugin {
 
         let shutdown = Arc::new(AtomicBool::new(false));
 
-        let listener = TcpListener::new(
-            physical_port,
+        let (listener, participant_id) = Self::bind_listener(
+            domain_id,
+            participant_id,
             tuning,
             tls_config.clone(),
-            tcp_config.tls_handshake_timeout,
-            tcp_config.first_frame_timeout,
-        )
-        .map_err(|e| {
-            log::error!(
-                "[TcpTransportPlugin] Failed to bind TCP listener on port {} \
-                 (domain={}): {}. Another participant may already be using this port \
-                 on the same host.",
-                physical_port,
-                domain_id,
-                e
-            );
-            transport_io_error(
-                TransportErrorCode::TcpBindFailed,
-                format!(
-                    "Failed to bind TCP listener on port {} (domain={}): {}",
-                    physical_port, domain_id, e
-                ),
-            )
-        })?;
+            &tcp_config,
+        )?;
         let listener_port = listener.port();
 
         let shared =
@@ -188,11 +173,109 @@ impl TcpTransportPlugin {
             initial_peers,
             public_address: tcp_config.public_address,
             accept_undefined_peers: tcp_config.accept_undefined_peers,
+            reported_unreachable: Mutex::new(HashSet::new()),
             shutdown,
             sender,
             listener: Mutex::new(Some(listener)),
             shared,
         })
+    }
+
+    /// Bind the listener this participant answers on, and report which
+    /// participant id it ended up owning.
+    ///
+    /// An explicit `bind_port` is taken as given and never searched around: the
+    /// operator named that port, so a conflict has to surface rather than be
+    /// worked around. Otherwise the domain formula is walked upwards until a free
+    /// slot is found, which is what lets several participants share a host while
+    /// every port stays computable by a peer. The walk stops at the end of this
+    /// domain's own block — one step further would hand out the next domain's
+    /// base port and break the isolation between domains.
+    fn bind_listener(
+        domain_id: u32,
+        first_participant_id: u32,
+        tuning: TcpSocketTuning,
+        tls_config: Option<Arc<TlsConfig>>,
+        tcp_config: &TcpConfig,
+    ) -> io::Result<(TcpListener, u32)> {
+        let open = |port: u16, tls_config: Option<Arc<TlsConfig>>| {
+            TcpListener::new(
+                port,
+                tuning,
+                tls_config,
+                tcp_config.tls_handshake_timeout,
+                tcp_config.first_frame_timeout,
+            )
+        };
+
+        if let Some(port) = tcp_config.bind_port {
+            return open(port, tls_config)
+                .map(|listener| (listener, first_participant_id))
+                .map_err(|e| {
+                    log::error!(
+                        "[TcpTransportPlugin] Failed to bind TCP listener on the configured \
+                         port {} (domain={}): {}. int2dds.transport.TCPv4.bind_port is used \
+                         as given, so give each participant its own port or drop the property \
+                         to have one picked from the domain formula.",
+                        port,
+                        domain_id,
+                        e
+                    );
+                    transport_io_error(
+                        TransportErrorCode::TcpBindFailed,
+                        format!(
+                            "Failed to bind TCP listener on the configured port {} (domain={}): {}",
+                            port, domain_id, e
+                        ),
+                    )
+                });
+        }
+
+        let mut last_error = None;
+        for participant_id in first_participant_id..=PortManager::MAX_TCP_PARTICIPANT_ID {
+            let port = PortManager::get_tcp_physical_port(domain_id, participant_id);
+            match open(port, tls_config.clone()) {
+                Ok(listener) => return Ok((listener, participant_id)),
+                Err(e) => {
+                    debug!(
+                        "[TcpTransportPlugin] Port {} taken, trying participant id {}",
+                        port,
+                        participant_id + 1
+                    );
+                    last_error = Some(e);
+                }
+            }
+        }
+
+        let last_port =
+            PortManager::get_tcp_physical_port(domain_id, PortManager::MAX_TCP_PARTICIPANT_ID);
+        let first_port = PortManager::get_tcp_physical_port(domain_id, first_participant_id);
+        log::error!(
+            "[TcpTransportPlugin] No free TCP listening port for domain {}: ports {}..={} are \
+             all in use. A domain holds at most {} participants per host; the next port belongs \
+             to domain {}.",
+            domain_id,
+            first_port,
+            last_port,
+            PortManager::MAX_TCP_PARTICIPANT_ID + 1,
+            domain_id + 1
+        );
+        Err(transport_io_error(
+            TransportErrorCode::TcpBindFailed,
+            match last_error {
+                Some(e) => format!(
+                    "No free TCP listening port for domain {} (tried {}..={}): {}",
+                    domain_id, first_port, last_port, e
+                ),
+                None => format!(
+                    "No TCP listening port left for domain {}: participant id {} is past the \
+                     domain's last slot {}",
+                    domain_id,
+                    first_participant_id,
+                    PortManager::MAX_TCP_PARTICIPANT_ID
+                ),
+            },
+        ))
     }
 
     /// Both discovery and user-data advertise the same standard TCP locator.
@@ -241,6 +324,35 @@ impl TcpTransportPlugin {
             || self.initial_peers.is_empty()
             || self.initial_peers.contains(addr)
     }
+
+    /// Report a peer this participant has discovered but is not allowed to
+    /// answer, once per address.
+    ///
+    /// Only an address whose host is already configured is reported. That host
+    /// was meant to be reachable, so a port outside the list means a participant
+    /// landed on a slot the list does not cover and the two will never match. A
+    /// locator on an unlisted host is the dial gate doing its job — a peer with
+    /// several NICs advertises one locator per NIC, and skipping the ones not
+    /// named is expected rather than a fault.
+    fn report_unreachable_peer(&self, addr: &SocketAddr) {
+        if !self.initial_peers.iter().any(|peer| peer.ip() == addr.ip()) {
+            return;
+        }
+        let first_report = match self.reported_unreachable.lock() {
+            Ok(mut reported) => reported.insert(*addr),
+            Err(_) => false,
+        };
+        if first_report {
+            log::error!(
+                "[TcpTransportPlugin] Discovered a participant at {} but it is not in \
+                 int2dds.initial_peers, so nothing will be sent to it and the two will not \
+                 match. The host is configured, so a participant landed on a port the list \
+                 does not cover: add {} to the list.",
+                addr,
+                addr
+            );
+        }
+    }
 }
 
 impl TransportPlugin for TcpTransportPlugin {
@@ -275,7 +387,8 @@ impl TransportPlugin for TcpTransportPlugin {
                     locator.port() as u16,
                 );
                 if !self.should_dial(&addr) {
-                    log::debug!("[TcpTransportPlugin] skip non-initial-peer locator {}", addr);
+                    debug!("[TcpTransportPlugin] skip non-initial-peer locator {}", addr);
+                    self.report_unreachable_peer(&addr);
                     return Ok(());
                 }
                 let kind = match target {
@@ -449,6 +562,54 @@ mod tests {
             cfg,
         )
         .expect("plugin creation")
+    }
+
+    fn make_scanning_plugin(domain: u32, bind_port: Option<u16>) -> io::Result<TcpTransportPlugin> {
+        let cfg = TcpConfig {
+            initial_peers: vec!["127.0.0.1:7400".parse().unwrap()],
+            bind_port,
+            ..TcpConfig::default()
+        };
+        TcpTransportPlugin::new(
+            domain,
+            0,
+            "127.0.0.1".to_string(),
+            vec!["127.0.0.1".to_string()],
+            [0u8; 12],
+            cfg,
+        )
+    }
+
+    /// Two participants on one host and domain both come up, on adjacent slots
+    /// of the same domain block.
+    #[test]
+    fn a_second_participant_takes_the_next_slot_in_the_domain_block() {
+        let domain = next_test_domain();
+        let first = make_scanning_plugin(domain, None).expect("first plugin");
+        let second = make_scanning_plugin(domain, None).expect("second plugin");
+
+        assert_eq!(first.participant_id(), 0);
+        assert_eq!(second.participant_id(), 1);
+        assert_eq!(
+            second.tcp_listener_port().expect("second port"),
+            first.tcp_listener_port().expect("first port") + 2
+        );
+
+        first.close();
+        second.close();
+    }
+
+    /// A pinned port is used as given: the walk that finds a free slot must not
+    /// silently move a participant off the port an operator named.
+    #[test]
+    fn a_pinned_bind_port_is_never_searched_around() {
+        let occupied = std::net::TcpListener::bind("0.0.0.0:0").expect("occupy a port");
+        let port = occupied.local_addr().expect("local addr").port();
+
+        let result = make_scanning_plugin(next_test_domain(), Some(port));
+
+        assert!(result.is_err());
+        drop(occupied);
     }
 
     /// Plugin construction succeeds and the OS accepts TCP connections on
