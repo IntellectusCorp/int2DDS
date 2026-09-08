@@ -128,8 +128,8 @@ fn payload_survives_the_process_boundary() {
     let owned = OwnedSegment::create(DOMAIN, PARENT_SLOT, 1, &[(1024, 4)], 8).unwrap();
     let mut child = spawn_child("claim_and_die");
 
-    let lease = owned.owner_mut().acquire(16).unwrap();
-    owned.owner_mut().slot_mut(&lease)[..5].copy_from_slice(b"frame");
+    let mut lease = owned.owner_mut().acquire(16).unwrap();
+    lease.bytes_mut()[..5].copy_from_slice(b"frame");
     let slot_ref = owned.owner_mut().commit(lease, 5);
 
     let child_seg = attach_retry(DOMAIN, CHILD_SLOT, PARENT_SLOT);

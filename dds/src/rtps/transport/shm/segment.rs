@@ -4,7 +4,7 @@
 
 use std::io;
 use std::sync::atomic::Ordering;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use crate::rtps::transport::shm::layout::{LayoutError, SegmentView};
@@ -41,8 +41,10 @@ pub(crate) struct OwnedSegment {
     pub(crate) slot: u32,
     pub(crate) epoch: u64,
     // Declared last on purpose: fields drop in declaration order, so the
-    // mapping must outlive everything that points into it.
-    _shm: SharedMemory,
+    // mapping must outlive everything that points into it -- true for `ring`
+    // and `notifier`. `owner` holds its own `Arc` clone of the mapping (see
+    // `PoolOwner::new`'s `map` contract), so it does not depend on this order.
+    _shm: Arc<SharedMemory>,
 }
 
 impl OwnedSegment {
@@ -88,8 +90,14 @@ impl OwnedSegment {
         unsafe { SegmentView::init(base, total, slot, epoch, ring_offset, pool_offset) };
 
         let notifier = Notifier::create(&event_name(domain, slot), ring.futex_ptr())?;
+        let shm = Arc::new(shm);
         Ok(OwnedSegment {
-            owner: Mutex::new(PoolOwner::new(pool, slot, epoch)),
+            owner: Mutex::new(PoolOwner::new(
+                pool,
+                slot,
+                epoch,
+                Arc::clone(&shm) as Arc<dyn Send + Sync>,
+            )),
             ring: Mutex::new(ring),
             notifier,
             slot,
@@ -276,8 +284,8 @@ mod tests {
         let owned = OwnedSegment::create(DOMAIN, 0, 1, &[(64, 2)], 4).unwrap();
         let peer = PeerSegment::attach(DOMAIN, 0, 1).unwrap();
 
-        let lease = { owned.owner_mut().acquire(8) }.unwrap();
-        owned.owner_mut().slot_mut(&lease)[..4].copy_from_slice(b"ping");
+        let mut lease = { owned.owner_mut().acquire(8) }.unwrap();
+        lease.bytes_mut()[..4].copy_from_slice(b"ping");
         let r = owned.owner_mut().commit(lease, 4);
 
         peer.ring.push(&r.encode(), SPILL_NONE).unwrap();

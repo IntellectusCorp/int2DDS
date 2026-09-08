@@ -3,6 +3,7 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use crate::rtps::transport::shm::pool::{Pool, SLOT_READY, SLOT_WRITING};
@@ -11,6 +12,31 @@ use crate::rtps::transport::shm::slot_ref::SlotRef;
 pub(crate) struct SlotLease {
     pub(crate) class: u16,
     pub(crate) index: u32,
+    ptr: *mut u8,
+    size: usize,
+    /// Alive for as long as the caller holds the lease. `reclaim_stale_leases`
+    /// recovers only entries whose lease was dropped without `commit` or
+    /// `abort` -- a panic, never a slow serializer.
+    _live: Arc<()>,
+    /// Keeps the mapping `ptr` points into alive. The borrow checker used to do
+    /// this: the old `slot_mut` borrowed the owner, which owned the mapping. A
+    /// lease now outlives its guard and can cross threads, so it holds the
+    /// mapping itself.
+    _map: Arc<dyn Send + Sync>,
+}
+
+// Safety: `acquire` put the slot in Writing with only the owner's bit set, and
+// nothing clears that before `commit` or `abort`, so these bytes are reachable
+// by no one else. Moving the lease moves that exclusive right with it.
+unsafe impl Send for SlotLease {}
+
+impl SlotLease {
+    /// `&mut self` is what forbids two live slices into one slot; the pool
+    /// mutex used to serve that role and no longer needs to be held here.
+    pub(crate) fn bytes_mut(&mut self) -> &mut [u8] {
+        // Safety: see the `Send` note above.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.size) }
+    }
 }
 
 pub(crate) struct PoolOwner {
@@ -19,11 +45,21 @@ pub(crate) struct PoolOwner {
     own_bit: u64,
     own_epoch: u64,
     free: Vec<VecDeque<u32>>,
-    leased: Vec<Vec<(u32, Instant)>>,
+    leased: Vec<Vec<(u32, Instant, Weak<()>)>>,
+    map: Arc<dyn Send + Sync>,
 }
 
 impl PoolOwner {
-    pub(crate) fn new(pool: Pool, own_slot: u32, own_epoch: u64) -> PoolOwner {
+    /// `map` must own the mapping `pool` points into: every `SlotLease` clones
+    /// it, and that clone is the only thing keeping the mapping alive once the
+    /// lease outlives its guard. Tests over a stack region pass a placeholder
+    /// because the region already outlives them.
+    pub(crate) fn new(
+        pool: Pool,
+        own_slot: u32,
+        own_epoch: u64,
+        map: Arc<dyn Send + Sync>,
+    ) -> PoolOwner {
         let classes = pool.class_count() as usize;
         let free = (0..classes)
             .map(|c| (0..pool.slot_count(c as u16)).collect::<VecDeque<u32>>())
@@ -34,6 +70,7 @@ impl PoolOwner {
             own_epoch,
             free,
             leased: vec![Vec::new(); classes],
+            map,
             pool,
         }
     }
@@ -83,21 +120,20 @@ impl PoolOwner {
             }
             meta.len.store(0, Ordering::Relaxed);
             meta.state.store(SLOT_WRITING, Ordering::Release);
-            self.leased[class as usize].push((index, Instant::now()));
-            return Some(SlotLease { class, index });
+            let ptr = self.pool.data(class, index).expect("index came from the free queue");
+            let size = self.pool.slot_size(class) as usize;
+            let live = Arc::new(());
+            self.leased[class as usize].push((index, Instant::now(), Arc::downgrade(&live)));
+            return Some(SlotLease {
+                class,
+                index,
+                ptr,
+                size,
+                _live: live,
+                _map: Arc::clone(&self.map),
+            });
         }
         None
-    }
-
-    /// Takes `&mut self` so the borrow checker forbids two live slices into the
-    /// same slot; with `&self` a caller could hold aliasing `&mut [u8]`.
-    pub(crate) fn slot_mut(&mut self, lease: &SlotLease) -> &mut [u8] {
-        let ptr = self.pool.data(lease.class, lease.index).expect("lease is in range");
-        let size = self.pool.slot_size(lease.class) as usize;
-        // Safety: the lease was produced by `acquire`, which put the slot in
-        // Writing state with only this owner's bit set, so no reader may touch
-        // it until `commit`. `&mut self` makes this the only live slice.
-        unsafe { std::slice::from_raw_parts_mut(ptr, size) }
     }
 
     pub(crate) fn commit(&mut self, lease: SlotLease, len: u32) -> SlotRef {
@@ -123,6 +159,8 @@ impl PoolOwner {
         self.drop_lease(lease.class, lease.index);
     }
 
+    /// The slot must not have a live lease: this hands it back to the free
+    /// queue, and the next `acquire` would issue a second lease for it.
     pub(crate) fn release_own(&mut self, class: u16, index: u32) {
         if let Some(meta) = self.pool.meta(class, index) {
             meta.refs.fetch_and(!self.own_bit, Ordering::AcqRel);
@@ -131,7 +169,7 @@ impl PoolOwner {
     }
 
     fn drop_lease(&mut self, class: u16, index: u32) {
-        self.leased[class as usize].retain(|(i, _)| *i != index);
+        self.leased[class as usize].retain(|(i, _, _)| *i != index);
     }
 
     /// Clear a dead participant's bit across every slot this owner holds.
@@ -158,9 +196,21 @@ impl PoolOwner {
         for class in 0..self.free.len() {
             let stale: Vec<u32> = self.leased[class]
                 .iter()
-                .filter(|(_, at)| now.duration_since(*at) >= older_than)
-                .map(|(i, _)| *i)
+                // A lease still in the caller's hands is not abandoned, however
+                // old: 6.2 hands its slice to user serialization code, which may
+                // run arbitrarily long. Only a lease dropped without `commit` or
+                // `abort` is recoverable.
+                .filter(|(_, at, live)| {
+                    live.strong_count() == 0 && now.duration_since(*at) >= older_than
+                })
+                .map(|(i, _, _)| *i)
                 .collect();
+            // `Weak::strong_count` is a relaxed load. Pair it with an acquire
+            // fence so the abandoned writer's stores to the slot happen-before
+            // the next owner's stores to it.
+            if !stale.is_empty() {
+                std::sync::atomic::fence(Ordering::Acquire);
+            }
             for index in stale {
                 self.release_own(class as u16, index);
                 self.drop_lease(class as u16, index);
@@ -185,7 +235,9 @@ mod tests {
         let layout = PoolLayout::new(&[(64, 2)]).unwrap();
         let region = AlignedRegion::new(layout.total_size() as usize);
         let pool = unsafe { Pool::init(region.ptr(), &layout) };
-        (region, PoolOwner::new(pool, 3, 1))
+        // `region` outlives the owner lexically, so the mapping a lease would
+        // hold is not `region` itself -- any placeholder does.
+        (region, PoolOwner::new(pool, 3, 1, Arc::new(())))
     }
 
     #[test]
@@ -201,8 +253,8 @@ mod tests {
     #[test]
     fn commit_publishes_length_and_returns_matching_ref() {
         let (_region, mut o) = owner();
-        let lease = o.acquire(10).unwrap();
-        o.slot_mut(&lease)[..3].copy_from_slice(b"abc");
+        let mut lease = o.acquire(10).unwrap();
+        lease.bytes_mut()[..3].copy_from_slice(b"abc");
         let r = o.commit(lease, 3);
         let meta = o.pool().meta(r.class, r.index).unwrap();
         assert_eq!(meta.state.load(Ordering::Relaxed), SLOT_READY);
@@ -296,7 +348,12 @@ mod tests {
         let region = AlignedRegion::new(layout.total_size() as usize);
         // Safety: `region` is a zeroed, 64-aligned block of exactly
         // `total_size()` bytes that outlives every handle below.
-        let mut owner = PoolOwner::new(unsafe { Pool::init(region.ptr(), &layout) }, OWNER_SLOT, 1);
+        let mut owner = PoolOwner::new(
+            unsafe { Pool::init(region.ptr(), &layout) },
+            OWNER_SLOT,
+            1,
+            Arc::new(()),
+        );
         let readers: Vec<(u32, PoolReader)> = (0..READERS)
             .map(|i| {
                 // Safety: same region, already initialized by `Pool::init`.
@@ -353,7 +410,7 @@ mod tests {
             let deadline = Instant::now() + run_for;
             let mut published = 0u64;
             while Instant::now() < deadline {
-                let Some(lease) = owner.acquire(SLOT_SIZE) else {
+                let Some(mut lease) = owner.acquire(SLOT_SIZE) else {
                     std::hint::spin_loop();
                     continue;
                 };
@@ -363,7 +420,7 @@ mod tests {
                     .unwrap()
                     .generation
                     .load(Ordering::Acquire);
-                write_pattern(&mut owner.slot_mut(&lease)[..SLOT_SIZE], generation);
+                write_pattern(&mut lease.bytes_mut()[..SLOT_SIZE], generation);
                 let r = owner.commit(lease, SLOT_SIZE as u32);
                 *latest.lock().unwrap() = Some(r);
                 // Drop the owner bit so the slot can be recycled while readers
@@ -376,5 +433,43 @@ mod tests {
         });
 
         assert!(claimed.load(Ordering::Relaxed) > 0, "readers never claimed anything");
+    }
+
+    #[test]
+    fn a_live_lease_survives_the_sweep_and_a_dropped_one_does_not() {
+        let (_region, mut o) = owner();
+        let mut lease = o.acquire(10).unwrap();
+        lease.bytes_mut()[0] = 1;
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(
+            o.reclaim_stale_leases(Duration::from_millis(10)),
+            0,
+            "a lease still in the caller's hands is not abandoned, however old"
+        );
+
+        drop(lease);
+        assert_eq!(o.reclaim_stale_leases(Duration::from_millis(10)), 1);
+    }
+
+    #[test]
+    fn a_lease_keeps_the_mapping_alive() {
+        let layout = PoolLayout::new(&[(64, 2)]).unwrap();
+        let region = AlignedRegion::new(layout.total_size() as usize);
+        let map: Arc<dyn Send + Sync> = Arc::new(());
+        // Safety: `region` is a zeroed, 64-aligned block of exactly
+        // `total_size()` bytes that outlives every handle below.
+        let mut o =
+            PoolOwner::new(unsafe { Pool::init(region.ptr(), &layout) }, 3, 1, Arc::clone(&map));
+        assert_eq!(Arc::strong_count(&map), 2);
+
+        let lease = o.acquire(8).unwrap();
+        assert_eq!(
+            Arc::strong_count(&map),
+            3,
+            "a lease must hold the mapping its pointer addresses"
+        );
+
+        drop(lease);
+        assert_eq!(Arc::strong_count(&map), 2);
     }
 }

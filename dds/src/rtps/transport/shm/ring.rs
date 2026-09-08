@@ -32,6 +32,9 @@ pub(crate) struct RingHeader {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RingError {
     Full,
+    /// The cell was reclaimed by `recover_if_wedged` while this producer was
+    /// preempted. The payload was not published.
+    Preempted,
 }
 
 pub(crate) struct Ring {
@@ -169,7 +172,18 @@ impl Ring {
                 payload.len(),
             );
         }
-        self.seq_of(pos).store(pos + 1, Ordering::Release);
+        // A compare_exchange, not a store: `recover_if_wedged` may have freed
+        // this cell while this producer was preempted between the claim and
+        // here. Overwriting its marker would close the cell to consumer and
+        // producer alike, for good. Losing the CAS means the cell is no longer
+        // ours, so only this sample is lost.
+        if self
+            .seq_of(pos)
+            .compare_exchange(pos, pos + 1, Ordering::Release, Ordering::Relaxed)
+            .is_err()
+        {
+            return Err(RingError::Preempted);
+        }
         Ok(())
     }
 
@@ -184,6 +198,7 @@ impl Ring {
         let header = self.header();
         let pos = header.dequeue_pos.load(Ordering::Relaxed);
         if self.seq_of(pos).load(Ordering::Acquire) != pos + 1 {
+            self.recover_if_wedged(pos);
             return None;
         }
         // Safety: the marker above synchronizes with the producer's publishing
@@ -206,6 +221,40 @@ impl Ring {
         Some((len, spill))
     }
 
+    /// A producer that claimed this cell and died before its publishing store
+    /// leaves `seq == pos` for good: the consumer never advances, later cells
+    /// stay unreachable, and every push fails once `enqueue_pos` laps. Free the
+    /// cell only on the strongest evidence available -- a full lap has been
+    /// claimed since, so the claimer did not publish while every other producer
+    /// filled the ring. Freeing the cell is a CAS, not the plain store a normal
+    /// `pop` makes: `pop` has already seen `seq == pos + 1` and so knows the
+    /// producer finished, while this pass only inferred it.
+    ///
+    /// Two wedged cells in a row take two passes: after the first is freed the
+    /// lap condition no longer holds, so the second waits for one more push.
+    fn recover_if_wedged(&mut self, pos: u64) {
+        let header = self.header();
+        if self.seq_of(pos).load(Ordering::Acquire) != pos {
+            return;
+        }
+        if header.enqueue_pos.load(Ordering::Acquire).wrapping_sub(pos) < self.capacity {
+            return;
+        }
+        // A compare_exchange for the same reason the publishing store is one:
+        // the producer this pass declared gone may publish between the guards
+        // above and here. Losing the CAS means it did, so leave the cell to the
+        // next `pop`, which delivers it by the normal path. A plain store here
+        // would drop a sample `push` already reported as delivered.
+        if self
+            .seq_of(pos)
+            .compare_exchange(pos, pos + self.capacity, Ordering::Release, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+        header.dequeue_pos.store(pos + 1, Ordering::Release);
+    }
+
     pub(crate) fn futex_ptr(&self) -> *const AtomicU32 {
         &self.header().futex_word as *const AtomicU32
     }
@@ -214,7 +263,9 @@ impl Ring {
         &self.header().waiters
     }
 
-    /// Whether the consumer would find nothing to pop right now.
+    /// Whether the consumer would find nothing to pop right now. This does not
+    /// recover a wedged cell -- only `pop` does -- so a consumer that waits on
+    /// this alone must bound its wait.
     pub(crate) fn is_empty(&self) -> bool {
         let pos = self.header().dequeue_pos.load(Ordering::Relaxed);
         self.seq_of(pos).load(Ordering::Acquire) != pos + 1
@@ -364,5 +415,84 @@ mod tests {
         assert_eq!(seen, vec![PER_PRODUCER; PRODUCERS]);
         // Both handles are declared after `region`, so they drop first and
         // never outlive the memory they point into.
+    }
+
+    #[test]
+    fn a_cell_claimed_and_never_published_is_freed_after_a_full_lap() {
+        let (_region, mut r) = ring(4);
+
+        // A producer claimed cell 0 and died before its publishing store: the
+        // CAS moved `enqueue_pos`, `seq` never moved.
+        r.header().enqueue_pos.store(1, Ordering::Release);
+
+        // Three live producers then fill the rest of the lap.
+        for i in 0..3u8 {
+            r.push(&[i], SPILL_NONE).unwrap();
+        }
+        assert_eq!(r.header().enqueue_pos.load(Ordering::Acquire), 4);
+
+        let mut out = [0u8; RING_INLINE];
+        assert!(r.pop(&mut out).is_none(), "the wedged cell yields nothing");
+        let (len, _) = r.pop(&mut out).expect("the cell behind it must become reachable");
+        assert_eq!(&out[..len as usize], &[0u8]);
+
+        // The freed cell must be claimable again at its next position.
+        while r.pop(&mut out).is_some() {}
+        r.push(b"after", SPILL_NONE).unwrap();
+        let (len, _) = r.pop(&mut out).unwrap();
+        assert_eq!(&out[..len as usize], b"after");
+    }
+
+    #[test]
+    fn a_late_publish_after_recovery_loses_only_its_own_sample() {
+        let (_region, mut r) = ring(4);
+
+        // A producer claims cell 0 and stalls before publishing.
+        r.header().enqueue_pos.store(1, Ordering::Release);
+        for i in 0..3u8 {
+            r.push(&[i], SPILL_NONE).unwrap();
+        }
+
+        let mut out = [0u8; RING_INLINE];
+        assert!(r.pop(&mut out).is_none(), "the recovery pass yields nothing");
+
+        // The stalled producer finally publishes. Its cell is no longer its own.
+        assert_eq!(
+            r.seq_of(0).compare_exchange(0, 1, Ordering::Release, Ordering::Relaxed),
+            Err(4),
+            "the freed cell must refuse the late publish"
+        );
+
+        // Everything behind it still drains, and the ring still takes writes.
+        for i in 0..3u8 {
+            let (len, _) = r.pop(&mut out).expect("published cells stay reachable");
+            assert_eq!(&out[..len as usize], &[i]);
+        }
+        r.push(b"after", SPILL_NONE).unwrap();
+        let (len, _) = r.pop(&mut out).unwrap();
+        assert_eq!(&out[..len as usize], b"after");
+    }
+
+    #[test]
+    fn a_cell_published_a_lap_late_is_still_popped() {
+        let (_region, mut r) = ring(4);
+
+        // A producer claims cell 0; three others fill the lap behind it.
+        r.header().enqueue_pos.store(1, Ordering::Release);
+        for i in 0..3u8 {
+            r.push(&[i], SPILL_NONE).unwrap();
+        }
+
+        // It publishes after all, before any recovery pass runs. Recovery must
+        // then leave the cell alone -- its first guard already sees `pos + 1`.
+        r.seq_of(0).store(1, Ordering::Release);
+
+        let mut out = [0u8; RING_INLINE];
+        let (len, _) = r.pop(&mut out).expect("a published cell is never recovered away");
+        assert_eq!(len, 0, "cell 0 was claimed but its body was never written");
+        for i in 0..3u8 {
+            let (len, _) = r.pop(&mut out).expect("the rest still drains");
+            assert_eq!(&out[..len as usize], &[i]);
+        }
     }
 }
