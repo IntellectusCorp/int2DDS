@@ -3,11 +3,17 @@
 //! A peer has at most two lazy outbound slots, keyed by the frame kind. A slot
 //! is opened by the first frame that needs it and is dropped as soon as a write
 //! fails. There is no application-level connection handshake.
+//!
+//! Opening a slot is the one blocking step, so the discovery fan-out never takes
+//! it on the calling thread: it hands the dial to a worker and moves on to the
+//! next peer. A peer nobody answers therefore costs the announcement nothing,
+//! however many such peers are configured.
 
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
+use std::sync::{mpsc, Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -69,7 +75,13 @@ pub(crate) struct TcpSender {
     shared: Arc<ConnectionRegistry>,
     connections: Arc<DashMap<ConnectionKey, Arc<OutboundConnection>>>,
     shutdown: Arc<AtomicBool>,
+
+    pending_dials: Arc<DashMap<ConnectionKey, Vec<u8>>>,
+    dial_wakeup: Sender<ConnectionKey>,
 }
+
+/// How long the dial worker waits before checking whether it should still run.
+const DIAL_WORKER_IDLE_TICK: Duration = Duration::from_millis(200);
 
 impl TcpSender {
     #[allow(clippy::too_many_arguments)]
@@ -84,7 +96,8 @@ impl TcpSender {
         tcp_config: &TcpConfig,
         shutdown: Arc<AtomicBool>,
     ) -> Arc<Self> {
-        Arc::new(Self {
+        let (dial_wakeup, dial_requests) = mpsc::channel();
+        let sender = Arc::new(Self {
             working_ips,
             listener_port,
             connect_timeout: tcp_config.connect_timeout,
@@ -94,15 +107,79 @@ impl TcpSender {
             shared,
             connections: Arc::new(DashMap::new()),
             shutdown,
-        })
+            pending_dials: Arc::new(DashMap::new()),
+            dial_wakeup,
+        });
+        Self::spawn_dial_worker(&sender, dial_requests);
+        sender
     }
 
+    fn spawn_dial_worker(sender: &Arc<Self>, requests: Receiver<ConnectionKey>) {
+        let weak = Arc::downgrade(sender);
+        let spawned = std::thread::Builder::new().name("tcp_discovery_dial".to_string()).spawn(
+            move || loop {
+                let requested = match requests.recv_timeout(DIAL_WORKER_IDLE_TICK) {
+                    Ok(key) => Some(key),
+                    Err(RecvTimeoutError::Timeout) => None,
+                    Err(RecvTimeoutError::Disconnected) => return,
+                };
+                let Some(sender) = weak.upgrade() else {
+                    return;
+                };
+                if sender.shutdown.load(Ordering::Acquire) {
+                    return;
+                }
+                if let Some(key) = requested {
+                    sender.dial_pending(key);
+                }
+            },
+        );
+        if let Err(error) = spawned {
+            warn!("TcpSender: no dial worker, discovery will connect inline: {}", error);
+        }
+    }
+
+    /// Announce to one peer without ever waiting on a connection.
+    ///
+    /// An established peer is written to on this thread, which is the whole
+    /// point of keeping the slot. A peer with no slot yet is handed to the dial
+    /// worker with this announcement attached, so it still receives this round
+    /// once the connection comes up, and an unreachable peer costs the caller
+    /// nothing beyond the handoff.
     pub(crate) fn send_to_discovery(
         self: &Arc<Self>,
         addr: &SocketAddr,
         data: &[u8],
     ) -> io::Result<()> {
-        self.send_to(*addr, TcpFrameKind::Discovery, data)
+        let addr = *addr;
+        let key = (addr, TcpFrameKind::Discovery);
+        if self.is_self_connection(&addr) || self.live_connection(&key).is_some() {
+            return self.send_to(addr, TcpFrameKind::Discovery, data);
+        }
+
+        validate_payload_size(data.len())?;
+        let mut frame = Vec::with_capacity(data.len() + 8);
+        encode_frame(data, &mut frame)?;
+        self.pending_dials.insert(key, frame);
+        let _ = self.dial_wakeup.send(key);
+        Ok(())
+    }
+
+    /// Open the slot a queued announcement is waiting on and deliver it.
+    ///
+    /// A failure here is ordinary — a configured peer that is not up yet — so it
+    /// only feeds the backoff. The announcement is dropped rather than held,
+    /// since the next one supersedes it anyway.
+    fn dial_pending(self: &Arc<Self>, key: ConnectionKey) {
+        let Some((_, frame)) = self.pending_dials.remove(&key) else {
+            return;
+        };
+        if self.live_connection(&key).is_some() {
+            return;
+        }
+        if let Ok(connection) = self.open_connection(key) {
+            let _ = connection.send(&frame);
+        }
     }
 
     pub(crate) fn send_to(
@@ -189,6 +266,17 @@ impl TcpSender {
         self.connections.remove_if(&key, |_, current| Arc::ptr_eq(current, connection));
     }
 
+    /// Discard what a peer's earlier failures left behind.
+    ///
+    /// Reaching a candidate is guesswork and most guesses fail, so the backoff
+    /// those failures set is about an address nobody was known to be at. Once a
+    /// participant turns up there the guessing is over, and holding the peer
+    /// back for the rest of a delay earned while it did not exist would only
+    /// postpone the first real exchange.
+    pub(crate) fn forget_failures(&self, addr: SocketAddr) {
+        self.shared.clear_peer_backoff(addr);
+    }
+
     pub(crate) fn disconnect_peer(&self, addr: SocketAddr) {
         self.connections.retain(|(peer, _), _| *peer != addr);
         self.shared.clear_peer_backoff(addr);
@@ -197,6 +285,7 @@ impl TcpSender {
     pub(crate) fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Release);
         self.connections.clear();
+        self.pending_dials.clear();
     }
 
     pub(crate) fn is_self_connection(&self, addr: &SocketAddr) -> bool {

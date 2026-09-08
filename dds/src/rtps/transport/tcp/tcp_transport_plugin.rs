@@ -10,18 +10,21 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use log::{debug, info};
 
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::locator::{is_same_host, Locator};
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
+use crate::rtps::transport::peer_spec::PeerSpec;
 use crate::rtps::transport::plugin::{MessageSource, SendTarget, TransportPlugin};
 use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::tcp::connection_registry::{
     ConnectionRegistry, KeepaliveParams, TcpSocketTuning,
 };
 use crate::rtps::transport::tcp::framing::TcpFrameKind;
+use crate::rtps::transport::tcp::peer_candidates::{AnnounceTargets, PEER_PRUNE_DELAY};
 use crate::rtps::transport::tcp::tcp_listener::TcpListener;
 use crate::rtps::transport::tcp::tcp_sender::TcpSender;
 use crate::rtps::transport::tcp::tls::TlsConfig;
@@ -31,19 +34,23 @@ use crate::rtps::transport::{TcpConfig, TransportType};
 
 /// Sync facade owning the runtime and forwarding trait calls to the async stack.
 pub(crate) struct TcpTransportPlugin {
-    #[allow(dead_code)]
     domain_id: u32,
     participant_id: u32,
     working_ips: Vec<String>,
     listener_port: u16,
 
-    /// Configured SPDP initial peers, as the operator declared them.
-    initial_peers: Vec<SocketAddr>,
-
-    /// The dial gate. When non-empty, only these addresses are dialed; a peer's
-    /// other advertised locators are ignored. Empty falls back to dialing every
-    /// advertised locator.
+    /// The dial gate for addresses outside this domain's port block: a peer
+    /// declared with a port may sit anywhere, so it is named exactly.
     dial_allowed: Vec<SocketAddr>,
+
+    /// The hosts the configuration names, this one included. A participant on
+    /// one of them is reachable anywhere in this domain's port block, whatever
+    /// slot it settled on.
+    dial_allowed_hosts: HashSet<IpAddr>,
+
+    /// Where announcements go, and how that list settles as peers answer or
+    /// fail to.
+    announce_targets: Mutex<AnnounceTargets>,
 
     /// Public endpoint advertised in SPDP for WAN/NAT traversal (per participant).
     public_address: Option<SocketAddr>,
@@ -106,17 +113,39 @@ impl TcpTransportPlugin {
         tls_config: Option<Arc<TlsConfig>>,
         tcp_config: TcpConfig,
     ) -> io::Result<Self> {
-        let initial_peers = tcp_config.initial_peers.clone();
-        let dial_allowed = Self::allowed_dial_addresses(&initial_peers);
+        let peers = Self::resolve_peers(&tcp_config.initial_peers);
 
-        if tcp_config.transport_type == TransportType::TCP && initial_peers.is_empty() {
-            log::warn!(
-                "No initial peers configured: TCP has no multicast for discovery. \
-                 Set the int2dds.initial_peers QoS property (or INT2DDS_INITIAL_PEERS) to the \
-                 peer's ip:port. Ignore this if only endpoints \
-                 within this participant are meant to match."
+        // TCP has no multicast: a peer is reached because it was named, never
+        // because it was overheard. With the dial gate closed, an empty list is
+        // a participant that can neither reach anyone nor be reached, so it is
+        // refused here rather than left to look alive and stay silent.
+        if tcp_config.transport_type == TransportType::TCP
+            && !tcp_config.accept_undefined_peers
+            && peers.is_empty()
+        {
+            log::error!(
+                "[TcpTransportPlugin] No peers configured (domain={}). TCP has no multicast, so \
+                 every peer has to be named: set the int2dds.initial_peers QoS property (or \
+                 INT2DDS_INITIAL_PEERS) to '127.0.0.1:0' for this host, to '<ip>:0' to search \
+                 another host, or to an exact ip:port.",
+                domain_id
             );
+            return Err(transport_io_error(
+                TransportErrorCode::TcpBindFailed,
+                format!(
+                    "No initial peers configured for the TCP transport (domain={domain_id}); \
+                     TCP cannot discover a peer it was not told about"
+                ),
+            ));
         }
+
+        let dial_allowed = Self::allowed_dial_addresses(&peers);
+        let dial_allowed_hosts: HashSet<IpAddr> = peers.iter().map(|peer| peer.ip).collect();
+        let announce_targets = Mutex::new(AnnounceTargets::new(
+            Self::candidates(domain_id, &peers),
+            Some(PEER_PRUNE_DELAY),
+            Instant::now(),
+        ));
 
         let tuning = TcpSocketTuning {
             nodelay: tcp_config.nodelay,
@@ -173,8 +202,9 @@ impl TcpTransportPlugin {
             participant_id,
             working_ips,
             listener_port,
-            initial_peers,
             dial_allowed,
+            dial_allowed_hosts,
+            announce_targets,
             public_address: tcp_config.public_address,
             accept_undefined_peers: tcp_config.accept_undefined_peers,
             reported_unreachable: Mutex::new(HashSet::new()),
@@ -324,15 +354,22 @@ impl TcpTransportPlugin {
     /// under an address that never appears in the configuration. Without the
     /// substituted form the gate rejects it, and the peer is discovered over
     /// SPDP and then never spoken to again.
-    fn allowed_dial_addresses(initial_peers: &[SocketAddr]) -> Vec<SocketAddr> {
-        let mut allowed = initial_peers.to_vec();
+    fn allowed_dial_addresses(initial_peers: &[PeerSpec]) -> Vec<SocketAddr> {
+        let mut allowed = Vec::new();
         for peer in initial_peers {
-            if !is_same_host(*peer) {
+            let Some(port) = peer.port else {
+                continue;
+            };
+            let declared = SocketAddr::new(peer.ip, port);
+            if !allowed.contains(&declared) {
+                allowed.push(declared);
+            }
+            if !is_same_host(declared) {
                 continue;
             }
-            let loopback = match peer.ip() {
-                IpAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), peer.port()),
-                IpAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), peer.port()),
+            let loopback = match peer.ip {
+                IpAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+                IpAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port),
             };
             if !allowed.contains(&loopback) {
                 allowed.push(loopback);
@@ -341,9 +378,73 @@ impl TcpTransportPlugin {
         allowed
     }
 
-    /// Whether an outbound dial to `addr` is permitted. Restricted to
-    /// `dial_allowed` unless `accept_undefined_peers` is set or no peer was
+    /// Settle the configured list into the peers this participant announces to.
+    ///
+    /// A host given the wildcard port says its ports are unknown and stands for
+    /// every participant slot of the domain. A host given a real port says the
+    /// opposite and stands for that one address. Naming the same host both ways
+    /// is a contradiction, and the wider reading wins: the wildcard is what the
+    /// operator meant to search, and the ports written beside it would only
+    /// narrow what they already asked to be searched in full.
+    fn resolve_peers(initial_peers: &[PeerSpec]) -> Vec<PeerSpec> {
+        let searched: HashSet<IpAddr> =
+            initial_peers.iter().filter(|peer| peer.port.is_none()).map(|peer| peer.ip).collect();
+
+        let mut peers: Vec<PeerSpec> = Vec::with_capacity(initial_peers.len());
+        for peer in initial_peers {
+            if peer.port.is_some() && searched.contains(&peer.ip) {
+                log::debug!(
+                    "[TcpTransportPlugin] {} also carries the wildcard port, searching its \
+                     whole domain range instead",
+                    peer.ip
+                );
+                continue;
+            }
+            if !peers.contains(peer) {
+                peers.push(*peer);
+            }
+        }
+        peers
+    }
+
+    /// The addresses announcements start out going to.
+    ///
+    /// A peer declared with a port is one address and is marked as such, so the
+    /// list keeps it whatever happens. A peer named by host alone becomes one
+    /// address per participant slot of this domain, which is guesswork the list
+    /// is free to narrow down.
+    fn candidates(domain_id: u32, peers: &[PeerSpec]) -> Vec<(SocketAddr, bool)> {
+        let slot = |index: u32| PortManager::get_tcp_physical_port(domain_id, index);
+        peers
+            .iter()
+            .flat_map(|peer| {
+                let declared = peer.port.is_some();
+                peer.expand(slot).into_iter().map(move |addr| (addr, declared))
+            })
+            .collect()
+    }
+
+    /// Whether `port` is one this domain hands out to its own participants.
+    ///
+    /// The block ends where the next domain's begins, so a port inside it can
+    /// only ever belong to a participant of this domain.
+    fn is_in_domain_block(&self, port: u16) -> bool {
+        let first = PortManager::get_tcp_physical_port(self.domain_id, 0);
+        let last =
+            PortManager::get_tcp_physical_port(self.domain_id, PortManager::MAX_TCP_PARTICIPANT_ID);
+        (first..=last).contains(&port)
+    }
+
+    /// Whether an outbound dial to `addr` is permitted. Restricted to the
+    /// configured hosts unless `accept_undefined_peers` is set or no peer was
     /// configured at all (dial-all fallback).
+    ///
+    /// A configured host is trusted at any port of this domain's block, not only
+    /// at the ports that were written down. Which slot a participant settles on
+    /// depends on what else was running when it started, so pinning the gate to
+    /// the listed ports would leave a peer that shifted by one slot discovered
+    /// but unreachable. Narrowing inside a host buys nothing anyway — a host is
+    /// one trust boundary, and separating them is what TLS is for.
     ///
     /// Our own listener is exempt: nobody lists themselves as an initial peer,
     /// and what a Reader and a Writer of this participant exchange is not a dial
@@ -353,11 +454,25 @@ impl TcpTransportPlugin {
             || self.accept_undefined_peers
             || self.dial_allowed.is_empty()
             || self.dial_allowed.contains(addr)
+            || (self.dial_allowed_hosts.contains(&addr.ip())
+                && self.is_in_domain_block(addr.port()))
     }
 
     /// Report a peer this participant has discovered but is not allowed to
     /// answer, once per address.
     ///
+    /// Record that a participant lives at `addr`, so announcements keep going
+    /// there and the address is never given up on.
+    fn note_participant_at(&self, addr: SocketAddr) {
+        let first_sighting = match self.announce_targets.lock() {
+            Ok(mut targets) => targets.confirm(addr),
+            Err(poisoned) => poisoned.into_inner().confirm(addr),
+        };
+        if first_sighting {
+            self.sender.forget_failures(addr);
+        }
+    }
+
     /// Only an address on a host this participant was meant to reach is
     /// reported — one already named in the configuration, or this host itself.
     /// A port outside the list there means a participant landed on a slot the
@@ -366,7 +481,8 @@ impl TcpTransportPlugin {
     /// one locator per NIC, and skipping the ones not named is expected rather
     /// than a fault.
     fn report_unreachable_peer(&self, addr: &SocketAddr) {
-        let host_is_configured = self.initial_peers.iter().any(|peer| peer.ip() == addr.ip());
+        let host_is_configured =
+            self.dial_allowed_hosts.contains(&addr.ip()) || is_same_host(*addr);
         if !host_is_configured && !is_same_host(*addr) {
             return;
         }
@@ -402,10 +518,16 @@ impl TransportPlugin for TcpTransportPlugin {
 
     fn send(&self, data: &[u8], target: &SendTarget) -> io::Result<()> {
         match target {
-            SendTarget::SPDPDiscovery { initial_peers } => {
-                // SPDP fan-out — best-effort; per-peer failures must not
-                // abort the broadcast.
-                for peer_addr in *initial_peers {
+            SendTarget::SPDPDiscovery { .. } => {
+                // The list announcements go to is this transport's own: it
+                // starts from the configuration and narrows to the peers that
+                // answer, which the caller has no way to track.
+                let targets = match self.announce_targets.lock() {
+                    Ok(mut targets) => targets.due(Instant::now()),
+                    Err(poisoned) => poisoned.into_inner().due(Instant::now()),
+                };
+                // Best-effort: a peer that fails must not abort the broadcast.
+                for peer_addr in &targets {
                     let _ = self.sender.send_to_discovery(peer_addr, data);
                 }
                 Ok(())
@@ -423,6 +545,9 @@ impl TransportPlugin for TcpTransportPlugin {
                     self.report_unreachable_peer(&addr);
                     return Ok(());
                 }
+                // Reaching this point means a participant was discovered there,
+                // which is the only evidence that settles a guessed address.
+                self.note_participant_at(addr);
                 let kind = match target {
                     SendTarget::SEDPDiscovery(_) => TcpFrameKind::Discovery,
                     SendTarget::UserData(_) => TcpFrameKind::UserData,
@@ -531,6 +656,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicU32;
 
+    use crate::rtps::transport::peer_spec::MAX_PARTICIPANTS_PER_HOST;
     use crate::rtps::transport::tcp::framing::{test_framed, test_message};
 
     fn take_listener(plugin: &TcpTransportPlugin) -> TcpListener {
@@ -618,10 +744,122 @@ mod tests {
     fn a_same_host_peer_is_also_allowed_at_its_loopback_form() {
         let configured: SocketAddr = "127.0.0.2:8650".parse().unwrap();
 
-        let allowed = TcpTransportPlugin::allowed_dial_addresses(&[configured]);
+        let allowed = TcpTransportPlugin::allowed_dial_addresses(&[configured.into()]);
 
         assert!(allowed.contains(&configured));
         assert!(allowed.contains(&"127.0.0.1:8650".parse().unwrap()));
+    }
+
+    /// A host named with a port stands for that address alone.
+    #[test]
+    fn a_host_named_with_a_port_is_one_address() {
+        let declared: PeerSpec = "192.168.0.5:7400".parse().unwrap();
+
+        let peers = TcpTransportPlugin::resolve_peers(&[declared]);
+
+        assert_eq!(peers, vec![declared]);
+        assert_eq!(
+            TcpTransportPlugin::candidates(0, &peers),
+            vec![("192.168.0.5:7400".parse().unwrap(), true)]
+        );
+    }
+
+    /// A host given the wildcard port stands for every slot of the domain.
+    #[test]
+    fn a_host_given_the_wildcard_is_the_whole_domain_range() {
+        let named: PeerSpec = "192.168.0.5:0".parse().unwrap();
+
+        let candidates =
+            TcpTransportPlugin::candidates(0, &TcpTransportPlugin::resolve_peers(&[named]));
+
+        assert_eq!(candidates.len(), MAX_PARTICIPANTS_PER_HOST as usize);
+        assert!(candidates.iter().all(|(_, declared)| !declared), "a guess is not declared");
+        assert_eq!(
+            candidates[0].0,
+            format!("192.168.0.5:{}", PortManager::get_tcp_physical_port(0, 0)).parse().unwrap()
+        );
+    }
+
+    /// Naming one host both ways is a contradiction, and the search wins.
+    #[test]
+    fn a_host_named_both_ways_is_searched_in_full() {
+        let named: PeerSpec = "192.168.0.5:0".parse().unwrap();
+        let declared: PeerSpec = "192.168.0.5:7400".parse().unwrap();
+        let elsewhere: PeerSpec = "192.168.0.6:7400".parse().unwrap();
+
+        let peers = TcpTransportPlugin::resolve_peers(&[declared, named, elsewhere]);
+
+        assert_eq!(peers, vec![named, elsewhere], "the port beside the searched host is dropped");
+    }
+
+    /// Nothing is added behind the operator's back: the list is what they wrote.
+    #[test]
+    fn no_host_is_taken_in_that_was_not_named() {
+        let named: PeerSpec = "192.168.0.5:0".parse().unwrap();
+
+        assert_eq!(TcpTransportPlugin::resolve_peers(&[named]), vec![named]);
+        assert!(TcpTransportPlugin::resolve_peers(&[]).is_empty());
+    }
+
+    /// With the dial gate closed and no peer named, the participant could
+    /// neither reach anyone nor be reached, so it must not come up at all.
+    #[test]
+    fn a_tcp_participant_without_peers_is_refused() {
+        let cfg = TcpConfig {
+            bind_port: Some(0),
+            transport_type: TransportType::TCP,
+            accept_undefined_peers: false,
+            initial_peers: Vec::new(),
+            ..TcpConfig::default()
+        };
+
+        let result = TcpTransportPlugin::new(
+            next_test_domain(),
+            0,
+            "127.0.0.1".to_string(),
+            vec!["127.0.0.1".to_string()],
+            [0u8; 12],
+            cfg,
+        );
+
+        assert!(result.is_err());
+    }
+
+    /// A configured host is reachable at any slot of this domain's block, so a
+    /// participant that shifted by a slot is still spoken to.
+    #[test]
+    fn a_configured_host_is_dialable_across_the_whole_domain_block() {
+        const DOMAIN: u32 = 3;
+        let first_slot = PortManager::get_tcp_physical_port(DOMAIN, 0);
+        let cfg = TcpConfig {
+            bind_port: Some(0),
+            initial_peers: vec![format!("127.0.0.1:{first_slot}").parse().unwrap()],
+            ..TcpConfig::default()
+        };
+        let plugin = TcpTransportPlugin::new(
+            DOMAIN,
+            0,
+            "127.0.0.1".to_string(),
+            vec!["127.0.0.1".to_string()],
+            [0u8; 12],
+            cfg,
+        )
+        .expect("plugin creation");
+
+        let other_slot = PortManager::get_tcp_physical_port(DOMAIN, 7);
+        assert!(plugin.should_dial(&format!("127.0.0.1:{other_slot}").parse().unwrap()));
+
+        let next_domain_slot = PortManager::get_tcp_physical_port(DOMAIN + 1, 0);
+        assert!(
+            !plugin.should_dial(&format!("127.0.0.1:{next_domain_slot}").parse().unwrap()),
+            "a port of the next domain is not this domain's to dial"
+        );
+        assert!(
+            !plugin.should_dial(&format!("203.0.113.7:{other_slot}").parse().unwrap()),
+            "an unconfigured host stays out regardless of the port"
+        );
+
+        plugin.close();
     }
 
     /// A peer on another host is never rewritten, so the gate stays exactly as
@@ -630,7 +868,10 @@ mod tests {
     fn a_peer_on_another_host_is_left_as_configured() {
         let configured: SocketAddr = "203.0.113.7:8650".parse().unwrap();
 
-        assert_eq!(TcpTransportPlugin::allowed_dial_addresses(&[configured]), vec![configured]);
+        assert_eq!(
+            TcpTransportPlugin::allowed_dial_addresses(&[configured.into()]),
+            vec![configured]
+        );
     }
 
     /// Two participants on one host and domain both come up, on adjacent slots
@@ -828,7 +1069,7 @@ mod tests {
 
         let send_cfg = TcpConfig {
             bind_port: Some(0),
-            initial_peers: vec![receiver_addr],
+            initial_peers: vec![receiver_addr.into()],
             ..TcpConfig::default()
         };
         let sender = TcpTransportPlugin::new(
@@ -860,6 +1101,58 @@ mod tests {
         assert_eq!(user_frame.1.as_ref(), test_framed(&user).as_slice());
         assert_eq!(sender.sender.connection_count(), 2);
         assert_eq!(listener.connection_count(), 2);
+
+        sender.close();
+        receiver.close();
+    }
+
+    /// The fan-out hands its dials to a worker, so the announcement that
+    /// triggered one still has to reach the peer, and a peer nobody answers must
+    /// not hold up the peers that follow it in the list.
+    #[test]
+    fn an_announcement_survives_the_handoff_to_the_dial_worker() {
+        let domain = next_test_domain();
+        let recv_cfg = TcpConfig {
+            bind_port: Some(0),
+            initial_peers: vec!["127.0.0.1:1".parse().unwrap()],
+            ..TcpConfig::default()
+        };
+        let receiver = TcpTransportPlugin::new(
+            domain,
+            1,
+            "127.0.0.1".to_string(),
+            vec!["127.0.0.1".to_string()],
+            [0x44; 12],
+            recv_cfg,
+        )
+        .unwrap();
+        let receiver_addr: SocketAddr =
+            format!("127.0.0.1:{}", receiver.listener_port).parse().unwrap();
+
+        let dead: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let send_cfg = TcpConfig {
+            bind_port: Some(0),
+            initial_peers: vec![dead.into(), receiver_addr.into()],
+            ..TcpConfig::default()
+        };
+        let sender = TcpTransportPlugin::new(
+            domain,
+            0,
+            "127.0.0.1".to_string(),
+            vec!["127.0.0.1".to_string()],
+            [0x33; 12],
+            send_cfg,
+        )
+        .unwrap();
+
+        let mut listener = take_listener(&receiver);
+        let announcement = test_message(BUILTIN_WRITER, b"spdp");
+        sender.send(&announcement, &SendTarget::SPDPDiscovery { initial_peers: &[] }).unwrap();
+
+        let received = pump(&mut listener, 1);
+        assert_eq!(received.len(), 1, "the announcement must reach the peer that answers");
+        assert_eq!(received[0].0, TcpFrameKind::Discovery);
+        assert_eq!(received[0].1.as_ref(), test_framed(&announcement).as_slice());
 
         sender.close();
         receiver.close();

@@ -20,6 +20,7 @@ use crate::dcps::infrastructure::qos_policy::{
     PROP_TCP_SO_SNDBUF, PROP_TCP_TLS_HANDSHAKE_TIMEOUT_MS, PROP_TCP_UNACKED_TIMEOUT_MS,
     PROP_TRANSPORT,
 };
+use crate::rtps::transport::peer_spec::PeerSpec;
 use crate::rtps::transport::TransportType;
 
 /// IPv4 multicast TTL fallback. Matches RFC 1112 / `IP_MULTICAST_TTL` defaults
@@ -70,7 +71,7 @@ pub(crate) struct TcpConfig {
     pub transport_type: TransportType,
     pub bind_port: Option<u16>,
     pub public_address: Option<SocketAddr>,
-    pub initial_peers: Vec<SocketAddr>,
+    pub initial_peers: Vec<PeerSpec>,
     pub accept_undefined_peers: bool,
     pub nodelay: bool,
     pub connect_timeout: Duration,
@@ -98,8 +99,12 @@ impl TransportConfig for TcpConfig {
             public_address: prop_parse::<SocketAddr>(property, PROP_TCP_PUBLIC_ADDRESS),
             initial_peers: property
                 .find_property(PROP_INITIAL_PEERS)
-                .map(crate::common::env::parse_initial_peers)
-                .unwrap_or_else(crate::common::env::get_initial_peers),
+                .map(crate::rtps::transport::peer_spec::parse_peer_specs)
+                .unwrap_or_else(|| {
+                    std::env::var("INT2DDS_INITIAL_PEERS")
+                        .map(|peers| crate::rtps::transport::peer_spec::parse_peer_specs(&peers))
+                        .unwrap_or_default()
+                }),
             accept_undefined_peers: prop_parse::<bool>(property, PROP_ACCEPT_UNDEFINED_PEERS)
                 .unwrap_or(false),
             nodelay: prop_parse::<bool>(property, PROP_TCP_NODELAY).unwrap_or(true),
