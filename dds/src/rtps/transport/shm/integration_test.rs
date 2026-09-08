@@ -7,6 +7,7 @@ use std::process::Command;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+use super::notify::notify_supported;
 use super::participant_slot::{now_tick, ParticipantSlot, STALE_AFTER_TICKS};
 use super::registry::Registry;
 use super::registry_segment::unlink_registry;
@@ -116,6 +117,11 @@ fn child_notifier() {
 
 #[test]
 fn payload_survives_the_process_boundary() {
+    // `OwnedSegment::create` needs a notifier, so there is nothing to
+    // exercise where notification is unsupported.
+    if !notify_supported() {
+        return;
+    }
     unlink_segment(DOMAIN, PARENT_SLOT);
     unlink_segment(DOMAIN, CHILD_SLOT);
 
@@ -216,6 +222,9 @@ fn two_processes_share_one_registry() {
 
 #[test]
 fn a_peer_process_wakes_a_blocked_owner() {
+    if !notify_supported() {
+        return;
+    }
     unlink_segment(RUNTIME_SEGMENT_DOMAIN, PARENT_SLOT);
     let owned =
         OwnedSegment::create(RUNTIME_SEGMENT_DOMAIN, PARENT_SLOT, 1, &[(64, 2)], 4).unwrap();

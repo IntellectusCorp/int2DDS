@@ -144,6 +144,7 @@ impl ShmRuntime {
 mod tests {
     use super::*;
     use crate::rtps::transport::shm::config::{DEFAULT_CLASSES, DEFAULT_RING_ENTRIES};
+    use crate::rtps::transport::shm::notify::notify_supported;
     use crate::rtps::transport::shm::participant_slot::now_tick;
     use crate::rtps::transport::shm::registry_segment::unlink_registry;
     use crate::rtps::transport::shm::segment::unlink_segment;
@@ -152,6 +153,11 @@ mod tests {
 
     #[test]
     fn start_registers_the_participant_and_stops_cleanly() {
+        // `OwnedSegment::create` needs a notifier, so there is nothing to
+        // exercise where notification is unsupported.
+        if !notify_supported() {
+            return;
+        }
         crate::rtps::transport::shm::registry_segment::unlink_registry(DOMAIN);
         let rt = ShmRuntime::start(DOMAIN, [21; 12]).unwrap();
         let slot = rt.slot();
@@ -164,6 +170,9 @@ mod tests {
 
     #[test]
     fn peer_lost_releases_the_mapping_but_keeps_the_peers_bits() {
+        if !notify_supported() {
+            return;
+        }
         // Unmatch is not death: the peer may still be reading our pool slots,
         // and clearing its bits would let the owner overwrite them. Only the
         // sweep, which checks `process_alive`, may reclaim.

@@ -258,6 +258,7 @@ pub(crate) fn unlink_segment(domain: u32, slot: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rtps::transport::shm::notify::notify_supported;
     use crate::rtps::transport::shm::ring::{RING_INLINE, SPILL_NONE};
     use crate::rtps::transport::shm::slot_ref::SlotRef;
 
@@ -265,6 +266,11 @@ mod tests {
 
     #[test]
     fn owner_and_peer_share_one_segment() {
+        // `OwnedSegment::create` needs a notifier, so there is nothing to
+        // exercise where notification is unsupported.
+        if !notify_supported() {
+            return;
+        }
         // A leftover segment is no longer adopted, so clear one first.
         unlink_segment(DOMAIN, 0);
         let owned = OwnedSegment::create(DOMAIN, 0, 1, &[(64, 2)], 4).unwrap();
@@ -295,6 +301,9 @@ mod tests {
 
     #[test]
     fn a_peer_push_wakes_the_owner() {
+        if !notify_supported() {
+            return;
+        }
         unlink_segment(DOMAIN, 2);
         let owned = std::sync::Arc::new(OwnedSegment::create(DOMAIN, 2, 1, &[(64, 2)], 4).unwrap());
         let peer = PeerSegment::attach(DOMAIN, 2, 3).unwrap();
@@ -325,6 +334,9 @@ mod tests {
 
     #[test]
     fn waiting_returns_immediately_when_the_ring_already_has_a_message() {
+        if !notify_supported() {
+            return;
+        }
         unlink_segment(DOMAIN, 4);
         let owned = OwnedSegment::create(DOMAIN, 4, 1, &[(64, 2)], 4).unwrap();
         let peer = PeerSegment::attach(DOMAIN, 4, 5).unwrap();
@@ -342,6 +354,9 @@ mod tests {
 
     #[test]
     fn waiting_times_out_on_an_empty_ring_and_leaves_no_waiter() {
+        if !notify_supported() {
+            return;
+        }
         unlink_segment(DOMAIN, 6);
         let owned = OwnedSegment::create(DOMAIN, 6, 1, &[(64, 2)], 4).unwrap();
 
