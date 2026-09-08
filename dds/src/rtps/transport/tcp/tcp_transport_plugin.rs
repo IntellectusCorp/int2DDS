@@ -630,6 +630,11 @@ impl TransportPlugin for TcpTransportPlugin {
             );
             if !seen.contains(&addr) {
                 seen.push(addr);
+                let now = Instant::now();
+                match self.announce_targets.lock() {
+                    Ok(mut targets) => targets.revoke(addr, now),
+                    Err(poisoned) => poisoned.into_inner().revoke(addr, now),
+                }
                 self.sender.disconnect_peer(addr);
             }
         }

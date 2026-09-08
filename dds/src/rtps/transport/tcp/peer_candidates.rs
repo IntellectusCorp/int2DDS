@@ -131,6 +131,28 @@ impl AnnounceTargets {
         news
     }
 
+    /// Take back the confirmation of `addr`, leaving it a guess again.
+    ///
+    /// A participant that is gone answers nothing, and an address confirmed
+    /// once would otherwise be announced to for the rest of this participant's
+    /// life. Returning it to the state it had before it was ever reached puts
+    /// it back under the aging and the give-up deadline, so it is asked for a
+    /// while longer — a peer that is only restarting still answers — and then
+    /// dropped. A declared address is not a guess and is left alone.
+    pub(crate) fn revoke(&mut self, addr: SocketAddr, now: Instant) {
+        let prune_delay = self.prune_delay;
+        let Some(candidate) = self.candidates.get_mut(&addr) else {
+            return;
+        };
+        if candidate.pinned {
+            return;
+        }
+        candidate.confirmed = false;
+        candidate.next_attempt = now;
+        candidate.interval = AGING_BASE;
+        candidate.give_up_at = prune_delay.map(|delay| now + delay);
+    }
+
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.candidates.len()
@@ -227,6 +249,40 @@ mod tests {
         let due = targets.due(start);
         assert_eq!(due.len(), 2);
         assert!(due.contains(&addr(7500)));
+    }
+
+    #[test]
+    fn a_revoked_candidate_is_aged_again_and_then_dropped() {
+        let start = Instant::now();
+        let prune = Duration::from_secs(30);
+        let mut targets = AnnounceTargets::new([(addr(7400), false)], Some(prune), start);
+        targets.confirm(addr(7400));
+        targets.revoke(addr(7400), start);
+
+        assert_eq!(targets.due(start).len(), 1);
+        assert!(targets.due(start + AGING_BASE / 2).is_empty(), "the aging is back");
+        assert!(targets.due(start + prune).is_empty());
+        assert_eq!(targets.len(), 0, "and the deadline runs again from the revocation");
+    }
+
+    #[test]
+    fn a_declared_address_is_not_revoked() {
+        let start = Instant::now();
+        let prune = Duration::from_secs(30);
+        let mut targets = AnnounceTargets::new([(addr(7400), true)], Some(prune), start);
+        targets.revoke(addr(7400), start);
+
+        assert_eq!(targets.due(start + prune * 10).len(), 1);
+    }
+
+    #[test]
+    fn a_peer_that_comes_back_is_news_again() {
+        let start = Instant::now();
+        let mut targets = AnnounceTargets::new([(addr(7400), false)], None, start);
+        targets.confirm(addr(7400));
+        targets.revoke(addr(7400), start);
+
+        assert!(targets.confirm(addr(7400)), "the peer has to shed what its absence left behind");
     }
 
     #[test]
