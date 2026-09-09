@@ -852,12 +852,6 @@ pub const PROP_TRANSPORT: &str = "int2dds.transport";
 /// `INT2DDS_INITIAL_PEERS` env var when absent.
 pub const PROP_INITIAL_PEERS: &str = "int2dds.initial_peers";
 
-/// How many participant slots a host named with the wildcard port stands for.
-/// Default `16`. Raise it on a host that runs more participants than that, lower
-/// it to cut the addresses a fresh participant announces to before the list
-/// settles. Clamped to the number of slots the domain's port block holds.
-pub const PROP_PEER_SEARCH_SLOTS: &str = "int2dds.peer_search_slots";
-
 /// Whether to dial peers discovered at runtime that are NOT in `initial_peers`.
 /// `false` (default): only dial `initial_peers` (or every advertised locator when
 /// `initial_peers` is empty).
@@ -865,11 +859,21 @@ pub const PROP_PEER_SEARCH_SLOTS: &str = "int2dds.peer_search_slots";
 pub const PROP_ACCEPT_UNDEFINED_PEERS: &str = "int2dds.accept_undefined_peers";
 
 /// ---------TCP QoS ----------
-/// TCP listen (server bind) port. When absent, defaults to the domain port
-/// formula `PB + DG * domain_id`.
+/// TCP listen (server bind) port. Used exactly as given, so a port already
+/// taken fails participant creation rather than being searched around. When
+/// absent, the formula `PB + DG * domain_id + PG * participant_id` is walked
+/// upwards until a free slot within the domain's own port block is found.
 pub const PROP_TCP_BIND_PORT: &str = "int2dds.transport.TCPv4.bind_port";
 /// Public `ip:port` advertised in SPDP for WAN/NAT traversal.
 pub const PROP_TCP_PUBLIC_ADDRESS: &str = "int2dds.transport.TCPv4.public_address";
+/// How many participant slots a host named in `int2dds.initial_peers` with the
+/// wildcard port stands for. Default `16`, and `1..=125` — the number of slots
+/// one domain's port block holds — with anything outside that range pulled back
+/// to it. Raise it on a host that runs more participants than the default, lower
+/// it to cut the addresses a fresh participant announces to before the list
+/// settles. Falls back to the `INT2DDS_TCP_PEER_SEARCH_SLOTS` env var when
+/// absent.
+pub const PROP_TCP_PEER_SEARCH_SLOTS: &str = "int2dds.transport.TCPv4.peer_search_slots";
 /// Disable Nagle (`TCP_NODELAY`). Default `true`.
 pub const PROP_TCP_NODELAY: &str = "int2dds.transport.TCPv4.nodelay";
 /// Outbound connect timeout, milliseconds. Default `1000`.

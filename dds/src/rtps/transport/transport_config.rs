@@ -14,9 +14,9 @@ use std::time::Duration;
 
 use crate::dcps::infrastructure::qos_policy::{
     PropertyQosPolicy, PROP_ACCEPT_UNDEFINED_PEERS, PROP_INITIAL_PEERS, PROP_MULTICAST_TTL,
-    PROP_PEER_SEARCH_SLOTS, PROP_TCP_BIND_PORT, PROP_TCP_CONNECT_TIMEOUT_MS,
-    PROP_TCP_KEEPALIVE_INTERVAL_MS, PROP_TCP_KEEPALIVE_MAX_MISSES, PROP_TCP_KEEPALIVE_TIMEOUT_MS,
-    PROP_TCP_NODELAY, PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS, PROP_TCP_PUBLIC_ADDRESS,
+    PROP_TCP_BIND_PORT, PROP_TCP_CONNECT_TIMEOUT_MS, PROP_TCP_KEEPALIVE_INTERVAL_MS,
+    PROP_TCP_KEEPALIVE_MAX_MISSES, PROP_TCP_KEEPALIVE_TIMEOUT_MS, PROP_TCP_NODELAY,
+    PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS, PROP_TCP_PEER_SEARCH_SLOTS, PROP_TCP_PUBLIC_ADDRESS,
     PROP_TCP_SO_RCVBUF, PROP_TCP_SO_SNDBUF, PROP_TCP_TLS_HANDSHAKE_TIMEOUT_MS,
     PROP_TCP_UNACKED_TIMEOUT_MS, PROP_TRANSPORT,
 };
@@ -154,22 +154,19 @@ impl TransportConfig for HybridConfig {
     }
 }
 
-/// How far a host named with the wildcard port is expanded.
-///
-/// The ceiling is the domain's own port block: a slot past it belongs to the
-/// next domain, so announcing there would reach a participant this one can
-/// never match. A value outside the range is reported and pulled back rather
-/// than refused, since a peer list that is merely too wide still works.
 fn peer_search_slots(property: &PropertyQosPolicy) -> u32 {
     const MAX_SLOTS: u32 = PortManager::MAX_TCP_PARTICIPANT_ID + 1;
 
-    match prop_parse::<u32>(property, PROP_PEER_SEARCH_SLOTS) {
+    let configured = prop_parse::<u32>(property, PROP_TCP_PEER_SEARCH_SLOTS)
+        .or_else(crate::common::env::get_tcp_peer_search_slots);
+
+    match configured {
         None => DEFAULT_PARTICIPANTS_PER_HOST,
         Some(slots) if (1..=MAX_SLOTS).contains(&slots) => slots,
         Some(slots) => {
             let clamped = slots.clamp(1, MAX_SLOTS);
             log::warn!(
-                "{PROP_PEER_SEARCH_SLOTS} = {slots} is outside 1..={MAX_SLOTS}, one domain's \
+                "{PROP_TCP_PEER_SEARCH_SLOTS} = {slots} is outside 1..={MAX_SLOTS}, one domain's \
                  port block; using {clamped}"
             );
             clamped
@@ -188,6 +185,7 @@ mod tests {
 
     fn clear_env() {
         unsafe { std::env::remove_var("INT2DDS_MULTICAST_TTL") };
+        unsafe { std::env::remove_var("INT2DDS_TCP_PEER_SEARCH_SLOTS") };
     }
 
     #[test]
@@ -201,26 +199,45 @@ mod tests {
 
     #[test]
     fn the_search_width_is_configurable_and_bounded_by_the_domain_block() {
+        clear_env();
         assert_eq!(
             TcpConfig::from_property(&PropertyQosPolicy::default()).peer_search_slots,
             DEFAULT_PARTICIPANTS_PER_HOST
         );
 
         let mut p = PropertyQosPolicy::default();
-        p.add_property(PROP_PEER_SEARCH_SLOTS, "40", false);
+        p.add_property(PROP_TCP_PEER_SEARCH_SLOTS, "40", false);
         assert_eq!(TcpConfig::from_property(&p).peer_search_slots, 40);
 
         let mut p = PropertyQosPolicy::default();
-        p.add_property(PROP_PEER_SEARCH_SLOTS, "0", false);
+        p.add_property(PROP_TCP_PEER_SEARCH_SLOTS, "0", false);
         assert_eq!(TcpConfig::from_property(&p).peer_search_slots, 1, "a search of nothing");
 
         let mut p = PropertyQosPolicy::default();
-        p.add_property(PROP_PEER_SEARCH_SLOTS, "100000", false);
+        p.add_property(PROP_TCP_PEER_SEARCH_SLOTS, "100000", false);
         assert_eq!(
             TcpConfig::from_property(&p).peer_search_slots,
             PortManager::MAX_TCP_PARTICIPANT_ID + 1,
             "a slot past the block belongs to the next domain"
         );
+
+        // The env var carries the width where no QoS property can be set, and
+        // the property still wins wherever one is.
+        unsafe { std::env::set_var("INT2DDS_TCP_PEER_SEARCH_SLOTS", "40") };
+        assert_eq!(TcpConfig::from_property(&PropertyQosPolicy::default()).peer_search_slots, 40);
+
+        let mut p = PropertyQosPolicy::default();
+        p.add_property(PROP_TCP_PEER_SEARCH_SLOTS, "8", false);
+        assert_eq!(TcpConfig::from_property(&p).peer_search_slots, 8);
+
+        unsafe { std::env::set_var("INT2DDS_TCP_PEER_SEARCH_SLOTS", "100000") };
+        assert_eq!(
+            TcpConfig::from_property(&PropertyQosPolicy::default()).peer_search_slots,
+            PortManager::MAX_TCP_PARTICIPANT_ID + 1,
+            "the ceiling holds whichever way the width arrives"
+        );
+
+        clear_env();
     }
 
     #[test]
