@@ -903,31 +903,34 @@ impl DomainParticipant {
 
         let handle = publisher.get_instance_handle()?;
 
-        let mut publishers = self
-            .publishers
-            .lock()
-            .map_err(|_| DdsError::Error("Failed to lock publishers".to_string()))?;
-        let mut publishers_by_handle = self
-            .publishers_by_handle
-            .lock()
-            .map_err(|_| DdsError::Error("Failed to lock publishers_by_handle".to_string()))?;
+        {
+            let mut publishers = self
+                .publishers
+                .lock()
+                .map_err(|_| DdsError::Error("Failed to lock publishers".to_string()))?;
+            let mut publishers_by_handle = self
+                .publishers_by_handle
+                .lock()
+                .map_err(|_| DdsError::Error("Failed to lock publishers_by_handle".to_string()))?;
 
-        // Check existence by handle
-        if !publishers_by_handle.contains_key(&handle) {
-            return Err(DdsError::Error("Publisher not found".to_string()));
+            // Check existence by handle
+            if !publishers_by_handle.contains_key(&handle) {
+                return Err(DdsError::Error("Publisher not found".to_string()));
+            }
+
+            // Clean up dead references and remove the publisher
+            publishers.retain(|weak_publisher| {
+                match weak_publisher.upgrade() {
+                    Some(p) => p.get_instance_handle().is_ok_and(|h| h != handle),
+                    None => false, // Remove dead references
+                }
+            });
+
+            publishers_by_handle.remove(&handle);
         }
 
-        // Clean up dead references and remove the publisher
-        publishers.retain(|weak_publisher| {
-            match weak_publisher.upgrade() {
-                Some(p) => p.get_instance_handle().is_ok_and(|h| h != handle),
-                None => false, // Remove dead references
-            }
-        });
-
-        publishers_by_handle.remove(&handle);
-
         publisher.delete();
+
         Ok(())
     }
 
@@ -1118,31 +1121,34 @@ impl DomainParticipant {
 
         let handle = subscriber.get_instance_handle()?;
 
-        let mut subscribers = self
-            .subscribers
-            .lock()
-            .map_err(|_| DdsError::Error("Failed to lock Subscribers".to_string()))?;
-        let mut subscribers_by_handle = self
-            .subscribers_by_handle
-            .lock()
-            .map_err(|_| DdsError::Error("Failed to lock subscribers_by_handle".to_string()))?;
+        {
+            let mut subscribers = self
+                .subscribers
+                .lock()
+                .map_err(|_| DdsError::Error("Failed to lock Subscribers".to_string()))?;
+            let mut subscribers_by_handle = self
+                .subscribers_by_handle
+                .lock()
+                .map_err(|_| DdsError::Error("Failed to lock subscribers_by_handle".to_string()))?;
 
-        // Check existence by handle
-        if !subscribers_by_handle.contains_key(&handle) {
-            return Err(DdsError::Error("Subscriber not found".to_string()));
+            // Check existence by handle
+            if !subscribers_by_handle.contains_key(&handle) {
+                return Err(DdsError::Error("Subscriber not found".to_string()));
+            }
+
+            // Clean up dead references and remove the subscriber
+            subscribers.retain(|weak_subscriber| {
+                match weak_subscriber.upgrade() {
+                    Some(p) => p.get_instance_handle().is_ok_and(|h| h != handle),
+                    None => false, // Remove dead references
+                }
+            });
+
+            subscribers_by_handle.remove(&handle);
         }
 
-        // Clean up dead references and remove the subscriber
-        subscribers.retain(|weak_subscriber| {
-            match weak_subscriber.upgrade() {
-                Some(p) => p.get_instance_handle().is_ok_and(|h| h != handle),
-                None => false, // Remove dead references
-            }
-        });
-
-        subscribers_by_handle.remove(&handle);
-
         subscriber.delete();
+
         Ok(())
     }
 
