@@ -11,4 +11,4 @@ mod writer_store;
 pub(crate) use stateful_writer::StatefulWriter;
 pub(crate) use stateless_writer::StatelessWriter;
 pub(crate) use writer::Writer;
-pub(crate) use writer_store::WriterStore;
+pub(crate) use writer_store::{WriterCallbackLease, WriterStore};

@@ -4,7 +4,10 @@
 use crate::utils::notify::{callback_handle, notify_user};
 use std::{
     fmt::Debug,
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, Weak,
+    },
 };
 
 use log::{debug, error};
@@ -70,6 +73,9 @@ pub(crate) struct StatelessWriter {
     publication_matched_status: Arc<Mutex<PublicationMatchedStatus>>,
     offered_incompatible_qos_status: Arc<Mutex<OfferedIncompatibleQosStatus>>,
     offered_incompatible_type_status: Arc<Mutex<OfferedIncompatibleTypeStatus>>,
+    // Callback-producing accesses currently in flight against this writer. `remove_writer`
+    // drains this to zero before returning.
+    in_flight_callbacks: AtomicUsize,
 }
 
 impl StatelessWriter {
@@ -119,6 +125,7 @@ impl StatelessWriter {
             offered_incompatible_type_status: Arc::new(Mutex::new(
                 OfferedIncompatibleTypeStatus::default(),
             )),
+            in_flight_callbacks: AtomicUsize::new(0),
         }
     }
     /// Add `a_locator` unless the same (remote reader, locator) pair is already
@@ -288,6 +295,18 @@ impl Debug for StatelessWriter {
 }
 
 impl Writer for StatelessWriter {
+    fn enter_callback(&self) {
+        self.in_flight_callbacks.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn exit_callback(&self) {
+        self.in_flight_callbacks.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    fn in_flight_callbacks(&self) -> usize {
+        self.in_flight_callbacks.load(Ordering::SeqCst)
+    }
+
     fn writer_cache(&self) -> Arc<Mutex<WriterHistoryCache>> {
         Arc::clone(&self.writer_cache)
     }

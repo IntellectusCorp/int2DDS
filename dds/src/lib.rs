@@ -36,13 +36,14 @@ extern crate md5;
 pub mod test_utils {
     use std::sync::atomic::{AtomicI32, Ordering};
 
-    // Start from 100 to avoid conflicts with hardcoded domain IDs (0-99)
-    // Domain ID valid range: 0-232
-    static TEST_DOMAIN_ID_COUNTER: AtomicI32 = AtomicI32::new(100);
+    // 7400 + 250 * 232 + 11 = 65411, the last port mapping that fits a 16 bit UDP port.
+    const LAST_DOMAIN_ID: i32 = 232;
 
-    /// Returns a unique domain ID for test isolation.
-    /// Each call returns a different value, ensuring tests don't interfere with each other.
+    static TEST_DOMAIN_ID_COUNTER: AtomicI32 = AtomicI32::new(0);
+
+    /// Returns a domain ID for test isolation, cycling through 0..=LAST_DOMAIN_ID.
+    /// Consecutive calls differ, so tests that overlap in time never share a domain.
     pub fn unique_domain_id() -> i32 {
-        TEST_DOMAIN_ID_COUNTER.fetch_add(1, Ordering::SeqCst)
+        TEST_DOMAIN_ID_COUNTER.fetch_add(1, Ordering::SeqCst) % (LAST_DOMAIN_ID + 1)
     }
 }
