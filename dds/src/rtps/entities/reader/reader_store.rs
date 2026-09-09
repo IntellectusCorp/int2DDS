@@ -96,10 +96,9 @@ impl ReaderStore {
         self.by_id.iter().map(|r| r.value().clone()).collect()
     }
 
-    // Iterate over all readers as callback leases, each raised under the shard lock (see
-    // `get_reader_callback_lease`). Holding a lease keeps its reader out of a completing delete.
-    pub(crate) fn iter_all_callback_leases(&self) -> Vec<ReaderCallbackLease> {
-        self.by_id.iter().map(|r| ReaderCallbackLease::new(r.value().clone())).collect()
+    // Snapshot of every reader's EntityId in the store
+    pub(crate) fn all_entity_ids(&self) -> Vec<EntityId> {
+        self.by_id.iter().map(|r| *r.key()).collect()
     }
 }
 

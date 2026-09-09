@@ -96,9 +96,8 @@ impl WriterStore {
         self.by_id.iter().map(|w| w.value().clone()).collect()
     }
 
-    // Iterate over all writers as callback leases, each raised under the shard lock (see
-    // `get_writer_callback_lease`). Holding a lease keeps its writer out of a completing delete.
-    pub(crate) fn iter_all_callback_leases(&self) -> Vec<WriterCallbackLease> {
-        self.by_id.iter().map(|w| WriterCallbackLease::new(w.value().clone())).collect()
+    // Snapshot of every writer's EntityId in the store
+    pub(crate) fn all_entity_ids(&self) -> Vec<EntityId> {
+        self.by_id.iter().map(|w| *w.key()).collect()
     }
 }

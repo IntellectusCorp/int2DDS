@@ -925,9 +925,13 @@ impl Participant {
 
     /// Iterate through all Readers in the Participant to find Readers matched with the Writer, then remove Writer Proxy
     fn remove_unmatched_writer_from_reader(&self, writer_guid: Guid) -> RtpsResult<()> {
-        // Each lease keeps its reader's in-flight count raised across the SUBSCRIPTION_MATCHED(-1)
-        // update below, so a concurrent reader delete drains that callback.
-        for lease in self.rtps_reader_store.iter_all_callback_leases() {
+        // The lease keeps this reader's in-flight count raised across the SUBSCRIPTION_MATCHED(-1)
+        // update below, and drops at the end of the iteration so only that reader is held.
+        for entity_id in self.rtps_reader_store.all_entity_ids() {
+            let Some(lease) = self.rtps_reader_store.get_reader_callback_lease(entity_id) else {
+                continue;
+            };
+
             if let Some(stateful_reader) = lease.as_any().downcast_ref::<StatefulReader>() {
                 stateful_reader.remove_matched_writer_and_update_status(writer_guid)?;
             } else if let Some(stateless_reader) = lease.as_any().downcast_ref::<StatelessReader>()
@@ -941,9 +945,13 @@ impl Participant {
 
     /// Iterate through all Writers in the Participant to find Writers matched with the Reader, then remove Reader Locator or Reader Proxy
     fn remove_unmatched_reader_from_writer(&self, reader_guid: Guid) -> RtpsResult<()> {
-        // Each lease keeps its writer's in-flight count raised across the PUBLICATION_MATCHED(-1)
-        // update below, so a concurrent writer delete drains that callback.
-        for lease in self.rtps_writer_store.iter_all_callback_leases() {
+        // The lease keeps this writer's in-flight count raised across the PUBLICATION_MATCHED(-1)
+        // update below, and drops at the end of the iteration so only that writer is held.
+        for entity_id in self.rtps_writer_store.all_entity_ids() {
+            let Some(lease) = self.rtps_writer_store.get_writer_callback_lease(entity_id) else {
+                continue;
+            };
+
             if let Some(stateful_writer) = lease.as_any().downcast_ref::<StatefulWriter>() {
                 stateful_writer.remove_matched_reader_and_update_status(reader_guid)?;
             } else if let Some(stateless_writer) = lease.as_any().downcast_ref::<StatelessWriter>()
