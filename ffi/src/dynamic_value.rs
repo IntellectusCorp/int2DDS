@@ -65,6 +65,8 @@ fn into_handle(value: DynamicValue) -> *mut Int2DdsDynamicValue {
 
 macro_rules! value_ctor {
     ($fn_name:ident, $rust_ty:ty, $variant:expr) => {
+        /// # Safety
+        /// - `out` must be a valid pointer to a null pointer
         #[no_mangle]
         pub unsafe extern "C" fn $fn_name(
             value: $rust_ty,
@@ -93,6 +95,9 @@ value_ctor!(int2dds_dynamic_value_bitmask, u64, DynamicValue::Bitmask);
 value_ctor!(int2dds_dynamic_value_bitset, u64, DynamicValue::Bitset);
 
 /// Construct a char8 value from its byte value.
+///
+/// # Safety
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_value_char8(
     value: u8,
@@ -111,6 +116,10 @@ unsafe fn cstr_value(ptr: *const c_char) -> Result<String, Int2DdsRet> {
 }
 
 /// Construct a UTF-8 string value. `value` must be null-terminated UTF-8.
+///
+/// # Safety
+/// - `value` must be a valid null-terminated C string
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_value_string(
     value: *const c_char,
@@ -127,6 +136,10 @@ pub unsafe extern "C" fn int2dds_dynamic_value_string(
 }
 
 /// Construct a wide-string value. `value` must be null-terminated UTF-8.
+///
+/// # Safety
+/// - `value` must be a valid null-terminated C string
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_value_wstring(
     value: *const c_char,
@@ -144,6 +157,10 @@ pub unsafe extern "C" fn int2dds_dynamic_value_wstring(
 
 /// Construct an enum value from its literal name and numeric value. The name may
 /// be empty when only the numeric value is known.
+///
+/// # Safety
+/// - `name` must be a valid null-terminated C string
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_value_enum(
     name: *const c_char,
@@ -161,6 +178,10 @@ pub unsafe extern "C" fn int2dds_dynamic_value_enum(
 }
 
 /// Construct a nested struct value by cloning a DynamicData instance.
+///
+/// # Safety
+/// - `data` must be a valid DynamicData handle
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_value_struct(
     data: *const Int2DdsDynamicData,
@@ -174,6 +195,9 @@ pub unsafe extern "C" fn int2dds_dynamic_value_struct(
 
 /// Construct an empty sequence value. Append elements with
 /// `int2dds_dynamic_value_push`.
+///
+/// # Safety
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_value_sequence(
     out: *mut *mut Int2DdsDynamicValue,
@@ -185,6 +209,9 @@ pub unsafe extern "C" fn int2dds_dynamic_value_sequence(
 
 /// Construct an empty array value. Append elements with
 /// `int2dds_dynamic_value_push`.
+///
+/// # Safety
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_value_array(
     out: *mut *mut Int2DdsDynamicValue,
@@ -196,6 +223,9 @@ pub unsafe extern "C" fn int2dds_dynamic_value_array(
 
 /// Construct an empty map value. Add entries with
 /// `int2dds_dynamic_value_map_insert`.
+///
+/// # Safety
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_value_map(
     out: *mut *mut Int2DdsDynamicValue,
@@ -207,6 +237,11 @@ pub unsafe extern "C" fn int2dds_dynamic_value_map(
 
 /// Construct a union value from a discriminator and the selected branch value.
 /// Both inputs are consumed on success.
+///
+/// # Safety
+/// - `discriminator` must be a valid value handle
+/// - `value` must be a valid value handle
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_value_union(
     discriminator: *mut Int2DdsDynamicValue,
@@ -227,6 +262,10 @@ pub unsafe extern "C" fn int2dds_dynamic_value_union(
 
 /// Append `element` to a sequence/array value. Consumes `element` on success;
 /// on error `element` is left owned by the caller.
+///
+/// # Safety
+/// - `collection` must be a valid value handle
+/// - `element` must be a valid value handle
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_value_push(
     collection: *mut Int2DdsDynamicValue,
@@ -245,6 +284,11 @@ pub unsafe extern "C" fn int2dds_dynamic_value_push(
 
 /// Insert a key/value pair into a map value. Consumes `key` and `value` on
 /// success; on error both are left owned by the caller.
+///
+/// # Safety
+/// - `map` must be a valid value handle
+/// - `key` must be a valid value handle
+/// - `value` must be a valid value handle
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_value_map_insert(
     map: *mut Int2DdsDynamicValue,
@@ -266,6 +310,10 @@ pub unsafe extern "C" fn int2dds_dynamic_value_map_insert(
 }
 
 /// Destroy a value handle. Safe to call with null.
+///
+/// # Safety
+/// - `value` must be a valid value handle, or null (null is a no-op)
+/// - `value` must not be used after this call
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_value_destroy(value: *mut Int2DdsDynamicValue) {
     if !value.is_null() {
@@ -280,6 +328,11 @@ pub unsafe extern "C" fn int2dds_dynamic_value_destroy(value: *mut Int2DdsDynami
 /// Set a top-level field to `value`. Consumes `value` on a successful parse of
 /// `field` (regardless of whether the field exists); returns the field handle to
 /// the caller only when `field` is not valid UTF-8.
+///
+/// # Safety
+/// - `data` must be a valid DynamicData handle
+/// - `field` must be a valid null-terminated C string
+/// - `value` must be a valid value handle
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_data_set_value(
     data: *mut Int2DdsDynamicData,
@@ -302,6 +355,11 @@ pub unsafe extern "C" fn int2dds_dynamic_data_set_value(
 
 /// Clone the value at a dotted/indexed `path` into a new value handle. Destroy
 /// it with `int2dds_dynamic_value_destroy`.
+///
+/// # Safety
+/// - `data` must be a valid DynamicData handle
+/// - `path` must be a valid null-terminated C string
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_data_get_value(
     data: *const Int2DdsDynamicData,
@@ -329,6 +387,10 @@ pub unsafe extern "C" fn int2dds_dynamic_data_get_value(
 // ----------------------------------------------------------------------------
 
 /// Report the kind of a value (one of the `INT2DDS_VALUE_KIND_*` constants).
+///
+/// # Safety
+/// - `value` must be a valid value handle
+/// - `out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_value_kind(
     value: *const Int2DdsDynamicValue,
@@ -368,6 +430,9 @@ pub unsafe extern "C" fn int2dds_dynamic_value_kind(
 
 macro_rules! value_as {
     ($fn_name:ident, $rust_ty:ty) => {
+        /// # Safety
+        /// - `value` must be a valid value handle
+        /// - `out` must be a valid pointer
         #[no_mangle]
         pub unsafe extern "C" fn $fn_name(
             value: *const Int2DdsDynamicValue,
@@ -399,6 +464,10 @@ value_as!(int2dds_dynamic_value_as_f32, f32);
 value_as!(int2dds_dynamic_value_as_f64, f64);
 
 /// Read a char8 value as its byte value.
+///
+/// # Safety
+/// - `value` must be a valid value handle
+/// - `out` must point to at least `None` writable bytes
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_value_as_char8(
     value: *const Int2DdsDynamicValue,
@@ -416,6 +485,11 @@ pub unsafe extern "C" fn int2dds_dynamic_value_as_char8(
 }
 
 /// Read a string or wide-string value into `buf`.
+///
+/// # Safety
+/// - `value` must be a valid value handle
+/// - `buf` must point to at least `buf_len` writable bytes
+/// - `out_len` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_value_as_string(
     value: *const Int2DdsDynamicValue,
@@ -434,6 +508,11 @@ pub unsafe extern "C" fn int2dds_dynamic_value_as_string(
 
 /// Format any value as a human-readable string into `buf`, regardless of kind
 /// (mirrors the core `Display`).
+///
+/// # Safety
+/// - `value` must be a valid value handle
+/// - `buf` must point to at least `buf_len` writable bytes
+/// - `out_len` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_value_to_string(
     value: *const Int2DdsDynamicValue,
@@ -448,6 +527,12 @@ pub unsafe extern "C" fn int2dds_dynamic_value_to_string(
 
 /// Read an enum value's literal name into `buf` and its numeric value into
 /// `out_value`.
+///
+/// # Safety
+/// - `value` must be a valid value handle
+/// - `buf` must point to at least `buf_len` writable bytes
+/// - `out_len` must be a valid pointer
+/// - `out_value` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_value_as_enum(
     value: *const Int2DdsDynamicValue,
@@ -468,6 +553,10 @@ pub unsafe extern "C" fn int2dds_dynamic_value_as_enum(
 }
 
 /// Read a bitmask value's packed bits.
+///
+/// # Safety
+/// - `value` must be a valid value handle
+/// - `out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_value_as_bitmask(
     value: *const Int2DdsDynamicValue,
@@ -485,6 +574,10 @@ pub unsafe extern "C" fn int2dds_dynamic_value_as_bitmask(
 }
 
 /// Read a bitset value's packed bitfields.
+///
+/// # Safety
+/// - `value` must be a valid value handle
+/// - `out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_value_as_bitset(
     value: *const Int2DdsDynamicValue,
@@ -502,6 +595,10 @@ pub unsafe extern "C" fn int2dds_dynamic_value_as_bitset(
 }
 
 /// Element count of a sequence/array/map value.
+///
+/// # Safety
+/// - `value` must be a valid value handle
+/// - `out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_value_len(
     value: *const Int2DdsDynamicValue,
@@ -523,6 +620,10 @@ pub unsafe extern "C" fn int2dds_dynamic_value_len(
 }
 
 /// Clone the element at `index` of a sequence/array value.
+///
+/// # Safety
+/// - `value` must be a valid value handle
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_value_element(
     value: *const Int2DdsDynamicValue,
@@ -545,6 +646,10 @@ pub unsafe extern "C" fn int2dds_dynamic_value_element(
 }
 
 /// Clone the key of the map entry at `index`.
+///
+/// # Safety
+/// - `value` must be a valid value handle
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_value_map_key(
     value: *const Int2DdsDynamicValue,
@@ -566,6 +671,10 @@ pub unsafe extern "C" fn int2dds_dynamic_value_map_key(
 }
 
 /// Clone the value of the map entry at `index`.
+///
+/// # Safety
+/// - `value` must be a valid value handle
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_value_map_value(
     value: *const Int2DdsDynamicValue,
@@ -588,6 +697,10 @@ pub unsafe extern "C" fn int2dds_dynamic_value_map_value(
 
 /// Clone a nested struct value into a new DynamicData handle. Destroy it with
 /// `int2dds_dynamic_data_destroy`.
+///
+/// # Safety
+/// - `value` must be a valid value handle
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_value_as_struct(
     value: *const Int2DdsDynamicValue,
@@ -605,6 +718,10 @@ pub unsafe extern "C" fn int2dds_dynamic_value_as_struct(
 }
 
 /// Clone a union value's discriminator into a new value handle.
+///
+/// # Safety
+/// - `value` must be a valid value handle
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_value_union_discriminator(
     value: *const Int2DdsDynamicValue,
@@ -622,6 +739,10 @@ pub unsafe extern "C" fn int2dds_dynamic_value_union_discriminator(
 }
 
 /// Clone a union value's selected branch value into a new value handle.
+///
+/// # Safety
+/// - `value` must be a valid value handle
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_value_union_value(
     value: *const Int2DdsDynamicValue,

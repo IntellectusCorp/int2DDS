@@ -77,6 +77,7 @@ pub(crate) struct StatefulWriter {
     callback:
         Arc<Mutex<Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>>>,
     // Invoked with the minimum sequence number acked by all reliable readers when it advances
+    #[allow(clippy::type_complexity)]
     all_acked_callback: Arc<Mutex<Option<Arc<dyn Fn(SequenceNumber) + Send + Sync>>>>,
     // Mirrors all_acked_callback presence for a lock-free check on the write hot path
     all_acked_callback_set: Arc<AtomicBool>,

@@ -6,10 +6,8 @@
 
 use std::collections::HashSet;
 use std::num::NonZeroU16;
-use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
-use smallvec::SmallVec;
 
 use crate::{
     common::instance_handle::InstanceHandle,
@@ -30,16 +28,10 @@ use crate::{
 /// `Shared` holds a `Bytes` slice of the original socket buffer (or a
 /// fragment-assembled buffer), allowing multiple readers to receive the
 /// same payload with only refcount increments.
-/// `Chained` holds the fragment chunks as-is (scatter-gather receive path),
-/// avoiding a per-sample contiguous reassembly. `cached` is a shared lazy slot:
-/// the first caller that needs contiguous bytes (`as_slice`) materializes once
-/// and every reader of the same sample borrows that result, so materialization
-/// is at most once per sample globally.
 #[derive(Debug)]
 pub(crate) enum DataPayload {
     Owned(Vec<u8>),
     Shared(Bytes),
-    Chained { chunks: SmallVec<[Bytes; 1]>, cached: Arc<OnceLock<Bytes>> },
 }
 
 impl Clone for DataPayload {
@@ -47,9 +39,6 @@ impl Clone for DataPayload {
         match self {
             DataPayload::Owned(v) => DataPayload::Owned(v.clone()),
             DataPayload::Shared(b) => DataPayload::Shared(b.clone()),
-            DataPayload::Chained { chunks, cached } => {
-                DataPayload::Chained { chunks: chunks.clone(), cached: cached.clone() }
-            }
         }
     }
 }
@@ -67,34 +56,15 @@ impl DataPayload {
         match self {
             DataPayload::Owned(v) => v,
             DataPayload::Shared(b) => b,
-            // Materialize once into the shared cache, then borrow it. Callers
-            // that need contiguous bytes (key extraction, read_serialized) pay
-            // this at most once per sample across all readers.
-            DataPayload::Chained { chunks, cached } => {
-                cached.get_or_init(|| concat_chunks(chunks)).as_ref()
-            }
         }
     }
 
-    // Emptiness check that never materializes a chained payload. A single
-    // non-empty chunk is enough to answer without contiguous reassembly.
     pub(crate) fn is_empty(&self) -> bool {
         match self {
             DataPayload::Owned(v) => v.is_empty(),
             DataPayload::Shared(b) => b.is_empty(),
-            DataPayload::Chained { chunks, .. } => chunks.iter().all(|c| c.is_empty()),
         }
     }
-}
-
-// Concatenate chunks into a contiguous Bytes without zero-filling.
-fn concat_chunks(chunks: &[Bytes]) -> Bytes {
-    let total: usize = chunks.iter().map(|c| c.len()).sum();
-    let mut buf = Vec::with_capacity(total);
-    for c in chunks {
-        buf.extend_from_slice(c);
-    }
-    Bytes::from(buf)
 }
 
 // Per-sample inline QoS metadata carried in a Data submessage's inline QoS list.
@@ -226,7 +196,7 @@ impl CacheChange {
         self.instance_handle = instance_handle;
         match &mut self.data_payload {
             DataPayload::Owned(v) => v.clear(),
-            DataPayload::Shared(_) | DataPayload::Chained { .. } => {
+            DataPayload::Shared(_) => {
                 self.data_payload = DataPayload::Owned(Vec::new());
             }
         }
@@ -300,20 +270,6 @@ impl CacheChange {
             DataPayload::Shared(b) => b.clone(),
             // Owned payload: copy into a fresh Bytes (writer-side path).
             DataPayload::Owned(v) => Bytes::copy_from_slice(v),
-            // Chained: materialize once into the shared cache, then refcount bump.
-            DataPayload::Chained { chunks, cached } => {
-                cached.get_or_init(|| concat_chunks(chunks)).clone()
-            }
-        }
-    }
-
-    // Fragment chunks and their shared materialization cache, when this change
-    // holds a scatter-gather payload. Lets the subscription layer deserialize
-    // directly across chunks without a contiguous reassembly.
-    pub(crate) fn data_chunks(&self) -> Option<(&[Bytes], &Arc<OnceLock<Bytes>>)> {
-        match &self.data_payload {
-            DataPayload::Chained { chunks, cached } => Some((chunks, cached)),
-            _ => None,
         }
     }
 
@@ -323,7 +279,6 @@ impl CacheChange {
         match &mut self.data_payload {
             DataPayload::Owned(v) => v,
             DataPayload::Shared(_) => unreachable!("data_mut called on shared payload"),
-            DataPayload::Chained { .. } => unreachable!("data_mut called on chained payload"),
         }
     }
 
@@ -335,17 +290,6 @@ impl CacheChange {
     /// Set a shared payload for zero-copy multi-reader delivery.
     pub(crate) fn set_shared_payload(&mut self, data: Bytes) {
         self.data_payload = DataPayload::Shared(data);
-    }
-
-    // Set a scatter-gather payload: fragment chunks plus a shared materialization
-    // cache. All readers of one sample share `cached`, so any contiguous fallback
-    // happens at most once globally.
-    pub(crate) fn set_chained_payload(
-        &mut self,
-        chunks: SmallVec<[Bytes; 1]>,
-        cached: Arc<OnceLock<Bytes>>,
-    ) {
-        self.data_payload = DataPayload::Chained { chunks, cached };
     }
 
     pub(crate) fn source_timestamp(&self) -> Option<RtpsTime> {

@@ -9,6 +9,7 @@
 
 pub(crate) mod connection_registry;
 pub(crate) mod framing;
+pub(crate) mod peer_candidates;
 pub(crate) mod sync_connection;
 pub(crate) mod tcp_listener;
 pub(crate) mod tcp_sender;

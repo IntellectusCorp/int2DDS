@@ -988,7 +988,7 @@ pub unsafe extern "C" fn int2dds_datareader_take_serialized(
     };
 
     let (ret, info) = emit_bounded_serialized(outcome, buffer, actual_size_out);
-    *valid_data_out = info.map_or(true, |i| i.valid_data);
+    *valid_data_out = info.is_none_or(|i| i.valid_data);
     ret
 }
 
@@ -1092,7 +1092,7 @@ pub unsafe extern "C" fn int2dds_datareader_read_serialized(
     };
 
     let (ret, info) = emit_bounded_serialized(outcome, buffer, actual_size_out);
-    *valid_data_out = info.map_or(true, |i| i.valid_data);
+    *valid_data_out = info.is_none_or(|i| i.valid_data);
     ret
 }
 
@@ -1384,6 +1384,9 @@ unsafe fn read_or_take_instance_serialized_batch(
 }
 
 /// Get the number of samples in a sequence
+///
+/// # Safety
+/// - `seq` must be a valid sample sequence
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_sample_seq_length(seq: *const Int2DdsSampleSeq) -> usize {
     if seq.is_null() {

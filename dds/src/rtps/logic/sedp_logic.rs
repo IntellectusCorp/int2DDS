@@ -1745,10 +1745,10 @@ impl SedpLogic {
                         if !locator.is_udp() && !locator.is_tcp() {
                             continue;
                         }
-                        if !self.transport.can_handle(&locator) {
+                        if !self.transport.can_handle(locator) {
                             continue;
                         }
-                        match self.transport.send(&buffer, &SendTarget::SEDPDiscovery(&locator)) {
+                        match self.transport.send(&buffer, &SendTarget::SEDPDiscovery(locator)) {
                             Ok(_) => {
                                 is_sent = true;
                             }

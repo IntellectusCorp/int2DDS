@@ -53,9 +53,9 @@ impl<TReq: DdsRpcType, TRep: DdsRpcType> Replier<TReq, TRep> {
         let request_topic_name = topic_config.request_topic();
         let reply_topic_name = topic_config.reply_topic();
         let request_type_name =
-            topic_config.request_type().unwrap_or_else(|| Request::<TReq>::get_type_name());
+            topic_config.request_type().unwrap_or_else(Request::<TReq>::get_type_name);
         let reply_type_name =
-            topic_config.reply_type().unwrap_or_else(|| Reply::<TRep>::get_type_name());
+            topic_config.reply_type().unwrap_or_else(Reply::<TRep>::get_type_name);
 
         let request_topic = params.participant.create_topic::<Request<TReq>>(
             &request_topic_name,
@@ -129,11 +129,11 @@ impl<TReq: DdsRpcType, TRep: DdsRpcType> Replier<TReq, TRep> {
         related_request_id: &SampleIdentity,
         remote_ex: RemoteExceptionCode,
     ) -> DdsRpcResult<()> {
-        let mut reply = Reply {
+        let reply = Reply {
             header: ReplyHeader { related_request_id: *related_request_id, remote_ex },
             data: data.clone(),
         };
-        self.writer()?.write(&mut reply, InstanceHandle::NIL)?;
+        self.writer()?.write(&reply, InstanceHandle::NIL)?;
         Ok(())
     }
 
@@ -304,14 +304,14 @@ impl<TReq: DdsRpcType, TRep: DdsRpcType> DataReaderListener
                 if let Ok(data) = sample.data() {
                     let request_id = data.header.request_id;
                     if let Some(reply_data) = self.listener.process_request(sample, &request_id) {
-                        let mut reply = Reply {
+                        let reply = Reply {
                             header: ReplyHeader {
                                 related_request_id: request_id,
                                 remote_ex: RemoteExceptionCode::Ok,
                             },
                             data: reply_data,
                         };
-                        let _ = self.reply_writer.write(&mut reply, InstanceHandle::NIL);
+                        let _ = self.reply_writer.write(&reply, InstanceHandle::NIL);
                     }
                 }
             }

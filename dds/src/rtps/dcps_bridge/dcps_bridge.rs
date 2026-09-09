@@ -136,12 +136,7 @@ impl DcpsBridge {
             .map_err(|e| {
                 RtpsError::new(
                     RtpsErrorCode::Io,
-                    format!(
-                        "Failed to create transport plugin (domain={domain_id}): {e}. \
-                         When multiple participants share one process, give each a unique \
-                         TCP listen port via the int2dds.transport.TCPv4.bind_port \
-                         property."
-                    ),
+                    format!("Failed to create transport plugin (domain={domain_id}): {e}"),
                 )
             })?,
         );
@@ -1127,7 +1122,7 @@ mod tests {
                 let mut i = 0;
                 loop {
                     let changes = reader.available_changes();
-                    if changes.len() > 0 {
+                    if !changes.is_empty() {
                         for change in changes {
                             log::info!("change: {}", change);
                         }
@@ -1156,8 +1151,7 @@ mod tests {
         let test_topic_name = "hello_world_topic_sub";
         let test_type_name = "HelloWorld";
 
-        let dcps_bridge_test: Arc<Mutex<DcpsBridge>>;
-        dcps_bridge_test =
+        let dcps_bridge_test: Arc<Mutex<DcpsBridge>> =
             Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default()).unwrap()));
 
         let _participant = dcps_bridge_test.lock().unwrap().get_participant().unwrap();
@@ -1419,8 +1413,7 @@ mod tests {
         let test_topic_name = "hello_world_topic";
         let test_type_name = "HelloWorld";
 
-        let dcps_bridge_test: Arc<Mutex<DcpsBridge>>;
-        dcps_bridge_test =
+        let dcps_bridge_test: Arc<Mutex<DcpsBridge>> =
             Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default()).unwrap()));
 
         let mut publication_builtin_topic_data = PublicationBuiltinTopicData::new(
@@ -1476,8 +1469,7 @@ mod tests {
         let test_topic_name = "hello_world_topic";
         let test_type_name = "HelloWorld";
 
-        let dcps_bridge_test: Arc<Mutex<DcpsBridge>>;
-        dcps_bridge_test =
+        let dcps_bridge_test: Arc<Mutex<DcpsBridge>> =
             Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default()).unwrap()));
 
         let mut publication_builtin_topic_data = PublicationBuiltinTopicData::new(
@@ -1649,7 +1641,7 @@ mod tests {
         // Remove mocked writer proxy
         guard
             .participant
-            .cleanup_resources_for_remote_writer(remote_writer_guid, &test_topic_name.to_string())
+            .cleanup_resources_for_remote_writer(remote_writer_guid, test_topic_name)
             .unwrap();
         assert!(
             stateful_reader.writer_proxies().lock().unwrap().is_empty(),
@@ -1912,7 +1904,7 @@ mod tests {
         // Remove mocked reader locator
         guard
             .participant
-            .cleanup_resources_for_remote_reader(remote_reader_guid, &test_topic_name.to_string())
+            .cleanup_resources_for_remote_reader(remote_reader_guid, test_topic_name)
             .unwrap();
         assert!(
             stateless_writer.reader_locator().lock().unwrap().is_empty(),
@@ -1985,7 +1977,7 @@ mod tests {
         // Remove mocked reader proxy
         guard
             .participant
-            .cleanup_resources_for_remote_reader(remote_reader_guid, &test_topic_name.to_string())
+            .cleanup_resources_for_remote_reader(remote_reader_guid, test_topic_name)
             .unwrap();
         assert!(
             stateful_writer.reader_proxies().lock().unwrap().is_empty(),
@@ -2105,14 +2097,14 @@ mod tests {
         // Remove mocked reader proxy
         guard
             .participant
-            .cleanup_resources_for_remote_reader(remote_reader_guid_1, &test_topic_name.to_string())
+            .cleanup_resources_for_remote_reader(remote_reader_guid_1, test_topic_name)
             .unwrap();
         assert!(
             stateful_writer_1.reader_proxies().lock().unwrap().len() == 1,
             "Stateful writer 1's reader proxy list should contain 1 elements after removal"
         );
         assert!(
-            stateful_writer_2.reader_proxies().lock().unwrap().len() == 0,
+            stateful_writer_2.reader_proxies().lock().unwrap().is_empty(),
             "Stateful writer 2's reader proxy list should contain 0 after removal"
         );
     }

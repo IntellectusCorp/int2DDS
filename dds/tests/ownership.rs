@@ -29,10 +29,8 @@ use std::sync::{
     Arc,
 };
 
-/**
- * Tests exceptional cases with QoS interactions
- * Since happy cases are covered in interoperability tests.
- */
+// Tests exceptional cases with QoS interactions
+// Since happy cases are covered in interoperability tests.
 
 struct ReaderDeadlineListener {
     miss_count: Arc<AtomicUsize>,

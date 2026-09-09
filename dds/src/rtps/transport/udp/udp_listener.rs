@@ -86,13 +86,7 @@ impl UdpListener {
         let interface_address_list = NetworkInterface::show()
             .expect("Could not scan interfaces")
             .into_iter()
-            .flat_map(|i| {
-                i.addr.into_iter().filter(|a| match a {
-                    #[rustfmt::skip]
-                    Addr::V4(_) => true,
-                    _ => false,
-                })
-            });
+            .flat_map(|i| i.addr.into_iter().filter(|a| matches!(a, Addr::V4(_))));
 
         interface_address_list.clone().map(|a| Locator::from_ip_and_port(&a, port as u32)).collect()
     }

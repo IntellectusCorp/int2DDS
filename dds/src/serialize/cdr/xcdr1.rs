@@ -105,7 +105,7 @@ impl CdrSerializer {
         let offset = self.buffer.len() % alignment;
         if offset != 0 {
             let padding = alignment - offset;
-            self.buffer.extend(std::iter::repeat(0u8).take(padding));
+            self.buffer.extend(std::iter::repeat_n(0u8, padding));
         }
     }
 

@@ -16,10 +16,12 @@ use crate::dcps::infrastructure::qos_policy::{
     PropertyQosPolicy, PROP_ACCEPT_UNDEFINED_PEERS, PROP_INITIAL_PEERS, PROP_MULTICAST_INTERFACE,
     PROP_MULTICAST_TTL, PROP_TCP_BIND_PORT, PROP_TCP_CONNECT_TIMEOUT_MS,
     PROP_TCP_KEEPALIVE_INTERVAL_MS, PROP_TCP_KEEPALIVE_MAX_MISSES, PROP_TCP_KEEPALIVE_TIMEOUT_MS,
-    PROP_TCP_NODELAY, PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS, PROP_TCP_PUBLIC_ADDRESS,
-    PROP_TCP_SO_RCVBUF, PROP_TCP_SO_SNDBUF, PROP_TCP_TLS_HANDSHAKE_TIMEOUT_MS,
-    PROP_TCP_UNACKED_TIMEOUT_MS, PROP_TRANSPORT,
+    PROP_TCP_NODELAY, PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS, PROP_TCP_PEER_SEARCH_SLOTS,
+    PROP_TCP_PUBLIC_ADDRESS, PROP_TCP_SO_RCVBUF, PROP_TCP_SO_SNDBUF,
+    PROP_TCP_TLS_HANDSHAKE_TIMEOUT_MS, PROP_TCP_UNACKED_TIMEOUT_MS, PROP_TRANSPORT,
 };
+use crate::rtps::transport::peer_spec::{PeerSpec, DEFAULT_PARTICIPANTS_PER_HOST};
+use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::TransportType;
 
 /// IPv4 multicast TTL fallback. Matches RFC 1112 / `IP_MULTICAST_TTL` defaults
@@ -90,7 +92,8 @@ pub(crate) struct TcpConfig {
     pub transport_type: TransportType,
     pub bind_port: Option<u16>,
     pub public_address: Option<SocketAddr>,
-    pub initial_peers: Vec<SocketAddr>,
+    pub initial_peers: Vec<PeerSpec>,
+    pub peer_search_slots: u32,
     pub accept_undefined_peers: bool,
     pub nodelay: bool,
     pub connect_timeout: Duration,
@@ -118,8 +121,13 @@ impl TransportConfig for TcpConfig {
             public_address: prop_parse::<SocketAddr>(property, PROP_TCP_PUBLIC_ADDRESS),
             initial_peers: property
                 .find_property(PROP_INITIAL_PEERS)
-                .map(crate::common::env::parse_initial_peers)
-                .unwrap_or_else(crate::common::env::get_initial_peers),
+                .map(crate::rtps::transport::peer_spec::parse_peer_specs)
+                .unwrap_or_else(|| {
+                    std::env::var("INT2DDS_INITIAL_PEERS")
+                        .map(|peers| crate::rtps::transport::peer_spec::parse_peer_specs(&peers))
+                        .unwrap_or_default()
+                }),
+            peer_search_slots: peer_search_slots(property),
             accept_undefined_peers: prop_parse::<bool>(property, PROP_ACCEPT_UNDEFINED_PEERS)
                 .unwrap_or(false),
             nodelay: prop_parse::<bool>(property, PROP_TCP_NODELAY).unwrap_or(true),
@@ -166,6 +174,26 @@ impl TransportConfig for HybridConfig {
     }
 }
 
+fn peer_search_slots(property: &PropertyQosPolicy) -> u32 {
+    const MAX_SLOTS: u32 = PortManager::MAX_TCP_PARTICIPANT_ID + 1;
+
+    let configured = prop_parse::<u32>(property, PROP_TCP_PEER_SEARCH_SLOTS)
+        .or_else(crate::common::env::get_tcp_peer_search_slots);
+
+    match configured {
+        None => DEFAULT_PARTICIPANTS_PER_HOST,
+        Some(slots) if (1..=MAX_SLOTS).contains(&slots) => slots,
+        Some(slots) => {
+            let clamped = slots.clamp(1, MAX_SLOTS);
+            log::warn!(
+                "{PROP_TCP_PEER_SEARCH_SLOTS} = {slots} is outside 1..={MAX_SLOTS}, one domain's \
+                 port block; using {clamped}"
+            );
+            clamped
+        }
+    }
+}
+
 /// Parse a single text property into `T`, ignoring absent/invalid values.
 fn prop_parse<T: std::str::FromStr>(property: &PropertyQosPolicy, key: &str) -> Option<T> {
     property.find_property(key).and_then(|v| v.trim().parse::<T>().ok())
@@ -177,6 +205,7 @@ mod tests {
 
     fn clear_env() {
         unsafe { std::env::remove_var("INT2DDS_MULTICAST_TTL") };
+        unsafe { std::env::remove_var("INT2DDS_TCP_PEER_SEARCH_SLOTS") };
     }
 
     #[test]
@@ -186,6 +215,49 @@ mod tests {
             UdpConfig::from_property(&PropertyQosPolicy::default()).multicast_ttl,
             DEFAULT_MULTICAST_TTL
         );
+    }
+
+    #[test]
+    fn the_search_width_is_configurable_and_bounded_by_the_domain_block() {
+        clear_env();
+        assert_eq!(
+            TcpConfig::from_property(&PropertyQosPolicy::default()).peer_search_slots,
+            DEFAULT_PARTICIPANTS_PER_HOST
+        );
+
+        let mut p = PropertyQosPolicy::default();
+        p.add_property(PROP_TCP_PEER_SEARCH_SLOTS, "40", false);
+        assert_eq!(TcpConfig::from_property(&p).peer_search_slots, 40);
+
+        let mut p = PropertyQosPolicy::default();
+        p.add_property(PROP_TCP_PEER_SEARCH_SLOTS, "0", false);
+        assert_eq!(TcpConfig::from_property(&p).peer_search_slots, 1, "a search of nothing");
+
+        let mut p = PropertyQosPolicy::default();
+        p.add_property(PROP_TCP_PEER_SEARCH_SLOTS, "100000", false);
+        assert_eq!(
+            TcpConfig::from_property(&p).peer_search_slots,
+            PortManager::MAX_TCP_PARTICIPANT_ID + 1,
+            "a slot past the block belongs to the next domain"
+        );
+
+        // The env var carries the width where no QoS property can be set, and
+        // the property still wins wherever one is.
+        unsafe { std::env::set_var("INT2DDS_TCP_PEER_SEARCH_SLOTS", "40") };
+        assert_eq!(TcpConfig::from_property(&PropertyQosPolicy::default()).peer_search_slots, 40);
+
+        let mut p = PropertyQosPolicy::default();
+        p.add_property(PROP_TCP_PEER_SEARCH_SLOTS, "8", false);
+        assert_eq!(TcpConfig::from_property(&p).peer_search_slots, 8);
+
+        unsafe { std::env::set_var("INT2DDS_TCP_PEER_SEARCH_SLOTS", "100000") };
+        assert_eq!(
+            TcpConfig::from_property(&PropertyQosPolicy::default()).peer_search_slots,
+            PortManager::MAX_TCP_PARTICIPANT_ID + 1,
+            "the ceiling holds whichever way the width arrives"
+        );
+
+        clear_env();
     }
 
     #[test]

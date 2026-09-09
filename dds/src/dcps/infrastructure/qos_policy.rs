@@ -854,7 +854,9 @@ pub const PROP_MULTICAST_INTERFACE: &str = "int2dds.transport.UDPv4.multicast_in
 /// `INT2DDS_TRANSPORT` env var when absent.
 pub const PROP_TRANSPORT: &str = "int2dds.transport";
 
-/// SPDP initial peers, comma-separated `ip:port` list. Falls back to the
+/// SPDP initial peers, comma-separated `ip:port` list. Port `0` is a wildcard
+/// the TCP transport reads as every participant slot of the domain on that host;
+/// any other port names one exact address. Falls back to the
 /// `INT2DDS_INITIAL_PEERS` env var when absent.
 pub const PROP_INITIAL_PEERS: &str = "int2dds.initial_peers";
 
@@ -865,11 +867,21 @@ pub const PROP_INITIAL_PEERS: &str = "int2dds.initial_peers";
 pub const PROP_ACCEPT_UNDEFINED_PEERS: &str = "int2dds.accept_undefined_peers";
 
 /// ---------TCP QoS ----------
-/// TCP listen (server bind) port. When absent, defaults to the domain port
-/// formula `PB + DG * domain_id`.
+/// TCP listen (server bind) port. Used exactly as given, so a port already
+/// taken fails participant creation rather than being searched around. When
+/// absent, the formula `PB + DG * domain_id + PG * participant_id` is walked
+/// upwards until a free slot within the domain's own port block is found.
 pub const PROP_TCP_BIND_PORT: &str = "int2dds.transport.TCPv4.bind_port";
 /// Public `ip:port` advertised in SPDP for WAN/NAT traversal.
 pub const PROP_TCP_PUBLIC_ADDRESS: &str = "int2dds.transport.TCPv4.public_address";
+/// How many participant slots a host named in `int2dds.initial_peers` with the
+/// wildcard port stands for. Default `16`, and `1..=125` — the number of slots
+/// one domain's port block holds — with anything outside that range pulled back
+/// to it. Raise it on a host that runs more participants than the default, lower
+/// it to cut the addresses a fresh participant announces to before the list
+/// settles. Falls back to the `INT2DDS_TCP_PEER_SEARCH_SLOTS` env var when
+/// absent.
+pub const PROP_TCP_PEER_SEARCH_SLOTS: &str = "int2dds.transport.TCPv4.peer_search_slots";
 /// Disable Nagle (`TCP_NODELAY`). Default `true`.
 pub const PROP_TCP_NODELAY: &str = "int2dds.transport.TCPv4.nodelay";
 /// Outbound connect timeout, milliseconds. Default `1000`.
