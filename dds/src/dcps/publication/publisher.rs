@@ -532,21 +532,6 @@ impl Publisher {
         let topic_name = datawriter.get_topic()?.get_name().to_string();
         let topic_handle = datawriter.get_topic()?.get_instance_handle()?;
 
-        // Close the writer to new API calls and drain in-flight ones before the rtps writer is
-        // torn down, so no admitted write is aborted or loses its sample.
-        datawriter.mark_deleted_and_await_operation_completion();
-
-        {
-            let participant = self.get_participant()?;
-            let mut bridge_guard = participant.get_dcps_bridge()?;
-            match bridge_guard.as_mut() {
-                Some(bridge) => bridge
-                    .delete_rtps_writer(topic_name.clone(), handle.to_guid().entity_id())
-                    .map_err(|e| DdsError::Error(e.message))?,
-                None => return Err(DdsError::Error("DCPS Bridge is not initialized".to_string())),
-            };
-        }
-
         let mut removed = false;
 
         {
@@ -575,27 +560,44 @@ impl Publisher {
             }
         }
 
-        // If found in first map, also remove from second map
-        if removed {
-            if let Ok(mut writers_by_topic_handle) = self.writers_by_topic_handle.lock() {
-                if let Some(writers) = writers_by_topic_handle.get_mut(&topic_handle) {
-                    writers.retain(|weak_writer| {
-                        weak_writer
-                            .upgrade()
-                            .and_then(|writer| writer.get_instance_handle().ok())
-                            .is_some_and(|h| h != handle)
-                    });
+        if !removed {
+            return Err(DdsError::Error("DataWriter not found".to_string()));
+        }
 
-                    if writers.is_empty() {
-                        writers_by_topic_handle.remove(&topic_handle);
-                    }
+        // Remove from the by-handle map as well
+        if let Ok(mut writers_by_topic_handle) = self.writers_by_topic_handle.lock() {
+            if let Some(writers) = writers_by_topic_handle.get_mut(&topic_handle) {
+                writers.retain(|weak_writer| {
+                    weak_writer
+                        .upgrade()
+                        .and_then(|writer| writer.get_instance_handle().ok())
+                        .is_some_and(|h| h != handle)
+                });
+
+                if writers.is_empty() {
+                    writers_by_topic_handle.remove(&topic_handle);
                 }
             }
-            datawriter.delete();
-            Ok(())
-        } else {
-            Err(DdsError::Error("DataWriter not found".to_string()))
         }
+
+        // Close the writer to new API calls and drain in-flight ones before the rtps writer is
+        // torn down, so no admitted write is aborted or loses its sample.
+        datawriter.mark_deleted_and_await_operation_completion();
+
+        {
+            let participant = self.get_participant()?;
+            let mut bridge_guard = participant.get_dcps_bridge()?;
+            match bridge_guard.as_mut() {
+                Some(bridge) => bridge
+                    .delete_rtps_writer(topic_name.clone(), handle.to_guid().entity_id())
+                    .map_err(|e| DdsError::Error(e.message))?,
+                None => return Err(DdsError::Error("DCPS Bridge is not initialized".to_string())),
+            };
+        }
+
+        datawriter.delete();
+
+        Ok(())
     }
 
     fn remove_orphaned_writer(

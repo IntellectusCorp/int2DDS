@@ -613,21 +613,6 @@ impl Subscriber {
         let topic_name = effective_topic_name(topic_description.as_ref())?;
         let topic_handle = topic_description.topic_instance_handle()?;
 
-        // Close the reader to new API calls and drain in-flight ones before the rtps reader is
-        // torn down, so no admitted read or take runs against a half-deleted reader.
-        datareader.mark_deleted_and_await_operation_completion();
-
-        {
-            let participant = self.get_participant()?;
-            let mut bridge_guard = participant.get_dcps_bridge()?;
-            match bridge_guard.as_mut() {
-                Some(bridge) => bridge
-                    .delete_rtps_reader(topic_name.clone(), handle.to_guid().entity_id())
-                    .map_err(|e| DdsError::Error(e.message))?,
-                None => return Err(DdsError::Error("DCPS Bridge is not initialized".to_string())),
-            };
-        }
-
         let mut removed = false;
 
         {
@@ -656,27 +641,44 @@ impl Subscriber {
             }
         }
 
-        // If found in first map, also remove from second map
-        if removed {
-            if let Ok(mut readers_by_topic_handle) = self.readers_by_topic_handle.lock() {
-                if let Some(readers) = readers_by_topic_handle.get_mut(&topic_handle) {
-                    readers.retain(|weak_reader| {
-                        weak_reader
-                            .upgrade()
-                            .and_then(|reader| reader.get_instance_handle().ok())
-                            .is_some_and(|h| h != handle)
-                    });
+        if !removed {
+            return Err(DdsError::Error("DataReader not found".to_string()));
+        }
 
-                    if readers.is_empty() {
-                        readers_by_topic_handle.remove(&topic_handle);
-                    }
+        // Remove from the by-handle map as well
+        if let Ok(mut readers_by_topic_handle) = self.readers_by_topic_handle.lock() {
+            if let Some(readers) = readers_by_topic_handle.get_mut(&topic_handle) {
+                readers.retain(|weak_reader| {
+                    weak_reader
+                        .upgrade()
+                        .and_then(|reader| reader.get_instance_handle().ok())
+                        .is_some_and(|h| h != handle)
+                });
+
+                if readers.is_empty() {
+                    readers_by_topic_handle.remove(&topic_handle);
                 }
             }
-            datareader.delete();
-            Ok(())
-        } else {
-            Err(DdsError::Error("DataReader not found".to_string()))
         }
+
+        // Close the reader to new API calls and drain in-flight ones before the rtps reader is
+        // torn down, so no admitted read or take runs against a half-deleted reader.
+        datareader.mark_deleted_and_await_operation_completion();
+
+        {
+            let participant = self.get_participant()?;
+            let mut bridge_guard = participant.get_dcps_bridge()?;
+            match bridge_guard.as_mut() {
+                Some(bridge) => bridge
+                    .delete_rtps_reader(topic_name.clone(), handle.to_guid().entity_id())
+                    .map_err(|e| DdsError::Error(e.message))?,
+                None => return Err(DdsError::Error("DCPS Bridge is not initialized".to_string())),
+            };
+        }
+
+        datareader.delete();
+
+        Ok(())
     }
 
     fn remove_orphaned_reader(
