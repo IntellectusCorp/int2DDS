@@ -4,6 +4,7 @@ using System.Text;
 using Int2Dds.Cdr;
 using Int2Dds.Exceptions;
 using Int2Dds.Interop;
+using Int2Dds.Listeners;
 using Int2Dds.Qos;
 using Int2Dds.Types;
 
@@ -30,7 +31,7 @@ namespace Int2Dds.Core
             _name = topicName;
             var attr = typeof(T).GetCustomAttribute<DdsTypeAttribute>();
             _typeName = attr?.TypeName ?? typeof(T).Name;
-            var extensibility = attr?.Extensibility ?? (int)Extensibility.Appendable;
+            var extensibility = attr?.Extensibility ?? NativeMethods.int2dds_default_extensibility();
             var hasKey = attr?.HasKey ?? false;
 
             // Create Topic QoS if provided
@@ -82,6 +83,13 @@ namespace Int2Dds.Core
                 }
                 else
                 {
+                    // A keyed topic needs field metadata to advertise a TypeObject for a
+                    // spec-conformant KeyHash; the name-only keyed path was removed (#334).
+                    if (hasKey)
+                        throw new NotSupportedException(
+                            $"Keyed topic '{topicName}' (type '{_typeName}') needs DdsTypeInfoFields " +
+                            "metadata to advertise a TypeObject for a spec-conformant KeyHash (#334).");
+
                     unsafe
                     {
                         var topicNameBytes = Encoding.UTF8.GetBytes(topicName + '\0');
@@ -91,12 +99,11 @@ namespace Int2Dds.Core
                         fixed (byte* pTypeName = typeNameBytes)
                         {
                             ReturnCodeHelper.CheckReturn(
-                                NativeMethods.int2dds_create_topic_keyed(
+                                NativeMethods.int2dds_create_topic(
                                     participant.Handle,
                                     pTopicName,
                                     pTypeName,
                                     extensibility,
-                                    hasKey,
                                     qosHandle,
                                     out _handle));
                         }
@@ -119,8 +126,14 @@ namespace Int2Dds.Core
             _name = topicName;
             var attr = typeof(T).GetCustomAttribute<DdsTypeAttribute>();
             _typeName = attr?.TypeName ?? typeof(T).Name;
-            var extensibility = attr?.Extensibility ?? 0;
+            var extensibility = attr?.Extensibility ?? NativeMethods.int2dds_default_extensibility();
             var hasKey = attr?.HasKey ?? false;
+
+            // Keyed topics need a full TypeObject, which the profile path cannot build (#334).
+            if (hasKey)
+                throw new NotSupportedException(
+                    $"Keyed topic '{topicName}' cannot be created from a QoS profile; keyed topics " +
+                    "need field metadata for a spec-conformant KeyHash (#334).");
 
             unsafe
             {
@@ -138,11 +151,23 @@ namespace Int2Dds.Core
                             pTopicName,
                             pTypeName,
                             (int)extensibility,
-                            hasKey,
                             pQos,
                             out _handle));
                 }
             }
+        }
+
+        /// <summary>
+        /// Wraps a native handle returned by <c>find_topic</c> without re-creating
+        /// the topic. The native topic already carries its type registration; this
+        /// only attaches the managed type <typeparamref name="T"/> for serialization.
+        /// </summary>
+        internal Topic(DomainParticipant participant, IntPtr foundHandle, string topicName)
+        {
+            _name = topicName;
+            var attr = typeof(T).GetCustomAttribute<DdsTypeAttribute>();
+            _typeName = attr?.TypeName ?? typeof(T).Name;
+            _handle = foundHandle;
         }
 
         /// <summary>
@@ -185,6 +210,27 @@ namespace Int2Dds.Core
                             case "arr":
                                 rc = NativeMethods.int2dds_type_info_add_array_field(ti, pField, f.TypeConst, f.Size, f.Flags);
                                 break;
+                            case "nested":
+                            case "seq_nested":
+                            case "arr_nested":
+                                if (f.NestedType == null)
+                                    throw new InvalidOperationException(
+                                        $"Nested type_info field '{f.Name}' has no NestedType.");
+                                IntPtr nestedTi = BuildTypeInfoForType(f.NestedType);
+                                try
+                                {
+                                    if (f.Op == "seq_nested")
+                                        rc = NativeMethods.int2dds_type_info_add_sequence_of_nested_field(ti, pField, nestedTi, f.Size, f.Flags);
+                                    else if (f.Op == "arr_nested")
+                                        rc = NativeMethods.int2dds_type_info_add_array_of_nested_field(ti, pField, nestedTi, f.Size, f.Flags);
+                                    else
+                                        rc = NativeMethods.int2dds_type_info_add_nested_field(ti, pField, nestedTi, f.Flags);
+                                }
+                                finally
+                                {
+                                    NativeMethods.int2dds_type_info_destroy(nestedTi);
+                                }
+                                break;
                             default:
                                 rc = 0;
                                 break;
@@ -203,9 +249,93 @@ namespace Int2Dds.Core
         }
 
         /// <summary>
+        /// Builds a nested type's Int2DdsTypeInfo. For a struct, reflects its generated
+        /// <c>DdsTypeInfoFields</c> and <c>DdsTypeAttribute</c>. For an enum, builds the
+        /// enumerated TypeObject by reflection (PascalCase member names match the Rust derive,
+        /// IDL enums are i32 -> bit_bound 32). The returned handle is owned by the caller and
+        /// must be freed with int2dds_type_info_destroy.
+        /// </summary>
+        private static unsafe IntPtr BuildTypeInfoForType(Type nestedType)
+        {
+            if (nestedType.IsEnum)
+                return BuildEnumTypeInfo(nestedType);
+
+            var attr = nestedType.GetCustomAttribute<DdsTypeAttribute>();
+            string name = attr?.TypeName ?? nestedType.Name;
+            int ext = attr?.Extensibility ?? NativeMethods.int2dds_default_extensibility();
+            var fieldsInfo = nestedType.GetField(
+                "DdsTypeInfoFields", BindingFlags.Public | BindingFlags.Static);
+            var fields = fieldsInfo?.GetValue(null) as DdsTypeInfoField[]
+                ?? new DdsTypeInfoField[0];
+            return BuildTypeInfo(name, ext, fields);
+        }
+
+        /// <summary>
+        /// Builds an enum's Int2DdsTypeInfo from its CLR metadata. Literals are read via
+        /// <c>Type.GetFields</c> so they stay in IDL declaration order (unlike
+        /// <c>Enum.GetNames</c>, which sorts by value and would reorder a non-ascending enum,
+        /// breaking byte-parity with the Rust derive). Member names are PascalCase (matching the
+        /// derive variant names); IDL enums are i32, so bit_bound is 32 and no literal is @default.
+        /// </summary>
+        private static unsafe IntPtr BuildEnumTypeInfo(Type enumType)
+        {
+            var attr = enumType.GetCustomAttribute<DdsTypeAttribute>();
+            string name = attr?.TypeName ?? enumType.Name;
+            var nameBytes = Encoding.UTF8.GetBytes(name + '\0');
+            IntPtr ti;
+            fixed (byte* pName = nameBytes)
+            {
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_type_info_create_enum(pName, 32, out ti));
+            }
+            try
+            {
+                // Static value fields, in declaration order (excludes the special __value field).
+                foreach (var field in enumType.GetFields(BindingFlags.Public | BindingFlags.Static))
+                {
+                    int value = Convert.ToInt32(field.GetRawConstantValue());
+                    var litBytes = Encoding.UTF8.GetBytes(field.Name + '\0');
+                    fixed (byte* pLit = litBytes)
+                    {
+                        ReturnCodeHelper.CheckReturn(
+                            NativeMethods.int2dds_type_info_add_enum_literal(ti, pLit, value, 0));
+                    }
+                }
+            }
+            catch
+            {
+                NativeMethods.int2dds_type_info_destroy(ti);
+                throw;
+            }
+            return ti;
+        }
+
+        /// <summary>
         /// Gets the native handle. For internal use by other Core types.
         /// </summary>
         internal IntPtr Handle => _handle;
+
+        /// <summary>
+        /// Gets the StatusCondition associated with this topic.
+        /// </summary>
+        public Int2Dds.Conditions.StatusCondition GetStatusCondition()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            ReturnCodeHelper.CheckReturn(
+                NativeMethods.int2dds_topic_get_statuscondition(_handle, out var conditionHandle));
+            return new Int2Dds.Conditions.StatusCondition(conditionHandle);
+        }
+
+        /// <summary>
+        /// Gets the current status change bitmask of this topic.
+        /// </summary>
+        public uint GetStatusChanges()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            ReturnCodeHelper.CheckReturn(
+                NativeMethods.int2dds_topic_get_status_changes(_handle, out var mask));
+            return mask;
+        }
 
         /// <summary>
         /// Gets the topic name.
@@ -221,6 +351,24 @@ namespace Int2Dds.Core
         /// Gets the CLR type associated with this topic.
         /// </summary>
         public Type TypeClass => typeof(T);
+
+        /// <summary>
+        /// Gets the inconsistent topic status for this Topic. Reports how many times a
+        /// remote topic with the same name but an incompatible type was discovered.
+        /// Reading the status resets its <c>TotalCountChange</c>.
+        /// </summary>
+        public InconsistentTopicStatus GetInconsistentTopicStatus()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+
+            unsafe
+            {
+                NativeInconsistentTopicStatus native;
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_topic_get_inconsistent_topic_status(_handle, &native));
+                return new InconsistentTopicStatus(native.TotalCount, native.TotalCountChange);
+            }
+        }
 
         /// <summary>
         /// Sets new QoS policies on this Topic.

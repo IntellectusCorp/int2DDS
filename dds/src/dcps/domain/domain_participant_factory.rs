@@ -126,6 +126,7 @@ impl DomainParticipantFactory {
         listener: Option<Arc<dyn DomainParticipantListener>>,
         mask: StatusMask,
     ) -> DdsResult<DomainParticipant> {
+        crate::common::enterprise_hooks::call_participant_gate()?;
         let domain_id = if domain_id != DEFAULT_DOMAIN_ID {
             domain_id
         } else {
@@ -147,10 +148,8 @@ impl DomainParticipantFactory {
                     self.default_participant_qos.lock().ok().and_then(|g| g.clone())
                 {
                     registered
-                } else if let Ok(profile_qos) = self.get_participant_qos_from_profile("") {
-                    profile_qos
                 } else {
-                    DomainParticipantQos::default()
+                    self.get_participant_qos_from_profile("").unwrap_or_default()
                 }
             }
         };
@@ -758,8 +757,16 @@ impl ConfiguredParticipant {
 
 #[cfg(test)]
 mod factory_test {
+    use std::io::Write;
+
+    use tempfile::NamedTempFile;
+
     use crate::{
-        infrastructure::qos_policy::{EntityFactoryQosPolicy, UserDataQosPolicy},
+        core::time::Duration,
+        infrastructure::qos_policy::{
+            EntityFactoryQosPolicy, HistoryQosPolicyKind, ReliabilityQosPolicyKind,
+            UserDataQosPolicy,
+        },
         publication::qos::PublisherQos,
     };
 
@@ -837,5 +844,266 @@ mod factory_test {
         } else {
             panic!("Expected DdsError::AlreadyDeleted");
         }
+    }
+
+    fn create_test_profile_file() -> NamedTempFile {
+        let mut file = NamedTempFile::new().unwrap();
+        // max_blocking_time is optional - defaults to 100ms if not specified
+        let json = r#"{
+            "name": "TestLibrary",
+            "qos_profiles": [{
+                "name": "ReliableProfile",
+                "publisher_qos": {
+                    "partition": {
+                        "name": { "element": ["partition1"] }
+                    }
+                },
+                "subscriber_qos": {
+                    "partition": {
+                        "name": { "element": ["partition1"] }
+                    }
+                },
+                "topic_qos": {
+                    "reliability": {
+                        "kind": "RELIABLE_RELIABILITY_QOS"
+                    }
+                },
+                "datawriter_qos": {
+                    "reliability": {
+                        "kind": "RELIABLE_RELIABILITY_QOS"
+                    },
+                    "history": {
+                        "kind": "KEEP_LAST_HISTORY_QOS",
+                        "depth": 10
+                    }
+                },
+                "datareader_qos": {
+                    "reliability": {
+                        "kind": "RELIABLE_RELIABILITY_QOS"
+                    },
+                    "history": {
+                        "kind": "KEEP_LAST_HISTORY_QOS",
+                        "depth": 10
+                    }
+                }
+            },
+            {
+                "name": "BestEffortProfile",
+                "datawriter_qos": {
+                    "reliability": {
+                        "kind": "BEST_EFFORT_RELIABILITY_QOS"
+                    }
+                },
+                "datareader_qos": {
+                    "reliability": {
+                        "kind": "BEST_EFFORT_RELIABILITY_QOS"
+                    }
+                }
+            },
+            {
+                "name": "BlockingTimeOnly",
+                "datawriter_qos": {
+                    "reliability": {
+                        "max_blocking_time": { "sec": 1, "nanosec": 0 }
+                    }
+                },
+                "datareader_qos": {
+                    "reliability": {
+                        "max_blocking_time": { "sec": 1, "nanosec": 0 }
+                    }
+                }
+            }]
+        }"#;
+        file.write_all(json.as_bytes()).unwrap();
+        file
+    }
+
+    #[test]
+    fn test_factory_load_profiles() {
+        let file = create_test_profile_file();
+        let factory = DomainParticipantFactory::get_instance();
+
+        let result = factory.load_profiles(&[file.path()]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_get_datawriter_qos_from_profile() {
+        let file = create_test_profile_file();
+        let factory = DomainParticipantFactory::get_instance();
+        factory.load_profiles(&[file.path()]).unwrap();
+
+        let qos = factory.get_datawriter_qos_from_profile("TestLibrary::ReliableProfile");
+        assert!(qos.is_ok());
+
+        let qos = qos.unwrap();
+        assert_eq!(qos.reliability.kind, ReliabilityQosPolicyKind::Reliable);
+        assert!(matches!(qos.history.kind, HistoryQosPolicyKind::KeepLast(10)));
+    }
+
+    #[test]
+    fn test_get_datareader_qos_from_profile() {
+        let file = create_test_profile_file();
+        let factory = DomainParticipantFactory::get_instance();
+        factory.load_profiles(&[file.path()]).unwrap();
+
+        let qos = factory.get_datareader_qos_from_profile("TestLibrary::ReliableProfile");
+        assert!(qos.is_ok());
+
+        let qos = qos.unwrap();
+        assert_eq!(qos.reliability.kind, ReliabilityQosPolicyKind::Reliable);
+        assert!(matches!(qos.history.kind, HistoryQosPolicyKind::KeepLast(10)));
+    }
+
+    #[test]
+    fn test_get_publisher_qos_from_profile() {
+        let file = create_test_profile_file();
+        let factory = DomainParticipantFactory::get_instance();
+        factory.load_profiles(&[file.path()]).unwrap();
+
+        let qos = factory.get_publisher_qos_from_profile("TestLibrary::ReliableProfile");
+        assert!(qos.is_ok());
+
+        let qos = qos.unwrap();
+        assert_eq!(qos.partition.name, vec!["partition1".to_string()]);
+    }
+
+    #[test]
+    fn test_get_subscriber_qos_from_profile() {
+        let file = create_test_profile_file();
+        let factory = DomainParticipantFactory::get_instance();
+        factory.load_profiles(&[file.path()]).unwrap();
+
+        let qos = factory.get_subscriber_qos_from_profile("TestLibrary::ReliableProfile");
+        assert!(qos.is_ok());
+
+        let qos = qos.unwrap();
+        assert_eq!(qos.partition.name, vec!["partition1".to_string()]);
+    }
+
+    #[test]
+    fn test_get_topic_qos_from_profile() {
+        let file = create_test_profile_file();
+        let factory = DomainParticipantFactory::get_instance();
+        factory.load_profiles(&[file.path()]).unwrap();
+
+        let qos = factory.get_topic_qos_from_profile("TestLibrary::ReliableProfile");
+        assert!(qos.is_ok());
+
+        let qos = qos.unwrap();
+        assert_eq!(qos.reliability.kind, ReliabilityQosPolicyKind::Reliable);
+    }
+
+    #[test]
+    fn test_profile_not_found() {
+        let file = create_test_profile_file();
+        let factory = DomainParticipantFactory::get_instance();
+        factory.load_profiles(&[file.path()]).unwrap();
+
+        let qos = factory.get_datawriter_qos_from_profile("NonExistent::Profile");
+        assert!(qos.is_err());
+    }
+
+    #[test]
+    fn test_multiple_profiles() {
+        let file = create_test_profile_file();
+        let factory = DomainParticipantFactory::get_instance();
+        factory.load_profiles(&[file.path()]).unwrap();
+
+        let reliable_qos =
+            factory.get_datawriter_qos_from_profile("TestLibrary::ReliableProfile").unwrap();
+        let best_effort_qos =
+            factory.get_datawriter_qos_from_profile("TestLibrary::BestEffortProfile").unwrap();
+
+        assert_eq!(reliable_qos.reliability.kind, ReliabilityQosPolicyKind::Reliable);
+        assert_eq!(best_effort_qos.reliability.kind, ReliabilityQosPolicyKind::BestEffort);
+    }
+
+    #[test]
+    fn test_blocking_time_only() {
+        let file = create_test_profile_file();
+        let factory = DomainParticipantFactory::get_instance();
+        factory.load_profiles(&[file.path()]).unwrap();
+
+        let datawriter =
+            factory.get_datawriter_qos_from_profile("TestLibrary::BlockingTimeOnly").unwrap();
+        let datareader =
+            factory.get_datareader_qos_from_profile("TestLibrary::BlockingTimeOnly").unwrap();
+
+        assert_eq!(datawriter.reliability.kind, ReliabilityQosPolicyKind::Reliable);
+        assert_eq!(datawriter.reliability.max_blocking_time, Duration::from_seconds(1));
+        assert_eq!(datareader.reliability.kind, ReliabilityQosPolicyKind::BestEffort);
+        assert_eq!(datareader.reliability.max_blocking_time, Duration::from_seconds(1));
+    }
+
+    fn create_test_profile_xml() -> NamedTempFile {
+        let mut file = tempfile::Builder::new().suffix(".xml").tempfile().unwrap();
+        let xml = r#"<dds><qos_library name="XmlLibrary">
+            <qos_profile name="ReliableProfile">
+                <publisher_qos>
+                    <partition><name><element>partition1</element></name></partition>
+                </publisher_qos>
+                <datawriter_qos>
+                    <reliability><kind>RELIABLE_RELIABILITY_QOS</kind></reliability>
+                    <history><kind>KEEP_LAST_HISTORY_QOS</kind><depth>10</depth></history>
+                </datawriter_qos>
+            </qos_profile>
+        </qos_library></dds>"#;
+        file.write_all(xml.as_bytes()).unwrap();
+        file
+    }
+
+    #[test]
+    fn test_factory_load_xml_profiles() {
+        let file = create_test_profile_xml();
+        let factory = DomainParticipantFactory::get_instance();
+        factory.load_profiles(&[file.path()]).unwrap();
+
+        let qos = factory.get_datawriter_qos_from_profile("XmlLibrary::ReliableProfile").unwrap();
+        assert_eq!(qos.reliability.kind, ReliabilityQosPolicyKind::Reliable);
+        assert!(matches!(qos.history.kind, HistoryQosPolicyKind::KeepLast(10)));
+
+        let pub_qos =
+            factory.get_publisher_qos_from_profile("XmlLibrary::ReliableProfile").unwrap();
+        assert_eq!(pub_qos.partition.name, vec!["partition1".to_string()]);
+    }
+
+    fn write_profile_with_ttl(ttl: &str) -> NamedTempFile {
+        let mut file = NamedTempFile::new().unwrap();
+        let json = format!(
+            r#"{{
+                "name": "MulticastTtlLib",
+                "qos_profiles": [{{
+                    "name": "TtlProfile",
+                    "domain_participant_qos": {{
+                        "property": {{
+                            "value": [
+                                {{ "name": "int2dds.transport.UDPv4.multicast_ttl", "value": "{}", "propagate": false }}
+                            ]
+                        }}
+                    }}
+                }}]
+            }}"#,
+            ttl
+        );
+        file.write_all(json.as_bytes()).unwrap();
+        file
+    }
+
+    #[test]
+    fn participant_qos_property_loaded_from_profile() {
+        let file = write_profile_with_ttl("32");
+        let factory = DomainParticipantFactory::get_instance();
+        factory.load_profiles(&[file.path()]).unwrap();
+
+        let qos = factory
+            .get_participant_qos_from_profile("MulticastTtlLib::TtlProfile")
+            .expect("profile resolves");
+
+        assert_eq!(
+            qos.property.find_property("int2dds.transport.UDPv4.multicast_ttl"),
+            Some("32"),
+            "property must be reachable on the resolved DomainParticipantQos"
+        );
     }
 }

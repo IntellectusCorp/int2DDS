@@ -6,15 +6,11 @@ namespace Int2Dds.Interop
     internal static partial class NativeMethods
     {
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static unsafe extern int int2dds_create_participant(IntPtr factory, byte* name, int domain_id, out IntPtr participant_out);
+        internal static extern int int2dds_create_participant(IntPtr factory, int domain_id, IntPtr qos, out IntPtr participant_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static unsafe extern int int2dds_create_participant_with_profile(IntPtr factory, byte* name, int domain_id,
+        internal static unsafe extern int int2dds_create_participant_with_profile(IntPtr factory, int domain_id,
             byte* qos_path, out IntPtr participant_out);
-
-        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static unsafe extern int int2dds_create_participant_with_qos(IntPtr factory, byte* name, int domain_id,
-            IntPtr qos, out IntPtr participant_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_delete_participant(IntPtr participant);
@@ -27,5 +23,20 @@ namespace Int2Dds.Interop
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_participant_delete_contained_entities(IntPtr participant);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_participant_set_qos(IntPtr participant, IntPtr qos);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_participant_get_qos(IntPtr participant, out IntPtr qos_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_participant_get_current_time(IntPtr participant, out int sec_out, out uint nanosec_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_participant_contains_entity(IntPtr participant, byte* handle, [MarshalAs(UnmanagedType.U1)] out bool result_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_participant_find_topic(IntPtr participant, byte* topic_name, byte* dds_type_name, int timeout_ms, out IntPtr topic_out);
     }
 }

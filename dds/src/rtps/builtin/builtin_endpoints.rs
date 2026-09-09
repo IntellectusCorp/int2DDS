@@ -63,7 +63,7 @@ pub struct BuiltinEndpoints {
 
 impl BuiltinEndpoints {
     fn get_heartbeat_period() -> RtpsDuration {
-        let period = crate::common::int2dds_feature_ffi::get_heartbeat_period_seconds(
+        let period = crate::common::enterprise_hooks::call_heartbeat_period(
             DEFAULT_HEARTBEAT_PERIOD_SECONDS,
         );
 
@@ -115,7 +115,7 @@ impl BuiltinEndpoints {
             false,
             None,
             None,
-            SubscriptionBuiltinTopicData::default(),
+            SubscriptionBuiltinTopicData::builtin_reliable(),
             participant_guid,
         );
         let sedp_subscriptions_writer = StatefulWriter::new(
@@ -140,7 +140,7 @@ impl BuiltinEndpoints {
             false,
             None,
             None,
-            SubscriptionBuiltinTopicData::default(),
+            SubscriptionBuiltinTopicData::builtin_reliable(),
             participant_guid,
         );
 
@@ -167,7 +167,7 @@ impl BuiltinEndpoints {
             false,
             None,
             None,
-            SubscriptionBuiltinTopicData::default(),
+            SubscriptionBuiltinTopicData::builtin_reliable(),
             participant_guid,
         );
 
@@ -198,7 +198,7 @@ impl BuiltinEndpoints {
             false,
             None,
             None,
-            SubscriptionBuiltinTopicData::default(),
+            SubscriptionBuiltinTopicData::builtin_reliable(),
             participant_guid,
         );
 
@@ -225,7 +225,7 @@ impl BuiltinEndpoints {
             false,
             None,
             None,
-            SubscriptionBuiltinTopicData::default(),
+            SubscriptionBuiltinTopicData::builtin_reliable(),
             participant_guid,
         );
         let type_lookup_reply_writer = StatefulWriter::new(
@@ -250,7 +250,7 @@ impl BuiltinEndpoints {
             false,
             None,
             None,
-            SubscriptionBuiltinTopicData::default(),
+            SubscriptionBuiltinTopicData::builtin_reliable(),
             participant_guid,
         );
 

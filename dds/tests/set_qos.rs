@@ -55,8 +55,10 @@ fn test_unmatch_after_set_qos() {
         .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
         .unwrap();
 
-    let mut writer_qos = DataWriterQos::default();
-    writer_qos.deadline = DeadlineQosPolicy { period: Duration::from_millis(1000) };
+    let writer_qos = DataWriterQos {
+        deadline: DeadlineQosPolicy { period: Duration::from_millis(1000) },
+        ..Default::default()
+    };
 
     let _data_writer = create_datawriter(&participant, PublisherQos::default(), writer_qos);
 
@@ -77,8 +79,10 @@ fn test_unmatch_after_set_qos() {
     let (sender, receiver) = sync_channel(10);
     let read_listener = SubListener { sender };
 
-    let mut reader_qos = DataReaderQos::default();
-    reader_qos.deadline = DeadlineQosPolicy { period: Duration::from_millis(1000) };
+    let mut reader_qos = DataReaderQos {
+        deadline: DeadlineQosPolicy { period: Duration::from_millis(1000) },
+        ..Default::default()
+    };
 
     let data_reader = subscriber
         .create_datareader::<KeyedDataType>(
@@ -110,8 +114,10 @@ fn test_match_after_set_qos() {
         .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
         .unwrap();
 
-    let mut writer_qos = DataWriterQos::default();
-    writer_qos.deadline = DeadlineQosPolicy { period: Duration::from_millis(1000) };
+    let writer_qos = DataWriterQos {
+        deadline: DeadlineQosPolicy { period: Duration::from_millis(1000) },
+        ..Default::default()
+    };
 
     let _data_writer = create_datawriter(&participant, PublisherQos::default(), writer_qos);
 
@@ -132,8 +138,10 @@ fn test_match_after_set_qos() {
     let (sender, receiver) = sync_channel(10);
     let read_listener = SubListener { sender };
 
-    let mut reader_qos = DataReaderQos::default();
-    reader_qos.deadline = DeadlineQosPolicy { period: Duration::from_millis(500) };
+    let mut reader_qos = DataReaderQos {
+        deadline: DeadlineQosPolicy { period: Duration::from_millis(500) },
+        ..Default::default()
+    };
 
     let data_reader = subscriber
         .create_datareader::<KeyedDataType>(

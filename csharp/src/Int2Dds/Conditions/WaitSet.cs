@@ -42,7 +42,7 @@ namespace Int2Dds.Conditions
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
             if (condition == null) throw new ArgumentNullException(nameof(condition));
             ReturnCodeHelper.CheckReturn(
-                NativeMethods.int2dds_waitset_attach_guard_condition(_handle, condition.Handle));
+                NativeMethods.int2dds_waitset_attach_guardcondition(_handle, condition.Handle));
         }
 
         /// <summary>
@@ -53,7 +53,7 @@ namespace Int2Dds.Conditions
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
             if (condition == null) throw new ArgumentNullException(nameof(condition));
             ReturnCodeHelper.CheckReturn(
-                NativeMethods.int2dds_waitset_detach_guard_condition(_handle, condition.Handle));
+                NativeMethods.int2dds_waitset_detach_guardcondition(_handle, condition.Handle));
         }
 
         /// <summary>
@@ -64,7 +64,7 @@ namespace Int2Dds.Conditions
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
             if (condition == null) throw new ArgumentNullException(nameof(condition));
             ReturnCodeHelper.CheckReturn(
-                NativeMethods.int2dds_waitset_attach_condition(_handle, condition.Handle));
+                NativeMethods.int2dds_waitset_attach_statuscondition(_handle, condition.Handle));
         }
 
         /// <summary>
@@ -75,47 +75,88 @@ namespace Int2Dds.Conditions
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
             if (condition == null) throw new ArgumentNullException(nameof(condition));
             ReturnCodeHelper.CheckReturn(
-                NativeMethods.int2dds_waitset_detach_condition(_handle, condition.Handle));
+                NativeMethods.int2dds_waitset_detach_statuscondition(_handle, condition.Handle));
         }
 
         /// <summary>
-        /// Attaches a DataReader by its native handle.
+        /// Attaches a <see cref="ReadCondition"/> (or <see cref="QueryCondition"/>) to this WaitSet.
+        /// </summary>
+        public void Attach(ReadCondition condition)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            if (condition == null) throw new ArgumentNullException(nameof(condition));
+            ReturnCodeHelper.CheckReturn(
+                NativeMethods.int2dds_waitset_attach_readcondition(_handle, condition.Handle));
+        }
+
+        /// <summary>
+        /// Detaches a <see cref="ReadCondition"/> (or <see cref="QueryCondition"/>) from this WaitSet.
+        /// </summary>
+        public void Detach(ReadCondition condition)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            if (condition == null) throw new ArgumentNullException(nameof(condition));
+            ReturnCodeHelper.CheckReturn(
+                NativeMethods.int2dds_waitset_detach_readcondition(_handle, condition.Handle));
+        }
+
+        private void AttachEntityStatusCondition(IntPtr conditionHandle, bool attach)
+        {
+            try
+            {
+                int ret = attach
+                    ? NativeMethods.int2dds_waitset_attach_statuscondition(_handle, conditionHandle)
+                    : NativeMethods.int2dds_waitset_detach_statuscondition(_handle, conditionHandle);
+                ReturnCodeHelper.CheckReturn(ret);
+            }
+            finally
+            {
+                NativeMethods.int2dds_statuscondition_delete(conditionHandle);
+            }
+        }
+
+        /// <summary>
+        /// Attaches a DataReader's status condition by the reader's native handle.
         /// </summary>
         internal void AttachDataReader(IntPtr readerHandle)
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
             ReturnCodeHelper.CheckReturn(
-                NativeMethods.int2dds_waitset_attach_datareader(_handle, readerHandle));
+                NativeMethods.int2dds_datareader_get_statuscondition(readerHandle, out var cond));
+            AttachEntityStatusCondition(cond, attach: true);
         }
 
         /// <summary>
-        /// Detaches a DataReader by its native handle.
+        /// Detaches a DataReader's status condition by the reader's native handle.
         /// </summary>
         internal void DetachDataReader(IntPtr readerHandle)
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
             ReturnCodeHelper.CheckReturn(
-                NativeMethods.int2dds_waitset_detach_datareader(_handle, readerHandle));
+                NativeMethods.int2dds_datareader_get_statuscondition(readerHandle, out var cond));
+            AttachEntityStatusCondition(cond, attach: false);
         }
 
         /// <summary>
-        /// Attaches a DataWriter by its native handle.
+        /// Attaches a DataWriter's status condition by the writer's native handle.
         /// </summary>
         internal void AttachDataWriter(IntPtr writerHandle)
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
             ReturnCodeHelper.CheckReturn(
-                NativeMethods.int2dds_waitset_attach_datawriter(_handle, writerHandle));
+                NativeMethods.int2dds_datawriter_get_statuscondition(writerHandle, out var cond));
+            AttachEntityStatusCondition(cond, attach: true);
         }
 
         /// <summary>
-        /// Detaches a DataWriter by its native handle.
+        /// Detaches a DataWriter's status condition by the writer's native handle.
         /// </summary>
         internal void DetachDataWriter(IntPtr writerHandle)
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
             ReturnCodeHelper.CheckReturn(
-                NativeMethods.int2dds_waitset_detach_datawriter(_handle, writerHandle));
+                NativeMethods.int2dds_datawriter_get_statuscondition(writerHandle, out var cond));
+            AttachEntityStatusCondition(cond, attach: false);
         }
 
         /// <summary>
@@ -135,12 +176,14 @@ namespace Int2Dds.Conditions
                 ? (long)timeout.Value.TotalMilliseconds
                 : -1;
 
-            int ret = NativeMethods.int2dds_waitset_wait(_handle, timeoutMs);
+            int ret = NativeMethods.int2dds_waitset_wait_ex(_handle, timeoutMs, out IntPtr seqHandle);
 
             if (ret == ReturnCode.Timeout)
                 return false;
 
             ReturnCodeHelper.CheckReturn(ret);
+            if (seqHandle != IntPtr.Zero)
+                NativeMethods.int2dds_condition_seq_delete(seqHandle);
             return true;
         }
 
@@ -163,7 +206,23 @@ namespace Int2Dds.Conditions
                 : -1;
 
             int ret = NativeMethods.int2dds_waitset_wait_ex(_handle, timeoutMs, out IntPtr seqHandle);
+            return CollectConditions(ret, seqHandle);
+        }
 
+        /// <summary>
+        /// Nanosecond-precision variant of <see cref="WaitEx"/>. Pass a negative
+        /// value for an infinite wait.
+        /// </summary>
+        public IReadOnlyList<Condition> WaitExNs(long timeoutNs)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+
+            int ret = NativeMethods.int2dds_waitset_wait_ex_ns(_handle, timeoutNs, out IntPtr seqHandle);
+            return CollectConditions(ret, seqHandle);
+        }
+
+        private IReadOnlyList<Condition> CollectConditions(int ret, IntPtr seqHandle)
+        {
             if (ret == ReturnCode.Timeout)
                 return Int2Dds.Internal.EmptyArrayHolder<Condition>.Value;
 

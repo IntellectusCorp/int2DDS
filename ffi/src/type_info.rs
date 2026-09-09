@@ -18,10 +18,11 @@ use std::ffi::CStr;
 use int2dds::{
     serialize::cdr::ExtensibilityKind,
     xtypes::{
-        plain_collection_equiv_kind, CollectionElementFlag, CommonStructMember,
+        plain_collection_equiv_kind, CollectionElementFlag, CommonStructMember, CompleteBitflag,
+        CompleteBitmaskType, CompleteEnumeratedLiteral, CompleteEnumeratedType,
         CompleteMemberDetail, CompleteStructMember, CompleteStructType, CompleteTypeObject,
-        EquivalenceHash, MemberFlag, PlainCollectionHeader, TryConstructKind, TypeFlag,
-        TypeIdentifier, TypeObject,
+        EnumeratedLiteralFlag, EquivalenceHash, MemberFlag, PlainCollectionHeader,
+        TryConstructKind, TypeFlag, TypeIdentifier, TypeObject,
     },
 };
 
@@ -86,6 +87,30 @@ impl FieldInfo {
     }
 }
 
+/// One enum literal: discriminant `value`, `name`, and whether it is the `@default` literal.
+struct EnumLiteral {
+    value: i32,
+    name: String,
+    is_default: bool,
+}
+
+/// One bitmask flag: bit `position` and `name`.
+struct BitFlag {
+    position: u16,
+    name: String,
+}
+
+/// The kind-specific body of a type info builder. `Struct` uses the builder's `fields`;
+/// `Enum`/`Bitmask` carry their own literals/flags. This lets a single builder represent
+/// any named type a member can reference, so the content-hash nested machinery
+/// (`push_nested_field`, seq/array-of-nested) works uniformly for structs, enums, and
+/// bitmasks — matching the derive macro's `<FieldType>::type_identifier()`.
+enum TypeInfoBody {
+    Struct,
+    Enum { bit_bound: u16, literals: Vec<EnumLiteral> },
+    Bitmask { bit_bound: u16, flags: Vec<BitFlag> },
+}
+
 /// Opaque type info builder for the FFI layer.
 ///
 /// Collects field descriptions and builds TypeIdentifier/TypeObject
@@ -93,20 +118,132 @@ impl FieldInfo {
 pub struct Int2DdsTypeInfo {
     pub(crate) type_name: String,
     pub(crate) extensibility: ExtensibilityKind,
+    body: TypeInfoBody,
     fields: Vec<FieldInfo>,
+    /// Transitive closure of nested `TypeObject`s referenced by struct-typed members,
+    /// keyed by the content-hash `CompleteTypeId` the member points at. Empty for flat
+    /// types. Fed into a `TypeRegistry` at topic creation so composite (nested-struct)
+    /// key members resolve and compute the same InstanceHandle as native Rust.
+    dependencies: Vec<(TypeIdentifier, TypeObject)>,
 }
 
 impl Int2DdsTypeInfo {
-    /// Assemble an empty builder from Rust (e.g. `create_topic_with_field_descriptors`),
+    /// Assemble an empty struct builder from Rust (e.g. `create_topic_with_field_descriptors`),
     /// without going through the C `int2dds_type_info_create` handle path.
     pub(crate) fn new(type_name: String, extensibility: ExtensibilityKind) -> Self {
-        Self { type_name, extensibility, fields: Vec::new() }
+        Self {
+            type_name,
+            extensibility,
+            body: TypeInfoBody::Struct,
+            fields: Vec::new(),
+            dependencies: Vec::new(),
+        }
+    }
+
+    /// Assemble an enum builder. Enums have no extensibility of their own (they are leaf
+    /// types); `Final` is stored as a placeholder and never consulted for enums.
+    pub(crate) fn new_enum(type_name: String, bit_bound: u16) -> Self {
+        Self {
+            type_name,
+            extensibility: ExtensibilityKind::Final,
+            body: TypeInfoBody::Enum { bit_bound, literals: Vec::new() },
+            fields: Vec::new(),
+            dependencies: Vec::new(),
+        }
+    }
+
+    /// Assemble a bitmask builder.
+    pub(crate) fn new_bitmask(type_name: String, bit_bound: u16) -> Self {
+        Self {
+            type_name,
+            extensibility: ExtensibilityKind::Final,
+            body: TypeInfoBody::Bitmask { bit_bound, flags: Vec::new() },
+            fields: Vec::new(),
+            dependencies: Vec::new(),
+        }
+    }
+
+    /// Append an enum literal. No-op if this builder is not an enum.
+    pub(crate) fn push_enum_literal(&mut self, name: String, value: i32, is_default: bool) {
+        if let TypeInfoBody::Enum { literals, .. } = &mut self.body {
+            literals.push(EnumLiteral { value, name, is_default });
+        }
+    }
+
+    /// Append a bitmask flag. No-op if this builder is not a bitmask.
+    pub(crate) fn push_bitmask_flag(&mut self, name: String, position: u16) {
+        if let TypeInfoBody::Bitmask { flags, .. } = &mut self.body {
+            flags.push(BitFlag { position, name });
+        }
     }
 
     /// Append a field whose `TypeIdentifier` is already resolved. `flags` uses the
     /// `INT2DDS_MEMBER_*` bitmask (KEY/OPTIONAL/MUST_UNDERSTAND/EXTERNAL).
     pub(crate) fn push_field(&mut self, name: String, type_id: TypeIdentifier, flags: i32) {
         self.fields.push(FieldInfo { name, type_id, flags });
+    }
+
+    /// Append a nested struct-typed field, referencing `nested` by its content-hash
+    /// `CompleteTypeId` (matching the derive macro's `<FieldType>::type_identifier()`)
+    /// and recording `nested`'s `TypeObject` plus its own transitive dependencies so the
+    /// full closure is available for registry-backed key resolution.
+    pub(crate) fn push_nested_field(&mut self, name: String, nested: &Int2DdsTypeInfo, flags: i32) {
+        let nested_id = self.intern_nested(nested);
+        self.fields.push(FieldInfo { name, type_id: nested_id, flags });
+    }
+
+    /// Resolve `nested` to its content-hash `CompleteTypeId` and record its `TypeObject`
+    /// plus transitive dependencies, returning the element id. Shared by the nested-field
+    /// and collection-of-nested builders.
+    fn intern_nested(&mut self, nested: &Int2DdsTypeInfo) -> TypeIdentifier {
+        let nested_obj = nested.build_type_object();
+        let nested_id = TypeIdentifier::CompleteTypeId(nested_obj.compute_hash());
+        self.add_dependency(nested_id.clone(), nested_obj);
+        for (id, obj) in &nested.dependencies {
+            self.add_dependency(id.clone(), obj.clone());
+        }
+        nested_id
+    }
+
+    /// Append a `sequence<Nested>` field, referencing the element by content-hash
+    /// `CompleteTypeId` wrapped in a plain-sequence id (whose header equiv_kind is derived
+    /// as Complete). Records the element `TypeObject` and its transitive deps.
+    pub(crate) fn push_sequence_of_nested_field(
+        &mut self,
+        name: String,
+        element: &Int2DdsTypeInfo,
+        bound: u32,
+        flags: i32,
+    ) {
+        let element_id = self.intern_nested(element);
+        let type_id = plain_sequence_id(element_id, bound);
+        self.fields.push(FieldInfo { name, type_id, flags });
+    }
+
+    /// Append a `Nested[N]` fixed-array field, referencing the element by content-hash
+    /// `CompleteTypeId` wrapped in a plain-array id. Records element + transitive deps.
+    pub(crate) fn push_array_of_nested_field(
+        &mut self,
+        name: String,
+        element: &Int2DdsTypeInfo,
+        array_size: u32,
+        flags: i32,
+    ) {
+        let element_id = self.intern_nested(element);
+        let type_id = plain_array_id(element_id, array_size);
+        self.fields.push(FieldInfo { name, type_id, flags });
+    }
+
+    /// Record a nested dependency, de-duplicating by `TypeIdentifier`.
+    fn add_dependency(&mut self, id: TypeIdentifier, obj: TypeObject) {
+        if !self.dependencies.iter().any(|(existing, _)| existing == &id) {
+            self.dependencies.push((id, obj));
+        }
+    }
+
+    /// The nested-type dependency closure for registry-backed key resolution.
+    pub(crate) fn dependency_closure(&self) -> Vec<(TypeIdentifier, TypeObject)> {
+        self.dependencies.clone()
     }
 
     /// Build a CompleteStructType from the collected fields.
@@ -146,10 +283,62 @@ impl Int2DdsTypeInfo {
         complete
     }
 
-    /// Build TypeObject from the collected fields.
+    /// Build a CompleteEnumeratedType from the collected literals. Mirrors the derive macro:
+    /// `TypeFlag::default()`, literals with `EnumeratedLiteralFlag::DEFAULT` on the `@default`
+    /// literal (else `default()`), so FFI-built and derived enum TypeObjects hash alike.
+    fn build_complete_enum_type(
+        &self,
+        bit_bound: u16,
+        literals: &[EnumLiteral],
+    ) -> CompleteEnumeratedType {
+        let mut enum_type =
+            CompleteEnumeratedType::new(TypeFlag::default(), self.type_name.clone(), bit_bound);
+        for lit in literals {
+            let flag = if lit.is_default {
+                EnumeratedLiteralFlag::DEFAULT
+            } else {
+                EnumeratedLiteralFlag::default()
+            };
+            enum_type.add_literal(CompleteEnumeratedLiteral::new(
+                lit.value,
+                flag,
+                lit.name.clone(),
+            ));
+        }
+        enum_type
+    }
+
+    /// Build a CompleteBitmaskType from the collected flags. Mirrors the derive macro.
+    fn build_complete_bitmask_type(
+        &self,
+        bit_bound: u16,
+        flags: &[BitFlag],
+    ) -> CompleteBitmaskType {
+        let mut bitmask_type =
+            CompleteBitmaskType::new(TypeFlag::default(), self.type_name.clone(), bit_bound);
+        for f in flags {
+            bitmask_type.add_flag(CompleteBitflag::new(
+                f.position,
+                MemberFlag::default(),
+                f.name.clone(),
+            ));
+        }
+        bitmask_type
+    }
+
+    /// Build TypeObject from the collected fields/literals/flags, dispatching on body kind.
     pub(crate) fn build_type_object(&self) -> TypeObject {
-        let complete = self.build_complete_struct_type();
-        TypeObject::Complete(CompleteTypeObject::Struct(complete))
+        match &self.body {
+            TypeInfoBody::Struct => {
+                TypeObject::Complete(CompleteTypeObject::Struct(self.build_complete_struct_type()))
+            }
+            TypeInfoBody::Enum { bit_bound, literals } => TypeObject::Complete(
+                CompleteTypeObject::Enum(self.build_complete_enum_type(*bit_bound, literals)),
+            ),
+            TypeInfoBody::Bitmask { bit_bound, flags } => TypeObject::Complete(
+                CompleteTypeObject::Bitmask(self.build_complete_bitmask_type(*bit_bound, flags)),
+            ),
+        }
     }
 
     /// Check if any field is marked as a key field.
@@ -157,34 +346,32 @@ impl Int2DdsTypeInfo {
         self.fields.iter().any(|f| f.is_key())
     }
 
-    /// Derive key-field descriptors (index + scalar type) for the keyed fields, so a topic
-    /// created from this type_info still extracts instance keys (compute_key) like the
-    /// field-descriptor path. Non-scalar keys are skipped (extraction supports scalars).
-    pub(crate) fn key_field_infos(&self) -> Vec<crate::raw_type_support::KeyFieldInfo> {
-        use crate::raw_type_support::{KeyFieldInfo, KeyFieldType};
-        let mut out = Vec::new();
-        for (index, field) in self.fields.iter().enumerate() {
-            if !field.is_key() {
-                continue;
-            }
-            let field_type = match &field.type_id {
-                TypeIdentifier::String8
-                | TypeIdentifier::String8Small { .. }
-                | TypeIdentifier::String8Large { .. } => KeyFieldType::String,
-                TypeIdentifier::Int32 => KeyFieldType::Int32,
-                TypeIdentifier::Uint32 => KeyFieldType::UInt32,
-                TypeIdentifier::Int16 => KeyFieldType::Int16,
-                TypeIdentifier::Uint16 => KeyFieldType::UInt16,
-                TypeIdentifier::Int64 => KeyFieldType::Int64,
-                TypeIdentifier::Uint64 => KeyFieldType::UInt64,
-                TypeIdentifier::Int8 => KeyFieldType::Int8,
-                TypeIdentifier::Uint8 | TypeIdentifier::Byte => KeyFieldType::UInt8,
-                TypeIdentifier::Boolean => KeyFieldType::Bool,
-                _ => continue,
-            };
-            out.push(KeyFieldInfo { field_index: index, field_type });
+    /// Flat CDR field descriptors for the raw ContentFilteredTopic / QueryCondition
+    /// parser, so filters work on generated (type_info) topics — not just the explicit
+    /// `create_topic_with_field_descriptors` path. Returns `None` if this is not a struct
+    /// or any member is non-flat (nested/collection/enum/float/wide-string/char): the
+    /// parser skips members sequentially, so a partial set would misalign every field after
+    /// the gap. `None` preserves the prior no-filtering behavior for those types.
+    pub(crate) fn cdr_field_descriptors(&self) -> Option<Vec<crate::data::CdrFieldDescriptor>> {
+        if !matches!(self.body, TypeInfoBody::Struct) {
+            return None;
         }
-        out
+        // The flat sequential-skip parser handles Final (no header) and Appendable
+        // (leading DHEADER) layouts, but not Mutable EMHEADER-per-member framing — so
+        // leave Mutable topics without descriptors (filter unavailable) rather than
+        // mis-parsing them.
+        if matches!(self.extensibility, ExtensibilityKind::Mutable) {
+            return None;
+        }
+        let mut descriptors = Vec::with_capacity(self.fields.len());
+        for field in &self.fields {
+            descriptors.push(crate::data::CdrFieldDescriptor {
+                name: field.name.clone(),
+                field_type: type_identifier_to_cdr_field_type(&field.type_id)?,
+                is_key: field.is_key(),
+            });
+        }
+        Some(descriptors)
     }
 
     /// Build TypeIdentifier (CompleteTypeId hash) from the collected fields.
@@ -215,6 +402,30 @@ fn field_type_to_type_identifier(field_type: i32) -> Option<TypeIdentifier> {
         INT2DDS_FIELD_WSTRING => Some(TypeIdentifier::String16),
         _ => None,
     }
+}
+
+/// Map a resolved member `TypeIdentifier` to the flat `CdrFieldType` the raw
+/// ContentFilteredTopic / QueryCondition parser understands. Returns `None` for any
+/// type the parser cannot skip or read (nested structs, collections, maps, enums,
+/// bitmasks, wide strings, floats, chars) — a single non-flat member makes the whole
+/// descriptor set unusable, since the parser walks members sequentially.
+fn type_identifier_to_cdr_field_type(id: &TypeIdentifier) -> Option<crate::data::CdrFieldType> {
+    use crate::data::CdrFieldType;
+    Some(match id {
+        TypeIdentifier::Boolean => CdrFieldType::Bool,
+        TypeIdentifier::Byte | TypeIdentifier::Uint8 => CdrFieldType::UInt8,
+        TypeIdentifier::Int8 => CdrFieldType::Int8,
+        TypeIdentifier::Int16 => CdrFieldType::Int16,
+        TypeIdentifier::Int32 => CdrFieldType::Int32,
+        TypeIdentifier::Int64 => CdrFieldType::Int64,
+        TypeIdentifier::Uint16 => CdrFieldType::UInt16,
+        TypeIdentifier::Uint32 => CdrFieldType::UInt32,
+        TypeIdentifier::Uint64 => CdrFieldType::UInt64,
+        TypeIdentifier::String8
+        | TypeIdentifier::String8Small { .. }
+        | TypeIdentifier::String8Large { .. } => CdrFieldType::String,
+        _ => return None,
+    })
 }
 
 fn named_type_identifier(hash_name: &str) -> TypeIdentifier {
@@ -290,6 +501,9 @@ fn string_id(bound: u32, wide: bool) -> TypeIdentifier {
     }
 }
 
+/// # Safety
+/// - `type_name` must be a valid null-terminated C string
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_create(
     type_name: *const std::os::raw::c_char,
@@ -301,11 +515,9 @@ pub unsafe extern "C" fn int2dds_type_info_create(
 
     let name_str = cstr_arg!(type_name);
 
-    let ext_kind = match extensibility {
-        0 => ExtensibilityKind::Final,
-        1 => ExtensibilityKind::Appendable,
-        2 => ExtensibilityKind::Mutable,
-        _ => return INT2DDS_RET_INVALID_ARGUMENT,
+    let ext_kind = match crate::topic::resolve_extensibility(extensibility) {
+        Some(k) => k,
+        None => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
     let ti = Box::new(Int2DdsTypeInfo::new(name_str.to_string(), ext_kind));
@@ -314,7 +526,92 @@ pub unsafe extern "C" fn int2dds_type_info_create(
     INT2DDS_RET_OK
 }
 
+/// Create an enum type info builder. `bit_bound` is the discriminant bit width (IDL enums
+/// are i32 -> 32). Populate literals with `int2dds_type_info_add_enum_literal`, then pass
+/// the builder to `int2dds_type_info_add_nested_field` (or a collection-of-nested variant)
+/// on the parent so an enum-typed member resolves and computes native-Rust keys.
+///
+/// # Safety
+/// - `type_name` must be a valid null-terminated C string
+/// - `out` must be a valid pointer to a null pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_type_info_create_enum(
+    type_name: *const std::os::raw::c_char,
+    bit_bound: u16,
+    out: *mut *mut Int2DdsTypeInfo,
+) -> Int2DdsRet {
+    check_null!(type_name);
+    check_null!(out);
+    let name_str = cstr_arg!(type_name);
+    let ti = Box::new(Int2DdsTypeInfo::new_enum(name_str.to_string(), bit_bound));
+    *out = Box::into_raw(ti);
+    INT2DDS_RET_OK
+}
+
+/// Append a literal to an enum builder. `is_default` marks the `@default` literal (0/1);
+/// no-op on a non-enum builder.
+///
+/// # Safety
+/// - `type_info` must be a valid type info builder
+/// - `literal_name` must be a valid null-terminated C string
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_type_info_add_enum_literal(
+    type_info: *mut Int2DdsTypeInfo,
+    literal_name: *const std::os::raw::c_char,
+    value: i32,
+    is_default: i32,
+) -> Int2DdsRet {
+    check_null!(type_info);
+    check_null!(literal_name);
+    let ti = &mut *type_info;
+    let name_str = cstr_arg!(literal_name);
+    ti.push_enum_literal(name_str.to_string(), value, is_default != 0);
+    INT2DDS_RET_OK
+}
+
+/// Create a bitmask type info builder. `bit_bound` is the flag storage bit width (default 32).
+///
+/// # Safety
+/// - `type_name` must be a valid null-terminated C string
+/// - `out` must be a valid pointer to a null pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_type_info_create_bitmask(
+    type_name: *const std::os::raw::c_char,
+    bit_bound: u16,
+    out: *mut *mut Int2DdsTypeInfo,
+) -> Int2DdsRet {
+    check_null!(type_name);
+    check_null!(out);
+    let name_str = cstr_arg!(type_name);
+    let ti = Box::new(Int2DdsTypeInfo::new_bitmask(name_str.to_string(), bit_bound));
+    *out = Box::into_raw(ti);
+    INT2DDS_RET_OK
+}
+
+/// Append a flag to a bitmask builder. `position` is the bit index; no-op on a non-bitmask.
+///
+/// # Safety
+/// - `type_info` must be a valid type info builder
+/// - `flag_name` must be a valid null-terminated C string
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_type_info_add_bitmask_flag(
+    type_info: *mut Int2DdsTypeInfo,
+    flag_name: *const std::os::raw::c_char,
+    position: u16,
+) -> Int2DdsRet {
+    check_null!(type_info);
+    check_null!(flag_name);
+    let ti = &mut *type_info;
+    let name_str = cstr_arg!(flag_name);
+    ti.push_bitmask_flag(name_str.to_string(), position);
+    INT2DDS_RET_OK
+}
+
 /// Add a primitive-typed field to the type info builder.
+///
+/// # Safety
+/// - `type_info` must be a valid type info builder
+/// - `field_name` must be a valid null-terminated C string
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_add_field(
     type_info: *mut Int2DdsTypeInfo,
@@ -347,6 +644,10 @@ pub unsafe extern "C" fn int2dds_type_info_add_field(
 /// Prefer this over `int2dds_type_info_add_field(.., INT2DDS_FIELD_STRING, ..)` when the
 /// IDL declares `string<N>`, so the emitted TypeIdentifier carries the bound and matches
 /// strict XTypes peers byte-for-byte.
+///
+/// # Safety
+/// - `type_info` must be a valid type info builder
+/// - `field_name` must be a valid null-terminated C string
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_add_string_field(
     type_info: *mut Int2DdsTypeInfo,
@@ -366,6 +667,10 @@ pub unsafe extern "C" fn int2dds_type_info_add_string_field(
 }
 
 /// Add a (possibly bounded) wide-string (`wstring<N>`) field. `bound == 0` means unbounded.
+///
+/// # Safety
+/// - `type_info` must be a valid type info builder
+/// - `field_name` must be a valid null-terminated C string
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_add_wstring_field(
     type_info: *mut Int2DdsTypeInfo,
@@ -385,6 +690,10 @@ pub unsafe extern "C" fn int2dds_type_info_add_wstring_field(
 }
 
 /// Add a sequence field to the type info builder.
+///
+/// # Safety
+/// - `type_info` must be a valid type info builder
+/// - `field_name` must be a valid null-terminated C string
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_add_sequence_field(
     type_info: *mut Int2DdsTypeInfo,
@@ -413,6 +722,10 @@ pub unsafe extern "C" fn int2dds_type_info_add_sequence_field(
 }
 
 /// Add an array field to the type info builder.
+///
+/// # Safety
+/// - `type_info` must be a valid type info builder
+/// - `field_name` must be a valid null-terminated C string
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_add_array_field(
     type_info: *mut Int2DdsTypeInfo,
@@ -441,6 +754,11 @@ pub unsafe extern "C" fn int2dds_type_info_add_array_field(
 }
 
 /// Add a named (complex) type field to the type info builder.
+///
+/// # Safety
+/// - `type_info` must be a valid type info builder
+/// - `field_name` must be a valid null-terminated C string
+/// - `type_hash_name` must be a valid null-terminated C string
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_add_named_type_field(
     type_info: *mut Int2DdsTypeInfo,
@@ -464,6 +782,104 @@ pub unsafe extern "C" fn int2dds_type_info_add_named_type_field(
     INT2DDS_RET_OK
 }
 
+/// Add a nested struct-typed field, supplying the nested type's own builder.
+///
+/// Unlike `int2dds_type_info_add_named_type_field` (which emits a name-hash
+/// `MinimalTypeId` reference), this references the nested type by its content-hash
+/// `CompleteTypeId` — matching the derive macro byte-for-byte — and captures the nested
+/// `TypeObject` so composite (nested-struct) key members resolve and compute native-Rust
+/// InstanceHandles. `nested_type_info` is borrowed, not consumed: the caller still owns
+/// it and must destroy it.
+///
+/// # Safety
+/// - `type_info` must be a valid type info builder
+/// - `field_name` must be a valid null-terminated C string
+/// - `nested_type_info` must be a valid type info builder; it is borrowed, not
+///   consumed, and the caller still owns it
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_type_info_add_nested_field(
+    type_info: *mut Int2DdsTypeInfo,
+    field_name: *const std::os::raw::c_char,
+    nested_type_info: *const Int2DdsTypeInfo,
+    flags: i32,
+) -> Int2DdsRet {
+    check_null!(type_info);
+    check_null!(field_name);
+    check_null!(nested_type_info);
+
+    let ti = &mut *type_info;
+    let nested = &*nested_type_info;
+    let name_str = cstr_arg!(field_name);
+
+    ti.push_nested_field(name_str.to_string(), nested, flags);
+
+    INT2DDS_RET_OK
+}
+
+/// Add a `sequence<Nested>` field whose element is a nested struct/enum/bitmask, supplying
+/// the element's own builder. References the element by content-hash `CompleteTypeId`
+/// (matching the derive macro) so sequence-of-nested key members resolve and compute
+/// native-Rust InstanceHandles. `element_type_info` is borrowed, not consumed.
+///
+/// # Safety
+/// - `type_info` must be a valid type info builder
+/// - `field_name` must be a valid null-terminated C string
+/// - `element_type_info` must be a valid type info builder; it is borrowed, not
+///   consumed, and the caller still owns it
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_type_info_add_sequence_of_nested_field(
+    type_info: *mut Int2DdsTypeInfo,
+    field_name: *const std::os::raw::c_char,
+    element_type_info: *const Int2DdsTypeInfo,
+    bound: u32,
+    flags: i32,
+) -> Int2DdsRet {
+    check_null!(type_info);
+    check_null!(field_name);
+    check_null!(element_type_info);
+
+    let ti = &mut *type_info;
+    let element = &*element_type_info;
+    let name_str = cstr_arg!(field_name);
+
+    ti.push_sequence_of_nested_field(name_str.to_string(), element, bound, flags);
+
+    INT2DDS_RET_OK
+}
+
+/// Add a `Nested[N]` fixed-array field whose element is a nested struct/enum/bitmask,
+/// supplying the element's own builder. `element_type_info` is borrowed, not consumed.
+///
+/// # Safety
+/// - `type_info` must be a valid type info builder
+/// - `field_name` must be a valid null-terminated C string
+/// - `element_type_info` must be a valid type info builder; it is borrowed, not
+///   consumed, and the caller still owns it
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_type_info_add_array_of_nested_field(
+    type_info: *mut Int2DdsTypeInfo,
+    field_name: *const std::os::raw::c_char,
+    element_type_info: *const Int2DdsTypeInfo,
+    array_size: u32,
+    flags: i32,
+) -> Int2DdsRet {
+    check_null!(type_info);
+    check_null!(field_name);
+    check_null!(element_type_info);
+
+    let ti = &mut *type_info;
+    let element = &*element_type_info;
+    let name_str = cstr_arg!(field_name);
+
+    ti.push_array_of_nested_field(name_str.to_string(), element, array_size, flags);
+
+    INT2DDS_RET_OK
+}
+
+/// # Safety
+/// - `type_info` must be a valid type info builder
+/// - `field_name` must be a valid null-terminated C string
+/// - `element_hash_name` must be a valid null-terminated C string
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_add_sequence_of_named_field(
     type_info: *mut Int2DdsTypeInfo,
@@ -488,6 +904,10 @@ pub unsafe extern "C" fn int2dds_type_info_add_sequence_of_named_field(
     INT2DDS_RET_OK
 }
 
+/// # Safety
+/// - `type_info` must be a valid type info builder
+/// - `field_name` must be a valid null-terminated C string
+/// - `element_hash_name` must be a valid null-terminated C string
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_add_array_of_named_field(
     type_info: *mut Int2DdsTypeInfo,
@@ -512,6 +932,9 @@ pub unsafe extern "C" fn int2dds_type_info_add_array_of_named_field(
     INT2DDS_RET_OK
 }
 
+/// # Safety
+/// - `type_info` must be a valid type info builder
+/// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_to_type_object(
     type_info: *const Int2DdsTypeInfo,
@@ -520,11 +943,18 @@ pub unsafe extern "C" fn int2dds_type_info_to_type_object(
     check_null!(type_info);
     check_null!(out);
     let to = (*type_info).build_type_object();
-    *out = Box::into_raw(Box::new(crate::dynamic::Int2DdsTypeObject::from_type_object(to)));
+    let deps = (*type_info).dependency_closure();
+    *out = Box::into_raw(Box::new(crate::dynamic::Int2DdsTypeObject::from_type_object_with_deps(
+        to, deps,
+    )));
     INT2DDS_RET_OK
 }
 
 /// Destroy a type info builder.
+///
+/// # Safety
+/// - `type_info` must be a valid type info builder, or null (null is a no-op)
+/// - `type_info` must not be used after this call
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_destroy(type_info: *mut Int2DdsTypeInfo) {
     if !type_info.is_null() {
@@ -559,11 +989,8 @@ mod tests {
         }
 
         // FFI type_info builder path (mirrors what the generated C emits).
-        let mut ti = Int2DdsTypeInfo {
-            type_name: "PrimitivesType".to_string(),
-            extensibility: ExtensibilityKind::Appendable,
-            fields: Vec::new(),
-        };
+        let mut ti =
+            Int2DdsTypeInfo::new("PrimitivesType".to_string(), ExtensibilityKind::Appendable);
         ti.fields.push(FieldInfo {
             name: "id".to_string(),
             type_id: TypeIdentifier::Int32,
@@ -663,11 +1090,7 @@ mod tests {
             bool_array: [bool; 4],
         }
 
-        let mut ti = Int2DdsTypeInfo {
-            type_name: "TestSeqType".to_string(),
-            extensibility: ExtensibilityKind::Appendable,
-            fields: Vec::new(),
-        };
+        let mut ti = Int2DdsTypeInfo::new("TestSeqType".to_string(), ExtensibilityKind::Appendable);
         ti.fields.push(FieldInfo {
             name: "id".to_string(),
             type_id: TypeIdentifier::Int32,
@@ -789,5 +1212,569 @@ mod tests {
         );
 
         unsafe { int2dds_type_info_destroy(ffi_ptr) };
+    }
+
+    /// Production-path parity: build the `TypeObject` exactly as
+    /// `create_topic_with_type_info` does (via `Int2DdsTypeInfo::build_type_object`),
+    /// not from the derive macro, then confirm `compute_key` still equals the derive
+    /// oracle. `type_info_handle` in raw_key_hash.rs feeds the *derive* TypeObject, so
+    /// it cannot see a divergence in the FFI-built one: if member numbering or flag
+    /// framing differed, `compute_key` would silently fall through to the non-canonical
+    /// md5 path (production sets key_fields, all_fields is None). Covers multi-key
+    /// (member_id ordering) and string keys.
+    #[test]
+    fn test_type_info_compute_key_matches_derive_via_production_builder() {
+        use int2dds::common::instance_handle::InstanceHandle;
+        use int2dds::topic::type_support::{DdsType, TypeSupport};
+        use int2dds::xtypes::HasTypeObject;
+        use std::any::Any;
+
+        fn prod_handle(ti: &Int2DdsTypeInfo, payload: &[u8]) -> InstanceHandle {
+            let support = crate::raw_type_support::RawTypeSupport::with_type_info(
+                ti.type_name.clone(),
+                ti.extensibility,
+                ti.has_key_field(),
+                ti.build_type_identifier(),
+                ti.build_type_object(),
+            );
+            let data = support.deserialize(payload, None).unwrap();
+            support.compute_key(data.as_ref())
+        }
+
+        // --- single long key (with FFI-vs-derive TypeObject byte-parity canary) ---
+        #[derive(DdsType)]
+        #[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+        struct ProdKeyedLong {
+            #[dds(key)]
+            id: i32,
+            value: i32,
+        }
+        let inst = ProdKeyedLong { id: 5, value: 99 };
+        let oracle = ProdKeyedLong::get_type_support().compute_key(&inst as &dyn Any);
+        let mut ti =
+            Int2DdsTypeInfo::new("ProdKeyedLong".to_string(), ExtensibilityKind::Appendable);
+        ti.push_field("id".to_string(), TypeIdentifier::Int32, INT2DDS_MEMBER_KEY);
+        ti.push_field("value".to_string(), TypeIdentifier::Int32, 0);
+        assert_eq!(
+            match ti.build_type_object() {
+                TypeObject::Complete(c) => c.serialize(),
+                _ => panic!("Expected Complete"),
+            },
+            ProdKeyedLong::complete_type_object().serialize(),
+            "FFI-built TypeObject bytes must match derive for compute_key parity to hold"
+        );
+        let handle = prod_handle(&ti, &inst.serialize().unwrap());
+        assert_eq!(handle, oracle);
+        assert_eq!(*handle.value(), [0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+
+        // --- multi-key: two int keys exercise member_id ordering in serialize_key_cdr ---
+        #[derive(DdsType)]
+        #[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+        struct ProdMultiKey {
+            #[dds(key)]
+            region: i32,
+            #[dds(key)]
+            id: i32,
+            value: i32,
+        }
+        let inst = ProdMultiKey { region: 7, id: 5, value: 99 };
+        let oracle = ProdMultiKey::get_type_support().compute_key(&inst as &dyn Any);
+        let mut ti =
+            Int2DdsTypeInfo::new("ProdMultiKey".to_string(), ExtensibilityKind::Appendable);
+        ti.push_field("region".to_string(), TypeIdentifier::Int32, INT2DDS_MEMBER_KEY);
+        ti.push_field("id".to_string(), TypeIdentifier::Int32, INT2DDS_MEMBER_KEY);
+        ti.push_field("value".to_string(), TypeIdentifier::Int32, 0);
+        let handle = prod_handle(&ti, &inst.serialize().unwrap());
+        assert_ne!(handle, InstanceHandle::NIL, "multi-key must not fall to NIL");
+        assert_eq!(handle, oracle);
+
+        // --- string key ---
+        #[derive(DdsType)]
+        #[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+        struct ProdStringKey {
+            #[dds(key)]
+            name: String,
+            value: i32,
+        }
+        let inst = ProdStringKey { name: "BLUE".to_string(), value: 99 };
+        let oracle = ProdStringKey::get_type_support().compute_key(&inst as &dyn Any);
+        let mut ti =
+            Int2DdsTypeInfo::new("ProdStringKey".to_string(), ExtensibilityKind::Appendable);
+        ti.push_field("name".to_string(), TypeIdentifier::String8, INT2DDS_MEMBER_KEY);
+        ti.push_field("value".to_string(), TypeIdentifier::Int32, 0);
+        let handle = prod_handle(&ti, &inst.serialize().unwrap());
+        assert_ne!(handle, InstanceHandle::NIL, "string key must not fall to NIL");
+        assert_eq!(handle, oracle);
+    }
+
+    /// Composite (nested-struct) key parity through a registry-backed dynamic type.
+    /// This settles the load-bearing reconciliation for the #336 composite residual.
+    /// The derive macro references a nested struct member by its *content-hash*
+    /// `CompleteTypeId` (`type_struct.rs` emits `<FieldType>::type_identifier()`), NOT
+    /// the name-hash `MinimalTypeId` that `int2dds_type_info_add_named_type_field`
+    /// produces — so the FFI builder must reference the nested member by
+    /// `CompleteTypeId(nested_type_object.compute_hash())` to byte-match derive, and
+    /// register the nested `TypeObject` under that same content hash. A `TypeRegistry`
+    /// then resolves the child during `DynamicType` construction, after which
+    /// `serialize_key_cdr` recurses into the nested key members. The byte-parity canary
+    /// runs first: if the FFI outer TypeObject diverged from derive, discovery would
+    /// break before keys ever do. Green here means the remaining work (FFI dependency
+    /// API + generator recursion) is plumbing, not a design change.
+    #[test]
+    fn test_type_info_composite_key_resolves_via_registry() {
+        use int2dds::topic::type_support::{DdsType, TypeSupport};
+        use int2dds::xtypes::{
+            deserialize_dynamic_data, DynamicTypeSupport, HasTypeObject, TypeRegistry,
+        };
+        use std::any::Any;
+
+        #[derive(DdsType)]
+        #[dds_type(crate_path = "int2dds", extensibility = "Final")]
+        struct NestedKeyPart {
+            a: i32,
+            b: i32,
+        }
+        #[derive(DdsType)]
+        #[dds_type(crate_path = "int2dds", extensibility = "Final")]
+        struct CompositeKeyed {
+            #[dds(key)]
+            loc: NestedKeyPart,
+            value: i32,
+        }
+
+        let inst = CompositeKeyed { loc: NestedKeyPart { a: 7, b: 9 }, value: 1 };
+        let oracle = CompositeKeyed::get_type_support().compute_key(&inst as &dyn Any);
+        let bytes = inst.serialize().unwrap();
+
+        // Nested member reference = content-hash CompleteTypeId of the nested TypeObject
+        // (computed from the nested type_info, mirroring what the production builder will
+        // do — here the derived NestedKeyPart stands in for a nested Int2DdsTypeInfo).
+        let nested_to = TypeObject::Complete(NestedKeyPart::complete_type_object());
+        let nested_id = TypeIdentifier::CompleteTypeId(nested_to.compute_hash());
+
+        // Build the outer type through the FFI builder, referencing the nested struct.
+        let mut ti = Int2DdsTypeInfo::new("CompositeKeyed".to_string(), ExtensibilityKind::Final);
+        ti.push_field("loc".to_string(), nested_id, INT2DDS_MEMBER_KEY);
+        ti.push_field("value".to_string(), TypeIdentifier::Int32, 0);
+
+        // Canary: the FFI-built outer TypeObject must byte-match derive.
+        let outer_to = ti.build_type_object();
+        assert_eq!(
+            match &outer_to {
+                TypeObject::Complete(c) => c.serialize(),
+                _ => panic!("Expected Complete"),
+            },
+            CompositeKeyed::complete_type_object().serialize(),
+            "FFI composite TypeObject must byte-match derive (content-hash member ref)"
+        );
+
+        // Register the nested type under its content hash (matching the outer member's
+        // CompleteTypeId ref) so the DynamicType build resolves it instead of leaving an
+        // unresolved external ref.
+        let mut registry = TypeRegistry::new();
+        registry.register_type_object(nested_to);
+
+        let dts = DynamicTypeSupport::from_type_object_with_registry(outer_to, &registry)
+            .expect("outer dynamic type must build with nested resolved");
+        let dyn_data = deserialize_dynamic_data(&bytes, dts.dynamic_type())
+            .expect("sample must decode including nested struct");
+        let handle = dts.compute_key(&dyn_data);
+
+        assert_eq!(handle, oracle, "composite key must match derive oracle");
+        assert_eq!(*handle.value(), [0, 0, 0, 7, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    /// Generator-representative drift guard: reproduces what the C#/Python bindings do when
+    /// they walk generated `DdsTypeInfoFields`/`_dds_type_info_fields` — build each nested
+    /// `Int2DdsTypeInfo` via the same `push_field`/`string_id`/`push_nested_field` calls the
+    /// C ABI `add_field`/`add_string_field`/`add_nested_field` wrap — for a richer shape than
+    /// the two-primitive proof above: a nested-in-nested key whose innermost member is a
+    /// string. The outer TypeObject must byte-match derive (so the content-hash refs the
+    /// bindings emit line up), and the whole closure must resolve so the composite key equals
+    /// the native-Rust oracle. Divergence in nested extensibility, member order, string
+    /// bound, or key flags would break byte-parity here before it ever reached a peer.
+    #[test]
+    fn test_type_info_nested_in_nested_string_key_matches_derive() {
+        use int2dds::topic::type_support::{DdsType, TypeSupport};
+        use int2dds::xtypes::{
+            deserialize_dynamic_data, DynamicTypeSupport, HasTypeObject, TypeRegistry,
+        };
+        use std::any::Any;
+
+        #[derive(DdsType)]
+        #[dds_type(crate_path = "int2dds", extensibility = "Final")]
+        struct Inner {
+            x: i32,
+            label: String,
+        }
+        #[derive(DdsType)]
+        #[dds_type(crate_path = "int2dds", extensibility = "Final")]
+        struct Mid {
+            inner: Inner,
+            region: i32,
+        }
+        #[derive(DdsType)]
+        #[dds_type(crate_path = "int2dds", extensibility = "Final")]
+        struct Outer {
+            #[dds(key)]
+            loc: Mid,
+            value: i32,
+        }
+
+        let inst = Outer {
+            loc: Mid { inner: Inner { x: 5, label: "hi".to_string() }, region: 3 },
+            value: 1,
+        };
+        let oracle = Outer::get_type_support().compute_key(&inst as &dyn Any);
+        let bytes = inst.serialize().unwrap();
+
+        // Innermost: Inner { i32, string } — string via string_id (== add_string_field).
+        let mut inner_ti = Int2DdsTypeInfo::new("Inner".to_string(), ExtensibilityKind::Final);
+        inner_ti.push_field("x".to_string(), TypeIdentifier::Int32, 0);
+        inner_ti.push_field("label".to_string(), string_id(0, false), 0);
+
+        // Middle: Mid { Inner, i32 } — nested via push_nested_field (== add_nested_field).
+        let mut mid_ti = Int2DdsTypeInfo::new("Mid".to_string(), ExtensibilityKind::Final);
+        mid_ti.push_nested_field("inner".to_string(), &inner_ti, 0);
+        mid_ti.push_field("region".to_string(), TypeIdentifier::Int32, 0);
+
+        // Outer: Outer { @key Mid, i32 }.
+        let mut outer_ti = Int2DdsTypeInfo::new("Outer".to_string(), ExtensibilityKind::Final);
+        outer_ti.push_nested_field("loc".to_string(), &mid_ti, INT2DDS_MEMBER_KEY);
+        outer_ti.push_field("value".to_string(), TypeIdentifier::Int32, 0);
+
+        // Byte-parity at every level: transitively validates the content-hash refs.
+        let ser = |to: &TypeObject| match to {
+            TypeObject::Complete(c) => c.serialize(),
+            _ => panic!("Expected Complete"),
+        };
+        assert_eq!(
+            ser(&inner_ti.build_type_object()),
+            Inner::complete_type_object().serialize(),
+            "nested Inner TypeObject must byte-match derive"
+        );
+        assert_eq!(
+            ser(&mid_ti.build_type_object()),
+            Mid::complete_type_object().serialize(),
+            "nested Mid TypeObject must byte-match derive"
+        );
+        let outer_to = outer_ti.build_type_object();
+        assert_eq!(
+            ser(&outer_to),
+            Outer::complete_type_object().serialize(),
+            "outer TypeObject must byte-match derive"
+        );
+
+        // Resolve exactly as RawTypeSupport::with_type_info_and_deps does: register the whole
+        // dependency closure by content-hash id, then build the DynamicType against it.
+        let mut registry = TypeRegistry::new();
+        for (id, obj) in outer_ti.dependency_closure() {
+            registry.register_type_object_with_id(&id, obj);
+        }
+        let dts = DynamicTypeSupport::from_type_object_with_registry(outer_to, &registry)
+            .expect("outer dynamic type must build with the full nested closure resolved");
+        let dyn_data = deserialize_dynamic_data(&bytes, dts.dynamic_type())
+            .expect("sample must decode including nested-in-nested struct with a string");
+        let handle = dts.compute_key(&dyn_data);
+
+        assert_eq!(handle, oracle, "nested-in-nested composite key must match derive oracle");
+    }
+
+    /// Covers the shipped generator default: unspecified IDL extensibility resolves to
+    /// Appendable, so the generated nested-key types are Appendable, not Final. The
+    /// extensibility flag feeds the TypeObject content hash, so an all-Final golden alone
+    /// would not prove the content-hash refs the bindings emit line up for the default
+    /// case. (The key CDR itself is extensibility-agnostic below Mutable — serialize_key_cdr
+    /// serializes nested Final/Appendable structs inline without a DHEADER — so the handle
+    /// bytes match Final; what this guards is the byte-parity/resolution at Appendable.)
+    #[test]
+    fn test_type_info_composite_key_appendable_matches_derive() {
+        use int2dds::topic::type_support::{DdsType, TypeSupport};
+        use int2dds::xtypes::{
+            deserialize_dynamic_data, DynamicTypeSupport, HasTypeObject, TypeRegistry,
+        };
+        use std::any::Any;
+
+        #[derive(DdsType)]
+        #[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+        struct Point {
+            x: i32,
+            y: i32,
+        }
+        #[derive(DdsType)]
+        #[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+        struct Track {
+            #[dds(key)]
+            origin: Point,
+            id: i32,
+        }
+
+        let inst = Track { origin: Point { x: 5, y: -3 }, id: 1 };
+        let oracle = Track::get_type_support().compute_key(&inst as &dyn Any);
+        let bytes = inst.serialize().unwrap();
+
+        let mut point_ti = Int2DdsTypeInfo::new("Point".to_string(), ExtensibilityKind::Appendable);
+        point_ti.push_field("x".to_string(), TypeIdentifier::Int32, 0);
+        point_ti.push_field("y".to_string(), TypeIdentifier::Int32, 0);
+
+        let mut track_ti = Int2DdsTypeInfo::new("Track".to_string(), ExtensibilityKind::Appendable);
+        track_ti.push_nested_field("origin".to_string(), &point_ti, INT2DDS_MEMBER_KEY);
+        track_ti.push_field("id".to_string(), TypeIdentifier::Int32, 0);
+
+        let ser = |to: &TypeObject| match to {
+            TypeObject::Complete(c) => c.serialize(),
+            _ => panic!("Expected Complete"),
+        };
+        assert_eq!(
+            ser(&point_ti.build_type_object()),
+            Point::complete_type_object().serialize(),
+            "Appendable nested Point TypeObject must byte-match derive"
+        );
+        let track_to = track_ti.build_type_object();
+        assert_eq!(
+            ser(&track_to),
+            Track::complete_type_object().serialize(),
+            "Appendable outer Track TypeObject must byte-match derive"
+        );
+
+        let mut registry = TypeRegistry::new();
+        for (id, obj) in track_ti.dependency_closure() {
+            registry.register_type_object_with_id(&id, obj);
+        }
+        let dts = DynamicTypeSupport::from_type_object_with_registry(track_to, &registry)
+            .expect("Appendable outer dynamic type must build with nested resolved");
+        let dyn_data = deserialize_dynamic_data(&bytes, dts.dynamic_type())
+            .expect("Appendable sample must decode including nested struct");
+        let handle = dts.compute_key(&dyn_data);
+
+        assert_eq!(handle, oracle, "Appendable composite key must match derive oracle");
+    }
+
+    /// enum-typed @key member. The enum builder (`new_enum` + `push_enum_literal`) must
+    /// byte-match the derive enum TypeObject (bit_bound 32, literal values/flags), and the
+    /// key resolves to the i32 discriminant — matching the native-Rust oracle.
+    #[test]
+    fn test_type_info_enum_key_matches_derive() {
+        use int2dds::topic::type_support::{DdsType, TypeSupport};
+        use int2dds::xtypes::{
+            deserialize_dynamic_data, DynamicTypeSupport, HasTypeObject, TypeRegistry,
+        };
+        use std::any::Any;
+
+        #[derive(DdsType)]
+        #[dds_type(crate_path = "int2dds")]
+        enum Color {
+            Red = 0,
+            Green = 5,
+            Blue = 9,
+        }
+        #[derive(DdsType)]
+        #[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+        struct EnumKeyed {
+            #[dds(key)]
+            c: Color,
+            v: i32,
+        }
+
+        let inst = EnumKeyed { c: Color::Green, v: 9 };
+        let oracle = EnumKeyed::get_type_support().compute_key(&inst as &dyn Any);
+        let bytes = inst.serialize().unwrap();
+
+        // Enum builder: IDL enums are i32 -> bit_bound 32, no @default.
+        let mut color_ti = Int2DdsTypeInfo::new_enum("Color".to_string(), 32);
+        color_ti.push_enum_literal("Red".to_string(), 0, false);
+        color_ti.push_enum_literal("Green".to_string(), 5, false);
+        color_ti.push_enum_literal("Blue".to_string(), 9, false);
+
+        assert_eq!(
+            match color_ti.build_type_object() {
+                TypeObject::Complete(c) => c.serialize(),
+                _ => panic!("Expected Complete"),
+            },
+            Color::complete_type_object().serialize(),
+            "FFI enum TypeObject must byte-match derive"
+        );
+
+        let mut outer =
+            Int2DdsTypeInfo::new("EnumKeyed".to_string(), ExtensibilityKind::Appendable);
+        outer.push_nested_field("c".to_string(), &color_ti, INT2DDS_MEMBER_KEY);
+        outer.push_field("v".to_string(), TypeIdentifier::Int32, 0);
+
+        let outer_to = outer.build_type_object();
+        assert_eq!(
+            match &outer_to {
+                TypeObject::Complete(c) => c.serialize(),
+                _ => panic!("Expected Complete"),
+            },
+            EnumKeyed::complete_type_object().serialize(),
+            "outer TypeObject with enum key must byte-match derive"
+        );
+
+        let mut registry = TypeRegistry::new();
+        for (id, obj) in outer.dependency_closure() {
+            registry.register_type_object_with_id(&id, obj);
+        }
+        let dts = DynamicTypeSupport::from_type_object_with_registry(outer_to, &registry)
+            .expect("outer dynamic type must build with enum resolved");
+        let dyn_data = deserialize_dynamic_data(&bytes, dts.dynamic_type())
+            .expect("sample must decode including enum member");
+        let handle = dts.compute_key(&dyn_data);
+
+        assert_eq!(handle, oracle, "enum key must match derive oracle");
+        assert_eq!(*handle.value(), [0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    /// Fixed-array-of-struct @key (`Point[2]`). Element referenced by content-hash wrapped
+    /// in a plain-array id; key resolves to the raw 16-byte inline serialization.
+    #[test]
+    fn test_type_info_array_of_struct_key_matches_derive() {
+        use int2dds::topic::type_support::{DdsType, TypeSupport};
+        use int2dds::xtypes::{
+            deserialize_dynamic_data, DynamicTypeSupport, HasTypeObject, TypeRegistry,
+        };
+        use std::any::Any;
+
+        #[derive(DdsType)]
+        #[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+        struct Point {
+            x: i32,
+            y: i32,
+        }
+        #[derive(DdsType)]
+        #[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+        struct ArrKeyed {
+            #[dds(key)]
+            pts: [Point; 2],
+            v: i32,
+        }
+
+        let inst = ArrKeyed { pts: [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }], v: 9 };
+        let oracle = ArrKeyed::get_type_support().compute_key(&inst as &dyn Any);
+        let bytes = inst.serialize().unwrap();
+
+        let mut point_ti = Int2DdsTypeInfo::new("Point".to_string(), ExtensibilityKind::Appendable);
+        point_ti.push_field("x".to_string(), TypeIdentifier::Int32, 0);
+        point_ti.push_field("y".to_string(), TypeIdentifier::Int32, 0);
+
+        let mut outer = Int2DdsTypeInfo::new("ArrKeyed".to_string(), ExtensibilityKind::Appendable);
+        outer.push_array_of_nested_field("pts".to_string(), &point_ti, 2, INT2DDS_MEMBER_KEY);
+        outer.push_field("v".to_string(), TypeIdentifier::Int32, 0);
+
+        let outer_to = outer.build_type_object();
+        assert_eq!(
+            match &outer_to {
+                TypeObject::Complete(c) => c.serialize(),
+                _ => panic!("Expected Complete"),
+            },
+            ArrKeyed::complete_type_object().serialize(),
+            "outer TypeObject with array-of-struct key must byte-match derive"
+        );
+
+        let mut registry = TypeRegistry::new();
+        for (id, obj) in outer.dependency_closure() {
+            registry.register_type_object_with_id(&id, obj);
+        }
+        let dts = DynamicTypeSupport::from_type_object_with_registry(outer_to, &registry)
+            .expect("outer dynamic type must build with array element resolved");
+        let dyn_data = deserialize_dynamic_data(&bytes, dts.dynamic_type())
+            .expect("sample must decode including array-of-struct member");
+        let handle = dts.compute_key(&dyn_data);
+
+        assert_eq!(handle, oracle, "array-of-struct key must match derive oracle");
+        assert_eq!(*handle.value(), [0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4]);
+    }
+
+    /// Sequence-of-struct @key (`sequence<Point>`). Element referenced by content-hash
+    /// wrapped in a plain-sequence id; the >16-byte key hashes (MD5) — must match derive.
+    #[test]
+    fn test_type_info_sequence_of_struct_key_matches_derive() {
+        use int2dds::topic::type_support::{DdsType, TypeSupport};
+        use int2dds::xtypes::{
+            deserialize_dynamic_data, DynamicTypeSupport, HasTypeObject, TypeRegistry,
+        };
+        use std::any::Any;
+
+        #[derive(DdsType)]
+        #[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+        struct Point {
+            x: i32,
+            y: i32,
+        }
+        #[derive(DdsType)]
+        #[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+        struct SeqKeyed {
+            #[dds(key)]
+            pts: Vec<Point>,
+            v: i32,
+        }
+
+        let inst = SeqKeyed { pts: vec![Point { x: 1, y: 2 }, Point { x: 3, y: 4 }], v: 9 };
+        let oracle = SeqKeyed::get_type_support().compute_key(&inst as &dyn Any);
+        let bytes = inst.serialize().unwrap();
+
+        let mut point_ti = Int2DdsTypeInfo::new("Point".to_string(), ExtensibilityKind::Appendable);
+        point_ti.push_field("x".to_string(), TypeIdentifier::Int32, 0);
+        point_ti.push_field("y".to_string(), TypeIdentifier::Int32, 0);
+
+        let mut outer = Int2DdsTypeInfo::new("SeqKeyed".to_string(), ExtensibilityKind::Appendable);
+        outer.push_sequence_of_nested_field("pts".to_string(), &point_ti, 0, INT2DDS_MEMBER_KEY);
+        outer.push_field("v".to_string(), TypeIdentifier::Int32, 0);
+
+        let outer_to = outer.build_type_object();
+        assert_eq!(
+            match &outer_to {
+                TypeObject::Complete(c) => c.serialize(),
+                _ => panic!("Expected Complete"),
+            },
+            SeqKeyed::complete_type_object().serialize(),
+            "outer TypeObject with sequence-of-struct key must byte-match derive"
+        );
+
+        let mut registry = TypeRegistry::new();
+        for (id, obj) in outer.dependency_closure() {
+            registry.register_type_object_with_id(&id, obj);
+        }
+        let dts = DynamicTypeSupport::from_type_object_with_registry(outer_to, &registry)
+            .expect("outer dynamic type must build with sequence element resolved");
+        let dyn_data = deserialize_dynamic_data(&bytes, dts.dynamic_type())
+            .expect("sample must decode including sequence-of-struct member");
+        let handle = dts.compute_key(&dyn_data);
+
+        assert_eq!(handle, oracle, "sequence-of-struct key must match derive oracle (MD5)");
+    }
+
+    /// The bitmask builder (`new_bitmask` + `push_bitmask_flag`) must byte-match the derive
+    /// bitmask TypeObject (bit_bound, flag positions/names). Proves the polymorphic builder's
+    /// bitmask arm so bitmask-typed members resolve via the same content-hash machinery.
+    #[test]
+    #[allow(non_upper_case_globals)] // derive emits per-flag consts named after the variants
+    fn test_type_info_bitmask_type_object_matches_derive() {
+        use int2dds::xtypes::HasTypeObject;
+        use int2dds_derive::DdsType;
+
+        #[derive(DdsType)]
+        #[dds_type(crate_path = "int2dds", bitmask, bit_bound = 8)]
+        enum Permissions {
+            #[dds(position = 0)]
+            Read,
+            #[dds(position = 1)]
+            Write,
+            #[dds(position = 5)]
+            Admin,
+        }
+
+        let mut bm = Int2DdsTypeInfo::new_bitmask("Permissions".to_string(), 8);
+        bm.push_bitmask_flag("Read".to_string(), 0);
+        bm.push_bitmask_flag("Write".to_string(), 1);
+        bm.push_bitmask_flag("Admin".to_string(), 5);
+
+        assert_eq!(
+            match bm.build_type_object() {
+                TypeObject::Complete(c) => c.serialize(),
+                _ => panic!("Expected Complete"),
+            },
+            Permissions::complete_type_object().serialize(),
+            "FFI bitmask TypeObject must byte-match derive"
+        );
     }
 }

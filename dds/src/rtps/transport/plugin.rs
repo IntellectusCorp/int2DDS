@@ -7,14 +7,17 @@ use std::net::SocketAddr;
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::locator::Locator;
 use crate::rtps::transport::shm::shm_listener::ShmListener;
+use crate::rtps::transport::tcp::connection_registry::ConnectionRegistry;
+use crate::rtps::transport::tcp::tcp_listener::TcpListener;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
+use bytes::Bytes;
 
 use super::{HybridConfig, TcpConfig, TransportConfig, TransportType, UdpConfig};
 use crate::dcps::infrastructure::qos_policy::PropertyQosPolicy;
 
 /// Intent-based send target, named after the RTPS protocol concept being
 /// delivered rather than the transport mechanism used. Each `TransportPlugin`
-/// picks the mechanism (multicast, unicast fan-out, BIND, SHM write, ...) that
+/// picks the mechanism (multicast, unicast fan-out, framed TCP, SHM write, ...) that
 /// realizes the intent on its own transport.
 pub(crate) enum SendTarget<'a> {
     /// Announce this participant's presence (SPDP).
@@ -30,7 +33,7 @@ pub(crate) enum SendTarget<'a> {
     /// Send endpoint discovery data (SEDP) to a specific remote participant.
     ///
     /// - UDP: sendto(locator address)
-    /// - TCP: BIND handshake + send on discovery logical port
+    /// - TCP: send a discovery-kind frame
     /// - Hybrid: route by locator kind (UDP or TCP)
     /// - SHM: sendto via UDP (discovery is always UDP)
     SEDPDiscovery(&'a Locator),
@@ -38,7 +41,7 @@ pub(crate) enum SendTarget<'a> {
     /// Send user data to a specific remote endpoint.
     ///
     /// - UDP: sendto(locator address)
-    /// - TCP: BIND handshake + send on user_data logical port
+    /// - TCP: send a user-data-kind frame
     /// - Hybrid: route by locator kind (UDP or TCP)
     /// - SHM: route by locator kind (SHM or UDP)
     UserData(&'a Locator),
@@ -46,32 +49,27 @@ pub(crate) enum SendTarget<'a> {
 
 /// Unified message received from any transport source.
 pub(crate) struct IncomingMessage {
-    pub data: Vec<u8>,
+    pub data: Bytes,
     pub source: SocketAddr,
 }
 
 /// Source of incoming messages for a ListeningTask.
 ///
 /// The variant determines the I/O mechanism, not the transport type.
-/// ListeningTask branches on I/O mechanism (2 branches),
-/// not on transport type (which would be N branches).
+/// ListeningTask branches on I/O mechanism rather than transport type.
 pub(crate) enum MessageSource {
-    /// Direct mio-based polling — zero channel overhead.
-    /// Used when a single listener owns the receive path (e.g., UDP-only mode).
-    MioPoll { listener: UdpListener },
+    /// A single datagram listener owning the receive path.
+    Udp { listener: UdpListener },
 
-    /// Direct mio polling for a UDP listener combined with direct ring-buffer
-    /// polling for an SHM listener in the same loop.
-    /// SHM has no file descriptor and cannot register with mio, so it is polled
-    /// alongside UDP (zero-timeout poll + brief CPU yield when both are idle).
-    /// Used by SHM mode for user data unicast where UDP fallback and SHM are
-    /// merged at the listening-task level (no inter-thread channel).
-    MioPollWithShm { listener: UdpListener, shm: ShmListener },
+    /// A shared-memory listener polled in the same loop as its datagram
+    /// fallback. SHM has no file descriptor and cannot register with mio, so
+    /// both are polled directly (zero-timeout poll plus a brief yield when
+    /// idle) instead of being merged over a channel.
+    Shm { listener: UdpListener, shm: ShmListener },
 
-    /// Channel-based receiving.
-    /// Used when the transport internally demultiplexes a single byte stream
-    /// into per-logical-port streams (TCP single-port mux).
-    Channel { rx: crossbeam_channel::Receiver<IncomingMessage> },
+    /// A listener that owns accepted connections and reassembles framed
+    /// streams from them.
+    Stream { listener: TcpListener, shared: std::sync::Arc<ConnectionRegistry> },
 }
 
 /// Transport plugin trait — the only interface RTPS logic depends on.
@@ -83,7 +81,7 @@ pub(crate) trait TransportPlugin: Send + Sync {
     /// Send data with intent-based targeting.
     ///
     /// The caller expresses *what* to do (announce, discovery, user data).
-    /// The implementation decides *how* (multicast, TCP BIND, SHM write, etc.).
+    /// The implementation decides *how* (multicast, framed TCP, SHM write, etc.).
     fn send(&self, data: &[u8], target: &SendTarget) -> io::Result<()>;
 
     /// True iff this plugin can route to `locator`.
@@ -108,6 +106,16 @@ pub(crate) trait TransportPlugin: Send + Sync {
     /// participants. Populated into the SPDP announcement.
     fn advertised_default_unicast_locators(&self) -> Vec<Locator>;
 
+    /// How many bytes may be in flight toward this participant before they
+    /// start being dropped, for advertising in SPDP under the vendor PID. A
+    /// datagram transport answers with the receive buffer the kernel granted
+    /// it; a stream transport answers with the backlog it will hold. `None`
+    /// when a transport has neither - a peer must then treat us as
+    /// non-advertising, not as advertising zero.
+    fn advertised_receive_buffer_size(&self) -> Option<usize> {
+        None
+    }
+
     /// Take ownership of the discovery multicast message source.
     ///
     /// Returns `None` if the transport does not support multicast (e.g., TCP).
@@ -128,6 +136,10 @@ pub(crate) trait TransportPlugin: Send + Sync {
     /// Called once during initialization. The returned `MessageSource`
     /// is moved into `UserUnicastListeningTask`.
     fn take_user_data_unicast_source(&self) -> Option<MessageSource>;
+
+    fn take_stream_source(&self) -> Option<MessageSource> {
+        None
+    }
 
     /// Get the local port number used by this transport's sender.
     fn port(&self) -> u16;

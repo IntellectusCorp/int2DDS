@@ -90,7 +90,7 @@ namespace Int2Dds.Tests
             return null!;
         }
 
-        private static string XtypesDir() => AppContext.BaseDirectory;
+        private static string XtypesDir() => AppDomain.CurrentDomain.BaseDirectory;
 
         [Fact]
         public void XmlFlatRoundTrip()
@@ -119,7 +119,7 @@ namespace Int2Dds.Tests
 
             using var got = Take(reader);
             Assert.Equal(7u, got.GetU32("id"));
-            Assert.Equal(23.5f, got.GetF32("temperature"), 3);
+            Assert.Equal(23.5, (double)got.GetF32("temperature"), 3);
             Assert.True(got.GetBool("active"));
             Assert.Equal("sensor-A", got.GetString("label"));
             Assert.Equal(-100, got.GetI64("count"));
@@ -193,15 +193,15 @@ namespace Int2Dds.Tests
             using (var health = got.GetValue("health"))
                 Assert.Equal((2UL << 7) | 80, health.AsBitset());
 
-            Assert.Equal(1.5f, got.GetF32("home.x"), 3);
-            Assert.Equal(-2.5f, got.GetF32("home.y"), 3);
+            Assert.Equal(1.5, (double)got.GetF32("home.x"), 3);
+            Assert.Equal(-2.5, (double)got.GetF32("home.y"), 3);
 
             using (var pts = got.GetValue("points"))
             {
                 Assert.Equal(DynamicValueKind.Sequence, pts.Kind());
                 Assert.Equal(2, pts.Length());
             }
-            Assert.Equal(20.0f, got.GetF32("points[1].x"), 3);
+            Assert.Equal(20.0, (double)got.GetF32("points[1].x"), 3);
 
             Assert.Equal(100, got.GetI32("samples[0]"));
             Assert.Equal(200, got.GetI32("samples[1]"));

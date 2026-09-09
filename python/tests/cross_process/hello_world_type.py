@@ -14,7 +14,6 @@ from dataclasses import dataclass
 from typing import ClassVar
 
 from int2dds.cdr import CdrReader, CdrWriter, Extensibility
-from int2dds.cdr.writer import CdrKeyWriter
 
 
 @dataclass
@@ -28,7 +27,7 @@ class HelloWorld:
     index: int = 0
     message: str = ""
 
-    def _serialize_cdr(self, xcdr2: bool = True) -> bytes:
+    def _serialize_cdr(self, xcdr2: bool = False) -> bytes:
         w = CdrWriter(extensibility=self._extensibility, xcdr2=xcdr2)
         w.write_u32(self.index)
         w.write_string(self.message)
@@ -38,6 +37,3 @@ class HelloWorld:
     def _deserialize_cdr(cls, data: bytes) -> "HelloWorld":
         r = CdrReader(data)
         return cls(index=r.read_u32(), message=r.read_string())
-
-    def _serialize_key(self) -> bytes:
-        return b""

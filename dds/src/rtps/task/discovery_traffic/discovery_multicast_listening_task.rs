@@ -39,10 +39,12 @@ impl DiscoveryMulticastListeningTask {
 
     pub(crate) fn multicast_listening(&mut self, source: MessageSource) -> std::io::Result<()> {
         match source {
-            MessageSource::MioPoll { mut listener } => self.listen_mio_poll(&mut listener),
-            MessageSource::Channel { rx } => self.listen_channel(&rx),
-            MessageSource::MioPollWithShm { .. } => {
-                unreachable!("MioPollWithShm is only used by user-data unicast")
+            MessageSource::Udp { mut listener } => self.listen_mio_poll(&mut listener),
+            MessageSource::Shm { .. } => {
+                unreachable!("Shm is only used by user-data unicast")
+            }
+            MessageSource::Stream { .. } => {
+                unreachable!("Stream is handled by the stream unicast listening task")
             }
         }
     }
@@ -51,7 +53,7 @@ impl DiscoveryMulticastListeningTask {
         &mut self,
         listener: &mut crate::rtps::transport::udp::udp_listener::UdpListener,
     ) -> std::io::Result<()> {
-        info!("start discovery multicast listening (MioPoll)");
+        info!("start discovery multicast listening (Udp)");
         let mut poll = Poll::new()?;
         let mut events = Events::with_capacity(MAX_EVENTS);
 
@@ -100,39 +102,6 @@ impl DiscoveryMulticastListeningTask {
 
                         self.process_rtps_message(buffer, from_addr);
                     }
-                }
-            }
-        }
-    }
-
-    fn listen_channel(
-        &mut self,
-        rx: &crossbeam_channel::Receiver<crate::rtps::transport::plugin::IncomingMessage>,
-    ) -> std::io::Result<()> {
-        info!("start discovery multicast listening (Channel)");
-
-        loop {
-            match rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(msg) => {
-                    let spdp_logic =
-                        self.spdp_logic.as_ref().as_ref().expect("SpdpLogic is not initialized");
-                    if let Ok(true) = spdp_logic.is_participant_terminated() {
-                        debug!("Detected global termination flag, discovery multicast channel listening terminating...");
-                        return Ok(());
-                    }
-                    self.process_rtps_message(Bytes::from(msg.data), msg.source);
-                }
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                    let spdp_logic =
-                        self.spdp_logic.as_ref().as_ref().expect("SpdpLogic is not initialized");
-                    if let Ok(true) = spdp_logic.is_participant_terminated() {
-                        debug!("Detected global termination flag, discovery multicast channel listening terminating...");
-                        return Ok(());
-                    }
-                }
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                    info!("[DiscoveryMulticast] Channel disconnected, stopping listener");
-                    return Ok(());
                 }
             }
         }
@@ -192,7 +161,7 @@ impl DiscoveryMulticastListeningTask {
                         error!("Failed to handle participant termination message: {:?}", e);
                     }
                 } else if let Err(e) =
-                    spdp_logic.handle_discovered_participant_data(participant_proxy_data)
+                    spdp_logic.handle_discovered_participant_data(participant_proxy_data, from_addr)
                 {
                     error!("Failed to handle discovered participant data: {:?}", e);
                 }

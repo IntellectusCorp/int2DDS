@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process;
 
@@ -526,15 +527,15 @@ fn main() {
 /// Generate the selected outputs for a single input IDL file.
 fn process_file(args: &Args, input_file: &str) {
     // Read input, resolving #include directives into a single translation unit.
-    let source = match preprocess::load_with_includes(
+    let (source, loaded) = match preprocess::load_with_includes_ex(
         std::path::Path::new(input_file),
         &args.include_dirs,
     ) {
-        Ok((s, missing)) => {
+        Ok((s, missing, loaded)) => {
             for inc in &missing {
                 eprintln!("warning: could not resolve #include \"{}\" (use -I <dir>)", inc);
             }
-            s
+            (s, loaded)
         }
         Err(e) => {
             eprintln!("error: cannot read '{}': {}", input_file, e);
@@ -565,6 +566,12 @@ fn process_file(args: &Args, input_file: &str) {
         }
     };
 
+    // Map each #included type to the output module its own file is emitted into,
+    // so codegen can emit a cross-file import (`from <module> import <Leaf>`).
+    // Naming mirrors the per-file auto-naming below (idl_to_output_name); this
+    // assumes every included file is also generated as a sibling module.
+    model.imported.modules = build_import_modules(input_file, &loaded, &args.include_dirs);
+
     // Apply ROS2-compatible type naming : rewrite
     // every registered DDS type name to scope::dds_::Name_. Generated struct/field
     // code is untouched; only the registered/TypeObject name changes.
@@ -588,7 +595,7 @@ fn process_file(args: &Args, input_file: &str) {
     let base_name = naming::idl_to_output_name(idl_filename);
 
     // Auto-name into output_dir for languages allowed by `langs` (None = all).
-    let allowed = |i: usize| args.langs.map_or(true, |s| s[i]);
+    let allowed = |i: usize| args.langs.is_none_or(|s| s[i]);
     let auto = |ext: &str, i: usize| {
         args.output_dir
             .as_ref()
@@ -679,7 +686,9 @@ fn process_file(args: &Args, input_file: &str) {
     if let Some(path) = &rpc_path {
         let rust_opts = codegen::rust::RustOptions { crate_path: args.crate_path.clone() };
         let rpc_opts = codegen::rpc::RpcOptions { crate_path: args.crate_path.clone() };
-        let mut code = String::from("#![allow(non_camel_case_types, dead_code, unused_imports, unreachable_patterns, unused_variables)]\n\n");
+        let mut code = String::from(
+            "#![allow(non_camel_case_types, dead_code, unused_imports, unreachable_patterns, unused_variables)]\n#![allow(clippy::useless_conversion, clippy::clone_on_copy, clippy::redundant_field_names)]\n\n",
+        );
         code.push_str(&codegen::rust::generate(&model, idl_filename, &rust_opts));
         code.push('\n');
         code.push_str(&codegen::rpc::generate(&model, &rpc_opts));
@@ -721,6 +730,45 @@ fn process_file(args: &Args, input_file: &str) {
         }
         eprintln!("generated: {}", path);
     }
+}
+
+/// Build a `qualified/leaf name -> output module basename` map for every type
+/// declared in an `#include`d (non-root) file. Both the qualified and the leaf
+/// name are inserted so codegen can look up a reference written either way; on a
+/// leaf collision across included files the first one wins (an accepted limit).
+fn build_import_modules(
+    root_file: &str,
+    loaded: &[PathBuf],
+    _include_dirs: &[PathBuf],
+) -> HashMap<String, String> {
+    let root_canon = std::fs::canonicalize(root_file).ok();
+    let mut map: HashMap<String, String> = HashMap::new();
+    for file in loaded {
+        // Skip the root file itself; only its includes are imported.
+        if root_canon.is_some() && std::fs::canonicalize(file).ok() == root_canon {
+            continue;
+        }
+        let src = match std::fs::read_to_string(file) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let defs = match parser::parse_idl(&src) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        let names = match resolver::declared_qualified_names(&defs) {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        let fname = file.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        let module = naming::idl_to_output_name(fname);
+        for q in names {
+            let leaf = q.rsplit("::").next().unwrap_or(&q).to_string();
+            map.entry(leaf).or_insert_with(|| module.clone());
+            map.insert(q, module.clone());
+        }
+    }
+    map
 }
 
 /// Write file, creating parent directories if needed

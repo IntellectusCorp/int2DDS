@@ -27,6 +27,16 @@ impl Default for COptions {
     }
 }
 
+/// Element kinds whose sequence/array bodies can be moved with one call.
+/// See `CGen::bulk_element` for what qualifies and why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BulkElem {
+    /// Fixed-width primitive whose C memory bytes are its CDR wire bytes, plus that width.
+    Prim(u32),
+    /// `boolean` — one octet on the wire, but the copy needs a 0/1 normalization pass.
+    Bool,
+}
+
 pub fn generate(model: &IdlModel, idl_filename: &str, opts: &COptions) -> String {
     let mut gen = CGen { out: String::new(), opts, model };
     gen.emit_file(idl_filename);
@@ -459,16 +469,20 @@ impl<'a> CGen<'a> {
         self.emit_serialize_cdr(s);
         self.raw("\n");
 
+        // writer-anchored serialize: xcdr2 follows the writer's effective DataRepresentation
+        self.emit_serialize_for_fn(s);
+        self.raw("\n");
+
         // deserialize_cdr
         self.emit_deserialize_cdr(s);
         self.raw("\n");
 
-        // serialize_key
-        self.emit_serialize_key(s);
-        self.raw("\n");
-
         // type_info builder (for DDS-XTypes discovery)
         self.emit_type_info_fn(s);
+        self.raw("\n");
+
+        // create_topic helper (extensibility carried by the type, no arg)
+        self.emit_create_topic_fn(s);
     }
 
     fn emit_struct_typedef(&mut self, s: &ResolvedStruct) {
@@ -653,10 +667,16 @@ impl<'a> CGen<'a> {
                 self.raw("    }\n");
             }
             ExtensibilityKind::Mutable => {
-                self.raw("    size_t dh;\n");
-                self.raw("    int2dds_cdr_write_dheader_begin(&w, &dh);\n");
+                self.raw("    size_t dh = 0;\n");
+                self.raw("    if (w.xcdr2) {\n");
+                self.raw("        int2dds_cdr_write_dheader_begin(&w, &dh);\n");
+                self.raw("    }\n");
                 self.emit_serialize_fields_mutable(s, "val");
-                self.raw("    int2dds_cdr_write_dheader_finalize(&w, dh);\n");
+                self.raw("    if (w.xcdr2) {\n");
+                self.raw("        int2dds_cdr_write_dheader_finalize(&w, dh);\n");
+                self.raw("    } else {\n");
+                self.raw("        int2dds_cdr_write_pid_sentinel(&w);\n");
+                self.raw("    }\n");
             }
         }
 
@@ -686,11 +706,8 @@ impl<'a> CGen<'a> {
                 self.raw("    }\n");
             }
             ExtensibilityKind::Mutable => {
-                self.raw("    uint32_t obj_size;\n    size_t start_pos;\n");
-                self.raw("    int2dds_cdr_read_dheader(&r, &obj_size, &start_pos);\n");
                 self.raw("    memset(val_out, 0, sizeof(*val_out));\n");
                 self.emit_deserialize_fields_mutable(s, "val_out");
-                self.raw("    int2dds_cdr_read_dheader_end(&r, obj_size, start_pos);\n");
             }
         }
 
@@ -730,15 +747,33 @@ impl<'a> CGen<'a> {
                 self.raw("    }\n");
             }
             ExtensibilityKind::Mutable => {
-                // Mutable always requires XCDR2 (DHEADER + EMHEADER, DHEADER-bounded, no sentinel)
-                self.raw("    size_t dh;\n");
-                self.raw("    int2dds_cdr_write_dheader_begin(&w, &dh);\n");
+                // XCDR2: DHEADER + EMHEADER (DHEADER-bounded, no sentinel)
+                // XCDR1: PL_CDR parameter list (PID headers, sentinel-terminated)
+                self.raw("    size_t dh = 0;\n");
+                self.raw("    if (w.xcdr2) {\n");
+                self.raw("        int2dds_cdr_write_dheader_begin(&w, &dh);\n");
+                self.raw("    }\n");
                 self.emit_serialize_fields_mutable(s, "val");
-                self.raw("    int2dds_cdr_write_dheader_finalize(&w, dh);\n");
+                self.raw("    if (w.xcdr2) {\n");
+                self.raw("        int2dds_cdr_write_dheader_finalize(&w, dh);\n");
+                self.raw("    } else {\n");
+                self.raw("        int2dds_cdr_write_pid_sentinel(&w);\n");
+                self.raw("    }\n");
             }
         }
 
         self.raw("    return w.error == INT2DDS_CDR_OK ? int2dds_cdr_writer_size(&w) : 0;\n}\n");
+    }
+
+    fn emit_serialize_for_fn(&mut self, s: &ResolvedStruct) {
+        self.raw(&format!(
+            "static inline size_t {}_serialize_for(\n    const Int2DdsDataWriter *writer,\n    const {} *val,\n    uint8_t *buf,\n    size_t capacity)\n{{\n",
+            s.name, s.name
+        ));
+        self.raw(&format!(
+            "    return {}_serialize_cdr(val, buf, capacity,\n        int2dds_datawriter_data_representation(writer) == INT2DDS_QOS_DATA_REPR_XCDR2);\n}}\n",
+            s.name
+        ));
     }
 
     fn make_field_accessor(&self, m: &ResolvedMember, prefix: &str, field_name: &str) -> String {
@@ -781,16 +816,28 @@ impl<'a> CGen<'a> {
     fn emit_serialize_fields_mutable(&mut self, s: &ResolvedStruct, prefix: &str) {
         for (i, m) in s.members.iter().enumerate() {
             let id = m.member_id.unwrap_or(i as u32);
+            let mu = if m.must_understand { "true" } else { "false" };
             let field_name = naming::escape_keyword(&m.name, naming::TargetLang::C);
             let accessor = self.make_field_accessor(m, prefix, &field_name);
             self.raw("    {\n");
             self.raw("        size_t em;\n");
+            self.raw("        if (w.xcdr2) {\n");
             self.raw(&format!(
-                "        int2dds_cdr_write_emheader_begin(&w, {}, false, &em);\n",
-                id
+                "            int2dds_cdr_write_emheader_begin(&w, {}, {}, &em);\n",
+                id, mu
             ));
+            self.raw("        } else {\n");
+            self.raw(&format!("            int2dds_cdr_write_pid_begin(&w, {}, &em);\n", id));
+            self.raw("        }\n");
             self.emit_write_field_indented(&m.resolved_type, &accessor, "        ");
-            self.raw("        int2dds_cdr_write_emheader_finalize(&w, em);\n");
+            self.raw("        if (w.xcdr2) {\n");
+            self.raw("            int2dds_cdr_write_emheader_finalize(&w, em);\n");
+            self.raw("        } else {\n");
+            self.raw(&format!(
+                "            int2dds_cdr_write_pid_finalize(&w, {}, {}, em);\n",
+                id, mu
+            ));
+            self.raw("        }\n");
             self.raw("    }\n");
         }
     }
@@ -868,19 +915,37 @@ impl<'a> CGen<'a> {
                     "{}int2dds_cdr_write_seq_header(&w, {}.length);\n",
                     indent, accessor
                 ));
-                self.raw(&format!(
-                    "{}for (uint32_t _i = 0; _i < {}.length; _i++) {{\n",
-                    indent, accessor
-                ));
-                let elem_accessor = format!("{}.data[_i]", accessor);
-                self.emit_write_field_indented(element, &elem_accessor, &format!("{}    ", indent));
-                self.raw(&format!("{}}}\n", indent));
+                if let Some(kind) = self.bulk_element(element) {
+                    let data = format!("{}.data", accessor);
+                    let count = format!("{}.length", accessor);
+                    self.emit_bulk_write(kind, &data, &count, indent);
+                } else {
+                    self.raw(&format!(
+                        "{}for (uint32_t _i = 0; _i < {}.length; _i++) {{\n",
+                        indent, accessor
+                    ));
+                    let elem_accessor = format!("{}.data[_i]", accessor);
+                    self.emit_write_field_indented(
+                        element,
+                        &elem_accessor,
+                        &format!("{}    ", indent),
+                    );
+                    self.raw(&format!("{}}}\n", indent));
+                }
             }
             ResolvedType::Array { element, size } => {
-                self.raw(&format!("{}for (uint32_t _i = 0; _i < {}; _i++) {{\n", indent, size));
-                let elem_accessor = format!("{}[_i]", accessor);
-                self.emit_write_field_indented(element, &elem_accessor, &format!("{}    ", indent));
-                self.raw(&format!("{}}}\n", indent));
+                if let Some(kind) = self.bulk_element(element) {
+                    self.emit_bulk_write(kind, accessor, &size.to_string(), indent);
+                } else {
+                    self.raw(&format!("{}for (uint32_t _i = 0; _i < {}; _i++) {{\n", indent, size));
+                    let elem_accessor = format!("{}[_i]", accessor);
+                    self.emit_write_field_indented(
+                        element,
+                        &elem_accessor,
+                        &format!("{}    ", indent),
+                    );
+                    self.raw(&format!("{}}}\n", indent));
+                }
             }
             ResolvedType::Map { key, value, .. } => {
                 let needs_dh = Self::sequence_element_needs_dheader(key)
@@ -981,11 +1046,8 @@ impl<'a> CGen<'a> {
                 self.raw("    }\n");
             }
             ExtensibilityKind::Mutable => {
-                self.raw("    uint32_t obj_size;\n    size_t start_pos;\n");
-                self.raw("    int2dds_cdr_read_dheader(&r, &obj_size, &start_pos);\n");
                 self.raw("    memset(val_out, 0, sizeof(*val_out));\n");
                 self.emit_deserialize_fields_mutable(s, "val_out");
-                self.raw("    int2dds_cdr_read_dheader_end(&r, obj_size, start_pos);\n");
             }
         }
 
@@ -1012,28 +1074,48 @@ impl<'a> CGen<'a> {
     }
 
     fn emit_deserialize_fields_mutable(&mut self, s: &ResolvedStruct, prefix: &str) {
-        self.raw("    size_t _d_end = start_pos + obj_size;\n");
-        self.raw("    while (int2dds_cdr_reader_position(&r) < _d_end) {\n");
-        self.raw("        uint32_t mid, dlen;\n        bool mu;\n");
+        self.raw("    if (r.xcdr2) {\n");
+        self.raw("        uint32_t obj_size;\n        size_t start_pos;\n");
+        self.raw("        int2dds_cdr_read_dheader(&r, &obj_size, &start_pos);\n");
+        self.raw("        size_t _d_end = start_pos + obj_size;\n");
+        self.raw("        while (int2dds_cdr_reader_position(&r) < _d_end) {\n");
+        self.raw("            uint32_t mid, dlen;\n            bool mu;\n");
         self.raw(
-            "        if (!int2dds_cdr_read_emheader(&r, &mid, &dlen, &mu))\n            return false;\n",
+            "            if (!int2dds_cdr_read_emheader(&r, &mid, &dlen, &mu))\n                break;\n",
         );
-        self.raw("        switch (mid) {\n");
+        self.emit_mutable_member_switch(s, prefix, "            ");
+        self.raw("        }\n");
+        self.raw("        int2dds_cdr_read_dheader_end(&r, obj_size, start_pos);\n");
+        self.raw("    } else {\n");
+        self.raw("        for (;;) {\n");
+        self.raw("            uint32_t mid, dlen;\n            bool sen;\n");
+        self.raw(
+            "            if (!int2dds_cdr_read_pid_header(&r, &mid, &dlen, &sen) || sen)\n                break;\n",
+        );
+        self.raw("            size_t mstart = int2dds_cdr_reader_position(&r);\n");
+        self.emit_mutable_member_switch(s, prefix, "            ");
+        self.raw("            size_t mused = int2dds_cdr_reader_position(&r) - mstart;\n");
+        self.raw("            if (mused < dlen) {\n");
+        self.raw("                int2dds_cdr_skip_bytes(&r, dlen - mused);\n");
+        self.raw("            }\n");
+        self.raw("        }\n");
+        self.raw("    }\n");
+    }
 
+    fn emit_mutable_member_switch(&mut self, s: &ResolvedStruct, prefix: &str, indent: &str) {
+        self.raw(&format!("{}switch (mid) {{\n", indent));
         for (i, m) in s.members.iter().enumerate() {
             let id = m.member_id.unwrap_or(i as u32);
             let field_name = naming::escape_keyword(&m.name, naming::TargetLang::C);
             let accessor = self.make_field_accessor(m, prefix, &field_name);
-            self.raw(&format!("        case {}:\n", id));
-            self.emit_read_field_indented(&m.resolved_type, &accessor, "            ");
-            self.raw("            break;\n");
+            self.raw(&format!("{}case {}:\n", indent, id));
+            self.emit_read_field_indented(&m.resolved_type, &accessor, &format!("{}    ", indent));
+            self.raw(&format!("{}    break;\n", indent));
         }
-
-        self.raw("        default:\n");
-        self.raw("            int2dds_cdr_skip_bytes(&r, dlen);\n");
-        self.raw("            break;\n");
-        self.raw("        }\n");
-        self.raw("    }\n");
+        self.raw(&format!("{}default:\n", indent));
+        self.raw(&format!("{}    int2dds_cdr_skip_bytes(&r, dlen);\n", indent));
+        self.raw(&format!("{}    break;\n", indent));
+        self.raw(&format!("{}}}\n", indent));
     }
 
     fn emit_read_field(&mut self, ty: &ResolvedType, accessor: &str) {
@@ -1127,6 +1209,10 @@ impl<'a> CGen<'a> {
                     indent, accessor
                 ));
 
+                let bulk = self.bulk_element(element);
+                let data = format!("{}.data", accessor);
+                let count = format!("{}.length", accessor);
+
                 // Pointer mode + unbounded: auto-allocate the data array
                 if self.opts.string_mode == StringMode::Pointer && bound.is_none() {
                     let elem_c = self.type_to_c_base(element);
@@ -1136,21 +1222,27 @@ impl<'a> CGen<'a> {
                         indent, accessor, elem_c, accessor, elem_c
                     ));
                     self.raw(&format!("{}    if ({}.data) {{\n", indent, accessor));
-                    self.raw(&format!(
-                        "{}        for (uint32_t _i = 0; _i < {}.length; _i++) {{\n",
-                        indent, accessor
-                    ));
-                    let elem_accessor = format!("{}.data[_i]", accessor);
-                    self.emit_read_field_indented(
-                        element,
-                        &elem_accessor,
-                        &format!("{}            ", indent),
-                    );
-                    self.raw(&format!("{}        }}\n", indent));
+                    if let Some(kind) = bulk {
+                        self.emit_bulk_read(kind, &data, &count, &format!("{}        ", indent));
+                    } else {
+                        self.raw(&format!(
+                            "{}        for (uint32_t _i = 0; _i < {}.length; _i++) {{\n",
+                            indent, accessor
+                        ));
+                        let elem_accessor = format!("{}.data[_i]", accessor);
+                        self.emit_read_field_indented(
+                            element,
+                            &elem_accessor,
+                            &format!("{}            ", indent),
+                        );
+                        self.raw(&format!("{}        }}\n", indent));
+                    }
                     self.raw(&format!("{}    }}\n", indent));
                     self.raw(&format!("{}}}\n", indent));
-                } else {
+                } else if let Some(kind) = bulk {
                     // Bounded or FixedArray mode: data is inline array or pre-allocated
+                    self.emit_bulk_read(kind, &data, &count, indent);
+                } else {
                     self.raw(&format!(
                         "{}for (uint32_t _i = 0; _i < {}.length; _i++) {{\n",
                         indent, accessor
@@ -1165,10 +1257,18 @@ impl<'a> CGen<'a> {
                 }
             }
             ResolvedType::Array { element, size } => {
-                self.raw(&format!("{}for (uint32_t _i = 0; _i < {}; _i++) {{\n", indent, size));
-                let elem_accessor = format!("{}[_i]", accessor);
-                self.emit_read_field_indented(element, &elem_accessor, &format!("{}    ", indent));
-                self.raw(&format!("{}}}\n", indent));
+                if let Some(kind) = self.bulk_element(element) {
+                    self.emit_bulk_read(kind, accessor, &size.to_string(), indent);
+                } else {
+                    self.raw(&format!("{}for (uint32_t _i = 0; _i < {}; _i++) {{\n", indent, size));
+                    let elem_accessor = format!("{}[_i]", accessor);
+                    self.emit_read_field_indented(
+                        element,
+                        &elem_accessor,
+                        &format!("{}    ", indent),
+                    );
+                    self.raw(&format!("{}}}\n", indent));
+                }
             }
             ResolvedType::Map { key, value, .. } => {
                 let needs_dh = Self::sequence_element_needs_dheader(key)
@@ -1243,41 +1343,72 @@ impl<'a> CGen<'a> {
         }
     }
 
-    // ---- Key Serialization ----
+    // ---- Type Info (DDS-XTypes discovery) ----
 
-    fn emit_serialize_key(&mut self, s: &ResolvedStruct) {
-        let key_fields: Vec<&ResolvedMember> = s.members.iter().filter(|m| m.is_key).collect();
-
-        self.raw(&format!(
-            "static inline size_t {}_serialize_key(\n    const {} *val,\n    uint8_t *buf,\n    size_t capacity)\n{{\n",
-            s.name, s.name
-        ));
-
-        if key_fields.is_empty() {
-            // No key fields -> empty key (key=NULL, key_len=0 in FFI)
-            self.raw("    (void)val; (void)buf; (void)capacity;\n");
-            self.raw("    return 0;\n");
-        } else {
-            // Key serialization: big-endian, XCDR2, no encapsulation header
-            self.raw("    Int2DdsCdrWriter w;\n");
-            self.raw("    int2dds_cdr_writer_init(&w, buf, capacity, false, true); /* BE, XCDR2, no header */\n");
-
-            // Sort by member_id if present
-            let mut sorted_keys = key_fields;
-            sorted_keys.sort_by_key(|m| m.member_id.unwrap_or(u32::MAX));
-
-            for m in &sorted_keys {
-                let field_name = naming::escape_keyword(&m.name, naming::TargetLang::C);
-                let accessor = self.make_field_accessor(m, "val", &field_name);
-                self.emit_write_field_indented(&m.resolved_type, &accessor, "    ");
+    /// How a sequence or array of `element` can be moved in one call, if at all.
+    ///
+    /// CDR lays same-width primitives out back to back — no inter-element padding, and no
+    /// per-element transform beyond byte order — so for these element types one aligned
+    /// bulk copy is byte-identical to the per-element loop. That matters for large
+    /// payloads: the loop costs a bounds check per element and its loop-carried error flag
+    /// blocks vectorization.
+    ///
+    /// Deliberately excluded:
+    /// - `enum`, because the generated C type is a real `typedef enum` whose size is
+    ///   implementation-defined, while the wire (and the Rust side) use int32.
+    /// - `struct`, `string`, `wstring`, `map` and nested sequences/arrays, because C
+    ///   in-memory layout does not match CDR layout for aggregates and variable-length
+    ///   elements. Nested arrays fall through to the loop, which then recurses per
+    ///   dimension and reaches this fast path on the innermost one.
+    fn bulk_element(&self, element: &ResolvedType) -> Option<BulkElem> {
+        match element {
+            ResolvedType::Bool => Some(BulkElem::Bool),
+            ResolvedType::U8 | ResolvedType::UInt8 | ResolvedType::I8 | ResolvedType::Char => {
+                Some(BulkElem::Prim(1))
             }
-
-            self.raw("    return w.error == INT2DDS_CDR_OK ? int2dds_cdr_writer_size(&w) : 0;\n");
+            ResolvedType::I16 | ResolvedType::U16 | ResolvedType::WChar => Some(BulkElem::Prim(2)),
+            ResolvedType::I32 | ResolvedType::U32 | ResolvedType::F32 => Some(BulkElem::Prim(4)),
+            ResolvedType::I64 | ResolvedType::U64 | ResolvedType::F64 => Some(BulkElem::Prim(8)),
+            ResolvedType::Bitmask(name) => {
+                // emit_bitmask() declares a plain uintN_t typedef of exactly the wire width.
+                let bits = self.find_bitmask(name).map(|b| b.bit_bound).unwrap_or(32);
+                Some(BulkElem::Prim(match bits {
+                    0..=8 => 1,
+                    9..=16 => 2,
+                    17..=32 => 4,
+                    _ => 8,
+                }))
+            }
+            _ => None,
         }
-        self.raw("}\n");
     }
 
-    // ---- Type Info (DDS-XTypes discovery) ----
+    /// Emit the single call that writes a whole bulk-eligible element run.
+    ///
+    /// `boolean` needs no special case here: a valid C `bool` already holds 0 or 1, which is
+    /// exactly what `int2dds_cdr_write_bool` would emit for it. Only the read side has to
+    /// normalize, because there the octet comes off the wire.
+    fn emit_bulk_write(&mut self, kind: BulkElem, data: &str, count: &str, indent: &str) {
+        let size = match kind {
+            BulkElem::Prim(size) => size,
+            BulkElem::Bool => 1,
+        };
+        self.raw(&format!(
+            "{}int2dds_cdr_write_prim_array(&w, {}, {}, {});\n",
+            indent, data, count, size
+        ));
+    }
+
+    /// Emit the single call that reads a whole bulk-eligible element run.
+    fn emit_bulk_read(&mut self, kind: BulkElem, data: &str, count: &str, indent: &str) {
+        let call = match kind {
+            BulkElem::Prim(size) => {
+                format!("int2dds_cdr_read_prim_array(&r, {}, {}, {})", data, count, size)
+            }
+            BulkElem::Bool => format!("int2dds_cdr_read_bool_array(&r, {}, {})", data, count),
+        };
+        self.raw(&format!("{}{};\n", indent, call));
+    }
 
     /// Check if a sequence needs an outer DHEADER in XCDR2.
     fn sequence_element_needs_dheader(element: &ResolvedType) -> bool {
@@ -1466,10 +1597,149 @@ impl<'a> CGen<'a> {
         }
     }
 
-    fn emit_type_info_field(&mut self, m: &ResolvedMember) {
+    /// Resolve a struct by qualified or leaf name across the local model and imported
+    /// (`#include`d) types, mirroring the C#/Python generators' `find_struct`.
+    fn find_struct(&self, name: &str) -> Option<&ResolvedStruct> {
+        let simple = name.rsplit("::").next().unwrap_or(name);
+        self.model
+            .structs
+            .iter()
+            .chain(self.model.imported.structs.iter())
+            .find(|s| s.name == simple)
+    }
+
+    /// True when `name` resolves to a struct (local or imported), not an enum, bitmask,
+    /// bitset, union, or externally-declared type. Only such types have a generated
+    /// `{Name}_type_info()` builder to reference by content-hash.
+    fn is_model_struct(&self, name: &str) -> bool {
+        self.find_struct(name).is_some()
+    }
+
+    /// All members including inherited ones (ancestors first), matching the C#/Python
+    /// `collect_all_members` so the type_info metadata (and thus KeyHash) covers base
+    /// `@key` members.
+    fn collect_all_members(&self, s: &ResolvedStruct) -> Vec<ResolvedMember> {
+        let mut all = Vec::new();
+        if let Some(base_name) = &s.base_type {
+            if let Some(base) = self.find_struct(base_name) {
+                all.extend(self.collect_all_members(base));
+            }
+        }
+        all.extend(s.members.clone());
+        all
+    }
+
+    /// The nested in-model struct this member would reference via a content-hash
+    /// `{Name}_type_info()` call, if any — the same edges `try_emit_nested_ti` follows.
+    fn nested_struct_target(m: &ResolvedMember) -> Option<&str> {
+        match &m.resolved_type {
+            ResolvedType::Struct(sname) if !m.is_external => Some(sname.as_str()),
+            ResolvedType::Sequence { element, .. } | ResolvedType::Array { element, .. } => {
+                match element.as_ref() {
+                    ResolvedType::Struct(ename) => Some(ename.as_str()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// True when the content-hash nested edges out of `from` can reach `target`
+    /// (including `from == target`). Carries its own `visited` set so this walk cannot
+    /// itself loop forever on the very cyclic input it guards against.
+    fn nested_reaches(
+        &self,
+        from: &str,
+        target: &str,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        let from_simple = from.rsplit("::").next().unwrap_or(from);
+        let target_simple = target.rsplit("::").next().unwrap_or(target);
+        if from_simple == target_simple {
+            return true;
+        }
+        if !visited.insert(from_simple.to_string()) {
+            return false;
+        }
+        let Some(s) = self.find_struct(from_simple) else {
+            return false;
+        };
+        for m in self.collect_all_members(s) {
+            if let Some(next) = Self::nested_struct_target(&m) {
+                if self.nested_reaches(next, target_simple, visited) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// If `m` is (or is a sequence/array of) an in-model, non-@external nested struct,
+    /// emit its content-hash type_info field — build the nested `{Name}_type_info()`, add
+    /// it via the matching `*_nested_field` builder (content-hash CompleteTypeId, so the
+    /// runtime resolves the full definition and recurses into @key members, matching derive
+    /// and the C#/Python bindings), then destroy it — and return true. Otherwise return
+    /// false so the caller falls back to the name-hash / scalar paths.
+    fn try_emit_nested_ti(&mut self, m: &ResolvedMember, flags: &str, owner: &str) -> bool {
+        let name = &m.name;
+        let var = format!("_nti_{}", name);
+        let (nested_name, add_stmt) = match &m.resolved_type {
+            ResolvedType::Struct(sname) if !m.is_external && self.is_model_struct(sname) => (
+                sname,
+                format!(
+                    "int2dds_type_info_add_nested_field(ti, \"{}\", {}, {});",
+                    name, var, flags
+                ),
+            ),
+            ResolvedType::Sequence { element, bound } => match element.as_ref() {
+                ResolvedType::Struct(ename) if self.is_model_struct(ename) => (
+                    ename,
+                    format!(
+                        "int2dds_type_info_add_sequence_of_nested_field(ti, \"{}\", {}, {}, {});",
+                        name,
+                        var,
+                        bound.unwrap_or(0),
+                        flags
+                    ),
+                ),
+                _ => return false,
+            },
+            ResolvedType::Array { element, size } => match element.as_ref() {
+                ResolvedType::Struct(ename) if self.is_model_struct(ename) => (
+                    ename,
+                    format!(
+                        "int2dds_type_info_add_array_of_nested_field(ti, \"{}\", {}, {}, {});",
+                        name, var, size, flags
+                    ),
+                ),
+                _ => return false,
+            },
+            _ => return false,
+        };
+        // Cycle guard: emitting `{nested}_type_info()` inside `{owner}_type_info()` must not
+        // close a call-graph cycle (self- or mutual recursion), or the generated C recurses
+        // forever. Fall back to the name-hash path for the cyclic edge.
+        let mut visited = std::collections::HashSet::new();
+        if self.nested_reaches(nested_name, owner, &mut visited) {
+            return false;
+        }
+        let simple = nested_name.rsplit("::").next().unwrap_or(nested_name);
+        self.raw("    {\n");
+        self.raw(&format!("        Int2DdsTypeInfo *{} = {}_type_info();\n", var, simple));
+        self.raw(&format!("        {}\n", add_stmt));
+        self.raw(&format!("        int2dds_type_info_destroy({});\n", var));
+        self.raw("    }\n");
+        true
+    }
+
+    fn emit_type_info_field(&mut self, m: &ResolvedMember, owner: &str) {
         let name = &m.name;
         let ty = &m.resolved_type;
         let flags = Self::member_flags_literal(m);
+
+        if self.try_emit_nested_ti(m, &flags, owner) {
+            return;
+        }
 
         match ty {
             ResolvedType::Sequence { element, bound }
@@ -1571,11 +1841,31 @@ impl<'a> CGen<'a> {
             s.qualified_name, ext_int
         ));
 
-        for m in &s.members {
-            self.emit_type_info_field(m);
+        let members = self.collect_all_members(s);
+        for m in &members {
+            self.emit_type_info_field(m, &s.name);
         }
 
         self.raw("    return ti;\n}\n");
+    }
+
+    /// Emit a `{Name}_create_topic` convenience wrapper. Extensibility is carried by the
+    /// type through `{Name}_type_info()`, so C callers create a topic without passing an
+    /// extensibility argument — parity with the Python/C# bindings, where extensibility is
+    /// a property of the type rather than a `create_topic` parameter. Works for keyed types
+    /// too, since the type-info path derives the key from the TypeObject. Requires
+    /// `int2dds-ffi.h` (same prerequisite as `{Name}_type_info`).
+    fn emit_create_topic_fn(&mut self, s: &ResolvedStruct) {
+        self.raw(&format!(
+            "static inline Int2DdsRet {}_create_topic(const Int2DdsParticipant *participant, const char *topic_name, const Int2DdsTopicQos *qos, Int2DdsTopic **topic_out) {{\n",
+            s.name
+        ));
+        self.raw(&format!("    Int2DdsTypeInfo *ti = {}_type_info();\n", s.name));
+        self.raw(
+            "    Int2DdsRet ret = int2dds_create_topic_with_type_info(participant, topic_name, ti, qos, topic_out);\n",
+        );
+        self.raw("    int2dds_type_info_destroy(ti);\n");
+        self.raw("    return ret;\n}\n");
     }
 
     // ---- Memory Management (Pointer mode) ----
@@ -1787,8 +2077,13 @@ mod tests {
         assert!(code.contains("int2dds_cdr_write_u32(&w, val->index)"));
         assert!(code.contains("int2dds_cdr_write_string(&w, val->message)"));
         assert!(code.contains("HelloWorld_deserialize_cdr("));
-        assert!(code.contains("HelloWorld_serialize_key("));
-        assert!(code.contains("return 0;"));
+        assert!(code.contains("HelloWorld_serialize_for("));
+        assert!(code.contains(
+            "int2dds_datawriter_data_representation(writer) == INT2DDS_QOS_DATA_REPR_XCDR2"
+        ));
+        // No key helper is emitted: the core derives the canonical key from the
+        // full serialized sample (see the Python/C# generators).
+        assert!(!code.contains("HelloWorld_serialize_key("));
     }
 
     #[test]
@@ -1806,7 +2101,12 @@ mod tests {
         let model = resolve(defs).unwrap();
         let code = generate(&model, "SensorData.idl", &COptions::default());
 
-        assert!(code.contains("int2dds_cdr_writer_init(&w, buf, capacity, false, true)"));
+        // The key is carried by the advertised TypeObject, not by a generated
+        // key-serialization helper.
+        assert!(code.contains(
+            "int2dds_type_info_add_field(ti, \"sensor_id\", INT2DDS_FIELD_INT32, INT2DDS_MEMBER_KEY)"
+        ));
+        assert!(!code.contains("SensorData_serialize_key("));
         assert!(code.contains("int2dds_cdr_write_i32(&w, val->sensor_id)"));
         assert!(code.contains("char location[129];")); // 128 + 1
     }
@@ -1834,6 +2134,11 @@ mod tests {
         assert!(code.contains("case 0:"));
         assert!(code.contains("case 1:"));
         assert!(code.contains("int2dds_cdr_reader_position(&r) < _d_end"));
+        // PL_CDR1 (XCDR1 mutable) branch
+        assert!(code.contains("int2dds_cdr_write_pid_begin(&w, 0, &em)"));
+        assert!(code.contains("int2dds_cdr_write_pid_finalize(&w, 1, false, em)"));
+        assert!(code.contains("int2dds_cdr_write_pid_sentinel(&w)"));
+        assert!(code.contains("int2dds_cdr_read_pid_header(&r, &mid, &dlen, &sen)"));
     }
 
     #[test]
@@ -2242,8 +2547,8 @@ mod tests {
 
         assert!(code.contains("int32_t data;"));
         assert!(code.contains("int32_t sensor_id;"));
-        assert!(!code.contains("data_"));
-        assert!(!code.contains("sensor_id_"));
+        assert!(!code.contains("->data_"));
+        assert!(!code.contains("->sensor_id_"));
     }
 
     #[test]

@@ -17,7 +17,10 @@ use crate::{
 };
 
 use super::dynamic_data::{DynamicData, DynamicValue};
-use super::dynamic_serialization::{deserialize_dynamic_data, serialize_dynamic_data};
+use super::dynamic_serialization::{
+    deserialize_dynamic_data, deserialize_key_cdr, key_holder_max_size, serialize_dynamic_data,
+    serialize_key_cdr,
+};
 use super::dynamic_type::DynamicType;
 
 /// TypeSupport implementation for DynamicData.
@@ -228,22 +231,9 @@ impl TypeSupport for DynamicTypeSupport {
             .downcast_ref::<DynamicData>()
             .ok_or_else(|| DdsError::Error("Expected DynamicData type".to_string()))?;
 
-        // Serialize only key fields
-        let key_members = self.dynamic_type.key_members();
-        if key_members.is_empty() {
-            return Ok(Arc::from(Vec::new().into_boxed_slice()));
-        }
-
-        // Create a new DynamicData with only key fields
-        let mut key_data = DynamicData::new(self.dynamic_type.clone());
-        for member in &key_members {
-            if let Some(value) = dynamic_data.get_value(&member.name) {
-                let _ = key_data.set_value(&member.name, value.clone());
-            }
-        }
-
-        // Serialize key data
-        serialize_dynamic_data(&key_data, &SerializationFormat::Cdr)
+        // Canonical RTPS KeyHash CDR: big-endian, member order, no encapsulation header.
+        let (key_cdr, _single) = serialize_key_cdr(dynamic_data)?;
+        Ok(Arc::from(key_cdr.into_boxed_slice()))
     }
 
     fn deserialize_key(&self, serialized_key: &[u8]) -> DdsResult<Box<dyn Any + Send + Sync>> {
@@ -251,9 +241,41 @@ impl TypeSupport for DynamicTypeSupport {
             return Ok(Box::new(DynamicData::new(self.dynamic_type.clone())));
         }
 
-        // Deserialize key data
-        let key_data = deserialize_dynamic_data(serialized_key, &self.dynamic_type)?;
+        let key_data = deserialize_key_cdr(serialized_key, &self.dynamic_type)?;
         Ok(Box::new(key_data))
+    }
+
+    fn serialize_key_payload(
+        &self,
+        data: &dyn Any,
+        format: &SerializationFormat,
+    ) -> DdsResult<SerializedData> {
+        // Wrap the canonical KeyHash body (big-endian, max-align-4, headerless FINAL
+        // key-holder projection) as a wire serializedKey with the representation-correct
+        // encapsulation id, so peers frame it as the topic's representation instead of
+        // the default's always-CDR_BE. This is the raw/dynamic path used when no typed
+        // value is available (e.g. FFI dispose from stored key bytes). Byte-exact XCDR1
+        // 8-byte alignment and nested DELIMITED framing are deferred; the reader's
+        // primary instance match is the 16-byte KeyHash inline QoS, not this body.
+        let body = self.serialize_key(data)?;
+        let mut payload = Vec::with_capacity(body.len() + 8);
+        match format {
+            SerializationFormat::Cdr => {
+                payload.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // CDR_BE
+                payload.extend_from_slice(&body);
+            }
+            SerializationFormat::Xcdr { extensibility_kind, .. } => {
+                if matches!(extensibility_kind, ExtensibilityKind::Final) {
+                    payload.extend_from_slice(&[0x00, 0x06, 0x00, 0x00]); // PLAIN_CDR2_BE
+                    payload.extend_from_slice(&body);
+                } else {
+                    payload.extend_from_slice(&[0x00, 0x08, 0x00, 0x00]); // DELIMITED_CDR2_BE
+                    payload.extend_from_slice(&(body.len() as u32).to_be_bytes()); // DHEADER
+                    payload.extend_from_slice(&body);
+                }
+            }
+        }
+        Ok(Arc::from(payload.into_boxed_slice()))
     }
 
     fn compute_key(&self, data: &dyn Any) -> InstanceHandle {
@@ -262,33 +284,17 @@ impl TypeSupport for DynamicTypeSupport {
             None => return InstanceHandle::NIL,
         };
 
-        let key_values = dynamic_data.get_key_values();
-        if key_values.is_empty() {
-            return InstanceHandle::NIL;
-        }
-
-        // Compute MD5 hash of key values
-        let mut hasher_data = Vec::new();
-        for (name, value) in key_values {
-            hasher_data.extend_from_slice(name.as_bytes());
-            hasher_data.push(0); // Separator
-                                 // Simple value serialization for hashing
-            match value {
-                DynamicValue::Int32(v) => hasher_data.extend_from_slice(&v.to_le_bytes()),
-                DynamicValue::Int64(v) => hasher_data.extend_from_slice(&v.to_le_bytes()),
-                DynamicValue::Uint32(v) => hasher_data.extend_from_slice(&v.to_le_bytes()),
-                DynamicValue::Uint64(v) => hasher_data.extend_from_slice(&v.to_le_bytes()),
-                DynamicValue::String(s) => hasher_data.extend_from_slice(s.as_bytes()),
-                _ => {}
+        match serialize_key_cdr(dynamic_data) {
+            Ok((key_cdr, _single)) if !key_cdr.is_empty() => {
+                // RTPS KeyHash step 5: the raw-vs-MD5 decision is made on the key
+                // holder's *maximum* serialized size, not the actual length.
+                match key_holder_max_size(&self.dynamic_type) {
+                    Some(n) if n <= 16 => InstanceHandle::from_key_cdr(&key_cdr),
+                    _ => InstanceHandle::from_key_cdr_hashed(&key_cdr),
+                }
             }
+            _ => InstanceHandle::NIL,
         }
-
-        if hasher_data.is_empty() {
-            return InstanceHandle::NIL;
-        }
-
-        let hash = md5::compute(&hasher_data);
-        InstanceHandle::new(hash.0)
     }
 
     fn is_compute_key_provided(&self) -> bool {
@@ -330,20 +336,20 @@ impl DdsType for DynamicData {
 fn dynamic_value_to_parameter(value: &DynamicValue) -> DdsResult<Parameter> {
     match value {
         DynamicValue::Boolean(v) => Ok(Parameter::IntegerValue(if *v { 1 } else { 0 })),
-        DynamicValue::Int8(v) => Ok(Parameter::IntegerValue(*v as i32)),
-        DynamicValue::Int16(v) => Ok(Parameter::IntegerValue(*v as i32)),
-        DynamicValue::Int32(v) => Ok(Parameter::IntegerValue(*v)),
-        DynamicValue::Int64(v) => Ok(Parameter::IntegerValue(*v as i32)),
-        DynamicValue::Uint8(v) => Ok(Parameter::IntegerValue(*v as i32)),
-        DynamicValue::Uint16(v) => Ok(Parameter::IntegerValue(*v as i32)),
-        DynamicValue::Uint32(v) => Ok(Parameter::IntegerValue(*v as i32)),
-        DynamicValue::Uint64(v) => Ok(Parameter::IntegerValue(*v as i32)),
+        DynamicValue::Int8(v) => Ok(Parameter::IntegerValue(*v as i128)),
+        DynamicValue::Int16(v) => Ok(Parameter::IntegerValue(*v as i128)),
+        DynamicValue::Int32(v) => Ok(Parameter::IntegerValue(*v as i128)),
+        DynamicValue::Int64(v) => Ok(Parameter::IntegerValue(*v as i128)),
+        DynamicValue::Uint8(v) => Ok(Parameter::IntegerValue(*v as i128)),
+        DynamicValue::Uint16(v) => Ok(Parameter::IntegerValue(*v as i128)),
+        DynamicValue::Uint32(v) => Ok(Parameter::IntegerValue(*v as i128)),
+        DynamicValue::Uint64(v) => Ok(Parameter::IntegerValue(*v as i128)),
         DynamicValue::Float32(v) => Ok(Parameter::FloatValue(*v as f64)),
         DynamicValue::Float64(v) => Ok(Parameter::FloatValue(*v)),
         DynamicValue::String(v) => Ok(Parameter::String(v.clone())),
         DynamicValue::WString(v) => Ok(Parameter::String(v.clone())),
         DynamicValue::Char8(v) => Ok(Parameter::CharValue(*v)),
-        DynamicValue::Byte(v) => Ok(Parameter::IntegerValue(*v as i32)),
+        DynamicValue::Byte(v) => Ok(Parameter::IntegerValue(*v as i128)),
         DynamicValue::Enum { name, value: _ } => {
             Ok(Parameter::EnumeratedValue { type_name: None, value: name.clone() })
         }
@@ -600,9 +606,8 @@ mod nested_enum_width_tests {
         let dynamic = build_dynamic_enum_holder(support.dynamic_type());
         let codegen = concrete_cdr(&concrete_enum_holder());
 
-        match serialize_dynamic_data(&dynamic, &SerializationFormat::Cdr) {
-            Ok(bytes) => assert_ne!(bytes.to_vec(), codegen),
-            Err(_) => {}
+        if let Ok(bytes) = serialize_dynamic_data(&dynamic, &SerializationFormat::Cdr) {
+            assert_ne!(bytes.to_vec(), codegen);
         }
     }
 }

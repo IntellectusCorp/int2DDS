@@ -1,104 +1,25 @@
-//! Per-connection state shared across the tasks that drive a connection.
+//! Per-participant state both halves of the TCP transport share.
 //!
-//! Each TCP connection is driven by a reader/writer task pair that both need to
-//! see the same connection state. `ConnectionRegistry` is that single source of truth:
-//! held in an `Arc`, it keeps one `ConnectionEntry` per connection (state,
-//! remote addr, writer inbox, cancel token) and routes inbound frames via
-//! `dispatch` — RTPS data to the DDS layer through the crossbeam senders,
-//! control frames to their handlers. A connection is torn down by firing its
-//! `CancellationToken`.
+//! Socket tuning applied to every stream, the reconnect backoff a failed peer
+//! earns, and the queue that carries a participant's own user data past the
+//! socket. The registry knows nothing about RTPS packet contents.
 
-use std::collections::HashMap;
+use std::io;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::Sender;
 use dashmap::DashMap;
-use log::{debug, warn};
-use tokio::sync::{mpsc, oneshot};
-use tokio_util::sync::CancellationToken;
+use flume::{Receiver, Sender, TrySendError};
+use mio::Waker;
 
 use crate::rtps::common::guid::GuidPrefix;
-use crate::rtps::transport::error::TransportErrorCode;
+use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::plugin::IncomingMessage;
-use crate::rtps::transport::port_manager::PortManager;
-use crate::rtps::transport::tcp::protocol::ControlMsg;
+use crate::rtps::transport::tcp::framing::{TcpBufferPool, TcpFrameKind};
 
-mod handlers;
-
-// ── ID + state types ─────────────────────────────────────────────────────────
-
-/// Unique connection id, issued monotonically by `ConnectionRegistry::next_conn_id`.
-pub(crate) type ConnectionId = usize;
-
-/// Connection state machine — drives which dispatch handler runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ConnectionState {
-    /// Awaiting the first PEER_HELLO(Control conn) or PORT_BIND frame(Data conn).
-    AwaitingFirstMessage,
-    /// Control connection: PORT_RESERVE.
-    Control,
-    /// Data connection: RTPS frames.
-    Active,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ConnectionDirection {
-    /// Accepted by the listener — peer initiated.
-    Inbound,
-    /// Initiated by `TcpSender::do_connect_*`.
-    Outbound,
-}
-
-/// Groups the control / discovery / user-data connections of one remote
-/// participant for per-connection bookkeeping and lookup.
-#[derive(Debug, Default)]
-pub(crate) struct PeerConnectionGroup {
-    pub(crate) control_conn: Option<ConnectionId>,
-    pub(crate) discovery_conn: Option<ConnectionId>,
-    pub(crate) user_data_conn: Option<ConnectionId>,
-}
-
-impl PeerConnectionGroup {
-    fn new() -> Self {
-        Self { control_conn: None, discovery_conn: None, user_data_conn: None }
-    }
-
-    pub(crate) fn all_conns(&self) -> Vec<ConnectionId> {
-        [self.control_conn, self.discovery_conn, self.user_data_conn]
-            .iter()
-            .flatten()
-            .copied()
-            .collect()
-    }
-
-    pub(crate) fn has_data_conns(&self) -> bool {
-        self.discovery_conn.is_some() || self.user_data_conn.is_some()
-    }
-}
-
-/// Per-connection bookkeeping shared across the actor pair.
-pub(crate) struct ConnectionEntry {
-    pub(crate) remote_addr: SocketAddr,
-    pub(crate) state: ConnectionState,
-    pub(crate) direction: ConnectionDirection,
-    pub(crate) bound_logical_port: Option<u16>,
-    pub(crate) remote_guid_prefix: Option<GuidPrefix>,
-    /// writer inbox: pushing a frame here sends it on this connection.
-    pub(crate) writer_tx: mpsc::Sender<Vec<u8>>,
-    /// Child token for the actor pair; cancelling it tears the pair down.
-    pub(crate) cancel: CancellationToken,
-    pub(crate) pending_ack: Option<Arc<Mutex<Option<oneshot::Sender<ControlMsg>>>>>,
-}
-
-// ── ConnectionRegistry ─────────────────────────────────────────────────────────────────
-
-/// OS keepalive tuning (`SO_KEEPALIVE` + `TCP_KEEPIDLE/INTVL/CNT`) applied to
-/// every connection. `time` is the idle period before the first probe,
-/// `interval` the gap between probes, `retries` the unanswered probes tolerated
-/// before the OS tears the connection down.
+/// OS keepalive tuning applied to every inbound and outbound stream.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct KeepaliveParams {
     pub(crate) time: Duration,
@@ -106,8 +27,7 @@ pub(crate) struct KeepaliveParams {
     pub(crate) retries: u32,
 }
 
-/// Socket-level tuning applied to both inbound and outbound
-/// TCP streams. Resolved per participant from `TcpConfig`.
+/// Socket-level tuning resolved per participant from `TcpConfig`.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TcpSocketTuning {
     pub(crate) nodelay: bool,
@@ -129,19 +49,14 @@ impl Default for TcpSocketTuning {
     }
 }
 
-/// Bound how long unacknowledged data may stay outstanding before the OS drops
-/// the connection, so a dead link surfaces as a write error (instead of blocking
-/// the sender ~indefinitely). Applied to every outbound/inbound stream.
-pub(crate) fn apply_unacked_timeout(tcp: &tokio::net::TcpStream, timeout: Option<Duration>) {
+pub(crate) fn apply_unacked_timeout(tcp: &std::net::TcpStream, timeout: Option<Duration>) {
     let Some(t) = timeout else { return };
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
-        // TCP_USER_TIMEOUT, milliseconds.
         let _ = socket2::SockRef::from(tcp).set_tcp_user_timeout(Some(t));
     }
     #[cfg(target_os = "macos")]
     {
-        // TCP_RXT_CONNDROPTIME, whole seconds (round up, min 1).
         const TCP_RXT_CONNDROPTIME: libc::c_int = 0x80;
         use std::os::unix::io::AsRawFd;
         let secs = t.as_secs().max(1) as libc::c_int;
@@ -155,18 +70,13 @@ pub(crate) fn apply_unacked_timeout(tcp: &tokio::net::TcpStream, timeout: Option
             );
         }
     }
-    // TODO(windows): TCP_MAXRTMS (ms) / TCP_MAXRT (s) via setsockopt(IPPROTO_TCP)
-    // once a Windows test environment is available; until then OS keepalive covers it.
     #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
     {
         let _ = (tcp, t);
     }
 }
 
-/// Enable OS keepalive on a inbound/outbound stream so an idle connection whose
-/// peer has silently gone (crash, link loss) is reaped by the kernel without an
-/// application-level keepalive.
-pub(crate) fn apply_keepalive(tcp: &tokio::net::TcpStream, params: Option<KeepaliveParams>) {
+pub(crate) fn apply_keepalive(tcp: &std::net::TcpStream, params: Option<KeepaliveParams>) {
     let Some(p) = params else { return };
     #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
     {
@@ -178,7 +88,6 @@ pub(crate) fn apply_keepalive(tcp: &tokio::net::TcpStream, params: Option<Keepal
     }
     #[cfg(target_os = "windows")]
     {
-        // TCP_KEEPCNT (with_retries) is unsupported on Windows; set idle + interval.
         let ka = socket2::TcpKeepalive::new().with_time(p.time).with_interval(p.interval);
         let _ = socket2::SockRef::from(tcp).set_tcp_keepalive(&ka);
     }
@@ -194,390 +103,276 @@ pub(crate) fn apply_keepalive(tcp: &tokio::net::TcpStream, params: Option<Keepal
     }
 }
 
-/// Apply the full socket tuning (`nodelay`, send/recv buffers, unacked timeout,
-/// keepalive) to a freshly established stream. Shared by the outbound connect
-/// (`create_stream`) and the inbound accept loop so both sides tune identically.
-pub(crate) fn apply_socket_tuning(tcp: &tokio::net::TcpStream, tuning: &TcpSocketTuning) {
+pub(crate) fn apply_socket_tuning(tcp: &std::net::TcpStream, tuning: &TcpSocketTuning) {
     let _ = tcp.set_nodelay(tuning.nodelay);
-    if let Some(sz) = tuning.so_rcvbuf {
-        let _ = socket2::SockRef::from(tcp).set_recv_buffer_size(sz);
+    if let Some(size) = tuning.so_rcvbuf {
+        let _ = socket2::SockRef::from(tcp).set_recv_buffer_size(size);
     }
-    if let Some(sz) = tuning.so_sndbuf {
-        let _ = socket2::SockRef::from(tcp).set_send_buffer_size(sz);
+    if let Some(size) = tuning.so_sndbuf {
+        let _ = socket2::SockRef::from(tcp).set_send_buffer_size(size);
     }
     apply_unacked_timeout(tcp, tuning.unacked_timeout);
     apply_keepalive(tcp, tuning.keepalive);
 }
 
-/// First reconnect-backoff delay after a failed outbound connect.
+const SELF_DELIVERY_BYTE_CAP: usize = 64 * 1024 * 1024;
+const SELF_DELIVERY_COUNT_BACKSTOP: usize = 65_536;
+
 pub(crate) const BACKOFF_BASE: Duration = Duration::from_millis(500);
-/// Cap for the exponential reconnect-backoff growth (kept high on purpose so a
-/// truly unreachable peer is not hammered).
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
 
-/// Per-peer reconnect backoff. After a failed outbound connect, no new connect
-/// to the peer is attempted until `next_attempt`; `delay` doubles per
-/// consecutive failure (capped at `BACKOFF_MAX`). Cleared on an outbound success
-/// or when the peer proves reachable via its inbound PEER_HELLO.
 struct BackoffState {
     next_attempt: Instant,
     delay: Duration,
 }
 
-/// Thread-safe shared state for the mux listener.
+type BackoffKey = (SocketAddr, TcpFrameKind);
+
 pub(crate) struct ConnectionRegistry {
-    pub(crate) domain_id: u32,
-    pub(crate) participant_id: u32,
-    #[allow(dead_code)]
-    local_guid_prefix: GuidPrefix,
-
     pub(crate) tuning: TcpSocketTuning,
+    buffer_pool: Arc<TcpBufferPool>,
+    backoff: DashMap<BackoffKey, BackoffState>,
 
-    pub(crate) connections: DashMap<ConnectionId, ConnectionEntry>,
-    peer_connections: Mutex<HashMap<GuidPrefix, PeerConnectionGroup>>,
-
-    backoff: DashMap<SocketAddr, BackoffState>,
-
-    /// Cookie issued at PORT_RESERVE → consumed at PORT_BIND.
-    cookie_to_port: DashMap<[u8; 16], u16>,
-    cookie_to_guid: DashMap<[u8; 16], GuidPrefix>,
-    next_cookie: AtomicU8,
-
-    pub(crate) next_conn_id: AtomicUsize,
-
-    discovery_tx: Sender<IncomingMessage>,
-    user_data_tx: Sender<IncomingMessage>,
+    self_delivery_tx: Sender<IncomingMessage>,
+    self_delivery_rx: Mutex<Option<Receiver<IncomingMessage>>>,
+    self_delivery_bytes: Arc<AtomicUsize>,
+    self_delivery_waker: Mutex<Option<Arc<Waker>>>,
 }
 
 impl ConnectionRegistry {
     pub(crate) fn new(
-        domain_id: u32,
-        participant_id: u32,
-        local_guid_prefix: GuidPrefix,
+        _domain_id: u32,
+        _participant_id: u32,
+        _local_guid_prefix: GuidPrefix,
         tuning: TcpSocketTuning,
-        discovery_tx: Sender<IncomingMessage>,
-        user_data_tx: Sender<IncomingMessage>,
     ) -> Self {
+        let (self_delivery_tx, self_delivery_rx) = flume::bounded(SELF_DELIVERY_COUNT_BACKSTOP);
         Self {
-            domain_id,
-            participant_id,
-            local_guid_prefix,
             tuning,
-            connections: DashMap::new(),
-            peer_connections: Mutex::new(HashMap::new()),
+            buffer_pool: TcpBufferPool::new(),
             backoff: DashMap::new(),
-            cookie_to_port: DashMap::new(),
-            cookie_to_guid: DashMap::new(),
-            next_cookie: AtomicU8::new(0x31),
-            next_conn_id: AtomicUsize::new(0),
-            discovery_tx,
-            user_data_tx,
+            self_delivery_tx,
+            self_delivery_rx: Mutex::new(Some(self_delivery_rx)),
+            self_delivery_bytes: Arc::new(AtomicUsize::new(0)),
+            self_delivery_waker: Mutex::new(None),
         }
     }
 
-    // ── basic counters ───────────────────────────────────────────────────────
-
-    pub(crate) fn connection_count(&self) -> usize {
-        self.connections.len()
+    pub(crate) fn set_self_delivery_waker(&self, waker: Arc<Waker>) {
+        if let Ok(mut guard) = self.self_delivery_waker.lock() {
+            *guard = Some(Arc::clone(&waker));
+        }
+        let _ = waker.wake();
     }
 
-    pub(crate) fn peer_count(&self) -> usize {
-        self.peer_connections.lock().expect("peer_connections lock").len()
+    pub(crate) fn clear_self_delivery_waker(&self) {
+        if let Ok(mut guard) = self.self_delivery_waker.lock() {
+            *guard = None;
+        }
     }
 
-    // ── reconnect backoff ──────────────────────────────────────────────────────
+    pub(crate) fn try_receive_self_delivery(&self) -> Option<IncomingMessage> {
+        let message = self.self_delivery_rx.lock().ok()?.as_ref()?.try_recv().ok()?;
+        self.self_delivery_bytes.fetch_sub(message.data.len(), Ordering::AcqRel);
+        Some(message)
+    }
 
-    /// Remaining fail-fast window for `addr`, or `None` if a connect may proceed.
-    pub(crate) fn backoff_remaining(&self, addr: SocketAddr) -> Option<Duration> {
-        let entry = self.backoff.get(&addr)?;
+    pub(crate) fn buffer_pool(&self) -> &Arc<TcpBufferPool> {
+        &self.buffer_pool
+    }
+
+    pub(crate) fn backoff_remaining(&self, key: BackoffKey) -> Option<Duration> {
+        let entry = self.backoff.get(&key)?;
         let now = Instant::now();
         (entry.next_attempt > now).then(|| entry.next_attempt - now)
     }
 
-    /// Record a failed outbound connect: grow the backoff (exponential, capped).
-    pub(crate) fn note_connect_failure(&self, addr: SocketAddr) {
+    pub(crate) fn note_connect_failure(&self, key: BackoffKey, err: &io::Error) {
         let now = Instant::now();
         let mut entry = self
             .backoff
-            .entry(addr)
+            .entry(key)
             .or_insert(BackoffState { next_attempt: now, delay: Duration::ZERO });
-        let delay =
-            if entry.delay.is_zero() { BACKOFF_BASE } else { (entry.delay * 2).min(BACKOFF_MAX) };
+        let delay = if err.kind() == io::ErrorKind::ConnectionRefused || entry.delay.is_zero() {
+            BACKOFF_BASE
+        } else {
+            (entry.delay * 2).min(BACKOFF_MAX)
+        };
         entry.delay = delay;
         entry.next_attempt = now + delay;
     }
 
-    /// Clear a peer's backoff.
-    pub(crate) fn clear_backoff(&self, addr: SocketAddr) {
-        self.backoff.remove(&addr);
+    pub(crate) fn clear_backoff(&self, key: BackoffKey) {
+        self.backoff.remove(&key);
     }
 
-    /// Register a freshly-accepted inbound connection.
-    ///
-    /// Called by `mux_listener::accept_task` after spawning the reader/writer task pair.
-    /// Returns the assigned `ConnectionId` so the caller can keep a local handle
-    /// for logging / metrics.
-    pub(crate) fn register_inbound_connection(
-        &self,
-        remote_addr: SocketAddr,
-        writer_tx: mpsc::Sender<Vec<u8>>,
-        cancel: CancellationToken,
-    ) -> ConnectionId {
-        let conn_id = self.next_conn_id.fetch_add(1, Ordering::SeqCst);
-        self.connections.insert(
-            conn_id,
-            ConnectionEntry {
-                remote_addr,
-                state: ConnectionState::AwaitingFirstMessage,
-                direction: ConnectionDirection::Inbound,
-                bound_logical_port: None,
-                remote_guid_prefix: None,
-                writer_tx,
-                cancel,
-                // Inbound connections never await outbound responses — slot stays None.
-                pending_ack: None,
-            },
-        );
-        conn_id
+    pub(crate) fn clear_peer_backoff(&self, addr: SocketAddr) {
+        self.backoff.retain(|(peer, _), _| *peer != addr);
     }
 
-    /// Register an outbound **control** connection that has just completed
-    /// the PEER_HELLO handshake. The `pending_ack` slot is the single-slot
-    /// oneshot mailbox where `dispatch` will route PORT_RESERVE_ACK /
-    /// PORT_BIND_ACK / Error responses for this connection.
-    ///
-    /// Starts in `Control` state — bypasses `AwaitingFirstMessage` since the
-    /// initial handshake was driven inline by the sender before this entry
-    /// was created. Also pre-registers the peer group so subsequent data
-    /// connections can be grouped under the same GUID.
-    pub(crate) fn register_outbound_control_connection(
+    /// Self-addressed user data bypasses the socket. Local discovery is handled
+    /// by the discovery logic and remains intentionally suppressed.
+    pub(crate) fn deliver_to_self(
         &self,
-        remote_addr: SocketAddr,
-        writer_tx: mpsc::Sender<Vec<u8>>,
-        cancel: CancellationToken,
-        pending_ack: Arc<Mutex<Option<oneshot::Sender<ControlMsg>>>>,
-    ) -> ConnectionId {
-        let conn_id = self.next_conn_id.fetch_add(1, Ordering::SeqCst);
-        let synthetic_guid = addr_to_guid(remote_addr);
-
-        self.connections.insert(
-            conn_id,
-            ConnectionEntry {
-                remote_addr,
-                state: ConnectionState::Control,
-                direction: ConnectionDirection::Outbound,
-                bound_logical_port: None,
-                remote_guid_prefix: Some(synthetic_guid),
-                writer_tx,
-                cancel,
-                pending_ack: Some(pending_ack),
-            },
-        );
-
-        let mut pc = self.peer_connections.lock().expect("peer_connections lock");
-        let group = pc.entry(synthetic_guid).or_insert_with(PeerConnectionGroup::new);
-        group.control_conn = Some(conn_id);
-
-        debug!(
-            "TcpMuxListener: Registered outbound control conn {} (addr={:?})",
-            conn_id, remote_addr
-        );
-        conn_id
-    }
-
-    /// Register an outbound **data** connection that has just completed the
-    /// PORT_BIND handshake. Starts in `Active` state with `bound_logical_port`
-    /// already set, so `dispatch` routes inbound RTPS data straight to the
-    /// crossbeam channels. No `pending_ack` — data connections don't expect
-    /// control responses.
-    pub(crate) fn register_outbound_data_connection(
-        &self,
-        remote_addr: SocketAddr,
-        logical_port: u16,
-        writer_tx: mpsc::Sender<Vec<u8>>,
-        cancel: CancellationToken,
-    ) -> ConnectionId {
-        let conn_id = self.next_conn_id.fetch_add(1, Ordering::SeqCst);
-        let synthetic_guid = addr_to_guid(remote_addr);
-
-        self.connections.insert(
-            conn_id,
-            ConnectionEntry {
-                remote_addr,
-                state: ConnectionState::Active,
-                direction: ConnectionDirection::Outbound,
-                bound_logical_port: Some(logical_port),
-                remote_guid_prefix: Some(synthetic_guid),
-                writer_tx,
-                cancel,
-                pending_ack: None,
-            },
-        );
-
-        let mut pc = self.peer_connections.lock().expect("peer_connections lock");
-        let group = pc.entry(synthetic_guid).or_insert_with(PeerConnectionGroup::new);
-        if PortManager::is_discovery_unicast_port_logically(self.domain_id, logical_port) {
-            group.discovery_conn = Some(conn_id);
-        } else {
-            group.user_data_conn = Some(conn_id);
+        source: SocketAddr,
+        kind: TcpFrameKind,
+        data: &[u8],
+    ) -> io::Result<bool> {
+        if kind != TcpFrameKind::UserData {
+            return Ok(false);
         }
 
-        debug!(
-            "TcpMuxListener: Registered outbound data conn {} (addr={:?}, port={})",
-            conn_id, remote_addr, logical_port
-        );
-        conn_id
-    }
+        let len = data.len();
+        if self
+            .self_delivery_bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                used.checked_add(len).filter(|total| *total <= SELF_DELIVERY_BYTE_CAP)
+            })
+            .is_err()
+        {
+            return Err(transport_io_error(
+                TransportErrorCode::TcpChannelFull,
+                format!("intra-participant queue over byte cap, dropped a {len} byte frame"),
+            ));
+        }
 
-    // ── connection / peer cleanup ────────────────────────────────────────────
-
-    /// Update peer_connections bookkeeping then remove the connection entry.
-    pub(crate) fn remove_connection(&self, conn_id: ConnectionId) {
-        let guid_opt = self.connections.get(&conn_id).and_then(|e| e.remote_guid_prefix);
-        if let Some(guid) = guid_opt {
-            let mut control_removed = false;
-            {
-                let mut pc = self.peer_connections.lock().expect("peer_connections lock");
-                if let Some(group) = pc.get_mut(&guid) {
-                    if group.control_conn == Some(conn_id) {
-                        group.control_conn = None;
-                        control_removed = true;
-                    }
-                    if group.discovery_conn == Some(conn_id) {
-                        group.discovery_conn = None;
-                    }
-                    if group.user_data_conn == Some(conn_id) {
-                        group.user_data_conn = None;
-                    }
-
-                    if group.all_conns().is_empty() {
-                        pc.remove(&guid);
+        let msg = IncomingMessage { data: self.buffer_pool.copy_from_slice(data), source };
+        match self.self_delivery_tx.try_send(msg) {
+            Ok(()) => {
+                if let Ok(guard) = self.self_delivery_waker.lock() {
+                    if let Some(waker) = guard.as_ref() {
+                        let _ = waker.wake();
                     }
                 }
+                Ok(true)
             }
-
-            if control_removed {
-                self.purge_cookies_for_guid(guid);
+            Err(TrySendError::Full(_)) => {
+                self.self_delivery_bytes.fetch_sub(len, Ordering::AcqRel);
+                Err(transport_io_error(
+                    TransportErrorCode::TcpChannelFull,
+                    format!(
+                        "intra-participant queue over count backstop, dropped a {len} byte frame"
+                    ),
+                ))
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.self_delivery_bytes.fetch_sub(len, Ordering::AcqRel);
+                Ok(true)
             }
         }
-        self.remove_connection_inner(conn_id);
-    }
-
-    /// Drop every pending PORT_RESERVE cookie issued for `guid`.
-    fn purge_cookies_for_guid(&self, guid: GuidPrefix) {
-        let stale: Vec<[u8; 16]> =
-            self.cookie_to_guid.iter().filter(|e| *e.value() == guid).map(|e| *e.key()).collect();
-        for cookie in stale {
-            self.cookie_to_guid.remove(&cookie);
-            self.cookie_to_port.remove(&cookie);
-        }
-    }
-
-    /// Tear down every connection (inbound + outbound) grouped under the peer at
-    /// `addr`, cancelling their actor pairs and purging its pending cookies.
-    /// Used by the DDS-unmatch cleanup path so a peer's inbound connections are
-    /// released too — they group under the peer's advertised listener address.
-    pub(crate) fn remove_peer_by_addr(&self, addr: SocketAddr) {
-        let guid = addr_to_guid(addr);
-        let conns = {
-            let mut pc = self.peer_connections.lock().expect("peer_connections lock");
-            pc.remove(&guid).map(|g| g.all_conns()).unwrap_or_default()
-        };
-        for conn_id in conns {
-            self.remove_connection_inner(conn_id);
-        }
-        self.purge_cookies_for_guid(guid);
-    }
-
-    fn remove_connection_inner(&self, conn_id: ConnectionId) {
-        if let Some((_, entry)) = self.connections.remove(&conn_id) {
-            // Wake the reader/writer task pair so they can tear down even if the
-            // caller did not cancel them explicitly.
-            entry.cancel.cancel();
-            debug!("TcpMuxListener: Removed conn {} (addr={:?})", conn_id, entry.remote_addr);
-        }
     }
 }
-
-/// Derive a synthetic GuidPrefix from a remote socket address.
-/// Used to group connections from the same participant when we don't yet
-/// know the real GUID prefix.
-fn addr_to_guid(addr: SocketAddr) -> GuidPrefix {
-    let mut g = [0u8; 12];
-    if let SocketAddr::V4(v4) = addr {
-        g[0..4].copy_from_slice(&v4.ip().octets());
-        g[4..6].copy_from_slice(&v4.port().to_be_bytes());
-    }
-    g
-}
-
-fn send_control(writer_tx: &mpsc::Sender<Vec<u8>>, msg: &ControlMsg) {
-    if let Err(e) = writer_tx.try_send(msg.to_bytes()) {
-        warn!(
-            "TcpMuxListener [{}]: Failed to send {}: {:?}",
-            TransportErrorCode::TcpControlSendFailed,
-            msg.type_name(),
-            e
-        );
-    }
-}
-
-// ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mio::{Events, Poll, Waker};
 
-    /// `PeerConnectionGroup` tracks occupied roles and reports `has_data_conns`.
-    #[test]
-    fn peer_connection_group_all_tokens() {
-        let mut group = PeerConnectionGroup::new();
-        assert!(group.all_conns().is_empty());
-        assert!(!group.has_data_conns());
+    use crate::rtps::transport::tokens::ListenerToken;
 
-        group.control_conn = Some(100);
-        assert_eq!(group.all_conns().len(), 1);
-        assert!(!group.has_data_conns());
-
-        group.discovery_conn = Some(101);
-        group.user_data_conn = Some(102);
-        assert_eq!(group.all_conns().len(), 3);
-        assert!(group.has_data_conns());
+    fn registry() -> Arc<ConnectionRegistry> {
+        Arc::new(ConnectionRegistry::new(0, 0, [0; 12], TcpSocketTuning::default()))
     }
 
-    /// Removing a control connection purges its pending PORT_RESERVE cookies
-    /// (reserved but never bound), without touching another peer's cookies.
     #[test]
-    fn remove_control_connection_purges_pending_cookies() {
-        use crossbeam_channel::bounded;
+    fn backoff_is_exponential_and_success_clears_it() {
+        let registry = registry();
+        let peer: SocketAddr = "127.0.0.1:7400".parse().unwrap();
+        let key = (peer, TcpFrameKind::Discovery);
+        let error = io::Error::from(io::ErrorKind::TimedOut);
+        registry.note_connect_failure(key, &error);
+        let first = registry.backoff_remaining(key).unwrap();
+        registry.note_connect_failure(key, &error);
+        let second = registry.backoff_remaining(key).unwrap();
+        assert!(second > first);
+        registry.clear_backoff(key);
+        assert!(registry.backoff_remaining(key).is_none());
+    }
 
-        let (d_tx, _d_rx) = bounded(8);
-        let (u_tx, _u_rx) = bounded(8);
-        let shared =
-            ConnectionRegistry::new(0, 0, [0u8; 12], TcpSocketTuning::default(), d_tx, u_tx);
+    /// A refusal means the peer is not up yet, so the delay stays flat instead
+    /// of growing past the announcement period.
+    #[test]
+    fn a_refusal_does_not_grow_the_delay() {
+        let registry = registry();
+        let peer: SocketAddr = "127.0.0.1:7400".parse().unwrap();
+        let key = (peer, TcpFrameKind::Discovery);
+        let error = io::Error::from(io::ErrorKind::ConnectionRefused);
+        registry.note_connect_failure(key, &error);
+        let first = registry.backoff_remaining(key).unwrap();
+        registry.note_connect_failure(key, &error);
+        let second = registry.backoff_remaining(key).unwrap();
+        assert!(second <= first + Duration::from_millis(5));
+        assert!(second <= BACKOFF_BASE);
+    }
 
-        let addr: SocketAddr = "127.0.0.1:7400".parse().unwrap();
-        let (tx, _rx) = mpsc::channel::<Vec<u8>>(8);
-        let conn_id = shared.register_outbound_control_connection(
-            addr,
-            tx,
-            CancellationToken::new(),
-            Arc::new(Mutex::new(None)),
-        );
-        let guid = addr_to_guid(addr);
+    /// One kind's failed dial must leave the other kind free to connect.
+    #[test]
+    fn a_backoff_is_confined_to_its_frame_kind() {
+        let registry = registry();
+        let peer: SocketAddr = "127.0.0.1:7400".parse().unwrap();
+        let error = io::Error::from(io::ErrorKind::ConnectionRefused);
+        registry.note_connect_failure((peer, TcpFrameKind::UserData), &error);
+        assert!(registry.backoff_remaining((peer, TcpFrameKind::Discovery)).is_none());
+        assert!(registry.backoff_remaining((peer, TcpFrameKind::UserData)).is_some());
 
-        // Two pending cookies for this peer, one for another peer.
-        shared.cookie_to_guid.insert([1u8; 16], guid);
-        shared.cookie_to_port.insert([1u8; 16], 100);
-        let other = addr_to_guid("127.0.0.1:7500".parse().unwrap());
-        shared.cookie_to_guid.insert([9u8; 16], other);
-        shared.cookie_to_port.insert([9u8; 16], 200);
+        registry.clear_peer_backoff(peer);
+        assert!(registry.backoff_remaining((peer, TcpFrameKind::UserData)).is_none());
+    }
 
-        shared.remove_connection(conn_id);
+    #[test]
+    fn socket_qos_is_applied_before_stream_use() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        let (accepted, _) = listener.accept().unwrap();
 
-        assert!(shared.cookie_to_guid.get(&[1u8; 16]).is_none(), "peer cookie purged");
-        assert!(shared.cookie_to_port.get(&[1u8; 16]).is_none(), "peer cookie port purged");
-        assert!(shared.cookie_to_guid.get(&[9u8; 16]).is_some(), "other peer's cookie kept");
-        assert!(shared.cookie_to_port.get(&[9u8; 16]).is_some(), "other peer's cookie port kept");
+        let tuning = TcpSocketTuning {
+            nodelay: true,
+            so_rcvbuf: Some(128 * 1024),
+            so_sndbuf: Some(128 * 1024),
+            unacked_timeout: Some(Duration::from_secs(7)),
+            keepalive: Some(KeepaliveParams {
+                time: Duration::from_secs(11),
+                interval: Duration::from_secs(3),
+                retries: 2,
+            }),
+        };
+        apply_socket_tuning(&client, &tuning);
+        apply_socket_tuning(&accepted, &tuning);
+
+        assert!(client.nodelay().unwrap());
+        let socket = socket2::SockRef::from(&client);
+        assert!(socket.keepalive().unwrap());
+        assert!(socket.recv_buffer_size().unwrap() >= 128 * 1024);
+        assert!(socket.send_buffer_size().unwrap() >= 128 * 1024);
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        assert_eq!(socket.tcp_user_timeout().unwrap(), Some(Duration::from_secs(7)));
+    }
+
+    #[test]
+    fn self_delivery_wakes_the_poller_and_releases_queued_bytes() {
+        let registry = registry();
+        let source: SocketAddr = "127.0.0.1:7400".parse().unwrap();
+        assert!(!registry.deliver_to_self(source, TcpFrameKind::Discovery, b"discovery").unwrap());
+        assert!(registry.deliver_to_self(source, TcpFrameKind::UserData, b"user").unwrap());
+        assert_eq!(registry.self_delivery_bytes.load(Ordering::Acquire), 4);
+
+        let mut poll = Poll::new().unwrap();
+        let waker =
+            Arc::new(Waker::new(poll.registry(), ListenerToken::Shutdown.to_mio()).unwrap());
+        registry.set_self_delivery_waker(waker);
+        let mut events = Events::with_capacity(2);
+        poll.poll(&mut events, Some(Duration::from_secs(1))).unwrap();
+        assert!(events.iter().any(|event| event.token() == ListenerToken::Shutdown.to_mio()));
+
+        let message = registry.try_receive_self_delivery().unwrap();
+        assert_eq!(message.source, source);
+        assert_eq!(message.data.as_ref(), b"user");
+        assert_eq!(registry.self_delivery_bytes.load(Ordering::Acquire), 0);
+        assert!(registry.try_receive_self_delivery().is_none());
+
+        registry.clear_self_delivery_waker();
+        drop(registry);
+        drop(poll);
     }
 }

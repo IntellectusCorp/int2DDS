@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 use log::debug;
@@ -24,6 +25,7 @@ pub(crate) struct ReaderProxy {
     unicast_locator_list: Vec<Locator>,
     multicast_locator_list: Vec<Locator>,
     requested_changes: Vec<SequenceNumber>, // List of sequence numbers requested again by Reader through ACKNACK or NACK message
+    requested_fragments: BTreeMap<SequenceNumber, BTreeSet<u32>>, // Fragment numbers requested again by Reader through NACK_FRAG, grouped by sequence number
     highest_sent_change_sn: SequenceNumber, // Sequence number of the last CacheChange recorded as sent to Reader
     max_acked_sn: SequenceNumber,
     expects_inline_qos: bool, // false
@@ -75,6 +77,7 @@ impl ReaderProxy {
             multicast_locator_list,
             highest_sent_change_sn,
             requested_changes: Vec::new(),
+            requested_fragments: BTreeMap::new(),
             max_acked_sn,
             expects_inline_qos,
             is_active,
@@ -152,10 +155,38 @@ impl ReaderProxy {
 
     pub(crate) fn remove_cached_sn_on_cache_change_removal(&mut self, deleted_sn: SequenceNumber) {
         self.requested_changes.retain(|sn| *sn != deleted_sn);
+        self.requested_fragments.remove(&deleted_sn);
     }
 
     pub(crate) fn empty_requested_changes(&mut self) {
         self.requested_changes = Vec::new();
+    }
+
+    // Records `fragment_nums`, the fragments a NACK_FRAG requested for `seq_num`.
+    // Its bitmap states the receive status only for [window_start, window_start + window_num_bits).
+    pub(crate) fn requested_fragments_add(
+        &mut self,
+        seq_num: SequenceNumber,
+        window_start: u32,       // First fragment number the bitmap covers.
+        window_num_bits: u32,    // Number of bits in the bitmap
+        fragment_nums: Vec<u32>, // Fragment numbers the bitmap still requests, all in [window_start, window_start + window_num_bits)
+    ) {
+        // First fragment number after the range the bitmap covers.
+        let window_end = window_start.saturating_add(window_num_bits);
+
+        // Pending fragments of this sample, accumulated across earlier NACK_FRAGs.
+        let missing_fragments = self.requested_fragments.entry(seq_num).or_default();
+
+        // Clears every old entry inside [window_start, window_end)
+        missing_fragments
+            .retain(|fragment_num| *fragment_num < window_start || *fragment_num >= window_end);
+
+        // Then puts back the ones the bitmap still requests.
+        missing_fragments.extend(fragment_nums);
+    }
+
+    pub(crate) fn take_requested_fragments(&mut self) -> BTreeMap<SequenceNumber, BTreeSet<u32>> {
+        std::mem::take(&mut self.requested_fragments)
     }
 
     pub(crate) fn unsent_changes(&self, history_cache: &WriterHistoryCache) -> bool {
@@ -163,7 +194,7 @@ impl ReaderProxy {
     }
 
     pub(crate) fn unacked_changes(&self, history_cache: &WriterHistoryCache) -> bool {
-        history_cache.get_seq_num_max().map_or(false, |max_sn| max_sn > self.max_acked_sn)
+        history_cache.get_seq_num_max().is_some_and(|max_sn| max_sn > self.max_acked_sn)
     }
 
     pub(crate) fn unicast_locator_list(&self) -> &[Locator] {

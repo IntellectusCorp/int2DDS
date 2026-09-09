@@ -1,1074 +1,427 @@
-//! Outbound side of the TCP mux transport.
+//! Outbound TCP connections, written from the calling thread.
 //!
-//! `TcpSender` owns the outbound connection cache and reader/writer task lifecycles,
-//! exposing sync `send_to_*` methods for the DDS layer.
-//! A connect runs TCP + (optional) TLS + the 3-way handshake
-//! (PEER_HELLO → PORT_RESERVE → PORT_BIND), then hands the stream to a
-//! reader/writer task pair.
+//! A peer has at most two lazy outbound slots, keyed by the frame kind. A slot
+//! is opened by the first frame that needs it and is dropped as soon as a write
+//! fails. There is no application-level connection handshake.
+//!
+//! Opening a slot is the one blocking step, so the discovery fan-out never takes
+//! it on the calling thread: it hands the dial to a worker and moves on to the
+//! next peer. A peer nobody answers therefore costs the announcement nothing,
+//! however many such peers are configured.
 
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
+use std::sync::{mpsc, Arc, Mutex as StdMutex};
+use std::time::{Duration, Instant};
 
-use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use log::{debug, warn};
-use tokio::net::TcpStream;
-use tokio::sync::{mpsc, oneshot, Mutex as TokioMutex, Notify};
-use tokio_util::sync::CancellationToken;
 
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
-use crate::rtps::transport::port_manager::PortManager;
-use crate::rtps::transport::tcp::connection_registry::{apply_socket_tuning, ConnectionRegistry};
-use crate::rtps::transport::tcp::connection_tasks::{
-    inbox_capacity, spawn_connection_tasks, SharedWriteHalf,
-};
-use crate::rtps::transport::tcp::framing::{read_framed_message, write_framed_message};
-use crate::rtps::transport::tcp::protocol::{encode_locator, ControlMsg};
-use crate::rtps::transport::tcp::stream::{wrap_plain, AsyncConnStream};
-use crate::rtps::transport::tcp::tls::{connect_tls_async, TlsConfig};
+use crate::rtps::transport::tcp::connection_registry::ConnectionRegistry;
+use crate::rtps::transport::tcp::framing::{encode_frame, validate_payload_size, TcpFrameKind};
+use crate::rtps::transport::tcp::sync_connection::{OutboundConnection, SendOutcome};
+use crate::rtps::transport::tcp::tls::TlsConfig;
 use crate::rtps::transport::TcpConfig;
 
-/// Logical port 0 = control connection
-pub(crate) const CONTROL_LOGICAL_PORT: u16 = 0;
-
-// ── Cache entry types ───────────────────────────────────────────────────────
-
-/// An entry in the sender's outbound cache.
-struct OutboundEntry {
-    /// Control inbox feeding the connection's `writer_task`. Used by the
-    /// reader task and the PORT_RESERVE round-trip to enqueue protocol frames;
-    /// not used by the user-data send path. A closed inbox means the task pair
-    /// has exited, which the send path treats as a dead connection.
-    writer_tx: mpsc::Sender<Vec<u8>>,
-    /// User-data writes acquire this directly via
-    /// `runtime.block_on(write_half.lock().await)` and perform the wire
-    /// `writev` inline on the calling thread.
-    write_half: SharedWriteHalf,
-    /// Cancel token for this connection's actor pair (the same token stored in
-    /// `ConnectionRegistry::ConnectionEntry::cancel`). `evict_connection` fires it to tear
-    /// down just this connection on a write failure, without touching the peer.
-    cancel: CancellationToken,
-    /// `control` is `Some` only for
-    /// control connections (logical_port == CONTROL_LOGICAL_PORT)
-    control: Option<ControlExtras>,
+#[derive(Default)]
+struct DropCounter {
+    count: AtomicU64,
+    last_warn: StdMutex<Option<Instant>>,
 }
 
-#[derive(Clone)]
-struct ControlExtras {
-    /// Same `Arc` that lives in `ConnectionRegistry::ConnectionEntry::pending_ack`.
-    /// dispatch installs the response; the awaiting connect_task takes it.
-    pending_ack: Arc<StdMutex<Option<oneshot::Sender<ControlMsg>>>>,
-    /// Lets only one PORT_RESERVE round-trip run at a time, so concurrent
-    /// requests don't clobber each other's `pending_ack` slot.
-    request_lock: Arc<TokioMutex<()>>,
-}
+impl DropCounter {
+    fn record(&self, cause: &str, addr: SocketAddr, kind: TcpFrameKind) {
+        let total = self.count.fetch_add(1, Ordering::Relaxed) + 1;
+        let now = Instant::now();
+        let mut last = match self.last_warn.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if last.is_none_or(|previous| now.duration_since(previous) >= Duration::from_secs(1)) {
+            *last = Some(now);
+            warn!("TcpSender: dropped {:?} frame to {}: {} ({} total)", kind, addr, cause, total);
+        }
+    }
 
-/// Borrowed handle to the cache entry of a control connection. Holds clones
-/// of the channels needed to issue + await a PORT_RESERVE request.
-struct ControlConnHandle {
-    writer_tx: mpsc::Sender<Vec<u8>>,
-    extras: ControlExtras,
-}
-
-// ── In-flight connect guard ─────────────────────────────────────────────────
-
-/// Guard that prevents duplicate concurrent connects to the same peer.
-/// While it lives, the peer is marked "connecting" in `in_flight` so other
-/// tasks wait instead of opening a second connection. On drop (success,
-/// error, panic, or cancel) it clears the mark and wakes the waiters.
-struct InFlightGuard {
-    map: Arc<DashMap<(SocketAddr, u16), Arc<Notify>>>,
-    key: (SocketAddr, u16),
-    notify: Arc<Notify>,
-}
-
-impl Drop for InFlightGuard {
-    fn drop(&mut self) {
-        self.map.remove(&self.key);
-        self.notify.notify_waiters();
+    #[cfg(test)]
+    fn count(&self) -> u64 {
+        self.count.load(Ordering::Relaxed)
     }
 }
 
-/// Result of trying to claim the connect slot for a peer.
-enum InFlightAcquisition {
-    /// We claimed the slot — the caller must perform the connect.
-    Acquired(InFlightGuard),
-    /// Another task was already connecting (we waited for it) — the caller
-    /// should just re-check the cache.
-    AlreadyDone,
+#[derive(Default)]
+struct SendStats {
+    connect_failed: DropCounter,
+    backoff: DropCounter,
+    peer_stalled: DropCounter,
+    write_error: DropCounter,
 }
 
-// ── TcpSender ────────────────────────────────────────────────────────────────
+type ConnectionKey = (SocketAddr, TcpFrameKind);
 
-/// Outbound side of the TCP mux transport. See module-level docs.
 pub(crate) struct TcpSender {
-    domain_id: u32,
-    participant_id: u32,
-    working_ip: String,
+    working_ips: Vec<String>,
     listener_port: u16,
-    public_addr: Option<SocketAddr>,
-    #[allow(dead_code)]
-    local_guid_prefix: GuidPrefix,
 
     connect_timeout: Duration,
-    handshake_timeout: Duration,
+    tls_handshake_timeout: Duration,
 
+    stats: Arc<SendStats>,
     tls_config: Option<Arc<TlsConfig>>,
     shared: Arc<ConnectionRegistry>,
+    connections: Arc<DashMap<ConnectionKey, Arc<OutboundConnection>>>,
+    shutdown: Arc<AtomicBool>,
 
-    /// Outbound connection cache, keyed by (addr, logical_port).
-    connections: Arc<DashMap<(SocketAddr, u16), OutboundEntry>>,
-
-    /// Marks peers currently being connected, so duplicate concurrent
-    /// connects to the same peer are prevented. See `InFlightGuard`.
-    in_flight: Arc<DashMap<(SocketAddr, u16), Arc<Notify>>>,
-
-    /// Handle to the runtime, saved when the sender is built.
-    /// The sync `send_to_*` methods run outside the runtime, so they cannot
-    /// use `tokio::spawn` (it would panic). They use this handle instead to
-    /// run async work (`block_on`) and start connect tasks.
-    runtime_handle: tokio::runtime::Handle,
-
-    cancel: CancellationToken,
+    pending_dials: Arc<DashMap<ConnectionKey, Vec<u8>>>,
+    dial_wakeup: Sender<ConnectionKey>,
 }
 
+/// How long the dial worker waits before checking whether it should still run.
+const DIAL_WORKER_IDLE_TICK: Duration = Duration::from_millis(200);
+
 impl TcpSender {
-    /// Build a sender. Must be called inside a tokio runtime context so the
-    /// captured `Handle` is valid for the sync `send_to_*` block_on path.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        domain_id: u32,
-        participant_id: u32,
-        working_ip: String,
+        _domain_id: u32,
+        _participant_id: u32,
+        working_ips: Vec<String>,
         listener_port: u16,
-        local_guid_prefix: GuidPrefix,
+        _local_guid_prefix: GuidPrefix,
         tls_config: Option<Arc<TlsConfig>>,
         shared: Arc<ConnectionRegistry>,
         tcp_config: &TcpConfig,
+        shutdown: Arc<AtomicBool>,
     ) -> Arc<Self> {
-        let cancel = CancellationToken::new();
-        let runtime_handle = tokio::runtime::Handle::current();
-
-        // Prefer the configured public address (WAN/NAT).
-        let public_addr = tcp_config.public_address;
-
-        Arc::new(Self {
-            domain_id,
-            participant_id,
-            working_ip,
+        let (dial_wakeup, dial_requests) = mpsc::channel();
+        let sender = Arc::new(Self {
+            working_ips,
             listener_port,
-            public_addr,
-            local_guid_prefix,
             connect_timeout: tcp_config.connect_timeout,
-            handshake_timeout: tcp_config.bind_timeout,
+            tls_handshake_timeout: tcp_config.tls_handshake_timeout,
+            stats: Arc::new(SendStats::default()),
             tls_config,
             shared,
             connections: Arc::new(DashMap::new()),
-            in_flight: Arc::new(DashMap::new()),
-            runtime_handle,
-            cancel,
-        })
-    }
-
-    /// Resolve the connection's shared write half, establishing it on cache
-    /// miss. Blocks the caller (via `send_to`'s `block_on`) until the
-    /// connection is ready.
-    async fn ensure_connection(
-        self: &Arc<Self>,
-        addr: SocketAddr,
-        logical_port: u16,
-    ) -> io::Result<SharedWriteHalf> {
-        let key = (addr, logical_port);
-
-        // Reuse a live cached connection. A dead one — task pair gone, its
-        // writer inbox closed — is evicted here so the connect below rebuilds it
-        // on demand. A data connection always (re)establishes its control
-        // connection first via `do_connect_data`, so no orphaned data link lingers.
-        let cached_dead = match self.connections.get(&key) {
-            Some(entry) if !entry.writer_tx.is_closed() => {
-                return Ok(Arc::clone(&entry.write_half));
-            }
-            Some(_) => true,
-            None => false,
-        };
-        if cached_dead {
-            self.evict_connection(addr, logical_port);
-        }
-
-        // Reconnect backoff: while the peer is in its backoff window from a
-        // recent failure, fail fast instead of attempting (and blocking on) a
-        // fresh connect. This bounds reconnect churn during a long outage.
-        if let Some(retry_in) = self.backoff_remaining(addr) {
-            return Err(transport_io_error(
-                TransportErrorCode::TcpReconnectBackoff,
-                format!("peer {addr} in reconnect backoff ({retry_in:?} remaining)"),
-            ));
-        }
-
-        let result = if logical_port == CONTROL_LOGICAL_PORT {
-            do_connect_control(self, addr).await.map(|_| ())
-        } else {
-            do_connect_data(self, addr, logical_port).await.map(|_| ())
-        };
-
-        if let Err(e) = result {
-            warn!(
-                "TcpSender: outbound connect to {:?} (port={}) failed: {:?}",
-                addr, logical_port, e
-            );
-            // If a connection fails to be established, the failure is reported
-            // and backoff logic is triggered.
-            self.note_connect_failure(addr);
-            return Err(e);
-        }
-
-        // If the connection is successfully established, report success
-        // and reset the backoff.
-        self.note_connect_success(addr);
-
-        self.connections.get(&key).map(|entry| Arc::clone(&entry.write_half)).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::Other, "connect succeeded but cache entry missing")
-        })
-    }
-
-    /// Tear down a single cached connection `(addr, logical_port)` and its
-    /// actor pair, leaving every other connection to the peer untouched.
-    ///
-    /// Used on a write failure: the write proves only that *this* connection is
-    /// unusable. Firing the cancel token wakes the
-    /// task pair, whose reader exit calls `ConnectionRegistry::remove_connection` to drop
-    /// the shared-state entry.
-    fn evict_connection(&self, addr: SocketAddr, logical_port: u16) {
-        if let Some((_, entry)) = self.connections.remove(&(addr, logical_port)) {
-            entry.cancel.cancel();
-        }
-    }
-
-    /// Tear down every outbound connection to `addr` (all logical ports) and its
-    /// actor pairs. Called when the DDS layer unmatches the peer,
-    /// so its transport resources are released promptly.
-    /// Cancelling each actor wakes its reader, which drops the matching `ConnectionRegistry` entry.
-    pub(crate) fn disconnect_peer(&self, addr: SocketAddr) {
-        self.connections.retain(|(peer_addr, _), entry| {
-            let keep = *peer_addr != addr;
-            if !keep {
-                entry.cancel.cancel();
-            }
-            keep
+            shutdown,
+            pending_dials: Arc::new(DashMap::new()),
+            dial_wakeup,
         });
-        self.shared.clear_backoff(addr);
-        self.shared.remove_peer_by_addr(addr);
+        Self::spawn_dial_worker(&sender, dial_requests);
+        sender
     }
 
-    // Reconnect backoff lives in `ConnectionRegistry` (shared with the inbound
-    // path); these thin wrappers keep the outbound call sites unchanged.
-
-    fn backoff_remaining(&self, addr: SocketAddr) -> Option<Duration> {
-        self.shared.backoff_remaining(addr)
-    }
-
-    fn note_connect_failure(&self, addr: SocketAddr) {
-        self.shared.note_connect_failure(addr);
-    }
-
-    fn note_connect_success(&self, addr: SocketAddr) {
-        self.shared.clear_backoff(addr);
-    }
-
-    /// Graceful shutdown — cancels the shared token, tearing down every
-    /// connection actor via its child token.
-    pub(crate) async fn shutdown(&self) {
-        self.cancel.cancel();
-    }
-
-    /// Heuristic: is this address our own listener? Avoids loopback
-    /// self-connections during SPDP fan-out.
-    fn is_self_connection(&self, addr: &SocketAddr) -> bool {
-        if addr.port() != self.listener_port {
-            return false;
-        }
-        match addr.ip() {
-            IpAddr::V4(v4) => v4.is_loopback() || self.working_ip == v4.to_string(),
-            IpAddr::V6(_) => false,
+    fn spawn_dial_worker(sender: &Arc<Self>, requests: Receiver<ConnectionKey>) {
+        let weak = Arc::downgrade(sender);
+        let spawned = std::thread::Builder::new().name("tcp_discovery_dial".to_string()).spawn(
+            move || loop {
+                let requested = match requests.recv_timeout(DIAL_WORKER_IDLE_TICK) {
+                    Ok(key) => Some(key),
+                    Err(RecvTimeoutError::Timeout) => None,
+                    Err(RecvTimeoutError::Disconnected) => return,
+                };
+                let Some(sender) = weak.upgrade() else {
+                    return;
+                };
+                if sender.shutdown.load(Ordering::Acquire) {
+                    return;
+                }
+                if let Some(key) = requested {
+                    sender.dial_pending(key);
+                }
+            },
+        );
+        if let Err(error) = spawned {
+            warn!("TcpSender: no dial worker, discovery will connect inline: {}", error);
         }
     }
-}
 
-// ── Send path ────────────────────────────────────────────────────────────────
-//
-// Sends a single RTPS frame inline on the user thread. The connection's
-// `SharedWriteHalf` is locked for the duration of one `write_vectored`
-// syscall; the calling thread waits via `runtime.block_on` until the
-// kernel accepts the bytes.
-impl TcpSender {
-    /// SPDP bootstrap fan-out to an initial peer we have not discovered yet.
-    /// The peer's participant id (hence its logical port) is unknown, so we
-    /// reserve the well-known index-0 metatraffic port.
-    /// Once SPDP completes, SEDP and user data reserve the
-    /// peer's actual advertised logical port via `send_to`.
+    /// Announce to one peer without ever waiting on a connection.
+    ///
+    /// An established peer is written to on this thread, which is the whole
+    /// point of keeping the slot. A peer with no slot yet is handed to the dial
+    /// worker with this announcement attached, so it still receives this round
+    /// once the connection comes up, and an unreachable peer costs the caller
+    /// nothing beyond the handoff.
     pub(crate) fn send_to_discovery(
         self: &Arc<Self>,
         addr: &SocketAddr,
         data: &[u8],
     ) -> io::Result<()> {
-        let logical_port = PortManager::get_discovery_traffic_unicast_port(self.domain_id, 0);
-        self.send_to(*addr, logical_port, data)
+        let addr = *addr;
+        let key = (addr, TcpFrameKind::Discovery);
+        if self.is_self_connection(&addr) || self.live_connection(&key).is_some() {
+            return self.send_to(addr, TcpFrameKind::Discovery, data);
+        }
+
+        validate_payload_size(data.len())?;
+        let mut frame = Vec::with_capacity(data.len() + 8);
+        encode_frame(data, &mut frame)?;
+        self.pending_dials.insert(key, frame);
+        let _ = self.dial_wakeup.send(key);
+        Ok(())
     }
 
-    /// Resolve the connection's write half — fast path on cache hit,
-    /// otherwise block until the connection (control + data handshake) is
-    /// established — then perform the wire `writev` inline. `logical_port` is the
-    /// destination's advertised RTPS port, reserved on the mux connection.
+    /// Open the slot a queued announcement is waiting on and deliver it.
+    ///
+    /// A failure here is ordinary — a configured peer that is not up yet — so it
+    /// only feeds the backoff. The announcement is dropped rather than held,
+    /// since the next one supersedes it anyway.
+    fn dial_pending(self: &Arc<Self>, key: ConnectionKey) {
+        let Some((_, frame)) = self.pending_dials.remove(&key) else {
+            return;
+        };
+        if self.live_connection(&key).is_some() {
+            return;
+        }
+        if let Ok(connection) = self.open_connection(key) {
+            let _ = connection.send(&frame);
+        }
+    }
+
     pub(crate) fn send_to(
         self: &Arc<Self>,
         addr: SocketAddr,
-        logical_port: u16,
+        kind: TcpFrameKind,
         data: &[u8],
     ) -> io::Result<()> {
-        let key = (addr, logical_port);
+        validate_payload_size(data.len())?;
 
-        // A dead entry (writer inbox closed) falls through to ensure_connection, which evicts and rebuilds.
-        // The cache guard is dropped before sending so the rebuild can remove
-        // the dead entry without a DashMap shard self-deadlock.
-        let cached = match self.connections.get(&key) {
-            Some(entry) if !entry.writer_tx.is_closed() => Some(Arc::clone(&entry.write_half)),
-            _ => None,
-        };
-        let write_half = match cached {
-            Some(wh) => wh,
-            None => self.runtime_handle.block_on(self.ensure_connection(addr, logical_port))?,
+        if self.is_self_connection(&addr) {
+            self.shared.deliver_to_self(addr, kind, data)?;
+            return Ok(());
+        }
+
+        let key = (addr, kind);
+        let connection = match self.live_connection(&key) {
+            Some(connection) => connection,
+            None => self.open_connection(key)?,
         };
 
-        let payload = data.to_vec();
-        let res = self.runtime_handle.block_on(async move {
-            let mut wh = write_half.lock().await;
-            write_framed_message(&mut *wh, &payload).await
-        });
-        match res {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                warn!(
-                    "TcpSender: write to {:?} (port={}) failed: {:?} — evicting connection",
-                    addr, logical_port, e
-                );
-                self.evict_connection(addr, logical_port);
-                Err(e)
+        let mut frame = Vec::with_capacity(data.len() + 8);
+        encode_frame(data, &mut frame)?;
+
+        match connection.send(&frame) {
+            Ok(SendOutcome::Sent) => Ok(()),
+            Ok(SendOutcome::Stalled) => {
+                self.stats.peer_stalled.record("peer send queue full", addr, kind);
+                Err(transport_io_error(
+                    TransportErrorCode::TcpPeerSendQueueFull,
+                    format!("peer {addr} has no room for a {kind:?} frame"),
+                ))
+            }
+            Err(error) => {
+                if connection.is_failed() {
+                    self.evict_connection(key, &connection);
+                    self.stats.write_error.record("write error", addr, kind);
+                    debug!("TcpSender: write {:?} to {} failed: {}", kind, addr, error);
+                }
+                Err(error)
             }
         }
+    }
+
+    fn live_connection(&self, key: &ConnectionKey) -> Option<Arc<OutboundConnection>> {
+        let connection = self.connections.get(key)?;
+        if connection.is_failed() {
+            return None;
+        }
+        Some(Arc::clone(&connection))
+    }
+
+    fn open_connection(&self, key: ConnectionKey) -> io::Result<Arc<OutboundConnection>> {
+        let (addr, kind) = key;
+        if let Some(remaining) = self.shared.backoff_remaining(key) {
+            self.stats.backoff.record("reconnect backoff", addr, kind);
+            return Err(transport_io_error(
+                TransportErrorCode::TcpReconnectBackoff,
+                format!("peer {addr} is in reconnect backoff for another {remaining:?}"),
+            ));
+        }
+
+        let connection = OutboundConnection::connect(
+            addr,
+            &self.shared.tuning,
+            self.tls_config.as_deref(),
+            self.connect_timeout,
+            self.tls_handshake_timeout,
+        )
+        .inspect_err(|error| {
+            self.stats.connect_failed.record("connect failed", addr, kind);
+            self.shared.note_connect_failure(key, error);
+        })?;
+
+        self.shared.clear_backoff(key);
+        debug!("TcpSender: established {:?} connection to {}", kind, addr);
+
+        let connection = Arc::new(connection);
+        self.connections.insert(key, Arc::clone(&connection));
+        Ok(connection)
+    }
+
+    fn evict_connection(&self, key: ConnectionKey, connection: &Arc<OutboundConnection>) {
+        self.connections.remove_if(&key, |_, current| Arc::ptr_eq(current, connection));
+    }
+
+    /// Discard what a peer's earlier failures left behind.
+    ///
+    /// Reaching a candidate is guesswork and most guesses fail, so the backoff
+    /// those failures set is about an address nobody was known to be at. Once a
+    /// participant turns up there the guessing is over, and holding the peer
+    /// back for the rest of a delay earned while it did not exist would only
+    /// postpone the first real exchange.
+    pub(crate) fn forget_failures(&self, addr: SocketAddr) {
+        self.shared.clear_peer_backoff(addr);
+    }
+
+    pub(crate) fn disconnect_peer(&self, addr: SocketAddr) {
+        self.connections.retain(|(peer, _), _| *peer != addr);
+        self.shared.clear_peer_backoff(addr);
+    }
+
+    pub(crate) fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+        self.connections.clear();
+        self.pending_dials.clear();
+    }
+
+    pub(crate) fn is_self_connection(&self, addr: &SocketAddr) -> bool {
+        if addr.port() != self.listener_port {
+            return false;
+        }
+        match addr.ip() {
+            IpAddr::V4(ip) => {
+                ip.is_loopback()
+                    || self.working_ips.iter().any(|candidate| *candidate == ip.to_string())
+            }
+            IpAddr::V6(_) => false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn connection_count(&self) -> usize {
+        self.connections.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_shut_down(&self) -> bool {
+        self.shutdown.load(Ordering::Acquire)
     }
 }
 
 impl Drop for TcpSender {
     fn drop(&mut self) {
-        // Cancel the shared token so every connection actor (child token) exits
-        // at its next yield. Best-effort — Drop cannot await their teardown.
-        self.cancel.cancel();
+        self.shutdown.store(true, Ordering::Release);
     }
 }
-
-/// Atomic acquire — returns `Acquired` if we got the slot, or `AlreadyDone`
-/// after waiting for the existing in-flight task to finish.
-async fn acquire_in_flight(sender: &Arc<TcpSender>, key: (SocketAddr, u16)) -> InFlightAcquisition {
-    enum Slot {
-        Existing(Arc<Notify>),
-        New(Arc<Notify>),
-    }
-
-    // Atomic check-and-insert. Entry guard is dropped before any await.
-    let slot = match sender.in_flight.entry(key) {
-        Entry::Occupied(e) => Slot::Existing(e.get().clone()),
-        Entry::Vacant(v) => {
-            let n = Arc::new(Notify::new());
-            v.insert(n.clone());
-            Slot::New(n)
-        }
-    };
-
-    match slot {
-        Slot::Existing(notify) => {
-            notify.notified().await;
-            InFlightAcquisition::AlreadyDone
-        }
-        Slot::New(notify) => InFlightAcquisition::Acquired(InFlightGuard {
-            map: Arc::clone(&sender.in_flight),
-            key,
-            notify,
-        }),
-    }
-}
-
-// ── do_connect_control ──────────────────────────────────────────────────────
-
-async fn do_connect_control(
-    sender: &Arc<TcpSender>,
-    addr: SocketAddr,
-) -> io::Result<mpsc::Sender<Vec<u8>>> {
-    if sender.is_self_connection(&addr) {
-        return Err(io::Error::new(io::ErrorKind::AddrInUse, "self connect"));
-    }
-
-    // 1. TCP (+ TLS).
-    let mut stream = create_stream(sender, addr).await?;
-
-    // 2. PEER_HELLO + PEER_HELLO_ACK (inline, before the tasks take the stream).
-    let locator = if let Some(SocketAddr::V4(pub_v4)) = sender.public_addr {
-        encode_locator(*pub_v4.ip(), pub_v4.port())
-    } else if let Some(ext_ip) = crate::common::env::get_external_address() {
-        encode_locator(ext_ip, sender.listener_port)
-    } else {
-        match stream.local_addr()?.ip() {
-            IpAddr::V4(ip) => encode_locator(ip, sender.listener_port),
-            IpAddr::V6(_) => [0u8; 16], // TCPv6: Unsupported
-        }
-    };
-    peer_hello_handshake(&mut stream, locator, sender.handshake_timeout).await?;
-
-    // 3. Channel + cancel + pending_ack mailbox.
-    let (tx, rx) = mpsc::channel::<Vec<u8>>(inbox_capacity());
-    let conn_cancel = sender.cancel.child_token();
-    let pending_ack = Arc::new(StdMutex::new(None));
-    let request_lock = Arc::new(TokioMutex::new(()));
-
-    // 4. Register in connection_registry BEFORE spawning the tasks — otherwise the
-    //    reader task could receive a frame and find no entry.
-    let conn_id = sender.shared.register_outbound_control_connection(
-        addr,
-        tx.clone(),
-        conn_cancel.clone(),
-        Arc::clone(&pending_ack),
-    );
-
-    // 5. Spawn the actor pair.
-    let write_half = spawn_connection_tasks(
-        stream,
-        conn_id,
-        Arc::clone(&sender.shared),
-        conn_cancel.clone(),
-        tx.clone(),
-        rx,
-    );
-
-    // 6. Cache for future sends + future PORT_RESERVE round-trips.
-    sender.connections.insert(
-        (addr, CONTROL_LOGICAL_PORT),
-        OutboundEntry {
-            writer_tx: tx.clone(),
-            write_half,
-            cancel: conn_cancel,
-            control: Some(ControlExtras { pending_ack, request_lock }),
-        },
-    );
-
-    debug!("TcpSender: control connection established to {:?} (conn={})", addr, conn_id);
-    Ok(tx)
-}
-
-// ── do_connect_data ─────────────────────────────────────────────────────────
-
-async fn do_connect_data(
-    sender: &Arc<TcpSender>,
-    addr: SocketAddr,
-    logical_port: u16,
-) -> io::Result<mpsc::Sender<Vec<u8>>> {
-    if sender.is_self_connection(&addr) {
-        return Err(io::Error::new(io::ErrorKind::AddrInUse, "self connect"));
-    }
-
-    // 1. Ensure we have a control connection.
-    let control = ensure_control_connection(sender, addr).await?;
-
-    // 2. PORT_RESERVE round-trip → cookie. A failure here means the control
-    //    connection itself is unusable so evicts it.
-    let cookie =
-        match port_reserve_round_trip(&control, logical_port, sender.handshake_timeout).await {
-            Ok(cookie) => cookie,
-            Err(e) => {
-                sender.evict_connection(addr, CONTROL_LOGICAL_PORT);
-                return Err(e);
-            }
-        };
-
-    // 3. Open a TCP for the data connection.
-    let mut stream = create_stream(sender, addr).await?;
-
-    // 4. PORT_BIND + PORT_BIND_ACK (inline, before the tasks).
-    port_bind_handshake(&mut stream, cookie, sender.handshake_timeout).await?;
-
-    // 5. Channel + cancel — no pending_ack needed for data connections.
-    let (tx, rx) = mpsc::channel::<Vec<u8>>(inbox_capacity());
-    let conn_cancel = sender.cancel.child_token();
-
-    // 6. Register, then spawn (race-free order).
-    let conn_id = sender.shared.register_outbound_data_connection(
-        addr,
-        logical_port,
-        tx.clone(),
-        conn_cancel.clone(),
-    );
-    let write_half = spawn_connection_tasks(
-        stream,
-        conn_id,
-        Arc::clone(&sender.shared),
-        conn_cancel.clone(),
-        tx.clone(),
-        rx,
-    );
-
-    // 7. Cache.
-    sender.connections.insert(
-        (addr, logical_port),
-        OutboundEntry { writer_tx: tx.clone(), write_half, cancel: conn_cancel, control: None },
-    );
-
-    debug!(
-        "TcpSender: data connection established to {:?} (port={}, conn={})",
-        addr, logical_port, conn_id
-    );
-    Ok(tx)
-}
-
-// ── ensure_control_connection ───────────────────────────────────────────────
-
-/// Look up the control connection in cache, creating it via the in-flight
-/// gate if missing. Returns a handle the caller uses to issue PORT_RESERVE
-/// round-trips.
-async fn ensure_control_connection(
-    sender: &Arc<TcpSender>,
-    addr: SocketAddr,
-) -> io::Result<ControlConnHandle> {
-    let key = (addr, CONTROL_LOGICAL_PORT);
-
-    if let Some(handle) = lookup_control_handle(sender, key) {
-        return Ok(handle);
-    }
-
-    match acquire_in_flight(sender, key).await {
-        InFlightAcquisition::Acquired(_guard) => {
-            let _ = do_connect_control(sender, addr).await?;
-            // _guard drops at end of scope → notify_waiters fires.
-        }
-        InFlightAcquisition::AlreadyDone => {
-            // Concurrent task finished; cache may or may not have the entry.
-        }
-    }
-
-    lookup_control_handle(sender, key).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::Other, "control connect failed (cache miss after wait)")
-    })
-}
-
-fn lookup_control_handle(sender: &TcpSender, key: (SocketAddr, u16)) -> Option<ControlConnHandle> {
-    if let Some(entry) = sender.connections.get(&key) {
-        if !entry.writer_tx.is_closed() {
-            return entry.control.as_ref().map(|extras| ControlConnHandle {
-                writer_tx: entry.writer_tx.clone(),
-                extras: extras.clone(),
-            });
-        }
-    }
-
-    if let Some((_, dead)) = sender.connections.remove_if(&key, |_, e| e.writer_tx.is_closed()) {
-        dead.cancel.cancel();
-    }
-    None
-}
-
-// ── PORT_RESERVE round-trip via single-slot oneshot ─────────────────────────
-
-async fn port_reserve_round_trip(
-    control: &ControlConnHandle,
-    logical_port: u16,
-    timeout: Duration,
-) -> io::Result<[u8; 16]> {
-    // Serialise concurrent PORT_RESERVE on the same control connection.
-    // Otherwise the second request would clobber the first's pending_ack slot.
-    let _permit = control.extras.request_lock.lock().await;
-
-    let (tx, rx) = oneshot::channel();
-    *control.extras.pending_ack.lock().expect("pending_ack lock") = Some(tx);
-
-    let _ = control.writer_tx.try_send(ControlMsg::PortReserve { logical_port }.to_bytes());
-
-    let response = match tokio::time::timeout(timeout, rx).await {
-        Ok(Ok(msg)) => msg,
-        Ok(Err(_)) => {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "PORT_RESERVE response channel closed",
-            ));
-        }
-        Err(_) => {
-            // Timeout — clean up our slot in case dispatch never ran.
-            *control.extras.pending_ack.lock().expect("pending_ack lock") = None;
-            return Err(transport_io_error(
-                TransportErrorCode::TcpHandshakeReserveFailed,
-                "PORT_RESERVE response timeout",
-            ));
-        }
-    };
-
-    match response {
-        ControlMsg::PortReserveAck { cookie } => Ok(cookie),
-        ControlMsg::Error { operation: _, code, message } => Err(transport_io_error(
-            TransportErrorCode::TcpHandshakeReserveFailed,
-            format!("PORT_RESERVE rejected: code={} message={}", code, message),
-        )),
-        other => Err(transport_io_error(
-            TransportErrorCode::TcpHandshakeReserveFailed,
-            format!("unexpected response to PORT_RESERVE: {}", other.type_name()),
-        )),
-    }
-}
-
-// ── Stream open + inline handshakes ─────────────────────────────────────────
-
-async fn create_stream(sender: &Arc<TcpSender>, addr: SocketAddr) -> io::Result<AsyncConnStream> {
-    // 1. TCP connect (timeout-bounded).
-    let tcp = tokio::time::timeout(sender.connect_timeout, TcpStream::connect(addr))
-        .await
-        .map_err(|_| {
-            transport_io_error(
-                TransportErrorCode::TcpConnectionTimeout,
-                format!("tcp connect timeout to {:?}", addr),
-            )
-        })??;
-
-    apply_socket_tuning(&tcp, &sender.shared.tuning);
-
-    // 2. Optional TLS handshake.
-    if let Some(cfg) = &sender.tls_config {
-        let client_cfg = cfg
-            .build_client_config()
-            .map_err(|e| transport_io_error(TransportErrorCode::TlsConfigError, e.to_string()))?;
-        // TODO: thread the SNI name properly. For now use the configured
-        // server_name or fall back to "localhost".
-        let sni = cfg.server_name().to_string();
-
-        let stream = tokio::time::timeout(
-            sender.handshake_timeout,
-            connect_tls_async(tcp, client_cfg, &sni),
-        )
-        .await
-        .map_err(|_| {
-            transport_io_error(TransportErrorCode::TlsHandshakeFailed, "tls handshake timeout")
-        })??;
-
-        Ok(stream)
-    } else {
-        Ok(wrap_plain(tcp))
-    }
-}
-
-async fn peer_hello_handshake(
-    stream: &mut AsyncConnStream,
-    locator: [u8; 16],
-    timeout: Duration,
-) -> io::Result<()> {
-    let hello = ControlMsg::PeerHello { locator };
-    write_framed_message(stream, &hello.to_bytes()).await?;
-
-    let response_bytes =
-        tokio::time::timeout(timeout, read_framed_message(stream)).await.map_err(|_| {
-            transport_io_error(
-                TransportErrorCode::TcpHandshakeHelloFailed,
-                "PEER_HELLO_ACK timeout",
-            )
-        })??;
-
-    let response = ControlMsg::from_bytes(&response_bytes).map_err(|e| {
-        transport_io_error(
-            TransportErrorCode::TcpHandshakeHelloFailed,
-            format!("malformed PEER_HELLO_ACK: {:?}", e),
-        )
-    })?;
-
-    match response {
-        ControlMsg::PeerHelloAck => Ok(()),
-        ControlMsg::Error { code, message, .. } => Err(transport_io_error(
-            TransportErrorCode::TcpHandshakeHelloFailed,
-            format!("PEER_HELLO rejected: code={} message={}", code, message),
-        )),
-        other => Err(transport_io_error(
-            TransportErrorCode::TcpHandshakeHelloFailed,
-            format!("unexpected response to PEER_HELLO: {}", other.type_name()),
-        )),
-    }
-}
-
-async fn port_bind_handshake(
-    stream: &mut AsyncConnStream,
-    cookie: [u8; 16],
-    timeout: Duration,
-) -> io::Result<()> {
-    let bind = ControlMsg::PortBind { cookie };
-    write_framed_message(stream, &bind.to_bytes()).await?;
-
-    let response_bytes =
-        tokio::time::timeout(timeout, read_framed_message(stream)).await.map_err(|_| {
-            transport_io_error(TransportErrorCode::TcpHandshakeBindFailed, "PORT_BIND_ACK timeout")
-        })??;
-
-    let response = ControlMsg::from_bytes(&response_bytes).map_err(|e| {
-        transport_io_error(
-            TransportErrorCode::TcpHandshakeBindFailed,
-            format!("malformed PORT_BIND_ACK: {:?}", e),
-        )
-    })?;
-
-    match response {
-        ControlMsg::PortBindAck => Ok(()),
-        ControlMsg::Error { code, message, .. } => Err(transport_io_error(
-            TransportErrorCode::TcpHandshakeBindFailed,
-            format!("PORT_BIND rejected: code={} message={}", code, message),
-        )),
-        other => Err(transport_io_error(
-            TransportErrorCode::TcpHandshakeBindFailed,
-            format!("unexpected response to PORT_BIND: {}", other.type_name()),
-        )),
-    }
-}
-
-// ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rtps::transport::plugin::IncomingMessage;
-    use crate::rtps::transport::tcp::connection_registry::{TcpSocketTuning, BACKOFF_BASE};
-    use crate::rtps::transport::tcp::tcp_mux_listener::TcpMuxListener;
-    use crossbeam_channel::bounded;
-    use std::time::Instant;
+    use crate::rtps::transport::tcp::connection_registry::TcpSocketTuning;
+    use crate::rtps::transport::tcp::framing::test_message;
 
-    /// Helper: build the crossbeam channels needed by `ConnectionRegistry::new` /
-    /// `TcpMuxListener::bind_and_spawn`, returning the receivers so tests
-    /// can observe routed RTPS frames.
-    fn make_channels() -> (
-        crossbeam_channel::Sender<IncomingMessage>,
-        crossbeam_channel::Receiver<IncomingMessage>,
-        crossbeam_channel::Sender<IncomingMessage>,
-        crossbeam_channel::Receiver<IncomingMessage>,
-    ) {
-        let (d_tx, d_rx) = bounded(64);
-        let (u_tx, u_rx) = bounded(64);
-        (d_tx, d_rx, u_tx, u_rx)
+    fn make_sender(config: TcpConfig) -> Arc<TcpSender> {
+        let tuning = TcpSocketTuning {
+            nodelay: config.nodelay,
+            so_rcvbuf: config.so_rcvbuf,
+            so_sndbuf: config.so_sndbuf,
+            unacked_timeout: config.unacked_timeout,
+            keepalive: None,
+        };
+        let registry = Arc::new(ConnectionRegistry::new(0, 0, [0; 12], tuning));
+        TcpSender::new(
+            0,
+            0,
+            vec!["192.0.2.1".into()],
+            7400,
+            [0; 12],
+            None,
+            registry,
+            &config,
+            Arc::new(AtomicBool::new(false)),
+        )
     }
 
-    /// Poll a crossbeam receiver from async code without blocking a worker.
-    /// Returns `Some(msg)` if received before `deadline`, else `None`.
-    async fn wait_for_recv<T>(rx: &crossbeam_channel::Receiver<T>, deadline: Instant) -> Option<T> {
-        while Instant::now() < deadline {
-            if let Ok(msg) = rx.try_recv() {
-                return Some(msg);
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+    /// A peer that cannot be reached must not leave a slot behind, and the
+    /// second attempt must be refused by the backoff instead of waiting again.
+    /// The other frame kind keeps its own slot and is still free to dial.
+    #[test]
+    fn an_unreachable_peer_leaves_no_connection_and_enters_backoff() {
+        let config =
+            TcpConfig { connect_timeout: Duration::from_millis(50), ..TcpConfig::default() };
+        let sender = make_sender(config);
+        let peer: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let message = test_message(0x02, b"payload");
+
+        let first = sender.send_to(peer, TcpFrameKind::UserData, &message).unwrap_err();
+        assert_ne!(first.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(sender.connection_count(), 0);
+
+        let second = sender.send_to(peer, TcpFrameKind::UserData, &message).unwrap_err();
+        assert_eq!(second.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(sender.stats.backoff.count(), 1);
+
+        let other_kind = sender.send_to(peer, TcpFrameKind::Discovery, &message).unwrap_err();
+        assert_ne!(other_kind.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(sender.stats.backoff.count(), 1);
+    }
+
+    /// Each frame kind opens its own slot to the same peer, and no more.
+    #[test]
+    fn cache_has_at_most_two_roles_per_peer() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let peer = listener.local_addr().expect("addr");
+        let config =
+            TcpConfig { connect_timeout: Duration::from_millis(500), ..TcpConfig::default() };
+        let sender = make_sender(config);
+        let message = test_message(0x02, b"payload");
+
+        for _ in 0..2 {
+            sender.send_to(peer, TcpFrameKind::Discovery, &message).expect("discovery send");
+            sender.send_to(peer, TcpFrameKind::UserData, &message).expect("user send");
         }
-        None
+
+        assert_eq!(sender.connection_count(), 2);
+        sender.shutdown();
     }
 
-    /// Build a bare sender with its own ConnectionRegistry. The sender does NOT bind
-    /// a listener — callers that need a target listener spawn one separately.
-    fn make_sender(
-        participant_id: u32,
-        guid_prefix: GuidPrefix,
-        listener_port: u16,
-    ) -> (Arc<TcpSender>, crossbeam_channel::Receiver<IncomingMessage>) {
-        let (d_tx, d_rx, u_tx, _u_rx) = make_channels();
-        let shared = Arc::new(ConnectionRegistry::new(
-            0,
-            participant_id,
-            guid_prefix,
-            TcpSocketTuning::default(),
-            d_tx,
-            u_tx,
-        ));
-        let sender = TcpSender::new(
-            0,
-            participant_id,
-            "127.0.0.1".to_string(),
-            listener_port,
-            guid_prefix,
-            None,
-            shared,
-            &TcpConfig::default(),
-        );
-        (sender, d_rx)
-    }
+    /// A peer that never reads must never hold a sending thread. Frames its
+    /// socket cannot take are queued in order rather than dropped, so falling
+    /// behind costs the peer latency and costs the caller nothing.
+    #[test]
+    fn a_peer_that_never_reads_cannot_hold_the_caller() {
+        // The accepted socket inherits this receive buffer, so the peer cannot
+        // absorb the test's traffic in kernel memory and the send queue really
+        // does fill up.
+        let listener = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)
+            .expect("socket");
+        listener.set_recv_buffer_size(2 * 1024).expect("rcvbuf");
+        listener.bind(&"127.0.0.1:0".parse::<SocketAddr>().unwrap().into()).expect("bind");
+        listener.listen(8).expect("listen");
+        let listener = std::net::TcpListener::from(listener);
+        let peer = listener.local_addr().expect("addr");
+        let bound = Duration::from_millis(50);
+        let config =
+            TcpConfig { connect_timeout: bound, so_sndbuf: Some(4 * 1024), ..TcpConfig::default() };
+        let sender = make_sender(config);
+        let message = test_message(0x02, &vec![0u8; 32 * 1024]);
 
-    /// `send_to_*` blocks via `runtime_handle.block_on`, which panics if
-    /// invoked from inside a tokio runtime worker. Production callers are the
-    /// sync DDS write path (outside any runtime); tests run under
-    /// `#[tokio::test]`, so they must drive the send from a blocking thread.
-    async fn blocking_send_discovery(
-        sender: &Arc<TcpSender>,
-        target: SocketAddr,
-        data: &[u8],
-    ) -> io::Result<()> {
-        let sender = Arc::clone(sender);
-        let data = data.to_vec();
-        tokio::task::spawn_blocking(move || sender.send_to_discovery(&target, &data))
-            .await
-            .expect("spawn_blocking join")
-    }
+        for _ in 0..64 {
+            let call = Instant::now();
+            let result = sender.send_to(peer, TcpFrameKind::UserData, &message);
+            assert!(
+                call.elapsed() < bound * 8,
+                "one send held the thread for {:?}",
+                call.elapsed()
+            );
+            result.expect("a peer that is only behind must not cost a frame");
+        }
 
-    // ── construction smoke ───────────────────────────────────────────────────
-
-    /// `TcpSender::new` inside a tokio context succeeds and `shutdown()`
-    /// completes cleanly (it just cancels the shared token).
-    #[tokio::test(flavor = "multi_thread")]
-    async fn new_in_runtime_succeeds_and_shuts_down() {
-        let (sender, _disc_rx) = make_sender(0, [0xAA; 12], 12345);
-        // No connections yet.
-        assert_eq!(sender.connections.len(), 0);
-        // Shutdown must complete within a small timeout — guard against deadlock.
-        tokio::time::timeout(Duration::from_secs(2), sender.shutdown())
-            .await
-            .expect("shutdown did not complete within 2s");
-    }
-
-    // ── private heuristics ───────────────────────────────────────────────────
-
-    /// `is_self_connection` flags loopback + matching listener port.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn self_connection_detection() {
-        let listener_port: u16 = 7000;
-        let (sender, _) = make_sender(0, [0xAA; 12], listener_port);
-
-        let self_addr: SocketAddr = format!("127.0.0.1:{}", listener_port).parse().unwrap();
-        assert!(sender.is_self_connection(&self_addr));
-
-        let wrong_port: SocketAddr = format!("127.0.0.1:{}", listener_port + 1).parse().unwrap();
-        assert!(!sender.is_self_connection(&wrong_port));
-
-        let wrong_ip: SocketAddr = format!("192.0.2.1:{}", listener_port).parse().unwrap();
-        assert!(!sender.is_self_connection(&wrong_ip));
-
-        sender.shutdown().await;
-    }
-
-    // ── end-to-end: sender ──▶ separate listener (same process) ──────────────
-
-    /// Full 3-way handshake (PEER_HELLO + PORT_RESERVE + PORT_BIND) plus an
-    /// RTPS frame round-trip. Sender on side A reaches the listener on side B,
-    /// and the RTPS frame is routed to side B's discovery crossbeam channel.
-    ///
-    /// Both sides use `participant_id = 0` so the logical port computation
-    /// agrees on both ends — the listener's `ConnectionRegistry` only accepts
-    /// PORT_RESERVE for its own discovery/user ports.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn end_to_end_send_to_discovery_roundtrip() {
-        // Side B (listener) — ephemeral port.
-        let (b_disc_tx, b_disc_rx, b_user_tx, _b_user_rx) = make_channels();
-        let listener = TcpMuxListener::bind_and_spawn(
-            0,
-            0,
-            0,
-            [0u8; 12],
-            b_disc_tx,
-            b_user_tx,
-            None,
-            TcpSocketTuning::default(),
-        )
-        .expect("listener bind_and_spawn");
-        let b_port = listener.port();
-
-        // Side A (sender) — different GUID, dummy local listener port.
-        let (sender, _a_disc_rx) = make_sender(0, [0xAA; 12], 12345);
-
-        // Send.
-        let target: SocketAddr = format!("127.0.0.1:{}", b_port).parse().unwrap();
-        let rtps_data: &[u8] = b"RTPS\x02\x04\x00\x00\x01\x02\x03\x04\x05\x06\x07\x08";
-        blocking_send_discovery(&sender, target, rtps_data).await.expect("send");
-
-        // Listener should eventually receive the RTPS frame on its discovery channel.
-        // 5s allows for the full chain: connect → PEER_HELLO + ACK → PORT_RESERVE
-        // round-trip → PORT_BIND + ACK → task spawn → first frame.
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let received = wait_for_recv(&b_disc_rx, deadline).await;
-        let msg = received.expect("listener did not receive RTPS data within 5s");
-
-        assert_eq!(&msg.data[..rtps_data.len()], rtps_data);
-
-        sender.shutdown().await;
-        listener.shutdown().await;
-    }
-
-    /// A second send to the same peer reuses the cached data connection
-    /// instead of triggering a new connect_task.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn cached_send_reuses_existing_data_connection() {
-        let (b_disc_tx, b_disc_rx, b_user_tx, _b_user_rx) = make_channels();
-        let listener = TcpMuxListener::bind_and_spawn(
-            0,
-            0,
-            0,
-            [0u8; 12],
-            b_disc_tx,
-            b_user_tx,
-            None,
-            TcpSocketTuning::default(),
-        )
-        .expect("listener bind_and_spawn");
-        let b_port = listener.port();
-
-        let (sender, _) = make_sender(0, [0xAA; 12], 12345);
-
-        let target: SocketAddr = format!("127.0.0.1:{}", b_port).parse().unwrap();
-        blocking_send_discovery(&sender, target, b"RTPS\x00\x00\x00\x00")
-            .await
-            .expect("first send");
-
-        // Wait until the first frame lands on the listener (proves the cache is populated).
-        let deadline = Instant::now() + Duration::from_secs(5);
-        wait_for_recv(&b_disc_rx, deadline).await.expect("first send did not deliver within 5s");
-
-        // Cache should now contain at least control + data entries.
-        let after_first = sender.connections.len();
-        assert!(after_first >= 2, "expected control + data entries in cache, got {}", after_first);
-
-        // Second send reuses the cached connection.
-        blocking_send_discovery(&sender, target, b"RTPS\x11\x11\x11\x11")
-            .await
-            .expect("second send");
-
-        let deadline = Instant::now() + Duration::from_secs(5);
-        wait_for_recv(&b_disc_rx, deadline).await.expect("second send did not deliver within 5s");
-
-        assert_eq!(
-            sender.connections.len(),
-            after_first,
-            "second send should reuse cache, not spawn new connect",
-        );
-
-        sender.shutdown().await;
-        listener.shutdown().await;
-    }
-
-    /// `evict_connection` tears down only the targeted connection, leaving the
-    /// peer's other connections (here, the control connection) in the cache.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn evict_connection_removes_only_that_connection() {
-        let (b_disc_tx, b_disc_rx, b_user_tx, _b_user_rx) = make_channels();
-        let listener = TcpMuxListener::bind_and_spawn(
-            0,
-            0,
-            0,
-            [0u8; 12],
-            b_disc_tx,
-            b_user_tx,
-            None,
-            TcpSocketTuning::default(),
-        )
-        .expect("listener bind_and_spawn");
-        let b_port = listener.port();
-
-        let (sender, _) = make_sender(0, [0xAA; 12], 12345);
-        let target: SocketAddr = format!("127.0.0.1:{}", b_port).parse().unwrap();
-        blocking_send_discovery(&sender, target, b"RTPS\x00\x00\x00\x00").await.expect("send");
-
-        // Wait for cache to populate (control + discovery-data entries).
-        let deadline = Instant::now() + Duration::from_secs(5);
-        wait_for_recv(&b_disc_rx, deadline).await.expect("send did not deliver within 5s");
-        assert!(sender.connections.len() >= 2, "expected control + data entries in cache");
-
-        let disc_port = PortManager::get_discovery_traffic_unicast_port(0, 0);
-        sender.evict_connection(target, disc_port);
-
-        assert!(
-            sender.connections.get(&(target, disc_port)).is_none(),
-            "evicted data connection must be gone",
-        );
-        assert!(
-            sender.connections.get(&(target, CONTROL_LOGICAL_PORT)).is_some(),
-            "control connection must survive single-connection eviction",
-        );
-
-        sender.shutdown().await;
-        listener.shutdown().await;
-    }
-
-    /// `disconnect_peer` evicts every cached connection to the addr (all logical
-    /// ports) and clears its backoff — the DDS-unmatch cleanup path.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn disconnect_peer_evicts_all_connections_and_backoff() {
-        let (b_disc_tx, b_disc_rx, b_user_tx, _b_user_rx) = make_channels();
-        let listener = TcpMuxListener::bind_and_spawn(
-            0,
-            0,
-            0,
-            [0u8; 12],
-            b_disc_tx,
-            b_user_tx,
-            None,
-            TcpSocketTuning::default(),
-        )
-        .expect("listener bind_and_spawn");
-        let b_port = listener.port();
-
-        let (sender, _) = make_sender(0, [0xAA; 12], 12345);
-        let target: SocketAddr = format!("127.0.0.1:{}", b_port).parse().unwrap();
-        blocking_send_discovery(&sender, target, b"RTPS\x00\x00\x00\x00").await.expect("send");
-
-        let deadline = Instant::now() + Duration::from_secs(5);
-        wait_for_recv(&b_disc_rx, deadline).await.expect("send did not deliver within 5s");
-        assert!(sender.connections.len() >= 2, "expected control + data entries");
-
-        // Seed a backoff entry to confirm it is cleared too.
-        sender.note_connect_failure(target);
-        assert!(sender.backoff_remaining(target).is_some());
-
-        sender.disconnect_peer(target);
-        assert_eq!(
-            sender.connections.iter().filter(|e| e.key().0 == target).count(),
-            0,
-            "disconnect_peer must evict every connection to the addr",
-        );
-        assert!(sender.backoff_remaining(target).is_none(), "backoff must be cleared");
-
-        sender.shutdown().await;
-        listener.shutdown().await;
-    }
-
-    /// Reconnect backoff grows exponentially per consecutive connect failure
-    /// and is cleared by a success.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn reconnect_backoff_grows_and_resets() {
-        let (sender, _) = make_sender(0, [0xAA; 12], 12345);
-        let addr: SocketAddr = "192.0.2.1:7400".parse().unwrap();
-
-        assert!(sender.backoff_remaining(addr).is_none(), "no backoff initially");
-
-        sender.note_connect_failure(addr);
-        let first = sender.backoff_remaining(addr).expect("backoff after first failure");
-        assert!(first > Duration::ZERO && first <= BACKOFF_BASE);
-
-        sender.note_connect_failure(addr);
-        let second = sender.backoff_remaining(addr).expect("backoff after second failure");
-        assert!(second > BACKOFF_BASE, "delay must grow on a repeat failure");
-        assert!(second <= BACKOFF_BASE * 2);
-
-        sender.note_connect_success(addr);
-        assert!(sender.backoff_remaining(addr).is_none(), "success clears backoff");
-
-        sender.shutdown().await;
-    }
-
-    /// A send to our own listener port is refused without spawning a connect
-    /// (self-loop heuristic). The send itself returns Ok (fire-and-forget)
-    /// but no connection is added to the cache.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn send_to_self_does_not_populate_cache() {
-        let listener_port = 7777;
-        let (sender, _) = make_sender(0, [0xAA; 12], listener_port);
-
-        let self_addr: SocketAddr = format!("127.0.0.1:{}", listener_port).parse().unwrap();
-        // `ensure_connection` rejects the self-connect (AddrInUse) before any
-        // cache insert, so the send returns Err and nothing is cached.
-        let _ = blocking_send_discovery(&sender, self_addr, b"RTPS\x00\x00\x00\x00").await;
-
-        assert_eq!(sender.connections.len(), 0, "self-connection must not be cached",);
-
-        sender.shutdown().await;
+        assert_eq!(sender.stats.peer_stalled.count(), 0);
+        sender.shutdown();
     }
 }

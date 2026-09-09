@@ -210,6 +210,55 @@ impl Drop for DomainParticipant {
     }
 }
 
+/// A borrowed participant handle that skips the 25-refcount deep clone `get_participant` performs.
+///
+/// Returned by [`Subscriber::participant_arc`](crate::subscription::subscriber::Subscriber) for
+/// internal hot paths. It exists rather than a bare `Arc<DomainParticipant>` because
+/// `get_participant` force-sets `self_ref` on the value it hands back, so its temporary takes part
+/// in the `Drop` guard above and performs the factory orphan handoff when it is the last reference
+/// standing. A bare `Arc` would instead let the count fall to zero and drop the interior value,
+/// whose `self_ref` is `None` -- the participant would be destroyed rather than orphaned, chosen
+/// nondeterministically by whichever thread released last. The guard here reproduces the original
+/// behaviour for two atomic loads, against the ~52 read-modify-writes the clone cost.
+///
+/// The value behind it has `self_ref: None` (see `DomainParticipant::new`, which builds the `Arc`
+/// from a clone taken before `self_ref` is assigned), so it must not be used to reach
+/// `create_*`/`delete_*`, which read that field.
+pub(crate) struct ParticipantRef(Arc<DomainParticipant>);
+
+impl ParticipantRef {
+    pub(crate) fn new(inner: Arc<DomainParticipant>) -> Self {
+        Self(inner)
+    }
+}
+
+impl std::ops::Deref for ParticipantRef {
+    type Target = DomainParticipant;
+
+    fn deref(&self) -> &DomainParticipant {
+        &self.0
+    }
+}
+
+impl Drop for ParticipantRef {
+    fn drop(&mut self) {
+        if self.0.is_builtin {
+            return;
+        }
+        // Plain loads, not read-modify-writes: this is the whole cost of the parity guard.
+        if Arc::strong_count(&self.0) > 1 {
+            return;
+        }
+        if self.0.deleted.load(Ordering::SeqCst) {
+            return;
+        }
+        if let Ok(guid) = self.0.guid() {
+            DomainParticipantFactory::get_instance()
+                .handle_participant_drop(&self.0.domain_id, &InstanceHandle::from_guid(&guid));
+        }
+    }
+}
+
 #[derive(Default, Clone)]
 struct OrphanedEntities {
     topics: Vec<Arc<Topic>>,
@@ -749,12 +798,10 @@ impl DomainParticipant {
                     self.default_publisher_qos.lock().ok().and_then(|g| g.clone())
                 {
                     registered
-                } else if let Ok(profile_qos) =
-                    DomainParticipantFactory::get_instance().get_publisher_qos_from_profile("")
-                {
-                    profile_qos
                 } else {
-                    PublisherQos::default()
+                    DomainParticipantFactory::get_instance()
+                        .get_publisher_qos_from_profile("")
+                        .unwrap_or_default()
                 }
             }
         };
@@ -965,12 +1012,10 @@ impl DomainParticipant {
                     self.default_subscriber_qos.lock().ok().and_then(|g| g.clone())
                 {
                     registered
-                } else if let Ok(profile_qos) =
-                    DomainParticipantFactory::get_instance().get_subscriber_qos_from_profile("")
-                {
-                    profile_qos
                 } else {
-                    SubscriberQos::default()
+                    DomainParticipantFactory::get_instance()
+                        .get_subscriber_qos_from_profile("")
+                        .unwrap_or_default()
                 }
             }
         };
@@ -1567,6 +1612,27 @@ impl DomainParticipant {
     /// * The QoS policies are inconsistent
     /// * Type registration fails
     /// * A topic with the same name but different type already exists
+    /// Resolution chain for `QosKind::Default`: registered default → configured
+    /// default profile → spec default. `QosKind::Specific` is used as-is.
+    ///
+    /// Shared by `create_topic` and `create_topic_dynamic` so both entry points
+    /// resolve the default sentinel identically.
+    fn resolve_topic_qos(&self, qos: QosKind<TopicQos>) -> TopicQos {
+        match qos {
+            QosKind::Specific(q) => q,
+            QosKind::Default => {
+                if let Some(registered) = self.default_topic_qos.lock().ok().and_then(|g| g.clone())
+                {
+                    registered
+                } else {
+                    DomainParticipantFactory::get_instance()
+                        .get_topic_qos_from_profile("")
+                        .unwrap_or_default()
+                }
+            }
+        }
+    }
+
     pub fn create_topic<Foo>(
         &self,
         topic_name: &str,
@@ -1583,21 +1649,7 @@ impl DomainParticipant {
         }
         self.is_deleted()?;
 
-        let qos = match qos.into() {
-            QosKind::Specific(q) => q,
-            QosKind::Default => {
-                if let Some(registered) = self.default_topic_qos.lock().ok().and_then(|g| g.clone())
-                {
-                    registered
-                } else if let Ok(profile_qos) =
-                    DomainParticipantFactory::get_instance().get_topic_qos_from_profile("")
-                {
-                    profile_qos
-                } else {
-                    TopicQos::default()
-                }
-            }
-        };
+        let qos = self.resolve_topic_qos(qos.into());
 
         qos.is_consistent()?;
         let handle = self.create_instance_handle()?;
@@ -2612,7 +2664,7 @@ impl DomainParticipant {
         &self,
         topic_name: &str,
         type_support: Arc<crate::xtypes::DynamicTypeSupport>,
-        qos: TopicQos,
+        qos: impl Into<QosKind<TopicQos>>,
         listener: Option<Arc<dyn TopicListener>>,
         mask: StatusMask,
     ) -> DdsResult<Topic> {
@@ -2620,6 +2672,12 @@ impl DomainParticipant {
             return Err(DdsError::PreconditionNotMet);
         }
         self.is_deleted()?;
+
+        // Same default-resolution chain as the typed create_topic: a caller that wants
+        // the QoS profile applied passes TOPIC_QOS_DEFAULT. Passing a concrete TopicQos
+        // still means "use exactly this" via the blanket From<T> for QosKind<T>, so
+        // existing callers are unaffected.
+        let qos = self.resolve_topic_qos(qos.into());
 
         qos.is_consistent()?;
         let handle = self.create_instance_handle()?;
@@ -2764,8 +2822,9 @@ impl DomainParticipant {
         Ok(obj.clone())
     }
 
-    /// Resolve the TypeObject for `topic_name`
-    fn discovered_type_object(&self, topic_name: &str) -> DdsResult<crate::xtypes::TypeObject> {
+    /// Resolve the TypeObject for `topic_name`. Triggers a TypeLookup fetch and
+    /// returns `PreconditionNotMet` while the reply is pending; retry until Ok.
+    pub fn discovered_type_object(&self, topic_name: &str) -> DdsResult<crate::xtypes::TypeObject> {
         let rtps_participant = self.get_rtps_participant()?;
 
         // Inline TypeObject advertised by a remote publication/subscription. The
@@ -3004,6 +3063,19 @@ impl DomainParticipant {
         }
     }
 
+    /// Register a callback for remote endpoint (SEDP) discovery events.
+    ///
+    /// The callback fires when a remote reader or writer is discovered or disposed.
+    pub fn set_endpoint_discovery_callback(
+        &self,
+        f: std::sync::Arc<
+            dyn Fn(&crate::rtps::entities::participant::EndpointDiscoveryEvent) + Send + Sync,
+        >,
+    ) -> DdsResult<()> {
+        self.get_rtps_participant()?.set_endpoint_discovery_cb(f);
+        Ok(())
+    }
+
     fn has_manual_by_participant_writers(&self) -> DdsResult<bool> {
         let publishers = self.get_publishers()?;
         for publisher in publishers {
@@ -3136,7 +3208,7 @@ mod domain_participant_tests {
         assert!(participant1 != participant4);
 
         // Test 5: Search test in participant vector
-        let participants = vec![participant1.clone(), participant3.clone()];
+        let participants = [participant1.clone(), participant3.clone()];
 
         assert!(participants.contains(&participant1), "Should find the participant in the vector");
 
@@ -4003,10 +4075,7 @@ mod domain_participant_tests {
         #[cfg(test)]
         pub fn get_topic_strong_count(&self, topic_name: &str) -> Option<usize> {
             let topics_by_name = self.find_topic_by_name(topic_name).unwrap();
-            match topics_by_name {
-                Some(topic) => Some(Arc::strong_count(&topic)),
-                None => None,
-            }
+            topics_by_name.map(|topic| Arc::strong_count(&topic))
         }
     }
 
@@ -4141,7 +4210,7 @@ mod domain_participant_tests {
             .unwrap();
 
         // Attempt to delete non-existent topic
-        assert!(matches!(participant.delete_topic(topic), Err(_)));
+        assert!(participant.delete_topic(topic).is_err());
 
         participant.delete_contained_entities().unwrap();
         factory.delete_participant(participant).unwrap();

@@ -37,10 +37,22 @@ pub fn init_from_env() {
     // - INT2DDS_NETWORK_INTERFACE: Set network interface name to use (e.g., eth0, wlan0) - Default: automatic selection
     // - INT2DDS_NETWORK_IP: Set network IP address directly (e.g., 192.168.1.100) - Default: automatic selection
     // - INT2DDS_USE_LOOPBACK_INTERFACE: Enable loopback interface for discovery and endpoint communication (true, false) - Default: false
+    // - INT2DDS_FORCE_LOOPBACK_MULTICAST: Force multicast egress through the loopback interface (127.0.0.1) for local-only testing (true, false) - Default: false
+    // - INT2DDS_DISABLE_SAME_HOST_LOOPBACK: Address a co-located peer at every address it announced instead of 127.0.0.1 (true, false) - Default: false
     // - INT2DDS_UDP_SOCKET_BUFFER: Set UDP socket buffer size (bytes) - Default: OS default
     // - INT2DDS_SHM_BUFFER_SIZE: Set shared memory buffer size (bytes) - Default: 1048576 (1MB)
+    // - INT2DDS_DATA_FRAG_SIZE: Set DATA_FRAG fragment size (1-65000) when the writer QoS specifies none - Default: 65000
+    // - INT2DDS_MAX_MESSAGE_SIZE: Set max UDP message size (1-65000), header-inclusive datagram budget bounding fragments packed per message - Default: 65000
+    // - INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT: Set the default for the disable_piggyback_heartbeat writer QoS (true, false) - Default: false
+    // - INT2DDS_DISABLE_PREEMPTIVE: Disable preemptive ACKNACK and preemptive HEARTBEAT on new endpoint matches (true, false) - Default: false
+    // - INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS: Reader delay before the first NACK_FRAG for missing fragments (ms) - Default: 5
+    // - INT2DDS_NACK_FRAG_RETRY_MS: Reader retry interval when a NACK_FRAG got no reply (ms) - Default: 200
+    // - INT2DDS_NACK_FRAG_MAX_RETRIES: Reader retries before yielding to the periodic heartbeat - Default: 10
+    // - INT2DDS_NACK_RESPONSE_DELAY_MS: Writer delay before answering an ACKNACK or NACK_FRAG (ms) - Default: 0
+    // - INT2DDS_SEND_CREDIT_BACKSTOP_MS: Writer age at which a send charge toward a silent peer stops counting (ms) - Default: 250
 
     // - INT2DDS_INITIAL_PEERS: Set initial peers for SPDP unicast discovery (comma-separated, e.g., "192.168.1.10:7400,192.168.1.11:7400") - Default: none
+    // - INT2DDS_TCP_PEER_SEARCH_SLOTS: Set how many participant slots a TCP peer named with the wildcard port stands for (1-125, one domain's port block) - Default: 16
 
     // - INT2DDS_MULTICAST_TTL: Set IPv4 multicast TTL fallback (0-255) when no PropertyQosPolicy entry is present - Default: OS default (1)
 
@@ -200,6 +212,30 @@ pub fn set_use_loopback_interface(enabled: bool) {
     unsafe { std::env::set_var("INT2DDS_USE_LOOPBACK_INTERFACE", enabled.to_string()) };
 }
 
+/// Get the force loopback multicast setting from environment variable
+pub fn get_force_loopback_multicast() -> bool {
+    std::env::var("INT2DDS_FORCE_LOOPBACK_MULTICAST")
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false)
+}
+
+/// Set the force loopback multicast via environment variable
+pub fn set_force_loopback_multicast(enabled: bool) {
+    log::info!("Environment variable set: INT2DDS_FORCE_LOOPBACK_MULTICAST = {}", enabled);
+    unsafe { std::env::set_var("INT2DDS_FORCE_LOOPBACK_MULTICAST", enabled.to_string()) };
+}
+
+/// Read the same-host loopback gate from `INT2DDS_DISABLE_SAME_HOST_LOOPBACK`
+pub fn get_disable_same_host_loopback() -> bool {
+    get_bool_env("INT2DDS_DISABLE_SAME_HOST_LOOPBACK").unwrap_or(false)
+}
+
+/// Set the same-host loopback gate via environment variable
+pub fn set_disable_same_host_loopback(is_disabled: bool) {
+    log::info!("Environment variable set: INT2DDS_DISABLE_SAME_HOST_LOOPBACK = {}", is_disabled);
+    unsafe { std::env::set_var("INT2DDS_DISABLE_SAME_HOST_LOOPBACK", is_disabled.to_string()) };
+}
+
 /// Set the UDP socket buffer size via environment variable
 pub fn set_udp_socket_buffer_size(size: usize) {
     log::info!("Environment variable set: INT2DDS_UDP_SOCKET_BUFFER = {}", size);
@@ -268,27 +304,6 @@ pub fn set_initial_peers(peers: &[std::net::SocketAddr]) {
     unsafe { std::env::set_var("INT2DDS_INITIAL_PEERS", peers_str) };
 }
 
-/// Get the fragment size (data_max_size_serialized) for user-defined writers.
-/// Default 65000; capped at 65000 (u16 wire limit + 64KB datagram - headers).
-pub fn get_fragment_size() -> i32 {
-    const DEFAULT: i32 = 65000;
-    const MAX: i32 = 65000;
-    match std::env::var("INT2DDS_FRAGMENT_SIZE").ok().and_then(|v| v.parse::<i32>().ok()) {
-        Some(v) if v > MAX => {
-            log::warn!("INT2DDS_FRAGMENT_SIZE={} exceeds max {}, clamping to {}", v, MAX, MAX);
-            MAX
-        }
-        Some(v) if v > 0 => v,
-        _ => DEFAULT,
-    }
-}
-
-/// Set the writer fragment size via environment variable
-pub fn set_fragment_size(size: i32) {
-    log::info!("Environment variable set: INT2DDS_FRAGMENT_SIZE = {}", size);
-    unsafe { std::env::set_var("INT2DDS_FRAGMENT_SIZE", size.to_string()) };
-}
-
 /// Read the IPv4 multicast TTL override from `INT2DDS_MULTICAST_TTL`.
 ///
 /// Returns `None` when the variable is unset, empty, or fails to parse as `u8`
@@ -316,6 +331,261 @@ pub fn get_multicast_ttl_override() -> Option<u8> {
 pub fn set_multicast_ttl(ttl: u8) {
     log::info!("Environment variable set: INT2DDS_MULTICAST_TTL = {}", ttl);
     unsafe { std::env::set_var("INT2DDS_MULTICAST_TTL", ttl.to_string()) };
+}
+
+/// Read the TCP peer search width from `INT2DDS_TCP_PEER_SEARCH_SLOTS`.
+/// Returns `None` when unset, empty, or not an integer; the range is the
+/// transport's to check, since the ceiling is one domain's port block.
+pub fn get_tcp_peer_search_slots() -> Option<u32> {
+    let raw = std::env::var("INT2DDS_TCP_PEER_SEARCH_SLOTS").ok().filter(|s| !s.is_empty())?;
+    match raw.parse::<u32>() {
+        Ok(slots) => Some(slots),
+        Err(e) => {
+            log::warn!(
+                "Invalid INT2DDS_TCP_PEER_SEARCH_SLOTS value '{}': {}. Ignoring env default.",
+                raw,
+                e
+            );
+            None
+        }
+    }
+}
+
+/// Read the DATA_FRAG fragment size fallback from `INT2DDS_DATA_FRAG_SIZE`.
+/// Returns `None` when unset, empty, or not an integer; the range is the QoS policy's to check.
+pub fn get_data_frag_size_override() -> Option<i32> {
+    let raw = std::env::var("INT2DDS_DATA_FRAG_SIZE").ok().filter(|s| !s.is_empty())?;
+    match raw.parse::<i32>() {
+        Ok(size) => Some(size),
+        Err(e) => {
+            log::warn!(
+                "Invalid INT2DDS_DATA_FRAG_SIZE value '{}': {}. Ignoring env override.",
+                raw,
+                e
+            );
+            None
+        }
+    }
+}
+
+/// Set the DATA_FRAG fragment size fallback via `INT2DDS_DATA_FRAG_SIZE`.
+/// Must be called before the DataWriter is created in order to take effect.
+pub fn set_data_frag_size(size: i32) {
+    log::info!("Environment variable set: INT2DDS_DATA_FRAG_SIZE = {}", size);
+    unsafe { std::env::set_var("INT2DDS_DATA_FRAG_SIZE", size.to_string()) };
+}
+
+// Read the max UDP message size override from `INT2DDS_MAX_MESSAGE_SIZE`.
+// Header-inclusive datagram budget. `None` when unset, empty, or not an integer.
+pub fn get_max_message_size_override() -> Option<i32> {
+    let raw = std::env::var("INT2DDS_MAX_MESSAGE_SIZE").ok().filter(|s| !s.is_empty())?;
+    match raw.parse::<i32>() {
+        Ok(size) => Some(size),
+        Err(e) => {
+            log::warn!(
+                "Invalid INT2DDS_MAX_MESSAGE_SIZE value '{}': {}. Ignoring env override.",
+                raw,
+                e
+            );
+            None
+        }
+    }
+}
+
+// Set the max UDP message size via `INT2DDS_MAX_MESSAGE_SIZE`.
+// Must be called before the DataWriter is created in order to take effect.
+pub fn set_max_message_size(size: i32) {
+    log::info!("Environment variable set: INT2DDS_MAX_MESSAGE_SIZE = {}", size);
+    unsafe { std::env::set_var("INT2DDS_MAX_MESSAGE_SIZE", size.to_string()) };
+}
+
+// Resolve INT2DDS_MAX_MESSAGE_SIZE to a concrete size, clamped to 1..=65000, default 65000.
+pub fn get_max_message_size() -> usize {
+    get_max_message_size_override().filter(|&size| (1..=65000).contains(&size)).unwrap_or(65000)
+        as usize
+}
+
+// Read the disable_piggyback_heartbeat QoS default from
+// `INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT`.
+// Read a boolean env var, accepting `true`/`false`/`1`/`0` case-insensitively.
+// Returns `None` when unset, empty, or not a recognized boolean.
+fn get_bool_env(name: &str) -> Option<bool> {
+    let raw = std::env::var(name).ok().filter(|s| !s.is_empty())?;
+
+    if raw.eq_ignore_ascii_case("true") || raw == "1" {
+        Some(true)
+    } else if raw.eq_ignore_ascii_case("false") || raw == "0" {
+        Some(false)
+    } else {
+        log::warn!("Invalid {} value '{}'. Ignoring env default.", name, raw);
+        None
+    }
+}
+
+// Read the disable_piggyback_heartbeat QoS default from
+// `INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT`.
+// Returns `None` when unset, empty, or not a recognized boolean.
+pub fn get_disable_piggyback_heartbeat_default() -> Option<bool> {
+    get_bool_env("INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT")
+}
+
+// Set the disable_piggyback_heartbeat QoS default via
+// `INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT`.
+// Must be called before the DataWriter QoS is constructed in order to take effect.
+pub fn set_disable_piggyback_heartbeat_default(is_disabled: bool) {
+    log::info!(
+        "Environment variable set: INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT = {}",
+        is_disabled
+    );
+    unsafe {
+        std::env::set_var("INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT", is_disabled.to_string())
+    };
+}
+
+// Read the preemptive ACKNACK/HEARTBEAT gate from `INT2DDS_DISABLE_PREEMPTIVE`.
+// Read at match time, so it only affects endpoint matches made after it is set.
+pub fn get_disable_preemptive() -> bool {
+    get_bool_env("INT2DDS_DISABLE_PREEMPTIVE").unwrap_or(false)
+}
+
+// Disable the preemptive ACKNACK and preemptive HEARTBEAT sent on a new endpoint
+// match, via `INT2DDS_DISABLE_PREEMPTIVE`. Responses to a peer's preemptive ACKNACK are unaffected.
+pub fn set_disable_preemptive(is_disabled: bool) {
+    log::info!("Environment variable set: INT2DDS_DISABLE_PREEMPTIVE = {}", is_disabled);
+    unsafe { std::env::set_var("INT2DDS_DISABLE_PREEMPTIVE", is_disabled.to_string()) };
+}
+
+/// SEDP heartbeat period override from `INT2DDS_SEDP_HEARTBEAT_MS`, in ms.
+/// A lost announcement waits one period before the reader NACKs for it.
+pub fn get_sedp_heartbeat_ms() -> Option<u64> {
+    static CACHED: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let raw = std::env::var("INT2DDS_SEDP_HEARTBEAT_MS").ok()?;
+        match raw.trim().parse::<u64>() {
+            Ok(ms) if ms > 0 => {
+                log::info!("Environment variable set: INT2DDS_SEDP_HEARTBEAT_MS = {}", ms);
+                Some(ms)
+            }
+            _ => None,
+        }
+    })
+}
+
+/// Reader NACK_FRAG response-delay override from `INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS`, in ms.
+/// Delay before the reader sends its first NACK_FRAG for a sample's missing fragments.
+pub fn get_nack_frag_response_delay_ms_override() -> Option<u32> {
+    let raw =
+        std::env::var("INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS").ok().filter(|s| !s.is_empty())?;
+    match raw.parse::<u32>() {
+        Ok(ms) => Some(ms),
+        Err(e) => {
+            log::warn!(
+                "Invalid INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS value '{}': {}. Ignoring env override.",
+                raw,
+                e
+            );
+            None
+        }
+    }
+}
+
+/// Set the NACK_FRAG response delay via `INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS`.
+pub fn set_nack_frag_response_delay_ms(ms: u32) {
+    log::info!("Environment variable set: INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS = {}", ms);
+    unsafe { std::env::set_var("INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS", ms.to_string()) };
+}
+
+/// Reader NACK_FRAG retry-interval override from `INT2DDS_NACK_FRAG_RETRY_MS`, in ms.
+/// Delay before the reader re-asks when a NACK_FRAG produced no fragments.
+pub fn get_nack_frag_retry_ms_override() -> Option<u32> {
+    let raw = std::env::var("INT2DDS_NACK_FRAG_RETRY_MS").ok().filter(|s| !s.is_empty())?;
+    match raw.parse::<u32>() {
+        Ok(ms) => Some(ms),
+        Err(e) => {
+            log::warn!(
+                "Invalid INT2DDS_NACK_FRAG_RETRY_MS value '{}': {}. Ignoring env override.",
+                raw,
+                e
+            );
+            None
+        }
+    }
+}
+
+/// Set the NACK_FRAG retry interval via `INT2DDS_NACK_FRAG_RETRY_MS`.
+pub fn set_nack_frag_retry_ms(ms: u32) {
+    log::info!("Environment variable set: INT2DDS_NACK_FRAG_RETRY_MS = {}", ms);
+    unsafe { std::env::set_var("INT2DDS_NACK_FRAG_RETRY_MS", ms.to_string()) };
+}
+
+/// Reader NACK_FRAG max-retries override from `INT2DDS_NACK_FRAG_MAX_RETRIES`.
+/// Retries before a stalled fragment repair yields to the periodic heartbeat.
+pub fn get_nack_frag_max_retries_override() -> Option<u32> {
+    let raw = std::env::var("INT2DDS_NACK_FRAG_MAX_RETRIES").ok().filter(|s| !s.is_empty())?;
+    match raw.parse::<u32>() {
+        Ok(retries) => Some(retries),
+        Err(e) => {
+            log::warn!(
+                "Invalid INT2DDS_NACK_FRAG_MAX_RETRIES value '{}': {}. Ignoring env override.",
+                raw,
+                e
+            );
+            None
+        }
+    }
+}
+
+/// Set the NACK_FRAG max retries via `INT2DDS_NACK_FRAG_MAX_RETRIES`.
+pub fn set_nack_frag_max_retries(retries: u32) {
+    log::info!("Environment variable set: INT2DDS_NACK_FRAG_MAX_RETRIES = {}", retries);
+    unsafe { std::env::set_var("INT2DDS_NACK_FRAG_MAX_RETRIES", retries.to_string()) };
+}
+
+/// Writer NACK response-delay override from `INT2DDS_NACK_RESPONSE_DELAY_MS`, in ms.
+/// Delay before the writer answers a reader's ACKNACK or NACK_FRAG with the repair.
+pub fn get_nack_response_delay_ms_override() -> Option<u32> {
+    let raw = std::env::var("INT2DDS_NACK_RESPONSE_DELAY_MS").ok().filter(|s| !s.is_empty())?;
+    match raw.parse::<u32>() {
+        Ok(ms) => Some(ms),
+        Err(e) => {
+            log::warn!(
+                "Invalid INT2DDS_NACK_RESPONSE_DELAY_MS value '{}': {}. Ignoring env override.",
+                raw,
+                e
+            );
+            None
+        }
+    }
+}
+
+/// Set the writer NACK response delay via `INT2DDS_NACK_RESPONSE_DELAY_MS`.
+pub fn set_nack_response_delay_ms(ms: u32) {
+    log::info!("Environment variable set: INT2DDS_NACK_RESPONSE_DELAY_MS = {}", ms);
+    unsafe { std::env::set_var("INT2DDS_NACK_RESPONSE_DELAY_MS", ms.to_string()) };
+}
+
+/// Send-credit backstop override from `INT2DDS_SEND_CREDIT_BACKSTOP_MS`, in ms.
+/// Age at which wire bytes charged toward a remote participant stop counting against its send
+/// window, for a peer that never sends the ACKNACK or NACK_FRAG that would release them.
+pub fn get_send_credit_backstop_ms_override() -> Option<u32> {
+    let raw = std::env::var("INT2DDS_SEND_CREDIT_BACKSTOP_MS").ok().filter(|s| !s.is_empty())?;
+    match raw.parse::<u32>() {
+        Ok(ms) => Some(ms),
+        Err(e) => {
+            log::warn!(
+                "Invalid INT2DDS_SEND_CREDIT_BACKSTOP_MS value '{}': {}. Ignoring env override.",
+                raw,
+                e
+            );
+            None
+        }
+    }
+}
+
+/// Set the send-credit backstop via `INT2DDS_SEND_CREDIT_BACKSTOP_MS`.
+pub fn set_send_credit_backstop_ms(ms: u32) {
+    log::info!("Environment variable set: INT2DDS_SEND_CREDIT_BACKSTOP_MS = {}", ms);
+    unsafe { std::env::set_var("INT2DDS_SEND_CREDIT_BACKSTOP_MS", ms.to_string()) };
 }
 
 // Read the public IPv4 advertised in SPDP from `INT2DDS_EXTERNAL_ADDRESS`.
@@ -357,9 +627,17 @@ fn parse_port_env(name: &str) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{get_multicast_ttl_override, set_multicast_ttl};
+    use super::{
+        get_disable_preemptive, get_multicast_ttl_override, get_nack_frag_max_retries_override,
+        get_nack_frag_response_delay_ms_override, get_nack_frag_retry_ms_override,
+        get_nack_response_delay_ms_override, get_send_credit_backstop_ms_override,
+        set_disable_preemptive, set_multicast_ttl, set_nack_frag_max_retries,
+        set_nack_frag_response_delay_ms, set_nack_frag_retry_ms, set_nack_response_delay_ms,
+        set_send_credit_backstop_ms,
+    };
 
     const ENV_KEY: &str = "INT2DDS_MULTICAST_TTL";
+    const PREEMPTIVE_KEY: &str = "INT2DDS_DISABLE_PREEMPTIVE";
 
     fn clear_env() {
         unsafe { std::env::remove_var(ENV_KEY) };
@@ -380,5 +658,118 @@ mod tests {
         assert_eq!(get_multicast_ttl_override(), None, "out-of-u8 range → None");
 
         clear_env();
+    }
+
+    /// Unset and unparseable both have to read as "enabled", or a typo would silently
+    /// turn preemptive traffic off for the whole participant.
+    #[test]
+    fn preemptive_gate_defaults_to_enabled() {
+        unsafe { std::env::remove_var(PREEMPTIVE_KEY) };
+        assert!(!get_disable_preemptive(), "unset → preemptive stays enabled");
+
+        for value in ["true", "TRUE", "1"] {
+            unsafe { std::env::set_var(PREEMPTIVE_KEY, value) };
+            assert!(get_disable_preemptive(), "{} → disabled", value);
+        }
+
+        for value in ["false", "0", "yes", ""] {
+            unsafe { std::env::set_var(PREEMPTIVE_KEY, value) };
+            assert!(!get_disable_preemptive(), "{:?} → enabled", value);
+        }
+
+        set_disable_preemptive(true);
+        assert!(get_disable_preemptive(), "setter round-trip");
+
+        unsafe { std::env::remove_var(PREEMPTIVE_KEY) };
+    }
+
+    #[test]
+    fn nack_frag_response_delay_env_round_trips_and_rejects_invalid() {
+        const KEY: &str = "INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS";
+        unsafe { std::env::remove_var(KEY) };
+        assert_eq!(get_nack_frag_response_delay_ms_override(), None, "unset → None");
+
+        set_nack_frag_response_delay_ms(500);
+        assert_eq!(get_nack_frag_response_delay_ms_override(), Some(500));
+
+        unsafe { std::env::set_var(KEY, "abc") };
+        assert_eq!(get_nack_frag_response_delay_ms_override(), None, "non-numeric → None");
+
+        unsafe { std::env::set_var(KEY, "-1") };
+        assert_eq!(get_nack_frag_response_delay_ms_override(), None, "negative → None");
+
+        unsafe { std::env::remove_var(KEY) };
+    }
+
+    #[test]
+    fn nack_frag_retry_ms_env_round_trips_and_rejects_invalid() {
+        const KEY: &str = "INT2DDS_NACK_FRAG_RETRY_MS";
+        unsafe { std::env::remove_var(KEY) };
+        assert_eq!(get_nack_frag_retry_ms_override(), None, "unset → None");
+
+        set_nack_frag_retry_ms(750);
+        assert_eq!(get_nack_frag_retry_ms_override(), Some(750));
+
+        unsafe { std::env::set_var(KEY, "abc") };
+        assert_eq!(get_nack_frag_retry_ms_override(), None, "non-numeric → None");
+
+        unsafe { std::env::set_var(KEY, "-1") };
+        assert_eq!(get_nack_frag_retry_ms_override(), None, "negative → None");
+
+        unsafe { std::env::remove_var(KEY) };
+    }
+
+    #[test]
+    fn nack_response_delay_env_round_trips_and_rejects_invalid() {
+        const KEY: &str = "INT2DDS_NACK_RESPONSE_DELAY_MS";
+        unsafe { std::env::remove_var(KEY) };
+        assert_eq!(get_nack_response_delay_ms_override(), None, "unset → None");
+
+        set_nack_response_delay_ms(100);
+        assert_eq!(get_nack_response_delay_ms_override(), Some(100));
+
+        unsafe { std::env::set_var(KEY, "abc") };
+        assert_eq!(get_nack_response_delay_ms_override(), None, "non-numeric → None");
+
+        unsafe { std::env::set_var(KEY, "-1") };
+        assert_eq!(get_nack_response_delay_ms_override(), None, "negative → None");
+
+        unsafe { std::env::remove_var(KEY) };
+    }
+
+    #[test]
+    fn nack_frag_max_retries_env_round_trips_and_rejects_invalid() {
+        const KEY: &str = "INT2DDS_NACK_FRAG_MAX_RETRIES";
+        unsafe { std::env::remove_var(KEY) };
+        assert_eq!(get_nack_frag_max_retries_override(), None, "unset → None");
+
+        set_nack_frag_max_retries(25);
+        assert_eq!(get_nack_frag_max_retries_override(), Some(25));
+
+        unsafe { std::env::set_var(KEY, "abc") };
+        assert_eq!(get_nack_frag_max_retries_override(), None, "non-numeric → None");
+
+        unsafe { std::env::set_var(KEY, "-1") };
+        assert_eq!(get_nack_frag_max_retries_override(), None, "negative → None");
+
+        unsafe { std::env::remove_var(KEY) };
+    }
+
+    #[test]
+    fn send_credit_backstop_env_round_trips_and_rejects_invalid() {
+        const KEY: &str = "INT2DDS_SEND_CREDIT_BACKSTOP_MS";
+        unsafe { std::env::remove_var(KEY) };
+        assert_eq!(get_send_credit_backstop_ms_override(), None, "unset → None");
+
+        set_send_credit_backstop_ms(750);
+        assert_eq!(get_send_credit_backstop_ms_override(), Some(750));
+
+        unsafe { std::env::set_var(KEY, "abc") };
+        assert_eq!(get_send_credit_backstop_ms_override(), None, "non-numeric → None");
+
+        unsafe { std::env::set_var(KEY, "-1") };
+        assert_eq!(get_send_credit_backstop_ms_override(), None, "negative → None");
+
+        unsafe { std::env::remove_var(KEY) };
     }
 }

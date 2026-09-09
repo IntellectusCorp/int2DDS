@@ -34,10 +34,9 @@ use std::{
     fmt::Debug,
     marker::PhantomData,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
         Arc, Mutex, RwLock, Weak,
     },
-    time::Instant,
 };
 
 use super::{
@@ -68,7 +67,7 @@ use crate::{
             EnableChild, Entity, EntityInternal, UpdateStatus,
         },
         history_cache::HistoryCache as DcpsHistoryCache,
-        qos_policy::{HistoryQosPolicyKind, PresentationQosAccessScopeKind, Qos},
+        qos_policy::Qos,
         status::{
             LivelinessChangedStatus, RequestedDeadlineMissedStatus, RequestedIncompatibleQosStatus,
             RequestedIncompatibleTypeStatus, SampleLostStatus, SampleRejectedStatus, StatusInfo,
@@ -87,7 +86,7 @@ use crate::{
     },
     subscription::{
         data_reader_history::{DataReaderHistoryCache, ReaderChangeId},
-        data_sample::{DataSample, SamplePayload},
+        data_sample::DataSample,
         read_condition::ReadConditionTrait,
         sample_info::{InstanceInfo, SampleInfo, StateMaskExt},
     },
@@ -100,105 +99,9 @@ use crate::{
     utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
 };
 
-static SERIALIZED_TAKE_PROFILE_COUNT: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_PROFILE_PRECHECK_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_PROFILE_GET_CHANGES_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_PROFILE_SORT_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_PROFILE_FILTER_SETUP_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_PROFILE_INSTANCE_INFO_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_PROFILE_LOOP_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_PROFILE_CLEANUP_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_PROFILE_TOTAL_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_LOOP_PROFILE_COUNT: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_LOOP_PROFILE_SAMPLE_STATE_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_LOOP_PROFILE_INFO_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_LOOP_PROFILE_MATCH_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_LOOP_PROFILE_DATA_BYTES_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_LOOP_PROFILE_SAMPLE_INFO_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_LOOP_PROFILE_REMOVE_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_LOOP_PROFILE_PUSH_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_TAKE_LOOP_PROFILE_TOTAL_US: AtomicU64 = AtomicU64::new(0);
-
-fn serialized_take_profile_enabled() -> bool {
-    std::env::var_os("RMW_INT2DDS_PROFILE").is_some()
-}
-
-fn elapsed_us(start: Instant, end: Instant) -> u64 {
-    end.duration_since(start).as_micros() as u64
-}
-
-fn record_serialized_take_profile(
-    precheck_us: u64,
-    get_changes_us: u64,
-    sort_us: u64,
-    filter_setup_us: u64,
-    instance_info_us: u64,
-    loop_us: u64,
-    cleanup_us: u64,
-    total_us: u64,
-) {
-    let n = SERIALIZED_TAKE_PROFILE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    SERIALIZED_TAKE_PROFILE_PRECHECK_US.fetch_add(precheck_us, Ordering::Relaxed);
-    SERIALIZED_TAKE_PROFILE_GET_CHANGES_US.fetch_add(get_changes_us, Ordering::Relaxed);
-    SERIALIZED_TAKE_PROFILE_SORT_US.fetch_add(sort_us, Ordering::Relaxed);
-    SERIALIZED_TAKE_PROFILE_FILTER_SETUP_US.fetch_add(filter_setup_us, Ordering::Relaxed);
-    SERIALIZED_TAKE_PROFILE_INSTANCE_INFO_US.fetch_add(instance_info_us, Ordering::Relaxed);
-    SERIALIZED_TAKE_PROFILE_LOOP_US.fetch_add(loop_us, Ordering::Relaxed);
-    SERIALIZED_TAKE_PROFILE_CLEANUP_US.fetch_add(cleanup_us, Ordering::Relaxed);
-    SERIALIZED_TAKE_PROFILE_TOTAL_US.fetch_add(total_us, Ordering::Relaxed);
-
-    if n % 300 == 0 {
-        let divisor = n as f64;
-        eprintln!(
-            "INT2DDS_SERIALIZED_TAKE_PROFILE count={} total_avg_us={:.3} precheck_avg_us={:.3} get_changes_avg_us={:.3} sort_avg_us={:.3} filter_setup_avg_us={:.3} instance_info_avg_us={:.3} loop_avg_us={:.3} cleanup_avg_us={:.3}",
-            n,
-            SERIALIZED_TAKE_PROFILE_TOTAL_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_TAKE_PROFILE_PRECHECK_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_TAKE_PROFILE_GET_CHANGES_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_TAKE_PROFILE_SORT_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_TAKE_PROFILE_FILTER_SETUP_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_TAKE_PROFILE_INSTANCE_INFO_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_TAKE_PROFILE_LOOP_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_TAKE_PROFILE_CLEANUP_US.load(Ordering::Relaxed) as f64 / divisor,
-        );
-    }
-}
-
-fn record_serialized_take_loop_profile(
-    sample_state_us: u64,
-    info_us: u64,
-    match_us: u64,
-    data_bytes_us: u64,
-    sample_info_us: u64,
-    remove_us: u64,
-    push_us: u64,
-    total_us: u64,
-) {
-    let n = SERIALIZED_TAKE_LOOP_PROFILE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    SERIALIZED_TAKE_LOOP_PROFILE_SAMPLE_STATE_US.fetch_add(sample_state_us, Ordering::Relaxed);
-    SERIALIZED_TAKE_LOOP_PROFILE_INFO_US.fetch_add(info_us, Ordering::Relaxed);
-    SERIALIZED_TAKE_LOOP_PROFILE_MATCH_US.fetch_add(match_us, Ordering::Relaxed);
-    SERIALIZED_TAKE_LOOP_PROFILE_DATA_BYTES_US.fetch_add(data_bytes_us, Ordering::Relaxed);
-    SERIALIZED_TAKE_LOOP_PROFILE_SAMPLE_INFO_US.fetch_add(sample_info_us, Ordering::Relaxed);
-    SERIALIZED_TAKE_LOOP_PROFILE_REMOVE_US.fetch_add(remove_us, Ordering::Relaxed);
-    SERIALIZED_TAKE_LOOP_PROFILE_PUSH_US.fetch_add(push_us, Ordering::Relaxed);
-    SERIALIZED_TAKE_LOOP_PROFILE_TOTAL_US.fetch_add(total_us, Ordering::Relaxed);
-
-    if n % 300 == 0 {
-        let divisor = n as f64;
-        eprintln!(
-            "INT2DDS_SERIALIZED_TAKE_LOOP_PROFILE count={} total_avg_us={:.3} sample_state_avg_us={:.3} info_avg_us={:.3} match_avg_us={:.3} data_bytes_avg_us={:.3} sample_info_avg_us={:.3} remove_avg_us={:.3} push_avg_us={:.3}",
-            n,
-            SERIALIZED_TAKE_LOOP_PROFILE_TOTAL_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_TAKE_LOOP_PROFILE_SAMPLE_STATE_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_TAKE_LOOP_PROFILE_INFO_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_TAKE_LOOP_PROFILE_MATCH_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_TAKE_LOOP_PROFILE_DATA_BYTES_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_TAKE_LOOP_PROFILE_SAMPLE_INFO_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_TAKE_LOOP_PROFILE_REMOVE_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_TAKE_LOOP_PROFILE_PUSH_US.load(Ordering::Relaxed) as f64 / divisor,
-        );
-    }
+pub enum BoundedSerialized {
+    Fit(Bytes, SampleInfo),
+    TooSmall { required: usize },
 }
 
 // Pub/Sub must contain multiple types of DataWriter/Reader<Foo>,
@@ -773,6 +676,31 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         }
     }
 
+    /// Get the raw serialized key bytes for a given instance handle.
+    ///
+    /// Serialized counterpart of [`get_key_value`](Self::get_key_value) for the FFI
+    /// raw-serialized path, mirroring the writer's `get_key_value_serialized`. For
+    /// native (derive) types this returns the CDR-serialized key; for raw FFI types
+    /// (which cannot deserialize/re-serialize a key) it returns the stored instance
+    /// handle bytes, which still round-trip through `lookup_instance_serialized`.
+    pub fn get_key_value_serialized(&self, handle: InstanceHandle) -> DdsResult<Arc<[u8]>> {
+        self.is_enabled()?;
+
+        if handle.is_nil() {
+            return Err(DdsError::BadParameter);
+        }
+
+        let instance_info = self.get_instance_infos()?;
+        if let Some(info) = instance_info.get(&handle) {
+            if info.key.is_empty() {
+                return Err(DdsError::Error("Unknown Key".to_string()));
+            }
+            Ok(info.key.clone())
+        } else {
+            Err(DdsError::BadParameter)
+        }
+    }
+
     /// Looks up the instance handle corresponding to a data instance.
     ///
     /// This operation takes an instance and returns the handle that can be used in subsequent
@@ -845,6 +773,31 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                 None => InstanceHandle::NIL, // Unregistered instance
             })
         }
+    }
+
+    /// Look up an instance handle from the stored serialized key bytes.
+    ///
+    /// Serialized counterpart of [`lookup_instance`](Self::lookup_instance) for the FFI
+    /// raw-serialized path. The reader stores each instance's canonical key CDR (via the
+    /// type support's `serialize_key`, the same projection the wire uses), so this matches
+    /// on the stored key bytes — as returned by [`get_key_value_serialized`](Self::get_key_value_serialized).
+    /// Returns `InstanceHandle::NIL` if the instance is not known to this reader.
+    pub fn lookup_instance_serialized(&self, key: &[u8]) -> DdsResult<InstanceHandle> {
+        self.is_deleted()?;
+
+        if key.is_empty() {
+            return Ok(InstanceHandle::NIL);
+        }
+
+        let instances = self.instance_infos.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
+        for (handle, info) in instances.iter() {
+            if info.key.as_ref() == key {
+                return Ok(*handle);
+            }
+        }
+
+        Ok(InstanceHandle::NIL)
     }
 
     // For Entity
@@ -1054,57 +1007,66 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         // Check if already exists, then insert
         writer_samples.insert(seq_num);
 
-        // QoS-based size limit
-        let max_samples = self.get_max_samples()?;
-
-        if writer_samples.len() > max_samples {
-            self.cleanup_old_read_samples(writer_samples, max_samples)?;
-        }
-
+        // No count cap here. Evicting by count cannot tell a still-cached sample from one the
+        // cache has dropped, and evicting a cached one flips it back to NOT_READ so the next
+        // `read()` hands it out a second time. `prune_read_samples_to_cache` bounds this map
+        // against the cache instead, which is the only cut that is unobservable.
         Ok(())
     }
 
-    fn get_max_samples(&self) -> DdsResult<usize> {
-        let qos = self.get_qos_arc()?;
+    /// Drops read-state for samples the cache no longer holds.
+    ///
+    /// `read_samples` exists so a second `read()` can report `READ_SAMPLE_STATE`. Its only
+    /// bound was `get_max_samples`, which resolved to `usize::MAX` under the default
+    /// `LENGTH_UNLIMITED` limits, so the map grew for the reader's lifetime.
+    ///
+    /// The bound has to come from the cache rather than a count. `get_sample_state` answers
+    /// `READ` both for a sample recorded here and for a sample that is no longer cached, so
+    /// entries below the cache's low-water mark cannot change any answer -- dropping them is
+    /// unobservable. Dropping an entry whose sample is *still* cached is not: it would report
+    /// `NOT_READ` again and hand the sample out a second time.
+    ///
+    /// `changes` is the snapshot the caller already holds, so this needs no extra cache lock,
+    /// and being a pre-removal snapshot only makes the mark conservative.
+    fn prune_read_samples_to_cache(&self, changes: &[Arc<CacheChange>]) {
+        let Ok(mut read_samples) = self.read_samples.lock() else { return };
 
-        let samples_limit = match qos.history.kind {
-            HistoryQosPolicyKind::KeepLast(depth) => depth,
-            HistoryQosPolicyKind::KeepAll => {
-                if qos.resource_limits.max_samples_per_instance == -1 {
-                    i32::MAX
-                } else {
-                    qos.resource_limits.max_samples_per_instance
+        // Only `read()` records anything here, so a reader that only ever `take()`s -- the
+        // common case -- has nothing to prune. Bailing before the map is built keeps this off
+        // that path entirely rather than hashing a Guid per cached change for an empty result.
+        if read_samples.is_empty() {
+            return;
+        }
+
+        let mut low_water: HashMap<Guid, SequenceNumber> = HashMap::new();
+        for change in changes {
+            low_water
+                .entry(change.writer_guid())
+                .and_modify(|lowest| {
+                    if change.sequence_number() < *lowest {
+                        *lowest = change.sequence_number();
+                    }
+                })
+                .or_insert_with(|| change.sequence_number());
+        }
+
+        read_samples.retain(|writer_guid, seen| {
+            match low_water.get(writer_guid) {
+                // Every sample this writer had has left the cache, so nothing recorded for it
+                // is reachable any more. Dropping the entry also bounds the outer map, which
+                // otherwise kept one entry per writer GUID ever matched.
+                None => false,
+                // `split_off` allocates a fresh set and moves every retained element, so in the
+                // steady state -- nothing below the mark -- it would do maximal work for no
+                // benefit. Only pay it when something is actually prunable.
+                Some(lowest) => {
+                    if seen.first().is_some_and(|oldest| oldest < lowest) {
+                        *seen = seen.split_off(lowest);
+                    }
+                    !seen.is_empty()
                 }
             }
-        };
-
-        let max_instances = if qos.resource_limits.max_instances == -1 {
-            i32::MAX
-        } else {
-            qos.resource_limits.max_instances
-        };
-
-        let max_samples = i32::min(
-            qos.resource_limits.max_samples,
-            max_instances.saturating_mul(samples_limit), // Prevent overflow
-        );
-
-        Ok(max_samples as usize)
-    }
-
-    fn cleanup_old_read_samples(
-        &self,
-        writer_samples: &mut BTreeSet<SequenceNumber>,
-        max_samples: usize,
-    ) -> DdsResult<()> {
-        if writer_samples.len() >= max_samples {
-            if let Some(&oldest_seq_num) = writer_samples.iter().next() {
-                writer_samples.remove(&oldest_seq_num);
-                log::debug!("Removed oldest read sample with sequence number: {}", oldest_seq_num);
-            }
-        }
-
-        Ok(())
+        });
     }
 
     fn mark_instance_as_viewed(&self, handle: InstanceHandle) {
@@ -1238,6 +1200,12 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         };
 
         // Listener
+        // StatusCondition. DDS 1.4 2.2.4.1: the flag becomes TRUE when the status
+        // changes, which is before any listener runs, so a thread already blocked in
+        // WaitSet::wait observes the change instead of it being published only after
+        // the listener has already consumed and cleared the status.
+        self.set_communication_status_propagation(&StatusKind::REQUESTED_DEADLINE_MISSED, true)?;
+
         let mask = self.get_listener_mask()?;
         if mask.contains(StatusKind::REQUESTED_DEADLINE_MISSED) {
             let mut listener_called = false;
@@ -1258,11 +1226,13 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
             if listener_called {
                 let _ = self.take_requested_deadline_missed_status()?;
+                // DDS 1.4 2.2.4.1: the StatusChangedFlag is reset to FALSE when the
+                // listener returns. Only this entity's flag -- the Subscriber and
+                // DomainParticipant own theirs and may still hold unconsumed events
+                // from sibling readers.
+                self.set_communication_status(&StatusKind::REQUESTED_DEADLINE_MISSED, false)?;
             }
         }
-
-        // StatusCondition
-        self.set_communication_status_propagation(&StatusKind::REQUESTED_DEADLINE_MISSED, true)?;
 
         // Ownership is lost when deadline is missed
         if let Ok(datareader_cache) = self.datareader_cache.lock() {
@@ -1289,6 +1259,12 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         };
 
         // Listener
+        // StatusCondition. DDS 1.4 2.2.4.1: the flag becomes TRUE when the status
+        // changes, which is before any listener runs, so a thread already blocked in
+        // WaitSet::wait observes the change instead of it being published only after
+        // the listener has already consumed and cleared the status.
+        self.set_communication_status_propagation(&StatusKind::REQUESTED_INCOMPATIBLE_QOS, true)?;
+
         let mask = self.get_listener_mask()?;
         if mask.contains(StatusKind::REQUESTED_INCOMPATIBLE_QOS) {
             let mut listener_called = false;
@@ -1309,11 +1285,13 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
             if listener_called {
                 let _ = self.take_requested_incompatible_qos_status()?;
+                // DDS 1.4 2.2.4.1: the StatusChangedFlag is reset to FALSE when the
+                // listener returns. Only this entity's flag -- the Subscriber and
+                // DomainParticipant own theirs and may still hold unconsumed events
+                // from sibling readers.
+                self.set_communication_status(&StatusKind::REQUESTED_INCOMPATIBLE_QOS, false)?;
             }
         }
-
-        // StatusCondition
-        self.set_communication_status_propagation(&StatusKind::REQUESTED_INCOMPATIBLE_QOS, true)?;
 
         Ok(())
     }
@@ -1347,6 +1325,12 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         };
 
         // Listener
+        // StatusCondition. DDS 1.4 2.2.4.1: the flag becomes TRUE when the status
+        // changes, which is before any listener runs, so a thread already blocked in
+        // WaitSet::wait observes the change instead of it being published only after
+        // the listener has already consumed and cleared the status.
+        self.set_communication_status_propagation(&StatusKind::SAMPLE_LOST, true)?;
+
         let mask = self.get_listener_mask()?;
         if mask.contains(StatusKind::SAMPLE_LOST) {
             let mut listener_called = false;
@@ -1367,11 +1351,13 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
             if listener_called {
                 let _ = self.take_sample_lost_status()?;
+                // DDS 1.4 2.2.4.1: the StatusChangedFlag is reset to FALSE when the
+                // listener returns. Only this entity's flag -- the Subscriber and
+                // DomainParticipant own theirs and may still hold unconsumed events
+                // from sibling readers.
+                self.set_communication_status(&StatusKind::SAMPLE_LOST, false)?;
             }
         }
-
-        // StatusCondition
-        self.set_communication_status_propagation(&StatusKind::SAMPLE_LOST, true)?;
 
         Ok(())
     }
@@ -1388,6 +1374,12 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         };
 
         // Listener
+        // StatusCondition. DDS 1.4 2.2.4.1: the flag becomes TRUE when the status
+        // changes, which is before any listener runs, so a thread already blocked in
+        // WaitSet::wait observes the change instead of it being published only after
+        // the listener has already consumed and cleared the status.
+        self.set_communication_status_propagation(&StatusKind::SAMPLE_REJECTED, true)?;
+
         let mask = self.get_listener_mask()?;
         if mask.contains(StatusKind::SAMPLE_REJECTED) {
             let mut listener_called = false;
@@ -1408,32 +1400,39 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
             if listener_called {
                 let _ = self.take_sample_rejected_status()?;
+                // DDS 1.4 2.2.4.1: the StatusChangedFlag is reset to FALSE when the
+                // listener returns. Only this entity's flag -- the Subscriber and
+                // DomainParticipant own theirs and may still hold unconsumed events
+                // from sibling readers.
+                self.set_communication_status(&StatusKind::SAMPLE_REJECTED, false)?;
             }
         }
-
-        // StatusCondition
-        self.set_communication_status_propagation(&StatusKind::SAMPLE_REJECTED, true)?;
 
         Ok(())
     }
     fn handle_data_available_status(&self) -> DdsResult<()> {
+        // StatusCondition first. DDS 1.4 2.2.4.1: the flag becomes TRUE when the status
+        // changes, which is before any listener runs, so a thread already blocked in
+        // WaitSet::wait observes the change. Publishing it after the listeners also made the
+        // flag hostage to them completing -- a listener that panics is contained at the
+        // callback boundary, and the waiter would then block forever on a reader whose samples
+        // are sitting in the cache. `handle_liveliness_changed_status` uses this same order.
+        self.set_read_communication_status(true)?;
+
         // Listener
         if let Some(listener) = self.get_listener()? {
             listener.on_data_available(self);
         }
-        let subscriber = self.get_subscriber()?;
+        let subscriber = self.subscriber_arc()?;
         if let Some(listener) = subscriber.get_listener()? {
             listener.on_data_available(self);
             listener.on_data_on_readers(&subscriber);
         }
-        let participant = subscriber.get_participant()?;
+        let participant = subscriber.participant_arc()?;
         if let Some(listener) = participant.get_listener()? {
             listener.on_data_available(self);
             listener.on_data_on_readers(&subscriber);
         }
-
-        // StatusCondition
-        self.set_read_communication_status(true)?;
 
         Ok(())
     }
@@ -1459,6 +1458,12 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         };
 
         // Listener
+        // StatusCondition. DDS 1.4 2.2.4.1: the flag becomes TRUE when the status
+        // changes, which is before any listener runs, so a thread already blocked in
+        // WaitSet::wait observes the change instead of it being published only after
+        // the listener has already consumed and cleared the status.
+        self.set_communication_status_propagation(&StatusKind::LIVELINESS_CHANGED, true)?;
+
         let mask = self.get_listener_mask()?;
         if mask.contains(StatusKind::LIVELINESS_CHANGED) {
             let mut listener_called = false;
@@ -1479,11 +1484,13 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
             if listener_called {
                 let _ = self.take_liveliness_changed_status()?;
+                // DDS 1.4 2.2.4.1: the StatusChangedFlag is reset to FALSE when the
+                // listener returns. Only this entity's flag -- the Subscriber and
+                // DomainParticipant own theirs and may still hold unconsumed events
+                // from sibling readers.
+                self.set_communication_status(&StatusKind::LIVELINESS_CHANGED, false)?;
             }
         }
-
-        // StatusCondition
-        self.set_communication_status_propagation(&StatusKind::LIVELINESS_CHANGED, true)?;
 
         Ok(())
     }
@@ -1509,6 +1516,12 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         };
 
         // Listener
+        // StatusCondition. DDS 1.4 2.2.4.1: the flag becomes TRUE when the status
+        // changes, which is before any listener runs, so a thread already blocked in
+        // WaitSet::wait observes the change instead of it being published only after
+        // the listener has already consumed and cleared the status.
+        self.set_communication_status_propagation(&StatusKind::SUBSCRIPTION_MATCHED, true)?;
+
         let mask = self.get_listener_mask()?;
         if mask.contains(StatusKind::SUBSCRIPTION_MATCHED) {
             let mut listener_called = false;
@@ -1529,11 +1542,13 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
             if listener_called {
                 let _ = self.take_subscription_matched_status()?;
+                // DDS 1.4 2.2.4.1: the StatusChangedFlag is reset to FALSE when the
+                // listener returns. Only this entity's flag -- the Subscriber and
+                // DomainParticipant own theirs and may still hold unconsumed events
+                // from sibling readers.
+                self.set_communication_status(&StatusKind::SUBSCRIPTION_MATCHED, false)?;
             }
         }
-
-        // StatusCondition
-        self.set_communication_status_propagation(&StatusKind::SUBSCRIPTION_MATCHED, true)?;
 
         Ok(())
     }
@@ -1546,10 +1561,10 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         // 1. DataReader StatusCondition
         self.set_communication_status(status_kind, trigger_value)?;
         // 2. Subscriber StatusCondition
-        let subscriber = self.get_subscriber()?;
+        let subscriber = self.subscriber_arc()?;
         subscriber.set_communication_status(status_kind, trigger_value)?;
         // 3. DomainParticipant StatusCondition
-        subscriber.get_participant()?.set_communication_status(status_kind, trigger_value)?;
+        subscriber.participant_arc()?.set_communication_status(status_kind, trigger_value)?;
 
         Ok(())
     }
@@ -1558,15 +1573,32 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         // 1. DataReader StatusCondition
         self.set_communication_status(&StatusKind::DATA_AVAILABLE, trigger_value)?;
 
-        // 2. Subscriber StatusCondition
-        let subscriber = self.get_subscriber()?;
-        subscriber.set_communication_status(&StatusKind::DATA_ON_READERS, trigger_value)?;
-        subscriber.set_communication_status(&StatusKind::DATA_AVAILABLE, trigger_value)?;
+        // 2. Subscriber and 3. DomainParticipant StatusConditions.
+        //
+        // `Entity::set_communication_status` reaches the condition through `get_statuscondition`,
+        // which takes a mutex and clones a 4-`Arc` `StatusCondition` just to run one atomic bit
+        // update. The subscriber and the participant each take two status kinds, so calling it
+        // once per kind pays that lock-and-clone twice for the very same condition. Hoisting one
+        // clone per entity turns five lock+clone pairs per sample into three -- and every reader
+        // under the participant does this on every sample it delivers.
+        //
+        // The two kinds stay two separate calls on purpose. `add_communication_status` fires the
+        // WaitSet callback only when `enabled_statuses` contains *every* bit of its argument
+        // (`StatusMask::contains` is all-of), so folding the kinds into one mask would silently
+        // stop waking a condition that enabled only one of them.
+        let subscriber = self.subscriber_arc()?;
+        let subscriber_condition = subscriber.get_statuscondition()?;
+        subscriber_condition
+            .set_communication_status(&StatusKind::DATA_ON_READERS, trigger_value)?;
+        subscriber_condition
+            .set_communication_status(&StatusKind::DATA_AVAILABLE, trigger_value)?;
 
-        // 3. DomainParticipant StatusCondition
-        let participant = subscriber.get_participant()?;
-        participant.set_communication_status(&StatusKind::DATA_ON_READERS, trigger_value)?;
-        participant.set_communication_status(&StatusKind::DATA_AVAILABLE, trigger_value)?;
+        let participant = subscriber.participant_arc()?;
+        let participant_condition = participant.get_statuscondition()?;
+        participant_condition
+            .set_communication_status(&StatusKind::DATA_ON_READERS, trigger_value)?;
+        participant_condition
+            .set_communication_status(&StatusKind::DATA_AVAILABLE, trigger_value)?;
 
         Ok(())
     }
@@ -1594,25 +1626,37 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         }
     }
 
+    /// Upgraded parent handle without the deep clone [`DataReaderBase::get_subscriber`] performs.
+    ///
+    /// Same failure modes and messages -- `AlreadyDeleted` when this reader is deleted, `Error`
+    /// when the parent `Weak` has expired -- but two atomic read-modify-writes instead of ~28.
+    /// Needs no drop guard, unlike the participant equivalent: the value inside the `Arc` has
+    /// `self_ref: None`, so `Drop for Subscriber` early-returns either way.
+    ///
+    /// Only for internal call sites that never read `Subscriber::self_ref`.
+    pub(crate) fn subscriber_arc(&self) -> DdsResult<Arc<Subscriber>> {
+        self.is_deleted()?;
+        self.subscriber.as_ref().and_then(|weak_ref| weak_ref.upgrade()).ok_or_else(|| {
+            DdsError::Error("Subscriber reference is invalid or expired".to_string())
+        })
+    }
+
     fn subscriber_topic_ordered(&self) -> bool {
-        self.get_subscriber()
-            .and_then(|s| s.get_qos_arc())
-            .map(|q| {
-                q.presentation.ordered_access
-                    && q.presentation.access_scope == PresentationQosAccessScopeKind::Topic
-            })
-            .unwrap_or(false)
+        self.subscriber_arc().and_then(|s| s.presentation_topic_ordered()).unwrap_or(false)
     }
 
     pub(crate) fn is_subscriber_coherent(&self) -> bool {
-        self.get_subscriber()
-            .and_then(|s| s.get_qos_arc())
-            .map(|q| q.presentation.coherent_access)
-            .unwrap_or(false)
+        self.subscriber_arc().and_then(|s| s.presentation_coherent_access()).unwrap_or(false)
     }
 
     pub fn has_cached_data(&self) -> DdsResult<bool> {
-        Ok(!self.get_available_changes()?.is_empty())
+        let cache = self.get_datareader_cache()?;
+        let mut guard = cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
+        // Expired samples must not count as available data.
+        guard.purge_expired_on_read()?;
+
+        Ok(guard.has_changes())
     }
 
     pub(crate) fn get_change(
@@ -2553,8 +2597,61 @@ impl<Foo: DdsType> DataReader<Foo> {
         sample_states: &[SampleStateKind],
         view_states: &[ViewStateKind],
         instance_states: &[InstanceStateKind],
-    ) -> DdsResult<Vec<(Arc<[u8]>, SampleInfo)>> {
-        self.read_or_take_serialized(max_samples, sample_states, view_states, instance_states, true)
+    ) -> DdsResult<Vec<(Bytes, SampleInfo)>> {
+        self.read_or_take_serialized(
+            max_samples,
+            sample_states,
+            view_states,
+            instance_states,
+            true,
+            None,
+        )
+    }
+
+    /// Take pre-serialized samples belonging to a single instance.
+    ///
+    /// Like [`take_serialized`](Self::take_serialized) but restricted to the
+    /// instance identified by `handle`. A nil handle returns `BadParameter`; an
+    /// unknown handle yields no samples (mirroring `take_instance`).
+    pub fn take_instance_serialized(
+        &self,
+        max_samples: i32,
+        handle: InstanceHandle,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+    ) -> DdsResult<Vec<(Bytes, SampleInfo)>> {
+        self.read_or_take_serialized(
+            max_samples,
+            sample_states,
+            view_states,
+            instance_states,
+            true,
+            Some(handle),
+        )
+    }
+
+    /// Read pre-serialized samples belonging to a single instance.
+    ///
+    /// Like [`read_serialized`](Self::read_serialized) but restricted to the
+    /// instance identified by `handle`. A nil handle returns `BadParameter`; an
+    /// unknown handle yields no samples (mirroring `read_instance`).
+    pub fn read_instance_serialized(
+        &self,
+        max_samples: i32,
+        handle: InstanceHandle,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+    ) -> DdsResult<Vec<(Bytes, SampleInfo)>> {
+        self.read_or_take_serialized(
+            max_samples,
+            sample_states,
+            view_states,
+            instance_states,
+            false,
+            Some(handle),
+        )
     }
 
     /// Read pre-serialized data directly from the cache, bypassing TypeSupport deserialization.
@@ -2570,38 +2667,115 @@ impl<Foo: DdsType> DataReader<Foo> {
         sample_states: &[SampleStateKind],
         view_states: &[ViewStateKind],
         instance_states: &[InstanceStateKind],
-    ) -> DdsResult<Vec<(Arc<[u8]>, SampleInfo)>> {
+    ) -> DdsResult<Vec<(Bytes, SampleInfo)>> {
         self.read_or_take_serialized(
             max_samples,
             sample_states,
             view_states,
             instance_states,
             false,
+            None,
         )
     }
 
     /// Take a single pre-serialized sample from the cache.
-    pub fn take_next_serialized(&self) -> DdsResult<(Arc<[u8]>, SampleInfo)> {
+    pub fn take_next_serialized(&self) -> DdsResult<(Bytes, SampleInfo)> {
         let results = self.read_or_take_serialized(
             1,
             &[SampleStateKind::NOT_READ_SAMPLE_STATE],
             &[ViewStateKind::ANY_VIEW_STATE],
             &[InstanceStateKind::ANY_INSTANCE_STATE],
             true,
+            None,
         )?;
         results.into_iter().next().ok_or(DdsError::NoData)
     }
 
     /// Take a single pre-serialized sample without copying shared receive payloads.
     pub fn take_next_serialized_bytes(&self) -> DdsResult<(Bytes, SampleInfo)> {
-        let results = self.read_or_take_serialized_bytes(
+        let (results, _) = self.read_or_take_serialized_bytes(
             1,
             &[SampleStateKind::NOT_READ_SAMPLE_STATE],
             &[ViewStateKind::ANY_VIEW_STATE],
             &[InstanceStateKind::ANY_INSTANCE_STATE],
             true,
+            None,
+            None,
         )?;
         results.into_iter().next().ok_or(DdsError::NoData)
+    }
+
+    fn bounded_single_serialized(
+        &self,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+        take: bool,
+        max_bytes: usize,
+    ) -> DdsResult<BoundedSerialized> {
+        let (results, too_small) = self.read_or_take_serialized_bytes(
+            1,
+            sample_states,
+            view_states,
+            instance_states,
+            take,
+            Some(max_bytes),
+            None,
+        )?;
+        if let Some(required) = too_small {
+            return Ok(BoundedSerialized::TooSmall { required });
+        }
+        results
+            .into_iter()
+            .next()
+            .map(|(data, info)| BoundedSerialized::Fit(data, info))
+            .ok_or(DdsError::NoData)
+    }
+
+    pub fn take_next_serialized_bounded(&self, max_bytes: usize) -> DdsResult<BoundedSerialized> {
+        self.bounded_single_serialized(
+            &[SampleStateKind::NOT_READ_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::ANY_INSTANCE_STATE],
+            true,
+            max_bytes,
+        )
+    }
+
+    pub fn read_next_serialized_bounded(&self, max_bytes: usize) -> DdsResult<BoundedSerialized> {
+        self.bounded_single_serialized(
+            &[SampleStateKind::NOT_READ_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::ANY_INSTANCE_STATE],
+            false,
+            max_bytes,
+        )
+    }
+
+    pub fn take_serialized_bounded(
+        &self,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+        max_bytes: usize,
+    ) -> DdsResult<BoundedSerialized> {
+        self.bounded_single_serialized(sample_states, view_states, instance_states, true, max_bytes)
+    }
+
+    pub fn read_serialized_bounded(
+        &self,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+        max_bytes: usize,
+    ) -> DdsResult<BoundedSerialized> {
+        self.bounded_single_serialized(
+            sample_states,
+            view_states,
+            instance_states,
+            false,
+            max_bytes,
+        )
     }
 
     fn read_or_take_serialized(
@@ -2611,17 +2785,20 @@ impl<Foo: DdsType> DataReader<Foo> {
         view_states: &[ViewStateKind],
         instance_states: &[InstanceStateKind],
         take: bool,
-    ) -> DdsResult<Vec<(Arc<[u8]>, SampleInfo)>> {
+        instance_handle: Option<InstanceHandle>,
+    ) -> DdsResult<Vec<(Bytes, SampleInfo)>> {
+        // Hand back the `Bytes` the cache already holds. Rewrapping into a fresh
+        // `Arc<[u8]>` copied every sample in full on the way out.
         self.read_or_take_serialized_bytes(
             max_samples,
             sample_states,
             view_states,
             instance_states,
             take,
+            None,
+            instance_handle,
         )
-        .map(|results| {
-            results.into_iter().map(|(data, info)| (Arc::from(data.as_ref()), info)).collect()
-        })
+        .map(|(results, _)| results)
     }
 
     fn read_or_take_serialized_bytes(
@@ -2631,55 +2808,49 @@ impl<Foo: DdsType> DataReader<Foo> {
         view_states: &[ViewStateKind],
         instance_states: &[InstanceStateKind],
         take: bool,
-    ) -> DdsResult<Vec<(Bytes, SampleInfo)>> {
-        let profile = serialized_take_profile_enabled();
-        let total_t0 = Instant::now();
-        let precheck_t0 = Instant::now();
+        max_bytes: Option<usize>,
+        instance_handle: Option<InstanceHandle>,
+    ) -> DdsResult<(Vec<(Bytes, SampleInfo)>, Option<usize>)> {
         self.is_enabled()?;
 
         if max_samples == 0 {
             return Err(DdsError::BadParameter);
         }
 
+        // Instance-scoped variants reject a nil handle, matching the typed
+        // read/take_instance path; an unknown (non-nil) handle simply yields no
+        // matching samples via the in-loop filter below.
+        if let Some(handle) = instance_handle {
+            if handle.is_nil() {
+                return Err(DdsError::BadParameter);
+            }
+        }
+
         self.set_read_communication_status(false)?;
-        let precheck_us = if profile { elapsed_us(precheck_t0, Instant::now()) } else { 0 };
         let mut result: Vec<(Bytes, SampleInfo)> = Vec::new();
         let mut remaining = if max_samples == -1 { i32::MAX } else { max_samples };
 
-        let get_changes_t0 = Instant::now();
         let changes = self.get_available_changes()?;
-        let get_changes_us = if profile { elapsed_us(get_changes_t0, Instant::now()) } else { 0 };
-
-        let sort_us = 0u64;
 
         // ContentFilteredTopic is applied on the receive path, so the cache is already filtered.
-        let filter_setup_us = 0u64;
-
-        let instance_info_t0 = Instant::now();
         let instance_infos = self.get_instance_infos()?;
-        let instance_info_us =
-            if profile { elapsed_us(instance_info_t0, Instant::now()) } else { 0 };
 
-        let loop_t0 = Instant::now();
-        let mut loop_sample_state_us = 0;
-        let mut loop_info_us = 0;
-        let mut loop_match_us = 0;
-        let mut loop_data_bytes_us = 0;
-        let mut loop_sample_info_us = 0;
-        let mut loop_remove_us = 0;
-        let mut loop_push_us = 0;
         for change in changes.iter() {
             if remaining <= 0 {
                 break;
             }
 
-            let sample_state_t0 = Instant::now();
+            // Instance filter: skip changes belonging to a different instance,
+            // before any state check or cache removal (so `take` never consumes
+            // samples from other instances).
+            if let Some(target) = instance_handle {
+                if change.instance_handle() != target {
+                    continue;
+                }
+            }
+
             let sample_state =
                 self.get_sample_state(&change.writer_guid(), &change.sequence_number())?;
-            if profile {
-                loop_sample_state_us += elapsed_us(sample_state_t0, Instant::now());
-            }
-            let info_t0 = Instant::now();
             let info = match instance_infos.get(&change.instance_handle()) {
                 Some(info) => info,
                 None => &InstanceInfo {
@@ -2691,19 +2862,12 @@ impl<Foo: DdsType> DataReader<Foo> {
                     pending_notification: false,
                 },
             };
-            if profile {
-                loop_info_us += elapsed_us(info_t0, Instant::now());
-            }
 
-            let match_t0 = Instant::now();
             if !sample_states.matches(sample_state)
                 || !view_states.matches(info.view_state)
                 || !instance_states.matches(info.instance_state)
             {
                 continue;
-            }
-            if profile {
-                loop_match_us += elapsed_us(match_t0, Instant::now());
             }
 
             let has_valid_data = match change.kind() {
@@ -2713,13 +2877,14 @@ impl<Foo: DdsType> DataReader<Foo> {
                 | ChangeKind::NotAliveDisposedUnregistered => false,
             };
 
-            let data_bytes_t0 = Instant::now();
             let serialized_data = change.data_bytes();
-            if profile {
-                loop_data_bytes_us += elapsed_us(data_bytes_t0, Instant::now());
+
+            if let Some(cap) = max_bytes {
+                if has_valid_data && serialized_data.len() > cap {
+                    return Ok((Vec::new(), Some(serialized_data.len())));
+                }
             }
 
-            let sample_info_t0 = Instant::now();
             let sample_info = SampleInfo {
                 sample_state,
                 view_state: info.view_state,
@@ -2729,50 +2894,27 @@ impl<Foo: DdsType> DataReader<Foo> {
                 sample_rank: 0,
                 generation_rank: 0,
                 absolute_generation_rank: 0,
-                source_timestamp: (*change.source_timestamp().as_ref().ok_or(DdsError::Error(
-                    "CacheChange's source timestamp is not properly initialized".to_string(),
-                ))?)
+                source_timestamp: (*change.source_timestamp().as_ref().ok_or_else(|| {
+                    DdsError::Error(
+                        "CacheChange's source timestamp is not properly initialized".to_string(),
+                    )
+                })?)
                 .into(),
                 instance_handle: change.instance_handle(),
                 publication_handle: InstanceHandle::from_guid(&change.writer_guid()),
                 valid_data: has_valid_data,
             };
-            if profile {
-                loop_sample_info_us += elapsed_us(sample_info_t0, Instant::now());
-            }
 
-            let remove_t0 = Instant::now();
             if take {
                 self.remove_change(change.clone())?;
             } else {
                 self.mark_sample_as_read(&change.writer_guid(), change.sequence_number())?;
             }
-            if profile {
-                loop_remove_us += elapsed_us(remove_t0, Instant::now());
-            }
 
-            let push_t0 = Instant::now();
             result.push((serialized_data, sample_info));
             remaining -= 1;
-            if profile {
-                loop_push_us += elapsed_us(push_t0, Instant::now());
-            }
-        }
-        let loop_us = if profile { elapsed_us(loop_t0, Instant::now()) } else { 0 };
-        if profile {
-            record_serialized_take_loop_profile(
-                loop_sample_state_us,
-                loop_info_us,
-                loop_match_us,
-                loop_data_bytes_us,
-                loop_sample_info_us,
-                loop_remove_us,
-                loop_push_us,
-                loop_us,
-            );
         }
 
-        let cleanup_t0 = Instant::now();
         for sample_info in self.drain_pending_notifications(
             &instance_infos,
             sample_states,
@@ -2788,25 +2930,13 @@ impl<Foo: DdsType> DataReader<Foo> {
             self.mark_instance_as_viewed(sample_info.instance_handle);
         }
 
+        self.prune_read_samples_to_cache(&changes);
         self.reevaluate_all_conditions()?;
-        let cleanup_us = if profile { elapsed_us(cleanup_t0, Instant::now()) } else { 0 };
 
         if result.is_empty() {
             Err(DdsError::NoData)
         } else {
-            if profile {
-                record_serialized_take_profile(
-                    precheck_us,
-                    get_changes_us,
-                    sort_us,
-                    filter_setup_us,
-                    instance_info_us,
-                    loop_us,
-                    cleanup_us,
-                    elapsed_us(total_t0, Instant::now()),
-                );
-            }
-            Ok(result)
+            Ok((result, None))
         }
     }
 
@@ -3007,6 +3137,7 @@ impl<Foo: DdsType> DataReader<Foo> {
             self.mark_instance_as_viewed(sample.sample_info().instance_handle);
         }
 
+        self.prune_read_samples_to_cache(&changes);
         self.reevaluate_all_conditions()?;
 
         if result_samples.is_empty() {
@@ -3138,19 +3269,7 @@ impl<Foo: DdsType> DataReader<Foo> {
             | ChangeKind::NotAliveDisposedUnregistered => false,
         };
 
-        let data = if has_valid_data {
-            // Carry fragment chunks straight through when present, so deserialization
-            // happens across them with no contiguous reassembly.
-            Some(match change.data_chunks() {
-                Some((chunks, cached)) => SamplePayload::Chained {
-                    chunks: chunks.iter().cloned().collect(),
-                    cached: cached.clone(),
-                },
-                None => SamplePayload::Contiguous(change.data_bytes()),
-            })
-        } else {
-            None
-        };
+        let data = if has_valid_data { Some(change.data_bytes()) } else { None };
 
         // Use cached instance_infos if provided, otherwise fetch
         let owned_instance_infos;
@@ -3808,7 +3927,7 @@ pub(crate) mod tests {
     use crate::domain::domain_participant_factory::DomainParticipantFactory;
     use crate::domain::qos::DomainParticipantQos;
     use crate::infrastructure::qos_policy::{
-        DurabilityQosPolicy, DurabilityQosPolicyKind, HistoryQosPolicy,
+        DurabilityQosPolicy, DurabilityQosPolicyKind, HistoryQosPolicy, HistoryQosPolicyKind,
         PresentationQosAccessScopeKind, PresentationQosPolicy, ReliabilityQosPolicy,
         ReliabilityQosPolicyKind,
     };
@@ -3829,6 +3948,98 @@ pub(crate) mod tests {
     pub struct TestData {
         #[dds(key)]
         id: u32,
+    }
+
+    /// `set_read_communication_status` fans one arrival out to three entity levels with two
+    /// status kinds, and every reader under a participant writes the participant's shared
+    /// condition on every sample. Pin the exact bits at every level so a refactor of how the
+    /// condition is reached cannot quietly drop or merge one of the five updates -- merging the
+    /// two kinds into a single mask op looks equivalent but is not, because the WaitSet trigger
+    /// test is all-of (`StatusMask::contains`), not any-of.
+    #[test]
+    fn read_communication_status_sets_and_clears_every_level() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<TestData>(
+                "ReadCommStatusTopic",
+                "TestData",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let reader = subscriber
+            .create_datareader::<TestData>(
+                &topic,
+                DataReaderQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        reader.set_read_communication_status(true).unwrap();
+
+        assert!(
+            reader.get_status_changes().unwrap().contains(StatusMask::DATA_AVAILABLE),
+            "reader must report DATA_AVAILABLE"
+        );
+        let subscriber_changes = subscriber.get_status_changes().unwrap();
+        assert!(
+            subscriber_changes.contains(StatusMask::DATA_ON_READERS),
+            "subscriber must report DATA_ON_READERS"
+        );
+        assert!(
+            subscriber_changes.contains(StatusMask::DATA_AVAILABLE),
+            "subscriber must report DATA_AVAILABLE"
+        );
+        let participant_changes = participant.get_status_changes().unwrap();
+        assert!(
+            participant_changes.contains(StatusMask::DATA_ON_READERS),
+            "participant must report DATA_ON_READERS"
+        );
+        assert!(
+            participant_changes.contains(StatusMask::DATA_AVAILABLE),
+            "participant must report DATA_AVAILABLE"
+        );
+
+        reader.set_read_communication_status(false).unwrap();
+
+        assert!(
+            !reader.get_status_changes().unwrap().contains(StatusMask::DATA_AVAILABLE),
+            "reader must clear DATA_AVAILABLE"
+        );
+        let subscriber_changes = subscriber.get_status_changes().unwrap();
+        assert!(
+            !subscriber_changes.contains(StatusMask::DATA_ON_READERS),
+            "subscriber must clear DATA_ON_READERS"
+        );
+        assert!(
+            !subscriber_changes.contains(StatusMask::DATA_AVAILABLE),
+            "subscriber must clear DATA_AVAILABLE"
+        );
+        let participant_changes = participant.get_status_changes().unwrap();
+        assert!(
+            !participant_changes.contains(StatusMask::DATA_ON_READERS),
+            "participant must clear DATA_ON_READERS"
+        );
+        assert!(
+            !participant_changes.contains(StatusMask::DATA_AVAILABLE),
+            "participant must clear DATA_AVAILABLE"
+        );
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
     }
 
     #[derive(DdsType)]
@@ -3889,6 +4100,23 @@ pub(crate) mod tests {
         participant.delete_contained_entities().unwrap();
         factory.delete_participant(participant).unwrap();
     }
+
+    /// Listener mask for the counting listeners below. Deliberately not `StatusMask::default()`,
+    /// which is `ALL`.
+    ///
+    /// DDS 1.4 2.2.4.1: a plain communication status is consumed by the listener that handles it,
+    /// and its StatusChangedFlag is reset when that listener returns. A reader whose mask enables
+    /// SUBSCRIPTION_MATCHED therefore never leaves the status latched for a StatusCondition, so
+    /// these tests -- which use the listener only to count `on_data_available` but wait on the
+    /// reader's own condition for the discovery handshake -- would block in
+    /// `WaitSet::wait(Duration::infinite())` forever. LIVELINESS_CHANGED is the same story for
+    /// `test_take_next_instance_surfaces_no_writers_after_writer_deleted`.
+    ///
+    /// The mask is what separates the two mechanisms: the listener takes data notifications, the
+    /// WaitSet takes everything else. Note that `handle_data_available_status` invokes the listener
+    /// without consulting the mask, so DATA_AVAILABLE is named here for intent rather than because
+    /// omitting it would silence the counter.
+    const DATA_ONLY_LISTENER_MASK: StatusMask = StatusMask::DATA_AVAILABLE;
 
     struct SubListener {
         counter_sender: SyncSender<()>,
@@ -3961,13 +4189,13 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubListener { counter_sender: counter_sender };
+        let read_listener = SubListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorld>(
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -3992,7 +4220,7 @@ pub(crate) mod tests {
         writer.write(&data2, InstanceHandle::NIL).unwrap();
 
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 2 {
@@ -4016,6 +4244,187 @@ pub(crate) mod tests {
         assert_eq!(samples[1].sample_info().sample_rank, 0);
         assert_eq!(samples[0].data().unwrap().index, data1.index);
         assert_eq!(samples[1].data().unwrap().index, data2.index);
+
+        participant.delete_contained_entities().unwrap();
+        factory.delete_participant(participant).unwrap();
+    }
+
+    /// `read()` records every sample it hands out in `read_samples` so a later `read()` can
+    /// report `READ_SAMPLE_STATE`. Nothing ever pruned that map, so it grew for the reader's
+    /// lifetime -- roughly 20 bytes per distinct sample read, unbounded.
+    ///
+    /// The bound must come from the cache, not from a count. `get_sample_state` answers
+    /// `READ` both for a sample recorded in `read_samples` and for a sample that is no longer
+    /// cached, so entries below the cache's low-water mark cannot change any answer and are
+    /// free to drop. Evicting an entry whose sample is *still cached* would flip it back to
+    /// `NOT_READ` and re-deliver it, which is why the last assertion here matters more than
+    /// the size one.
+    #[test]
+    fn read_samples_stays_bounded_without_redelivering() {
+        const SAMPLES: usize = 60;
+
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "read_samples_growth",
+                "HelloWorldType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        // KeepLast(1) on both ends: the cache holds one sample at a time, so a correctly
+        // bounded `read_samples` cannot accumulate either.
+        let history = HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepLast(1), strict: false };
+        let reliability = ReliabilityQosPolicy {
+            kind: ReliabilityQosPolicyKind::Reliable,
+            max_blocking_time: Duration::from_seconds(1),
+        };
+
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic,
+                DataWriterQos { history, reliability, ..Default::default() },
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        // `on_data_available` is what the loop below synchronises on. `write` hands the sample
+        // to the send path and returns while delivery lands on the receive thread afterwards,
+        // so reading straight after `write` times the loopback rather than the bound under test.
+        let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
+        let data_reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &topic,
+                DataReaderQos { history, reliability, ..Default::default() },
+                Some(Arc::new(SubListener { counter_sender })),
+                DATA_ONLY_LISTENER_MASK,
+            )
+            .unwrap();
+
+        let condition = writer.get_statuscondition().unwrap().clone();
+        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
+        let wait_set = WaitSet::new();
+        wait_set.attach_condition(condition.clone()).unwrap();
+        // Bounded: `Duration::infinite()` here would wedge the whole test binary if matching
+        // ever regressed, and `cargo test` has no per-test timeout to save it.
+        wait_set.wait(Duration::from_seconds(10)).expect("writer never matched the reader");
+        wait_set.detach_condition(condition).unwrap();
+
+        // The reader's side of the match too, not just the writer's: a sample from a writer the
+        // reader has not matched yet is dropped on arrival, which would leave the loop below
+        // reading an empty cache for a reason that has nothing to do with the bound.
+        let condition = data_reader.get_statuscondition().unwrap().clone();
+        condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
+        wait_set.attach_condition(condition.clone()).unwrap();
+        wait_set.wait(Duration::from_seconds(10)).expect("reader never matched the writer");
+        wait_set.detach_condition(condition).unwrap();
+
+        // Each iteration waits for its own sample to land before reading, so the loop performs
+        // `SAMPLES` real reads instead of however many happen to win a race against delivery.
+        // That is what keeps the bound below meaningful: the defect this test guards grew
+        // `read_samples` once per sample *read*, so a run whose reads mostly returned `NoData`
+        // would satisfy the bound with the defect fully present.
+        let mut reads = 0usize;
+        for index in 0..SAMPLES as u32 {
+            writer
+                .write(&HelloWorld { index, message: "growth".to_string() }, InstanceHandle::NIL)
+                .unwrap();
+            // A missed signal is not a failure by itself -- the listener is a synchronisation
+            // aid, and the floor asserted after the loop is what decides whether enough was read.
+            let _ = counter_receiver.recv_timeout(std::time::Duration::from_secs(10));
+            // `read` is the non-consuming path, and the only one that records read state.
+            let read = data_reader.read(
+                1,
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            );
+            if read.is_ok() {
+                reads += 1;
+            }
+        }
+        // Well clear of the bound asserted below, so the two cannot both hold unless
+        // `read_samples` is bounded by what the cache retains rather than by the read count.
+        assert!(
+            reads >= SAMPLES / 2,
+            "only {reads} of {SAMPLES} reads handed out a sample, too few for the bound below \
+             to mean anything"
+        );
+
+        // Backstop for a missed listener signal, which the loop above deliberately tolerates:
+        // without one, the final sample can still be in flight here. A sample that reads
+        // NOT_READ because it has only just arrived is not the defect under test, so the guards
+        // below must not run against a cache that is still filling. With every signal seen this
+        // succeeds on its first read and costs nothing.
+        let settle_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut read_last = false;
+        while !read_last && std::time::Instant::now() < settle_deadline {
+            if let Ok(samples) = data_reader.read(
+                1,
+                &[SampleStateKind::ANY_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            ) {
+                read_last = samples
+                    .iter()
+                    .any(|sample| matches!(sample.data(), Ok(d) if d.index == SAMPLES as u32 - 1));
+            }
+            if !read_last {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        assert!(
+            read_last,
+            "the last written sample never reached the reader, so the guard below would assert \
+             against a cache that is still filling rather than against redelivery"
+        );
+
+        let recorded: usize =
+            data_reader.read_samples.lock().unwrap().values().map(|set| set.len()).sum();
+
+        // Bounded by what a KeepLast(1) cache can retain, not by the number of samples read.
+        // Slack covers samples still in flight when the loop ends; the pre-fix behaviour
+        // recorded one entry per sample, so any bound well under SAMPLES discriminates.
+        assert!(
+            recorded <= 8,
+            "read_samples holds {recorded} sequence numbers for a depth-1 cache, so it is \
+             growing with every sample read rather than with what the cache retains"
+        );
+
+        // The guard that must hold before and after any bounding change: whatever is still
+        // cached and already read stays READ. A cap that evicts a live entry re-delivers it.
+        // Unconditional -- gating it on the preceding read succeeding is how a bounding bug
+        // would slip through unnoticed.
+        assert!(
+            data_reader
+                .read(
+                    1,
+                    &[SampleStateKind::NOT_READ_SAMPLE_STATE],
+                    &[ViewStateKind::ANY_VIEW_STATE],
+                    &[InstanceStateKind::ANY_INSTANCE_STATE],
+                )
+                .is_err(),
+            "a cached sample that was already read came back as NOT_READ, so bounding \
+             read_samples re-delivers already-read samples"
+        );
 
         participant.delete_contained_entities().unwrap();
         factory.delete_participant(participant).unwrap();
@@ -4073,13 +4482,13 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubListener { counter_sender: counter_sender };
+        let read_listener = SubListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorld>(
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -4105,7 +4514,7 @@ pub(crate) mod tests {
         writer.write(&data2, InstanceHandle::NIL).unwrap();
 
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 2 {
@@ -4197,13 +4606,13 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubListener { counter_sender: counter_sender };
+        let read_listener = SubListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorld>(
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -4228,7 +4637,7 @@ pub(crate) mod tests {
         writer.write(&data2, InstanceHandle::NIL).unwrap();
 
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 2 {
@@ -4318,13 +4727,13 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubListener { counter_sender: counter_sender };
+        let read_listener = SubListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorld>(
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -4350,7 +4759,7 @@ pub(crate) mod tests {
         writer.write(&data2, InstanceHandle::NIL).unwrap();
 
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 2 {
@@ -4440,13 +4849,13 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubListener { counter_sender: counter_sender };
+        let read_listener = SubListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorld>(
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -4472,7 +4881,7 @@ pub(crate) mod tests {
         writer.write(&data2, InstanceHandle::NIL).unwrap();
 
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 2 {
@@ -4546,13 +4955,13 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubListener { counter_sender: counter_sender };
+        let read_listener = SubListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorld>(
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -4578,7 +4987,7 @@ pub(crate) mod tests {
         writer.write(&data2, InstanceHandle::NIL).unwrap();
 
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 2 {
@@ -4707,13 +5116,13 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubKeyListener { counter_sender: counter_sender };
+        let read_listener = SubKeyListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorldWithKey>(
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -4743,7 +5152,7 @@ pub(crate) mod tests {
         writer.write(&data3, instance_handle_1).unwrap();
         writer.write(&data4, instance_handle_3).unwrap();
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 4 {
@@ -4835,13 +5244,13 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubKeyListener { counter_sender: counter_sender };
+        let read_listener = SubKeyListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorldWithKey>(
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -4872,7 +5281,7 @@ pub(crate) mod tests {
         writer.write(&data4, instance_handle_3).unwrap();
 
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 4 {
@@ -4985,13 +5394,13 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, _counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubKeyListener { counter_sender: counter_sender };
+        let read_listener = SubKeyListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorldWithKey>(
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -5066,13 +5475,13 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubKeyListener { counter_sender: counter_sender };
+        let read_listener = SubKeyListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorldWithKey>(
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -5103,7 +5512,7 @@ pub(crate) mod tests {
         writer.write(&data4, instance_handle_3).unwrap();
 
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 4 {
@@ -5184,13 +5593,13 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubKeyListener { counter_sender: counter_sender };
+        let read_listener = SubKeyListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorldWithKey>(
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -5221,7 +5630,7 @@ pub(crate) mod tests {
         writer.write(&data4, instance_handle_3).unwrap();
 
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 4 {
@@ -5317,13 +5726,13 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubKeyListener { counter_sender: counter_sender };
+        let read_listener = SubKeyListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorldWithKey>(
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -5354,7 +5763,7 @@ pub(crate) mod tests {
         writer.write(&data4, instance_handle_3).unwrap();
 
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 4 {
@@ -5461,13 +5870,13 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubKeyListener { counter_sender: counter_sender };
+        let read_listener = SubKeyListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorldWithKey>(
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -5498,7 +5907,7 @@ pub(crate) mod tests {
         writer.write(&data4, instance_handle_3).unwrap();
 
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 4 {
@@ -5578,13 +5987,13 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubKeyListener { counter_sender: counter_sender };
+        let read_listener = SubKeyListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorldWithKey>(
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -5615,7 +6024,7 @@ pub(crate) mod tests {
         writer.write(&data4, instance_handle_3).unwrap();
 
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 4 {
@@ -5734,7 +6143,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -5859,7 +6268,7 @@ pub(crate) mod tests {
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -5977,13 +6386,13 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubKeyListener { counter_sender: counter_sender };
+        let read_listener = SubKeyListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorldWithKey>(
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -6014,7 +6423,7 @@ pub(crate) mod tests {
         writer.write(&data4, instance_handle_3).unwrap();
 
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 4 {
@@ -6113,13 +6522,13 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubKeyListener { counter_sender: counter_sender };
+        let read_listener = SubKeyListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorldWithKey>(
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -6150,7 +6559,7 @@ pub(crate) mod tests {
         writer.write(&data4, instance_handle_3).unwrap();
 
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 4 {
@@ -6264,13 +6673,13 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubKeyListener { counter_sender: counter_sender };
+        let read_listener = SubKeyListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorldWithKey>(
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -6301,7 +6710,7 @@ pub(crate) mod tests {
         writer.write(&data4, instance_handle_3).unwrap();
 
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 4 {
@@ -6381,13 +6790,13 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
-        let read_listener = SubKeyListener { counter_sender: counter_sender };
+        let read_listener = SubKeyListener { counter_sender };
         let data_reader = subscriber
             .create_datareader::<HelloWorldWithKey>(
                 &topic,
                 reader_qos,
                 Some(Arc::new(read_listener)),
-                StatusMask::default(),
+                DATA_ONLY_LISTENER_MASK,
             )
             .unwrap();
 
@@ -6418,7 +6827,7 @@ pub(crate) mod tests {
         writer.write(&data4, instance_handle_3).unwrap();
 
         let mut count = 0;
-        while let Ok(_) = counter_receiver.recv() {
+        while counter_receiver.recv().is_ok() {
             count += 1;
             println!("Data received count: {}", count);
             if count == 4 {

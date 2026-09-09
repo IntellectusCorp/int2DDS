@@ -17,16 +17,13 @@ use crate::{
             sequence::SequenceNumber,
         },
         entities::history::{
-            cache_change::CacheChange, cache_change_pool::CacheChangePool,
+            cache_change::CacheChange,
+            cache_change_pool::{CacheChangePool, MAX_POOL_CAP},
             history_cache::HistoryCache,
         },
     },
     subscription::data_reader_history::ReaderChangeId,
 };
-
-// Upper bound on pooled idle changes when history is effectively unbounded
-// (KEEP_ALL with unlimited resource limits reports max_samples as i32::MAX).
-const MAX_POOL_CAP: usize = 1024;
 
 // A remote writer's open coherent set: identified by its first member's sequence
 // number, members held back until the set end is observed.
@@ -92,18 +89,12 @@ impl HistoryCache for ReaderHistoryCache {
 
     fn get_seq_num_min(&self) -> Option<SequenceNumber> {
         let min_change = self.changes.iter().min_by_key(|change| change.sequence_number());
-        match min_change {
-            Some(change) => Some(change.sequence_number()),
-            None => None,
-        }
+        min_change.map(|change| change.sequence_number())
     }
 
     fn get_seq_num_max(&self) -> Option<SequenceNumber> {
         let max_change = self.changes.iter().max_by_key(|change| change.sequence_number());
-        match max_change {
-            Some(change) => Some(change.sequence_number()),
-            None => None,
-        }
+        max_change.map(|change| change.sequence_number())
     }
 }
 

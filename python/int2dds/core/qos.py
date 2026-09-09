@@ -36,6 +36,11 @@ class DestinationOrderKind(IntEnum):
     BY_SOURCE = 1
 
 
+class LifespanReferenceKind(IntEnum):
+    BY_SOURCE = 0
+    BY_RECEPTION = 1
+
+
 class LivelinessKind(IntEnum):
     AUTOMATIC = 0
     MANUAL_BY_PARTICIPANT = 1
@@ -115,11 +120,18 @@ class ResourceLimits:
 class Lifespan:
     duration: float = float("inf")  # seconds, inf = infinite
 
+    _INFINITE_NS = 0x7FFFFFFFFFFFFFFF
+
     @property
     def _duration_ns(self) -> int:
         if self.duration == float("inf"):
-            return 0x7FFFFFFFFFFFFFFF
+            return self._INFINITE_NS
         return int(self.duration * 1_000_000_000)
+
+    @classmethod
+    def from_ns(cls, ns: int) -> "Lifespan":
+        # Inverse of _duration_ns: the sentinel maps back to infinite, not ~292 years.
+        return cls(duration=float("inf") if ns == cls._INFINITE_NS else ns / 1_000_000_000)
 
 
 @dataclass
@@ -129,6 +141,19 @@ class DestinationOrder:
     @property
     def _kind_int(self) -> int:
         return DestinationOrderKind.BY_SOURCE if self.kind == "BY_SOURCE" else DestinationOrderKind.BY_RECEPTION
+
+
+@dataclass
+class LifespanReference:
+    kind: Literal["BY_SOURCE", "BY_RECEPTION"] = "BY_SOURCE"
+
+    @property
+    def _kind_int(self) -> int:
+        return (
+            LifespanReferenceKind.BY_RECEPTION
+            if self.kind == "BY_RECEPTION"
+            else LifespanReferenceKind.BY_SOURCE
+        )
 
 
 @dataclass
@@ -175,7 +200,7 @@ class ReaderDataLifecycle:
 
 @dataclass
 class DataRepresentation:
-    kind: Literal["XCDR1", "XCDR2"] = "XCDR2"
+    kind: Literal["XCDR1", "XCDR2"] = "XCDR1"
 
     @property
     def _kind_int(self) -> int:
@@ -238,9 +263,13 @@ class Property:
     as a convenience.
     """
     entries: list[tuple[str, str, bool]] = field(default_factory=list)
+    binary_entries: list[tuple[str, bytes, bool]] = field(default_factory=list)
 
     def add(self, name: str, value: str, propagate: bool = True) -> None:
         self.entries.append((name, value, propagate))
+
+    def add_binary(self, name: str, data: bytes, propagate: bool = True) -> None:
+        self.binary_entries.append((name, bytes(data), propagate))
 
     def set_multicast_ttl(self, ttl: int) -> None:
         if not 0 <= ttl <= 255:
@@ -257,9 +286,9 @@ class Property:
 
 @dataclass
 class DataWriterQos:
-    reliability: Reliability = field(default_factory=lambda: Reliability("RELIABLE"))
-    durability: Durability = field(default_factory=lambda: Durability("VOLATILE"))
-    history: History = field(default_factory=History)
+    reliability: Reliability | None = None
+    durability: Durability | None = None
+    history: History | None = None
     ownership: Ownership | None = None
     ownership_strength: OwnershipStrength | None = None
     resource_limits: ResourceLimits | None = None
@@ -272,16 +301,18 @@ class DataWriterQos:
     data_representation: DataRepresentation | None = None
     deadline: Deadline | None = None
     liveliness: Liveliness | None = None
+    data_frag: int | None = None  # DATA_FRAG max fragment size (bytes)
 
 
 @dataclass
 class DataReaderQos:
-    reliability: Reliability = field(default_factory=lambda: Reliability("BEST_EFFORT"))
-    durability: Durability = field(default_factory=lambda: Durability("VOLATILE"))
-    history: History = field(default_factory=History)
+    reliability: Reliability | None = None
+    durability: Durability | None = None
+    history: History | None = None
     ownership: Ownership | None = None
     resource_limits: ResourceLimits | None = None
     destination_order: DestinationOrder | None = None
+    lifespan_reference: LifespanReference | None = None
     time_based_filter: TimeBasedFilter | None = None
     latency_budget: LatencyBudget | None = None
     user_data: UserData | None = None

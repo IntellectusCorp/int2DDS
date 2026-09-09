@@ -66,8 +66,11 @@ namespace Int2Dds.Xtypes
                 // The serialized samples use classic (XCDR1) CDR; advertise the same in SEDP.
                 ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_set_data_representation(
                     qos, (int)DataRepresentationKind.Xcdr1));
-                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_create_datawriter(
-                    publisher.Handle, topic.Handle, qos, out _handle));
+                unsafe
+                {
+                    ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_create_datawriter(
+                        publisher.Handle, topic.Handle, qos, null, 0, out _handle));
+                }
             }
             finally
             {
@@ -83,9 +86,13 @@ namespace Int2Dds.Xtypes
             get
             {
                 if (_disposed) throw new ObjectDisposedException(GetType().Name);
-                ReturnCodeHelper.CheckReturn(
-                    NativeMethods.int2dds_get_publication_matched_status(_handle, out _, out int current));
-                return current;
+                unsafe
+                {
+                    NativePublicationMatchedStatus native;
+                    ReturnCodeHelper.CheckReturn(
+                        NativeMethods.int2dds_datawriter_get_publication_matched_status(_handle, &native));
+                    return native.CurrentCount;
+                }
             }
         }
 
@@ -93,19 +100,16 @@ namespace Int2Dds.Xtypes
         /// Publishes a pre-serialized CDR sample.
         /// </summary>
         /// <param name="data">The CDR-serialized sample bytes (including the encapsulation header).</param>
-        /// <param name="key">The CDR-serialized key bytes, or <c>null</c> for a keyless write.</param>
-        public unsafe void WriteSerialized(byte[] data, byte[]? key = null)
+        public unsafe void WriteSerialized(byte[] data)
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
             if (data == null) throw new ArgumentNullException(nameof(data));
 
             fixed (byte* pData = data)
-            fixed (byte* pKey = key)
             {
-                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_write_serialized(
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_write_serialized(
                     _handle,
-                    pData, (UIntPtr)data.Length,
-                    pKey, key != null ? (UIntPtr)key.Length : UIntPtr.Zero));
+                    pData, (UIntPtr)data.Length));
             }
         }
 
@@ -153,8 +157,11 @@ namespace Int2Dds.Xtypes
                     qos, (int)reliability, maxBlockingTimeNs));
                 ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_set_data_representation(
                     qos, (int)DataRepresentationKind.Xcdr1));
-                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_create_datareader(
-                    subscriber.Handle, topic.Handle, qos, out _handle));
+                unsafe
+                {
+                    ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_create_datareader(
+                        subscriber.Handle, topic.Handle, qos, null, 0, out _handle));
+                }
             }
             finally
             {
@@ -170,9 +177,13 @@ namespace Int2Dds.Xtypes
             get
             {
                 if (_disposed) throw new ObjectDisposedException(GetType().Name);
-                ReturnCodeHelper.CheckReturn(
-                    NativeMethods.int2dds_get_subscription_matched_status(_handle, out _, out int current));
-                return current;
+                unsafe
+                {
+                    NativeSubscriptionMatchedStatus native;
+                    ReturnCodeHelper.CheckReturn(
+                        NativeMethods.int2dds_datareader_get_subscription_matched_status(_handle, &native));
+                    return native.CurrentCount;
+                }
             }
         }
 
@@ -186,7 +197,7 @@ namespace Int2Dds.Xtypes
 
             fixed (byte* pBuffer = _buffer)
             {
-                int ret = NativeMethods.int2dds_take_serialized(
+                int ret = NativeMethods.int2dds_datareader_take_serialized(
                     _handle, pBuffer, (UIntPtr)_buffer.Length, out UIntPtr actualSize, out bool validData);
 
                 if (ret == ReturnCode.NoData)
@@ -228,7 +239,7 @@ namespace Int2Dds.Xtypes
     /// </summary>
     public static class DynamicEntities
     {
-        // int2dds_wait_for_type_object returns this when no matching type is
+        // int2dds_participant_wait_for_type_object returns this when no matching type is
         // discovered within the timeout (INT2DDS_RET_DYNAMIC_TIMEOUT). It is the
         // expected outcome while polling for a not-yet-present publisher.
         private const int DynamicTimeout = 203;
@@ -248,7 +259,7 @@ namespace Int2Dds.Xtypes
             fixed (byte* pTopic = topicBytes)
             fixed (byte* pName = nameBuf)
             {
-                int ret = NativeMethods.int2dds_wait_for_type_object(
+                int ret = NativeMethods.int2dds_participant_wait_for_type_object(
                     participant.Handle, pTopic, timeoutMs, out IntPtr typeObj,
                     pName, (UIntPtr)nameBuf.Length, out UIntPtr outLen);
                 if (ret == DynamicTimeout)

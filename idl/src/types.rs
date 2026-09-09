@@ -1,5 +1,5 @@
 /// Internal representation (IR) for resolved IDL types.
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Fully resolved type information.
 #[derive(Debug, Clone)]
@@ -219,6 +219,20 @@ pub struct ResolvedException {
     pub members: Vec<ResolvedMember>,
 }
 
+/// Types pulled in from `#include`d files: resolved so cross-file references
+/// work, but not emitted into this file's output (their own file emits them).
+/// Codegen consults these to recurse into nested-struct key fields and to emit
+/// the language-level import for a referenced imported type. `modules` maps a
+/// type's qualified and leaf name to the output module basename it lives in
+/// (populated by the CLI, which knows each included file's origin).
+#[derive(Debug, Clone, Default)]
+pub struct ImportedTypes {
+    pub structs: Vec<ResolvedStruct>,
+    pub enums: Vec<ResolvedEnum>,
+    pub bitmasks: Vec<ResolvedBitmask>,
+    pub modules: HashMap<String, String>,
+}
+
 /// Complete resolved IDL model.
 #[derive(Debug, Clone)]
 pub struct IdlModel {
@@ -230,6 +244,7 @@ pub struct IdlModel {
     pub interfaces: Vec<ResolvedInterface>,
     pub exceptions: Vec<ResolvedException>,
     pub constants: Vec<ResolvedConst>,
+    pub imported: ImportedTypes,
 }
 
 impl IdlModel {

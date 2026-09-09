@@ -59,6 +59,17 @@ namespace Int2Dds.Interop
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern void int2dds_dynamic_reader_destroy(IntPtr reader);
 
+        // A dynamic endpoint is a distinct native type from the typed one, so the typed
+        // int2dds_datawriter_get_qos / int2dds_datareader_get_qos cannot be used on it.
+        // The QoS handle these produce IS the typed one, so the existing
+        // int2dds_datawriter_qos_get_* / int2dds_datareader_qos_get_* accessors and the
+        // matching _destroy apply unchanged.
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_dynamic_writer_get_qos(IntPtr writer, out IntPtr qos_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_dynamic_reader_get_qos(IntPtr reader, out IntPtr qos_out);
+
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_dynamic_writer_publication_matched_count(IntPtr writer, out int count_out);
 

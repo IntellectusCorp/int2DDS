@@ -7,6 +7,7 @@
 //! The deadline monitor runs in a background thread, periodically checking registered
 //! instances to ensure data is written or received within the specified deadline period.
 
+use crate::utils::notify::notify_user;
 use log::{debug, trace, warn};
 use std::{
     collections::HashMap,
@@ -282,7 +283,10 @@ impl DeadlineMonitor {
                         handle
                     );
 
-                    callback.as_ref()(status, Some(info));
+                    // Sole path to the user's deadline-missed listeners, on this monitor's own
+                    // thread. Without the boundary a panic there ends the thread and deadline
+                    // detection stops for every entity it watches, silently.
+                    notify_user("deadline_monitor", || callback.as_ref()(status, Some(info)));
                 }
             }
 

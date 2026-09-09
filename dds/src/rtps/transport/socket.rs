@@ -68,23 +68,23 @@ impl Socket {
         // Check if user specified which network to use via env variable
         let is_network_specified = get_network_interface().is_some() || get_network_ip().is_some();
 
-        if let Ok(Some(ip)) = crate::common::int2dds_feature_ffi::get_working_ip() {
-            // int2DDS-feature enabled
+        if let Some(ip) = crate::common::enterprise_hooks::call_resolve_ip() {
+            // enterprise resolve_ip hook enabled
             if is_network_specified {
-                log::debug!("Using int2DDS-feature specified IP: {}", ip);
+                log::debug!("Using enterprise hooks specified IP: {}", ip);
                 ips.push(ip);
                 from_feature = true;
             } else {
                 log::warn!(
-                    "int2DDS-feature is enabled but no network interface specified. \
+                    "enterprise resolve_ip hook is enabled but no network interface specified. \
                             Falling back to default (auto-detection)"
                 );
             }
         } else if is_network_specified {
-            // These variables can only be used with int2DDS-feature
+            // These variables can only be used with the enterprise resolve_ip hook
             log::warn!(
                 "Env variable INT2DDS_NETWORK_INTERFACE or INT2DDS_NETWORK_IP is set \
-                 but int2DDS-feature is not enabled. Ignoring the value"
+                 but the enterprise resolve_ip hook is not enabled. Ignoring the value"
             );
         }
 
@@ -94,7 +94,7 @@ impl Socket {
         // Some environments, notably WSL, attach non-127/8 addresses to `lo`.
         // Treat those as loopback-interface addresses unless loopback use is explicit.
         if ips.is_empty() {
-            if let Ok(ifaces) = get_if_addrs::get_if_addrs() {
+            if let Ok(ifaces) = if_addrs::get_if_addrs() {
                 for iface in ifaces {
                     let is_loopback_interface = Self::is_loopback_interface_name(&iface.name);
                     if is_loopback_interface && !use_loopback {
@@ -136,7 +136,7 @@ impl Socket {
     }
 
     pub(crate) fn get_sender_bind_addr(&self) -> String {
-        // From int2DDS-feature: bind to the feature-specified IP directly
+        // From enterprise hooks: bind to the hook-specified IP directly
         if self.working_ips.from_feature {
             return self.working_ips.ips[0].clone();
         }
@@ -159,13 +159,19 @@ impl Socket {
     // 0.0.0.0 relies on default route, which doesn't exist in gateway-less environments,
     // and multicast addresses (e.g. 239.x) don't match any subnet route.
     pub(crate) fn get_sender_multicast_if_addr(&self) -> String {
-        // From int2DDS-feature: use the feature-specified IP directly
+        // From enterprise hooks: use the hook-specified IP directly
         if self.working_ips.from_feature {
             log::debug!(
-                "Using int2DDS-feature specified multicast interface IP: {}",
+                "Using enterprise hooks specified multicast interface IP: {}",
                 self.working_ips.ips[0]
             );
             return self.working_ips.ips[0].clone();
+        }
+
+        // loopback-only multicast egress when opted in.
+        if crate::common::env::get_force_loopback_multicast() {
+            log::debug!("FORCE_LOOPBACK_MULTICAST: forcing multicast interface IP to 127.0.0.1");
+            return "127.0.0.1".to_string();
         }
 
         // Probe the OS routing table by connecting to a public address.

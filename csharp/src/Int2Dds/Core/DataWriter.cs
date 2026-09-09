@@ -34,41 +34,50 @@ namespace Int2Dds.Core
             IDataWriterListener listener = null, uint statusMask = 0)
         {
             _topic = topic;
-            _xcdr2 = qos?.DataRepresentation?.Kind == Qos.DataRepresentationKind.Xcdr2;
 
-            // Always create a QoS handle so that the native layer receives the
-            // correct DataRepresentation default (XCDR1) even when the caller
-            // does not supply an explicit QoS object.
+            // Effective representation = caller's choice, else the core default
+            // (single source of truth in the Rust core, not hardcoded here).
+            int effectiveRepr = qos?.DataRepresentation != null
+                ? (int)qos.DataRepresentation.Kind
+                : NativeMethods.int2dds_default_data_representation();
+            _xcdr2 = effectiveRepr == (int)Qos.DataRepresentationKind.Xcdr2;
+
+            // With an explicit QoS, build a handle and apply it (Specific). With
+            // no QoS, pass NULL so the native layer engages QosKind::Default — the
+            // QoS-profile / spec-default resolution chain — instead of overriding
+            // it with a bare default handle.
             IntPtr qosHandle = IntPtr.Zero;
-            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_create_default(out qosHandle));
-            try
+            if (qos != null)
             {
-                if (qos != null)
-                    ApplyWriterQos(qosHandle, qos);
-
-                // Ensure SEDP advertises the same encoding that C# actually uses.
-                if (qos?.DataRepresentation == null)
-                    ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_set_data_representation(
-                        qosHandle, (int)Qos.DataRepresentationKind.Xcdr1));
-            }
-            catch
-            {
-                NativeMethods.int2dds_datawriter_qos_destroy(qosHandle);
-                throw;
-            }
-
-            try
-            {
-                if (listener != null)
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_create_default(out qosHandle));
+                try
                 {
-                    unsafe
+                    QosMarshal.ApplyWriterQos(qosHandle, qos);
+
+                    // Ensure SEDP advertises the same encoding that C# actually uses.
+                    if (qos.DataRepresentation == null)
+                        ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_set_data_representation(
+                            qosHandle, effectiveRepr));
+                }
+                catch
+                {
+                    NativeMethods.int2dds_datawriter_qos_destroy(qosHandle);
+                    throw;
+                }
+            }
+
+            try
+            {
+                unsafe
+                {
+                    if (listener != null)
                     {
                         var (nativeListener, contextHandle) = ListenerRegistry.CreateWriterListener(listener, this);
                         _listenerContextHandle = contextHandle;
                         try
                         {
                             ReturnCodeHelper.CheckReturn(
-                                NativeMethods.int2dds_create_datawriter_with_listener(
+                                NativeMethods.int2dds_create_datawriter(
                                     publisher.Handle, topic.Handle, qosHandle, &nativeListener, statusMask, out _handle));
                         }
                         catch
@@ -78,17 +87,25 @@ namespace Int2Dds.Core
                             throw;
                         }
                     }
-                }
-                else
-                {
-                    ReturnCodeHelper.CheckReturn(
-                        NativeMethods.int2dds_create_datawriter(publisher.Handle, topic.Handle, qosHandle, out _handle));
+                    else
+                    {
+                        ReturnCodeHelper.CheckReturn(
+                            NativeMethods.int2dds_create_datawriter(
+                                publisher.Handle, topic.Handle, qosHandle, null, 0, out _handle));
+                    }
                 }
             }
             finally
             {
-                NativeMethods.int2dds_datawriter_qos_destroy(qosHandle);
+                if (qosHandle != IntPtr.Zero)
+                    NativeMethods.int2dds_datawriter_qos_destroy(qosHandle);
             }
+
+            // With no explicit QoS the effective representation was resolved by the
+            // native QoS-profile / spec-default chain; re-read it so C#'s serialization
+            // matches what SEDP advertises (a profile may select XCDR2).
+            if (qos == null)
+                _xcdr2 = ResolveEffectiveXcdr2();
         }
 
         /// <summary>
@@ -99,7 +116,6 @@ namespace Int2Dds.Core
             IDataWriterListener listener = null, uint statusMask = 0)
         {
             _topic = topic;
-            _xcdr2 = false;
 
             unsafe
             {
@@ -113,7 +129,7 @@ namespace Int2Dds.Core
                         try
                         {
                             ReturnCodeHelper.CheckReturn(
-                                NativeMethods.int2dds_create_datawriter_with_profile_and_listener(
+                                NativeMethods.int2dds_create_datawriter_with_profile(
                                     publisher.Handle, topic.Handle, pQos, &nativeListener, statusMask, out _handle));
                         }
                         catch
@@ -127,10 +143,21 @@ namespace Int2Dds.Core
                     {
                         ReturnCodeHelper.CheckReturn(
                             NativeMethods.int2dds_create_datawriter_with_profile(
-                                publisher.Handle, topic.Handle, pQos, out _handle));
+                                publisher.Handle, topic.Handle, pQos, null, 0, out _handle));
                     }
                 }
             }
+
+            _xcdr2 = ResolveEffectiveXcdr2();
+        }
+
+        // Re-read the data representation the native writer actually resolved (from a
+        // QoS profile or the spec default) so client-side CDR serialization matches what
+        // SEDP advertises — a profile may select XCDR2 even when the library default is XCDR1.
+        private bool ResolveEffectiveXcdr2()
+        {
+            return NativeMethods.int2dds_datawriter_data_representation(_handle)
+                == (int)Qos.DataRepresentationKind.Xcdr2;
         }
 
         /// <summary>
@@ -165,18 +192,15 @@ namespace Int2Dds.Core
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
             var data = sample.SerializeCdr(_xcdr2);
-            var key = s_hasKey ? sample.SerializeKey() : null;
 
             unsafe
             {
                 fixed (byte* pData = data)
-                fixed (byte* pKey = key)
                 {
                     ReturnCodeHelper.CheckReturn(
-                        NativeMethods.int2dds_write_serialized(
+                        NativeMethods.int2dds_datawriter_write_serialized(
                             _handle,
-                            pData, (UIntPtr)data.Length,
-                            pKey, key != null ? (UIntPtr)key.Length : UIntPtr.Zero));
+                            pData, (UIntPtr)data.Length));
                 }
             }
         }
@@ -191,7 +215,6 @@ namespace Int2Dds.Core
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
             var data = sample.SerializeCdr(_xcdr2);
-            var key = s_hasKey ? sample.SerializeKey() : null;
 
             var epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
             var elapsed = timestamp.ToUniversalTime() - epoch;
@@ -201,13 +224,11 @@ namespace Int2Dds.Core
             unsafe
             {
                 fixed (byte* pData = data)
-                fixed (byte* pKey = key)
                 {
                     ReturnCodeHelper.CheckReturn(
-                        NativeMethods.int2dds_write_serialized_w_timestamp(
+                        NativeMethods.int2dds_datawriter_write_serialized_w_timestamp(
                             _handle,
                             pData, (UIntPtr)data.Length,
-                            pKey, key != null ? (UIntPtr)key.Length : UIntPtr.Zero,
                             sec, nanosec));
                 }
             }
@@ -220,7 +241,7 @@ namespace Int2Dds.Core
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
-            var key = s_hasKey ? sample.SerializeKey() : null;
+            var key = s_hasKey ? sample.SerializeCdr(_xcdr2) : null;
             if (key == null || key.Length == 0)
                 return InstanceHandle.Nil;
 
@@ -247,7 +268,7 @@ namespace Int2Dds.Core
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
-            var key = s_hasKey ? sample.SerializeKey() : null;
+            var key = s_hasKey ? sample.SerializeCdr(_xcdr2) : null;
             if (key == null || key.Length == 0)
                 return;
 
@@ -272,7 +293,7 @@ namespace Int2Dds.Core
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
-            var key = s_hasKey ? sample.SerializeKey() : null;
+            var key = s_hasKey ? sample.SerializeCdr(_xcdr2) : null;
             if (key == null || key.Length == 0)
                 return;
 
@@ -297,7 +318,7 @@ namespace Int2Dds.Core
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
-            var key = s_hasKey ? sample.SerializeKey() : null;
+            var key = s_hasKey ? sample.SerializeCdr(_xcdr2) : null;
             if (key == null || key.Length == 0)
                 return InstanceHandle.Nil;
 
@@ -385,9 +406,13 @@ namespace Int2Dds.Core
         public (int totalCount, int currentCount) GetPublicationMatchedStatus()
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
-            ReturnCodeHelper.CheckReturn(
-                NativeMethods.int2dds_get_publication_matched_status(_handle, out var total, out var current));
-            return (total, current);
+            unsafe
+            {
+                NativePublicationMatchedStatus native;
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_datawriter_get_publication_matched_status(_handle, &native));
+                return (native.TotalCount, native.CurrentCount);
+            }
         }
 
         public LivelinessLostStatus GetLivelinessLostStatus()
@@ -427,6 +452,60 @@ namespace Int2Dds.Core
             }
         }
 
+        /// <summary>Gets the offered incompatible type status.</summary>
+        public OfferedIncompatibleTypeStatus GetOfferedIncompatibleTypeStatus()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            unsafe
+            {
+                NativeOfferedIncompatibleTypeStatus native;
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_datawriter_get_offered_incompatible_type_status(_handle, &native));
+                return new OfferedIncompatibleTypeStatus(native.TotalCount, native.TotalCountChange);
+            }
+        }
+
+        /// <summary>Gets this DataWriter's 16-byte GUID.</summary>
+        public unsafe byte[] GetGuid()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            var guid = new byte[16];
+            fixed (byte* p = guid)
+            {
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_get_guid(_handle, p));
+            }
+            return guid;
+        }
+
+        /// <summary>
+        /// Writes pre-serialized CDR bytes through the zero-copy staging path
+        /// (prepare a native buffer, copy into it, then commit). Aborts the loan
+        /// on failure.
+        /// </summary>
+        public unsafe void WriteSerializedStaged(byte[] data)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            if (data == null) throw new ArgumentNullException(nameof(data));
+
+            byte* buffer;
+            UIntPtr capacity;
+            IntPtr loan;
+            ReturnCodeHelper.CheckReturn(
+                NativeMethods.int2dds_datawriter_prepare_serialized_write(_handle, (UIntPtr)data.Length, out buffer, out capacity, out loan));
+            try
+            {
+                System.Runtime.InteropServices.Marshal.Copy(data, 0, (IntPtr)buffer, data.Length);
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_datawriter_commit_serialized_write(
+                        _handle, loan, (UIntPtr)data.Length));
+            }
+            catch
+            {
+                NativeMethods.int2dds_datawriter_abort_serialized_write(loan);
+                throw;
+            }
+        }
+
         /// <summary>
         /// Gets the current QoS policies of this DataWriter.
         /// </summary>
@@ -437,7 +516,7 @@ namespace Int2Dds.Core
             ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_get_qos(_handle, out var qosHandle));
             try
             {
-                return ReadWriterQos(qosHandle);
+                return QosMarshal.ReadWriterQos(qosHandle);
             }
             finally
             {
@@ -455,7 +534,7 @@ namespace Int2Dds.Core
             ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_get_qos(_handle, out var qosHandle));
             try
             {
-                ApplyWriterQos(qosHandle, qos);
+                QosMarshal.ApplyWriterQos(qosHandle, qos);
                 ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_set_qos(_handle, qosHandle));
             }
             finally
@@ -515,112 +594,15 @@ namespace Int2Dds.Core
             return new StatusCondition(conditionHandle);
         }
 
-        private static void ApplyWriterQos(IntPtr qosHandle, DataWriterQos qos)
+        /// <summary>
+        /// Gets the current status change bitmask of this DataWriter.
+        /// </summary>
+        public uint GetStatusChanges()
         {
-            if (qos.Reliability != null)
-                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_set_reliability(
-                    qosHandle, (int)qos.Reliability.Kind, qos.Reliability.MaxBlockingTimeNs));
-
-            if (qos.Durability != null)
-                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_set_durability(
-                    qosHandle, (int)qos.Durability.Kind));
-
-            if (qos.History != null)
-                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_set_history(
-                    qosHandle, (int)qos.History.Kind, qos.History.Depth));
-
-            if (qos.Ownership != null)
-                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_set_ownership(
-                    qosHandle, (int)qos.Ownership.Kind));
-
-            if (qos.OwnershipStrength != null)
-                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_set_ownership_strength(
-                    qosHandle, qos.OwnershipStrength.Value));
-
-            if (qos.ResourceLimits != null)
-                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_set_resource_limits(
-                    qosHandle, qos.ResourceLimits.MaxSamples, qos.ResourceLimits.MaxInstances,
-                    qos.ResourceLimits.MaxSamplesPerInstance));
-
-            if (qos.Lifespan != null)
-                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_set_lifespan(
-                    qosHandle, qos.Lifespan.DurationNs));
-
-            if (qos.DestinationOrder != null)
-                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_set_destination_order(
-                    qosHandle, (int)qos.DestinationOrder.Kind));
-
-            if (qos.LatencyBudget != null)
-                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_set_latency_budget(
-                    qosHandle, qos.LatencyBudget.DurationNs));
-
-            if (qos.TransportPriority != null)
-                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_set_transport_priority(
-                    qosHandle, qos.TransportPriority.Value));
-
-            if (qos.UserData != null && qos.UserData.Data != null && qos.UserData.Data.Length > 0)
-            {
-                unsafe
-                {
-                    fixed (byte* pData = qos.UserData.Data)
-                    {
-                        ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_set_user_data(
-                            qosHandle, pData, (UIntPtr)qos.UserData.Data.Length));
-                    }
-                }
-            }
-
-            if (qos.WriterDataLifecycle != null)
-                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_set_writer_data_lifecycle(
-                    qosHandle, qos.WriterDataLifecycle.AutodisposeUnregisteredInstances));
-
-            if (qos.DataRepresentation != null)
-                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_set_data_representation(
-                    qosHandle, (int)qos.DataRepresentation.Kind));
-
-            if (qos.Deadline != null)
-                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_set_deadline(
-                    qosHandle, qos.Deadline.PeriodNs));
-
-            if (qos.Liveliness != null)
-                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_set_liveliness(
-                    qosHandle, (int)qos.Liveliness.Kind, qos.Liveliness.LeaseDurationNs));
-        }
-
-        private static DataWriterQos ReadWriterQos(IntPtr h)
-        {
-            NativeMethods.int2dds_datawriter_qos_get_reliability(h, out var relKind, out var relTime);
-            NativeMethods.int2dds_datawriter_qos_get_durability(h, out var durKind);
-            NativeMethods.int2dds_datawriter_qos_get_history(h, out var histKind, out var histDepth);
-            NativeMethods.int2dds_datawriter_qos_get_ownership(h, out var ownKind);
-            NativeMethods.int2dds_datawriter_qos_get_ownership_strength(h, out var ownStr);
-            NativeMethods.int2dds_datawriter_qos_get_resource_limits(h, out var maxS, out var maxI, out var maxPI);
-            NativeMethods.int2dds_datawriter_qos_get_lifespan(h, out var lifespanNs);
-            NativeMethods.int2dds_datawriter_qos_get_destination_order(h, out var destKind);
-            NativeMethods.int2dds_datawriter_qos_get_deadline(h, out var deadlineNs);
-            NativeMethods.int2dds_datawriter_qos_get_liveliness(h, out var liveKind, out var liveNs);
-            NativeMethods.int2dds_datawriter_qos_get_data_representation(h, out var reprKind);
-            NativeMethods.int2dds_datawriter_qos_get_transport_priority(h, out var transPri);
-            NativeMethods.int2dds_datawriter_qos_get_latency_budget(h, out var latNs);
-            NativeMethods.int2dds_datawriter_qos_get_writer_data_lifecycle(h, out var autoDispose);
-
-            return new DataWriterQos
-            {
-                Reliability = new Reliability((ReliabilityKind)relKind, TimeSpan.FromTicks(relTime / 100)),
-                Durability = new Durability((DurabilityKind)durKind),
-                History = new History((HistoryKind)histKind, histDepth),
-                Ownership = new Ownership((OwnershipKind)ownKind),
-                OwnershipStrength = new OwnershipStrength(ownStr),
-                ResourceLimits = new ResourceLimits(maxS, maxI, maxPI),
-                Lifespan = new Lifespan(TimeSpan.FromTicks(lifespanNs / 100)),
-                DestinationOrder = new DestinationOrder((DestinationOrderKind)destKind),
-                Deadline = new Deadline(TimeSpan.FromTicks(deadlineNs / 100)),
-                Liveliness = new Liveliness((LivelinessKind)liveKind, TimeSpan.FromTicks(liveNs / 100)),
-                DataRepresentation = new DataRepresentation((DataRepresentationKind)reprKind),
-                TransportPriority = new TransportPriority(transPri),
-                LatencyBudget = new LatencyBudget(TimeSpan.FromTicks(latNs / 100)),
-                WriterDataLifecycle = new WriterDataLifecycle(autoDispose),
-            };
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            ReturnCodeHelper.CheckReturn(
+                NativeMethods.int2dds_datawriter_get_status_changes(_handle, out var mask));
+            return mask;
         }
 
         /// <summary>

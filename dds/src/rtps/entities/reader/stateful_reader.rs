@@ -1,10 +1,14 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
+use crate::utils::notify::{callback_handle, notify_user};
 use std::{
     any::Any,
     fmt::Debug,
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, Weak,
+    },
 };
 
 use log::{debug, error};
@@ -28,7 +32,7 @@ use crate::{
     rtps::{
         common::{
             entity_id::EntityId,
-            guid::{Guid, GuidPrefix},
+            guid::Guid,
             locator::Locator,
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
             time::RtpsDuration,
@@ -67,6 +71,9 @@ pub(crate) struct StatefulReader {
     subscription_matched_status: Arc<Mutex<SubscriptionMatchedStatus>>,
     requested_incompatible_qos_status: Arc<Mutex<RequestedIncompatibleQosStatus>>,
     requested_incompatible_type_status: Arc<Mutex<RequestedIncompatibleTypeStatus>>,
+    // Callback-producing accesses currently in flight against this reader. `remove_reader`
+    // drains this to zero before returning.
+    in_flight_callbacks: AtomicUsize,
 }
 
 impl StatefulReader {
@@ -109,6 +116,7 @@ impl StatefulReader {
             requested_incompatible_type_status: Arc::new(Mutex::new(
                 RequestedIncompatibleTypeStatus::default(),
             )),
+            in_flight_callbacks: AtomicUsize::new(0),
         }
     }
 
@@ -116,13 +124,26 @@ impl StatefulReader {
         RtpsDuration::from(self.reader_reliability_extension.preemptive_acknack_delay)
     }
 
-    pub(crate) fn matched_writer_add(&self, a_writer_proxy: WriterProxy) {
+    /// Add `a_writer_proxy` unless a proxy for the same remote writer is already
+    /// present. Returns whether it was added.
+    ///
+    /// The check happens under the same lock as the insert: SEDP matching can be
+    /// driven concurrently by the local-creation path and the SEDP receive path,
+    /// and a plain `matched_writer_is_matched` guard at the call site leaves a
+    /// window where both callers pass it and push a duplicate proxy.
+    pub(crate) fn matched_writer_add(&self, a_writer_proxy: WriterProxy) -> bool {
         match self.matched_writers.lock() {
             Ok(mut matched_writers) => {
+                let remote_guid = a_writer_proxy.remote_writer_guid();
+                if matched_writers.iter().any(|proxy| proxy.remote_writer_guid() == remote_guid) {
+                    return false;
+                }
                 matched_writers.push(a_writer_proxy);
+                true
             }
             Err(e) => {
                 error!("Failed to acquire matched_writers lock: {}", e);
+                false
             }
         }
     }
@@ -260,15 +281,10 @@ impl Entity for StatefulReader {
     }
 
     fn update_status(&self, status: StatusKind, info: Option<Arc<dyn StatusInfo>>) {
-        match self.status_callback.lock() {
-            Ok(callback) => {
-                if let Some(callback) = callback.as_ref() {
-                    callback(status, info.clone());
-                }
-            }
-            Err(e) => {
-                log::error!("Failed to lock callback: {:?}", e);
-            }
+        // Lift the callback out before calling it: the listener it reaches may
+        // re-enter this entity, and an unwind through the call would poison the slot.
+        if let Some(callback) = callback_handle(&self.status_callback) {
+            notify_user("stateful_reader", || callback(status, info.clone()));
         }
     }
 
@@ -276,25 +292,11 @@ impl Entity for StatefulReader {
         &self,
         f: Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>,
     ) {
-        match self.status_callback.lock() {
-            Ok(mut callback) => {
-                callback.replace(f);
-            }
-            Err(e) => {
-                log::error!("Failed to lock callback: {:?}", e);
-            }
-        }
+        self.status_callback.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).replace(f);
     }
 
     fn set_update_change(&self, f: Arc<dyn Fn(Arc<CacheChange>) + Send + Sync>) {
-        match self.change_callback.lock() {
-            Ok(mut callback) => {
-                callback.replace(f);
-            }
-            Err(e) => {
-                log::error!("Failed to lock callback: {:?}", e);
-            }
-        }
+        self.change_callback.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).replace(f);
     }
 
     fn get_update_status_callback(
@@ -330,6 +332,18 @@ impl Debug for StatefulReader {
 }
 
 impl Reader for StatefulReader {
+    fn enter_callback(&self) {
+        self.in_flight_callbacks.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn exit_callback(&self) {
+        self.in_flight_callbacks.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    fn in_flight_callbacks(&self) -> usize {
+        self.in_flight_callbacks.load(Ordering::SeqCst)
+    }
+
     fn reader_cache(&self) -> Arc<Mutex<ReaderHistoryCache>> {
         // self.reader_cache.clone()
         Arc::clone(&self.reader_cache)
@@ -358,6 +372,18 @@ impl Reader for StatefulReader {
 
     fn heartbeat_suppression_duration(&self) -> RtpsDuration {
         RtpsDuration::from(self.reader_reliability_extension.heartbeat_suppression_duration)
+    }
+
+    fn nack_frag_response_delay(&self) -> RtpsDuration {
+        RtpsDuration::from(self.reader_reliability_extension.nack_frag_response_delay)
+    }
+
+    fn nack_frag_retry_delay(&self) -> RtpsDuration {
+        RtpsDuration::from(self.reader_reliability_extension.nack_frag_retry_delay)
+    }
+
+    fn nack_frag_max_retries(&self) -> u32 {
+        self.reader_reliability_extension.nack_frag_max_retries
     }
 
     fn matched_writer_is_matched(&self, writer_guid: Guid) -> bool {
@@ -394,27 +420,13 @@ impl Reader for StatefulReader {
             change.total_fragments()
         );
 
-        match self.status_callback.lock() {
-            Ok(callback) => {
-                if let Some(callback) = callback.as_ref() {
-                    callback(StatusKind::DATA_AVAILABLE, None);
-                }
-            }
-            Err(e) => {
-                log::error!("Failed to lock callback: {:?}", e);
-            }
-        };
+        if let Some(callback) = callback_handle(&self.status_callback) {
+            notify_user("stateful_reader", || callback(StatusKind::DATA_AVAILABLE, None));
+        }
 
-        match self.change_callback.lock() {
-            Ok(callback) => {
-                if let Some(callback) = callback.as_ref() {
-                    callback(change);
-                }
-            }
-            Err(e) => {
-                log::error!("Failed to lock callback: {:?}", e);
-            }
-        };
+        if let Some(callback) = callback_handle(&self.change_callback) {
+            notify_user("stateful_reader", || callback(change));
+        }
 
         debug!("StatefulReader on_change completed.");
     }
@@ -500,51 +512,60 @@ impl Reader for StatefulReader {
         debug!("Removed writer proxy with guid {} from matched writers", writer_guid);
         Ok(true)
     }
+}
 
-    fn remove_all_matched_writers_with_prefix_and_update_status(
-        &self,
-        prefix: GuidPrefix,
-    ) -> RtpsResult<usize> {
-        let mut writer_proxies = self
-            .matched_writers
-            .lock()
-            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        core::time::Duration as DcpsDuration,
+        rtps::common::entity_kind::EntityKind,
+        subscription::qos::{DataReaderQos, SubscriberQos},
+        topic::qos::TopicQos,
+    };
+    use const_default::ConstDefault;
 
-        debug!(
-            "Before unmatching with writer, this reader had {:?} matched writer",
-            writer_proxies.len()
+    #[test]
+    fn nack_frag_accessors_read_through_reliability_extension_qos() {
+        let guid =
+            Guid::new([9; 12], EntityId::new([0, 0, 1], EntityKind::USER_DEFINED_READER_WITH_KEY));
+        let datareader_qos = DataReaderQos {
+            reader_reliability_extension: ReaderReliabilityExtensionQosPolicy {
+                nack_frag_response_delay: DcpsDuration::from_millis(123),
+                nack_frag_retry_delay: DcpsDuration::from_millis(456),
+                nack_frag_max_retries: 7,
+                ..ReaderReliabilityExtensionQosPolicy::DEFAULT
+            },
+            ..DataReaderQos::default()
+        };
+        let subscription_data = SubscriptionBuiltinTopicData::new(
+            &datareader_qos,
+            &SubscriberQos::default(),
+            &TopicQos::default(),
         );
-        for writer_proxy in writer_proxies.iter() {
-            if writer_proxy.remote_writer_guid().prefix() == prefix {
-                self.update_subscription_matched_status(
-                    -1,
-                    InstanceHandle::from_guid(&writer_proxy.remote_writer_guid()),
-                );
-            }
-        }
-        let removed_guids: Vec<Guid> = writer_proxies
-            .iter()
-            .filter(|proxy| proxy.remote_writer_guid().prefix() == prefix)
-            .map(|proxy| proxy.remote_writer_guid())
-            .collect();
-        let len_before = writer_proxies.len();
-        writer_proxies.retain(|writer_proxy| writer_proxy.remote_writer_guid().prefix() != prefix);
-        let removed = len_before - writer_proxies.len();
-        let len_after = writer_proxies.len();
-        drop(writer_proxies);
 
-        // Connectivity change: drop any open coherent sets from the removed writers.
-        if let Ok(mut cache) = self.reader_cache.lock() {
-            for writer_guid in &removed_guids {
-                cache.discard_coherent_pending(*writer_guid);
-            }
-        }
-
-        debug!(
-            "Removed all unmatched remote writers from participant: {}",
-            Guid::guid_prefix_to_string(&prefix)
+        let reader = StatefulReader::new(
+            guid,
+            TopicKind::WithKey,
+            ReliabilityQosPolicyKind::Reliable,
+            Vec::new(),
+            Vec::new(),
+            guid.entity_id(),
+            false,
+            None,
+            None,
+            subscription_data,
+            guid,
         );
-        debug!("Current number of matched writer: {:?}", len_after);
-        Ok(removed)
+
+        assert_eq!(
+            reader.nack_frag_response_delay(),
+            RtpsDuration::from(DcpsDuration::from_millis(123))
+        );
+        assert_eq!(
+            reader.nack_frag_retry_delay(),
+            RtpsDuration::from(DcpsDuration::from_millis(456))
+        );
+        assert_eq!(reader.nack_frag_max_retries(), 7);
     }
 }

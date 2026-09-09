@@ -52,7 +52,6 @@ unsafe impl Sync for Int2DdsConfiguredParticipant {}
 /// - each element of `paths` must be non-null
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_load_profiles(
-    _factory: *const Int2DdsParticipantFactory,
     paths: *const *const c_char,
     count: usize,
 ) -> Int2DdsRet {
@@ -82,7 +81,6 @@ pub unsafe extern "C" fn int2dds_load_profiles(
 /// - `out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_get_dynamic_type_support(
-    _factory: *const Int2DdsParticipantFactory,
     type_name: *const c_char,
     out: *mut *mut Int2DdsDynamicTypeSupport,
 ) -> Int2DdsRet {

@@ -608,6 +608,47 @@ impl From<qos_policy::DestinationOrderQosPolicy> for DestinationOrderQosPolicy {
     }
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub(crate) struct LifespanReferenceQosPolicy {
+    pub(crate) kind: LifespanReferenceQosPolicyKind,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub(crate) enum LifespanReferenceQosPolicyKind {
+    #[default]
+    #[serde(rename = "BY_SOURCE")]
+    BySourceTimestampLifespanReferenceQos,
+    #[serde(rename = "BY_RECEPTION")]
+    ByReceptionTimestampLifespanReferenceQos,
+}
+
+impl From<LifespanReferenceQosPolicy> for qos_policy::LifespanReferenceQosPolicy {
+    fn from(external: LifespanReferenceQosPolicy) -> Self {
+        match external.kind {
+            LifespanReferenceQosPolicyKind::BySourceTimestampLifespanReferenceQos => {
+                Self { kind: qos_policy::LifespanReferenceQosPolicyKind::BySourceTimestamp }
+            }
+            LifespanReferenceQosPolicyKind::ByReceptionTimestampLifespanReferenceQos => {
+                Self { kind: qos_policy::LifespanReferenceQosPolicyKind::ByReceptionTimestamp }
+            }
+        }
+    }
+}
+
+impl From<qos_policy::LifespanReferenceQosPolicy> for LifespanReferenceQosPolicy {
+    fn from(internal: qos_policy::LifespanReferenceQosPolicy) -> Self {
+        match internal.kind {
+            qos_policy::LifespanReferenceQosPolicyKind::BySourceTimestamp => {
+                Self { kind: LifespanReferenceQosPolicyKind::BySourceTimestampLifespanReferenceQos }
+            }
+            qos_policy::LifespanReferenceQosPolicyKind::ByReceptionTimestamp => Self {
+                kind: LifespanReferenceQosPolicyKind::ByReceptionTimestampLifespanReferenceQos,
+            },
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct WriterReliabilityExtensionQosPolicy {
@@ -621,14 +662,7 @@ pub(crate) struct WriterReliabilityExtensionQosPolicy {
 
 impl Default for WriterReliabilityExtensionQosPolicy {
     fn default() -> Self {
-        Self {
-            disable_piggyback_heartbeat: false,
-            heartbeat_period: Duration { sec: 2, nanosec: 0 },
-            initial_heartbeat_delay: Duration { sec: 0, nanosec: 10_000_000 },
-            push_mode: true,
-            nack_suppression_duration: Duration { sec: 0, nanosec: 0 },
-            nack_response_delay: Duration { sec: 0, nanosec: 10_000_000 },
-        }
+        qos_policy::WriterReliabilityExtensionQosPolicy::default().into()
     }
 }
 
@@ -660,19 +694,44 @@ impl From<qos_policy::WriterReliabilityExtensionQosPolicy> for WriterReliability
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
+pub(crate) struct DataFragQosPolicy {
+    pub(crate) max_size: i32,
+}
+
+impl Default for DataFragQosPolicy {
+    fn default() -> Self {
+        Self { max_size: qos_policy::DataFragQosPolicy::UNSET }
+    }
+}
+
+impl From<DataFragQosPolicy> for qos_policy::DataFragQosPolicy {
+    fn from(external: DataFragQosPolicy) -> Self {
+        Self { max_size: external.max_size }
+    }
+}
+
+impl From<qos_policy::DataFragQosPolicy> for DataFragQosPolicy {
+    fn from(internal: qos_policy::DataFragQosPolicy) -> Self {
+        Self { max_size: internal.max_size }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub(crate) struct ReaderReliabilityExtensionQosPolicy {
     pub(crate) heartbeat_response_delay: Duration,
     pub(crate) heartbeat_suppression_duration: Duration,
     pub(crate) preemptive_acknack_delay: Duration,
+    pub(crate) nack_frag_response_delay: Duration,
+    pub(crate) nack_frag_retry_delay: Duration,
+    pub(crate) nack_frag_max_retries: u32,
 }
 
+// Delegates rather than repeating the literals, so an env override (INT2DDS_NACK_FRAG_*)
+// also applies to profiles that don't set these fields, same as the writer-side sibling.
 impl Default for ReaderReliabilityExtensionQosPolicy {
     fn default() -> Self {
-        Self {
-            heartbeat_response_delay: Duration { sec: 0, nanosec: 10_000_000 },
-            heartbeat_suppression_duration: Duration { sec: 0, nanosec: 0 },
-            preemptive_acknack_delay: Duration { sec: 0, nanosec: 80_000_000 },
-        }
+        qos_policy::ReaderReliabilityExtensionQosPolicy::default().into()
     }
 }
 
@@ -682,6 +741,9 @@ impl From<ReaderReliabilityExtensionQosPolicy> for qos_policy::ReaderReliability
             heartbeat_response_delay: external.heartbeat_response_delay,
             heartbeat_suppression_duration: external.heartbeat_suppression_duration,
             preemptive_acknack_delay: external.preemptive_acknack_delay,
+            nack_frag_response_delay: external.nack_frag_response_delay,
+            nack_frag_retry_delay: external.nack_frag_retry_delay,
+            nack_frag_max_retries: external.nack_frag_max_retries,
         }
     }
 }
@@ -692,6 +754,9 @@ impl From<qos_policy::ReaderReliabilityExtensionQosPolicy> for ReaderReliability
             heartbeat_response_delay: internal.heartbeat_response_delay,
             heartbeat_suppression_duration: internal.heartbeat_suppression_duration,
             preemptive_acknack_delay: internal.preemptive_acknack_delay,
+            nack_frag_response_delay: internal.nack_frag_response_delay,
+            nack_frag_retry_delay: internal.nack_frag_retry_delay,
+            nack_frag_max_retries: internal.nack_frag_max_retries,
         }
     }
 }
@@ -704,6 +769,8 @@ pub(crate) struct DataRepresentationQosPolicy {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+// Variant names mirror the DDS-XTypes spec; renaming them would change the config file keys.
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum DataRepresentationId {
     #[default]
     XcdrDataRepresentation,

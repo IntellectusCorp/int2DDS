@@ -96,6 +96,7 @@ mod cdr_struct_tests {
         },
     };
     use std::collections::HashMap;
+    use std::f64::consts::PI;
     fn encode_cdr<T: CdrSerialize>(value: &T) -> Vec<u8> {
         let mut serializer = CdrSerializer::new(true);
         serializer.write_encapsulation_header().unwrap();
@@ -200,7 +201,7 @@ mod cdr_struct_tests {
     fn test_keyed_struct_cdr() {
         use crate::dcps::topic::type_support::TypeSupport;
 
-        let value = KeyedStruct { id: 42, name: "test".to_string(), value: 3.14 };
+        let value = KeyedStruct { id: 42, name: "test".to_string(), value: PI };
 
         // Full serialization/deserialization
         let mut serializer = CdrSerializer::new(true);
@@ -356,7 +357,7 @@ mod cdr_struct_tests {
             pub y: f64,
         }
 
-        let value: Box<InnerData> = Box::new(InnerData { x: 100, y: 3.14 });
+        let value: Box<InnerData> = Box::new(InnerData { x: 100, y: PI });
         let mut serializer = CdrSerializer::new(true);
         serializer.write_encapsulation_header().unwrap();
         value.serialize_cdr(&mut serializer).unwrap();
@@ -365,7 +366,7 @@ mod cdr_struct_tests {
         let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
         let result = Box::<InnerData>::deserialize_cdr(&mut deserializer).unwrap();
         assert_eq!(result.x, 100);
-        assert_eq!(result.y, 3.14);
+        assert_eq!(result.y, PI);
     }
 
     // ============================================================================
@@ -389,7 +390,7 @@ mod cdr_struct_tests {
     fn test_struct_inheritance_cdr() {
         let value = ChildStruct {
             base: ParentStruct { parent_id: 42, parent_name: "parent".to_string() },
-            child_value: 3.14,
+            child_value: PI,
         };
 
         let mut serializer = CdrSerializer::new(true);
@@ -401,7 +402,7 @@ mod cdr_struct_tests {
         let result = ChildStruct::deserialize_cdr(&mut deserializer).unwrap();
         assert_eq!(result.base.parent_id, 42);
         assert_eq!(result.base.parent_name, "parent");
-        assert_eq!(result.child_value, 3.14);
+        assert_eq!(result.child_value, PI);
     }
 
     #[derive(DdsType)]
@@ -479,8 +480,8 @@ mod cdr_struct_tests {
         #[test]
         fn test_bitmask_combined_flags() {
             let mut value = MyBitmaskValue::empty();
-            value.set(MyBitmaskValue::FLAG0);
-            value.set(MyBitmaskValue::FLAG7);
+            value.insert(MyBitmaskValue::FLAG0);
+            value.insert(MyBitmaskValue::FLAG7);
             assert!(value.contains(MyBitmaskValue::FLAG0));
             assert!(!value.contains(MyBitmaskValue::FLAG1));
             assert!(value.contains(MyBitmaskValue::FLAG7));
@@ -508,6 +509,39 @@ mod cdr_struct_tests {
             let masked = combined & MyBitmaskValue::from(MyBitmask::FLAG0);
             assert!(masked.contains(MyBitmaskValue::FLAG0));
             assert!(!masked.contains(MyBitmaskValue::FLAG1));
+        }
+
+        #[test]
+        fn test_bitmask_insert_remove() {
+            // Spec §7.2.4.3.6: the companion value provides insert/remove.
+            let mut value = MyBitmaskValue::empty();
+            value.insert(MyBitmaskValue::FLAG0);
+            value.insert(MyBitmaskValue::FLAG7);
+            assert!(value.contains(MyBitmaskValue::FLAG0));
+            assert!(value.contains(MyBitmaskValue::FLAG7));
+            value.remove(MyBitmaskValue::FLAG0);
+            assert!(!value.contains(MyBitmaskValue::FLAG0));
+            assert!(value.contains(MyBitmaskValue::FLAG7));
+        }
+
+        #[test]
+        fn test_bitmask_from_bits() {
+            // Spec §7.2.4.3.6: from_bits returns None for a bit with no declared flag.
+            let ok = MyBitmaskValue::from_bits(0b1000_0011);
+            assert_eq!(ok, Some(MyBitmaskValue(0b1000_0011)));
+            // bit 2 corresponds to no declared flag (positions are 0, 1, 7).
+            assert_eq!(MyBitmaskValue::from_bits(0b0000_0100), None);
+        }
+
+        #[test]
+        fn test_bitmask_bitxor() {
+            // Spec §7.2.4.3.6: the companion value implements BitXor.
+            let a = MyBitmaskValue::from(MyBitmask::FLAG0);
+            let b = MyBitmaskValue::from(MyBitmask::FLAG1);
+            let x = a ^ b;
+            assert_eq!(x.bits(), 0b11);
+            let y = x ^ b;
+            assert_eq!(y.bits(), 0b01);
         }
 
         #[test]

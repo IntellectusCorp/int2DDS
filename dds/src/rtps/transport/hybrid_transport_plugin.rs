@@ -2,24 +2,19 @@
 #![allow(unused_variables)]
 
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::Ipv4Addr;
 use std::sync::Mutex;
-use std::thread;
 
-use crossbeam_channel::{bounded, Receiver};
-use log::{debug, info, warn};
+use log::{debug, info};
 
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::locator::Locator;
-use crate::rtps::transport::plugin::{IncomingMessage, MessageSource, SendTarget, TransportPlugin};
+use crate::rtps::transport::plugin::{MessageSource, SendTarget, TransportPlugin};
 use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::tcp::tcp_transport_plugin::TcpTransportPlugin;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use crate::rtps::transport::udp::udp_sender::UdpSender;
 use crate::rtps::transport::HybridConfig;
-
-/// Channel buffer size for merged sources.
-const CHANNEL_BUFFER_SIZE: usize = 256;
 
 /// Hybrid transport plugin — UDP multicast discovery + TCP/UDP unicast.
 ///
@@ -40,17 +35,15 @@ pub(crate) struct HybridTransportPlugin {
     // UDP listeners — multicast is always UDP
     discovery_multicast_listener: Mutex<Option<UdpListener>>,
 
-    // Merged discovery unicast: UDP unicast + TCP discovery channel
-    discovery_unicast_rx: Mutex<Option<Receiver<IncomingMessage>>>,
-
-    // Merged user unicast: UDP unicast + TCP user data channel
-    user_data_unicast_rx: Mutex<Option<Receiver<IncomingMessage>>>,
+    // Unicast reception is one stream source handed straight through from the
+    // embedded TCP plugin; it carries both discovery and user data.
+    stream_source: Mutex<Option<MessageSource>>,
 }
 
 impl HybridTransportPlugin {
     pub(crate) fn new(
         domain_id: u32,
-        mut participant_id: u32,
+        participant_id: u32,
         bind_ip: String,
         multicast_if_ip: String,
         working_ips: Vec<String>,
@@ -63,42 +56,18 @@ impl HybridTransportPlugin {
         let discovery_mc_port = PortManager::get_discovery_traffic_multicast_port(domain_id);
         let discovery_mc = UdpListener::new_multicast(discovery_mc_port, &working_ips).ok();
 
-        // UDP unicast: retry on AddrInUse with incremented participant_id, just
-        // like UdpTransportPlugin and ShmTransportPlugin. Without this, two
-        // Hybrid processes on the same host both bind (domain, pid=0)'s UDP
-        // unicast ports, the second `.ok()` swallows the conflict, and
-        // discovery silently fails. (The TCP listen port is independent of
-        // participant_id; for several participants on one host, pin a distinct
-        // int2dds.transport.TCPv4.bind_port per participant.)
-        let (discovery_uc, user_uc) = loop {
-            let disc_port =
-                PortManager::get_discovery_traffic_unicast_port(domain_id, participant_id);
-            let user_port = PortManager::get_user_traffic_unicast_port(domain_id, participant_id);
-            match UdpListener::new(disc_port) {
-                Ok(disc_listener) => {
-                    let user_listener = UdpListener::new(user_port).ok();
-                    break (Some(disc_listener), user_listener);
-                }
-                Err(_) => {
-                    log::info!(
-                        "[HybridTransportPlugin] UDP port {} in use, trying participant_id {}",
-                        disc_port,
-                        participant_id + 1
-                    );
-                    participant_id += 1;
-                }
-            }
-        };
-
-        // Create TCP plugin (handles its own mux listener thread).
-        // Pass the final participant_id so TCP's identity matches UDP's. The TCP
-        // listen port comes from the per-participant TcpConfig (bind_port
-        // property, else the domain formula).
+        // Create TCP plugin (handles its own mux listener thread). The TCP listen
+        // port comes from the per-participant TcpConfig (bind_port property, else
+        // the domain formula).
         // Hybrid discovers peers over UDP multicast, so the embedded TCP plugin
         // must dial any discovered peer's TCP locators — force accept-undefined-
         // peers regardless of the configured value.
         let mut tcp_config = hybrid_config.tcp;
         tcp_config.accept_undefined_peers = true;
+        // Peers learn the TCP listen port from the SPDP locators carried over UDP
+        // multicast, so it never has to be predictable. Binding an ephemeral port
+        // by default lets several participants share one host without colliding.
+        tcp_config.bind_port = Some(tcp_config.bind_port.unwrap_or(0));
         let tcp_plugin = TcpTransportPlugin::new(
             domain_id,
             participant_id,
@@ -108,47 +77,7 @@ impl HybridTransportPlugin {
             tcp_config,
         )?;
 
-        // Create merged discovery unicast channel: UDP listener + TCP discovery rx
-        let (disc_merged_tx, disc_merged_rx) = bounded::<IncomingMessage>(CHANNEL_BUFFER_SIZE);
-        // Create merged user unicast channel: UDP listener + TCP user data rx
-        let (user_merged_tx, user_merged_rx) = bounded::<IncomingMessage>(CHANNEL_BUFFER_SIZE);
-
-        // Spawn merge thread for discovery unicast
-        let tcp_disc_source = tcp_plugin.take_discovery_unicast_source();
-        let disc_tx = disc_merged_tx.clone();
-        if let Some(udp_listener) = discovery_uc {
-            thread::Builder::new()
-                .name("hybrid_discovery_merge".to_string())
-                .spawn(move || {
-                    merge_udp_and_channel(udp_listener, tcp_disc_source, disc_tx);
-                })
-                .expect("Failed to create hybrid discovery merge thread");
-        } else if let Some(MessageSource::Channel { rx }) = tcp_disc_source {
-            thread::Builder::new()
-                .name("hybrid_discovery_forward".to_string())
-                .spawn(move || {
-                    forward_channel(rx, disc_merged_tx);
-                })
-                .expect("Failed to create hybrid discovery forward thread");
-        }
-
-        // Spawn merge thread for user unicast
-        let tcp_user_source = tcp_plugin.take_user_data_unicast_source();
-        if let Some(udp_listener) = user_uc {
-            thread::Builder::new()
-                .name("hybrid_user_merge".to_string())
-                .spawn(move || {
-                    merge_udp_and_channel(udp_listener, tcp_user_source, user_merged_tx);
-                })
-                .expect("Failed to create hybrid user merge thread");
-        } else if let Some(MessageSource::Channel { rx }) = tcp_user_source {
-            thread::Builder::new()
-                .name("hybrid_user_forward".to_string())
-                .spawn(move || {
-                    forward_channel(rx, user_merged_tx);
-                })
-                .expect("Failed to create hybrid user forward thread");
-        }
+        let tcp_stream_source = tcp_plugin.take_stream_source();
 
         info!("[HybridTransportPlugin] Created (domain={}, pid={})", domain_id, participant_id);
 
@@ -159,8 +88,7 @@ impl HybridTransportPlugin {
             participant_id,
             working_ips,
             discovery_multicast_listener: Mutex::new(discovery_mc),
-            discovery_unicast_rx: Mutex::new(Some(disc_merged_rx)),
-            user_data_unicast_rx: Mutex::new(Some(user_merged_rx)),
+            stream_source: Mutex::new(tcp_stream_source),
         })
     }
 
@@ -184,6 +112,11 @@ impl HybridTransportPlugin {
 }
 
 impl TransportPlugin for HybridTransportPlugin {
+    /// Unicast rides TCP, so the bound that applies is the TCP one.
+    fn advertised_receive_buffer_size(&self) -> Option<usize> {
+        self.tcp_plugin.advertised_receive_buffer_size()
+    }
+
     fn send(&self, data: &[u8], target: &SendTarget) -> io::Result<()> {
         match target {
             SendTarget::SPDPDiscovery { initial_peers } => {
@@ -195,28 +128,9 @@ impl TransportPlugin for HybridTransportPlugin {
                 }
                 Ok(())
             }
-            SendTarget::SEDPDiscovery(locator) => {
+            SendTarget::SEDPDiscovery(locator) | SendTarget::UserData(locator) => {
                 if locator.is_tcp() {
                     self.tcp_plugin.send(data, target)
-                } else if locator.is_udp() {
-                    let ip = locator.to_ip_v4_addr();
-                    let port = locator.port() as u16;
-                    let addr = SocketAddr::new(IpAddr::V4(ip), port);
-                    self.udp_sender.send(&addr, data)?;
-                    Ok(())
-                } else {
-                    Err(io::Error::new(io::ErrorKind::Unsupported, locator.kind_name()))
-                }
-            }
-            SendTarget::UserData(locator) => {
-                if locator.is_tcp() {
-                    self.tcp_plugin.send(data, target)
-                } else if locator.is_udp() {
-                    let ip = locator.to_ip_v4_addr();
-                    let port = locator.port() as u16;
-                    let addr = SocketAddr::new(IpAddr::V4(ip), port);
-                    self.udp_sender.send(&addr, data)?;
-                    Ok(())
                 } else {
                     Err(io::Error::new(io::ErrorKind::Unsupported, locator.kind_name()))
                 }
@@ -225,8 +139,7 @@ impl TransportPlugin for HybridTransportPlugin {
     }
 
     fn can_handle(&self, locator: &Locator) -> bool {
-        // Hybrid carries both UDP and TCP senders.
-        locator.is_udp() || locator.is_tcp()
+        locator.is_tcp()
     }
 
     fn advertised_metatraffic_unicast_locators(&self) -> Vec<Locator> {
@@ -242,17 +155,19 @@ impl TransportPlugin for HybridTransportPlugin {
 
     fn take_discovery_multicast_source(&self) -> Option<MessageSource> {
         let listener = self.discovery_multicast_listener.lock().expect("lock poisoned").take()?;
-        Some(MessageSource::MioPoll { listener })
+        Some(MessageSource::Udp { listener })
     }
 
     fn take_discovery_unicast_source(&self) -> Option<MessageSource> {
-        let rx = self.discovery_unicast_rx.lock().expect("lock poisoned").take()?;
-        Some(MessageSource::Channel { rx })
+        None
     }
 
     fn take_user_data_unicast_source(&self) -> Option<MessageSource> {
-        let rx = self.user_data_unicast_rx.lock().expect("lock poisoned").take()?;
-        Some(MessageSource::Channel { rx })
+        None
+    }
+
+    fn take_stream_source(&self) -> Option<MessageSource> {
+        self.stream_source.lock().expect("lock poisoned").take()
     }
 
     fn port(&self) -> u16 {
@@ -285,76 +200,5 @@ impl TransportPlugin for HybridTransportPlugin {
         }
 
         debug!("[HybridTransportPlugin] Closed");
-    }
-}
-
-/// Merge UDP listener and channel source into a single output channel.
-fn merge_udp_and_channel(
-    mut udp_listener: UdpListener,
-    channel_source: Option<MessageSource>,
-    tx: crossbeam_channel::Sender<IncomingMessage>,
-) {
-    use mio::{Events, Interest, Poll, Token};
-    use std::time::Duration;
-
-    let channel_rx = match channel_source {
-        Some(MessageSource::Channel { rx }) => Some(rx),
-        _ => None,
-    };
-
-    let mut poll = match Poll::new() {
-        Ok(p) => p,
-        Err(e) => {
-            warn!("[HybridMerge] Failed to create poll: {:?}", e);
-            return;
-        }
-    };
-    let mut events = Events::with_capacity(64);
-    let udp_token = Token(1);
-    if let Err(e) = poll.registry().register(udp_listener.socket(), udp_token, Interest::READABLE) {
-        warn!("[HybridMerge] Failed to register UDP listener: {:?}", e);
-        return;
-    }
-
-    loop {
-        let _ = poll.poll(&mut events, Some(Duration::from_millis(50)));
-
-        // Drain UDP
-        for event in events.iter() {
-            if event.token() == udp_token && event.is_readable() {
-                while let Some((buffer, from_addr)) = udp_listener.get_message() {
-                    let msg = IncomingMessage { data: buffer.to_vec(), source: from_addr };
-                    if tx.try_send(msg).is_err() {
-                        return; // Channel closed
-                    }
-                }
-            }
-        }
-
-        // Drain TCP channel
-        if let Some(rx) = &channel_rx {
-            while let Ok(msg) = rx.try_recv() {
-                if tx.try_send(msg).is_err() {
-                    return;
-                }
-            }
-        }
-
-        // Check if output channel is disconnected
-        if tx.is_empty() && tx.len() == 0 {
-            // Can't easily check disconnection; rely on try_send errors above
-        }
-    }
-}
-
-/// Forward messages from one channel to another.
-fn forward_channel(
-    rx: crossbeam_channel::Receiver<IncomingMessage>,
-    tx: crossbeam_channel::Sender<IncomingMessage>,
-) {
-    while let Ok(msg) = rx.recv() {
-        if tx.try_send(msg).is_err() {
-            return;
-        }
     }
 }

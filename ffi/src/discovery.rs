@@ -5,7 +5,12 @@
 //! retrieval, and field getters for opaque builtin topic data types.
 
 use crate::error::*;
+use crate::subscriber::{
+    INT2DDS_INSTANCE_STATE_ALIVE, INT2DDS_INSTANCE_STATE_NOT_ALIVE_DISPOSED,
+    INT2DDS_INSTANCE_STATE_NOT_ALIVE_NO_WRITERS,
+};
 use crate::types::{Int2DdsDataReader, Int2DdsDataWriter, Int2DdsParticipant};
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::time::{Duration as StdDuration, Instant};
 
@@ -18,12 +23,16 @@ use int2dds::common::{
     instance_handle::InstanceHandle,
 };
 use int2dds::core::time::Duration;
+use int2dds::core::types::LENGTH_UNLIMITED;
 use int2dds::infrastructure::qos_policy::{
     DurabilityQosPolicyKind, LivelinessQosPolicyKind, ReliabilityQosPolicyKind,
 };
 use int2dds::infrastructure::status::StatusMask;
 use int2dds::infrastructure::wait_set::WaitSet;
-use int2dds::subscription::sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind};
+use int2dds::subscription::sample_info::{
+    InstanceStateKind, SampleInfo, SampleStateKind, ViewStateKind,
+};
+use int2dds::EndpointDiscoveryEvent;
 
 // ============================================================================
 // Opaque builtin topic data types
@@ -41,12 +50,20 @@ pub struct Int2DdsSubscriptionBuiltinTopicData {
     pub(crate) inner: SubscriptionBuiltinTopicData,
 }
 
+/// One instance of a snapshot. `data` is absent for a dispose, which travels as a key with no
+/// payload, so the handle is the only identity a departure can be acted on by.
+pub(crate) struct SnapshotEntry<T> {
+    pub(crate) data: Option<T>,
+    pub(crate) instance_state: u32,
+    pub(crate) instance_handle: [u8; 16],
+}
+
 pub struct Int2DdsPublicationBuiltinTopicDataSeq {
-    pub(crate) items: Vec<PublicationBuiltinTopicData>,
+    pub(crate) items: Vec<SnapshotEntry<PublicationBuiltinTopicData>>,
 }
 
 pub struct Int2DdsSubscriptionBuiltinTopicDataSeq {
-    pub(crate) items: Vec<SubscriptionBuiltinTopicData>,
+    pub(crate) items: Vec<SnapshotEntry<SubscriptionBuiltinTopicData>>,
 }
 
 unsafe impl Send for Int2DdsParticipantBuiltinTopicData {}
@@ -60,10 +77,53 @@ unsafe impl Sync for Int2DdsPublicationBuiltinTopicDataSeq {}
 unsafe impl Send for Int2DdsSubscriptionBuiltinTopicDataSeq {}
 unsafe impl Sync for Int2DdsSubscriptionBuiltinTopicDataSeq {}
 
+/// Translate an `INT2DDS_INSTANCE_STATE_*` mask into the states a read selects on.
+/// An empty mask would select nothing, so it falls back to alive.
+fn instance_states_from_mask(mask: u32) -> Vec<InstanceStateKind> {
+    let mut states = Vec::new();
+    if mask & INT2DDS_INSTANCE_STATE_ALIVE != 0 {
+        states.push(InstanceStateKind::ALIVE_INSTANCE_STATE);
+    }
+    if mask & INT2DDS_INSTANCE_STATE_NOT_ALIVE_DISPOSED != 0 {
+        states.push(InstanceStateKind::NOT_ALIVE_DISPOSED_INSTANCE_STATE);
+    }
+    if mask & INT2DDS_INSTANCE_STATE_NOT_ALIVE_NO_WRITERS != 0 {
+        states.push(InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE);
+    }
+    if states.is_empty() {
+        states.push(InstanceStateKind::ALIVE_INSTANCE_STATE);
+    }
+    states
+}
+
+/// Fold one sample into the snapshot, keyed by instance. The instance state belongs to the
+/// instance so the later sample decides it, while the payload is kept from whichever sample had one.
+fn merge_snapshot_sample<T>(
+    by_handle: &mut HashMap<[u8; 16], SnapshotEntry<T>>,
+    info: &SampleInfo,
+    data: Option<T>,
+) {
+    let instance_handle = *info.instance_handle.value();
+    let instance_state = u32::from(info.instance_state);
+    match by_handle.entry(instance_handle) {
+        Entry::Occupied(mut occupied) => {
+            let entry = occupied.get_mut();
+            entry.instance_state = instance_state;
+            if data.is_some() {
+                entry.data = data;
+            }
+        }
+        Entry::Vacant(vacant) => {
+            vacant.insert(SnapshotEntry { data, instance_state, instance_handle });
+        }
+    }
+}
+
 fn collect_publication_snapshot(
     participant: &Int2DdsParticipant,
     timeout_ms: i32,
-) -> Result<Vec<PublicationBuiltinTopicData>, Int2DdsRet> {
+    instance_states: &[InstanceStateKind],
+) -> Result<Vec<SnapshotEntry<PublicationBuiltinTopicData>>, Int2DdsRet> {
     let builtin_subscriber =
         participant.inner.get_builtin_subscriber().map_err(|e| dds_error_to_code(&e))?;
     let publication_reader = builtin_subscriber
@@ -82,25 +142,25 @@ fn collect_publication_snapshot(
         Some(Instant::now() + StdDuration::from_millis(timeout_ms as u64))
     };
 
-    let mut by_guid: HashMap<_, PublicationBuiltinTopicData> = HashMap::new();
+    let mut by_handle: HashMap<[u8; 16], SnapshotEntry<PublicationBuiltinTopicData>> =
+        HashMap::new();
     loop {
         let _ = publication_reader.get_status_changes();
         if let Ok(samples) = publication_reader.read(
-            1000,
+            LENGTH_UNLIMITED,
             &[SampleStateKind::ANY_SAMPLE_STATE],
             &[ViewStateKind::ANY_VIEW_STATE],
-            &[InstanceStateKind::ALIVE_INSTANCE_STATE],
+            instance_states,
         ) {
             for sample in samples.iter() {
-                if let Ok(data) = sample.data() {
-                    by_guid.insert(data.endpoint_guid(), data);
-                }
+                let info = sample.sample_info();
+                merge_snapshot_sample(&mut by_handle, &info, sample.data().ok());
             }
         }
 
         match deadline {
             None => {
-                if !by_guid.is_empty() {
+                if !by_handle.is_empty() {
                     break;
                 }
                 let _ = wait_set.wait(Duration { sec: 0, nanosec: 200_000_000 });
@@ -120,13 +180,14 @@ fn collect_publication_snapshot(
         }
     }
 
-    Ok(by_guid.into_values().collect())
+    Ok(by_handle.into_values().collect())
 }
 
 fn collect_subscription_snapshot(
     participant: &Int2DdsParticipant,
     timeout_ms: i32,
-) -> Result<Vec<SubscriptionBuiltinTopicData>, Int2DdsRet> {
+    instance_states: &[InstanceStateKind],
+) -> Result<Vec<SnapshotEntry<SubscriptionBuiltinTopicData>>, Int2DdsRet> {
     let builtin_subscriber =
         participant.inner.get_builtin_subscriber().map_err(|e| dds_error_to_code(&e))?;
     let subscription_reader = builtin_subscriber
@@ -145,25 +206,25 @@ fn collect_subscription_snapshot(
         Some(Instant::now() + StdDuration::from_millis(timeout_ms as u64))
     };
 
-    let mut by_guid: HashMap<_, SubscriptionBuiltinTopicData> = HashMap::new();
+    let mut by_handle: HashMap<[u8; 16], SnapshotEntry<SubscriptionBuiltinTopicData>> =
+        HashMap::new();
     loop {
         let _ = subscription_reader.get_status_changes();
         if let Ok(samples) = subscription_reader.read(
-            1000,
+            LENGTH_UNLIMITED,
             &[SampleStateKind::ANY_SAMPLE_STATE],
             &[ViewStateKind::ANY_VIEW_STATE],
-            &[InstanceStateKind::ALIVE_INSTANCE_STATE],
+            instance_states,
         ) {
             for sample in samples.iter() {
-                if let Ok(data) = sample.data() {
-                    by_guid.insert(data.endpoint_guid(), data);
-                }
+                let info = sample.sample_info();
+                merge_snapshot_sample(&mut by_handle, &info, sample.data().ok());
             }
         }
 
         match deadline {
             None => {
-                if !by_guid.is_empty() {
+                if !by_handle.is_empty() {
                     break;
                 }
                 let _ = wait_set.wait(Duration { sec: 0, nanosec: 200_000_000 });
@@ -183,7 +244,7 @@ fn collect_subscription_snapshot(
         }
     }
 
-    Ok(by_guid.into_values().collect())
+    Ok(by_handle.into_values().collect())
 }
 
 // ============================================================================
@@ -200,7 +261,9 @@ fn builtin_topic_key_to_bytes(value: &[i32; 3]) -> [u8; 12] {
 
 /// Copy a Rust string into a caller-provided C buffer as null-terminated UTF-8.
 /// Returns the required size (including null terminator) in `size_out`.
-/// If `capacity` is too small, copies up to `capacity - 1` bytes plus null.
+/// A NULL `buf` or zero `capacity` is a size query and returns OK with `size_out` set.
+/// If `capacity` is nonzero but too small, returns `INT2DDS_RET_BUFFER_TOO_SMALL`
+/// without copying (never emits a partially-truncated, invalid-UTF-8 string).
 unsafe fn copy_string_to_c(
     s: &str,
     buf: *mut u8,
@@ -214,9 +277,11 @@ unsafe fn copy_string_to_c(
     if buf.is_null() || capacity == 0 {
         return INT2DDS_RET_OK;
     }
-    let copy_len = std::cmp::min(s.len(), capacity - 1);
-    std::ptr::copy_nonoverlapping(s.as_ptr(), buf, copy_len);
-    *buf.add(copy_len) = 0; // null terminator
+    if capacity < needed {
+        return INT2DDS_RET_BUFFER_TOO_SMALL;
+    }
+    std::ptr::copy_nonoverlapping(s.as_ptr(), buf, s.len());
+    *buf.add(s.len()) = 0; // null terminator
     INT2DDS_RET_OK
 }
 
@@ -229,6 +294,12 @@ unsafe fn copy_string_to_c(
 /// Writes up to `capacity` handles into `handles_out`.
 /// `count_out` receives the total number of discovered participants
 /// (may be greater than `capacity`).
+///
+/// # Safety
+/// - `participant` must be a valid participant
+/// - `handles_out` may be null to query only the count; otherwise it must point to
+///   `capacity` 16-byte handles
+/// - `count_out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_participant_get_discovered_participants(
     participant: *const Int2DdsParticipant,
@@ -245,8 +316,8 @@ pub unsafe extern "C" fn int2dds_participant_get_discovered_participants(
     *count_out = handles.len();
     if !handles_out.is_null() {
         let copy_count = std::cmp::min(handles.len(), capacity);
-        for i in 0..copy_count {
-            *handles_out.add(i) = *handles[i].value();
+        for (i, handle) in handles.iter().take(copy_count).enumerate() {
+            *handles_out.add(i) = *handle.value();
         }
     }
 
@@ -254,6 +325,12 @@ pub unsafe extern "C" fn int2dds_participant_get_discovered_participants(
 }
 
 /// Get matched subscription instance handles for a DataWriter.
+///
+/// # Safety
+/// - `writer` must be a valid datawriter
+/// - `handles_out` may be null to query only the count; otherwise it must point to
+///   `capacity` 16-byte handles
+/// - `count_out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datawriter_get_matched_subscriptions(
     writer: *const Int2DdsDataWriter,
@@ -270,8 +347,8 @@ pub unsafe extern "C" fn int2dds_datawriter_get_matched_subscriptions(
     *count_out = handles.len();
     if !handles_out.is_null() {
         let copy_count = std::cmp::min(handles.len(), capacity);
-        for i in 0..copy_count {
-            *handles_out.add(i) = *handles[i].value();
+        for (i, handle) in handles.iter().take(copy_count).enumerate() {
+            *handles_out.add(i) = *handle.value();
         }
     }
 
@@ -279,6 +356,12 @@ pub unsafe extern "C" fn int2dds_datawriter_get_matched_subscriptions(
 }
 
 /// Get matched publication instance handles for a DataReader.
+///
+/// # Safety
+/// - `reader` must be a valid datareader
+/// - `handles_out` may be null to query only the count; otherwise it must point to
+///   `capacity` 16-byte handles
+/// - `count_out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datareader_get_matched_publications(
     reader: *const Int2DdsDataReader,
@@ -295,89 +378,21 @@ pub unsafe extern "C" fn int2dds_datareader_get_matched_publications(
     *count_out = handles.len();
     if !handles_out.is_null() {
         let copy_count = std::cmp::min(handles.len(), capacity);
-        for i in 0..copy_count {
-            *handles_out.add(i) = *handles[i].value();
+        for (i, handle) in handles.iter().take(copy_count).enumerate() {
+            *handles_out.add(i) = *handle.value();
         }
     }
 
     INT2DDS_RET_OK
 }
 
-/// Get the number of discovered publications currently known to a participant.
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_participant_get_discovered_publication_count(
-    participant: *const Int2DdsParticipant,
-    count_out: *mut usize,
-) -> Int2DdsRet {
-    check_null!(participant);
-    check_null!(count_out);
-
-    let participant_ref = &*participant;
-    let publications = ffi_try!(participant_ref.inner.get_discovered_publications());
-    *count_out = publications.len();
-    INT2DDS_RET_OK
-}
-
-/// Get discovered publication data by stable snapshot index.
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_participant_get_discovered_publication_data_by_index(
-    participant: *const Int2DdsParticipant,
-    index: usize,
-    data_out: *mut *mut Int2DdsPublicationBuiltinTopicData,
-) -> Int2DdsRet {
-    check_null!(participant);
-    check_null!(data_out);
-
-    let participant_ref = &*participant;
-    let publications = ffi_try!(participant_ref.inner.get_discovered_publications());
-    let data = match publications.get(index) {
-        Some(value) => value.clone(),
-        None => return INT2DDS_RET_PRECONDITION_NOT_MET,
-    };
-
-    *data_out = Box::into_raw(Box::new(Int2DdsPublicationBuiltinTopicData { inner: data }));
-    INT2DDS_RET_OK
-}
-
-/// Get the number of discovered subscriptions currently known to a participant.
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_participant_get_discovered_subscription_count(
-    participant: *const Int2DdsParticipant,
-    count_out: *mut usize,
-) -> Int2DdsRet {
-    check_null!(participant);
-    check_null!(count_out);
-
-    let participant_ref = &*participant;
-    let subscriptions = ffi_try!(participant_ref.inner.get_discovered_subscriptions());
-    *count_out = subscriptions.len();
-    INT2DDS_RET_OK
-}
-
-/// Get discovered subscription data by stable snapshot index.
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_participant_get_discovered_subscription_data_by_index(
-    participant: *const Int2DdsParticipant,
-    index: usize,
-    data_out: *mut *mut Int2DdsSubscriptionBuiltinTopicData,
-) -> Int2DdsRet {
-    check_null!(participant);
-    check_null!(data_out);
-
-    let participant_ref = &*participant;
-    let subscriptions = ffi_try!(participant_ref.inner.get_discovered_subscriptions());
-    let data = match subscriptions.get(index) {
-        Some(value) => value.clone(),
-        None => return INT2DDS_RET_PRECONDITION_NOT_MET,
-    };
-
-    *data_out = Box::into_raw(Box::new(Int2DdsSubscriptionBuiltinTopicData { inner: data }));
-    INT2DDS_RET_OK
-}
-
 /// Collect a snapshot of discovered publications via the builtin DCPSPublication reader.
+///
+/// # Safety
+/// - `participant` must be a valid participant
+/// - `seq_out` must be a valid pointer to a null pointer
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_take_discovered_publications_snapshot(
+pub unsafe extern "C" fn int2dds_participant_take_discovered_publications_snapshot(
     participant: *const Int2DdsParticipant,
     timeout_ms: i32,
     seq_out: *mut *mut Int2DdsPublicationBuiltinTopicDataSeq,
@@ -385,8 +400,33 @@ pub unsafe extern "C" fn int2dds_take_discovered_publications_snapshot(
     check_null!(participant);
     check_null!(seq_out);
 
+    int2dds_participant_take_discovered_publications_snapshot_filtered(
+        participant,
+        timeout_ms,
+        INT2DDS_INSTANCE_STATE_ALIVE,
+        seq_out,
+    )
+}
+
+/// Collect a snapshot of discovered publications restricted to the given instance states.
+/// `instance_state_mask` takes `INT2DDS_INSTANCE_STATE_*` values combined with a bitwise or.
+///
+/// # Safety
+/// - `participant` must be a valid participant
+/// - `seq_out` must be a valid pointer to a null pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_participant_take_discovered_publications_snapshot_filtered(
+    participant: *const Int2DdsParticipant,
+    timeout_ms: i32,
+    instance_state_mask: u32,
+    seq_out: *mut *mut Int2DdsPublicationBuiltinTopicDataSeq,
+) -> Int2DdsRet {
+    check_null!(participant);
+    check_null!(seq_out);
+
     let participant_ref = &*participant;
-    let items = match collect_publication_snapshot(participant_ref, timeout_ms) {
+    let states = instance_states_from_mask(instance_state_mask);
+    let items = match collect_publication_snapshot(participant_ref, timeout_ms, &states) {
         Ok(items) => items,
         Err(ret) => return ret,
     };
@@ -395,8 +435,58 @@ pub unsafe extern "C" fn int2dds_take_discovered_publications_snapshot(
     INT2DDS_RET_OK
 }
 
+/// Instance state of the entry at `index`, as an `INT2DDS_INSTANCE_STATE_*` value.
+///
+/// # Safety
+/// - `seq` must be a valid publication data sequence
+/// - `instance_state_out` must be a valid pointer
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_seq_len(
+pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_seq_get_instance_state(
+    seq: *const Int2DdsPublicationBuiltinTopicDataSeq,
+    index: usize,
+    instance_state_out: *mut u32,
+) -> Int2DdsRet {
+    check_null!(seq);
+    check_null!(instance_state_out);
+    let items = &(*seq).items;
+    match items.get(index) {
+        Some(entry) => {
+            *instance_state_out = entry.instance_state;
+            INT2DDS_RET_OK
+        }
+        None => INT2DDS_RET_PRECONDITION_NOT_MET,
+    }
+}
+
+/// Instance handle of the entry at `index`, which is the endpoint GUID.
+/// Present even for an entry with no announcement to read a GUID out of.
+///
+/// # Safety
+/// - `seq` must be a valid publication data sequence
+/// - `handle_out` must point to a 16-byte buffer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_seq_get_instance_handle(
+    seq: *const Int2DdsPublicationBuiltinTopicDataSeq,
+    index: usize,
+    handle_out: *mut [u8; 16],
+) -> Int2DdsRet {
+    check_null!(seq);
+    check_null!(handle_out);
+    let items = &(*seq).items;
+    match items.get(index) {
+        Some(entry) => {
+            *handle_out = entry.instance_handle;
+            INT2DDS_RET_OK
+        }
+        None => INT2DDS_RET_PRECONDITION_NOT_MET,
+    }
+}
+
+/// # Safety
+/// - `seq` must be a valid publication data sequence
+/// - `count_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_seq_length(
     seq: *const Int2DdsPublicationBuiltinTopicDataSeq,
     count_out: *mut usize,
 ) -> Int2DdsRet {
@@ -406,6 +496,9 @@ pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_seq_len(
     INT2DDS_RET_OK
 }
 
+/// # Safety
+/// - `seq` must be a valid publication data sequence
+/// - `data_out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_seq_get(
     seq: *const Int2DdsPublicationBuiltinTopicDataSeq,
@@ -414,16 +507,21 @@ pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_seq_get(
 ) -> Int2DdsRet {
     check_null!(seq);
     check_null!(data_out);
-    let data = match (&(*seq).items).get(index) {
-        Some(item) => item.clone(),
+    // Absent for a key-only entry such as a dispose; read the instance handle for those.
+    let items = &(*seq).items;
+    let data = match items.get(index).and_then(|entry| entry.data.clone()) {
+        Some(data) => data,
         None => return INT2DDS_RET_PRECONDITION_NOT_MET,
     };
     *data_out = Box::into_raw(Box::new(Int2DdsPublicationBuiltinTopicData { inner: data }));
     INT2DDS_RET_OK
 }
 
+/// # Safety
+/// - `seq` must be a valid publication data sequence
+/// - `seq` must not be used after this call
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_seq_destroy(
+pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_seq_delete(
     seq: *mut Int2DdsPublicationBuiltinTopicDataSeq,
 ) -> Int2DdsRet {
     check_null!(seq);
@@ -432,8 +530,12 @@ pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_seq_destroy(
 }
 
 /// Collect a snapshot of discovered subscriptions via the builtin DCPSSubscription reader.
+///
+/// # Safety
+/// - `participant` must be a valid participant
+/// - `seq_out` must be a valid pointer to a null pointer
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_take_discovered_subscriptions_snapshot(
+pub unsafe extern "C" fn int2dds_participant_take_discovered_subscriptions_snapshot(
     participant: *const Int2DdsParticipant,
     timeout_ms: i32,
     seq_out: *mut *mut Int2DdsSubscriptionBuiltinTopicDataSeq,
@@ -441,8 +543,33 @@ pub unsafe extern "C" fn int2dds_take_discovered_subscriptions_snapshot(
     check_null!(participant);
     check_null!(seq_out);
 
+    int2dds_participant_take_discovered_subscriptions_snapshot_filtered(
+        participant,
+        timeout_ms,
+        INT2DDS_INSTANCE_STATE_ALIVE,
+        seq_out,
+    )
+}
+
+/// Collect a snapshot of discovered subscriptions restricted to the given instance states.
+/// See `int2dds_participant_take_discovered_publications_snapshot_filtered` for the mask.
+///
+/// # Safety
+/// - `participant` must be a valid participant
+/// - `seq_out` must be a valid pointer to a null pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_participant_take_discovered_subscriptions_snapshot_filtered(
+    participant: *const Int2DdsParticipant,
+    timeout_ms: i32,
+    instance_state_mask: u32,
+    seq_out: *mut *mut Int2DdsSubscriptionBuiltinTopicDataSeq,
+) -> Int2DdsRet {
+    check_null!(participant);
+    check_null!(seq_out);
+
     let participant_ref = &*participant;
-    let items = match collect_subscription_snapshot(participant_ref, timeout_ms) {
+    let states = instance_states_from_mask(instance_state_mask);
+    let items = match collect_subscription_snapshot(participant_ref, timeout_ms, &states) {
         Ok(items) => items,
         Err(ret) => return ret,
     };
@@ -451,8 +578,58 @@ pub unsafe extern "C" fn int2dds_take_discovered_subscriptions_snapshot(
     INT2DDS_RET_OK
 }
 
+/// Instance state of the entry at `index`, as an `INT2DDS_INSTANCE_STATE_*` value.
+///
+/// # Safety
+/// - `seq` must be a valid subscription data sequence
+/// - `instance_state_out` must be a valid pointer
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_seq_len(
+pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_seq_get_instance_state(
+    seq: *const Int2DdsSubscriptionBuiltinTopicDataSeq,
+    index: usize,
+    instance_state_out: *mut u32,
+) -> Int2DdsRet {
+    check_null!(seq);
+    check_null!(instance_state_out);
+    let items = &(*seq).items;
+    match items.get(index) {
+        Some(entry) => {
+            *instance_state_out = entry.instance_state;
+            INT2DDS_RET_OK
+        }
+        None => INT2DDS_RET_PRECONDITION_NOT_MET,
+    }
+}
+
+/// Instance handle of the entry at `index`, which is the endpoint GUID.
+/// See `int2dds_publication_builtin_topic_data_seq_get_instance_handle`.
+///
+/// # Safety
+/// - `seq` must be a valid subscription data sequence
+/// - `handle_out` must point to a 16-byte buffer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_seq_get_instance_handle(
+    seq: *const Int2DdsSubscriptionBuiltinTopicDataSeq,
+    index: usize,
+    handle_out: *mut [u8; 16],
+) -> Int2DdsRet {
+    check_null!(seq);
+    check_null!(handle_out);
+    let items = &(*seq).items;
+    match items.get(index) {
+        Some(entry) => {
+            *handle_out = entry.instance_handle;
+            INT2DDS_RET_OK
+        }
+        None => INT2DDS_RET_PRECONDITION_NOT_MET,
+    }
+}
+
+/// # Safety
+/// - `seq` must be a valid subscription data sequence
+/// - `count_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_seq_length(
     seq: *const Int2DdsSubscriptionBuiltinTopicDataSeq,
     count_out: *mut usize,
 ) -> Int2DdsRet {
@@ -462,6 +639,9 @@ pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_seq_len(
     INT2DDS_RET_OK
 }
 
+/// # Safety
+/// - `seq` must be a valid subscription data sequence
+/// - `data_out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_seq_get(
     seq: *const Int2DdsSubscriptionBuiltinTopicDataSeq,
@@ -470,16 +650,21 @@ pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_seq_get(
 ) -> Int2DdsRet {
     check_null!(seq);
     check_null!(data_out);
-    let data = match (&(*seq).items).get(index) {
-        Some(item) => item.clone(),
+    // Absent for a key-only entry such as a dispose; read the instance handle for those.
+    let items = &(*seq).items;
+    let data = match items.get(index).and_then(|entry| entry.data.clone()) {
+        Some(data) => data,
         None => return INT2DDS_RET_PRECONDITION_NOT_MET,
     };
     *data_out = Box::into_raw(Box::new(Int2DdsSubscriptionBuiltinTopicData { inner: data }));
     INT2DDS_RET_OK
 }
 
+/// # Safety
+/// - `seq` must be a valid subscription data sequence
+/// - `seq` must not be used after this call
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_seq_destroy(
+pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_seq_delete(
     seq: *mut Int2DdsSubscriptionBuiltinTopicDataSeq,
 ) -> Int2DdsRet {
     check_null!(seq);
@@ -494,6 +679,11 @@ pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_seq_destroy(
 /// Get discovered participant data for a given handle.
 /// On success, `*data_out` receives a heap-allocated opaque pointer.
 /// The caller must free it with `int2dds_participant_builtin_topic_data_destroy`.
+///
+/// # Safety
+/// - `participant` must be a valid participant
+/// - `handle` must point to a 16-byte buffer
+/// - `data_out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_participant_get_discovered_participant_data(
     participant: *const Int2DdsParticipant,
@@ -515,6 +705,11 @@ pub unsafe extern "C" fn int2dds_participant_get_discovered_participant_data(
 /// Get matched subscription data for a given handle.
 /// On success, `*data_out` receives a heap-allocated opaque pointer.
 /// The caller must free it with `int2dds_subscription_builtin_topic_data_destroy`.
+///
+/// # Safety
+/// - `writer` must be a valid datawriter
+/// - `handle` must point to a 16-byte buffer
+/// - `data_out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datawriter_get_matched_subscription_data(
     writer: *const Int2DdsDataWriter,
@@ -536,6 +731,11 @@ pub unsafe extern "C" fn int2dds_datawriter_get_matched_subscription_data(
 /// Get matched publication data for a given handle.
 /// On success, `*data_out` receives a heap-allocated opaque pointer.
 /// The caller must free it with `int2dds_publication_builtin_topic_data_destroy`.
+///
+/// # Safety
+/// - `reader` must be a valid datareader
+/// - `handle` must point to a 16-byte buffer
+/// - `data_out` must be a valid pointer to a null pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datareader_get_matched_publication_data(
     reader: *const Int2DdsDataReader,
@@ -560,6 +760,10 @@ pub unsafe extern "C" fn int2dds_datareader_get_matched_publication_data(
 
 /// Get the key from a ParticipantBuiltinTopicData.
 /// `key_out` must point to a 12-byte buffer.
+///
+/// # Safety
+/// - `data` must be a valid ParticipantBuiltinTopicData
+/// - `key_out` must point to a 12-byte buffer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_participant_builtin_topic_data_get_key(
     data: *const Int2DdsParticipantBuiltinTopicData,
@@ -575,6 +779,12 @@ pub unsafe extern "C" fn int2dds_participant_builtin_topic_data_get_key(
 
 /// Get the user_data from a ParticipantBuiltinTopicData.
 /// Copies up to `capacity` bytes into `buf`. `size_out` receives the actual size.
+///
+/// # Safety
+/// - `data` must be a valid ParticipantBuiltinTopicData
+/// - `buf` may be null to query only the required size; otherwise it must
+///   point to at least `capacity` writable bytes
+/// - `size_out` must be a valid pointer, or null
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_participant_builtin_topic_data_get_user_data(
     data: *const Int2DdsParticipantBuiltinTopicData,
@@ -598,6 +808,10 @@ pub unsafe extern "C" fn int2dds_participant_builtin_topic_data_get_user_data(
 }
 
 /// Free a ParticipantBuiltinTopicData obtained from discovery.
+///
+/// # Safety
+/// - `data` must be a valid ParticipantBuiltinTopicData
+/// - `data` must not be used after this call
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_participant_builtin_topic_data_destroy(
     data: *mut Int2DdsParticipantBuiltinTopicData,
@@ -613,6 +827,10 @@ pub unsafe extern "C" fn int2dds_participant_builtin_topic_data_destroy(
 
 /// Get the key from a PublicationBuiltinTopicData.
 /// `key_out` must point to a 12-byte buffer.
+///
+/// # Safety
+/// - `data` must be a valid PublicationBuiltinTopicData
+/// - `key_out` must point to a 12-byte buffer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_key(
     data: *const Int2DdsPublicationBuiltinTopicData,
@@ -628,6 +846,10 @@ pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_key(
 
 /// Get the endpoint GUID from a PublicationBuiltinTopicData.
 /// `guid_out` must point to a 16-byte buffer.
+///
+/// # Safety
+/// - `data` must be a valid PublicationBuiltinTopicData
+/// - `guid_out` must point to a 16-byte buffer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_endpoint_guid(
     data: *const Int2DdsPublicationBuiltinTopicData,
@@ -643,6 +865,10 @@ pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_endpoint_gui
 
 /// Get the participant key from a PublicationBuiltinTopicData.
 /// `key_out` must point to a 12-byte buffer.
+///
+/// # Safety
+/// - `data` must be a valid PublicationBuiltinTopicData
+/// - `key_out` must point to a 12-byte buffer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_participant_key(
     data: *const Int2DdsPublicationBuiltinTopicData,
@@ -659,6 +885,12 @@ pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_participant_
 /// Get the topic name from a PublicationBuiltinTopicData.
 /// Copies a null-terminated UTF-8 string into `buf`.
 /// `size_out` receives the required size (including null terminator).
+///
+/// # Safety
+/// - `data` must be a valid PublicationBuiltinTopicData
+/// - `buf` may be null to query only the required size; otherwise it must
+///   point to at least `capacity` writable bytes
+/// - `size_out` must be a valid pointer, or null
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_topic_name(
     data: *const Int2DdsPublicationBuiltinTopicData,
@@ -675,6 +907,12 @@ pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_topic_name(
 /// Get the type name from a PublicationBuiltinTopicData.
 /// Copies a null-terminated UTF-8 string into `buf`.
 /// `size_out` receives the required size (including null terminator).
+///
+/// # Safety
+/// - `data` must be a valid PublicationBuiltinTopicData
+/// - `buf` may be null to query only the required size; otherwise it must
+///   point to at least `capacity` writable bytes
+/// - `size_out` must be a valid pointer, or null
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_type_name(
     data: *const Int2DdsPublicationBuiltinTopicData,
@@ -686,6 +924,29 @@ pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_type_name(
 
     let data_ref = &*data;
     copy_string_to_c(&data_ref.inner.type_name(), buf, capacity, size_out)
+}
+
+/// Take a clone of the TypeObject embedded in a PublicationBuiltinTopicData.
+/// Caller owns the returned handle and must destroy it via `int2dds_type_object_destroy`.
+/// Returns DYNAMIC_FIELD_NOT_FOUND if the publication did not carry a TypeObject.
+///
+/// # Safety
+/// - `data` must be a valid PublicationBuiltinTopicData
+/// - `out` must be a valid pointer to a null pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_take_type_object(
+    data: *const Int2DdsPublicationBuiltinTopicData,
+    out: *mut *mut crate::dynamic::Int2DdsTypeObject,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(out);
+    let to = match (*data).inner.type_object() {
+        Some(t) => t.clone(),
+        None => return INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND,
+    };
+    let h = Box::new(crate::dynamic::Int2DdsTypeObject { inner: to, deps: Vec::new() });
+    *out = Box::into_raw(h);
+    INT2DDS_RET_OK
 }
 
 /// Get the reliability kind from a PublicationBuiltinTopicData.
@@ -847,6 +1108,10 @@ pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_user_data(
 }
 
 /// Free a PublicationBuiltinTopicData obtained from discovery.
+///
+/// # Safety
+/// - `data` must be a valid PublicationBuiltinTopicData
+/// - `data` must not be used after this call
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_destroy(
     data: *mut Int2DdsPublicationBuiltinTopicData,
@@ -862,6 +1127,10 @@ pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_destroy(
 
 /// Get the key from a SubscriptionBuiltinTopicData.
 /// `key_out` must point to a 12-byte buffer.
+///
+/// # Safety
+/// - `data` must be a valid SubscriptionBuiltinTopicData
+/// - `key_out` must point to a 12-byte buffer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_get_key(
     data: *const Int2DdsSubscriptionBuiltinTopicData,
@@ -877,6 +1146,10 @@ pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_get_key(
 
 /// Get the endpoint GUID from a SubscriptionBuiltinTopicData.
 /// `guid_out` must point to a 16-byte buffer.
+///
+/// # Safety
+/// - `data` must be a valid SubscriptionBuiltinTopicData
+/// - `guid_out` must point to a 16-byte buffer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_get_endpoint_guid(
     data: *const Int2DdsSubscriptionBuiltinTopicData,
@@ -892,6 +1165,10 @@ pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_get_endpoint_gu
 
 /// Get the participant key from a SubscriptionBuiltinTopicData.
 /// `key_out` must point to a 12-byte buffer.
+///
+/// # Safety
+/// - `data` must be a valid SubscriptionBuiltinTopicData
+/// - `key_out` must point to a 12-byte buffer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_get_participant_key(
     data: *const Int2DdsSubscriptionBuiltinTopicData,
@@ -908,6 +1185,12 @@ pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_get_participant
 /// Get the topic name from a SubscriptionBuiltinTopicData.
 /// Copies a null-terminated UTF-8 string into `buf`.
 /// `size_out` receives the required size (including null terminator).
+///
+/// # Safety
+/// - `data` must be a valid SubscriptionBuiltinTopicData
+/// - `buf` may be null to query only the required size; otherwise it must
+///   point to at least `capacity` writable bytes
+/// - `size_out` must be a valid pointer, or null
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_get_topic_name(
     data: *const Int2DdsSubscriptionBuiltinTopicData,
@@ -924,6 +1207,12 @@ pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_get_topic_name(
 /// Get the type name from a SubscriptionBuiltinTopicData.
 /// Copies a null-terminated UTF-8 string into `buf`.
 /// `size_out` receives the required size (including null terminator).
+///
+/// # Safety
+/// - `data` must be a valid SubscriptionBuiltinTopicData
+/// - `buf` may be null to query only the required size; otherwise it must
+///   point to at least `capacity` writable bytes
+/// - `size_out` must be a valid pointer, or null
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_get_type_name(
     data: *const Int2DdsSubscriptionBuiltinTopicData,
@@ -1075,11 +1364,103 @@ pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_get_user_data(
 }
 
 /// Free a SubscriptionBuiltinTopicData obtained from discovery.
+///
+/// # Safety
+/// - `data` must be a valid SubscriptionBuiltinTopicData
+/// - `data` must not be used after this call
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_destroy(
     data: *mut Int2DdsSubscriptionBuiltinTopicData,
 ) -> Int2DdsRet {
     check_null!(data);
     drop(Box::from_raw(data));
+    INT2DDS_RET_OK
+}
+
+// ============================================================================
+// Endpoint (SEDP) discovery push callback
+// ============================================================================
+
+/// C callback invoked on every remote endpoint discovery/dispose.
+/// `is_writer`: 1 = publication/writer, 0 = subscription/reader.
+/// `is_alive`:  1 = alive (`pub_data` or `sub_data` valid), 0 = disposed (data null).
+/// `guid` always points to the 16-byte endpoint GUID (valid only during the call).
+/// All pointers are borrowed and must be copied out before returning.
+pub type Int2DdsEndpointDiscoveryCallback = extern "C" fn(
+    ctx: *mut core::ffi::c_void,
+    is_writer: i32,
+    is_alive: i32,
+    pub_data: *const Int2DdsPublicationBuiltinTopicData,
+    sub_data: *const Int2DdsSubscriptionBuiltinTopicData,
+    guid: *const [u8; 16],
+);
+
+struct EndpointDiscoveryCtx(*mut core::ffi::c_void);
+// The caller owns `ctx` and must keep it valid while the callback is registered.
+unsafe impl Send for EndpointDiscoveryCtx {}
+unsafe impl Sync for EndpointDiscoveryCtx {}
+
+/// Register a callback for remote endpoint discovery events. `callback` must be
+/// non-null; to disable, register a no-op callback (or destroy the participant)
+/// before freeing `ctx`.
+///
+/// # Safety
+/// - `participant` must be a valid participant
+/// - `callback` must be a valid function pointer
+/// - `ctx` is passed back to `callback` unchanged and must stay valid for as long as
+///   the callback can fire
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_participant_set_endpoint_discovery_callback(
+    participant: *const Int2DdsParticipant,
+    callback: Int2DdsEndpointDiscoveryCallback,
+    ctx: *mut core::ffi::c_void,
+) -> Int2DdsRet {
+    check_null!(participant);
+    let participant_ref = &*participant;
+
+    let ctx_wrap = EndpointDiscoveryCtx(ctx);
+    let cb = callback;
+    let closure: std::sync::Arc<dyn Fn(&EndpointDiscoveryEvent) + Send + Sync> =
+        std::sync::Arc::new(move |event: &EndpointDiscoveryEvent| {
+            // Capture the wrapper, not its raw pointer field, so the closure stays Send + Sync.
+            let ctx_wrap = &ctx_wrap;
+            let ctx = ctx_wrap.0;
+            match event {
+                EndpointDiscoveryEvent::WriterAlive(data) => {
+                    let guid = data.endpoint_guid().to_bytes();
+                    let wrapped = Int2DdsPublicationBuiltinTopicData { inner: data.clone() };
+                    cb(
+                        ctx,
+                        1,
+                        1,
+                        &wrapped as *const Int2DdsPublicationBuiltinTopicData,
+                        core::ptr::null(),
+                        &guid as *const [u8; 16],
+                    );
+                }
+                EndpointDiscoveryEvent::WriterDisposed(g) => {
+                    let guid = g.to_bytes();
+                    cb(ctx, 1, 0, core::ptr::null(), core::ptr::null(), &guid as *const [u8; 16]);
+                }
+                EndpointDiscoveryEvent::ReaderAlive(data) => {
+                    let guid = data.endpoint_guid().to_bytes();
+                    let wrapped = Int2DdsSubscriptionBuiltinTopicData { inner: data.clone() };
+                    cb(
+                        ctx,
+                        0,
+                        1,
+                        core::ptr::null(),
+                        &wrapped as *const Int2DdsSubscriptionBuiltinTopicData,
+                        &guid as *const [u8; 16],
+                    );
+                }
+                EndpointDiscoveryEvent::ReaderDisposed(g) => {
+                    let guid = g.to_bytes();
+                    cb(ctx, 0, 0, core::ptr::null(), core::ptr::null(), &guid as *const [u8; 16]);
+                }
+            }
+        });
+
+    ffi_try!(participant_ref.inner.set_endpoint_discovery_callback(closure));
     INT2DDS_RET_OK
 }

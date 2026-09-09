@@ -83,7 +83,8 @@ int2dds_domain_participant_factory_finalize()      // Finalize factory
 
 #### DomainParticipant
 ```c
-int2dds_create_participant()                       // Create domain participant
+int2dds_create_participant()                       // Create participant (qos NULL = default)
+int2dds_create_participant_with_profile()          // Create participant from a QoS profile
 int2dds_delete_participant()                       // Delete participant
 int2dds_participant_get_domain_id()                // Get domain ID
 int2dds_participant_assert_liveliness()            // Assert liveliness
@@ -93,17 +94,17 @@ int2dds_participant_delete_contained_entities()    // Delete all contained entit
 #### Publisher & DataWriter
 ```c
 // Publisher
-int2dds_create_publisher()                         // Create publisher
-int2dds_create_publisher_with_qos()                // Create publisher with QoS
+int2dds_create_publisher()                         // Create publisher (qos NULL = default)
+int2dds_create_publisher_with_profile()            // Create publisher from a QoS profile
 int2dds_publisher_set_qos()                        // Set publisher QoS
 int2dds_publisher_get_qos()                        // Get publisher QoS
 int2dds_delete_publisher()                         // Delete publisher
 int2dds_publisher_delete_contained_entities()      // Delete all contained entities
 int2dds_publisher_wait_for_acknowledgments()       // Wait for acknowledgments
 
-// DataWriter
+// DataWriter (qos NULL = default; listener NULL + mask 0 = no listener)
 int2dds_create_datawriter()                        // Create data writer
-int2dds_create_datawriter_with_listener()          // Create writer with listener callbacks
+int2dds_create_datawriter_with_profile()           // Create writer from a QoS profile
 int2dds_datawriter_set_listener()                  // Set/update listener
 int2dds_datawriter_get_listener()                  // Get current listener
 int2dds_datawriter_set_qos()                       // Set writer QoS
@@ -111,8 +112,8 @@ int2dds_datawriter_get_qos()                       // Get writer QoS
 int2dds_delete_datawriter()                        // Delete data writer
 
 // Write operations
-int2dds_write_serialized()                         // Write CDR-serialized data
-int2dds_write_serialized_w_timestamp()             // Write with source timestamp
+int2dds_datawriter_write_serialized()              // Write CDR-serialized data
+int2dds_datawriter_write_serialized_w_timestamp()  // Write with source timestamp
 
 // Instance management
 int2dds_datawriter_register_instance()             // Register keyed instance
@@ -122,7 +123,7 @@ int2dds_datawriter_lookup_instance()               // Lookup instance handle by 
 int2dds_datawriter_get_key_value()                 // Get key value from instance handle
 
 // Status & lifecycle
-int2dds_get_publication_matched_status()           // Get matched readers count
+int2dds_datawriter_get_publication_matched_status()         // Get publication matched status
 int2dds_datawriter_get_liveliness_lost_status()    // Get liveliness lost status
 int2dds_datawriter_get_offered_deadline_missed_status()     // Get offered deadline missed status
 int2dds_datawriter_get_offered_incompatible_qos_status()    // Get offered incompatible QoS status
@@ -133,16 +134,17 @@ int2dds_datawriter_assert_liveliness()             // Assert liveliness
 #### Subscriber & DataReader
 ```c
 // Subscriber
-int2dds_create_subscriber()                        // Create subscriber
-int2dds_create_subscriber_with_qos()               // Create subscriber with QoS
+int2dds_create_subscriber()                        // Create subscriber (qos NULL = default)
+int2dds_create_subscriber_with_profile()           // Create subscriber from a QoS profile
 int2dds_subscriber_set_qos()                       // Set subscriber QoS
 int2dds_subscriber_get_qos()                       // Get subscriber QoS
 int2dds_delete_subscriber()                        // Delete subscriber
 int2dds_subscriber_delete_contained_entities()     // Delete all contained entities
 
-// DataReader
+// DataReader (qos NULL = default; listener NULL + mask 0 = no listener)
 int2dds_create_datareader()                        // Create data reader
-int2dds_create_datareader_with_listener()          // Create reader with listener callbacks
+int2dds_create_datareader_with_profile()           // Create reader from a QoS profile
+int2dds_create_datareader_cft()                    // Create reader on a ContentFilteredTopic
 int2dds_datareader_set_listener()                  // Set/update listener
 int2dds_datareader_get_listener()                  // Get current listener
 int2dds_datareader_set_qos()                       // Set reader QoS
@@ -150,14 +152,14 @@ int2dds_datareader_get_qos()                       // Get reader QoS
 int2dds_delete_datareader()                        // Delete data reader
 
 // Read operations
-int2dds_take_serialized()                          // Take data (removes from cache)
-int2dds_read_serialized()                          // Read data (keeps in cache)
-int2dds_take_serialized_w_info()                   // Take with sample info
-int2dds_read_serialized_w_info()                   // Read with sample info
-int2dds_take_serialized_batch()                    // Take batch of samples
+int2dds_datareader_take_serialized()               // Take data (removes from cache)
+int2dds_datareader_read_serialized()               // Read data (keeps in cache)
+int2dds_datareader_take_serialized_w_info()        // Take with sample info
+int2dds_datareader_read_serialized_w_info()        // Read with sample info
+int2dds_datareader_take_serialized_batch()         // Take batch of samples
 
 // Status
-int2dds_get_subscription_matched_status()          // Get matched writers count
+int2dds_datareader_get_subscription_matched_status()        // Get subscription matched status
 int2dds_datareader_get_liveliness_changed_status()          // Get liveliness changed status
 int2dds_datareader_get_sample_rejected_status()             // Get sample rejected status
 int2dds_datareader_get_sample_lost_status()                 // Get sample lost status
@@ -167,7 +169,7 @@ int2dds_datareader_get_requested_incompatible_qos_status()  // Get requested inc
 
 #### DataReader Listener (Callbacks)
 ```c
-int2dds_create_datareader_with_listener()   // Create reader with listener callbacks
+int2dds_create_datareader()                  // listener/mask arguments attach callbacks at creation
 int2dds_datareader_set_listener()            // Set/update listener for existing reader
 int2dds_datareader_get_listener()            // Get current listener configuration
 ```
@@ -183,7 +185,7 @@ int2dds_datareader_get_listener()            // Get current listener configurati
 
 #### DataWriter Listener (Callbacks)
 ```c
-int2dds_create_datawriter_with_listener()   // Create writer with listener callbacks
+int2dds_create_datawriter()                  // listener/mask arguments attach callbacks at creation
 int2dds_datawriter_set_listener()            // Set/update listener for existing writer
 int2dds_datawriter_get_listener()            // Get current listener configuration
 ```
@@ -198,9 +200,9 @@ int2dds_datawriter_get_listener()            // Get current listener configurati
 
 #### Topic
 ```c
-int2dds_create_topic()                     // Create topic
-int2dds_create_topic_keyed()               // Create topic with explicit key flag
-int2dds_create_topic_with_type_info()      // Create topic with TypeInfo (XTypes)
+int2dds_create_topic()                     // Create topic (keyless raw-bytes path)
+int2dds_create_topic_with_profile()        // Create topic from a QoS profile
+int2dds_create_topic_with_type_info()      // Create topic with TypeInfo (XTypes; required for keyed types)
 int2dds_topic_set_qos()                    // Set topic QoS
 int2dds_topic_get_qos()                    // Get topic QoS
 int2dds_delete_topic()                     // Delete topic
@@ -275,12 +277,12 @@ int2dds_subscriber_qos_destroy()
 ```c
 // WaitSet
 int2dds_waitset_new()                       // Create waitset
-int2dds_waitset_wait()                      // Wait for conditions
-int2dds_waitset_wait_ex()                   // Wait and return triggered conditions
-int2dds_waitset_attach_condition()          // Attach status condition
-int2dds_waitset_detach_condition()          // Detach status condition
-int2dds_waitset_attach_guard_condition()    // Attach guard condition
-int2dds_waitset_detach_guard_condition()    // Detach guard condition
+int2dds_waitset_wait_ex()                    // Wait and return triggered conditions (ms)
+int2dds_waitset_wait_ex_ns()                 // Wait and return triggered conditions (ns)
+int2dds_waitset_attach_statuscondition()    // Attach status condition
+int2dds_waitset_detach_statuscondition()    // Detach status condition
+int2dds_waitset_attach_guardcondition()     // Attach guard condition
+int2dds_waitset_detach_guardcondition()     // Detach guard condition
 int2dds_waitset_delete()                    // Delete waitset
 
 // Condition Sequence (returned from wait_ex)
@@ -293,10 +295,10 @@ int2dds_condition_get_trigger_value()       // Get trigger value
 int2dds_condition_delete()                  // Delete condition handle
 
 // GuardCondition
-int2dds_guard_condition_new()               // Create guard condition
-int2dds_guard_condition_set_trigger_value() // Set trigger value
-int2dds_guard_condition_get_trigger_value() // Get trigger value
-int2dds_guard_condition_delete()            // Delete guard condition
+int2dds_guardcondition_new()                // Create guard condition
+int2dds_guardcondition_set_trigger_value()  // Set trigger value
+int2dds_guardcondition_get_trigger_value()  // Get trigger value
+int2dds_guardcondition_delete()             // Delete guard condition
 
 // StatusCondition
 int2dds_datareader_get_statuscondition()    // Get reader's status condition
@@ -344,15 +346,12 @@ int2dds_subscription_builtin_topic_data_destroy()
 #### Dynamic XTypes (Runtime Type Discovery)
 ```c
 // Builtin discovery
-int2dds_get_builtin_subscriber()           // Get builtin discovery subscriber
-int2dds_take_publication_data()            // Take publication discovery data
-int2dds_wait_for_type_object()             // Wait for type object discovery
-
-// Publication data accessors
-int2dds_publication_data_topic_name()      // Get discovered topic name
-int2dds_publication_data_type_name()       // Get discovered type name
-int2dds_publication_data_take_type_object() // Extract TypeObject from discovery data
-int2dds_publication_data_destroy()         // Destroy publication data
+int2dds_participant_get_builtin_subscriber()  // Get builtin discovery subscriber
+int2dds_subscriber_take_publication_data()    // Take one publication discovery sample
+                                              // (returns Int2DdsPublicationBuiltinTopicData;
+                                              //  use the accessors above + take_type_object)
+int2dds_publication_builtin_topic_data_take_type_object() // Extract TypeObject from discovery data
+int2dds_participant_wait_for_type_object()    // Wait for type object discovery
 
 // TypeObject introspection
 int2dds_type_object_extensibility()        // Get extensibility (Final/Appendable/Mutable)
@@ -529,10 +528,10 @@ INT2DDS_MEMBER_EXTERNAL         = 1 << 3
 
 The FFI uses **CDR serialization** with raw bytes:
 - C applications send/receive raw CDR-serialized byte arrays
-- `int2dds_write_serialized()` sends CDR bytes with optional key bytes
-- `int2dds_take_serialized()` / `int2dds_read_serialized()` receive CDR bytes into caller-provided buffers
-- `int2dds_take_serialized_w_info()` / `int2dds_read_serialized_w_info()` additionally return `Int2DdsSampleInfo`
-- `int2dds_take_serialized_batch()` takes multiple samples at once
+- `int2dds_datawriter_write_serialized()` sends CDR bytes (the instance key is derived from the sample)
+- `int2dds_datareader_take_serialized()` / `int2dds_datareader_read_serialized()` receive CDR bytes into caller-provided buffers
+- `int2dds_datareader_take_serialized_w_info()` / `int2dds_datareader_read_serialized_w_info()` additionally return `Int2DdsSampleInfo`
+- `int2dds_datareader_take_serialized_batch()` takes multiple samples at once
 
 ### TypeInfo Builder (for XTypes topic creation)
 
@@ -559,7 +558,7 @@ int2dds_type_info_destroy(ti);
 // Wait for a publisher's TypeObject to be discovered
 Int2DdsTypeObject* type_obj;
 char type_name[256];
-int2dds_wait_for_type_object(participant, "SensorTopic", 10000, &type_obj, type_name, 256, &name_len);
+int2dds_participant_wait_for_type_object(participant, "SensorTopic", 10000, &type_obj, type_name, 256, &name_len);
 
 // Introspect the type
 uint32_t member_count;
@@ -619,16 +618,16 @@ int main() {
     ret = int2dds_domain_participant_factory_get_instance(&factory);
     if (ret != INT2DDS_RET_OK) return -1;
 
-    // Create domain participant
-    ret = int2dds_create_participant(factory, NULL, 0, &participant);
+    // Create domain participant (NULL qos = default)
+    ret = int2dds_create_participant(factory, 0, NULL, &participant);
     if (ret != INT2DDS_RET_OK) return -1;
 
-    // Create publisher
-    ret = int2dds_create_publisher(participant, &publisher);
+    // Create publisher (NULL qos = default)
+    ret = int2dds_create_publisher(participant, NULL, &publisher);
     if (ret != INT2DDS_RET_OK) return -1;
 
-    // Create subscriber
-    ret = int2dds_create_subscriber(participant, &subscriber);
+    // Create subscriber (NULL qos = default)
+    ret = int2dds_create_subscriber(participant, NULL, &subscriber);
     if (ret != INT2DDS_RET_OK) return -1;
 
     // ... use publisher/subscriber ...

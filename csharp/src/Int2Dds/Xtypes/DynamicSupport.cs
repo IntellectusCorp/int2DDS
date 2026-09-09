@@ -26,7 +26,7 @@ namespace Int2Dds.Xtypes
             fixed (byte* pTopic = topicBytes)
             fixed (byte* pName = nameBuf)
             {
-                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_wait_for_type_object(
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_participant_wait_for_type_object(
                     participant.Handle, pTopic, timeoutMs, out typeObj, pName, (UIntPtr)nameBuf.Length, out outLen));
             }
             typeName = Encoding.UTF8.GetString(nameBuf, 0, (int)outLen);

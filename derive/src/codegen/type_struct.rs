@@ -3,8 +3,8 @@ use syn::DeriveInput;
 
 use crate::codegen::union_ops::wrap_with_emheader;
 use crate::codegen::utils::{
-    extract_option_inner_type, get_serialization_method, is_option_type, resolve_member_id,
-    SerializationMethod,
+    extract_option_inner_type, get_serialization_method, is_map_type, is_option_type,
+    resolve_member_id, AutoIdKind, SerializationMethod,
 };
 use crate::codegen::{
     generate_additional_derives, generate_field_deserialization_xcdr,
@@ -238,6 +238,9 @@ pub fn derive_struct_impl(
     let has_type_object_impl =
         crate::codegen::type_object::generate_has_type_object_impl(name, fields, type_config, &gc);
 
+    // Generate KeyHolder implementation (RTPS KeyHash projection)
+    let key_holder_impl = generate_key_holder_impl(fields, crate_path, type_config.autoid, &gc);
+
     quote! {
         #type_support_struct
         #type_support_impl
@@ -250,6 +253,7 @@ pub fn derive_struct_impl(
         #xcdr_serialize_members_impl
         #xcdr_deserialize_members_impl
         #has_type_object_impl
+        #key_holder_impl
         #additional_derives
     }
 }
@@ -273,6 +277,253 @@ fn find_all_key_fields(
             }
         })
         .collect()
+}
+
+/// Generate the `KeyHolder` impl (RTPS KeyHash projection, DDSI-RTPS 9.6.4.8).
+/// Keyed structs emit only their `@key` members in ascending resolved-member-id
+/// order (recursing into nested key holders); un-keyed structs (used as a nested
+/// key member) emit all serialized members. Byte-identical to the dynamic path.
+fn generate_key_holder_impl(
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
+    crate_path: &proc_macro2::TokenStream,
+    autoid: Option<AutoIdKind>,
+    gc: &GenCtx,
+) -> proc_macro2::TokenStream {
+    let impl_generics = &gc.impl_generics;
+    let where_clause = &gc.where_clause;
+    let full_type = &gc.full_type;
+
+    let mut keyed: Vec<(&syn::Field, u32)> = fields
+        .iter()
+        .enumerate()
+        .filter_map(|(index, field)| {
+            let cfg = parse_field_attributes(field);
+            if cfg.key {
+                let id = resolve_member_id(
+                    &cfg,
+                    &field.ident.as_ref().unwrap().to_string(),
+                    index,
+                    autoid,
+                );
+                Some((field, id))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let is_keyed = !keyed.is_empty();
+
+    // Keyed struct: project only its @key members (member-id order), recursing.
+    // No-key struct used as a whole nested key member: keep all serialized
+    // members. The whole case is serialized/deserialized in full via XCDR (no
+    // per-member `KeyHolder`/`Default` requirement — that would drag the trait
+    // onto every field type crate-wide), while `key_holder_max_size` still sums
+    // members through `KeyHolderAccessor` so an all-finite no-key aggregate is a
+    // finite size (=> raw), matching the dynamic path's `type_kind_max_size`.
+    keyed.sort_by_key(|(_, id)| *id);
+    let selected: Vec<&syn::Field> = if is_keyed {
+        keyed.into_iter().map(|(f, _)| f).collect()
+    } else {
+        fields.iter().filter(|f| !parse_field_attributes(f).non_serialized).collect()
+    };
+
+    // Both keyed and no-key aggregates serialize their `selected` members inline
+    // as FINAL (no DHEADER) via `KeyHolderAccessor`: a keyed struct projects only
+    // its @key members (member-id order), a no-key struct keeps all members. The
+    // FINAL inline form (never the type's own Appendable/Mutable framing) is what
+    // RTPS KeyHash requires and what the dynamic path's key holder produces.
+    let serialize_calls = selected.iter().map(|field| {
+        let field_name = field.ident.as_ref().unwrap();
+        let field_type = &field.ty;
+        quote! {
+            {
+                #[allow(unused_imports)]
+                use #crate_path::serialize::KeyHolderFallback as _;
+                let __kh = #crate_path::serialize::KeyHolderAccessor::<#field_type>(core::marker::PhantomData);
+                __kh.kh_serialize(&self.#field_name, serializer)?;
+            }
+        }
+    });
+    let serialize_body = quote! {
+        #(#serialize_calls)*
+        Ok(())
+    };
+    // Keyed structs reconstruct only their @key members onto a Default base (they
+    // already require `Default`). A no-key aggregate used as a whole key member
+    // reads via its own XCDR deserialize: for the common FINAL whole-key types
+    // (Guid, Locator, ...) that is the same inline no-DHEADER form the FINAL
+    // serialize above produces, and it needs no `Default` (some builtin no-key
+    // types opt out of it and carry non-serialized members).
+    let deserialize_body = if is_keyed {
+        let deserialize_assigns = selected.iter().map(|field| {
+            let field_name = field.ident.as_ref().unwrap();
+            let field_type = &field.ty;
+            quote! {
+                {
+                    #[allow(unused_imports)]
+                    use #crate_path::serialize::KeyHolderFallback as _;
+                    let __kh = #crate_path::serialize::KeyHolderAccessor::<#field_type>(core::marker::PhantomData);
+                    key_holder.#field_name = __kh.kh_deserialize(deserializer)?;
+                }
+            }
+        });
+        quote! {
+            let mut key_holder = <Self as Default>::default();
+            #(#deserialize_assigns)*
+            Ok(key_holder)
+        }
+    } else {
+        quote! {
+            #crate_path::serialize::xcdr::XcdrDeserialize::deserialize_xcdr(deserializer)
+        }
+    };
+
+    let max_size_accum =
+        selected.iter().map(|field| generate_key_holder_field_max_size(field, crate_path));
+
+    quote! {
+        impl #impl_generics #crate_path::serialize::KeyHolder for #full_type #where_clause {
+            fn serialize_key_holder(&self, serializer: &mut #crate_path::serialize::xcdr::Xcdr2Serializer) -> #crate_path::serialize::xcdr::XcdrResult<()> {
+                #serialize_body
+            }
+
+            fn deserialize_key_holder(deserializer: &mut #crate_path::serialize::xcdr::Xcdr2Deserializer) -> #crate_path::serialize::xcdr::XcdrResult<Self> {
+                #deserialize_body
+            }
+
+            #[allow(unreachable_code, unused_mut, unused_variables)]
+            fn key_holder_max_size() -> Option<usize> {
+                let mut pos = 0usize;
+                #(#max_size_accum)*
+                Some(pos)
+            }
+
+            fn key_holder_align() -> usize {
+                4
+            }
+        }
+    }
+}
+
+/// One field's contribution to the enclosing key holder's maximum serialized size
+/// (max alignment 4). Bounded strings use their attribute bound; unbounded strings,
+/// sequences, arrays and maps have no finite maximum (`return None` => always MD5);
+/// primitives, enums and nested aggregated types delegate to their `KeyHolder` impl.
+fn generate_key_holder_field_max_size(
+    field: &syn::Field,
+    crate_path: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let cfg = parse_field_attributes(field);
+    let field_type = &field.ty;
+
+    if is_map_type(field_type) {
+        return quote! { return None; };
+    }
+
+    // A fixed array `[T; N]` has a finite key-holder size (its `KeyHolder` impl
+    // sums N element holders); route it through the accessor rather than the
+    // sequence/unbounded `None` fallthrough below.
+    if matches!(field_type, syn::Type::Array(_)) {
+        return quote! {
+            {
+                #[allow(unused_imports)]
+                use #crate_path::serialize::KeyHolderFallback as _;
+                let __kh = #crate_path::serialize::KeyHolderAccessor::<#field_type>(core::marker::PhantomData);
+                pos = #crate_path::serialize::key_holder_align_up(pos, __kh.kh_align());
+                pos = pos.checked_add(__kh.kh_max_size()?)?;
+            }
+        };
+    }
+
+    // A `Vec<T>` sequence field: bounded (`#[dds(bound = N)]`) with a finite-size
+    // element has a finite key-holder max (`u32` length + up to N packed elements),
+    // matching the dynamic path's bounded-sequence arm; unbounded or unbounded-element
+    // sequences have no finite maximum (`return None` => always MD5).
+    if let Some(elem_ty) = sequence_element_type(field_type) {
+        if let Some(bound) = cfg.bound {
+            return quote! {
+                {
+                    #[allow(unused_imports)]
+                    use #crate_path::serialize::KeyHolderFallback as _;
+                    let __kh = #crate_path::serialize::KeyHolderAccessor::<#elem_ty>(core::marker::PhantomData);
+                    let __elem = __kh.kh_max_size()?;
+                    let __stride = #crate_path::serialize::key_holder_align_up(__elem, __kh.kh_align());
+                    pos = #crate_path::serialize::key_holder_align_up(pos, 4);
+                    pos = pos.checked_add(4usize)?;
+                    if #bound > 0usize {
+                        pos = pos.checked_add(__stride.checked_mul(#bound - 1)?)?.checked_add(__elem)?;
+                    }
+                }
+            };
+        }
+        return quote! { return None; };
+    }
+
+    match get_serialization_method(field_type) {
+        SerializationMethod::String => {
+            if let Some(bound) = cfg.bound {
+                quote! {
+                    pos = #crate_path::serialize::key_holder_align_up(pos, 4);
+                    pos = pos.checked_add(4usize + #bound + 1)?;
+                }
+            } else {
+                quote! { return None; }
+            }
+        }
+        SerializationMethod::WString => {
+            if let Some(bound) = cfg.bound {
+                quote! {
+                    pos = #crate_path::serialize::key_holder_align_up(pos, 4);
+                    pos = pos.checked_add(4usize + 2usize * (#bound + 1))?;
+                }
+            } else {
+                quote! { return None; }
+            }
+        }
+        // Primitives, char, bool, enums and nested aggregated types (Fallback)
+        // delegate to their KeyHolder impl.
+        SerializationMethod::U8
+        | SerializationMethod::U16
+        | SerializationMethod::U32
+        | SerializationMethod::U64
+        | SerializationMethod::I8
+        | SerializationMethod::I16
+        | SerializationMethod::I32
+        | SerializationMethod::I64
+        | SerializationMethod::F32
+        | SerializationMethod::F64
+        | SerializationMethod::Char
+        | SerializationMethod::Bool
+        | SerializationMethod::Fallback => {
+            quote! {
+                {
+                    #[allow(unused_imports)]
+                    use #crate_path::serialize::KeyHolderFallback as _;
+                    let __kh = #crate_path::serialize::KeyHolderAccessor::<#field_type>(core::marker::PhantomData);
+                    pos = #crate_path::serialize::key_holder_align_up(pos, __kh.kh_align());
+                    pos = pos.checked_add(__kh.kh_max_size()?)?;
+                }
+            }
+        }
+        // Sequences and arrays have no finite maximum key-holder size.
+        _ => quote! { return None; },
+    }
+}
+
+/// The element type `T` of a `Vec<T>` sequence field, or `None` for non-sequences.
+fn sequence_element_type(ty: &syn::Type) -> Option<&syn::Type> {
+    if let syn::Type::Path(p) = ty {
+        let seg = p.path.segments.last()?;
+        if seg.ident == "Vec" {
+            if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                if let Some(syn::GenericArgument::Type(t)) = args.args.first() {
+                    return Some(t);
+                }
+            }
+        }
+    }
+    None
 }
 
 fn builtin_topic_type_paths(
@@ -694,21 +945,21 @@ fn quote_field_to_parameter_conversion(
             use #crate_path::topic::sql::ast::Parameter;
 
             if let Some(v) = field_value.downcast_ref::<u8>() {
-                Ok(Parameter::IntegerValue(*v as i32))
+                Ok(Parameter::IntegerValue(*v as i128))
             } else if let Some(v) = field_value.downcast_ref::<u16>() {
-                Ok(Parameter::IntegerValue(*v as i32))
+                Ok(Parameter::IntegerValue(*v as i128))
             } else if let Some(v) = field_value.downcast_ref::<u32>() {
-                Ok(Parameter::IntegerValue(*v as i32))
+                Ok(Parameter::IntegerValue(*v as i128))
             } else if let Some(v) = field_value.downcast_ref::<u64>() {
-                Ok(Parameter::FloatValue(*v as f64))
+                Ok(Parameter::IntegerValue(*v as i128))
             } else if let Some(v) = field_value.downcast_ref::<i8>() {
-                Ok(Parameter::IntegerValue(*v as i32))
+                Ok(Parameter::IntegerValue(*v as i128))
             } else if let Some(v) = field_value.downcast_ref::<i16>() {
-                Ok(Parameter::IntegerValue(*v as i32))
+                Ok(Parameter::IntegerValue(*v as i128))
             } else if let Some(v) = field_value.downcast_ref::<i32>() {
-                Ok(Parameter::IntegerValue(*v))
+                Ok(Parameter::IntegerValue(*v as i128))
             } else if let Some(v) = field_value.downcast_ref::<i64>() {
-                Ok(Parameter::FloatValue(*v as f64))
+                Ok(Parameter::IntegerValue(*v as i128))
             } else if let Some(v) = field_value.downcast_ref::<f32>() {
                 Ok(Parameter::FloatValue(*v as f64))
             } else if let Some(v) = field_value.downcast_ref::<f64>() {
@@ -1153,9 +1404,7 @@ fn generate_cdr_mutable_deserialize_impl(
             let field_name_str = field_name.to_string();
             let field_config = parse_field_attributes(field);
             let is_optional = is_option_type(&field.ty);
-            if field_config.non_serialized {
-                quote! { #field_name }
-            } else if is_optional {
+            if field_config.non_serialized || is_optional {
                 quote! { #field_name }
             } else {
                 quote! {
@@ -1371,19 +1620,17 @@ fn generate_xcdr_serialize_impl(
                         field_serialize,
                     )
                 }
-            } else {
-                if is_optional {
-                    quote! {
-                        if let Some(ref opt_value) = self.#field_name {
-                            serializer.serialize_bool(true)?;
-                            #crate_path::serialize::xcdr::XcdrSerialize::serialize_xcdr(opt_value, serializer)?;
-                        } else {
-                            serializer.serialize_bool(false)?;
-                        }
+            } else if is_optional {
+                quote! {
+                    if let Some(ref opt_value) = self.#field_name {
+                        serializer.serialize_bool(true)?;
+                        #crate_path::serialize::xcdr::XcdrSerialize::serialize_xcdr(opt_value, serializer)?;
+                    } else {
+                        serializer.serialize_bool(false)?;
                     }
-                } else {
-                    field_serialize
                 }
+            } else {
+                field_serialize
             })
         })
         .collect();

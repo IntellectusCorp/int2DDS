@@ -25,7 +25,9 @@ use crate::{
             parameters::{ParameterId, ParameterId as CommonParameterId, ParameterList},
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
             time::{RtpsDuration, RtpsTime},
-            types::{ProtocolVersion, VendorId, RTPS_HEADER_LENGTH, VENDORID_UNKNOWN},
+            types::{
+                ProtocolVersion, VendorId, RTPS_HEADER_LENGTH, VENDORID_INT2, VENDORID_UNKNOWN,
+            },
         },
         messages::{
             header::Header,
@@ -38,12 +40,14 @@ use crate::{
                 heartbeat_frag::HeartbeatFrag, info::InfoReplyIp4, nack_frag::NackFrag,
             },
         },
+        transport::udp::recv_arena::MAX_UDP_PACKET_BYTES,
     },
     serialize::pl_cdr::parse_discovery_data,
 };
 use bytes::Bytes;
 use core::net::SocketAddr;
 use log::{debug, error, warn};
+use smallvec::SmallVec;
 use speedy::Readable;
 use std::sync::Arc;
 
@@ -67,8 +71,12 @@ pub(crate) struct MessageReceiver {
     source_guid_prefix: GuidPrefix,
     dest_guid_prefix: GuidPrefix,
     participant_guid_prefix: GuidPrefix,
-    unicast_reply_locator_list: Vec<Locator>,
-    multicast_reply_locator_list: Vec<Locator>,
+    // RTPS 8.3.4 Receiver state. Maintained per the spec but not read by anything yet, so as
+    // `Vec` these were two heap allocations on every received datagram for nothing. Inline
+    // capacity 1, not the 4 used elsewhere for structured elements: every writer here stores
+    // exactly one locator, and only an INFO_REPLY carrying a longer list ever spills.
+    unicast_reply_locator_list: SmallVec<[Locator; 1]>,
+    multicast_reply_locator_list: SmallVec<[Locator; 1]>,
     have_timestamp: bool,
     timestamp: RtpsTime,
     rtps_message: Option<Arc<RtpsMessage<'static>>>,
@@ -85,15 +93,15 @@ impl MessageReceiver {
             source_guid_prefix: GUIDPREFIX_UNKNOWN,
             dest_guid_prefix: participant_guid_prefix,
             participant_guid_prefix,
-            unicast_reply_locator_list: vec![Locator::from_ip(
+            unicast_reply_locator_list: SmallVec::from_buf([Locator::from_ip(
                 from_addr.ip(),
                 LOCATOR_PORT_INVALID,
-            )],
-            multicast_reply_locator_list: vec![Locator::new(
+            )]),
+            multicast_reply_locator_list: SmallVec::from_buf([Locator::new(
                 LOCATOR_KIND_UDP_V4,
                 LOCATOR_PORT_INVALID,
                 LOCATOR_ADDRESS_INVALID,
-            )],
+            )]),
             have_timestamp: false,
             timestamp: RtpsTime::INVALID,
             rtps_message: None,
@@ -111,6 +119,10 @@ impl MessageReceiver {
 
     pub(crate) fn get_source_guid_prefix(&self) -> GuidPrefix {
         self.source_guid_prefix
+    }
+
+    pub(crate) fn sender_addr(&self) -> SocketAddr {
+        self.sender_addr
     }
 
     // 8.3.6.4 Change in state of Receiver
@@ -142,9 +154,11 @@ impl MessageReceiver {
         info_reply_header: &SubmessageHeader,
         info_reply: &InfoReply,
     ) {
-        self.unicast_reply_locator_list = info_reply.unicast_locator_list().to_vec();
+        self.unicast_reply_locator_list =
+            info_reply.unicast_locator_list().iter().cloned().collect();
         if let Some(true) = info_reply_header.multicast_flag() {
-            self.multicast_reply_locator_list = info_reply.multicast_locator_list().to_vec();
+            self.multicast_reply_locator_list =
+                info_reply.multicast_locator_list().iter().cloned().collect();
         } else {
             self.multicast_reply_locator_list.clear();
         }
@@ -228,11 +242,17 @@ impl MessageReceiver {
 
         // submessage loop
         while !submessages_buffer.is_empty() {
+            let before = submessages_buffer.len();
             if let Ok(Some(submessage)) =
                 Submessage::read_from_buffer(self, &mut submessages_buffer)
             {
                 // info!("#### submessage {:?}", submessage);
                 message.submessages.push(submessage);
+            }
+            // A header whose length runs past the datagram returns before consuming anything,
+            // and this loop would then spin on the same bytes forever.
+            if submessages_buffer.len() == before {
+                break;
             }
         }
 
@@ -314,6 +334,7 @@ impl MessageReceiver {
                                     self.process_discovery_parameters(
                                         &parameters,
                                         &mut spdp_discovered_participant_data,
+                                        header.vendor_id(),
                                     );
                                 }
                                 Err(e) => {
@@ -382,10 +403,17 @@ impl MessageReceiver {
         self.dest_guid_prefix == guid_prefix
     }
 
+    // Smallest post-doubling SO_RCVBUF a peer sizing for one datagram could
+    // report; below this a window computed from it would divide toward zero.
+    const MIN_PLAUSIBLE_RECEIVE_BUFFER_BYTES: usize = 2 * MAX_UDP_PACKET_BYTES;
+
+    // Header vendor id, not the payload's PidVendorId parameter - the latter's
+    // order relative to PidReceiveBufferSize in the list isn't guaranteed.
     fn process_discovery_parameters(
         &self,
         parameters: &[Parameter],
         spdp_data: &mut SPDPDiscoveredParticipantData,
+        sender_vendor_id: VendorId,
     ) {
         let log_on = false;
         if log_on {
@@ -507,6 +535,33 @@ impl MessageReceiver {
                         debug!("Parameter {}: Entity name: '{}'", index, name);
                     }
                     spdp_data.set_entity_name(name.clone());
+                }
+                ParameterValue::ReceiveBufferSize(size) => {
+                    // Vendor-specific PID: a different vendor could use 0x8001 for
+                    // something else entirely, so only trust it from our own kind.
+                    if sender_vendor_id != VENDORID_INT2 {
+                        if log_on {
+                            debug!(
+                                "Parameter {}: Ignoring PidReceiveBufferSize from vendor {:02X}{:02X}",
+                                index, sender_vendor_id[0], sender_vendor_id[1]
+                            );
+                        }
+                        spdp_data.set_receive_buffer_size(None);
+                    } else if (*size as usize) < Self::MIN_PLAUSIBLE_RECEIVE_BUFFER_BYTES {
+                        warn!(
+                            "Parameter {}: Implausible receive buffer size {} (min {}); \
+                             treating as absent",
+                            index,
+                            size,
+                            Self::MIN_PLAUSIBLE_RECEIVE_BUFFER_BYTES
+                        );
+                        spdp_data.set_receive_buffer_size(None);
+                    } else {
+                        if log_on {
+                            debug!("Parameter {}: Receive buffer size: {}", index, size);
+                        }
+                        spdp_data.set_receive_buffer_size(Some(*size as usize));
+                    }
                 }
                 ParameterValue::PropertyList(properties) => {
                     if log_on {
@@ -684,4 +739,145 @@ impl MessageReceiver {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+    use crate::rtps::common::guid::GUIDPREFIX_UNKNOWN;
+
+    fn receiver() -> MessageReceiver {
+        MessageReceiver::new(GUIDPREFIX_UNKNOWN, &"127.0.0.1:0".parse().unwrap())
+    }
+
+    /// A datagram whose last submessage header claims more bytes than the datagram holds.
+    /// `read_from_buffer` bails on the bounds check before it splits, so nothing is consumed.
+    fn datagram_with_overlong_submessage_length() -> Bytes {
+        let mut d = Vec::new();
+        d.extend_from_slice(b"RTPS");
+        d.extend_from_slice(&[2, 4]); // protocol version
+        d.extend_from_slice(&[1, 3]); // vendor id
+        d.extend_from_slice(&[0u8; 12]); // guid prefix
+        assert_eq!(d.len(), RTPS_HEADER_LENGTH as usize);
+        d.push(0x07); // HEARTBEAT
+        d.push(0x01); // little endian
+        d.extend_from_slice(&u16::MAX.to_le_bytes()); // octetsToNextHeader, far past the end
+        Bytes::from(d)
+    }
+
+    #[test]
+    fn a_submessage_length_past_the_datagram_does_not_spin_the_loop() {
+        let datagram = datagram_with_overlong_submessage_length();
+        let mut receiver = receiver();
+        // Without the guard in `init` this call never returns.
+        let message = receiver.init(&datagram).expect("the RTPS header itself is well formed");
+        assert!(
+            message.submessages.is_empty(),
+            "the malformed submessage must be dropped, not parsed"
+        );
+    }
+
+    fn empty_proxy() -> SPDPDiscoveredParticipantData {
+        SPDPDiscoveredParticipantData::new(0, GUIDPREFIX_UNKNOWN, BuiltinEndpointSet::default())
+    }
+
+    // A peer that never sends PidReceiveBufferSize must read as absent, not as
+    // zero - a later window computation divides by this value.
+    #[test]
+    fn proxy_without_receive_buffer_param_reads_none() {
+        let mut proxy = empty_proxy();
+        let parameters = vec![Parameter {
+            id: ParameterId::PidVendorId,
+            value: ParameterValue::VendorId([9, 9]),
+        }];
+
+        receiver().process_discovery_parameters(&parameters, &mut proxy, VENDORID_INT2);
+
+        assert_eq!(proxy.receive_buffer_size(), None);
+    }
+
+    // A legitimate value, from our own vendor, must round-trip unchanged.
+    #[test]
+    fn proxy_with_receive_buffer_param_reads_the_advertised_value() {
+        let mut proxy = empty_proxy();
+        let parameters = vec![Parameter {
+            id: ParameterId::PidReceiveBufferSize,
+            value: ParameterValue::ReceiveBufferSize(425984),
+        }];
+
+        receiver().process_discovery_parameters(&parameters, &mut proxy, VENDORID_INT2);
+
+        assert_eq!(proxy.receive_buffer_size(), Some(425984usize));
+    }
+
+    fn receive_buffer_parameters(size: u32) -> Vec<Parameter<'static>> {
+        vec![Parameter {
+            id: ParameterId::PidReceiveBufferSize,
+            value: ParameterValue::ReceiveBufferSize(size),
+        }]
+    }
+
+    // The gap this task closes: an explicit zero would collapse a later send
+    // window to nothing. It must read as absent, not as Some(0).
+    #[test]
+    fn proxy_receive_buffer_param_zero_reads_none() {
+        let mut proxy = empty_proxy();
+        receiver().process_discovery_parameters(
+            &receive_buffer_parameters(0),
+            &mut proxy,
+            VENDORID_INT2,
+        );
+        assert_eq!(proxy.receive_buffer_size(), None);
+    }
+
+    // One byte under the floor must still be rejected...
+    #[test]
+    fn proxy_receive_buffer_param_just_below_floor_reads_none() {
+        let mut proxy = empty_proxy();
+        let below = MessageReceiver::MIN_PLAUSIBLE_RECEIVE_BUFFER_BYTES as u32 - 1;
+        receiver().process_discovery_parameters(
+            &receive_buffer_parameters(below),
+            &mut proxy,
+            VENDORID_INT2,
+        );
+        assert_eq!(proxy.receive_buffer_size(), None);
+    }
+
+    // ...while the floor itself is accepted - it is not part of the invalid range.
+    #[test]
+    fn proxy_receive_buffer_param_at_floor_round_trips() {
+        let mut proxy = empty_proxy();
+        let at_floor = MessageReceiver::MIN_PLAUSIBLE_RECEIVE_BUFFER_BYTES as u32;
+        receiver().process_discovery_parameters(
+            &receive_buffer_parameters(at_floor),
+            &mut proxy,
+            VENDORID_INT2,
+        );
+        assert_eq!(proxy.receive_buffer_size(), Some(at_floor as usize));
+    }
+
+    // No upper bound: this codebase has no established ceiling for a socket
+    // buffer (not even for its own local override), so a large-but-legitimate
+    // wire value is accepted rather than second-guessed against an invented cap.
+    #[test]
+    fn proxy_receive_buffer_param_implausibly_huge_value_still_round_trips() {
+        let mut proxy = empty_proxy();
+        receiver().process_discovery_parameters(
+            &receive_buffer_parameters(u32::MAX),
+            &mut proxy,
+            VENDORID_INT2,
+        );
+        assert_eq!(proxy.receive_buffer_size(), Some(u32::MAX as usize));
+    }
+
+    // 0x8001 is vendor-specific; a different vendor could use it for something
+    // else, so a value from any other vendor must not be trusted as ours.
+    #[test]
+    fn proxy_receive_buffer_param_from_other_vendor_reads_none() {
+        let mut proxy = empty_proxy();
+        let other_vendor: VendorId = [9, 9];
+        receiver().process_discovery_parameters(
+            &receive_buffer_parameters(425984),
+            &mut proxy,
+            other_vendor,
+        );
+        assert_eq!(proxy.receive_buffer_size(), None);
+    }
+}

@@ -8,6 +8,14 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#if defined(__GNUC__) || defined(__clang__)
+#define INT2DDS_DEPRECATED(msg) __attribute__((deprecated(msg)))
+#elif defined(_MSC_VER)
+#define INT2DDS_DEPRECATED(msg) __declspec(deprecated(msg))
+#else
+#define INT2DDS_DEPRECATED(msg)
+#endif
+
 /**
  * Value-kind discriminators returned by `int2dds_dynamic_value_kind`.
  */
@@ -94,6 +102,10 @@
 #define INT2DDS_QOS_DEST_ORDER_BY_RECEPTION 0
 
 #define INT2DDS_QOS_DEST_ORDER_BY_SOURCE 1
+
+#define INT2DDS_QOS_LIFESPAN_REF_BY_SOURCE 0
+
+#define INT2DDS_QOS_LIFESPAN_REF_BY_RECEPTION 1
 
 #define INT2DDS_STATUS_INCONSISTENT_TOPIC (1 << 0)
 
@@ -325,12 +337,6 @@ typedef struct Int2DdsParticipantFactory Int2DdsParticipantFactory;
  */
 typedef struct Int2DdsParticipantQos Int2DdsParticipantQos;
 
-/**
- * Opaque handle wrapping a discovered PublicationBuiltinTopicData sample.
- * Owned by the caller; destroy via `int2dds_publication_data_destroy`.
- */
-typedef struct Int2DdsPublicationBuiltinData Int2DdsPublicationBuiltinData;
-
 typedef struct Int2DdsPublicationBuiltinTopicData Int2DdsPublicationBuiltinTopicData;
 
 typedef struct Int2DdsPublicationBuiltinTopicDataSeq Int2DdsPublicationBuiltinTopicDataSeq;
@@ -344,6 +350,13 @@ typedef struct Int2DdsPublisher Int2DdsPublisher;
  * Opaque QoS handle for Publisher
  */
 typedef struct Int2DdsPublisherQos Int2DdsPublisherQos;
+
+/**
+ * Opaque handle to a ReadCondition or QueryCondition.
+ * `inner` is used by WaitSet (trait object); `kind` provides concrete access
+ * for the filtered read/take path and query-parameter mutation.
+ */
+typedef struct Int2DdsReadCondition Int2DdsReadCondition;
 
 /**
  * Opaque sequence of (serialized data, SampleInfo) pairs for batch read/take
@@ -411,6 +424,20 @@ typedef struct Int2DdsXmlTypeRegistry Int2DdsXmlTypeRegistry;
  * FFI return codes
  */
 typedef int32_t Int2DdsRet;
+
+/**
+ * C callback invoked on every remote endpoint discovery/dispose.
+ * `is_writer`: 1 = publication/writer, 0 = subscription/reader.
+ * `is_alive`:  1 = alive (`pub_data` or `sub_data` valid), 0 = disposed (data null).
+ * `guid` always points to the 16-byte endpoint GUID (valid only during the call).
+ * All pointers are borrowed and must be copied out before returning.
+ */
+typedef void (*Int2DdsEndpointDiscoveryCallback)(void *ctx,
+                                                 int32_t is_writer,
+                                                 int32_t is_alive,
+                                                 const struct Int2DdsPublicationBuiltinTopicData *pub_data,
+                                                 const struct Int2DdsSubscriptionBuiltinTopicData *sub_data,
+                                                 const uint8_t (*guid)[16]);
 
 /**
  * C-visible per-member information returned by `int2dds_type_object_member_info`.
@@ -749,6 +776,20 @@ typedef struct Int2DdsRequestedIncompatibleTypeStatus {
   int32_t total_count_change;
 } Int2DdsRequestedIncompatibleTypeStatus;
 
+/**
+ * C-compatible inconsistent topic status
+ */
+typedef struct Int2DdsInconsistentTopicStatus {
+  /**
+   * Total cumulative count of inconsistent topics detected
+   */
+  int32_t total_count;
+  /**
+   * Change in total_count since last access
+   */
+  int32_t total_count_change;
+} Int2DdsInconsistentTopicStatus;
+
 #define INT2DDS_RET_OK 0
 
 #define INT2DDS_RET_ERROR 1
@@ -798,9 +839,9 @@ extern "C" {
  *
  * # Safety
  * - `condition_out` must be a valid pointer to a null pointer
- * - The returned condition must be freed with `int2dds_guard_condition_delete`
+ * - The returned condition must be freed with `int2dds_guardcondition_delete`
  */
-Int2DdsRet int2dds_guard_condition_new(struct Int2DdsGuardCondition **condition_out);
+Int2DdsRet int2dds_guardcondition_new(struct Int2DdsGuardCondition **condition_out);
 
 /**
  * Set the trigger value of a GuardCondition
@@ -809,8 +850,8 @@ Int2DdsRet int2dds_guard_condition_new(struct Int2DdsGuardCondition **condition_
  * - `condition` must be a valid guard condition
  * - `value` is the new trigger value (true to trigger, false to reset)
  */
-Int2DdsRet int2dds_guard_condition_set_trigger_value(const struct Int2DdsGuardCondition *condition,
-                                                     bool value);
+Int2DdsRet int2dds_guardcondition_set_trigger_value(const struct Int2DdsGuardCondition *condition,
+                                                    bool value);
 
 /**
  * Get the trigger value of a GuardCondition
@@ -819,8 +860,8 @@ Int2DdsRet int2dds_guard_condition_set_trigger_value(const struct Int2DdsGuardCo
  * - `condition` must be a valid guard condition
  * - `value_out` must be a valid pointer
  */
-Int2DdsRet int2dds_guard_condition_get_trigger_value(const struct Int2DdsGuardCondition *condition,
-                                                     bool *value_out);
+Int2DdsRet int2dds_guardcondition_get_trigger_value(const struct Int2DdsGuardCondition *condition,
+                                                    bool *value_out);
 
 /**
  * Delete a GuardCondition
@@ -830,7 +871,7 @@ Int2DdsRet int2dds_guard_condition_get_trigger_value(const struct Int2DdsGuardCo
  * - `condition` must not be used after this call
  * - The condition should be detached from any WaitSets first
  */
-Int2DdsRet int2dds_guard_condition_delete(struct Int2DdsGuardCondition *condition);
+Int2DdsRet int2dds_guardcondition_delete(struct Int2DdsGuardCondition *condition);
 
 /**
  * Load QoS profiles (and, for XML files, the `<types>` section) from one or
@@ -843,9 +884,7 @@ Int2DdsRet int2dds_guard_condition_delete(struct Int2DdsGuardCondition *conditio
  * - `paths` must point to `count` valid, null-terminated UTF-8 C strings
  * - each element of `paths` must be non-null
  */
-Int2DdsRet int2dds_load_profiles(const struct Int2DdsParticipantFactory *_factory,
-                                 const char *const *paths,
-                                 uintptr_t count);
+Int2DdsRet int2dds_load_profiles(const char *const *paths, uintptr_t count);
 
 /**
  * Build a dynamic type support for a type declared in a `<types>` section that
@@ -856,8 +895,7 @@ Int2DdsRet int2dds_load_profiles(const struct Int2DdsParticipantFactory *_factor
  * - `type_name` must be a valid, null-terminated UTF-8 C string
  * - `out` must be a valid pointer to a null pointer
  */
-Int2DdsRet int2dds_get_dynamic_type_support(const struct Int2DdsParticipantFactory *_factory,
-                                            const char *type_name,
+Int2DdsRet int2dds_get_dynamic_type_support(const char *type_name,
                                             struct Int2DdsDynamicTypeSupport **out);
 
 /**
@@ -937,11 +975,72 @@ Int2DdsRet int2dds_domain_participant_factory_get_instance(struct Int2DdsPartici
 Int2DdsRet int2dds_domain_participant_factory_finalize(struct Int2DdsParticipantFactory *factory);
 
 /**
+ * Look up an existing participant on `domain_id`.
+ *
+ * On success `*participant_out` receives a NEW handle aliasing the existing
+ * core participant (freed independently with `int2dds_delete_participant`). If
+ * no participant exists on that domain, returns `INT2DDS_RET_OK` with
+ * `*participant_out` set to null.
+ *
+ * # Safety
+ * - `participant_out` must be a valid pointer to a null pointer
+ */
+Int2DdsRet int2dds_domain_participant_factory_lookup_participant(const struct Int2DdsParticipantFactory *_factory,
+                                                                 int32_t domain_id,
+                                                                 struct Int2DdsParticipant **participant_out);
+
+/**
+ * Set the factory's `autoenable_created_entities` policy (the only member of
+ * DomainParticipantFactoryQos).
+ *
+ * # Safety
+ * - none beyond a valid process; the factory handle is ignored (singleton).
+ */
+Int2DdsRet int2dds_domain_participant_factory_set_qos(const struct Int2DdsParticipantFactory *_factory,
+                                                      bool autoenable_created_entities);
+
+/**
+ * Get the factory's `autoenable_created_entities` policy.
+ *
+ * # Safety
+ * - `autoenable_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_domain_participant_factory_get_qos(const struct Int2DdsParticipantFactory *_factory,
+                                                      bool *autoenable_out);
+
+/**
+ * Set the factory's default participant QoS (used when a participant is created
+ * with default QoS). Pass a QoS handle, or null to reset to the built-in
+ * default.
+ *
+ * # Safety
+ * - `qos`, if non-null, must be a valid participant QoS handle
+ */
+Int2DdsRet int2dds_domain_participant_factory_set_default_participant_qos(const struct Int2DdsParticipantFactory *_factory,
+                                                                          const struct Int2DdsParticipantQos *qos);
+
+/**
+ * Get the factory's default participant QoS. On success `*qos_out` receives a
+ * new handle the caller frees with `int2dds_participant_qos_destroy`.
+ *
+ * # Safety
+ * - `qos_out` must be a valid pointer to a null pointer
+ */
+Int2DdsRet int2dds_domain_participant_factory_get_default_participant_qos(const struct Int2DdsParticipantFactory *_factory,
+                                                                          struct Int2DdsParticipantQos **qos_out);
+
+/**
  * Get discovered participant instance handles.
  *
  * Writes up to `capacity` handles into `handles_out`.
  * `count_out` receives the total number of discovered participants
  * (may be greater than `capacity`).
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `handles_out` may be null to query only the count; otherwise it must point to
+ *   `capacity` 16-byte handles
+ * - `count_out` must be a valid pointer
  */
 Int2DdsRet int2dds_participant_get_discovered_participants(const struct Int2DdsParticipant *participant,
                                                            uint8_t (*handles_out)[16],
@@ -950,6 +1049,12 @@ Int2DdsRet int2dds_participant_get_discovered_participants(const struct Int2DdsP
 
 /**
  * Get matched subscription instance handles for a DataWriter.
+ *
+ * # Safety
+ * - `writer` must be a valid datawriter
+ * - `handles_out` may be null to query only the count; otherwise it must point to
+ *   `capacity` 16-byte handles
+ * - `count_out` must be a valid pointer
  */
 Int2DdsRet int2dds_datawriter_get_matched_subscriptions(const struct Int2DdsDataWriter *writer,
                                                         uint8_t (*handles_out)[16],
@@ -958,6 +1063,12 @@ Int2DdsRet int2dds_datawriter_get_matched_subscriptions(const struct Int2DdsData
 
 /**
  * Get matched publication instance handles for a DataReader.
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `handles_out` may be null to query only the count; otherwise it must point to
+ *   `capacity` 16-byte handles
+ * - `count_out` must be a valid pointer
  */
 Int2DdsRet int2dds_datareader_get_matched_publications(const struct Int2DdsDataReader *reader,
                                                        uint8_t (*handles_out)[16],
@@ -965,67 +1076,156 @@ Int2DdsRet int2dds_datareader_get_matched_publications(const struct Int2DdsDataR
                                                        uintptr_t *count_out);
 
 /**
- * Get the number of discovered publications currently known to a participant.
- */
-Int2DdsRet int2dds_participant_get_discovered_publication_count(const struct Int2DdsParticipant *participant,
-                                                                uintptr_t *count_out);
-
-/**
- * Get discovered publication data by stable snapshot index.
- */
-Int2DdsRet int2dds_participant_get_discovered_publication_data_by_index(const struct Int2DdsParticipant *participant,
-                                                                        uintptr_t index,
-                                                                        struct Int2DdsPublicationBuiltinTopicData **data_out);
-
-/**
- * Get the number of discovered subscriptions currently known to a participant.
- */
-Int2DdsRet int2dds_participant_get_discovered_subscription_count(const struct Int2DdsParticipant *participant,
-                                                                 uintptr_t *count_out);
-
-/**
- * Get discovered subscription data by stable snapshot index.
- */
-Int2DdsRet int2dds_participant_get_discovered_subscription_data_by_index(const struct Int2DdsParticipant *participant,
-                                                                         uintptr_t index,
-                                                                         struct Int2DdsSubscriptionBuiltinTopicData **data_out);
-
-/**
  * Collect a snapshot of discovered publications via the builtin DCPSPublication reader.
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `seq_out` must be a valid pointer to a null pointer
  */
-Int2DdsRet int2dds_take_discovered_publications_snapshot(const struct Int2DdsParticipant *participant,
-                                                         int32_t timeout_ms,
-                                                         struct Int2DdsPublicationBuiltinTopicDataSeq **seq_out);
+Int2DdsRet int2dds_participant_take_discovered_publications_snapshot(const struct Int2DdsParticipant *participant,
+                                                                     int32_t timeout_ms,
+                                                                     struct Int2DdsPublicationBuiltinTopicDataSeq **seq_out);
 
-Int2DdsRet int2dds_publication_builtin_topic_data_seq_len(const struct Int2DdsPublicationBuiltinTopicDataSeq *seq,
-                                                          uintptr_t *count_out);
+/**
+ * Collect a snapshot of discovered publications restricted to the given instance states.
+ * `instance_state_mask` takes `INT2DDS_INSTANCE_STATE_*` values combined with a bitwise or.
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `seq_out` must be a valid pointer to a null pointer
+ */
+Int2DdsRet int2dds_participant_take_discovered_publications_snapshot_filtered(const struct Int2DdsParticipant *participant,
+                                                                              int32_t timeout_ms,
+                                                                              uint32_t instance_state_mask,
+                                                                              struct Int2DdsPublicationBuiltinTopicDataSeq **seq_out);
 
+/**
+ * Instance state of the entry at `index`, as an `INT2DDS_INSTANCE_STATE_*` value.
+ *
+ * # Safety
+ * - `seq` must be a valid publication data sequence
+ * - `instance_state_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_publication_builtin_topic_data_seq_get_instance_state(const struct Int2DdsPublicationBuiltinTopicDataSeq *seq,
+                                                                         uintptr_t index,
+                                                                         uint32_t *instance_state_out);
+
+/**
+ * Instance handle of the entry at `index`, which is the endpoint GUID.
+ * Present even for an entry with no announcement to read a GUID out of.
+ *
+ * # Safety
+ * - `seq` must be a valid publication data sequence
+ * - `handle_out` must point to a 16-byte buffer
+ */
+Int2DdsRet int2dds_publication_builtin_topic_data_seq_get_instance_handle(const struct Int2DdsPublicationBuiltinTopicDataSeq *seq,
+                                                                          uintptr_t index,
+                                                                          uint8_t (*handle_out)[16]);
+
+/**
+ * # Safety
+ * - `seq` must be a valid publication data sequence
+ * - `count_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_publication_builtin_topic_data_seq_length(const struct Int2DdsPublicationBuiltinTopicDataSeq *seq,
+                                                             uintptr_t *count_out);
+
+/**
+ * # Safety
+ * - `seq` must be a valid publication data sequence
+ * - `data_out` must be a valid pointer to a null pointer
+ */
 Int2DdsRet int2dds_publication_builtin_topic_data_seq_get(const struct Int2DdsPublicationBuiltinTopicDataSeq *seq,
                                                           uintptr_t index,
                                                           struct Int2DdsPublicationBuiltinTopicData **data_out);
 
-Int2DdsRet int2dds_publication_builtin_topic_data_seq_destroy(struct Int2DdsPublicationBuiltinTopicDataSeq *seq);
+/**
+ * # Safety
+ * - `seq` must be a valid publication data sequence
+ * - `seq` must not be used after this call
+ */
+Int2DdsRet int2dds_publication_builtin_topic_data_seq_delete(struct Int2DdsPublicationBuiltinTopicDataSeq *seq);
 
 /**
  * Collect a snapshot of discovered subscriptions via the builtin DCPSSubscription reader.
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `seq_out` must be a valid pointer to a null pointer
  */
-Int2DdsRet int2dds_take_discovered_subscriptions_snapshot(const struct Int2DdsParticipant *participant,
-                                                          int32_t timeout_ms,
-                                                          struct Int2DdsSubscriptionBuiltinTopicDataSeq **seq_out);
+Int2DdsRet int2dds_participant_take_discovered_subscriptions_snapshot(const struct Int2DdsParticipant *participant,
+                                                                      int32_t timeout_ms,
+                                                                      struct Int2DdsSubscriptionBuiltinTopicDataSeq **seq_out);
 
-Int2DdsRet int2dds_subscription_builtin_topic_data_seq_len(const struct Int2DdsSubscriptionBuiltinTopicDataSeq *seq,
-                                                           uintptr_t *count_out);
+/**
+ * Collect a snapshot of discovered subscriptions restricted to the given instance states.
+ * See `int2dds_participant_take_discovered_publications_snapshot_filtered` for the mask.
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `seq_out` must be a valid pointer to a null pointer
+ */
+Int2DdsRet int2dds_participant_take_discovered_subscriptions_snapshot_filtered(const struct Int2DdsParticipant *participant,
+                                                                               int32_t timeout_ms,
+                                                                               uint32_t instance_state_mask,
+                                                                               struct Int2DdsSubscriptionBuiltinTopicDataSeq **seq_out);
 
+/**
+ * Instance state of the entry at `index`, as an `INT2DDS_INSTANCE_STATE_*` value.
+ *
+ * # Safety
+ * - `seq` must be a valid subscription data sequence
+ * - `instance_state_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_subscription_builtin_topic_data_seq_get_instance_state(const struct Int2DdsSubscriptionBuiltinTopicDataSeq *seq,
+                                                                          uintptr_t index,
+                                                                          uint32_t *instance_state_out);
+
+/**
+ * Instance handle of the entry at `index`, which is the endpoint GUID.
+ * See `int2dds_publication_builtin_topic_data_seq_get_instance_handle`.
+ *
+ * # Safety
+ * - `seq` must be a valid subscription data sequence
+ * - `handle_out` must point to a 16-byte buffer
+ */
+Int2DdsRet int2dds_subscription_builtin_topic_data_seq_get_instance_handle(const struct Int2DdsSubscriptionBuiltinTopicDataSeq *seq,
+                                                                           uintptr_t index,
+                                                                           uint8_t (*handle_out)[16]);
+
+/**
+ * # Safety
+ * - `seq` must be a valid subscription data sequence
+ * - `count_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_subscription_builtin_topic_data_seq_length(const struct Int2DdsSubscriptionBuiltinTopicDataSeq *seq,
+                                                              uintptr_t *count_out);
+
+/**
+ * # Safety
+ * - `seq` must be a valid subscription data sequence
+ * - `data_out` must be a valid pointer to a null pointer
+ */
 Int2DdsRet int2dds_subscription_builtin_topic_data_seq_get(const struct Int2DdsSubscriptionBuiltinTopicDataSeq *seq,
                                                            uintptr_t index,
                                                            struct Int2DdsSubscriptionBuiltinTopicData **data_out);
 
-Int2DdsRet int2dds_subscription_builtin_topic_data_seq_destroy(struct Int2DdsSubscriptionBuiltinTopicDataSeq *seq);
+/**
+ * # Safety
+ * - `seq` must be a valid subscription data sequence
+ * - `seq` must not be used after this call
+ */
+Int2DdsRet int2dds_subscription_builtin_topic_data_seq_delete(struct Int2DdsSubscriptionBuiltinTopicDataSeq *seq);
 
 /**
  * Get discovered participant data for a given handle.
  * On success, `*data_out` receives a heap-allocated opaque pointer.
  * The caller must free it with `int2dds_participant_builtin_topic_data_destroy`.
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `handle` must point to a 16-byte buffer
+ * - `data_out` must be a valid pointer to a null pointer
  */
 Int2DdsRet int2dds_participant_get_discovered_participant_data(const struct Int2DdsParticipant *participant,
                                                                const uint8_t (*handle)[16],
@@ -1035,6 +1235,11 @@ Int2DdsRet int2dds_participant_get_discovered_participant_data(const struct Int2
  * Get matched subscription data for a given handle.
  * On success, `*data_out` receives a heap-allocated opaque pointer.
  * The caller must free it with `int2dds_subscription_builtin_topic_data_destroy`.
+ *
+ * # Safety
+ * - `writer` must be a valid datawriter
+ * - `handle` must point to a 16-byte buffer
+ * - `data_out` must be a valid pointer to a null pointer
  */
 Int2DdsRet int2dds_datawriter_get_matched_subscription_data(const struct Int2DdsDataWriter *writer,
                                                             const uint8_t (*handle)[16],
@@ -1044,6 +1249,11 @@ Int2DdsRet int2dds_datawriter_get_matched_subscription_data(const struct Int2Dds
  * Get matched publication data for a given handle.
  * On success, `*data_out` receives a heap-allocated opaque pointer.
  * The caller must free it with `int2dds_publication_builtin_topic_data_destroy`.
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `handle` must point to a 16-byte buffer
+ * - `data_out` must be a valid pointer to a null pointer
  */
 Int2DdsRet int2dds_datareader_get_matched_publication_data(const struct Int2DdsDataReader *reader,
                                                            const uint8_t (*handle)[16],
@@ -1052,6 +1262,10 @@ Int2DdsRet int2dds_datareader_get_matched_publication_data(const struct Int2DdsD
 /**
  * Get the key from a ParticipantBuiltinTopicData.
  * `key_out` must point to a 12-byte buffer.
+ *
+ * # Safety
+ * - `data` must be a valid ParticipantBuiltinTopicData
+ * - `key_out` must point to a 12-byte buffer
  */
 Int2DdsRet int2dds_participant_builtin_topic_data_get_key(const struct Int2DdsParticipantBuiltinTopicData *data,
                                                           uint8_t (*key_out)[12]);
@@ -1059,6 +1273,12 @@ Int2DdsRet int2dds_participant_builtin_topic_data_get_key(const struct Int2DdsPa
 /**
  * Get the user_data from a ParticipantBuiltinTopicData.
  * Copies up to `capacity` bytes into `buf`. `size_out` receives the actual size.
+ *
+ * # Safety
+ * - `data` must be a valid ParticipantBuiltinTopicData
+ * - `buf` may be null to query only the required size; otherwise it must
+ *   point to at least `capacity` writable bytes
+ * - `size_out` must be a valid pointer, or null
  */
 Int2DdsRet int2dds_participant_builtin_topic_data_get_user_data(const struct Int2DdsParticipantBuiltinTopicData *data,
                                                                 uint8_t *buf,
@@ -1067,12 +1287,20 @@ Int2DdsRet int2dds_participant_builtin_topic_data_get_user_data(const struct Int
 
 /**
  * Free a ParticipantBuiltinTopicData obtained from discovery.
+ *
+ * # Safety
+ * - `data` must be a valid ParticipantBuiltinTopicData
+ * - `data` must not be used after this call
  */
 Int2DdsRet int2dds_participant_builtin_topic_data_destroy(struct Int2DdsParticipantBuiltinTopicData *data);
 
 /**
  * Get the key from a PublicationBuiltinTopicData.
  * `key_out` must point to a 12-byte buffer.
+ *
+ * # Safety
+ * - `data` must be a valid PublicationBuiltinTopicData
+ * - `key_out` must point to a 12-byte buffer
  */
 Int2DdsRet int2dds_publication_builtin_topic_data_get_key(const struct Int2DdsPublicationBuiltinTopicData *data,
                                                           uint8_t (*key_out)[12]);
@@ -1080,6 +1308,10 @@ Int2DdsRet int2dds_publication_builtin_topic_data_get_key(const struct Int2DdsPu
 /**
  * Get the endpoint GUID from a PublicationBuiltinTopicData.
  * `guid_out` must point to a 16-byte buffer.
+ *
+ * # Safety
+ * - `data` must be a valid PublicationBuiltinTopicData
+ * - `guid_out` must point to a 16-byte buffer
  */
 Int2DdsRet int2dds_publication_builtin_topic_data_get_endpoint_guid(const struct Int2DdsPublicationBuiltinTopicData *data,
                                                                     uint8_t (*guid_out)[16]);
@@ -1087,6 +1319,10 @@ Int2DdsRet int2dds_publication_builtin_topic_data_get_endpoint_guid(const struct
 /**
  * Get the participant key from a PublicationBuiltinTopicData.
  * `key_out` must point to a 12-byte buffer.
+ *
+ * # Safety
+ * - `data` must be a valid PublicationBuiltinTopicData
+ * - `key_out` must point to a 12-byte buffer
  */
 Int2DdsRet int2dds_publication_builtin_topic_data_get_participant_key(const struct Int2DdsPublicationBuiltinTopicData *data,
                                                                       uint8_t (*key_out)[12]);
@@ -1095,6 +1331,12 @@ Int2DdsRet int2dds_publication_builtin_topic_data_get_participant_key(const stru
  * Get the topic name from a PublicationBuiltinTopicData.
  * Copies a null-terminated UTF-8 string into `buf`.
  * `size_out` receives the required size (including null terminator).
+ *
+ * # Safety
+ * - `data` must be a valid PublicationBuiltinTopicData
+ * - `buf` may be null to query only the required size; otherwise it must
+ *   point to at least `capacity` writable bytes
+ * - `size_out` must be a valid pointer, or null
  */
 Int2DdsRet int2dds_publication_builtin_topic_data_get_topic_name(const struct Int2DdsPublicationBuiltinTopicData *data,
                                                                  uint8_t *buf,
@@ -1105,11 +1347,29 @@ Int2DdsRet int2dds_publication_builtin_topic_data_get_topic_name(const struct In
  * Get the type name from a PublicationBuiltinTopicData.
  * Copies a null-terminated UTF-8 string into `buf`.
  * `size_out` receives the required size (including null terminator).
+ *
+ * # Safety
+ * - `data` must be a valid PublicationBuiltinTopicData
+ * - `buf` may be null to query only the required size; otherwise it must
+ *   point to at least `capacity` writable bytes
+ * - `size_out` must be a valid pointer, or null
  */
 Int2DdsRet int2dds_publication_builtin_topic_data_get_type_name(const struct Int2DdsPublicationBuiltinTopicData *data,
                                                                 uint8_t *buf,
                                                                 uintptr_t capacity,
                                                                 uintptr_t *size_out);
+
+/**
+ * Take a clone of the TypeObject embedded in a PublicationBuiltinTopicData.
+ * Caller owns the returned handle and must destroy it via `int2dds_type_object_destroy`.
+ * Returns DYNAMIC_FIELD_NOT_FOUND if the publication did not carry a TypeObject.
+ *
+ * # Safety
+ * - `data` must be a valid PublicationBuiltinTopicData
+ * - `out` must be a valid pointer to a null pointer
+ */
+Int2DdsRet int2dds_publication_builtin_topic_data_take_type_object(const struct Int2DdsPublicationBuiltinTopicData *data,
+                                                                   struct Int2DdsTypeObject **out);
 
 /**
  * Get the reliability kind from a PublicationBuiltinTopicData.
@@ -1196,12 +1456,20 @@ Int2DdsRet int2dds_publication_builtin_topic_data_get_user_data(const struct Int
 
 /**
  * Free a PublicationBuiltinTopicData obtained from discovery.
+ *
+ * # Safety
+ * - `data` must be a valid PublicationBuiltinTopicData
+ * - `data` must not be used after this call
  */
 Int2DdsRet int2dds_publication_builtin_topic_data_destroy(struct Int2DdsPublicationBuiltinTopicData *data);
 
 /**
  * Get the key from a SubscriptionBuiltinTopicData.
  * `key_out` must point to a 12-byte buffer.
+ *
+ * # Safety
+ * - `data` must be a valid SubscriptionBuiltinTopicData
+ * - `key_out` must point to a 12-byte buffer
  */
 Int2DdsRet int2dds_subscription_builtin_topic_data_get_key(const struct Int2DdsSubscriptionBuiltinTopicData *data,
                                                            uint8_t (*key_out)[12]);
@@ -1209,6 +1477,10 @@ Int2DdsRet int2dds_subscription_builtin_topic_data_get_key(const struct Int2DdsS
 /**
  * Get the endpoint GUID from a SubscriptionBuiltinTopicData.
  * `guid_out` must point to a 16-byte buffer.
+ *
+ * # Safety
+ * - `data` must be a valid SubscriptionBuiltinTopicData
+ * - `guid_out` must point to a 16-byte buffer
  */
 Int2DdsRet int2dds_subscription_builtin_topic_data_get_endpoint_guid(const struct Int2DdsSubscriptionBuiltinTopicData *data,
                                                                      uint8_t (*guid_out)[16]);
@@ -1216,6 +1488,10 @@ Int2DdsRet int2dds_subscription_builtin_topic_data_get_endpoint_guid(const struc
 /**
  * Get the participant key from a SubscriptionBuiltinTopicData.
  * `key_out` must point to a 12-byte buffer.
+ *
+ * # Safety
+ * - `data` must be a valid SubscriptionBuiltinTopicData
+ * - `key_out` must point to a 12-byte buffer
  */
 Int2DdsRet int2dds_subscription_builtin_topic_data_get_participant_key(const struct Int2DdsSubscriptionBuiltinTopicData *data,
                                                                        uint8_t (*key_out)[12]);
@@ -1224,6 +1500,12 @@ Int2DdsRet int2dds_subscription_builtin_topic_data_get_participant_key(const str
  * Get the topic name from a SubscriptionBuiltinTopicData.
  * Copies a null-terminated UTF-8 string into `buf`.
  * `size_out` receives the required size (including null terminator).
+ *
+ * # Safety
+ * - `data` must be a valid SubscriptionBuiltinTopicData
+ * - `buf` may be null to query only the required size; otherwise it must
+ *   point to at least `capacity` writable bytes
+ * - `size_out` must be a valid pointer, or null
  */
 Int2DdsRet int2dds_subscription_builtin_topic_data_get_topic_name(const struct Int2DdsSubscriptionBuiltinTopicData *data,
                                                                   uint8_t *buf,
@@ -1234,6 +1516,12 @@ Int2DdsRet int2dds_subscription_builtin_topic_data_get_topic_name(const struct I
  * Get the type name from a SubscriptionBuiltinTopicData.
  * Copies a null-terminated UTF-8 string into `buf`.
  * `size_out` receives the required size (including null terminator).
+ *
+ * # Safety
+ * - `data` must be a valid SubscriptionBuiltinTopicData
+ * - `buf` may be null to query only the required size; otherwise it must
+ *   point to at least `capacity` writable bytes
+ * - `size_out` must be a valid pointer, or null
  */
 Int2DdsRet int2dds_subscription_builtin_topic_data_get_type_name(const struct Int2DdsSubscriptionBuiltinTopicData *data,
                                                                  uint8_t *buf,
@@ -1313,83 +1601,107 @@ Int2DdsRet int2dds_subscription_builtin_topic_data_get_user_data(const struct In
 
 /**
  * Free a SubscriptionBuiltinTopicData obtained from discovery.
+ *
+ * # Safety
+ * - `data` must be a valid SubscriptionBuiltinTopicData
+ * - `data` must not be used after this call
  */
 Int2DdsRet int2dds_subscription_builtin_topic_data_destroy(struct Int2DdsSubscriptionBuiltinTopicData *data);
 
 /**
- * Destroy a publication builtin data handle. Safe to call with null.
+ * Register a callback for remote endpoint discovery events. `callback` must be
+ * non-null; to disable, register a no-op callback (or destroy the participant)
+ * before freeing `ctx`.
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `callback` must be a valid function pointer
+ * - `ctx` is passed back to `callback` unchanged and must stay valid for as long as
+ *   the callback can fire
  */
-void int2dds_publication_data_destroy(struct Int2DdsPublicationBuiltinData *p);
-
-/**
- * Copy the topic name of a discovered publication into `buf`.
- */
-Int2DdsRet int2dds_publication_data_topic_name(const struct Int2DdsPublicationBuiltinData *p,
-                                               char *buf,
-                                               uintptr_t buf_len,
-                                               uintptr_t *out_len);
-
-/**
- * Copy the type name of a discovered publication into `buf`.
- */
-Int2DdsRet int2dds_publication_data_type_name(const struct Int2DdsPublicationBuiltinData *p,
-                                              char *buf,
-                                              uintptr_t buf_len,
-                                              uintptr_t *out_len);
-
-/**
- * Take a clone of the TypeObject embedded in a publication discovery sample.
- * Caller owns the returned handle and must destroy it via `int2dds_type_object_destroy`.
- * Returns DYNAMIC_FIELD_NOT_FOUND if the publication did not carry a TypeObject.
- */
-Int2DdsRet int2dds_publication_data_take_type_object(const struct Int2DdsPublicationBuiltinData *p,
-                                                     struct Int2DdsTypeObject **out);
+Int2DdsRet int2dds_participant_set_endpoint_discovery_callback(const struct Int2DdsParticipant *participant,
+                                                               Int2DdsEndpointDiscoveryCallback callback,
+                                                               void *ctx);
 
 /**
  * Get the builtin subscriber for discovery topics.
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `out` must be a valid pointer to a null pointer
  */
-Int2DdsRet int2dds_get_builtin_subscriber(const struct Int2DdsParticipant *participant,
-                                          struct Int2DdsSubscriber **out);
+Int2DdsRet int2dds_participant_get_builtin_subscriber(const struct Int2DdsParticipant *participant,
+                                                      struct Int2DdsSubscriber **out);
 
 /**
  * Take one DCPSPublication discovery sample, optionally filtered by topic
  * name. Blocks up to `timeout_ms` milliseconds (negative = infinite). Returns
- * DYNAMIC_TIMEOUT on no match.
+ * DYNAMIC_TIMEOUT on no match. Destroy the result via
+ * `int2dds_publication_builtin_topic_data_destroy`.
+ *
+ * # Safety
+ * - `builtin_sub` must be a valid subscriber
+ * - `topic_name_filter` must be a valid null-terminated C string, or null to accept
+ *   any topic
+ * - `out` must be a valid pointer to a null pointer
  */
-Int2DdsRet int2dds_take_publication_data(const struct Int2DdsSubscriber *builtin_sub,
-                                         const char *topic_name_filter,
-                                         int32_t timeout_ms,
-                                         struct Int2DdsPublicationBuiltinData **out);
+Int2DdsRet int2dds_subscriber_take_publication_data(const struct Int2DdsSubscriber *builtin_sub,
+                                                    const char *topic_name_filter,
+                                                    int32_t timeout_ms,
+                                                    struct Int2DdsPublicationBuiltinTopicData **out);
 
 /**
  * High-level helper: wait until a publication for `topic_name` is discovered
  * AND its TypeObject is present, then return the TypeObject and type name.
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `topic_name` must be a valid null-terminated C string
+ * - `type_obj_out` must be a valid pointer to a null pointer
+ * - `type_name_buf` must point to at least `type_name_buf_len` writable bytes
+ * - `out_len` must be a valid pointer
  */
-Int2DdsRet int2dds_wait_for_type_object(const struct Int2DdsParticipant *participant,
-                                        const char *topic_name,
-                                        int32_t timeout_ms,
-                                        struct Int2DdsTypeObject **type_obj_out,
-                                        char *type_name_buf,
-                                        uintptr_t type_name_buf_len,
-                                        uintptr_t *out_len);
+Int2DdsRet int2dds_participant_wait_for_type_object(const struct Int2DdsParticipant *participant,
+                                                    const char *topic_name,
+                                                    int32_t timeout_ms,
+                                                    struct Int2DdsTypeObject **type_obj_out,
+                                                    char *type_name_buf,
+                                                    uintptr_t type_name_buf_len,
+                                                    uintptr_t *out_len);
 
 /**
  * Destroy a TypeObject handle. Safe to call with null.
+ *
+ * # Safety
+ * - `t` must be a valid TypeObject handle, or null (null is a no-op)
+ * - `t` must not be used after this call
  */
 void int2dds_type_object_destroy(struct Int2DdsTypeObject *t);
 
 /**
  * Return extensibility: 0 = Final, 1 = Appendable, 2 = Mutable.
+ *
+ * # Safety
+ * - `t` must be a valid TypeObject handle
+ * - `out` must be a valid pointer
  */
 Int2DdsRet int2dds_type_object_extensibility(const struct Int2DdsTypeObject *t, int32_t *out);
 
 /**
  * Return the number of struct members.
+ *
+ * # Safety
+ * - `t` must be a valid TypeObject handle
+ * - `out` must be a valid pointer
  */
 Int2DdsRet int2dds_type_object_member_count(const struct Int2DdsTypeObject *t, uint32_t *out);
 
 /**
  * Fill `out` with member info at `index`.
+ *
+ * # Safety
+ * - `t` must be a valid TypeObject handle
+ * - `out` must be a valid pointer to a member info struct
  */
 Int2DdsRet int2dds_type_object_member_info(const struct Int2DdsTypeObject *t,
                                            uint32_t index,
@@ -1397,6 +1709,11 @@ Int2DdsRet int2dds_type_object_member_info(const struct Int2DdsTypeObject *t,
 
 /**
  * Copy member name at `index` into `buf`.
+ *
+ * # Safety
+ * - `t` must be a valid TypeObject handle
+ * - `buf` must point to at least `buf_len` writable bytes
+ * - `out_len` must be a valid pointer
  */
 Int2DdsRet int2dds_type_object_member_name(const struct Int2DdsTypeObject *t,
                                            uint32_t index,
@@ -1406,6 +1723,11 @@ Int2DdsRet int2dds_type_object_member_name(const struct Int2DdsTypeObject *t,
 
 /**
  * Find a member index by name.
+ *
+ * # Safety
+ * - `t` must be a valid TypeObject handle
+ * - `name` must be a valid null-terminated C string
+ * - `index_out` must be a valid pointer
  */
 Int2DdsRet int2dds_type_object_find_member(const struct Int2DdsTypeObject *t,
                                            const char *name,
@@ -1414,6 +1736,14 @@ Int2DdsRet int2dds_type_object_find_member(const struct Int2DdsTypeObject *t,
 /**
  * Register a topic backed by a discovered TypeObject. The TypeObject is cloned
  * internally; the caller still owns and must destroy `type_obj`.
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `topic_name` must be a valid null-terminated C string
+ * - `type_name` must be a valid null-terminated C string
+ * - `type_obj` must be a valid TypeObject handle
+ * - `qos` can be null for the default QoS
+ * - `out` must be a valid pointer to a null pointer
  */
 Int2DdsRet int2dds_create_topic_with_type_object(const struct Int2DdsParticipant *participant,
                                                  const char *topic_name,
@@ -1424,6 +1754,12 @@ Int2DdsRet int2dds_create_topic_with_type_object(const struct Int2DdsParticipant
 
 /**
  * Read a char8 field (returned as its byte value) from a flat sample.
+ *
+ * # Safety
+ * - `bytes` must point to at least `len` readable bytes
+ * - `type_obj` must be a valid TypeObject handle
+ * - `field_name` must be a valid null-terminated C string
+ * - `out` must point to at least `None` writable bytes
  */
 Int2DdsRet int2dds_dynamic_sample_get_char8(const uint8_t *bytes,
                                             uintptr_t len,
@@ -1433,6 +1769,13 @@ Int2DdsRet int2dds_dynamic_sample_get_char8(const uint8_t *bytes,
 
 /**
  * Read a string field by name from a flat sample.
+ *
+ * # Safety
+ * - `bytes` must point to at least `len` readable bytes
+ * - `type_obj` must be a valid TypeObject handle
+ * - `field_name` must be a valid null-terminated C string
+ * - `out_buf` must point to at least `buf_cap` writable bytes
+ * - `out_len` must be a valid pointer
  */
 Int2DdsRet int2dds_dynamic_sample_get_string(const uint8_t *bytes,
                                              uintptr_t len,
@@ -1442,6 +1785,13 @@ Int2DdsRet int2dds_dynamic_sample_get_string(const uint8_t *bytes,
                                              uintptr_t buf_cap,
                                              uintptr_t *out_len);
 
+/**
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `bytes` must point to at least `len` readable bytes
+ * - `type_obj` must be a valid TypeObject handle
+ * - `out` must be a valid pointer to a null pointer
+ */
 Int2DdsRet int2dds_dynamic_data_from_sample(const struct Int2DdsParticipant *participant,
                                             const uint8_t *bytes,
                                             uintptr_t len,
@@ -1450,11 +1800,20 @@ Int2DdsRet int2dds_dynamic_data_from_sample(const struct Int2DdsParticipant *par
 
 /**
  * Destroy a DynamicData handle. Safe to call with null.
+ *
+ * # Safety
+ * - `d` must be a valid DynamicData handle, or null (null is a no-op)
+ * - `d` must not be used after this call
  */
 void int2dds_dynamic_data_destroy(struct Int2DdsDynamicData *d);
 
 /**
  * Read a char8 field (as its byte value) at `field_path`.
+ *
+ * # Safety
+ * - `data` must be a valid DynamicData handle
+ * - `field_path` must be a valid null-terminated C string
+ * - `out` must point to at least `None` writable bytes
  */
 Int2DdsRet int2dds_dynamic_data_get_char8(const struct Int2DdsDynamicData *data,
                                           const char *field_path,
@@ -1462,6 +1821,12 @@ Int2DdsRet int2dds_dynamic_data_get_char8(const struct Int2DdsDynamicData *data,
 
 /**
  * Read a string field at `field_path` into a caller-supplied buffer.
+ *
+ * # Safety
+ * - `data` must be a valid DynamicData handle
+ * - `field_path` must be a valid null-terminated C string
+ * - `out_buf` must point to at least `buf_cap` writable bytes
+ * - `out_len` must be a valid pointer
  */
 Int2DdsRet int2dds_dynamic_data_get_string(const struct Int2DdsDynamicData *data,
                                            const char *field_path,
@@ -1471,6 +1836,11 @@ Int2DdsRet int2dds_dynamic_data_get_string(const struct Int2DdsDynamicData *data
 
 /**
  * Get the element count of a sequence/array field at `field_path`.
+ *
+ * # Safety
+ * - `data` must be a valid DynamicData handle
+ * - `field_path` must be a valid null-terminated C string
+ * - `out` must be a valid pointer
  */
 Int2DdsRet int2dds_dynamic_data_get_len(const struct Int2DdsDynamicData *data,
                                         const char *field_path,
@@ -1479,6 +1849,11 @@ Int2DdsRet int2dds_dynamic_data_get_len(const struct Int2DdsDynamicData *data,
 /**
  * Extract a nested struct value at `field_path` as a new DynamicData handle.
  * Destroy it with `int2dds_dynamic_data_destroy`.
+ *
+ * # Safety
+ * - `data` must be a valid DynamicData handle
+ * - `field_path` must be a valid null-terminated C string
+ * - `out` must be a valid pointer to a null pointer
  */
 Int2DdsRet int2dds_dynamic_data_get_member(const struct Int2DdsDynamicData *data,
                                            const char *field_path,
@@ -1486,12 +1861,23 @@ Int2DdsRet int2dds_dynamic_data_get_member(const struct Int2DdsDynamicData *data
 
 /**
  * Destroy a dynamic type support handle. Safe to call with null.
+ *
+ * # Safety
+ * - `s` must be a valid dynamic type support handle, or null (null is a no-op)
+ * - `s` must not be used after this call
  */
 void int2dds_dynamic_type_support_destroy(struct Int2DdsDynamicTypeSupport *s);
 
 /**
  * Register a topic backed by a dynamic type support. The support's full type
  * closure is advertised during discovery.
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `topic_name` must be a valid null-terminated C string
+ * - `type_support` must be a valid dynamic type support handle
+ * - `qos` can be null for the default QoS
+ * - `out` must be a valid pointer to a null pointer
  */
 Int2DdsRet int2dds_create_topic_dynamic(const struct Int2DdsParticipant *participant,
                                         const char *topic_name,
@@ -1501,6 +1887,13 @@ Int2DdsRet int2dds_create_topic_dynamic(const struct Int2DdsParticipant *partici
 
 /**
  * Create a dynamic DataWriter. Pass null `qos` to use the default.
+ *
+ * # Safety
+ * - `publisher` must be a valid publisher
+ * - `topic` must be a valid topic
+ * - `type_support` must be a valid dynamic type support handle
+ * - `qos` can be null for the default QoS
+ * - `out` must be a valid pointer to a null pointer
  */
 Int2DdsRet int2dds_create_datawriter_dynamic(const struct Int2DdsPublisher *publisher,
                                              const struct Int2DdsTopic *topic,
@@ -1510,6 +1903,13 @@ Int2DdsRet int2dds_create_datawriter_dynamic(const struct Int2DdsPublisher *publ
 
 /**
  * Create a dynamic DataReader. Pass null `qos` to use the default.
+ *
+ * # Safety
+ * - `subscriber` must be a valid subscriber
+ * - `topic` must be a valid topic
+ * - `type_support` must be a valid dynamic type support handle
+ * - `qos` can be null for the default QoS
+ * - `out` must be a valid pointer to a null pointer
  */
 Int2DdsRet int2dds_create_datareader_dynamic(const struct Int2DdsSubscriber *subscriber,
                                              const struct Int2DdsTopic *topic,
@@ -1519,22 +1919,71 @@ Int2DdsRet int2dds_create_datareader_dynamic(const struct Int2DdsSubscriber *sub
 
 /**
  * Destroy a dynamic DataWriter handle. Safe to call with null.
+ *
+ * # Safety
+ * - `w` must be a valid dynamic datawriter, or null (null is a no-op)
+ * - `w` must not be used after this call
  */
 void int2dds_dynamic_writer_destroy(struct Int2DdsDynamicDataWriter *w);
 
 /**
  * Destroy a dynamic DataReader handle. Safe to call with null.
+ *
+ * # Safety
+ * - `r` must be a valid dynamic datareader, or null (null is a no-op)
+ * - `r` must not be used after this call
  */
 void int2dds_dynamic_reader_destroy(struct Int2DdsDynamicDataReader *r);
 
 /**
+ * Get the effective QoS of a dynamic DataWriter.
+ *
+ * A dynamic writer handle is `Int2DdsDynamicDataWriter`, a different type from the
+ * typed `Int2DdsDataWriter`, so `int2dds_datawriter_get_qos` cannot be used on it.
+ * The QoS handle written to `qos_out` is the *same* `Int2DdsDataWriterQos` type the
+ * typed path returns, so every `int2dds_datawriter_qos_get_*` accessor applies.
+ * The caller owns it and must release it with `int2dds_datawriter_qos_destroy`.
+ *
+ * # Safety
+ *
+ * `writer` must be a valid handle from `int2dds_create_datawriter_dynamic` and
+ * `qos_out` must point to writable storage for one pointer.
+ */
+Int2DdsRet int2dds_dynamic_writer_get_qos(const struct Int2DdsDynamicDataWriter *writer,
+                                          struct Int2DdsDataWriterQos **qos_out);
+
+/**
+ * Get the effective QoS of a dynamic DataReader.
+ *
+ * Counterpart to `int2dds_dynamic_writer_get_qos`. The handle written to `qos_out`
+ * is the same `Int2DdsDataReaderQos` type the typed path returns, so every
+ * `int2dds_datareader_qos_get_*` accessor applies. The caller owns it and must
+ * release it with `int2dds_datareader_qos_destroy`.
+ *
+ * # Safety
+ *
+ * `reader` must be a valid handle from `int2dds_create_datareader_dynamic` and
+ * `qos_out` must point to writable storage for one pointer.
+ */
+Int2DdsRet int2dds_dynamic_reader_get_qos(const struct Int2DdsDynamicDataReader *reader,
+                                          struct Int2DdsDataReaderQos **qos_out);
+
+/**
  * Current number of DataReaders matched to this dynamic writer.
+ *
+ * # Safety
+ * - `writer` must be a valid dynamic datawriter
+ * - `out` must be a valid pointer
  */
 Int2DdsRet int2dds_dynamic_writer_publication_matched_count(const struct Int2DdsDynamicDataWriter *writer,
                                                             int32_t *out);
 
 /**
  * Current number of DataWriters matched to this dynamic reader.
+ *
+ * # Safety
+ * - `reader` must be a valid dynamic datareader
+ * - `out` must be a valid pointer
  */
 Int2DdsRet int2dds_dynamic_reader_subscription_matched_count(const struct Int2DdsDynamicDataReader *reader,
                                                              int32_t *out);
@@ -1543,12 +1992,20 @@ Int2DdsRet int2dds_dynamic_reader_subscription_matched_count(const struct Int2Dd
  * Create an empty, writable DynamicData for the given type support.
  * Populate it with the `int2dds_dynamic_data_set_*` setters, then publish via
  * `int2dds_dynamic_writer_write`. Destroy with `int2dds_dynamic_data_destroy`.
+ *
+ * # Safety
+ * - `type_support` must be a valid dynamic type support handle
+ * - `out` must be a valid pointer to a null pointer
  */
 Int2DdsRet int2dds_dynamic_data_create(const struct Int2DdsDynamicTypeSupport *type_support,
                                        struct Int2DdsDynamicData **out);
 
 /**
  * Set a char8 field (given as its byte value) on a top-level field.
+ *
+ * # Safety
+ * - `data` must be a valid DynamicData handle
+ * - `field` must be a valid null-terminated C string
  */
 Int2DdsRet int2dds_dynamic_data_set_char8(struct Int2DdsDynamicData *data,
                                           const char *field,
@@ -1556,6 +2013,11 @@ Int2DdsRet int2dds_dynamic_data_set_char8(struct Int2DdsDynamicData *data,
 
 /**
  * Set a string field on a top-level field. `value` must be null-terminated UTF-8.
+ *
+ * # Safety
+ * - `data` must be a valid DynamicData handle
+ * - `field` must be a valid null-terminated C string
+ * - `value` must be a valid null-terminated C string
  */
 Int2DdsRet int2dds_dynamic_data_set_string(struct Int2DdsDynamicData *data,
                                            const char *field,
@@ -1563,6 +2025,10 @@ Int2DdsRet int2dds_dynamic_data_set_string(struct Int2DdsDynamicData *data,
 
 /**
  * Publish a populated DynamicData sample.
+ *
+ * # Safety
+ * - `writer` must be a valid dynamic datawriter
+ * - `data` must be a valid DynamicData handle
  */
 Int2DdsRet int2dds_dynamic_writer_write(const struct Int2DdsDynamicDataWriter *writer,
                                         const struct Int2DdsDynamicData *data);
@@ -1572,6 +2038,12 @@ Int2DdsRet int2dds_dynamic_writer_write(const struct Int2DdsDynamicDataWriter *w
  * new DynamicData handle (destroy with `int2dds_dynamic_data_destroy`) and, if
  * non-null, `out_info` receives the sample info. Returns INT2DDS_RET_NO_DATA
  * when no valid sample is available.
+ *
+ * # Safety
+ * - `reader` must be a valid dynamic datareader
+ * - `out_data` must be a valid pointer to a null pointer
+ * - `out_info` must be a valid pointer, or null if the caller does not need the
+ *   sample info
  */
 Int2DdsRet int2dds_dynamic_reader_take(const struct Int2DdsDynamicDataReader *reader,
                                        struct Int2DdsDynamicData **out_data,
@@ -1579,22 +2051,37 @@ Int2DdsRet int2dds_dynamic_reader_take(const struct Int2DdsDynamicDataReader *re
 
 /**
  * Construct a char8 value from its byte value.
+ *
+ * # Safety
+ * - `out` must be a valid pointer to a null pointer
  */
 Int2DdsRet int2dds_dynamic_value_char8(uint8_t value, struct Int2DdsDynamicValue **out);
 
 /**
  * Construct a UTF-8 string value. `value` must be null-terminated UTF-8.
+ *
+ * # Safety
+ * - `value` must be a valid null-terminated C string
+ * - `out` must be a valid pointer to a null pointer
  */
 Int2DdsRet int2dds_dynamic_value_string(const char *value, struct Int2DdsDynamicValue **out);
 
 /**
  * Construct a wide-string value. `value` must be null-terminated UTF-8.
+ *
+ * # Safety
+ * - `value` must be a valid null-terminated C string
+ * - `out` must be a valid pointer to a null pointer
  */
 Int2DdsRet int2dds_dynamic_value_wstring(const char *value, struct Int2DdsDynamicValue **out);
 
 /**
  * Construct an enum value from its literal name and numeric value. The name may
  * be empty when only the numeric value is known.
+ *
+ * # Safety
+ * - `name` must be a valid null-terminated C string
+ * - `out` must be a valid pointer to a null pointer
  */
 Int2DdsRet int2dds_dynamic_value_enum(const char *name,
                                       int32_t value,
@@ -1602,6 +2089,10 @@ Int2DdsRet int2dds_dynamic_value_enum(const char *name,
 
 /**
  * Construct a nested struct value by cloning a DynamicData instance.
+ *
+ * # Safety
+ * - `data` must be a valid DynamicData handle
+ * - `out` must be a valid pointer to a null pointer
  */
 Int2DdsRet int2dds_dynamic_value_struct(const struct Int2DdsDynamicData *data,
                                         struct Int2DdsDynamicValue **out);
@@ -1609,24 +2100,38 @@ Int2DdsRet int2dds_dynamic_value_struct(const struct Int2DdsDynamicData *data,
 /**
  * Construct an empty sequence value. Append elements with
  * `int2dds_dynamic_value_push`.
+ *
+ * # Safety
+ * - `out` must be a valid pointer to a null pointer
  */
 Int2DdsRet int2dds_dynamic_value_sequence(struct Int2DdsDynamicValue **out);
 
 /**
  * Construct an empty array value. Append elements with
  * `int2dds_dynamic_value_push`.
+ *
+ * # Safety
+ * - `out` must be a valid pointer to a null pointer
  */
 Int2DdsRet int2dds_dynamic_value_array(struct Int2DdsDynamicValue **out);
 
 /**
  * Construct an empty map value. Add entries with
  * `int2dds_dynamic_value_map_insert`.
+ *
+ * # Safety
+ * - `out` must be a valid pointer to a null pointer
  */
 Int2DdsRet int2dds_dynamic_value_map(struct Int2DdsDynamicValue **out);
 
 /**
  * Construct a union value from a discriminator and the selected branch value.
  * Both inputs are consumed on success.
+ *
+ * # Safety
+ * - `discriminator` must be a valid value handle
+ * - `value` must be a valid value handle
+ * - `out` must be a valid pointer to a null pointer
  */
 Int2DdsRet int2dds_dynamic_value_union(struct Int2DdsDynamicValue *discriminator,
                                        struct Int2DdsDynamicValue *value,
@@ -1635,6 +2140,10 @@ Int2DdsRet int2dds_dynamic_value_union(struct Int2DdsDynamicValue *discriminator
 /**
  * Append `element` to a sequence/array value. Consumes `element` on success;
  * on error `element` is left owned by the caller.
+ *
+ * # Safety
+ * - `collection` must be a valid value handle
+ * - `element` must be a valid value handle
  */
 Int2DdsRet int2dds_dynamic_value_push(struct Int2DdsDynamicValue *collection,
                                       struct Int2DdsDynamicValue *element);
@@ -1642,6 +2151,11 @@ Int2DdsRet int2dds_dynamic_value_push(struct Int2DdsDynamicValue *collection,
 /**
  * Insert a key/value pair into a map value. Consumes `key` and `value` on
  * success; on error both are left owned by the caller.
+ *
+ * # Safety
+ * - `map` must be a valid value handle
+ * - `key` must be a valid value handle
+ * - `value` must be a valid value handle
  */
 Int2DdsRet int2dds_dynamic_value_map_insert(struct Int2DdsDynamicValue *map,
                                             struct Int2DdsDynamicValue *key,
@@ -1649,6 +2163,10 @@ Int2DdsRet int2dds_dynamic_value_map_insert(struct Int2DdsDynamicValue *map,
 
 /**
  * Destroy a value handle. Safe to call with null.
+ *
+ * # Safety
+ * - `value` must be a valid value handle, or null (null is a no-op)
+ * - `value` must not be used after this call
  */
 void int2dds_dynamic_value_destroy(struct Int2DdsDynamicValue *value);
 
@@ -1656,6 +2174,11 @@ void int2dds_dynamic_value_destroy(struct Int2DdsDynamicValue *value);
  * Set a top-level field to `value`. Consumes `value` on a successful parse of
  * `field` (regardless of whether the field exists); returns the field handle to
  * the caller only when `field` is not valid UTF-8.
+ *
+ * # Safety
+ * - `data` must be a valid DynamicData handle
+ * - `field` must be a valid null-terminated C string
+ * - `value` must be a valid value handle
  */
 Int2DdsRet int2dds_dynamic_data_set_value(struct Int2DdsDynamicData *data,
                                           const char *field,
@@ -1664,6 +2187,11 @@ Int2DdsRet int2dds_dynamic_data_set_value(struct Int2DdsDynamicData *data,
 /**
  * Clone the value at a dotted/indexed `path` into a new value handle. Destroy
  * it with `int2dds_dynamic_value_destroy`.
+ *
+ * # Safety
+ * - `data` must be a valid DynamicData handle
+ * - `path` must be a valid null-terminated C string
+ * - `out` must be a valid pointer to a null pointer
  */
 Int2DdsRet int2dds_dynamic_data_get_value(const struct Int2DdsDynamicData *data,
                                           const char *path,
@@ -1671,16 +2199,29 @@ Int2DdsRet int2dds_dynamic_data_get_value(const struct Int2DdsDynamicData *data,
 
 /**
  * Report the kind of a value (one of the `INT2DDS_VALUE_KIND_*` constants).
+ *
+ * # Safety
+ * - `value` must be a valid value handle
+ * - `out` must be a valid pointer
  */
 Int2DdsRet int2dds_dynamic_value_kind(const struct Int2DdsDynamicValue *value, int32_t *out);
 
 /**
  * Read a char8 value as its byte value.
+ *
+ * # Safety
+ * - `value` must be a valid value handle
+ * - `out` must point to at least `None` writable bytes
  */
 Int2DdsRet int2dds_dynamic_value_as_char8(const struct Int2DdsDynamicValue *value, uint8_t *out);
 
 /**
  * Read a string or wide-string value into `buf`.
+ *
+ * # Safety
+ * - `value` must be a valid value handle
+ * - `buf` must point to at least `buf_len` writable bytes
+ * - `out_len` must be a valid pointer
  */
 Int2DdsRet int2dds_dynamic_value_as_string(const struct Int2DdsDynamicValue *value,
                                            char *buf,
@@ -1690,6 +2231,11 @@ Int2DdsRet int2dds_dynamic_value_as_string(const struct Int2DdsDynamicValue *val
 /**
  * Format any value as a human-readable string into `buf`, regardless of kind
  * (mirrors the core `Display`).
+ *
+ * # Safety
+ * - `value` must be a valid value handle
+ * - `buf` must point to at least `buf_len` writable bytes
+ * - `out_len` must be a valid pointer
  */
 Int2DdsRet int2dds_dynamic_value_to_string(const struct Int2DdsDynamicValue *value,
                                            char *buf,
@@ -1699,6 +2245,12 @@ Int2DdsRet int2dds_dynamic_value_to_string(const struct Int2DdsDynamicValue *val
 /**
  * Read an enum value's literal name into `buf` and its numeric value into
  * `out_value`.
+ *
+ * # Safety
+ * - `value` must be a valid value handle
+ * - `buf` must point to at least `buf_len` writable bytes
+ * - `out_len` must be a valid pointer
+ * - `out_value` must be a valid pointer
  */
 Int2DdsRet int2dds_dynamic_value_as_enum(const struct Int2DdsDynamicValue *value,
                                          char *buf,
@@ -1708,21 +2260,37 @@ Int2DdsRet int2dds_dynamic_value_as_enum(const struct Int2DdsDynamicValue *value
 
 /**
  * Read a bitmask value's packed bits.
+ *
+ * # Safety
+ * - `value` must be a valid value handle
+ * - `out` must be a valid pointer
  */
 Int2DdsRet int2dds_dynamic_value_as_bitmask(const struct Int2DdsDynamicValue *value, uint64_t *out);
 
 /**
  * Read a bitset value's packed bitfields.
+ *
+ * # Safety
+ * - `value` must be a valid value handle
+ * - `out` must be a valid pointer
  */
 Int2DdsRet int2dds_dynamic_value_as_bitset(const struct Int2DdsDynamicValue *value, uint64_t *out);
 
 /**
  * Element count of a sequence/array/map value.
+ *
+ * # Safety
+ * - `value` must be a valid value handle
+ * - `out` must be a valid pointer
  */
 Int2DdsRet int2dds_dynamic_value_len(const struct Int2DdsDynamicValue *value, uintptr_t *out);
 
 /**
  * Clone the element at `index` of a sequence/array value.
+ *
+ * # Safety
+ * - `value` must be a valid value handle
+ * - `out` must be a valid pointer to a null pointer
  */
 Int2DdsRet int2dds_dynamic_value_element(const struct Int2DdsDynamicValue *value,
                                          uintptr_t index,
@@ -1730,6 +2298,10 @@ Int2DdsRet int2dds_dynamic_value_element(const struct Int2DdsDynamicValue *value
 
 /**
  * Clone the key of the map entry at `index`.
+ *
+ * # Safety
+ * - `value` must be a valid value handle
+ * - `out` must be a valid pointer to a null pointer
  */
 Int2DdsRet int2dds_dynamic_value_map_key(const struct Int2DdsDynamicValue *value,
                                          uintptr_t index,
@@ -1737,6 +2309,10 @@ Int2DdsRet int2dds_dynamic_value_map_key(const struct Int2DdsDynamicValue *value
 
 /**
  * Clone the value of the map entry at `index`.
+ *
+ * # Safety
+ * - `value` must be a valid value handle
+ * - `out` must be a valid pointer to a null pointer
  */
 Int2DdsRet int2dds_dynamic_value_map_value(const struct Int2DdsDynamicValue *value,
                                            uintptr_t index,
@@ -1745,18 +2321,30 @@ Int2DdsRet int2dds_dynamic_value_map_value(const struct Int2DdsDynamicValue *val
 /**
  * Clone a nested struct value into a new DynamicData handle. Destroy it with
  * `int2dds_dynamic_data_destroy`.
+ *
+ * # Safety
+ * - `value` must be a valid value handle
+ * - `out` must be a valid pointer to a null pointer
  */
 Int2DdsRet int2dds_dynamic_value_as_struct(const struct Int2DdsDynamicValue *value,
                                            struct Int2DdsDynamicData **out);
 
 /**
  * Clone a union value's discriminator into a new value handle.
+ *
+ * # Safety
+ * - `value` must be a valid value handle
+ * - `out` must be a valid pointer to a null pointer
  */
 Int2DdsRet int2dds_dynamic_value_union_discriminator(const struct Int2DdsDynamicValue *value,
                                                      struct Int2DdsDynamicValue **out);
 
 /**
  * Clone a union value's selected branch value into a new value handle.
+ *
+ * # Safety
+ * - `value` must be a valid value handle
+ * - `out` must be a valid pointer to a null pointer
  */
 Int2DdsRet int2dds_dynamic_value_union_value(const struct Int2DdsDynamicValue *value,
                                              struct Int2DdsDynamicValue **out);
@@ -1789,6 +2377,33 @@ Int2DdsRet int2dds_env_set_multicast_ttl(uint8_t ttl);
 Int2DdsRet int2dds_env_get_multicast_ttl(uint8_t *ttl_out, bool *has_value_out);
 
 /**
+ * Sets the QoS profile file path(s) to auto-load, via the `DDS_QOS_PROFILE`
+ * environment variable. The `DomainParticipantFactory` singleton auto-loads
+ * these when it first initializes (on the first participant creation); the
+ * `*_QOS_DEFAULT` resolution then draws QoS from the selected default profile.
+ *
+ * Multiple paths may be joined with `,` (also `;` on Windows / `:` on Unix).
+ *
+ * # Safety
+ * - `path` must be a valid, null-terminated UTF-8 C string.
+ * - Call before the first `DomainParticipant` is created so the factory
+ *   singleton picks it up when it initializes.
+ */
+Int2DdsRet int2dds_env_set_qos_profile(const char *path);
+
+/**
+ * Selects the default QoS profile (`"Library::Profile"`) via the
+ * `DDS_DEFAULT_QOS_PROFILE` environment variable. The `*_QOS_DEFAULT`
+ * resolution reads this at entity-creation time, so `NULL`-QoS creators
+ * (participant/publisher/writer with default QoS) draw from this profile.
+ *
+ * # Safety
+ * - `profile` must be a valid, null-terminated UTF-8 C string
+ *   (e.g. `"HelloWorldDataFrag::Reliable"`).
+ */
+Int2DdsRet int2dds_env_set_default_qos_profile(const char *profile);
+
+/**
  * Copy the calling thread's last error message (UTF-8, NUL-terminated) into `buf`.
  * Returns the full message byte length, excluding the NUL.
  *
@@ -1805,62 +2420,29 @@ int32_t int2dds_last_error_message(char *buf, int32_t buf_len);
  * Create a DomainParticipant
  *
  * # Safety
- * - `name` must be a valid null-terminated C string or null
+ * - `qos` can be null for the default QoS (engages the core resolution chain:
+ *   registered default → configured default profile → spec default); a non-null
+ *   handle is cloned internally and remains owned by the caller
  * - `participant_out` must be a valid pointer to a null pointer
  * - The returned participant must be freed with `int2dds_delete_participant`
  */
 Int2DdsRet int2dds_create_participant(const struct Int2DdsParticipantFactory *_factory,
-                                      const char *name,
                                       int32_t domain_id,
+                                      const struct Int2DdsParticipantQos *qos,
                                       struct Int2DdsParticipant **participant_out);
 
 /**
  * Create a DomainParticipant using a QoS profile path
  *
  * # Safety
- * - `name` must be a valid null-terminated C string or null
  * - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
  * - `participant_out` must be a valid pointer to a null pointer
  * - The returned participant must be freed with `int2dds_delete_participant`
  */
 Int2DdsRet int2dds_create_participant_with_profile(const struct Int2DdsParticipantFactory *_factory,
-                                                   const char *name,
                                                    int32_t domain_id,
                                                    const char *qos_path,
                                                    struct Int2DdsParticipant **participant_out);
-
-/**
- * Create a DomainParticipant with the given QoS handle.
- *
- * The handle is cloned internally; the caller still owns `qos` and must
- * destroy it with `int2dds_participant_qos_destroy`.
- *
- * # Safety
- * - `name` must be a valid null-terminated C string or null
- * - `qos` must be a valid QoS handle created by
- *   `int2dds_participant_qos_create_default`
- * - `participant_out` must be a valid pointer to a null pointer
- * - The returned participant must be freed with `int2dds_delete_participant`
- */
-Int2DdsRet int2dds_create_participant_with_qos(const struct Int2DdsParticipantFactory *_factory,
-                                               const char *name,
-                                               int32_t domain_id,
-                                               const struct Int2DdsParticipantQos *qos,
-                                               struct Int2DdsParticipant **participant_out);
-
-/**
- * Get the resolved default DomainParticipant QoS (registered default ->
- * configured default profile -> spec default), so callers can modify it (e.g.
- * set user_data) and pass it to `int2dds_create_participant_with_qos` without
- * losing the configured transport/discovery defaults that the bare
- * `int2dds_create_participant` resolution chain applies.
- *
- * # Safety
- * - `qos_out` must be a valid pointer to a null pointer
- * - The returned QoS must be freed with `int2dds_participant_qos_destroy`
- */
-Int2DdsRet int2dds_get_default_participant_qos(const struct Int2DdsParticipantFactory *_factory,
-                                               struct Int2DdsParticipantQos **qos_out);
 
 /**
  * Delete a DomainParticipant
@@ -1891,6 +2473,27 @@ Int2DdsRet int2dds_participant_get_domain_id(const struct Int2DdsParticipant *pa
                                              int32_t *domain_id_out);
 
 /**
+ * Set the QoS of a participant.
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `qos` must be a valid QoS created by `int2dds_participant_qos_create_default`
+ */
+Int2DdsRet int2dds_participant_set_qos(const struct Int2DdsParticipant *participant,
+                                       const struct Int2DdsParticipantQos *qos);
+
+/**
+ * Get the QoS of a participant.
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `qos_out` must be a valid pointer to a null pointer
+ * - The returned QoS must be freed with `int2dds_participant_qos_destroy`
+ */
+Int2DdsRet int2dds_participant_get_qos(const struct Int2DdsParticipant *participant,
+                                       struct Int2DdsParticipantQos **qos_out);
+
+/**
  * Delete all entities contained by a participant
  *
  * This operation deletes all Publisher, Subscriber, Topic, ContentFilteredTopic
@@ -1903,28 +2506,62 @@ Int2DdsRet int2dds_participant_get_domain_id(const struct Int2DdsParticipant *pa
 Int2DdsRet int2dds_participant_delete_contained_entities(const struct Int2DdsParticipant *participant);
 
 /**
+ * Get the participant's current wall-clock time.
+ *
+ * `sec` is a Unix timestamp (seconds since the epoch); `nanosec` is the
+ * sub-second remainder.
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `sec_out` and `nanosec_out` must be valid pointers
+ */
+Int2DdsRet int2dds_participant_get_current_time(const struct Int2DdsParticipant *participant,
+                                                int32_t *sec_out,
+                                                uint32_t *nanosec_out);
+
+/**
+ * Test whether an entity (Publisher/Subscriber/Topic and their children) with
+ * the given 16-byte instance handle belongs to this participant.
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `handle` must point to a 16-byte instance handle
+ * - `result_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_participant_contains_entity(const struct Int2DdsParticipant *participant,
+                                               const uint8_t (*handle)[16],
+                                               bool *result_out);
+
+/**
+ * Find an existing local Topic by name, blocking up to `timeout_ms` for it to
+ * appear (a negative value blocks indefinitely — avoid it if the topic may
+ * never exist). `dds_type_name` labels the returned handle for the raw path and
+ * must match the caller's expected type.
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `topic_name` and `dds_type_name` must be valid null-terminated C strings
+ * - `topic_out` must be a valid pointer to a null pointer
+ */
+Int2DdsRet int2dds_participant_find_topic(const struct Int2DdsParticipant *participant,
+                                          const char *topic_name,
+                                          const char *dds_type_name,
+                                          int32_t timeout_ms,
+                                          struct Int2DdsTopic **topic_out);
+
+/**
  * Create a Publisher
  *
  * # Safety
  * - `participant` must be a valid participant
- * - `qos` can be null for default QoS
+ * - `qos` can be null for the default QoS (engages the core resolution chain:
+ *   registered default → configured default profile → spec default)
  * - `publisher_out` must be a valid pointer to a null pointer
  * - The returned publisher must be freed with `int2dds_delete_publisher`
  */
 Int2DdsRet int2dds_create_publisher(const struct Int2DdsParticipant *participant,
+                                    const struct Int2DdsPublisherQos *qos,
                                     struct Int2DdsPublisher **publisher_out);
-
-/**
- * Create a Publisher with QoS
- *
- * # Safety
- * - `participant` must be a valid participant
- * - `qos` must be a valid publisher QoS handle
- * - `publisher_out` must be a valid pointer to a null pointer
- */
-Int2DdsRet int2dds_create_publisher_with_qos(const struct Int2DdsParticipant *participant,
-                                             const struct Int2DdsPublisherQos *qos,
-                                             struct Int2DdsPublisher **publisher_out);
 
 /**
  * Create a Publisher using a QoS profile path
@@ -1967,6 +2604,16 @@ Int2DdsRet int2dds_publisher_get_qos(const struct Int2DdsPublisher *publisher,
                                      struct Int2DdsPublisherQos **qos_out);
 
 /**
+ * Get the 16-byte instance handle of a Publisher.
+ *
+ * # Safety
+ * - `publisher` must be a valid publisher
+ * - `handle_out` must point to a 16-byte buffer
+ */
+Int2DdsRet int2dds_publisher_get_instance_handle(const struct Int2DdsPublisher *publisher,
+                                                 uint8_t (*handle_out)[16]);
+
+/**
  * Set QoS on a DataWriter
  *
  * Applies new QoS policies to an existing DataWriter. Some policies can only
@@ -1992,6 +2639,19 @@ Int2DdsRet int2dds_datawriter_set_qos(const struct Int2DdsDataWriter *writer,
  */
 Int2DdsRet int2dds_datawriter_get_qos(const struct Int2DdsDataWriter *writer,
                                       struct Int2DdsDataWriterQos **qos_out);
+
+/**
+ * Effective data representation of a DataWriter (`INT2DDS_QOS_DATA_REPR_*`).
+ *
+ * Resolves an unset (empty) DataRepresentation QoS to the library default, so
+ * generated serializers can encode exactly what the writer advertises over
+ * discovery. Falls back to the library default if the writer is null or its
+ * QoS cannot be read.
+ *
+ * # Safety
+ * - `writer` must be null or a valid datawriter
+ */
+int32_t int2dds_datawriter_data_representation(const struct Int2DdsDataWriter *writer);
 
 /**
  * Get the 16-byte RTPS GUID of a DataWriter.
@@ -2023,33 +2683,18 @@ Int2DdsRet int2dds_delete_publisher(struct Int2DdsPublisher *publisher);
  * - `publisher` must be a valid publisher
  * - `topic` must be a valid topic
  * - `qos` can be null for default QoS
- * - `writer_out` must be a valid pointer to a null pointer
- * - The returned writer must be freed with `int2dds_delete_datawriter`
- */
-Int2DdsRet int2dds_create_datawriter(const struct Int2DdsPublisher *publisher,
-                                     const struct Int2DdsTopic *topic,
-                                     const struct Int2DdsDataWriterQos *qos,
-                                     struct Int2DdsDataWriter **writer_out);
-
-/**
- * Create a DataWriter with listener callbacks
- *
- * # Safety
- * - `publisher` must be a valid publisher
- * - `topic` must be a valid topic
- * - `qos` can be null for default QoS
- * - `listener` can be null for no listener
- * - `mask` specifies which status changes trigger callbacks
+ * - `listener` can be null for no listener; `mask` specifies which status
+ *   changes trigger callbacks (pass 0 with a null listener)
  * - `writer_out` must be a valid pointer to a null pointer
  * - The returned writer must be freed with `int2dds_delete_datawriter`
  * - Listener callbacks must be thread-safe and remain valid until writer is deleted
  */
-Int2DdsRet int2dds_create_datawriter_with_listener(const struct Int2DdsPublisher *publisher,
-                                                   const struct Int2DdsTopic *topic,
-                                                   const struct Int2DdsDataWriterQos *qos,
-                                                   const struct Int2DdsDataWriterListener *listener,
-                                                   uint32_t mask,
-                                                   struct Int2DdsDataWriter **writer_out);
+Int2DdsRet int2dds_create_datawriter(const struct Int2DdsPublisher *publisher,
+                                     const struct Int2DdsTopic *topic,
+                                     const struct Int2DdsDataWriterQos *qos,
+                                     const struct Int2DdsDataWriterListener *listener,
+                                     uint32_t mask,
+                                     struct Int2DdsDataWriter **writer_out);
 
 /**
  * Create a DataWriter using a QoS profile path
@@ -2058,33 +2703,18 @@ Int2DdsRet int2dds_create_datawriter_with_listener(const struct Int2DdsPublisher
  * - `publisher` must be a valid publisher
  * - `topic` must be a valid topic
  * - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
- * - `writer_out` must be a valid pointer to a null pointer
- * - The returned writer must be freed with `int2dds_delete_datawriter`
- */
-Int2DdsRet int2dds_create_datawriter_with_profile(const struct Int2DdsPublisher *publisher,
-                                                  const struct Int2DdsTopic *topic,
-                                                  const char *qos_path,
-                                                  struct Int2DdsDataWriter **writer_out);
-
-/**
- * Create a DataWriter with listener callbacks using a QoS profile path
- *
- * # Safety
- * - `publisher` must be a valid publisher
- * - `topic` must be a valid topic
- * - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
- * - `listener` can be null for no listener
- * - `mask` specifies which status changes trigger callbacks
+ * - `listener` can be null for no listener; `mask` specifies which status
+ *   changes trigger callbacks (pass 0 with a null listener)
  * - `writer_out` must be a valid pointer to a null pointer
  * - The returned writer must be freed with `int2dds_delete_datawriter`
  * - Listener callbacks must be thread-safe and remain valid until writer is deleted
  */
-Int2DdsRet int2dds_create_datawriter_with_profile_and_listener(const struct Int2DdsPublisher *publisher,
-                                                               const struct Int2DdsTopic *topic,
-                                                               const char *qos_path,
-                                                               const struct Int2DdsDataWriterListener *listener,
-                                                               uint32_t mask,
-                                                               struct Int2DdsDataWriter **writer_out);
+Int2DdsRet int2dds_create_datawriter_with_profile(const struct Int2DdsPublisher *publisher,
+                                                  const struct Int2DdsTopic *topic,
+                                                  const char *qos_path,
+                                                  const struct Int2DdsDataWriterListener *listener,
+                                                  uint32_t mask,
+                                                  struct Int2DdsDataWriter **writer_out);
 
 /**
  * Set or update the listener for a DataWriter
@@ -2120,18 +2750,14 @@ Int2DdsRet int2dds_datawriter_get_listener(const struct Int2DdsDataWriter *write
 Int2DdsRet int2dds_delete_datawriter(struct Int2DdsDataWriter *writer);
 
 /**
- * Get publication matched status
- *
- * Returns the number of matched readers for this DataWriter.
+ * Get publication matched status for a DataWriter
  *
  * # Safety
  * - `writer` must be a valid datawriter
- * - `total_count_out` must be a valid pointer
- * - `current_count_out` must be a valid pointer
+ * - `status_out` must be a valid pointer
  */
-Int2DdsRet int2dds_get_publication_matched_status(const struct Int2DdsDataWriter *writer,
-                                                  int32_t *total_count_out,
-                                                  int32_t *current_count_out);
+Int2DdsRet int2dds_datawriter_get_publication_matched_status(const struct Int2DdsDataWriter *writer,
+                                                             struct Int2DdsPublicationMatchedStatus *status_out);
 
 /**
  * Get liveliness lost status for a DataWriter
@@ -2193,61 +2819,84 @@ Int2DdsRet int2dds_publisher_delete_contained_entities(const struct Int2DdsPubli
  * - `writer`: A valid datawriter
  * - `data`: Pointer to the CDR-serialized byte buffer
  * - `data_len`: Length of the serialized data in bytes
- * - `key`: Pointer to the serialized key bytes (can be null if no key)
- * - `key_len`: Length of the key bytes
+ *
+ * The instance key and KeyHash are derived canonically from `data`
+ * (the full serialized sample).
  *
  * # Safety
  * - `writer` must be a valid datawriter
  * - `data` must point to at least `data_len` readable bytes
- * - If `key` is not null, it must point to at least `key_len` readable bytes
  */
-Int2DdsRet int2dds_write_serialized(const struct Int2DdsDataWriter *writer,
-                                    const uint8_t *data,
-                                    uintptr_t data_len,
-                                    const uint8_t *key,
-                                    uintptr_t key_len);
+Int2DdsRet int2dds_datawriter_write_serialized(const struct Int2DdsDataWriter *writer,
+                                               const uint8_t *data,
+                                               uintptr_t data_len);
 
-Int2DdsRet int2dds_prepare_serialized_write(const struct Int2DdsDataWriter *writer,
-                                            uintptr_t capacity,
-                                            uint8_t **data_out,
-                                            uintptr_t *capacity_out,
-                                            struct Int2DdsSerializedWriteLoan **loan_out);
+/**
+ * # Safety
+ * - `writer` must be a valid datawriter
+ * - `data_out` must be a valid pointer; it receives a writable buffer of
+ *   `*capacity_out` bytes that stays valid until the loan is committed or aborted
+ * - `capacity_out` must be a valid pointer
+ * - `loan_out` must be a valid pointer to a null pointer; the returned loan must be
+ *   committed or aborted
+ */
+Int2DdsRet int2dds_datawriter_prepare_serialized_write(const struct Int2DdsDataWriter *writer,
+                                                       uintptr_t capacity,
+                                                       uint8_t **data_out,
+                                                       uintptr_t *capacity_out,
+                                                       struct Int2DdsSerializedWriteLoan **loan_out);
 
-Int2DdsRet int2dds_commit_serialized_write(const struct Int2DdsDataWriter *writer,
-                                           struct Int2DdsSerializedWriteLoan *loan,
-                                           uintptr_t actual_size,
-                                           const uint8_t *key,
-                                           uintptr_t key_len);
+/**
+ * Commit a staged serialized write.
+ *
+ * # Ownership
+ * On success the loan is consumed and `loan` is freed — do not use or abort it.
+ * On failure the loan handle is left valid: the caller must release it with
+ * `int2dds_datawriter_abort_serialized_write` (or discard it after a subsequent successful
+ * path). This makes the common binding idiom (`commit`; on error `abort`)
+ * memory-safe rather than a double-free.
+ *
+ * # Safety
+ * - `writer` must be a valid datawriter
+ * - `loan` must be a valid loan from `int2dds_datawriter_prepare_serialized_write` that has
+ *   not already been committed or aborted
+ */
+Int2DdsRet int2dds_datawriter_commit_serialized_write(const struct Int2DdsDataWriter *writer,
+                                                      struct Int2DdsSerializedWriteLoan *loan,
+                                                      uintptr_t actual_size);
 
-Int2DdsRet int2dds_abort_serialized_write(struct Int2DdsSerializedWriteLoan *loan);
+/**
+ * # Safety
+ * - `loan` must be a valid serialized write loan, or null (null is a no-op)
+ * - `loan` must not be used after this call
+ */
+Int2DdsRet int2dds_datawriter_abort_serialized_write(struct Int2DdsSerializedWriteLoan *loan);
 
 /**
  * Write pre-serialized data with an explicit source timestamp.
  *
- * Same as `int2dds_write_serialized`, but allows the caller to specify a
+ * Same as `int2dds_datawriter_write_serialized`, but allows the caller to specify a
  * source timestamp instead of using the current time.
  *
  * # Parameters
  * - `writer`: A valid datawriter
  * - `data`: Pointer to the CDR-serialized byte buffer
  * - `data_len`: Length of the serialized data in bytes
- * - `key`: Pointer to the serialized key bytes (can be null if no key)
- * - `key_len`: Length of the key bytes
  * - `timestamp_sec`: Seconds component of the source timestamp
  * - `timestamp_nanosec`: Nanoseconds component of the source timestamp
+ *
+ * The instance key and KeyHash are derived canonically from `data`
+ * (the full serialized sample).
  *
  * # Safety
  * - `writer` must be a valid datawriter
  * - `data` must point to at least `data_len` readable bytes
- * - If `key` is not null, it must point to at least `key_len` readable bytes
  */
-Int2DdsRet int2dds_write_serialized_w_timestamp(const struct Int2DdsDataWriter *writer,
-                                                const uint8_t *data,
-                                                uintptr_t data_len,
-                                                const uint8_t *key,
-                                                uintptr_t key_len,
-                                                int32_t timestamp_sec,
-                                                uint32_t timestamp_nanosec);
+Int2DdsRet int2dds_datawriter_write_serialized_w_timestamp(const struct Int2DdsDataWriter *writer,
+                                                           const uint8_t *data,
+                                                           uintptr_t data_len,
+                                                           int32_t timestamp_sec,
+                                                           uint32_t timestamp_nanosec);
 
 /**
  * Block until all reliable DataReader entities have acknowledged all written data,
@@ -2270,7 +2919,9 @@ Int2DdsRet int2dds_publisher_wait_for_acknowledgments(const struct Int2DdsPublis
                                                       int64_t timeout_ms);
 
 /**
- * Register an instance with serialized key bytes
+ * Register an instance from the full serialized sample. The canonical KeyHash is
+ * derived from the sample by the core (matching the wire); `key`/`key_len` carry
+ * the serialized sample bytes.
  *
  * # Safety
  * - `writer` must be a valid datawriter
@@ -2283,11 +2934,20 @@ Int2DdsRet int2dds_datawriter_register_instance(const struct Int2DdsDataWriter *
                                                 uint8_t (*handle_out)[16]);
 
 /**
- * Dispose an instance with serialized key bytes
+ * Dispose an instance from the full serialized sample. `key`/`key_len` carry the
+ * serialized sample bytes (not a pre-serialized key); the core derives the canonical
+ * KeyHash from them. A keyed topic must have been created with a full TypeObject
+ * (int2dds_create_topic_with_type_info / _with_field_descriptors), otherwise this
+ * returns INT2DDS_RET_PRECONDITION_NOT_MET.
+ *
+ * `key` may be null when `handle` carries a valid instance handle (e.g. from
+ * `int2dds_datawriter_register_instance`); the serialized key is then looked up
+ * from the writer's instance registry. A null `key` with a nil/unknown handle
+ * returns INT2DDS_RET_BAD_PARAMETER.
  *
  * # Safety
  * - `writer` must be a valid datawriter
- * - `key` must point to at least `key_len` readable bytes
+ * - If `key` is not null, it must point to at least `key_len` readable bytes
  * - `handle` must be a valid pointer to a 16-byte instance handle (or null for NIL)
  */
 Int2DdsRet int2dds_datawriter_dispose(const struct Int2DdsDataWriter *writer,
@@ -2296,11 +2956,20 @@ Int2DdsRet int2dds_datawriter_dispose(const struct Int2DdsDataWriter *writer,
                                       const uint8_t (*handle)[16]);
 
 /**
- * Unregister an instance with serialized key bytes
+ * Unregister an instance from the full serialized sample. `key`/`key_len` carry the
+ * serialized sample bytes (not a pre-serialized key); the core derives the canonical
+ * KeyHash from them. A keyed topic must have been created with a full TypeObject
+ * (int2dds_create_topic_with_type_info / _with_field_descriptors), otherwise this
+ * returns INT2DDS_RET_PRECONDITION_NOT_MET.
+ *
+ * `key` may be null when `handle` carries a valid instance handle (e.g. from
+ * `int2dds_datawriter_register_instance`); the serialized key is then looked up
+ * from the writer's instance registry. A null `key` with a nil/unknown handle
+ * returns INT2DDS_RET_BAD_PARAMETER.
  *
  * # Safety
  * - `writer` must be a valid datawriter
- * - `key` must point to at least `key_len` readable bytes
+ * - If `key` is not null, it must point to at least `key_len` readable bytes
  * - `handle` must be a valid pointer to a 16-byte instance handle (or null for NIL)
  */
 Int2DdsRet int2dds_datawriter_unregister_instance(const struct Int2DdsDataWriter *writer,
@@ -2309,7 +2978,11 @@ Int2DdsRet int2dds_datawriter_unregister_instance(const struct Int2DdsDataWriter
                                                   const uint8_t (*handle)[16]);
 
 /**
- * Lookup an instance handle from serialized key bytes
+ * Lookup an instance handle from the full serialized sample. `key`/`key_len` carry the
+ * serialized sample bytes (not a pre-serialized key); the core derives the canonical
+ * KeyHash from them. A keyed topic must have been created with a full TypeObject
+ * (int2dds_create_topic_with_type_info / _with_field_descriptors), otherwise this
+ * returns INT2DDS_RET_PRECONDITION_NOT_MET.
  *
  * # Safety
  * - `writer` must be a valid datawriter
@@ -2418,6 +3091,17 @@ Int2DdsRet int2dds_datawriter_qos_set_ownership_strength(struct Int2DdsDataWrite
                                                          int32_t value);
 
 /**
+ * Set the DataFrag QoS (per-writer RTPS DATA_FRAG fragment size, in bytes) for
+ * DataWriter. Resolved when the writer is created: values `> 65000` are clamped
+ * to 65000, and `<= 0` means unspecified, falling back to the
+ * `INT2DDS_DATA_FRAG_SIZE` environment variable and then to 65000.
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ */
+Int2DdsRet int2dds_datawriter_qos_set_data_frag(struct Int2DdsDataWriterQos *qos, int32_t value);
+
+/**
  * Set resource limits QoS for DataWriter
  *
  * # Safety
@@ -2487,6 +3171,11 @@ Int2DdsRet int2dds_datawriter_qos_set_writer_data_lifecycle(struct Int2DdsDataWr
 
 /**
  * Get reliability QoS from DataWriter QoS handle
+ *
+ * # Safety
+ * - `qos` must be a valid datawriter QoS handle
+ * - `kind_out` must be a valid pointer
+ * - `max_blocking_time_ns_out` must be a valid pointer
  */
 Int2DdsRet int2dds_datawriter_qos_get_reliability(const struct Int2DdsDataWriterQos *qos,
                                                   int32_t *kind_out,
@@ -2494,12 +3183,21 @@ Int2DdsRet int2dds_datawriter_qos_get_reliability(const struct Int2DdsDataWriter
 
 /**
  * Get durability QoS from DataWriter QoS handle
+ *
+ * # Safety
+ * - `qos` must be a valid datawriter QoS handle
+ * - `kind_out` must be a valid pointer
  */
 Int2DdsRet int2dds_datawriter_qos_get_durability(const struct Int2DdsDataWriterQos *qos,
                                                  int32_t *kind_out);
 
 /**
  * Get history QoS from DataWriter QoS handle
+ *
+ * # Safety
+ * - `qos` must be a valid datawriter QoS handle
+ * - `kind_out` must be a valid pointer
+ * - `depth_out` must be a valid pointer
  */
 Int2DdsRet int2dds_datawriter_qos_get_history(const struct Int2DdsDataWriterQos *qos,
                                               int32_t *kind_out,
@@ -2507,18 +3205,44 @@ Int2DdsRet int2dds_datawriter_qos_get_history(const struct Int2DdsDataWriterQos 
 
 /**
  * Get ownership QoS from DataWriter QoS handle
+ *
+ * # Safety
+ * - `qos` must be a valid datawriter QoS handle
+ * - `kind_out` must be a valid pointer
  */
 Int2DdsRet int2dds_datawriter_qos_get_ownership(const struct Int2DdsDataWriterQos *qos,
                                                 int32_t *kind_out);
 
 /**
  * Get ownership strength from DataWriter QoS handle
+ *
+ * # Safety
+ * - `qos` must be a valid datawriter QoS handle
+ * - `value_out` must be a valid pointer
  */
 Int2DdsRet int2dds_datawriter_qos_get_ownership_strength(const struct Int2DdsDataWriterQos *qos,
                                                          int32_t *value_out);
 
 /**
+ * Get the DataFrag QoS (fragment size, in bytes) from a DataWriter QoS handle.
+ * Returns the value as set, not the resolved size: `0` means unspecified, so the
+ * writer will use `INT2DDS_DATA_FRAG_SIZE` if set and 65000 otherwise.
+ *
+ * # Safety
+ * - `qos` must be a valid datawriter QoS handle
+ * - `value_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_datawriter_qos_get_data_frag(const struct Int2DdsDataWriterQos *qos,
+                                                int32_t *value_out);
+
+/**
  * Get resource limits from DataWriter QoS handle
+ *
+ * # Safety
+ * - `qos` must be a valid datawriter QoS handle
+ * - `max_samples_out` must be a valid pointer
+ * - `max_instances_out` must be a valid pointer
+ * - `max_per_instance_out` must be a valid pointer
  */
 Int2DdsRet int2dds_datawriter_qos_get_resource_limits(const struct Int2DdsDataWriterQos *qos,
                                                       int32_t *max_samples_out,
@@ -2527,24 +3251,41 @@ Int2DdsRet int2dds_datawriter_qos_get_resource_limits(const struct Int2DdsDataWr
 
 /**
  * Get lifespan from DataWriter QoS handle
+ *
+ * # Safety
+ * - `qos` must be a valid datawriter QoS handle
+ * - `duration_ns_out` must be a valid pointer
  */
 Int2DdsRet int2dds_datawriter_qos_get_lifespan(const struct Int2DdsDataWriterQos *qos,
                                                int64_t *duration_ns_out);
 
 /**
  * Get destination order from DataWriter QoS handle
+ *
+ * # Safety
+ * - `qos` must be a valid datawriter QoS handle
+ * - `kind_out` must be a valid pointer
  */
 Int2DdsRet int2dds_datawriter_qos_get_destination_order(const struct Int2DdsDataWriterQos *qos,
                                                         int32_t *kind_out);
 
 /**
  * Get deadline from DataWriter QoS handle
+ *
+ * # Safety
+ * - `qos` must be a valid datawriter QoS handle
+ * - `period_ns_out` must be a valid pointer
  */
 Int2DdsRet int2dds_datawriter_qos_get_deadline(const struct Int2DdsDataWriterQos *qos,
                                                int64_t *period_ns_out);
 
 /**
  * Get liveliness from DataWriter QoS handle
+ *
+ * # Safety
+ * - `qos` must be a valid datawriter QoS handle
+ * - `kind_out` must be a valid pointer
+ * - `lease_duration_ns_out` must be a valid pointer
  */
 Int2DdsRet int2dds_datawriter_qos_get_liveliness(const struct Int2DdsDataWriterQos *qos,
                                                  int32_t *kind_out,
@@ -2552,24 +3293,61 @@ Int2DdsRet int2dds_datawriter_qos_get_liveliness(const struct Int2DdsDataWriterQ
 
 /**
  * Get data representation from DataWriter QoS handle
+ *
+ * # Safety
+ * - `qos` must be a valid datawriter QoS handle
+ * - `kind_out` must be a valid pointer
  */
 Int2DdsRet int2dds_datawriter_qos_get_data_representation(const struct Int2DdsDataWriterQos *qos,
                                                           int32_t *kind_out);
 
 /**
+ * Returns the library's default data representation (`INT2DDS_QOS_DATA_REPR_*`)
+ * used when an application creates an endpoint without setting one explicitly.
+ *
+ * Single source of truth for language bindings: instead of hardcoding XCDR1,
+ * bindings should query this so a change to the Rust core default propagates
+ * automatically to what they serialize and advertise.
+ */
+int32_t int2dds_default_data_representation(void);
+
+/**
+ * Returns the library's default type extensibility (`0` = Final, `1` = Appendable,
+ * `2` = Mutable) applied when a type does not declare one explicitly.
+ *
+ * Single source of truth for language bindings: instead of hardcoding Appendable,
+ * bindings should query this so a change to the Rust core default (the
+ * `ExtensibilityKind` enum default) propagates automatically to how they frame
+ * serialized samples (DHEADER presence) and advertise types.
+ */
+int32_t int2dds_default_extensibility(void);
+
+/**
  * Get transport priority from DataWriter QoS handle
+ *
+ * # Safety
+ * - `qos` must be a valid datawriter QoS handle
+ * - `value_out` must be a valid pointer
  */
 Int2DdsRet int2dds_datawriter_qos_get_transport_priority(const struct Int2DdsDataWriterQos *qos,
                                                          int32_t *value_out);
 
 /**
  * Get latency budget from DataWriter QoS handle
+ *
+ * # Safety
+ * - `qos` must be a valid datawriter QoS handle
+ * - `duration_ns_out` must be a valid pointer
  */
 Int2DdsRet int2dds_datawriter_qos_get_latency_budget(const struct Int2DdsDataWriterQos *qos,
                                                      int64_t *duration_ns_out);
 
 /**
  * Get writer data lifecycle from DataWriter QoS handle
+ *
+ * # Safety
+ * - `qos` must be a valid datawriter QoS handle
+ * - `autodispose_out` must be a valid pointer
  */
 Int2DdsRet int2dds_datawriter_qos_get_writer_data_lifecycle(const struct Int2DdsDataWriterQos *qos,
                                                             bool *autodispose_out);
@@ -2707,44 +3485,125 @@ Int2DdsRet int2dds_datareader_qos_set_reader_data_lifecycle(struct Int2DdsDataRe
                                                             int64_t autopurge_nowriter_ns,
                                                             int64_t autopurge_disposed_ns);
 
+/**
+ * # Safety
+ * - `qos` must be a valid datareader QoS handle
+ * - `kind_out` must be a valid pointer
+ * - `max_blocking_time_ns_out` must be a valid pointer
+ */
 Int2DdsRet int2dds_datareader_qos_get_reliability(const struct Int2DdsDataReaderQos *qos,
                                                   int32_t *kind_out,
                                                   int64_t *max_blocking_time_ns_out);
 
+/**
+ * # Safety
+ * - `qos` must be a valid datareader QoS handle
+ * - `kind_out` must be a valid pointer
+ */
 Int2DdsRet int2dds_datareader_qos_get_durability(const struct Int2DdsDataReaderQos *qos,
                                                  int32_t *kind_out);
 
+/**
+ * # Safety
+ * - `qos` must be a valid datareader QoS handle
+ * - `kind_out` must be a valid pointer
+ * - `depth_out` must be a valid pointer
+ */
 Int2DdsRet int2dds_datareader_qos_get_history(const struct Int2DdsDataReaderQos *qos,
                                               int32_t *kind_out,
                                               int32_t *depth_out);
 
+/**
+ * # Safety
+ * - `qos` must be a valid datareader QoS handle
+ * - `kind_out` must be a valid pointer
+ */
 Int2DdsRet int2dds_datareader_qos_get_ownership(const struct Int2DdsDataReaderQos *qos,
                                                 int32_t *kind_out);
 
+/**
+ * # Safety
+ * - `qos` must be a valid datareader QoS handle
+ * - `max_samples_out` must be a valid pointer
+ * - `max_instances_out` must be a valid pointer
+ * - `max_per_instance_out` must be a valid pointer
+ */
 Int2DdsRet int2dds_datareader_qos_get_resource_limits(const struct Int2DdsDataReaderQos *qos,
                                                       int32_t *max_samples_out,
                                                       int32_t *max_instances_out,
                                                       int32_t *max_per_instance_out);
 
+/**
+ * # Safety
+ * - `qos` must be a valid datareader QoS handle
+ * - `kind_out` must be a valid pointer
+ */
 Int2DdsRet int2dds_datareader_qos_get_destination_order(const struct Int2DdsDataReaderQos *qos,
                                                         int32_t *kind_out);
 
+/**
+ * # Safety
+ * - `qos` must be a valid datareader QoS handle
+ */
+Int2DdsRet int2dds_datareader_qos_set_lifespan_reference(struct Int2DdsDataReaderQos *qos,
+                                                         int32_t kind);
+
+/**
+ * # Safety
+ * - `qos` must be a valid datareader QoS handle
+ * - `kind_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_datareader_qos_get_lifespan_reference(const struct Int2DdsDataReaderQos *qos,
+                                                         int32_t *kind_out);
+
+/**
+ * # Safety
+ * - `qos` must be a valid datareader QoS handle
+ * - `period_ns_out` must be a valid pointer
+ */
 Int2DdsRet int2dds_datareader_qos_get_deadline(const struct Int2DdsDataReaderQos *qos,
                                                int64_t *period_ns_out);
 
+/**
+ * # Safety
+ * - `qos` must be a valid datareader QoS handle
+ * - `kind_out` must be a valid pointer
+ * - `lease_duration_ns_out` must be a valid pointer
+ */
 Int2DdsRet int2dds_datareader_qos_get_liveliness(const struct Int2DdsDataReaderQos *qos,
                                                  int32_t *kind_out,
                                                  int64_t *lease_duration_ns_out);
 
+/**
+ * # Safety
+ * - `qos` must be a valid datareader QoS handle
+ * - `kind_out` must be a valid pointer
+ */
 Int2DdsRet int2dds_datareader_qos_get_data_representation(const struct Int2DdsDataReaderQos *qos,
                                                           int32_t *kind_out);
 
+/**
+ * # Safety
+ * - `qos` must be a valid datareader QoS handle
+ * - `duration_ns_out` must be a valid pointer
+ */
 Int2DdsRet int2dds_datareader_qos_get_latency_budget(const struct Int2DdsDataReaderQos *qos,
                                                      int64_t *duration_ns_out);
 
+/**
+ * # Safety
+ * - `qos` must be a valid datareader QoS handle
+ * - `min_separation_ns_out` must be a valid pointer
+ */
 Int2DdsRet int2dds_datareader_qos_get_time_based_filter(const struct Int2DdsDataReaderQos *qos,
                                                         int64_t *min_separation_ns_out);
 
+/**
+ * # Safety
+ * - `qos` must be a valid datareader QoS handle
+ * - `autopurge_nowriter_ns_out` must be a valid pointer
+ * - `autopurge_disposed_ns_out` must be a valid pointer
+ */
 Int2DdsRet int2dds_datareader_qos_get_reader_data_lifecycle(const struct Int2DdsDataReaderQos *qos,
                                                             int64_t *autopurge_nowriter_ns_out,
                                                             int64_t *autopurge_disposed_ns_out);
@@ -3078,6 +3937,104 @@ Int2DdsRet int2dds_subscriber_qos_set_partition(struct Int2DdsSubscriberQos *qos
 Int2DdsRet int2dds_subscriber_qos_destroy(struct Int2DdsSubscriberQos *qos);
 
 /**
+ * Create a ReadCondition on a DataReader.
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `condition_out` must be a valid pointer to a null pointer
+ * - The returned condition must be freed with `int2dds_readcondition_delete`
+ */
+Int2DdsRet int2dds_datareader_create_readcondition(const struct Int2DdsDataReader *reader,
+                                                   uint32_t sample_state_mask,
+                                                   uint32_t view_state_mask,
+                                                   uint32_t instance_state_mask,
+                                                   struct Int2DdsReadCondition **condition_out);
+
+/**
+ * Create a QueryCondition on a DataReader.
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `query_expression` must be a valid null-terminated C string
+ * - `query_parameters` must be a valid array of `query_parameters_count`
+ *   null-terminated C strings, or null if the count is 0
+ * - `condition_out` must be a valid pointer to a null pointer
+ * - The returned condition must be freed with `int2dds_readcondition_delete`
+ */
+Int2DdsRet int2dds_datareader_create_querycondition(const struct Int2DdsDataReader *reader,
+                                                    uint32_t sample_state_mask,
+                                                    uint32_t view_state_mask,
+                                                    uint32_t instance_state_mask,
+                                                    const char *query_expression,
+                                                    const char *const *query_parameters,
+                                                    uintptr_t query_parameters_count,
+                                                    struct Int2DdsReadCondition **condition_out);
+
+/**
+ * Get the trigger value of a Read/QueryCondition.
+ *
+ * # Safety
+ * - `condition` must be a valid read condition
+ * - `value_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_readcondition_get_trigger_value(const struct Int2DdsReadCondition *condition,
+                                                   bool *value_out);
+
+/**
+ * Replace the parameters of a QueryCondition's SQL expression.
+ *
+ * Returns `INT2DDS_RET_INVALID_ARGUMENT` if the condition is a ReadCondition
+ * (no query expression) or the parameter count does not match the expression.
+ *
+ * # Safety
+ * - `condition` must be a valid read condition
+ * - `query_parameters` must be a valid array of `query_parameters_count`
+ *   null-terminated C strings, or null if the count is 0
+ */
+Int2DdsRet int2dds_querycondition_set_query_parameters(const struct Int2DdsReadCondition *condition,
+                                                       const char *const *query_parameters,
+                                                       uintptr_t query_parameters_count);
+
+/**
+ * Delete a Read/QueryCondition.
+ *
+ * # Safety
+ * - `condition` must be a valid read condition
+ * - `condition` must not be used after this call
+ * - The condition should be detached from any WaitSets first
+ */
+Int2DdsRet int2dds_readcondition_delete(struct Int2DdsReadCondition *condition);
+
+/**
+ * Take samples matching a Read/QueryCondition, returned as serialized bytes.
+ *
+ * For a ReadCondition the condition's state masks are applied directly on the
+ * serialized cache. For a QueryCondition the SQL content filter is additionally
+ * evaluated (requires field descriptors on the topic; see the module note).
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `condition` must be a valid read condition created from `reader`
+ * - `seq_out` must be a valid pointer to a null pointer
+ * - On `INT2DDS_RET_OK` the returned sequence must be freed with `int2dds_sample_seq_delete`
+ */
+Int2DdsRet int2dds_datareader_take_serialized_batch_w_readcondition(const struct Int2DdsDataReader *reader,
+                                                                    const struct Int2DdsReadCondition *condition,
+                                                                    int32_t max_samples,
+                                                                    struct Int2DdsSampleSeq **seq_out);
+
+/**
+ * Read samples matching a Read/QueryCondition (samples remain in the cache).
+ *
+ * # Safety
+ * - Same as `int2dds_datareader_take_serialized_batch_w_readcondition`
+ */
+Int2DdsRet int2dds_datareader_read_serialized_batch_w_readcondition(const struct Int2DdsDataReader *reader,
+                                                                    const struct Int2DdsReadCondition *condition,
+                                                                    int32_t max_samples,
+                                                                    struct Int2DdsSampleSeq **seq_out);
+
+/**
  * Get the StatusCondition from a DataReader
  *
  * # Safety
@@ -3100,6 +4057,50 @@ Int2DdsRet int2dds_datawriter_get_statuscondition(const struct Int2DdsDataWriter
                                                   struct Int2DdsStatusCondition **condition_out);
 
 /**
+ * Get the StatusCondition from a DomainParticipant
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `condition_out` must be a valid pointer to a null pointer
+ * - The returned condition must be freed with `int2dds_statuscondition_delete`
+ */
+Int2DdsRet int2dds_participant_get_statuscondition(const struct Int2DdsParticipant *participant,
+                                                   struct Int2DdsStatusCondition **condition_out);
+
+/**
+ * Get the StatusCondition from a Publisher
+ *
+ * # Safety
+ * - `publisher` must be a valid publisher
+ * - `condition_out` must be a valid pointer to a null pointer
+ * - The returned condition must be freed with `int2dds_statuscondition_delete`
+ */
+Int2DdsRet int2dds_publisher_get_statuscondition(const struct Int2DdsPublisher *publisher,
+                                                 struct Int2DdsStatusCondition **condition_out);
+
+/**
+ * Get the StatusCondition from a Subscriber
+ *
+ * # Safety
+ * - `subscriber` must be a valid subscriber
+ * - `condition_out` must be a valid pointer to a null pointer
+ * - The returned condition must be freed with `int2dds_statuscondition_delete`
+ */
+Int2DdsRet int2dds_subscriber_get_statuscondition(const struct Int2DdsSubscriber *subscriber,
+                                                  struct Int2DdsStatusCondition **condition_out);
+
+/**
+ * Get the StatusCondition from a Topic
+ *
+ * # Safety
+ * - `topic` must be a valid topic
+ * - `condition_out` must be a valid pointer to a null pointer
+ * - The returned condition must be freed with `int2dds_statuscondition_delete`
+ */
+Int2DdsRet int2dds_topic_get_statuscondition(const struct Int2DdsTopic *topic,
+                                             struct Int2DdsStatusCondition **condition_out);
+
+/**
  * Get the current status change bitmask from a DataReader.
  *
  * # Safety
@@ -3118,6 +4119,45 @@ Int2DdsRet int2dds_datareader_get_status_changes(const struct Int2DdsDataReader 
  */
 Int2DdsRet int2dds_datawriter_get_status_changes(const struct Int2DdsDataWriter *writer,
                                                  uint32_t *mask_out);
+
+/**
+ * Get the current status change bitmask from a DomainParticipant.
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `mask_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_participant_get_status_changes(const struct Int2DdsParticipant *participant,
+                                                  uint32_t *mask_out);
+
+/**
+ * Get the current status change bitmask from a Publisher.
+ *
+ * # Safety
+ * - `publisher` must be a valid publisher
+ * - `mask_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_publisher_get_status_changes(const struct Int2DdsPublisher *publisher,
+                                                uint32_t *mask_out);
+
+/**
+ * Get the current status change bitmask from a Subscriber.
+ *
+ * # Safety
+ * - `subscriber` must be a valid subscriber
+ * - `mask_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_subscriber_get_status_changes(const struct Int2DdsSubscriber *subscriber,
+                                                 uint32_t *mask_out);
+
+/**
+ * Get the current status change bitmask from a Topic.
+ *
+ * # Safety
+ * - `topic` must be a valid topic
+ * - `mask_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_topic_get_status_changes(const struct Int2DdsTopic *topic, uint32_t *mask_out);
 
 /**
  * Set the enabled statuses for a StatusCondition
@@ -3168,24 +4208,14 @@ Int2DdsRet int2dds_statuscondition_delete(struct Int2DdsStatusCondition *conditi
  *
  * # Safety
  * - `participant` must be a valid participant
- * - `qos` can be null for default QoS
+ * - `qos` can be null for the default QoS (engages the core resolution chain:
+ *   registered default → configured default profile → spec default)
  * - `subscriber_out` must be a valid pointer to a null pointer
  * - The returned subscriber must be freed with `int2dds_delete_subscriber`
  */
 Int2DdsRet int2dds_create_subscriber(const struct Int2DdsParticipant *participant,
+                                     const struct Int2DdsSubscriberQos *qos,
                                      struct Int2DdsSubscriber **subscriber_out);
-
-/**
- * Create a Subscriber with QoS
- *
- * # Safety
- * - `participant` must be a valid participant
- * - `qos` must be a valid subscriber QoS handle
- * - `subscriber_out` must be a valid pointer to a null pointer
- */
-Int2DdsRet int2dds_create_subscriber_with_qos(const struct Int2DdsParticipant *participant,
-                                              const struct Int2DdsSubscriberQos *qos,
-                                              struct Int2DdsSubscriber **subscriber_out);
 
 /**
  * Create a Subscriber using a QoS profile path
@@ -3223,6 +4253,16 @@ Int2DdsRet int2dds_subscriber_get_qos(const struct Int2DdsSubscriber *subscriber
                                       struct Int2DdsSubscriberQos **qos_out);
 
 /**
+ * Get the 16-byte instance handle of a Subscriber.
+ *
+ * # Safety
+ * - `subscriber` must be a valid subscriber
+ * - `handle_out` must point to a 16-byte buffer
+ */
+Int2DdsRet int2dds_subscriber_get_instance_handle(const struct Int2DdsSubscriber *subscriber,
+                                                  uint8_t (*handle_out)[16]);
+
+/**
  * Delete a Subscriber
  *
  * # Safety
@@ -3239,33 +4279,18 @@ Int2DdsRet int2dds_delete_subscriber(struct Int2DdsSubscriber *subscriber);
  * - `subscriber` must be a valid subscriber
  * - `topic` must be a valid topic
  * - `qos` can be null for default QoS
- * - `reader_out` must be a valid pointer to a null pointer
- * - The returned reader must be freed with `int2dds_delete_datareader`
- */
-Int2DdsRet int2dds_create_datareader(const struct Int2DdsSubscriber *subscriber,
-                                     const struct Int2DdsTopic *topic,
-                                     const struct Int2DdsDataReaderQos *qos,
-                                     struct Int2DdsDataReader **reader_out);
-
-/**
- * Create a DataReader with listener callbacks
- *
- * # Safety
- * - `subscriber` must be a valid subscriber
- * - `topic` must be a valid topic
- * - `qos` can be null for default QoS
- * - `listener` can be null for no listener
- * - `mask` specifies which status changes trigger callbacks
+ * - `listener` can be null for no listener; `mask` specifies which status
+ *   changes trigger callbacks (pass 0 with a null listener)
  * - `reader_out` must be a valid pointer to a null pointer
  * - The returned reader must be freed with `int2dds_delete_datareader`
  * - Listener callbacks must be thread-safe and remain valid until reader is deleted
  */
-Int2DdsRet int2dds_create_datareader_with_listener(const struct Int2DdsSubscriber *subscriber,
-                                                   const struct Int2DdsTopic *topic,
-                                                   const struct Int2DdsDataReaderQos *qos,
-                                                   const struct Int2DdsDataReaderListener *listener,
-                                                   uint32_t mask,
-                                                   struct Int2DdsDataReader **reader_out);
+Int2DdsRet int2dds_create_datareader(const struct Int2DdsSubscriber *subscriber,
+                                     const struct Int2DdsTopic *topic,
+                                     const struct Int2DdsDataReaderQos *qos,
+                                     const struct Int2DdsDataReaderListener *listener,
+                                     uint32_t mask,
+                                     struct Int2DdsDataReader **reader_out);
 
 /**
  * Create a DataReader using a QoS profile path
@@ -3274,33 +4299,18 @@ Int2DdsRet int2dds_create_datareader_with_listener(const struct Int2DdsSubscribe
  * - `subscriber` must be a valid subscriber
  * - `topic` must be a valid topic
  * - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
- * - `reader_out` must be a valid pointer to a null pointer
- * - The returned reader must be freed with `int2dds_delete_datareader`
- */
-Int2DdsRet int2dds_create_datareader_with_profile(const struct Int2DdsSubscriber *subscriber,
-                                                  const struct Int2DdsTopic *topic,
-                                                  const char *qos_path,
-                                                  struct Int2DdsDataReader **reader_out);
-
-/**
- * Create a DataReader with listener callbacks using a QoS profile path
- *
- * # Safety
- * - `subscriber` must be a valid subscriber
- * - `topic` must be a valid topic
- * - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
- * - `listener` can be null for no listener
- * - `mask` specifies which status changes trigger callbacks
+ * - `listener` can be null for no listener; `mask` specifies which status
+ *   changes trigger callbacks (pass 0 with a null listener)
  * - `reader_out` must be a valid pointer to a null pointer
  * - The returned reader must be freed with `int2dds_delete_datareader`
  * - Listener callbacks must be thread-safe and remain valid until reader is deleted
  */
-Int2DdsRet int2dds_create_datareader_with_profile_and_listener(const struct Int2DdsSubscriber *subscriber,
-                                                               const struct Int2DdsTopic *topic,
-                                                               const char *qos_path,
-                                                               const struct Int2DdsDataReaderListener *listener,
-                                                               uint32_t mask,
-                                                               struct Int2DdsDataReader **reader_out);
+Int2DdsRet int2dds_create_datareader_with_profile(const struct Int2DdsSubscriber *subscriber,
+                                                  const struct Int2DdsTopic *topic,
+                                                  const char *qos_path,
+                                                  const struct Int2DdsDataReaderListener *listener,
+                                                  uint32_t mask,
+                                                  struct Int2DdsDataReader **reader_out);
 
 /**
  * Create a DataReader using a ContentFilteredTopic
@@ -3309,33 +4319,18 @@ Int2DdsRet int2dds_create_datareader_with_profile_and_listener(const struct Int2
  * - `subscriber` must be a valid subscriber
  * - `cft` must be a valid ContentFilteredTopic
  * - `qos` can be null for default QoS
- * - `reader_out` must be a valid pointer to a null pointer
- * - The returned reader must be freed with `int2dds_delete_datareader`
- */
-Int2DdsRet int2dds_create_datareader_cft(const struct Int2DdsSubscriber *subscriber,
-                                         const struct Int2DdsContentFilteredTopic *cft,
-                                         const struct Int2DdsDataReaderQos *qos,
-                                         struct Int2DdsDataReader **reader_out);
-
-/**
- * Create a DataReader using a ContentFilteredTopic with listener callbacks
- *
- * # Safety
- * - `subscriber` must be a valid subscriber
- * - `cft` must be a valid ContentFilteredTopic
- * - `qos` can be null for default QoS
- * - `listener` can be null for no listener
- * - `mask` specifies which status changes trigger callbacks
+ * - `listener` can be null for no listener; `mask` specifies which status
+ *   changes trigger callbacks (pass 0 with a null listener)
  * - `reader_out` must be a valid pointer to a null pointer
  * - The returned reader must be freed with `int2dds_delete_datareader`
  * - Listener callbacks must be thread-safe and remain valid until reader is deleted
  */
-Int2DdsRet int2dds_create_datareader_cft_with_listener(const struct Int2DdsSubscriber *subscriber,
-                                                       const struct Int2DdsContentFilteredTopic *cft,
-                                                       const struct Int2DdsDataReaderQos *qos,
-                                                       const struct Int2DdsDataReaderListener *listener,
-                                                       uint32_t mask,
-                                                       struct Int2DdsDataReader **reader_out);
+Int2DdsRet int2dds_create_datareader_cft(const struct Int2DdsSubscriber *subscriber,
+                                         const struct Int2DdsContentFilteredTopic *cft,
+                                         const struct Int2DdsDataReaderQos *qos,
+                                         const struct Int2DdsDataReaderListener *listener,
+                                         uint32_t mask,
+                                         struct Int2DdsDataReader **reader_out);
 
 /**
  * Set or update the listener for a DataReader
@@ -3397,6 +4392,41 @@ Int2DdsRet int2dds_datareader_get_guid(const struct Int2DdsDataReader *reader,
                                        uint8_t (*guid_out)[16]);
 
 /**
+ * Look up an instance handle from raw serialized key bytes.
+ *
+ * Mirrors `int2dds_datawriter_lookup_instance` for the read side. Matches on the
+ * serialized key bytes stored per instance; writes `InstanceHandle::NIL` (all zeros)
+ * to `handle_out` when the instance is not known to this reader.
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `key` must point to at least `key_len` readable bytes
+ * - `handle_out` must be a valid pointer to a 16-byte buffer
+ */
+Int2DdsRet int2dds_datareader_lookup_instance(const struct Int2DdsDataReader *reader,
+                                              const uint8_t *key,
+                                              uintptr_t key_len,
+                                              uint8_t (*handle_out)[16]);
+
+/**
+ * Get the raw serialized key bytes for an instance handle.
+ *
+ * Mirrors `int2dds_datawriter_get_key_value` for the read side. Round-trips with
+ * `int2dds_datareader_lookup_instance`.
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `handle` must be a valid pointer to a 16-byte instance handle
+ * - `key_buf` must point to at least `key_capacity` writable bytes
+ * - `key_size_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_datareader_get_key_value(const struct Int2DdsDataReader *reader,
+                                            const uint8_t (*handle)[16],
+                                            uint8_t *key_buf,
+                                            uintptr_t key_capacity,
+                                            uintptr_t *key_size_out);
+
+/**
  * Check whether a DataReader currently has any cached samples.
  *
  * This is a level-triggered readiness check over the local reader cache.
@@ -3417,18 +4447,14 @@ Int2DdsRet int2dds_datareader_has_data(const struct Int2DdsDataReader *reader, b
 Int2DdsRet int2dds_delete_datareader(struct Int2DdsDataReader *reader);
 
 /**
- * Get subscription matched status
- *
- * Returns the number of matched writers for this DataReader.
+ * Get subscription matched status for a DataReader
  *
  * # Safety
  * - `reader` must be a valid datareader
- * - `total_count_out` must be a valid pointer
- * - `current_count_out` must be a valid pointer
+ * - `status_out` must be a valid pointer
  */
-Int2DdsRet int2dds_get_subscription_matched_status(const struct Int2DdsDataReader *reader,
-                                                   int32_t *total_count_out,
-                                                   int32_t *current_count_out);
+Int2DdsRet int2dds_datareader_get_subscription_matched_status(const struct Int2DdsDataReader *reader,
+                                                              struct Int2DdsSubscriptionMatchedStatus *status_out);
 
 /**
  * Get liveliness changed status for a DataReader
@@ -3505,7 +4531,7 @@ Int2DdsRet int2dds_subscriber_delete_contained_entities(const struct Int2DdsSubs
  * Take pre-serialized data from a DataReader, bypassing TypeSupport deserialization.
  *
  * Copies the raw CDR bytes (including encapsulation header) into the caller's buffer.
- * The sample is removed from the cache.
+ * The sample is removed from the cache only when it fits the caller's buffer.
  *
  * # Parameters
  * - `reader`: A valid datareader
@@ -3517,24 +4543,25 @@ Int2DdsRet int2dds_subscriber_delete_contained_entities(const struct Int2DdsSubs
  * # Returns
  * - INT2DDS_RET_OK on success
  * - INT2DDS_RET_NO_DATA if no samples available
- * - INT2DDS_RET_ERROR if buffer is too small (actual_size_out will contain the required size)
+ * - INT2DDS_RET_BUFFER_TOO_SMALL if the buffer is too small; the sample is preserved and
+ *   actual_size_out contains the required size, so a retry with a larger buffer succeeds
  *
  * # Safety
  * - `reader` must be a valid datareader
  * - `buffer` must point to at least `buffer_capacity` writable bytes
  * - `actual_size_out` and `valid_data_out` must be valid pointers
  */
-Int2DdsRet int2dds_take_serialized(const struct Int2DdsDataReader *reader,
-                                   uint8_t *buffer,
-                                   uintptr_t buffer_capacity,
-                                   uintptr_t *actual_size_out,
-                                   bool *valid_data_out);
+Int2DdsRet int2dds_datareader_take_serialized(const struct Int2DdsDataReader *reader,
+                                              uint8_t *buffer,
+                                              uintptr_t buffer_capacity,
+                                              uintptr_t *actual_size_out,
+                                              bool *valid_data_out);
 
 /**
  * Take pre-serialized data and loan the returned byte slice to the caller.
  *
  * The returned `data_out` pointer remains valid until `loan_out` is passed to
- * `int2dds_return_serialized_loan`. This avoids copying the payload into a
+ * `int2dds_datareader_return_serialized_loan`. This avoids copying the payload into a
  * caller-owned buffer for consumers that immediately deserialize the bytes.
  *
  * # Safety
@@ -3542,58 +4569,58 @@ Int2DdsRet int2dds_take_serialized(const struct Int2DdsDataReader *reader,
  * - `data_out`, `actual_size_out`, `valid_data_out`, and `loan_out` must be valid pointers
  * - if `*loan_out` is non-null, the caller must return it exactly once
  */
-Int2DdsRet int2dds_take_serialized_loaned(const struct Int2DdsDataReader *reader,
-                                          const uint8_t **data_out,
-                                          uintptr_t *actual_size_out,
-                                          bool *valid_data_out,
-                                          struct Int2DdsSerializedLoan **loan_out);
+Int2DdsRet int2dds_datareader_take_serialized_loaned(const struct Int2DdsDataReader *reader,
+                                                     const uint8_t **data_out,
+                                                     uintptr_t *actual_size_out,
+                                                     bool *valid_data_out,
+                                                     struct Int2DdsSerializedLoan **loan_out);
 
 /**
- * Return a serialized data loan produced by `int2dds_take_serialized_loaned`.
+ * Return a serialized data loan produced by `int2dds_datareader_take_serialized_loaned`.
  *
  * # Safety
- * - `loan` must be null or a pointer returned by `int2dds_take_serialized_loaned`
+ * - `loan` must be null or a pointer returned by `int2dds_datareader_take_serialized_loaned`
  * - `loan` must not be used after this call
  */
-Int2DdsRet int2dds_return_serialized_loan(struct Int2DdsSerializedLoan *loan);
+Int2DdsRet int2dds_datareader_return_serialized_loan(struct Int2DdsSerializedLoan *loan);
 
 /**
  * Read pre-serialized data from a DataReader without removing from cache.
  *
- * Same as `int2dds_take_serialized` but the sample remains in the cache.
+ * Same as `int2dds_datareader_take_serialized` but the sample remains in the cache.
  *
  * # Safety
- * - Same as `int2dds_take_serialized`
+ * - Same as `int2dds_datareader_take_serialized`
  */
-Int2DdsRet int2dds_read_serialized(const struct Int2DdsDataReader *reader,
-                                   uint8_t *buffer,
-                                   uintptr_t buffer_capacity,
-                                   uintptr_t *actual_size_out,
-                                   bool *valid_data_out);
+Int2DdsRet int2dds_datareader_read_serialized(const struct Int2DdsDataReader *reader,
+                                              uint8_t *buffer,
+                                              uintptr_t buffer_capacity,
+                                              uintptr_t *actual_size_out,
+                                              bool *valid_data_out);
 
 /**
  * Take pre-serialized data with full SampleInfo
  *
  * # Safety
- * - Same as `int2dds_take_serialized`, plus `info_out` must be a valid pointer
+ * - Same as `int2dds_datareader_take_serialized`, plus `info_out` must be a valid pointer
  */
-Int2DdsRet int2dds_take_serialized_w_info(const struct Int2DdsDataReader *reader,
-                                          uint8_t *buffer,
-                                          uintptr_t buffer_capacity,
-                                          uintptr_t *actual_size_out,
-                                          struct Int2DdsSampleInfo *info_out);
+Int2DdsRet int2dds_datareader_take_serialized_w_info(const struct Int2DdsDataReader *reader,
+                                                     uint8_t *buffer,
+                                                     uintptr_t buffer_capacity,
+                                                     uintptr_t *actual_size_out,
+                                                     struct Int2DdsSampleInfo *info_out);
 
 /**
  * Read pre-serialized data with full SampleInfo (sample remains in cache)
  *
  * # Safety
- * - Same as `int2dds_read_serialized`, plus `info_out` must be a valid pointer
+ * - Same as `int2dds_datareader_read_serialized`, plus `info_out` must be a valid pointer
  */
-Int2DdsRet int2dds_read_serialized_w_info(const struct Int2DdsDataReader *reader,
-                                          uint8_t *buffer,
-                                          uintptr_t buffer_capacity,
-                                          uintptr_t *actual_size_out,
-                                          struct Int2DdsSampleInfo *info_out);
+Int2DdsRet int2dds_datareader_read_serialized_w_info(const struct Int2DdsDataReader *reader,
+                                                     uint8_t *buffer,
+                                                     uintptr_t buffer_capacity,
+                                                     uintptr_t *actual_size_out,
+                                                     struct Int2DdsSampleInfo *info_out);
 
 /**
  * Take multiple serialized samples as a batch
@@ -3601,11 +4628,11 @@ Int2DdsRet int2dds_read_serialized_w_info(const struct Int2DdsDataReader *reader
  * # Safety
  * - `reader` must be a valid datareader
  * - `seq_out` must be a valid pointer to a null pointer
- * - The returned sequence must be freed with `int2dds_sample_seq_delete`
+ * - On `INT2DDS_RET_OK` the returned sequence must be freed with `int2dds_sample_seq_delete`
  */
-Int2DdsRet int2dds_take_serialized_batch(const struct Int2DdsDataReader *reader,
-                                         int32_t max_samples,
-                                         struct Int2DdsSampleSeq **seq_out);
+Int2DdsRet int2dds_datareader_take_serialized_batch(const struct Int2DdsDataReader *reader,
+                                                    int32_t max_samples,
+                                                    struct Int2DdsSampleSeq **seq_out);
 
 /**
  * Read multiple serialized samples as a batch (samples remain in cache)
@@ -3613,14 +4640,54 @@ Int2DdsRet int2dds_take_serialized_batch(const struct Int2DdsDataReader *reader,
  * # Safety
  * - `reader` must be a valid datareader
  * - `seq_out` must be a valid pointer to a null pointer
- * - The returned sequence must be freed with `int2dds_sample_seq_delete`
+ * - On `INT2DDS_RET_OK` the returned sequence must be freed with `int2dds_sample_seq_delete`
  */
-Int2DdsRet int2dds_read_serialized_batch(const struct Int2DdsDataReader *reader,
-                                         int32_t max_samples,
-                                         struct Int2DdsSampleSeq **seq_out);
+Int2DdsRet int2dds_datareader_read_serialized_batch(const struct Int2DdsDataReader *reader,
+                                                    int32_t max_samples,
+                                                    struct Int2DdsSampleSeq **seq_out);
+
+/**
+ * Take pre-serialized samples belonging to a single instance, as a batch.
+ *
+ * `handle` is a 16-byte instance handle (e.g. from `int2dds_datareader_lookup_instance`
+ * or a prior sample's info). A nil handle returns `INT2DDS_RET_BAD_PARAMETER`; an
+ * unknown handle returns no samples. The mask arguments are bitmasks of the
+ * SampleState/ViewState/InstanceState kinds; a mask of 0 selects "any".
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `handle` must point to a 16-byte instance handle
+ * - `seq_out` must be a valid pointer to a null pointer
+ * - On `INT2DDS_RET_OK` the returned sequence must be freed with `int2dds_sample_seq_delete`
+ */
+Int2DdsRet int2dds_datareader_take_instance_serialized_batch(const struct Int2DdsDataReader *reader,
+                                                             const uint8_t (*handle)[16],
+                                                             int32_t max_samples,
+                                                             uint32_t sample_state_mask,
+                                                             uint32_t view_state_mask,
+                                                             uint32_t instance_state_mask,
+                                                             struct Int2DdsSampleSeq **seq_out);
+
+/**
+ * Read pre-serialized samples belonging to a single instance, as a batch
+ * (samples remain in the cache).
+ *
+ * # Safety
+ * - Same as `int2dds_datareader_take_instance_serialized_batch`
+ */
+Int2DdsRet int2dds_datareader_read_instance_serialized_batch(const struct Int2DdsDataReader *reader,
+                                                             const uint8_t (*handle)[16],
+                                                             int32_t max_samples,
+                                                             uint32_t sample_state_mask,
+                                                             uint32_t view_state_mask,
+                                                             uint32_t instance_state_mask,
+                                                             struct Int2DdsSampleSeq **seq_out);
 
 /**
  * Get the number of samples in a sequence
+ *
+ * # Safety
+ * - `seq` must be a valid sample sequence
  */
 uintptr_t int2dds_sample_seq_length(const struct Int2DdsSampleSeq *seq);
 
@@ -3661,60 +4728,62 @@ Int2DdsRet int2dds_sample_seq_get_info(const struct Int2DdsSampleSeq *seq,
 Int2DdsRet int2dds_sample_seq_delete(struct Int2DdsSampleSeq *seq);
 
 /**
- * Read a single serialized sample with state condition filter
+ * Read a single serialized sample with state condition filter.
+ * A state mask of 0 selects "any".
  *
  * # Safety
- * - Same as `int2dds_read_serialized_w_info`, plus state masks
+ * - Same as `int2dds_datareader_read_serialized_w_info`, plus state masks
  */
-Int2DdsRet int2dds_read_serialized_w_condition(const struct Int2DdsDataReader *reader,
-                                               uint8_t *buffer,
-                                               uintptr_t buffer_capacity,
-                                               uintptr_t *actual_size_out,
-                                               struct Int2DdsSampleInfo *info_out,
-                                               uint32_t sample_state_mask,
-                                               uint32_t view_state_mask,
-                                               uint32_t instance_state_mask);
+Int2DdsRet int2dds_datareader_read_serialized_w_states(const struct Int2DdsDataReader *reader,
+                                                       uint8_t *buffer,
+                                                       uintptr_t buffer_capacity,
+                                                       uintptr_t *actual_size_out,
+                                                       struct Int2DdsSampleInfo *info_out,
+                                                       uint32_t sample_state_mask,
+                                                       uint32_t view_state_mask,
+                                                       uint32_t instance_state_mask);
 
 /**
- * Take a single serialized sample with state condition filter
+ * Take a single serialized sample with state condition filter.
+ * A state mask of 0 selects "any".
  *
  * # Safety
- * - Same as `int2dds_take_serialized_w_info`, plus state masks
+ * - Same as `int2dds_datareader_take_serialized_w_info`, plus state masks
  */
-Int2DdsRet int2dds_take_serialized_w_condition(const struct Int2DdsDataReader *reader,
-                                               uint8_t *buffer,
-                                               uintptr_t buffer_capacity,
-                                               uintptr_t *actual_size_out,
-                                               struct Int2DdsSampleInfo *info_out,
-                                               uint32_t sample_state_mask,
-                                               uint32_t view_state_mask,
-                                               uint32_t instance_state_mask);
+Int2DdsRet int2dds_datareader_take_serialized_w_states(const struct Int2DdsDataReader *reader,
+                                                       uint8_t *buffer,
+                                                       uintptr_t buffer_capacity,
+                                                       uintptr_t *actual_size_out,
+                                                       struct Int2DdsSampleInfo *info_out,
+                                                       uint32_t sample_state_mask,
+                                                       uint32_t view_state_mask,
+                                                       uint32_t instance_state_mask);
 
 /**
- * Take batch with state condition filter
+ * Take batch with state condition filter. A state mask of 0 selects "any".
  *
  * # Safety
- * - Same as `int2dds_take_serialized_batch`, plus state masks
+ * - Same as `int2dds_datareader_take_serialized_batch`, plus state masks
  */
-Int2DdsRet int2dds_take_serialized_batch_w_condition(const struct Int2DdsDataReader *reader,
-                                                     int32_t max_samples,
-                                                     struct Int2DdsSampleSeq **seq_out,
-                                                     uint32_t sample_state_mask,
-                                                     uint32_t view_state_mask,
-                                                     uint32_t instance_state_mask);
+Int2DdsRet int2dds_datareader_take_serialized_batch_w_states(const struct Int2DdsDataReader *reader,
+                                                             int32_t max_samples,
+                                                             struct Int2DdsSampleSeq **seq_out,
+                                                             uint32_t sample_state_mask,
+                                                             uint32_t view_state_mask,
+                                                             uint32_t instance_state_mask);
 
 /**
- * Read batch with state condition filter
+ * Read batch with state condition filter. A state mask of 0 selects "any".
  *
  * # Safety
- * - Same as `int2dds_read_serialized_batch`, plus state masks
+ * - Same as `int2dds_datareader_read_serialized_batch`, plus state masks
  */
-Int2DdsRet int2dds_read_serialized_batch_w_condition(const struct Int2DdsDataReader *reader,
-                                                     int32_t max_samples,
-                                                     struct Int2DdsSampleSeq **seq_out,
-                                                     uint32_t sample_state_mask,
-                                                     uint32_t view_state_mask,
-                                                     uint32_t instance_state_mask);
+Int2DdsRet int2dds_datareader_read_serialized_batch_w_states(const struct Int2DdsDataReader *reader,
+                                                             int32_t max_samples,
+                                                             struct Int2DdsSampleSeq **seq_out,
+                                                             uint32_t sample_state_mask,
+                                                             uint32_t view_state_mask,
+                                                             uint32_t instance_state_mask);
 
 /**
  * Block until the DataReader has received all historical data from matched
@@ -3729,15 +4798,18 @@ Int2DdsRet int2dds_datareader_wait_for_historical_data(const struct Int2DdsDataR
 /**
  * Create a Topic
  *
- * Creates a topic with RawTypeSupport for use with `int2dds_write_serialized()`
- * and `int2dds_take_serialized()`. C users handle CDR serialization themselves
- * using IDL-generated code.
+ * Creates a topic with RawTypeSupport for use with `int2dds_datawriter_write_serialized()`
+ * and `int2dds_datareader_take_serialized()`. C users handle CDR serialization themselves
+ * using IDL-generated code. Keyed topics require a full TypeObject; use
+ * `int2dds_create_topic_with_type_info` or `int2dds_create_topic_with_field_descriptors`.
  *
  * # Safety
  * - `participant` must be a valid participant
  * - `topic_name` must be a valid null-terminated C string
  * - `dds_type_name` must be a valid null-terminated C string (DDS registration name)
- * - `extensibility`: 0 = Final, 1 = Appendable, 2 = Mutable
+ * - `extensibility`: -1 = library default (Appendable per spec; frames a DHEADER, so
+ *   pass an explicit value or use the type-info path for a Final remote),
+ *   0 = Final, 1 = Appendable, 2 = Mutable
  * - `qos` can be null for default QoS
  * - `topic_out` must be a valid pointer to a null pointer
  * - The returned topic must be freed with `int2dds_delete_topic`
@@ -3750,41 +4822,17 @@ Int2DdsRet int2dds_create_topic(const struct Int2DdsParticipant *participant,
                                 struct Int2DdsTopic **topic_out);
 
 /**
- * Create a Topic with key support
- *
- * Same as `int2dds_create_topic` but with an explicit `has_key` parameter.
- * Use this when the data type has key fields for instance management
- * (register_instance, unregister_instance, dispose, lookup_instance).
- *
- * # Safety
- * - `participant` must be a valid participant
- * - `topic_name` must be a valid null-terminated C string
- * - `dds_type_name` must be a valid null-terminated C string (DDS registration name)
- * - `extensibility`: 0 = Final, 1 = Appendable, 2 = Mutable
- * - `has_key`: whether the data type has key fields
- * - `qos` can be null for default QoS
- * - `topic_out` must be a valid pointer to a null pointer
- * - The returned topic must be freed with `int2dds_delete_topic`
- */
-Int2DdsRet int2dds_create_topic_keyed(const struct Int2DdsParticipant *participant,
-                                      const char *topic_name,
-                                      const char *dds_type_name,
-                                      int32_t extensibility,
-                                      bool has_key,
-                                      const struct Int2DdsTopicQos *qos,
-                                      struct Int2DdsTopic **topic_out);
-
-/**
  * Create a Topic using a QoS profile path
  *
- * Same as `int2dds_create_topic_keyed` but uses a QoS profile path instead of a QoS handle.
+ * Same as `int2dds_create_topic` but uses a QoS profile path instead of a QoS handle.
  *
  * # Safety
  * - `participant` must be a valid participant
  * - `topic_name` must be a valid null-terminated C string
  * - `dds_type_name` must be a valid null-terminated C string (DDS registration name)
- * - `extensibility`: 0 = Final, 1 = Appendable, 2 = Mutable
- * - `has_key`: whether the data type has key fields
+ * - `extensibility`: -1 = library default (Appendable per spec; frames a DHEADER, so
+ *   pass an explicit value or use the type-info path for a Final remote),
+ *   0 = Final, 1 = Appendable, 2 = Mutable
  * - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
  * - `topic_out` must be a valid pointer to a null pointer
  * - The returned topic must be freed with `int2dds_delete_topic`
@@ -3793,7 +4841,6 @@ Int2DdsRet int2dds_create_topic_with_profile(const struct Int2DdsParticipant *pa
                                              const char *topic_name,
                                              const char *dds_type_name,
                                              int32_t extensibility,
-                                             bool has_key,
                                              const char *qos_path,
                                              struct Int2DdsTopic **topic_out);
 
@@ -3849,6 +4896,20 @@ Int2DdsRet int2dds_topic_get_qos(const struct Int2DdsTopic *topic,
  * - All DataReaders and DataWriters using this topic must be deleted first
  */
 Int2DdsRet int2dds_delete_topic(struct Int2DdsTopic *topic);
+
+/**
+ * Get the inconsistent topic status for a Topic
+ *
+ * Reports how many times a remote topic with the same name but an
+ * incompatible type was discovered. Reading the status resets its
+ * `total_count_change` and clears the INCONSISTENT_TOPIC status flag.
+ *
+ * # Safety
+ * - `topic` must be a valid topic
+ * - `status_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_topic_get_inconsistent_topic_status(const struct Int2DdsTopic *topic,
+                                                       struct Int2DdsInconsistentTopicStatus *status_out);
 
 /**
  * Get the name of a Topic
@@ -3922,46 +4983,34 @@ Int2DdsRet int2dds_contentfilteredtopic_set_expression_parameters(struct Int2Dds
                                                                   const char *const *expression_parameters,
                                                                   uintptr_t expression_parameters_count);
 
+/**
+ * # Safety
+ * - `cft` must be a valid content filtered topic
+ * - `filter_expression` must be a valid null-terminated C string
+ * - `expression_parameters` must be a valid array of `expression_parameters_count`
+ *   null-terminated C strings, or null if the count is 0
+ */
 Int2DdsRet int2dds_contentfilteredtopic_set_filter_expression(struct Int2DdsContentFilteredTopic *cft,
                                                               const char *filter_expression,
                                                               const char *const *expression_parameters,
                                                               uintptr_t expression_parameters_count);
 
+/**
+ * # Safety
+ * - `cft` must be a valid content filtered topic
+ */
 Int2DdsRet int2dds_contentfilteredtopic_set_enabled(struct Int2DdsContentFilteredTopic *cft,
                                                     bool enabled);
 
 /**
- * Create a Topic with key field metadata for compute_key() support.
- *
- * Same as int2dds_create_topic_keyed but additionally accepts key field
- * descriptors that enable instance handle computation from CDR data.
- * This is needed when the remote publisher does not include KEY_HASH
- * in inline QoS (e.g., CoreDX).
- *
- * # Safety
- * - Same as int2dds_create_topic_keyed
- * - field_indices/field_types must point to field_count elements, or be null if field_count is 0
- */
-Int2DdsRet int2dds_create_topic_keyed_with_key_fields(const struct Int2DdsParticipant *participant,
-                                                      const char *topic_name,
-                                                      const char *dds_type_name,
-                                                      int32_t extensibility,
-                                                      bool has_key,
-                                                      const struct Int2DdsTopicQos *qos,
-                                                      const uint32_t *field_indices,
-                                                      const uint32_t *field_types,
-                                                      uintptr_t field_count,
-                                                      struct Int2DdsTopic **topic_out);
-
-/**
  * Create a Topic with full field descriptors for reader-side CFT filtering.
  *
- * Extends int2dds_create_topic_keyed_with_key_fields by also providing
- * all field metadata (name, type) needed for get_field_value() support.
- * This enables ContentFilteredTopic reader-side filtering in the serialized path.
+ * Extends int2dds_create_topic by also providing all field metadata (name, type)
+ * needed for get_field_value() support. This enables ContentFilteredTopic
+ * reader-side filtering in the serialized path.
  *
  * # Safety
- * - Same as int2dds_create_topic_keyed
+ * - Same as int2dds_create_topic
  * - field_names: array of null-terminated C strings (field_count elements)
  * - field_types: array of u32 type IDs (field_count elements)
  * - field_is_key: array of bool (field_count elements)
@@ -3971,7 +5020,6 @@ Int2DdsRet int2dds_create_topic_with_field_descriptors(const struct Int2DdsParti
                                                        const char *topic_name,
                                                        const char *dds_type_name,
                                                        int32_t extensibility,
-                                                       bool has_key,
                                                        const struct Int2DdsTopicQos *qos,
                                                        const char *const *field_names,
                                                        const uint32_t *field_types,
@@ -3979,12 +5027,70 @@ Int2DdsRet int2dds_create_topic_with_field_descriptors(const struct Int2DdsParti
                                                        uintptr_t field_count,
                                                        struct Int2DdsTopic **topic_out);
 
+/**
+ * # Safety
+ * - `type_name` must be a valid null-terminated C string
+ * - `out` must be a valid pointer to a null pointer
+ */
 Int2DdsRet int2dds_type_info_create(const char *type_name,
                                     int32_t extensibility,
                                     struct Int2DdsTypeInfo **out);
 
 /**
+ * Create an enum type info builder. `bit_bound` is the discriminant bit width (IDL enums
+ * are i32 -> 32). Populate literals with `int2dds_type_info_add_enum_literal`, then pass
+ * the builder to `int2dds_type_info_add_nested_field` (or a collection-of-nested variant)
+ * on the parent so an enum-typed member resolves and computes native-Rust keys.
+ *
+ * # Safety
+ * - `type_name` must be a valid null-terminated C string
+ * - `out` must be a valid pointer to a null pointer
+ */
+Int2DdsRet int2dds_type_info_create_enum(const char *type_name,
+                                         uint16_t bit_bound,
+                                         struct Int2DdsTypeInfo **out);
+
+/**
+ * Append a literal to an enum builder. `is_default` marks the `@default` literal (0/1);
+ * no-op on a non-enum builder.
+ *
+ * # Safety
+ * - `type_info` must be a valid type info builder
+ * - `literal_name` must be a valid null-terminated C string
+ */
+Int2DdsRet int2dds_type_info_add_enum_literal(struct Int2DdsTypeInfo *type_info,
+                                              const char *literal_name,
+                                              int32_t value,
+                                              int32_t is_default);
+
+/**
+ * Create a bitmask type info builder. `bit_bound` is the flag storage bit width (default 32).
+ *
+ * # Safety
+ * - `type_name` must be a valid null-terminated C string
+ * - `out` must be a valid pointer to a null pointer
+ */
+Int2DdsRet int2dds_type_info_create_bitmask(const char *type_name,
+                                            uint16_t bit_bound,
+                                            struct Int2DdsTypeInfo **out);
+
+/**
+ * Append a flag to a bitmask builder. `position` is the bit index; no-op on a non-bitmask.
+ *
+ * # Safety
+ * - `type_info` must be a valid type info builder
+ * - `flag_name` must be a valid null-terminated C string
+ */
+Int2DdsRet int2dds_type_info_add_bitmask_flag(struct Int2DdsTypeInfo *type_info,
+                                              const char *flag_name,
+                                              uint16_t position);
+
+/**
  * Add a primitive-typed field to the type info builder.
+ *
+ * # Safety
+ * - `type_info` must be a valid type info builder
+ * - `field_name` must be a valid null-terminated C string
  */
 Int2DdsRet int2dds_type_info_add_field(struct Int2DdsTypeInfo *type_info,
                                        const char *field_name,
@@ -3997,6 +5103,10 @@ Int2DdsRet int2dds_type_info_add_field(struct Int2DdsTypeInfo *type_info,
  * Prefer this over `int2dds_type_info_add_field(.., INT2DDS_FIELD_STRING, ..)` when the
  * IDL declares `string<N>`, so the emitted TypeIdentifier carries the bound and matches
  * strict XTypes peers byte-for-byte.
+ *
+ * # Safety
+ * - `type_info` must be a valid type info builder
+ * - `field_name` must be a valid null-terminated C string
  */
 Int2DdsRet int2dds_type_info_add_string_field(struct Int2DdsTypeInfo *type_info,
                                               const char *field_name,
@@ -4005,6 +5115,10 @@ Int2DdsRet int2dds_type_info_add_string_field(struct Int2DdsTypeInfo *type_info,
 
 /**
  * Add a (possibly bounded) wide-string (`wstring<N>`) field. `bound == 0` means unbounded.
+ *
+ * # Safety
+ * - `type_info` must be a valid type info builder
+ * - `field_name` must be a valid null-terminated C string
  */
 Int2DdsRet int2dds_type_info_add_wstring_field(struct Int2DdsTypeInfo *type_info,
                                                const char *field_name,
@@ -4013,6 +5127,10 @@ Int2DdsRet int2dds_type_info_add_wstring_field(struct Int2DdsTypeInfo *type_info
 
 /**
  * Add a sequence field to the type info builder.
+ *
+ * # Safety
+ * - `type_info` must be a valid type info builder
+ * - `field_name` must be a valid null-terminated C string
  */
 Int2DdsRet int2dds_type_info_add_sequence_field(struct Int2DdsTypeInfo *type_info,
                                                 const char *field_name,
@@ -4022,6 +5140,10 @@ Int2DdsRet int2dds_type_info_add_sequence_field(struct Int2DdsTypeInfo *type_inf
 
 /**
  * Add an array field to the type info builder.
+ *
+ * # Safety
+ * - `type_info` must be a valid type info builder
+ * - `field_name` must be a valid null-terminated C string
  */
 Int2DdsRet int2dds_type_info_add_array_field(struct Int2DdsTypeInfo *type_info,
                                              const char *field_name,
@@ -4031,29 +5153,110 @@ Int2DdsRet int2dds_type_info_add_array_field(struct Int2DdsTypeInfo *type_info,
 
 /**
  * Add a named (complex) type field to the type info builder.
+ *
+ * # Safety
+ * - `type_info` must be a valid type info builder
+ * - `field_name` must be a valid null-terminated C string
+ * - `type_hash_name` must be a valid null-terminated C string
  */
 Int2DdsRet int2dds_type_info_add_named_type_field(struct Int2DdsTypeInfo *type_info,
                                                   const char *field_name,
                                                   const char *type_hash_name,
                                                   int32_t flags);
 
+/**
+ * Add a nested struct-typed field, supplying the nested type's own builder.
+ *
+ * Unlike `int2dds_type_info_add_named_type_field` (which emits a name-hash
+ * `MinimalTypeId` reference), this references the nested type by its content-hash
+ * `CompleteTypeId` — matching the derive macro byte-for-byte — and captures the nested
+ * `TypeObject` so composite (nested-struct) key members resolve and compute native-Rust
+ * InstanceHandles. `nested_type_info` is borrowed, not consumed: the caller still owns
+ * it and must destroy it.
+ *
+ * # Safety
+ * - `type_info` must be a valid type info builder
+ * - `field_name` must be a valid null-terminated C string
+ * - `nested_type_info` must be a valid type info builder; it is borrowed, not
+ *   consumed, and the caller still owns it
+ */
+Int2DdsRet int2dds_type_info_add_nested_field(struct Int2DdsTypeInfo *type_info,
+                                              const char *field_name,
+                                              const struct Int2DdsTypeInfo *nested_type_info,
+                                              int32_t flags);
+
+/**
+ * Add a `sequence<Nested>` field whose element is a nested struct/enum/bitmask, supplying
+ * the element's own builder. References the element by content-hash `CompleteTypeId`
+ * (matching the derive macro) so sequence-of-nested key members resolve and compute
+ * native-Rust InstanceHandles. `element_type_info` is borrowed, not consumed.
+ *
+ * # Safety
+ * - `type_info` must be a valid type info builder
+ * - `field_name` must be a valid null-terminated C string
+ * - `element_type_info` must be a valid type info builder; it is borrowed, not
+ *   consumed, and the caller still owns it
+ */
+Int2DdsRet int2dds_type_info_add_sequence_of_nested_field(struct Int2DdsTypeInfo *type_info,
+                                                          const char *field_name,
+                                                          const struct Int2DdsTypeInfo *element_type_info,
+                                                          uint32_t bound,
+                                                          int32_t flags);
+
+/**
+ * Add a `Nested[N]` fixed-array field whose element is a nested struct/enum/bitmask,
+ * supplying the element's own builder. `element_type_info` is borrowed, not consumed.
+ *
+ * # Safety
+ * - `type_info` must be a valid type info builder
+ * - `field_name` must be a valid null-terminated C string
+ * - `element_type_info` must be a valid type info builder; it is borrowed, not
+ *   consumed, and the caller still owns it
+ */
+Int2DdsRet int2dds_type_info_add_array_of_nested_field(struct Int2DdsTypeInfo *type_info,
+                                                       const char *field_name,
+                                                       const struct Int2DdsTypeInfo *element_type_info,
+                                                       uint32_t array_size,
+                                                       int32_t flags);
+
+/**
+ * # Safety
+ * - `type_info` must be a valid type info builder
+ * - `field_name` must be a valid null-terminated C string
+ * - `element_hash_name` must be a valid null-terminated C string
+ */
 Int2DdsRet int2dds_type_info_add_sequence_of_named_field(struct Int2DdsTypeInfo *type_info,
                                                          const char *field_name,
                                                          const char *element_hash_name,
                                                          uint32_t bound,
                                                          int32_t flags);
 
+/**
+ * # Safety
+ * - `type_info` must be a valid type info builder
+ * - `field_name` must be a valid null-terminated C string
+ * - `element_hash_name` must be a valid null-terminated C string
+ */
 Int2DdsRet int2dds_type_info_add_array_of_named_field(struct Int2DdsTypeInfo *type_info,
                                                       const char *field_name,
                                                       const char *element_hash_name,
                                                       uint32_t array_size,
                                                       int32_t flags);
 
+/**
+ * # Safety
+ * - `type_info` must be a valid type info builder
+ * - `out` must be a valid pointer to a null pointer
+ */
 Int2DdsRet int2dds_type_info_to_type_object(const struct Int2DdsTypeInfo *type_info,
                                             struct Int2DdsTypeObject **out);
 
 /**
  * Destroy a type info builder.
+ *
+ * # Safety
+ * - `type_info` must be a valid type info builder, or null (null is a no-op)
+ * - `type_info` must not be used after this call
  */
 void int2dds_type_info_destroy(struct Int2DdsTypeInfo *type_info);
 
@@ -4067,39 +5270,13 @@ void int2dds_type_info_destroy(struct Int2DdsTypeInfo *type_info);
 Int2DdsRet int2dds_waitset_new(struct Int2DdsWaitSet **waitset_out);
 
 /**
- * Wait for conditions to be triggered
- *
- * # Safety
- * - `waitset` must be a valid waitset
- * - `timeout_ms` is the timeout in milliseconds, or -1 for infinite
- *
- * Returns:
- * - INT2DDS_RET_OK if conditions were triggered
- * - INT2DDS_RET_TIMEOUT if the timeout expired
- * - INT2DDS_RET_ERROR for other errors
- */
-Int2DdsRet int2dds_waitset_wait(const struct Int2DdsWaitSet *waitset, int64_t timeout_ms);
-
-/**
- * Wait for conditions to be triggered, with nanosecond timeout resolution.
- *
- * Identical to `int2dds_waitset_wait` but the timeout is given in nanoseconds so
- * sub-millisecond waits are honored. Additive: the millisecond entry point is
- * unchanged.
- *
- * # Safety
- * - `waitset` must be a valid waitset
- * - `timeout_ns` is the timeout in nanoseconds, or -1 for infinite
- */
-Int2DdsRet int2dds_waitset_wait_ns(const struct Int2DdsWaitSet *waitset, int64_t timeout_ns);
-
-/**
  * Wait for conditions to be triggered and return the triggered conditions
  *
  * # Safety
  * - `waitset` must be a valid waitset
  * - `timeout_ms` is the timeout in milliseconds, or -1 for infinite
- * - `conditions_out` must be a valid pointer to a null pointer
+ * - `conditions_out` must be a valid pointer to a null pointer, or null if the
+ *   caller does not need the triggered conditions
  * - The returned condition sequence must be freed with `int2dds_condition_seq_delete`
  *
  * Returns:
@@ -4110,6 +5287,25 @@ Int2DdsRet int2dds_waitset_wait_ns(const struct Int2DdsWaitSet *waitset, int64_t
 Int2DdsRet int2dds_waitset_wait_ex(const struct Int2DdsWaitSet *waitset,
                                    int64_t timeout_ms,
                                    struct Int2DdsConditionSeq **conditions_out);
+
+/**
+ * Wait for conditions to be triggered and return them, with nanosecond timeout resolution.
+ *
+ * # Safety
+ * - `waitset` must be a valid waitset
+ * - `timeout_ns` is the timeout in nanoseconds, or -1 for infinite
+ * - `conditions_out` must be a valid pointer to a null pointer, or null if the
+ *   caller does not need the triggered conditions
+ * - The returned condition sequence must be freed with `int2dds_condition_seq_delete`
+ *
+ * Returns:
+ * - INT2DDS_RET_OK if conditions were triggered
+ * - INT2DDS_RET_TIMEOUT if the timeout expired
+ * - INT2DDS_RET_ERROR for other errors
+ */
+Int2DdsRet int2dds_waitset_wait_ex_ns(const struct Int2DdsWaitSet *waitset,
+                                      int64_t timeout_ns,
+                                      struct Int2DdsConditionSeq **conditions_out);
 
 /**
  * Get the number of conditions in a condition sequence
@@ -4172,8 +5368,8 @@ Int2DdsRet int2dds_condition_delete(struct Int2DdsCondition *condition);
  * - `waitset` must be a valid waitset
  * - `condition` must be a valid guard condition
  */
-Int2DdsRet int2dds_waitset_attach_guard_condition(const struct Int2DdsWaitSet *waitset,
-                                                  const struct Int2DdsGuardCondition *condition);
+Int2DdsRet int2dds_waitset_attach_guardcondition(const struct Int2DdsWaitSet *waitset,
+                                                 const struct Int2DdsGuardCondition *condition);
 
 /**
  * Detach a GuardCondition from the WaitSet
@@ -4182,8 +5378,8 @@ Int2DdsRet int2dds_waitset_attach_guard_condition(const struct Int2DdsWaitSet *w
  * - `waitset` must be a valid waitset
  * - `condition` must be a valid guard condition that was previously attached
  */
-Int2DdsRet int2dds_waitset_detach_guard_condition(const struct Int2DdsWaitSet *waitset,
-                                                  const struct Int2DdsGuardCondition *condition);
+Int2DdsRet int2dds_waitset_detach_guardcondition(const struct Int2DdsWaitSet *waitset,
+                                                 const struct Int2DdsGuardCondition *condition);
 
 /**
  * Attach a StatusCondition to the WaitSet
@@ -4192,8 +5388,8 @@ Int2DdsRet int2dds_waitset_detach_guard_condition(const struct Int2DdsWaitSet *w
  * - `waitset` must be a valid waitset
  * - `condition` must be a valid status condition
  */
-Int2DdsRet int2dds_waitset_attach_condition(const struct Int2DdsWaitSet *waitset,
-                                            const struct Int2DdsStatusCondition *condition);
+Int2DdsRet int2dds_waitset_attach_statuscondition(const struct Int2DdsWaitSet *waitset,
+                                                  const struct Int2DdsStatusCondition *condition);
 
 /**
  * Detach a StatusCondition from the WaitSet
@@ -4202,52 +5398,28 @@ Int2DdsRet int2dds_waitset_attach_condition(const struct Int2DdsWaitSet *waitset
  * - `waitset` must be a valid waitset
  * - `condition` must be a valid status condition that was previously attached
  */
-Int2DdsRet int2dds_waitset_detach_condition(const struct Int2DdsWaitSet *waitset,
-                                            const struct Int2DdsStatusCondition *condition);
+Int2DdsRet int2dds_waitset_detach_statuscondition(const struct Int2DdsWaitSet *waitset,
+                                                  const struct Int2DdsStatusCondition *condition);
 
 /**
- * Attach a DataReader's status condition to the WaitSet
- *
- * This allows waiting for data to arrive on a DataReader.
+ * Attach a Read/QueryCondition to the WaitSet
  *
  * # Safety
  * - `waitset` must be a valid waitset
- * - `reader` must be a valid datareader
+ * - `condition` must be a valid read condition
  */
-Int2DdsRet int2dds_waitset_attach_datareader(const struct Int2DdsWaitSet *waitset,
-                                             const struct Int2DdsDataReader *reader);
+Int2DdsRet int2dds_waitset_attach_readcondition(const struct Int2DdsWaitSet *waitset,
+                                                const struct Int2DdsReadCondition *condition);
 
 /**
- * Detach a DataReader's status condition from the WaitSet
+ * Detach a Read/QueryCondition from the WaitSet
  *
  * # Safety
  * - `waitset` must be a valid waitset
- * - `reader` must be a valid datareader that was previously attached
+ * - `condition` must be a valid read condition that was previously attached
  */
-Int2DdsRet int2dds_waitset_detach_datareader(const struct Int2DdsWaitSet *waitset,
-                                             const struct Int2DdsDataReader *reader);
-
-/**
- * Attach a DataWriter's status condition to the WaitSet
- *
- * This allows waiting for publication matched events on a DataWriter.
- *
- * # Safety
- * - `waitset` must be a valid waitset
- * - `writer` must be a valid datawriter
- */
-Int2DdsRet int2dds_waitset_attach_datawriter(const struct Int2DdsWaitSet *waitset,
-                                             const struct Int2DdsDataWriter *writer);
-
-/**
- * Detach a DataWriter's status condition from the WaitSet
- *
- * # Safety
- * - `waitset` must be a valid waitset
- * - `writer` must be a valid datawriter that was previously attached
- */
-Int2DdsRet int2dds_waitset_detach_datawriter(const struct Int2DdsWaitSet *waitset,
-                                             const struct Int2DdsDataWriter *writer);
+Int2DdsRet int2dds_waitset_detach_readcondition(const struct Int2DdsWaitSet *waitset,
+                                                const struct Int2DdsReadCondition *condition);
 
 /**
  * Delete a WaitSet
@@ -4262,23 +5434,38 @@ Int2DdsRet int2dds_waitset_delete(struct Int2DdsWaitSet *waitset);
 /**
  * Create an empty XML type registry. Destroy with
  * `int2dds_xml_type_registry_destroy`.
+ *
+ * # Safety
+ * - `out` must be a valid pointer to a null pointer
  */
 Int2DdsRet int2dds_xml_type_registry_create(struct Int2DdsXmlTypeRegistry **out);
 
 /**
  * Create an XML type registry and load `path` into it in one step.
+ *
+ * # Safety
+ * - `path` must be a valid null-terminated C string
+ * - `out` must be a valid pointer to a null pointer
  */
 Int2DdsRet int2dds_xml_type_registry_from_file(const char *path,
                                                struct Int2DdsXmlTypeRegistry **out);
 
 /**
  * Load additional types from an XML file into an existing registry.
+ *
+ * # Safety
+ * - `registry` must be a valid XML type registry
+ * - `path` must be a valid null-terminated C string
  */
 Int2DdsRet int2dds_xml_type_registry_load_file(struct Int2DdsXmlTypeRegistry *registry,
                                                const char *path);
 
 /**
  * Load additional types from an in-memory XML string into an existing registry.
+ *
+ * # Safety
+ * - `registry` must be a valid XML type registry
+ * - `xml` must be a valid null-terminated C string
  */
 Int2DdsRet int2dds_xml_type_registry_load_str(struct Int2DdsXmlTypeRegistry *registry,
                                               const char *xml);
@@ -4287,6 +5474,11 @@ Int2DdsRet int2dds_xml_type_registry_load_str(struct Int2DdsXmlTypeRegistry *reg
  * Look up a loaded type by name and build a dynamic type support (with its full
  * dependency closure). Destroy the result with
  * `int2dds_dynamic_type_support_destroy`.
+ *
+ * # Safety
+ * - `registry` must be a valid XML type registry
+ * - `name` must be a valid null-terminated C string
+ * - `out` must be a valid pointer to a null pointer
  */
 Int2DdsRet int2dds_xml_type_registry_get_type_support(const struct Int2DdsXmlTypeRegistry *registry,
                                                       const char *name,
@@ -4295,6 +5487,11 @@ Int2DdsRet int2dds_xml_type_registry_get_type_support(const struct Int2DdsXmlTyp
 /**
  * Look up a loaded type by name and return its top-level TypeObject for
  * introspection. Destroy the result with `int2dds_type_object_destroy`.
+ *
+ * # Safety
+ * - `registry` must be a valid XML type registry
+ * - `name` must be a valid null-terminated C string
+ * - `out` must be a valid pointer to a null pointer
  */
 Int2DdsRet int2dds_xml_type_registry_get_type_object(const struct Int2DdsXmlTypeRegistry *registry,
                                                      const char *name,
@@ -4302,12 +5499,21 @@ Int2DdsRet int2dds_xml_type_registry_get_type_object(const struct Int2DdsXmlType
 
 /**
  * Number of types loaded in the registry.
+ *
+ * # Safety
+ * - `registry` must be a valid XML type registry
+ * - `out` must be a valid pointer
  */
 Int2DdsRet int2dds_xml_type_registry_type_count(const struct Int2DdsXmlTypeRegistry *registry,
                                                 uintptr_t *out);
 
 /**
  * Copy the fully-qualified name of the type at `index` into `buf`.
+ *
+ * # Safety
+ * - `registry` must be a valid XML type registry
+ * - `buf` must point to at least `buf_len` writable bytes
+ * - `out_len` must be a valid pointer
  */
 Int2DdsRet int2dds_xml_type_registry_type_name(const struct Int2DdsXmlTypeRegistry *registry,
                                                uintptr_t index,
@@ -4317,6 +5523,10 @@ Int2DdsRet int2dds_xml_type_registry_type_name(const struct Int2DdsXmlTypeRegist
 
 /**
  * Destroy an XML type registry handle. Safe to call with null.
+ *
+ * # Safety
+ * - `registry` must be a valid XML type registry, or null (null is a no-op)
+ * - `registry` must not be used after this call
  */
 void int2dds_xml_type_registry_destroy(struct Int2DdsXmlTypeRegistry *registry);
 

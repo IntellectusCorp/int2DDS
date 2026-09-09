@@ -9,19 +9,21 @@
 //!
 //! ## Reading Data
 //!
-//! C users receive raw CDR bytes via `int2dds_take_serialized` / `int2dds_read_serialized`
+//! C users receive raw CDR bytes via `int2dds_datareader_take_serialized` / `int2dds_datareader_read_serialized`
 //! and deserialize them with IDL-generated code.
 
 use std::ffi::CStr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;
 use int2dds::{
+    common::instance_handle::InstanceHandle,
     core::time::Duration,
     infrastructure::status::StatusMask,
     subscription::{
+        data_reader::BoundedSerialized,
         data_reader_listener::DataReaderListener,
-        sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind},
+        sample_info::{InstanceStateKind, SampleInfo, SampleStateKind, ViewStateKind},
     },
 };
 
@@ -54,7 +56,7 @@ use super::{
     status::{
         Int2DdsLivelinessChangedStatus, Int2DdsRequestedDeadlineMissedStatus,
         Int2DdsRequestedIncompatibleQosStatus, Int2DdsRequestedIncompatibleTypeStatus,
-        Int2DdsSampleLostStatus, Int2DdsSampleRejectedStatus,
+        Int2DdsSampleLostStatus, Int2DdsSampleRejectedStatus, Int2DdsSubscriptionMatchedStatus,
     },
     types::*,
 };
@@ -63,58 +65,30 @@ use super::{
 ///
 /// # Safety
 /// - `participant` must be a valid participant
-/// - `qos` can be null for default QoS
+/// - `qos` can be null for the default QoS (engages the core resolution chain:
+///   registered default → configured default profile → spec default)
 /// - `subscriber_out` must be a valid pointer to a null pointer
 /// - The returned subscriber must be freed with `int2dds_delete_subscriber`
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_create_subscriber(
     participant: *const Int2DdsParticipant,
-    subscriber_out: *mut *mut Int2DdsSubscriber,
-) -> Int2DdsRet {
-    check_null!(participant);
-    check_null!(subscriber_out);
-
-    let participant_ref = &*participant;
-
-    // Pass the default sentinel so the core resolution chain (registered
-    // default → configured default profile → spec default) is engaged.
-    let subscriber = ffi_try!(participant_ref.inner.create_subscriber(
-        int2dds::subscription::qos::SUBSCRIBER_QOS_DEFAULT,
-        None,
-        StatusMask::default()
-    ));
-
-    // Wrap subscriber in Arc
-    let subscriber_arc = Arc::new(subscriber);
-
-    let subscriber_handle = Box::new(Int2DdsSubscriber { inner: subscriber_arc });
-
-    *subscriber_out = Box::into_raw(subscriber_handle);
-
-    INT2DDS_RET_OK
-}
-
-/// Create a Subscriber with QoS
-///
-/// # Safety
-/// - `participant` must be a valid participant
-/// - `qos` must be a valid subscriber QoS handle
-/// - `subscriber_out` must be a valid pointer to a null pointer
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_create_subscriber_with_qos(
-    participant: *const Int2DdsParticipant,
     qos: *const Int2DdsSubscriberQos,
     subscriber_out: *mut *mut Int2DdsSubscriber,
 ) -> Int2DdsRet {
     check_null!(participant);
-    check_null!(qos);
     check_null!(subscriber_out);
 
     let participant_ref = &*participant;
-    let qos_ref = &*qos;
+
+    // NULL qos → default sentinel (engages profile fallback). Non-NULL → use as-is.
+    let subscriber_qos = if qos.is_null() {
+        int2dds::infrastructure::qos_kind::QosKind::Default
+    } else {
+        int2dds::infrastructure::qos_kind::QosKind::Specific((*qos).inner.clone())
+    };
 
     let subscriber = ffi_try!(participant_ref.inner.create_subscriber(
-        qos_ref.inner.clone(),
+        subscriber_qos,
         None,
         StatusMask::default()
     ));
@@ -207,6 +181,26 @@ pub unsafe extern "C" fn int2dds_subscriber_get_qos(
     INT2DDS_RET_OK
 }
 
+/// Get the 16-byte instance handle of a Subscriber.
+///
+/// # Safety
+/// - `subscriber` must be a valid subscriber
+/// - `handle_out` must point to a 16-byte buffer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscriber_get_instance_handle(
+    subscriber: *const Int2DdsSubscriber,
+    handle_out: *mut [u8; 16],
+) -> Int2DdsRet {
+    check_null!(subscriber);
+    check_null!(handle_out);
+
+    let subscriber_ref = &*subscriber;
+    let handle = ffi_try!(subscriber_ref.inner.get_instance_handle());
+    *handle_out = *handle.value();
+
+    INT2DDS_RET_OK
+}
+
 /// Delete a Subscriber
 ///
 /// # Safety
@@ -221,30 +215,74 @@ pub unsafe extern "C" fn int2dds_delete_subscriber(
         return INT2DDS_RET_NULL_POINTER;
     }
 
-    let subscriber_ref = &*subscriber;
-    if Arc::strong_count(&subscriber_ref.inner) != 1 {
+    let subscriber_box = Box::from_raw(subscriber);
+    if Arc::strong_count(&subscriber_box.inner) != 1 {
+        let _ = Box::into_raw(subscriber_box);
         return INT2DDS_RET_PRECONDITION_NOT_MET;
     }
 
-    // Destructure Box to move Arc out
-    let Int2DdsSubscriber { inner: subscriber_arc } = *Box::from_raw(subscriber);
+    let subscriber_obj = (*subscriber_box.inner).clone();
 
-    // Try to unwrap Arc without cloning (succeeds if this is the only reference)
-    let subscriber_obj = match Arc::try_unwrap(subscriber_arc) {
-        Ok(s) => s,
-        Err(_arc) => return INT2DDS_RET_PRECONDITION_NOT_MET,
-    };
-
-    // Get the participant to delete the subscriber
     let participant = match subscriber_obj.get_participant() {
         Ok(p) => p,
-        Err(e) => return dds_error_to_code(&e),
+        Err(e) => {
+            let _ = Box::into_raw(subscriber_box);
+            return dds_error_to_code(&e);
+        }
     };
 
+    // On failure the subscriber is not deleted; restore the caller's handle
+    // (into_raw) instead of leaving it freed. The Box drops (frees) only on success.
     match participant.delete_subscriber(subscriber_obj) {
         Ok(()) => INT2DDS_RET_OK,
-        Err(e) => dds_error_to_code(&e),
+        Err(e) => {
+            let _ = Box::into_raw(subscriber_box);
+            dds_error_to_code(&e)
+        }
     }
+}
+
+/// Attach FFI listener callbacks to a freshly created reader handle, then re-notify
+/// for events that may have fired between entity creation and listener registration
+/// (the SEDP matching race).
+unsafe fn attach_reader_listener(
+    reader_handle: &Arc<Int2DdsDataReader>,
+    listener: *const Int2DdsDataReaderListener,
+    mask: u32,
+) -> Int2DdsRet {
+    if listener.is_null() {
+        return INT2DDS_RET_OK;
+    }
+
+    let weak = Arc::downgrade(reader_handle);
+    let listener_arc = Arc::new(FfiDataReaderListener::new(*listener, weak));
+
+    let listener_clone = listener_arc.clone()
+        as Arc<
+            dyn int2dds::subscription::data_reader_listener::DataReaderListener<Foo = Int2DdsData>,
+        >;
+    ffi_try!(reader_handle
+        .inner
+        .set_listener(Some(listener_clone), StatusMask::from_bits_truncate(mask)));
+
+    *reader_handle.listener.write().unwrap() = Some(listener_arc.clone());
+
+    if mask & crate::status_condition::INT2DDS_STATUS_SUBSCRIPTION_MATCHED != 0 {
+        if let Ok(status) = reader_handle.inner.get_subscription_matched_status() {
+            if status.current_count() > 0 {
+                listener_arc.on_subscription_matched(&reader_handle.inner, &status);
+            }
+        }
+    }
+    if mask & crate::status_condition::INT2DDS_STATUS_REQUESTED_INCOMPATIBLE_QOS != 0 {
+        if let Ok(status) = reader_handle.inner.get_requested_incompatible_qos_status() {
+            if status.total_count() > 0 {
+                listener_arc.on_requested_incompatible_qos(&reader_handle.inner, &status);
+            }
+        }
+    }
+
+    INT2DDS_RET_OK
 }
 
 /// Create a DataReader
@@ -253,57 +291,13 @@ pub unsafe extern "C" fn int2dds_delete_subscriber(
 /// - `subscriber` must be a valid subscriber
 /// - `topic` must be a valid topic
 /// - `qos` can be null for default QoS
-/// - `reader_out` must be a valid pointer to a null pointer
-/// - The returned reader must be freed with `int2dds_delete_datareader`
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_create_datareader(
-    subscriber: *const Int2DdsSubscriber,
-    topic: *const Int2DdsTopic,
-    qos: *const Int2DdsDataReaderQos,
-    reader_out: *mut *mut Int2DdsDataReader,
-) -> Int2DdsRet {
-    check_null!(subscriber);
-    check_null!(topic);
-    check_null!(reader_out);
-
-    let subscriber_ref = &*subscriber;
-    let topic_ref = &*topic;
-
-    // NULL qos → default sentinel (engages profile fallback). Non-NULL → use as-is.
-    let reader_qos = if qos.is_null() {
-        int2dds::infrastructure::qos_kind::QosKind::Default
-    } else {
-        int2dds::infrastructure::qos_kind::QosKind::Specific((*qos).inner.clone())
-    };
-
-    // Create DataReader<Int2DdsData>
-    let reader = ffi_try!(subscriber_ref.inner.create_datareader::<Int2DdsData>(
-        &*topic_ref.inner,
-        reader_qos,
-        None,
-        StatusMask::default()
-    ));
-
-    let reader_handle = Box::new(Int2DdsDataReader { inner: reader, listener: None });
-
-    *reader_out = Box::into_raw(reader_handle);
-
-    INT2DDS_RET_OK
-}
-
-/// Create a DataReader with listener callbacks
-///
-/// # Safety
-/// - `subscriber` must be a valid subscriber
-/// - `topic` must be a valid topic
-/// - `qos` can be null for default QoS
-/// - `listener` can be null for no listener
-/// - `mask` specifies which status changes trigger callbacks
+/// - `listener` can be null for no listener; `mask` specifies which status
+///   changes trigger callbacks (pass 0 with a null listener)
 /// - `reader_out` must be a valid pointer to a null pointer
 /// - The returned reader must be freed with `int2dds_delete_datareader`
 /// - Listener callbacks must be thread-safe and remain valid until reader is deleted
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_create_datareader_with_listener(
+pub unsafe extern "C" fn int2dds_create_datareader(
     subscriber: *const Int2DdsSubscriber,
     topic: *const Int2DdsTopic,
     qos: *const Int2DdsDataReaderQos,
@@ -325,7 +319,6 @@ pub unsafe extern "C" fn int2dds_create_datareader_with_listener(
         int2dds::infrastructure::qos_kind::QosKind::Specific((*qos).inner.clone())
     };
 
-    // Create DataReader<Int2DdsData> first without listener
     let reader = ffi_try!(subscriber_ref.inner.create_datareader::<Int2DdsData>(
         &*topic_ref.inner,
         reader_qos,
@@ -333,48 +326,14 @@ pub unsafe extern "C" fn int2dds_create_datareader_with_listener(
         StatusMask::from_bits_truncate(mask)
     ));
 
-    // Create reader_handle with the actual reader
-    let mut reader_handle = Box::new(Int2DdsDataReader { inner: reader, listener: None });
+    let reader_handle = Arc::new(Int2DdsDataReader { inner: reader, listener: RwLock::new(None) });
 
-    // If listener is provided, set it now
-    if !listener.is_null() {
-        let reader_ptr = &mut *reader_handle as *mut Int2DdsDataReader;
-        let ffi_listener = FfiDataReaderListener::new(*listener, reader_ptr);
-        let listener_arc = Arc::new(ffi_listener);
-
-        // Set the listener on the reader
-        let listener_clone = listener_arc.clone()
-            as Arc<
-                dyn int2dds::subscription::data_reader_listener::DataReaderListener<
-                    Foo = Int2DdsData,
-                >,
-            >;
-        ffi_try!(reader_handle
-            .inner
-            .set_listener(Some(listener_clone), StatusMask::from_bits_truncate(mask)));
-
-        reader_handle.listener = Some(listener_arc.clone());
-
-        // Check if matching already occurred before the listener was set.
-        // This handles the race condition where SEDP matching completes between
-        // create_datareader() and set_listener().
-        if mask & crate::status_condition::INT2DDS_STATUS_SUBSCRIPTION_MATCHED != 0 {
-            if let Ok(status) = reader_handle.inner.get_subscription_matched_status() {
-                if status.current_count() > 0 {
-                    listener_arc.on_subscription_matched(&reader_handle.inner, &status);
-                }
-            }
-        }
-        if mask & crate::status_condition::INT2DDS_STATUS_REQUESTED_INCOMPATIBLE_QOS != 0 {
-            if let Ok(status) = reader_handle.inner.get_requested_incompatible_qos_status() {
-                if status.total_count() > 0 {
-                    listener_arc.on_requested_incompatible_qos(&reader_handle.inner, &status);
-                }
-            }
-        }
+    let ret = attach_reader_listener(&reader_handle, listener, mask);
+    if ret != INT2DDS_RET_OK {
+        return ret;
     }
 
-    *reader_out = Box::into_raw(reader_handle);
+    *reader_out = Arc::into_raw(reader_handle) as *mut Int2DdsDataReader;
 
     INT2DDS_RET_OK
 }
@@ -385,55 +344,13 @@ pub unsafe extern "C" fn int2dds_create_datareader_with_listener(
 /// - `subscriber` must be a valid subscriber
 /// - `topic` must be a valid topic
 /// - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
-/// - `reader_out` must be a valid pointer to a null pointer
-/// - The returned reader must be freed with `int2dds_delete_datareader`
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_create_datareader_with_profile(
-    subscriber: *const Int2DdsSubscriber,
-    topic: *const Int2DdsTopic,
-    qos_path: *const std::os::raw::c_char,
-    reader_out: *mut *mut Int2DdsDataReader,
-) -> Int2DdsRet {
-    check_null!(subscriber);
-    check_null!(topic);
-    check_null!(qos_path);
-    check_null!(reader_out);
-
-    let subscriber_ref = &*subscriber;
-    let topic_ref = &*topic;
-
-    let qos_path_str = match CStr::from_ptr(qos_path).to_str() {
-        Ok(s) => s,
-        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
-    };
-
-    let reader = ffi_try!(subscriber_ref.inner.create_datareader_with_profile::<Int2DdsData>(
-        &*topic_ref.inner,
-        qos_path_str,
-        None,
-        StatusMask::default()
-    ));
-
-    let reader_handle = Box::new(Int2DdsDataReader { inner: reader, listener: None });
-
-    *reader_out = Box::into_raw(reader_handle);
-
-    INT2DDS_RET_OK
-}
-
-/// Create a DataReader with listener callbacks using a QoS profile path
-///
-/// # Safety
-/// - `subscriber` must be a valid subscriber
-/// - `topic` must be a valid topic
-/// - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
-/// - `listener` can be null for no listener
-/// - `mask` specifies which status changes trigger callbacks
+/// - `listener` can be null for no listener; `mask` specifies which status
+///   changes trigger callbacks (pass 0 with a null listener)
 /// - `reader_out` must be a valid pointer to a null pointer
 /// - The returned reader must be freed with `int2dds_delete_datareader`
 /// - Listener callbacks must be thread-safe and remain valid until reader is deleted
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_create_datareader_with_profile_and_listener(
+pub unsafe extern "C" fn int2dds_create_datareader_with_profile(
     subscriber: *const Int2DdsSubscriber,
     topic: *const Int2DdsTopic,
     qos_path: *const std::os::raw::c_char,
@@ -454,7 +371,6 @@ pub unsafe extern "C" fn int2dds_create_datareader_with_profile_and_listener(
         Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
-    // Create DataReader<Int2DdsData> first without listener
     let reader = ffi_try!(subscriber_ref.inner.create_datareader_with_profile::<Int2DdsData>(
         &*topic_ref.inner,
         qos_path_str,
@@ -462,46 +378,14 @@ pub unsafe extern "C" fn int2dds_create_datareader_with_profile_and_listener(
         StatusMask::from_bits_truncate(mask)
     ));
 
-    // Create reader_handle with the actual reader
-    let mut reader_handle = Box::new(Int2DdsDataReader { inner: reader, listener: None });
+    let reader_handle = Arc::new(Int2DdsDataReader { inner: reader, listener: RwLock::new(None) });
 
-    // If listener is provided, set it now
-    if !listener.is_null() {
-        let reader_ptr = &mut *reader_handle as *mut Int2DdsDataReader;
-        let ffi_listener = FfiDataReaderListener::new(*listener, reader_ptr);
-        let listener_arc = Arc::new(ffi_listener);
-
-        // Set the listener on the reader
-        let listener_clone = listener_arc.clone()
-            as Arc<
-                dyn int2dds::subscription::data_reader_listener::DataReaderListener<
-                    Foo = Int2DdsData,
-                >,
-            >;
-        ffi_try!(reader_handle
-            .inner
-            .set_listener(Some(listener_clone), StatusMask::from_bits_truncate(mask)));
-
-        reader_handle.listener = Some(listener_arc.clone());
-
-        // Check if matching already occurred before the listener was set.
-        if mask & crate::status_condition::INT2DDS_STATUS_SUBSCRIPTION_MATCHED != 0 {
-            if let Ok(status) = reader_handle.inner.get_subscription_matched_status() {
-                if status.current_count() > 0 {
-                    listener_arc.on_subscription_matched(&reader_handle.inner, &status);
-                }
-            }
-        }
-        if mask & crate::status_condition::INT2DDS_STATUS_REQUESTED_INCOMPATIBLE_QOS != 0 {
-            if let Ok(status) = reader_handle.inner.get_requested_incompatible_qos_status() {
-                if status.total_count() > 0 {
-                    listener_arc.on_requested_incompatible_qos(&reader_handle.inner, &status);
-                }
-            }
-        }
+    let ret = attach_reader_listener(&reader_handle, listener, mask);
+    if ret != INT2DDS_RET_OK {
+        return ret;
     }
 
-    *reader_out = Box::into_raw(reader_handle);
+    *reader_out = Arc::into_raw(reader_handle) as *mut Int2DdsDataReader;
 
     INT2DDS_RET_OK
 }
@@ -512,54 +396,13 @@ pub unsafe extern "C" fn int2dds_create_datareader_with_profile_and_listener(
 /// - `subscriber` must be a valid subscriber
 /// - `cft` must be a valid ContentFilteredTopic
 /// - `qos` can be null for default QoS
-/// - `reader_out` must be a valid pointer to a null pointer
-/// - The returned reader must be freed with `int2dds_delete_datareader`
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_create_datareader_cft(
-    subscriber: *const Int2DdsSubscriber,
-    cft: *const Int2DdsContentFilteredTopic,
-    qos: *const Int2DdsDataReaderQos,
-    reader_out: *mut *mut Int2DdsDataReader,
-) -> Int2DdsRet {
-    check_null!(subscriber);
-    check_null!(cft);
-    check_null!(reader_out);
-
-    let subscriber_ref = &*subscriber;
-    let cft_ref = &*cft;
-
-    let reader_qos = if qos.is_null() {
-        int2dds::subscription::qos::DataReaderQos::default()
-    } else {
-        (*qos).inner.clone()
-    };
-
-    let reader = ffi_try!(subscriber_ref.inner.create_datareader::<Int2DdsData>(
-        &cft_ref.inner,
-        reader_qos,
-        None,
-        StatusMask::default()
-    ));
-
-    let reader_handle = Box::new(Int2DdsDataReader { inner: reader, listener: None });
-    *reader_out = Box::into_raw(reader_handle);
-
-    INT2DDS_RET_OK
-}
-
-/// Create a DataReader using a ContentFilteredTopic with listener callbacks
-///
-/// # Safety
-/// - `subscriber` must be a valid subscriber
-/// - `cft` must be a valid ContentFilteredTopic
-/// - `qos` can be null for default QoS
-/// - `listener` can be null for no listener
-/// - `mask` specifies which status changes trigger callbacks
+/// - `listener` can be null for no listener; `mask` specifies which status
+///   changes trigger callbacks (pass 0 with a null listener)
 /// - `reader_out` must be a valid pointer to a null pointer
 /// - The returned reader must be freed with `int2dds_delete_datareader`
 /// - Listener callbacks must be thread-safe and remain valid until reader is deleted
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_create_datareader_cft_with_listener(
+pub unsafe extern "C" fn int2dds_create_datareader_cft(
     subscriber: *const Int2DdsSubscriber,
     cft: *const Int2DdsContentFilteredTopic,
     qos: *const Int2DdsDataReaderQos,
@@ -574,10 +417,11 @@ pub unsafe extern "C" fn int2dds_create_datareader_cft_with_listener(
     let subscriber_ref = &*subscriber;
     let cft_ref = &*cft;
 
+    // NULL qos → default sentinel (engages profile fallback). Non-NULL → use as-is.
     let reader_qos = if qos.is_null() {
-        int2dds::subscription::qos::DataReaderQos::default()
+        int2dds::infrastructure::qos_kind::QosKind::Default
     } else {
-        (*qos).inner.clone()
+        int2dds::infrastructure::qos_kind::QosKind::Specific((*qos).inner.clone())
     };
 
     let reader = ffi_try!(subscriber_ref.inner.create_datareader::<Int2DdsData>(
@@ -587,42 +431,14 @@ pub unsafe extern "C" fn int2dds_create_datareader_cft_with_listener(
         StatusMask::from_bits_truncate(mask)
     ));
 
-    let mut reader_handle = Box::new(Int2DdsDataReader { inner: reader, listener: None });
+    let reader_handle = Arc::new(Int2DdsDataReader { inner: reader, listener: RwLock::new(None) });
 
-    if !listener.is_null() {
-        let reader_ptr = &mut *reader_handle as *mut Int2DdsDataReader;
-        let ffi_listener = FfiDataReaderListener::new(*listener, reader_ptr);
-        let listener_arc = Arc::new(ffi_listener);
-
-        let listener_clone = listener_arc.clone()
-            as Arc<
-                dyn int2dds::subscription::data_reader_listener::DataReaderListener<
-                    Foo = Int2DdsData,
-                >,
-            >;
-        ffi_try!(reader_handle
-            .inner
-            .set_listener(Some(listener_clone), StatusMask::from_bits_truncate(mask)));
-
-        reader_handle.listener = Some(listener_arc.clone());
-
-        if mask & crate::status_condition::INT2DDS_STATUS_SUBSCRIPTION_MATCHED != 0 {
-            if let Ok(status) = reader_handle.inner.get_subscription_matched_status() {
-                if status.current_count() > 0 {
-                    listener_arc.on_subscription_matched(&reader_handle.inner, &status);
-                }
-            }
-        }
-        if mask & crate::status_condition::INT2DDS_STATUS_REQUESTED_INCOMPATIBLE_QOS != 0 {
-            if let Ok(status) = reader_handle.inner.get_requested_incompatible_qos_status() {
-                if status.total_count() > 0 {
-                    listener_arc.on_requested_incompatible_qos(&reader_handle.inner, &status);
-                }
-            }
-        }
+    let ret = attach_reader_listener(&reader_handle, listener, mask);
+    if ret != INT2DDS_RET_OK {
+        return ret;
     }
 
-    *reader_out = Box::into_raw(reader_handle);
+    *reader_out = Arc::into_raw(reader_handle) as *mut Int2DdsDataReader;
 
     INT2DDS_RET_OK
 }
@@ -642,18 +458,18 @@ pub unsafe extern "C" fn int2dds_datareader_set_listener(
 ) -> Int2DdsRet {
     check_null!(reader);
 
-    let reader_ref = &mut *reader;
+    // No early return is allowed between from_raw and into_raw below, or the
+    // caller's strong reference would be dropped and later delete double-frees.
+    let reader_arc = Arc::from_raw(reader as *const Int2DdsDataReader);
 
-    // Create new listener wrapper if provided
     let listener_arc = if !listener.is_null() {
-        let ffi_listener = FfiDataReaderListener::new(*listener, reader);
-        Some(Arc::new(ffi_listener))
+        let weak = Arc::downgrade(&reader_arc);
+        Some(Arc::new(FfiDataReaderListener::new(*listener, weak)))
     } else {
         None
     };
 
-    // Set listener on the inner reader
-    let result = reader_ref.inner.set_listener(
+    let result = reader_arc.inner.set_listener(
         listener_arc.clone().map(|l| {
             l as Arc<
                 dyn int2dds::subscription::data_reader_listener::DataReaderListener<
@@ -664,8 +480,9 @@ pub unsafe extern "C" fn int2dds_datareader_set_listener(
         StatusMask::from_bits_truncate(mask),
     );
 
-    // Update the stored listener
-    reader_ref.listener = listener_arc;
+    *reader_arc.listener.write().unwrap() = listener_arc;
+
+    let _ = Arc::into_raw(reader_arc);
 
     match result {
         Ok(()) => INT2DDS_RET_OK,
@@ -690,7 +507,7 @@ pub unsafe extern "C" fn int2dds_datareader_get_listener(
     let reader_ref = &*reader;
 
     // Return the stored listener callbacks
-    if let Some(listener_arc) = &reader_ref.listener {
+    if let Some(listener_arc) = reader_ref.listener.read().unwrap().as_ref() {
         // Copy the callbacks struct
         *listener_out = listener_arc.callbacks;
         INT2DDS_RET_OK
@@ -767,6 +584,86 @@ pub unsafe extern "C" fn int2dds_datareader_get_guid(
     INT2DDS_RET_OK
 }
 
+unsafe fn reader_handle_from_c(handle_ptr: *const [u8; 16]) -> InstanceHandle {
+    if handle_ptr.is_null() {
+        return InstanceHandle::NIL;
+    }
+    let value = *handle_ptr;
+    if value == [0u8; 16] {
+        InstanceHandle::NIL
+    } else {
+        InstanceHandle::new(value)
+    }
+}
+
+/// Look up an instance handle from raw serialized key bytes.
+///
+/// Mirrors `int2dds_datawriter_lookup_instance` for the read side. Matches on the
+/// serialized key bytes stored per instance; writes `InstanceHandle::NIL` (all zeros)
+/// to `handle_out` when the instance is not known to this reader.
+///
+/// # Safety
+/// - `reader` must be a valid datareader
+/// - `key` must point to at least `key_len` readable bytes
+/// - `handle_out` must be a valid pointer to a 16-byte buffer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_lookup_instance(
+    reader: *const Int2DdsDataReader,
+    key: *const u8,
+    key_len: usize,
+    handle_out: *mut [u8; 16],
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(key);
+    check_null!(handle_out);
+
+    let reader_ref = &*reader;
+    let key_bytes = std::slice::from_raw_parts(key, key_len);
+
+    let handle = ffi_try!(reader_ref.inner.lookup_instance_serialized(key_bytes));
+    *handle_out = *handle.value();
+
+    INT2DDS_RET_OK
+}
+
+/// Get the raw serialized key bytes for an instance handle.
+///
+/// Mirrors `int2dds_datawriter_get_key_value` for the read side. Round-trips with
+/// `int2dds_datareader_lookup_instance`.
+///
+/// # Safety
+/// - `reader` must be a valid datareader
+/// - `handle` must be a valid pointer to a 16-byte instance handle
+/// - `key_buf` must point to at least `key_capacity` writable bytes
+/// - `key_size_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_get_key_value(
+    reader: *const Int2DdsDataReader,
+    handle: *const [u8; 16],
+    key_buf: *mut u8,
+    key_capacity: usize,
+    key_size_out: *mut usize,
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(handle);
+    check_null!(key_buf);
+    check_null!(key_size_out);
+
+    let reader_ref = &*reader;
+    let instance_handle = reader_handle_from_c(handle);
+
+    let key_data = ffi_try!(reader_ref.inner.get_key_value_serialized(instance_handle));
+    *key_size_out = key_data.len();
+
+    if key_data.len() > key_capacity {
+        return INT2DDS_RET_BUFFER_TOO_SMALL;
+    }
+
+    std::ptr::copy_nonoverlapping(key_data.as_ptr(), key_buf, key_data.len());
+
+    INT2DDS_RET_OK
+}
+
 /// Check whether a DataReader currently has any cached samples.
 ///
 /// This is a level-triggered readiness check over the local reader cache.
@@ -804,45 +701,50 @@ pub unsafe extern "C" fn int2dds_delete_datareader(reader: *mut Int2DdsDataReade
         return INT2DDS_RET_NULL_POINTER;
     }
 
-    let reader_box = Box::from_raw(reader);
-    let reader_obj = reader_box.inner;
+    // Reclaim the caller's strong reference; the reader is freed only once this
+    // Arc and any callback that upgraded its Weak are dropped.
+    let reader_arc = Arc::from_raw(reader as *const Int2DdsDataReader);
+    let reader_obj = reader_arc.inner.clone();
 
-    // Get the subscriber to delete the reader
+    let _ = reader_obj.set_listener(None, StatusMask::default());
+
     let subscriber = match reader_obj.get_subscriber() {
         Ok(s) => s,
-        Err(e) => return dds_error_to_code(&e),
+        Err(e) => {
+            let _ = Arc::into_raw(reader_arc);
+            return dds_error_to_code(&e);
+        }
     };
 
+    // On failure the reader is not deleted; hand the caller's strong reference
+    // back (into_raw) so the handle stays valid instead of being freed.
     match subscriber.delete_datareader(reader_obj) {
         Ok(()) => INT2DDS_RET_OK,
-        Err(e) => dds_error_to_code(&e),
+        Err(e) => {
+            let _ = Arc::into_raw(reader_arc);
+            dds_error_to_code(&e)
+        }
     }
 }
 
-/// Get subscription matched status
-///
-/// Returns the number of matched writers for this DataReader.
+/// Get subscription matched status for a DataReader
 ///
 /// # Safety
 /// - `reader` must be a valid datareader
-/// - `total_count_out` must be a valid pointer
-/// - `current_count_out` must be a valid pointer
+/// - `status_out` must be a valid pointer
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_get_subscription_matched_status(
+pub unsafe extern "C" fn int2dds_datareader_get_subscription_matched_status(
     reader: *const Int2DdsDataReader,
-    total_count_out: *mut i32,
-    current_count_out: *mut i32,
+    status_out: *mut Int2DdsSubscriptionMatchedStatus,
 ) -> Int2DdsRet {
     check_null!(reader);
-    check_null!(total_count_out);
-    check_null!(current_count_out);
+    check_null!(status_out);
 
     let reader_ref = &*reader;
 
     match reader_ref.inner.get_subscription_matched_status() {
         Ok(status) => {
-            *total_count_out = status.total_count();
-            *current_count_out = status.current_count();
+            *status_out = Int2DdsSubscriptionMatchedStatus::from(&status);
             INT2DDS_RET_OK
         }
         Err(e) => dds_error_to_code(&e),
@@ -1018,10 +920,30 @@ pub unsafe extern "C" fn int2dds_subscriber_delete_contained_entities(
 // Raw Serialized Data Read/Take Functions
 // ============================================================================
 
+unsafe fn emit_bounded_serialized(
+    outcome: BoundedSerialized,
+    buffer: *mut u8,
+    actual_size_out: *mut usize,
+) -> (Int2DdsRet, Option<SampleInfo>) {
+    match outcome {
+        BoundedSerialized::TooSmall { required } => {
+            *actual_size_out = required;
+            (INT2DDS_RET_BUFFER_TOO_SMALL, None)
+        }
+        BoundedSerialized::Fit(data, info) => {
+            *actual_size_out = data.len();
+            if info.valid_data {
+                std::ptr::copy_nonoverlapping(data.as_ptr(), buffer, data.len());
+            }
+            (INT2DDS_RET_OK, Some(info))
+        }
+    }
+}
+
 /// Take pre-serialized data from a DataReader, bypassing TypeSupport deserialization.
 ///
 /// Copies the raw CDR bytes (including encapsulation header) into the caller's buffer.
-/// The sample is removed from the cache.
+/// The sample is removed from the cache only when it fits the caller's buffer.
 ///
 /// # Parameters
 /// - `reader`: A valid datareader
@@ -1033,14 +955,15 @@ pub unsafe extern "C" fn int2dds_subscriber_delete_contained_entities(
 /// # Returns
 /// - INT2DDS_RET_OK on success
 /// - INT2DDS_RET_NO_DATA if no samples available
-/// - INT2DDS_RET_ERROR if buffer is too small (actual_size_out will contain the required size)
+/// - INT2DDS_RET_BUFFER_TOO_SMALL if the buffer is too small; the sample is preserved and
+///   actual_size_out contains the required size, so a retry with a larger buffer succeeds
 ///
 /// # Safety
 /// - `reader` must be a valid datareader
 /// - `buffer` must point to at least `buffer_capacity` writable bytes
 /// - `actual_size_out` and `valid_data_out` must be valid pointers
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_take_serialized(
+pub unsafe extern "C" fn int2dds_datareader_take_serialized(
     reader: *const Int2DdsDataReader,
     buffer: *mut u8,
     buffer_capacity: usize,
@@ -1054,8 +977,8 @@ pub unsafe extern "C" fn int2dds_take_serialized(
 
     let reader_ref = &*reader;
 
-    let (serialized_data, sample_info) = match reader_ref.inner.take_next_serialized_bytes() {
-        Ok(result) => result,
+    let outcome = match reader_ref.inner.take_next_serialized_bounded(buffer_capacity) {
+        Ok(outcome) => outcome,
         Err(int2dds::dcps::core::error::DdsError::NoData) => {
             *valid_data_out = false;
             *actual_size_out = 0;
@@ -1064,26 +987,15 @@ pub unsafe extern "C" fn int2dds_take_serialized(
         Err(e) => return dds_error_to_code(&e),
     };
 
-    *valid_data_out = sample_info.valid_data;
-    *actual_size_out = serialized_data.len();
-
-    if !sample_info.valid_data {
-        return INT2DDS_RET_OK;
-    }
-
-    if serialized_data.len() > buffer_capacity {
-        return INT2DDS_RET_BUFFER_TOO_SMALL;
-    }
-
-    std::ptr::copy_nonoverlapping(serialized_data.as_ptr(), buffer, serialized_data.len());
-
-    INT2DDS_RET_OK
+    let (ret, info) = emit_bounded_serialized(outcome, buffer, actual_size_out);
+    *valid_data_out = info.is_none_or(|i| i.valid_data);
+    ret
 }
 
 /// Take pre-serialized data and loan the returned byte slice to the caller.
 ///
 /// The returned `data_out` pointer remains valid until `loan_out` is passed to
-/// `int2dds_return_serialized_loan`. This avoids copying the payload into a
+/// `int2dds_datareader_return_serialized_loan`. This avoids copying the payload into a
 /// caller-owned buffer for consumers that immediately deserialize the bytes.
 ///
 /// # Safety
@@ -1091,7 +1003,7 @@ pub unsafe extern "C" fn int2dds_take_serialized(
 /// - `data_out`, `actual_size_out`, `valid_data_out`, and `loan_out` must be valid pointers
 /// - if `*loan_out` is non-null, the caller must return it exactly once
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_take_serialized_loaned(
+pub unsafe extern "C" fn int2dds_datareader_take_serialized_loaned(
     reader: *const Int2DdsDataReader,
     data_out: *mut *const u8,
     actual_size_out: *mut usize,
@@ -1133,13 +1045,13 @@ pub unsafe extern "C" fn int2dds_take_serialized_loaned(
     INT2DDS_RET_OK
 }
 
-/// Return a serialized data loan produced by `int2dds_take_serialized_loaned`.
+/// Return a serialized data loan produced by `int2dds_datareader_take_serialized_loaned`.
 ///
 /// # Safety
-/// - `loan` must be null or a pointer returned by `int2dds_take_serialized_loaned`
+/// - `loan` must be null or a pointer returned by `int2dds_datareader_take_serialized_loaned`
 /// - `loan` must not be used after this call
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_return_serialized_loan(
+pub unsafe extern "C" fn int2dds_datareader_return_serialized_loan(
     loan: *mut Int2DdsSerializedLoan,
 ) -> Int2DdsRet {
     if !loan.is_null() {
@@ -1150,12 +1062,12 @@ pub unsafe extern "C" fn int2dds_return_serialized_loan(
 
 /// Read pre-serialized data from a DataReader without removing from cache.
 ///
-/// Same as `int2dds_take_serialized` but the sample remains in the cache.
+/// Same as `int2dds_datareader_take_serialized` but the sample remains in the cache.
 ///
 /// # Safety
-/// - Same as `int2dds_take_serialized`
+/// - Same as `int2dds_datareader_take_serialized`
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_read_serialized(
+pub unsafe extern "C" fn int2dds_datareader_read_serialized(
     reader: *const Int2DdsDataReader,
     buffer: *mut u8,
     buffer_capacity: usize,
@@ -1169,14 +1081,8 @@ pub unsafe extern "C" fn int2dds_read_serialized(
 
     let reader_ref = &*reader;
 
-    // Use read_serialized with NOT_READ state for "next" semantics
-    let results = match reader_ref.inner.read_serialized(
-        1,
-        &[int2dds::subscription::sample_info::SampleStateKind::NOT_READ_SAMPLE_STATE],
-        &[int2dds::subscription::sample_info::ViewStateKind::ANY_VIEW_STATE],
-        &[int2dds::subscription::sample_info::InstanceStateKind::ANY_INSTANCE_STATE],
-    ) {
-        Ok(r) => r,
+    let outcome = match reader_ref.inner.read_next_serialized_bounded(buffer_capacity) {
+        Ok(outcome) => outcome,
         Err(int2dds::dcps::core::error::DdsError::NoData) => {
             *valid_data_out = false;
             *actual_size_out = 0;
@@ -1185,29 +1091,9 @@ pub unsafe extern "C" fn int2dds_read_serialized(
         Err(e) => return dds_error_to_code(&e),
     };
 
-    let (serialized_data, sample_info) = match results.into_iter().next() {
-        Some(item) => item,
-        None => {
-            *valid_data_out = false;
-            *actual_size_out = 0;
-            return INT2DDS_RET_NO_DATA;
-        }
-    };
-
-    *valid_data_out = sample_info.valid_data;
-    *actual_size_out = serialized_data.len();
-
-    if !sample_info.valid_data {
-        return INT2DDS_RET_OK;
-    }
-
-    if serialized_data.len() > buffer_capacity {
-        return INT2DDS_RET_BUFFER_TOO_SMALL;
-    }
-
-    std::ptr::copy_nonoverlapping(serialized_data.as_ptr(), buffer, serialized_data.len());
-
-    INT2DDS_RET_OK
+    let (ret, info) = emit_bounded_serialized(outcome, buffer, actual_size_out);
+    *valid_data_out = info.is_none_or(|i| i.valid_data);
+    ret
 }
 
 // ============================================================================
@@ -1217,9 +1103,9 @@ pub unsafe extern "C" fn int2dds_read_serialized(
 /// Take pre-serialized data with full SampleInfo
 ///
 /// # Safety
-/// - Same as `int2dds_take_serialized`, plus `info_out` must be a valid pointer
+/// - Same as `int2dds_datareader_take_serialized`, plus `info_out` must be a valid pointer
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_take_serialized_w_info(
+pub unsafe extern "C" fn int2dds_datareader_take_serialized_w_info(
     reader: *const Int2DdsDataReader,
     buffer: *mut u8,
     buffer_capacity: usize,
@@ -1233,8 +1119,8 @@ pub unsafe extern "C" fn int2dds_take_serialized_w_info(
 
     let reader_ref = &*reader;
 
-    let (serialized_data, sample_info) = match reader_ref.inner.take_next_serialized() {
-        Ok(result) => result,
+    let outcome = match reader_ref.inner.take_next_serialized_bounded(buffer_capacity) {
+        Ok(outcome) => outcome,
         Err(int2dds::dcps::core::error::DdsError::NoData) => {
             *actual_size_out = 0;
             return INT2DDS_RET_NO_DATA;
@@ -1242,28 +1128,19 @@ pub unsafe extern "C" fn int2dds_take_serialized_w_info(
         Err(e) => return dds_error_to_code(&e),
     };
 
-    *info_out = Int2DdsSampleInfo::from(&sample_info);
-    *actual_size_out = serialized_data.len();
-
-    if !sample_info.valid_data {
-        return INT2DDS_RET_OK;
+    let (ret, info) = emit_bounded_serialized(outcome, buffer, actual_size_out);
+    if let Some(info) = info {
+        *info_out = Int2DdsSampleInfo::from(&info);
     }
-
-    if serialized_data.len() > buffer_capacity {
-        return INT2DDS_RET_BUFFER_TOO_SMALL;
-    }
-
-    std::ptr::copy_nonoverlapping(serialized_data.as_ptr(), buffer, serialized_data.len());
-
-    INT2DDS_RET_OK
+    ret
 }
 
 /// Read pre-serialized data with full SampleInfo (sample remains in cache)
 ///
 /// # Safety
-/// - Same as `int2dds_read_serialized`, plus `info_out` must be a valid pointer
+/// - Same as `int2dds_datareader_read_serialized`, plus `info_out` must be a valid pointer
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_read_serialized_w_info(
+pub unsafe extern "C" fn int2dds_datareader_read_serialized_w_info(
     reader: *const Int2DdsDataReader,
     buffer: *mut u8,
     buffer_capacity: usize,
@@ -1277,13 +1154,8 @@ pub unsafe extern "C" fn int2dds_read_serialized_w_info(
 
     let reader_ref = &*reader;
 
-    let results = match reader_ref.inner.read_serialized(
-        1,
-        &[SampleStateKind::NOT_READ_SAMPLE_STATE],
-        &[ViewStateKind::ANY_VIEW_STATE],
-        &[InstanceStateKind::ANY_INSTANCE_STATE],
-    ) {
-        Ok(r) => r,
+    let outcome = match reader_ref.inner.read_next_serialized_bounded(buffer_capacity) {
+        Ok(outcome) => outcome,
         Err(int2dds::dcps::core::error::DdsError::NoData) => {
             *actual_size_out = 0;
             return INT2DDS_RET_NO_DATA;
@@ -1291,28 +1163,11 @@ pub unsafe extern "C" fn int2dds_read_serialized_w_info(
         Err(e) => return dds_error_to_code(&e),
     };
 
-    let (serialized_data, sample_info) = match results.into_iter().next() {
-        Some(item) => item,
-        None => {
-            *actual_size_out = 0;
-            return INT2DDS_RET_NO_DATA;
-        }
-    };
-
-    *info_out = Int2DdsSampleInfo::from(&sample_info);
-    *actual_size_out = serialized_data.len();
-
-    if !sample_info.valid_data {
-        return INT2DDS_RET_OK;
+    let (ret, info) = emit_bounded_serialized(outcome, buffer, actual_size_out);
+    if let Some(info) = info {
+        *info_out = Int2DdsSampleInfo::from(&info);
     }
-
-    if serialized_data.len() > buffer_capacity {
-        return INT2DDS_RET_BUFFER_TOO_SMALL;
-    }
-
-    std::ptr::copy_nonoverlapping(serialized_data.as_ptr(), buffer, serialized_data.len());
-
-    INT2DDS_RET_OK
+    ret
 }
 
 // ============================================================================
@@ -1324,9 +1179,9 @@ pub unsafe extern "C" fn int2dds_read_serialized_w_info(
 /// # Safety
 /// - `reader` must be a valid datareader
 /// - `seq_out` must be a valid pointer to a null pointer
-/// - The returned sequence must be freed with `int2dds_sample_seq_delete`
+/// - On `INT2DDS_RET_OK` the returned sequence must be freed with `int2dds_sample_seq_delete`
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_take_serialized_batch(
+pub unsafe extern "C" fn int2dds_datareader_take_serialized_batch(
     reader: *const Int2DdsDataReader,
     max_samples: i32,
     seq_out: *mut *mut Int2DdsSampleSeq,
@@ -1344,14 +1199,14 @@ pub unsafe extern "C" fn int2dds_take_serialized_batch(
     ) {
         Ok(r) => r,
         Err(int2dds::dcps::core::error::DdsError::NoData) => {
-            *seq_out = Box::into_raw(Box::new(Int2DdsSampleSeq { samples: Vec::new() }));
+            *seq_out = std::ptr::null_mut();
             return INT2DDS_RET_NO_DATA;
         }
         Err(e) => return dds_error_to_code(&e),
     };
 
     if samples.is_empty() {
-        *seq_out = Box::into_raw(Box::new(Int2DdsSampleSeq { samples: Vec::new() }));
+        *seq_out = std::ptr::null_mut();
         return INT2DDS_RET_NO_DATA;
     }
 
@@ -1364,9 +1219,9 @@ pub unsafe extern "C" fn int2dds_take_serialized_batch(
 /// # Safety
 /// - `reader` must be a valid datareader
 /// - `seq_out` must be a valid pointer to a null pointer
-/// - The returned sequence must be freed with `int2dds_sample_seq_delete`
+/// - On `INT2DDS_RET_OK` the returned sequence must be freed with `int2dds_sample_seq_delete`
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_read_serialized_batch(
+pub unsafe extern "C" fn int2dds_datareader_read_serialized_batch(
     reader: *const Int2DdsDataReader,
     max_samples: i32,
     seq_out: *mut *mut Int2DdsSampleSeq,
@@ -1384,14 +1239,14 @@ pub unsafe extern "C" fn int2dds_read_serialized_batch(
     ) {
         Ok(r) => r,
         Err(int2dds::dcps::core::error::DdsError::NoData) => {
-            *seq_out = Box::into_raw(Box::new(Int2DdsSampleSeq { samples: Vec::new() }));
+            *seq_out = std::ptr::null_mut();
             return INT2DDS_RET_NO_DATA;
         }
         Err(e) => return dds_error_to_code(&e),
     };
 
     if samples.is_empty() {
-        *seq_out = Box::into_raw(Box::new(Int2DdsSampleSeq { samples: Vec::new() }));
+        *seq_out = std::ptr::null_mut();
         return INT2DDS_RET_NO_DATA;
     }
 
@@ -1399,7 +1254,139 @@ pub unsafe extern "C" fn int2dds_read_serialized_batch(
     INT2DDS_RET_OK
 }
 
+/// Take pre-serialized samples belonging to a single instance, as a batch.
+///
+/// `handle` is a 16-byte instance handle (e.g. from `int2dds_datareader_lookup_instance`
+/// or a prior sample's info). A nil handle returns `INT2DDS_RET_BAD_PARAMETER`; an
+/// unknown handle returns no samples. The mask arguments are bitmasks of the
+/// SampleState/ViewState/InstanceState kinds; a mask of 0 selects "any".
+///
+/// # Safety
+/// - `reader` must be a valid datareader
+/// - `handle` must point to a 16-byte instance handle
+/// - `seq_out` must be a valid pointer to a null pointer
+/// - On `INT2DDS_RET_OK` the returned sequence must be freed with `int2dds_sample_seq_delete`
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_take_instance_serialized_batch(
+    reader: *const Int2DdsDataReader,
+    handle: *const [u8; 16],
+    max_samples: i32,
+    sample_state_mask: u32,
+    view_state_mask: u32,
+    instance_state_mask: u32,
+    seq_out: *mut *mut Int2DdsSampleSeq,
+) -> Int2DdsRet {
+    read_or_take_instance_serialized_batch(
+        reader,
+        handle,
+        max_samples,
+        sample_state_mask,
+        view_state_mask,
+        instance_state_mask,
+        seq_out,
+        true,
+    )
+}
+
+/// Read pre-serialized samples belonging to a single instance, as a batch
+/// (samples remain in the cache).
+///
+/// # Safety
+/// - Same as `int2dds_datareader_take_instance_serialized_batch`
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_read_instance_serialized_batch(
+    reader: *const Int2DdsDataReader,
+    handle: *const [u8; 16],
+    max_samples: i32,
+    sample_state_mask: u32,
+    view_state_mask: u32,
+    instance_state_mask: u32,
+    seq_out: *mut *mut Int2DdsSampleSeq,
+) -> Int2DdsRet {
+    read_or_take_instance_serialized_batch(
+        reader,
+        handle,
+        max_samples,
+        sample_state_mask,
+        view_state_mask,
+        instance_state_mask,
+        seq_out,
+        false,
+    )
+}
+
+/// A mask of 0 selects ANY, mirroring the `extensibility = -1` default sentinel.
+fn state_kinds_from_masks(
+    sample_state_mask: u32,
+    view_state_mask: u32,
+    instance_state_mask: u32,
+) -> ([SampleStateKind; 1], [ViewStateKind; 1], [InstanceStateKind; 1]) {
+    (
+        [if sample_state_mask == 0 {
+            SampleStateKind::ANY_SAMPLE_STATE
+        } else {
+            SampleStateKind::from_bits_truncate(sample_state_mask)
+        }],
+        [if view_state_mask == 0 {
+            ViewStateKind::ANY_VIEW_STATE
+        } else {
+            ViewStateKind::from_bits_truncate(view_state_mask)
+        }],
+        [if instance_state_mask == 0 {
+            InstanceStateKind::ANY_INSTANCE_STATE
+        } else {
+            InstanceStateKind::from_bits_truncate(instance_state_mask)
+        }],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn read_or_take_instance_serialized_batch(
+    reader: *const Int2DdsDataReader,
+    handle: *const [u8; 16],
+    max_samples: i32,
+    sample_state_mask: u32,
+    view_state_mask: u32,
+    instance_state_mask: u32,
+    seq_out: *mut *mut Int2DdsSampleSeq,
+    take: bool,
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(handle);
+    check_null!(seq_out);
+
+    let reader_ref = &*reader;
+    let instance_handle = InstanceHandle::new(*handle);
+    let (ss, vs, is) =
+        state_kinds_from_masks(sample_state_mask, view_state_mask, instance_state_mask);
+
+    let result = if take {
+        reader_ref.inner.take_instance_serialized(max_samples, instance_handle, &ss, &vs, &is)
+    } else {
+        reader_ref.inner.read_instance_serialized(max_samples, instance_handle, &ss, &vs, &is)
+    };
+
+    match result {
+        Ok(samples) if samples.is_empty() => {
+            *seq_out = std::ptr::null_mut();
+            INT2DDS_RET_NO_DATA
+        }
+        Ok(samples) => {
+            *seq_out = Box::into_raw(Box::new(Int2DdsSampleSeq { samples }));
+            INT2DDS_RET_OK
+        }
+        Err(int2dds::dcps::core::error::DdsError::NoData) => {
+            *seq_out = std::ptr::null_mut();
+            INT2DDS_RET_NO_DATA
+        }
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
 /// Get the number of samples in a sequence
+///
+/// # Safety
+/// - `seq` must be a valid sample sequence
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_sample_seq_length(seq: *const Int2DdsSampleSeq) -> usize {
     if seq.is_null() {
@@ -1486,12 +1473,13 @@ pub unsafe extern "C" fn int2dds_sample_seq_delete(seq: *mut Int2DdsSampleSeq) -
 // Read/Take with state condition filter (Feature 7)
 // ============================================================================
 
-/// Read a single serialized sample with state condition filter
+/// Read a single serialized sample with state condition filter.
+/// A state mask of 0 selects "any".
 ///
 /// # Safety
-/// - Same as `int2dds_read_serialized_w_info`, plus state masks
+/// - Same as `int2dds_datareader_read_serialized_w_info`, plus state masks
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_read_serialized_w_condition(
+pub unsafe extern "C" fn int2dds_datareader_read_serialized_w_states(
     reader: *const Int2DdsDataReader,
     buffer: *mut u8,
     buffer_capacity: usize,
@@ -1507,14 +1495,11 @@ pub unsafe extern "C" fn int2dds_read_serialized_w_condition(
     check_null!(info_out);
 
     let reader_ref = &*reader;
+    let (ss, vs, is) =
+        state_kinds_from_masks(sample_state_mask, view_state_mask, instance_state_mask);
 
-    let results = match reader_ref.inner.read_serialized(
-        1,
-        &[SampleStateKind::from_bits_truncate(sample_state_mask)],
-        &[ViewStateKind::from_bits_truncate(view_state_mask)],
-        &[InstanceStateKind::from_bits_truncate(instance_state_mask)],
-    ) {
-        Ok(r) => r,
+    let outcome = match reader_ref.inner.read_serialized_bounded(&ss, &vs, &is, buffer_capacity) {
+        Ok(outcome) => outcome,
         Err(int2dds::dcps::core::error::DdsError::NoData) => {
             *actual_size_out = 0;
             return INT2DDS_RET_NO_DATA;
@@ -1522,35 +1507,20 @@ pub unsafe extern "C" fn int2dds_read_serialized_w_condition(
         Err(e) => return dds_error_to_code(&e),
     };
 
-    let (serialized_data, sample_info) = match results.into_iter().next() {
-        Some(item) => item,
-        None => {
-            *actual_size_out = 0;
-            return INT2DDS_RET_NO_DATA;
-        }
-    };
-
-    *info_out = Int2DdsSampleInfo::from(&sample_info);
-    *actual_size_out = serialized_data.len();
-
-    if !sample_info.valid_data {
-        return INT2DDS_RET_OK;
+    let (ret, info) = emit_bounded_serialized(outcome, buffer, actual_size_out);
+    if let Some(info) = info {
+        *info_out = Int2DdsSampleInfo::from(&info);
     }
-
-    if serialized_data.len() > buffer_capacity {
-        return INT2DDS_RET_BUFFER_TOO_SMALL;
-    }
-
-    std::ptr::copy_nonoverlapping(serialized_data.as_ptr(), buffer, serialized_data.len());
-    INT2DDS_RET_OK
+    ret
 }
 
-/// Take a single serialized sample with state condition filter
+/// Take a single serialized sample with state condition filter.
+/// A state mask of 0 selects "any".
 ///
 /// # Safety
-/// - Same as `int2dds_take_serialized_w_info`, plus state masks
+/// - Same as `int2dds_datareader_take_serialized_w_info`, plus state masks
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_take_serialized_w_condition(
+pub unsafe extern "C" fn int2dds_datareader_take_serialized_w_states(
     reader: *const Int2DdsDataReader,
     buffer: *mut u8,
     buffer_capacity: usize,
@@ -1566,14 +1536,11 @@ pub unsafe extern "C" fn int2dds_take_serialized_w_condition(
     check_null!(info_out);
 
     let reader_ref = &*reader;
+    let (ss, vs, is) =
+        state_kinds_from_masks(sample_state_mask, view_state_mask, instance_state_mask);
 
-    let results = match reader_ref.inner.take_serialized(
-        1,
-        &[SampleStateKind::from_bits_truncate(sample_state_mask)],
-        &[ViewStateKind::from_bits_truncate(view_state_mask)],
-        &[InstanceStateKind::from_bits_truncate(instance_state_mask)],
-    ) {
-        Ok(r) => r,
+    let outcome = match reader_ref.inner.take_serialized_bounded(&ss, &vs, &is, buffer_capacity) {
+        Ok(outcome) => outcome,
         Err(int2dds::dcps::core::error::DdsError::NoData) => {
             *actual_size_out = 0;
             return INT2DDS_RET_NO_DATA;
@@ -1581,35 +1548,19 @@ pub unsafe extern "C" fn int2dds_take_serialized_w_condition(
         Err(e) => return dds_error_to_code(&e),
     };
 
-    let (serialized_data, sample_info) = match results.into_iter().next() {
-        Some(item) => item,
-        None => {
-            *actual_size_out = 0;
-            return INT2DDS_RET_NO_DATA;
-        }
-    };
-
-    *info_out = Int2DdsSampleInfo::from(&sample_info);
-    *actual_size_out = serialized_data.len();
-
-    if !sample_info.valid_data {
-        return INT2DDS_RET_OK;
+    let (ret, info) = emit_bounded_serialized(outcome, buffer, actual_size_out);
+    if let Some(info) = info {
+        *info_out = Int2DdsSampleInfo::from(&info);
     }
-
-    if serialized_data.len() > buffer_capacity {
-        return INT2DDS_RET_BUFFER_TOO_SMALL;
-    }
-
-    std::ptr::copy_nonoverlapping(serialized_data.as_ptr(), buffer, serialized_data.len());
-    INT2DDS_RET_OK
+    ret
 }
 
-/// Take batch with state condition filter
+/// Take batch with state condition filter. A state mask of 0 selects "any".
 ///
 /// # Safety
-/// - Same as `int2dds_take_serialized_batch`, plus state masks
+/// - Same as `int2dds_datareader_take_serialized_batch`, plus state masks
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_take_serialized_batch_w_condition(
+pub unsafe extern "C" fn int2dds_datareader_take_serialized_batch_w_states(
     reader: *const Int2DdsDataReader,
     max_samples: i32,
     seq_out: *mut *mut Int2DdsSampleSeq,
@@ -1621,23 +1572,20 @@ pub unsafe extern "C" fn int2dds_take_serialized_batch_w_condition(
     check_null!(seq_out);
 
     let reader_ref = &*reader;
+    let (ss, vs, is) =
+        state_kinds_from_masks(sample_state_mask, view_state_mask, instance_state_mask);
 
-    let samples = match reader_ref.inner.take_serialized(
-        max_samples,
-        &[SampleStateKind::from_bits_truncate(sample_state_mask)],
-        &[ViewStateKind::from_bits_truncate(view_state_mask)],
-        &[InstanceStateKind::from_bits_truncate(instance_state_mask)],
-    ) {
+    let samples = match reader_ref.inner.take_serialized(max_samples, &ss, &vs, &is) {
         Ok(r) => r,
         Err(int2dds::dcps::core::error::DdsError::NoData) => {
-            *seq_out = Box::into_raw(Box::new(Int2DdsSampleSeq { samples: Vec::new() }));
+            *seq_out = std::ptr::null_mut();
             return INT2DDS_RET_NO_DATA;
         }
         Err(e) => return dds_error_to_code(&e),
     };
 
     if samples.is_empty() {
-        *seq_out = Box::into_raw(Box::new(Int2DdsSampleSeq { samples: Vec::new() }));
+        *seq_out = std::ptr::null_mut();
         return INT2DDS_RET_NO_DATA;
     }
 
@@ -1645,12 +1593,12 @@ pub unsafe extern "C" fn int2dds_take_serialized_batch_w_condition(
     INT2DDS_RET_OK
 }
 
-/// Read batch with state condition filter
+/// Read batch with state condition filter. A state mask of 0 selects "any".
 ///
 /// # Safety
-/// - Same as `int2dds_read_serialized_batch`, plus state masks
+/// - Same as `int2dds_datareader_read_serialized_batch`, plus state masks
 #[no_mangle]
-pub unsafe extern "C" fn int2dds_read_serialized_batch_w_condition(
+pub unsafe extern "C" fn int2dds_datareader_read_serialized_batch_w_states(
     reader: *const Int2DdsDataReader,
     max_samples: i32,
     seq_out: *mut *mut Int2DdsSampleSeq,
@@ -1662,23 +1610,20 @@ pub unsafe extern "C" fn int2dds_read_serialized_batch_w_condition(
     check_null!(seq_out);
 
     let reader_ref = &*reader;
+    let (ss, vs, is) =
+        state_kinds_from_masks(sample_state_mask, view_state_mask, instance_state_mask);
 
-    let samples = match reader_ref.inner.read_serialized(
-        max_samples,
-        &[SampleStateKind::from_bits_truncate(sample_state_mask)],
-        &[ViewStateKind::from_bits_truncate(view_state_mask)],
-        &[InstanceStateKind::from_bits_truncate(instance_state_mask)],
-    ) {
+    let samples = match reader_ref.inner.read_serialized(max_samples, &ss, &vs, &is) {
         Ok(r) => r,
         Err(int2dds::dcps::core::error::DdsError::NoData) => {
-            *seq_out = Box::into_raw(Box::new(Int2DdsSampleSeq { samples: Vec::new() }));
+            *seq_out = std::ptr::null_mut();
             return INT2DDS_RET_NO_DATA;
         }
         Err(e) => return dds_error_to_code(&e),
     };
 
     if samples.is_empty() {
-        *seq_out = Box::into_raw(Box::new(Int2DdsSampleSeq { samples: Vec::new() }));
+        *seq_out = std::ptr::null_mut();
         return INT2DDS_RET_NO_DATA;
     }
 
@@ -1731,13 +1676,14 @@ mod tests {
             context::int2dds_domain_participant_factory_get_instance(&mut factory as *mut _);
             participant::int2dds_create_participant(
                 factory,
-                ptr::null(),
                 0,
+                ptr::null(),
                 &mut participant as *mut _,
             );
 
             // Create subscriber
-            let ret = int2dds_create_subscriber(participant, &mut subscriber as *mut _);
+            let ret =
+                int2dds_create_subscriber(participant, ptr::null(), &mut subscriber as *mut _);
             assert_eq!(ret, INT2DDS_RET_OK);
             assert!(!subscriber.is_null());
 

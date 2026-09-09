@@ -119,11 +119,9 @@ pub fn create_datareader(
     let subscriber =
         domain_participant.create_subscriber(subscriber_qos, None, StatusMask::default()).unwrap();
 
-    let reader = subscriber
+    subscriber
         .create_datareader::<KeyedDataType>(&topic, data_reader_qos, None, StatusMask::default())
-        .unwrap();
-
-    reader
+        .unwrap()
 }
 
 pub fn create_datawriter(
@@ -144,11 +142,9 @@ pub fn create_datawriter(
     let publisher =
         domain_participant.create_publisher(publisher_qos, None, StatusMask::default()).unwrap();
 
-    let writer = publisher
+    publisher
         .create_datawriter::<KeyedDataType>(&topic, datawriter_qos, None, StatusMask::default())
-        .unwrap();
-
-    writer
+        .unwrap()
 }
 
 pub fn create_nokey_datareader(
@@ -169,11 +165,9 @@ pub fn create_nokey_datareader(
     let subscriber =
         domain_participant.create_subscriber(subscriber_qos, None, StatusMask::default()).unwrap();
 
-    let reader = subscriber
+    subscriber
         .create_datareader::<NoKeyDataType>(&topic, data_reader_qos, None, StatusMask::default())
-        .unwrap();
-
-    reader
+        .unwrap()
 }
 
 pub fn create_nokey_datawriter(
@@ -194,11 +188,9 @@ pub fn create_nokey_datawriter(
     let publisher =
         domain_participant.create_publisher(publisher_qos, None, StatusMask::default()).unwrap();
 
-    let writer = publisher
+    publisher
         .create_datawriter::<NoKeyDataType>(&topic, datawriter_qos, None, StatusMask::default())
-        .unwrap();
-
-    writer
+        .unwrap()
 }
 
 pub fn wait_for_writer_status<Foo: DdsType>(

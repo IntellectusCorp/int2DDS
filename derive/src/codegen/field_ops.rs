@@ -132,6 +132,7 @@ pub fn gen_post_deserialize_bound_check(
 
 /// Emit the deserialize-side action for a bound violation according to @try_construct.
 /// `truncate` is the type-specific truncation code (ignored for Discard/UseDefault).
+#[allow(clippy::too_many_arguments)]
 fn gen_bound_violation_action(
     field_name: &syn::Ident,
     field_kind: &str,

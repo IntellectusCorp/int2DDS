@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from int2dds._ffi import ffi, lib
+from int2dds._ffi import CData, ffi, lib
 from int2dds.exceptions import INT2DDS_RET_TIMEOUT, DdsTimeout, check_ret
 
 if TYPE_CHECKING:
@@ -48,28 +48,28 @@ class GuardCondition:
     def __init__(self) -> None:
         self._closed = False
         condition_ptr = ffi.new("Int2DdsGuardCondition **")
-        check_ret(lib.int2dds_guard_condition_new(condition_ptr))
+        check_ret(lib.int2dds_guardcondition_new(condition_ptr))
         self._handle = condition_ptr[0]
 
     @property
     def trigger_value(self) -> bool:
         """Get the current trigger value."""
         value_out = ffi.new("bool *")
-        check_ret(lib.int2dds_guard_condition_get_trigger_value(self._handle, value_out))
+        check_ret(lib.int2dds_guardcondition_get_trigger_value(self._handle, value_out))
         return value_out[0]
 
     def trigger(self) -> None:
         """Set the trigger value to True."""
-        check_ret(lib.int2dds_guard_condition_set_trigger_value(self._handle, True))
+        check_ret(lib.int2dds_guardcondition_set_trigger_value(self._handle, True))
 
     def reset(self) -> None:
         """Set the trigger value to False."""
-        check_ret(lib.int2dds_guard_condition_set_trigger_value(self._handle, False))
+        check_ret(lib.int2dds_guardcondition_set_trigger_value(self._handle, False))
 
     def close(self) -> None:
         """Delete the GuardCondition."""
         if not self._closed and self._handle is not None:
-            check_ret(lib.int2dds_guard_condition_delete(self._handle))
+            check_ret(lib.int2dds_guardcondition_delete(self._handle))
             self._handle = None
             self._closed = True
 
@@ -102,7 +102,7 @@ class StatusCondition:
 
     __slots__ = ("_handle", "_closed", "_owner")
 
-    def __init__(self, handle: ffi.CData, owner: object) -> None:
+    def __init__(self, handle: CData, owner: object) -> None:
         self._handle = handle
         self._owner = owner  # Keep reference to prevent premature deletion
         self._closed = False
@@ -145,6 +145,91 @@ class StatusCondition:
                 pass  # Suppress errors during cleanup
 
 
+# Sample / view / instance state mask constants (matching int2dds Rust bitflags)
+READ_SAMPLE_STATE = 0x0001
+NOT_READ_SAMPLE_STATE = 0x0002
+ANY_SAMPLE_STATE = 0xFFFF
+NEW_VIEW_STATE = 0x0001
+NOT_NEW_VIEW_STATE = 0x0002
+ANY_VIEW_STATE = 0xFFFF
+ALIVE_INSTANCE_STATE = 0x0001
+NOT_ALIVE_DISPOSED_INSTANCE_STATE = 0x0002
+NOT_ALIVE_NO_WRITERS_INSTANCE_STATE = 0x0004
+ANY_INSTANCE_STATE = 0xFFFF
+
+
+class ReadCondition:
+    """
+    A condition that triggers on samples matching sample/view/instance state
+    masks. Create it from a DataReader and attach it to a WaitSet.
+
+    Example:
+        >>> cond = reader.create_read_condition(
+        ...     sample_states=NOT_READ_SAMPLE_STATE)
+        >>> waitset.attach(cond)
+        >>> waitset.wait(timeout=5.0)
+        >>> samples = reader.take_w_condition(cond)
+    """
+
+    __slots__ = ("_handle", "_closed", "_owner")
+
+    def __init__(self, handle: CData, owner: object) -> None:
+        self._handle = handle
+        self._owner = owner  # Keep the reader alive while the condition exists
+        self._closed = False
+
+    @property
+    def trigger_value(self) -> bool:
+        """Get the current trigger value."""
+        value_out = ffi.new("bool *")
+        check_ret(lib.int2dds_readcondition_get_trigger_value(self._handle, value_out))
+        return value_out[0]
+
+    def close(self) -> None:
+        """Delete the ReadCondition."""
+        if not self._closed and self._handle is not None:
+            check_ret(lib.int2dds_readcondition_delete(self._handle))
+            self._handle = None
+            self._closed = True
+
+    def __enter__(self) -> ReadCondition:
+        return self
+
+    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        if not getattr(self, "_closed", True):
+            try:
+                self.close()
+            except Exception:
+                pass  # Suppress errors during cleanup
+
+
+class QueryCondition(ReadCondition):
+    """
+    A ReadCondition that additionally applies a SQL-92 content filter.
+
+    Content filtering requires the topic to carry field descriptors (the same
+    requirement as ContentFilteredTopic); on a plain raw topic the read raises
+    an error instead of silently ignoring the filter.
+
+    Example:
+        >>> cond = reader.create_query_condition("index > %0", ["100"])
+        >>> waitset.attach(cond)
+        >>> samples = reader.take_w_condition(cond)
+    """
+
+    def set_query_parameters(self, parameters: list[str]) -> None:
+        """Replace the parameters bound to the query expression."""
+        count = len(parameters)
+        encoded = [ffi.new("char[]", p.encode("utf-8")) for p in parameters]
+        arr = ffi.new("char *const[]", encoded) if count else ffi.NULL
+        check_ret(
+            lib.int2dds_querycondition_set_query_parameters(self._handle, arr, count)
+        )
+
+
 class Condition:
     """
     A generic condition returned from WaitSet.wait_ex().
@@ -163,7 +248,7 @@ class Condition:
 
     __slots__ = ("_handle", "_closed")
 
-    def __init__(self, handle: ffi.CData) -> None:
+    def __init__(self, handle: CData) -> None:
         self._handle = handle
         self._closed = False
 
@@ -225,13 +310,14 @@ class WaitSet:
         from int2dds.core.subscriber import DataReader
 
         if isinstance(condition, GuardCondition):
-            check_ret(lib.int2dds_waitset_attach_guard_condition(self._handle, condition._handle))
+            check_ret(lib.int2dds_waitset_attach_guardcondition(self._handle, condition._handle))
         elif isinstance(condition, StatusCondition):
-            check_ret(lib.int2dds_waitset_attach_condition(self._handle, condition._handle))
-        elif isinstance(condition, DataReader):
-            check_ret(lib.int2dds_waitset_attach_datareader(self._handle, condition._handle))
-        elif isinstance(condition, DataWriter):
-            check_ret(lib.int2dds_waitset_attach_datawriter(self._handle, condition._handle))
+            check_ret(lib.int2dds_waitset_attach_statuscondition(self._handle, condition._handle))
+        elif isinstance(condition, ReadCondition):
+            check_ret(lib.int2dds_waitset_attach_readcondition(self._handle, condition._handle))
+        elif isinstance(condition, (DataReader, DataWriter)):
+            cond = condition.get_statuscondition()
+            check_ret(lib.int2dds_waitset_attach_statuscondition(self._handle, cond._handle))
         else:
             raise TypeError(f"Cannot attach {type(condition).__name__} to WaitSet")
 
@@ -248,13 +334,14 @@ class WaitSet:
         from int2dds.core.subscriber import DataReader
 
         if isinstance(condition, GuardCondition):
-            check_ret(lib.int2dds_waitset_detach_guard_condition(self._handle, condition._handle))
+            check_ret(lib.int2dds_waitset_detach_guardcondition(self._handle, condition._handle))
         elif isinstance(condition, StatusCondition):
-            check_ret(lib.int2dds_waitset_detach_condition(self._handle, condition._handle))
-        elif isinstance(condition, DataReader):
-            check_ret(lib.int2dds_waitset_detach_datareader(self._handle, condition._handle))
-        elif isinstance(condition, DataWriter):
-            check_ret(lib.int2dds_waitset_detach_datawriter(self._handle, condition._handle))
+            check_ret(lib.int2dds_waitset_detach_statuscondition(self._handle, condition._handle))
+        elif isinstance(condition, ReadCondition):
+            check_ret(lib.int2dds_waitset_detach_readcondition(self._handle, condition._handle))
+        elif isinstance(condition, (DataReader, DataWriter)):
+            cond = condition.get_statuscondition()
+            check_ret(lib.int2dds_waitset_detach_statuscondition(self._handle, cond._handle))
         else:
             raise TypeError(f"Cannot detach {type(condition).__name__} from WaitSet")
 
@@ -272,11 +359,15 @@ class WaitSet:
             DdsTimeout: If the timeout expires before any condition triggers
         """
         timeout_ms = -1 if timeout is None else int(timeout * 1000)
-        ret = lib.int2dds_waitset_wait(self._handle, timeout_ms)
+        seq_ptr = ffi.new("Int2DdsConditionSeq **")
+        ret = lib.int2dds_waitset_wait_ex(self._handle, timeout_ms, seq_ptr)
 
         if ret == INT2DDS_RET_TIMEOUT:
             raise DdsTimeout()
         check_ret(ret)
+        if seq_ptr[0] != ffi.NULL:
+            lib.int2dds_condition_seq_delete(seq_ptr[0])
+
     def wait_ex(self, timeout: float | None = None) -> list[Condition]:
         """
         Wait for conditions and return the list of triggered conditions.
@@ -302,30 +393,36 @@ class WaitSet:
         """
         timeout_ms = -1 if timeout is None else int(timeout * 1000)
         seq_ptr = ffi.new("Int2DdsConditionSeq **")
-
         ret = lib.int2dds_waitset_wait_ex(self._handle, timeout_ms, seq_ptr)
+        return self._consume_condition_seq(ret, seq_ptr)
 
+    def wait_ex_ns(self, timeout_ns: int | None = None) -> list[Condition]:
+        """Nanosecond-precision variant of :meth:`wait_ex`.
+
+        Args:
+            timeout_ns: Maximum time to wait in nanoseconds, None for infinite.
+        """
+        timeout = -1 if timeout_ns is None else int(timeout_ns)
+        seq_ptr = ffi.new("Int2DdsConditionSeq **")
+        ret = lib.int2dds_waitset_wait_ex_ns(self._handle, timeout, seq_ptr)
+        return self._consume_condition_seq(ret, seq_ptr)
+
+    def _consume_condition_seq(self, ret: int, seq_ptr) -> list[Condition]:
         if ret == INT2DDS_RET_TIMEOUT:
             raise DdsTimeout()
         check_ret(ret)
 
         seq = seq_ptr[0]
         try:
-            # Get the number of triggered conditions
             count_out = ffi.new("size_t *")
             check_ret(lib.int2dds_condition_seq_length(seq, count_out))
-            count = count_out[0]
-
-            # Extract each condition
             conditions: list[Condition] = []
-            for i in range(count):
+            for i in range(count_out[0]):
                 cond_ptr = ffi.new("Int2DdsCondition **")
                 check_ret(lib.int2dds_condition_seq_get(seq, i, cond_ptr))
                 conditions.append(Condition(cond_ptr[0]))
-
             return conditions
         finally:
-            # Always free the sequence (individual conditions are owned by Condition objects)
             lib.int2dds_condition_seq_delete(seq)
 
 

@@ -448,7 +448,7 @@ impl DynamicType {
                 })
             }
             TypeIdentifier::CompleteTypeId(hash) | TypeIdentifier::MinimalTypeId(hash) => {
-                Self::resolve_nested(type_id, hash, ctx.as_deref_mut())
+                Self::resolve_nested(type_id, hash, ctx)
             }
             TypeIdentifier::None => {
                 Err(DynamicTypeError::UnsupportedType("None type identifier".to_string()))

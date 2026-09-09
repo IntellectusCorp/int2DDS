@@ -37,7 +37,7 @@ on:
           - both
         default: "both"
   pull_request:
-    branches: [develop]
+    branches: [develop, main]
     types: [opened, synchronize, reopened, ready_for_review]
 jobs:
   build_binary:
@@ -183,11 +183,17 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           pattern: tshark_*
-          merge-multiple: true
+          merge-multiple: false
           path: ./packets
         continue-on-error: true
       - name: Install junitparser
         run: pip install junitparser
+      - name: Checkout scripts
+        uses: actions/checkout@v4
+        with:
+          path: repo
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
       - name: Merge reports
         run: |
           cd reports
@@ -195,6 +201,15 @@ jobs:
           ls -la *.xml
           mv junit_interoperability_report.xml ../
           cd ..
+      - name: Summarize failures
+        run: |
+          python3 repo/.github/scripts/summarize_failures.py \
+            junit_interoperability_report.xml summary.txt
+      - name: Upload failure summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: failure_summary
+          path: summary.txt
       - name: Create test logs archive
         run: |
           if [ -d "./logs" ] && [ "$(ls -A ./logs)" ]; then
@@ -211,7 +226,7 @@ jobs:
           if [ -d "./packets" ] && [ "$(ls -A ./packets)" ]; then
             cd packets
             ls -la
-            zip -r ../packet_captures.zip *.pcap
+            zip -r ../packet_captures.zip .
             cd ..
           else
             echo "No packet captures found, skipping archive creation"
@@ -361,7 +376,7 @@ jobs:
             ./interoperability_report.xlsx
       - name: Delete intermediate artifacts
         if: always()
-        uses: geekyeggo/delete-artifact@v5
+        uses: geekyeggo/delete-artifact@v6
         with:
           name: |
             int2DDS_shapes_demo

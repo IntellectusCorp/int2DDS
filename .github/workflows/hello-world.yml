@@ -1,0 +1,261 @@
+name: Hello World Tests
+run-name: "Hello World Tests ${{ github.head_ref }}"
+
+on:
+  pull_request:
+    branches: [develop, main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+env:
+  # The examples declare net45..net10.0; pin the single TFM the runner's SDK has.
+  HW_DOTNET_TFM: net8.0
+  # Samples a subscriber must take before its cell counts as a pass. Read by both
+  # the pair script and the report, so the table cannot claim a different number.
+  HW_PAIR_SAMPLES: 10
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.89.0
+          rustflags: ""
+
+      - name: Load cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-develop
+          save-if: false
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      # Single place the runner's OS leaks into the rest of the job.
+      - name: Resolve the FFI library name for this runner
+        run: |
+          case "$(uname -s)" in
+            Darwin) echo "FFI_LIB=libint2dds_ffi.dylib" >> "$GITHUB_ENV" ;;
+            *)      echo "FFI_LIB=libint2dds_ffi.so"    >> "$GITHUB_ENV" ;;
+          esac
+
+      - name: Build Rust examples and the FFI library
+        run: |
+          cargo build --package int2dds --examples
+          cargo build --package int2dds-ffi
+
+      - name: Build C examples
+        run: |
+          cmake -S ffi/examples -B ffi/examples/build
+          cmake --build ffi/examples/build --parallel
+
+      # The C examples are the only stack that links the FFI at build time, so they
+      # are the only one that has to resolve the library by its soname at runtime.
+      - name: Show what the C examples link against
+        run: |
+          ls -l "target/debug/$FFI_LIB"*
+          if command -v readelf >/dev/null; then
+            readelf -d ffi/examples/build/hello_world_pub | grep -E 'NEEDED|RPATH|RUNPATH'
+          else
+            otool -l ffi/examples/build/hello_world_pub | grep -A2 -E 'LC_LOAD_DYLIB|LC_RPATH'
+          fi
+
+      - name: Build C# examples
+        run: |
+          for proj in HelloWorldPub HelloWorldSub; do
+            dotnet build "csharp/examples/$proj/$proj.csproj" \
+              -c Release -p:TargetFrameworks="$HW_DOTNET_TFM"
+            # .NET probes the app directory; setting LD_LIBRARY_PATH from inside the
+            # process (as NativeLibraryLoader does) is too late for glibc.
+            cp "target/debug/$FFI_LIB" "csharp/examples/$proj/bin/Release/$HW_DOTNET_TFM/"
+          done
+
+      - name: Package binaries
+        run: |
+          tar czf hello-world-bin.tar.gz \
+            target/debug/"$FFI_LIB"* \
+            target/debug/examples/hello_world_pub \
+            target/debug/examples/hello_world_sub \
+            ffi/examples/build/hello_world_pub \
+            ffi/examples/build/hello_world_sub \
+            "csharp/examples/HelloWorldPub/bin/Release/$HW_DOTNET_TFM" \
+            "csharp/examples/HelloWorldSub/bin/Release/$HW_DOTNET_TFM"
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: hello-world-bin
+          path: hello-world-bin.tar.gz
+          retention-days: 1
+
+  test:
+    name: publish from ${{ matrix.publisher }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        publisher: [rust, c, python, csharp]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve the FFI library name for this runner
+        run: |
+          case "$(uname -s)" in
+            Darwin) echo "FFI_LIB=libint2dds_ffi.dylib" >> "$GITHUB_ENV" ;;
+            *)      echo "FFI_LIB=libint2dds_ffi.so"    >> "$GITHUB_ENV" ;;
+          esac
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Install Python dependencies
+        run: pip install cffi
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: hello-world-bin
+
+      - name: Unpack binaries
+        run: |
+          tar xzf hello-world-bin.tar.gz
+          # The soname symlink has to survive the round trip or the C examples
+          # cannot load the library.
+          ls -l "target/debug/$FFI_LIB"*
+
+      - name: Run against every subscriber
+        env:
+          PUBLISHER: ${{ matrix.publisher }}
+        run: |
+          mkdir -p results logs
+          case "$PUBLISHER" in
+            rust)   pub_index=0 ;;
+            c)      pub_index=1 ;;
+            python) pub_index=2 ;;
+            csharp) pub_index=3 ;;
+          esac
+          subs=(rust c python csharp)
+          : > "results/$PUBLISHER.txt"
+          for j in "${!subs[@]}"; do
+            # A distinct domain per cell keeps sequential pairs from discovering each other.
+            domain=$(( pub_index * 4 + j ))
+            if bash .github/scripts/hello_world_pair.sh "$PUBLISHER" "${subs[$j]}" "$domain" logs; then
+              echo "${subs[$j]} PASS" >> "results/$PUBLISHER.txt"
+            else
+              echo "${subs[$j]} FAIL" >> "results/$PUBLISHER.txt"
+            fi
+          done
+          cat "results/$PUBLISHER.txt"
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hello-world-result-${{ matrix.publisher }}
+          path: results/
+          retention-days: 1
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hello-world-logs-${{ matrix.publisher }}
+          path: logs/
+          retention-days: 7
+
+  # Reports the plain "hello-world" status for the develop ruleset; renders the
+  # matrix as a table and fails unless every cell exchanged a sample.
+  hello-world:
+    name: hello-world
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: hello-world-result-*
+          merge-multiple: true
+          path: results
+        continue-on-error: true
+
+      - name: Render report
+        run: |
+          python3 - <<'PY'
+          import os
+          import pathlib
+
+          LANGS = ["rust", "c", "python", "csharp"]
+          LABEL = {"rust": "Rust", "c": "C", "python": "Python", "csharp": "C#"}
+          MARK = {"PASS": "✅", "FAIL": "❌"}
+          NEEDED = os.environ.get("HW_PAIR_SAMPLES", "10")
+
+          results = {}
+          for pub in LANGS:
+              row = {}
+              path = pathlib.Path("results") / f"{pub}.txt"
+              if path.exists():
+                  for line in path.read_text().splitlines():
+                      parts = line.split()
+                      if len(parts) == 2:
+                          row[parts[0]] = parts[1]
+              results[pub] = row
+
+          out = ["## Hello World Tests Report", "", "<table>"]
+          out.append(
+              "<tr><th rowspan='2'>Publisher</th>"
+              f"<th colspan='{len(LANGS)}' align='center'>Subscriber</th></tr>"
+          )
+          out.append("<tr>" + "".join(f"<th>{LABEL[s]}</th>" for s in LANGS) + "</tr>")
+          for pub in LANGS:
+              cells = "".join(
+                  "<td align='center'>{}</td>".format(
+                      MARK.get(results[pub].get(sub), "⚠️")
+                  )
+                  for sub in LANGS
+              )
+              out.append(f"<tr><th>{LABEL[pub]}</th>{cells}</tr>")
+          out += [
+              "</table>",
+              "",
+              f"✅ {NEEDED} samples received &nbsp;|&nbsp; ❌ fewer than {NEEDED} "
+              "&nbsp;|&nbsp; ⚠️ pair did not run",
+          ]
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+              f.write("\n".join(out) + "\n")
+
+          failed = [
+              (p, s) for p in LANGS for s in LANGS if results[p].get(s) != "PASS"
+          ]
+          for p, s in failed:
+              print(f"{LABEL[p]} -> {LABEL[s]}: {results[p].get(s) or 'did not run'}")
+          raise SystemExit(1 if failed else 0)
+          PY
+
+      - name: Delete intermediate artifacts
+        if: always()
+        uses: geekyeggo/delete-artifact@v6
+        with:
+          name: |
+            hello-world-bin
+            hello-world-result-*
+          failOnError: false

@@ -129,7 +129,7 @@ mod cdr_primitive_tests {
         let bytes = serializer.into_bytes();
         let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
         let result = bool::deserialize_cdr(&mut deserializer).unwrap();
-        assert_eq!(result, true);
+        assert!(result);
 
         let mut serializer = CdrSerializer::new(true);
         serializer.write_encapsulation_header().unwrap();
@@ -138,7 +138,7 @@ mod cdr_primitive_tests {
         let bytes = serializer.into_bytes();
         let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
         let result = bool::deserialize_cdr(&mut deserializer).unwrap();
-        assert_eq!(result, false);
+        assert!(!result);
     }
 
     #[test]
@@ -236,7 +236,7 @@ mod cdr_primitive_tests {
         let bytes = serializer.into_bytes();
         let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
         let result = bool::deserialize_xcdr(&mut deserializer).unwrap();
-        assert_eq!(result, true);
+        assert!(result);
 
         // i32
         let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Final);

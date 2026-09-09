@@ -31,8 +31,32 @@ static void handle_sigint(int sig) {
     g_stop = 1;
 }
 
+static const char* reliability_name(int32_t kind) {
+    return kind == INT2DDS_QOS_RELIABILITY_RELIABLE ? "Reliable" : "BestEffort";
+}
+
+static const char* durability_name(int32_t kind) {
+    switch (kind) {
+        case INT2DDS_QOS_DURABILITY_TRANSIENT_LOCAL: return "TransientLocal";
+        case INT2DDS_QOS_DURABILITY_TRANSIENT:       return "Transient";
+        case INT2DDS_QOS_DURABILITY_PERSISTENT:      return "Persistent";
+        default:                                     return "Volatile";
+    }
+}
+
+static void history_name(int32_t kind, int32_t depth, char* out, size_t out_len) {
+    if (kind == INT2DDS_QOS_HISTORY_KEEP_ALL) {
+        snprintf(out, out_len, "KeepAll");
+    } else {
+        snprintf(out, out_len, "KeepLast(%d)", depth);
+    }
+}
+
 int main(int argc, char* argv[]) {
     signal(SIGINT, handle_sigint);
+    /* Unbuffer stdout so redirected output (CI logs) appears as it is produced.
+       _IONBF rather than _IOLBF because the MSVC CRT does not implement line buffering. */
+    setvbuf(stdout, NULL, _IONBF, 0);
 
     Int2DdsRet ret;
     Int2DdsParticipantFactory* factory = NULL;
@@ -46,6 +70,7 @@ int main(int argc, char* argv[]) {
 
     int32_t domain_id = 0;
     int use_reliable = 0;
+    const char* topic_name = "hello_world_topic";
 
     /* Parse arguments */
     for (int i = 1; i < argc; i++) {
@@ -57,10 +82,6 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    printf("int2dds IDL Hello World Subscriber\n");
-    printf("Domain: %d, QoS: %s\n", domain_id, use_reliable ? "RELIABLE" : "BEST_EFFORT");
-    printf("------------------------------------\n");
-
     /* Initialize factory */
     ret = int2dds_domain_participant_factory_get_instance(&factory);
     if (ret != INT2DDS_RET_OK) {
@@ -69,23 +90,22 @@ int main(int argc, char* argv[]) {
     }
 
     /* Create participant */
-    ret = int2dds_create_participant(factory, "hello_world_subscriber", domain_id, &participant);
+    ret = int2dds_create_participant(factory, domain_id, NULL, &participant);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create participant: %d\n", ret);
         goto cleanup;
     }
 
     /* Create subscriber */
-    ret = int2dds_create_subscriber(participant, &subscriber);
+    ret = int2dds_create_subscriber(participant, NULL, &subscriber);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create subscriber: %d\n", ret);
         goto cleanup;
     }
 
-    /* Create topic with extensibility (1 = APPENDABLE) */
-    ret = int2dds_create_topic(participant, "hello_world_topic", "HelloWorld",
-                               1,  /* APPENDABLE (default extensibility) */
-                               NULL, &topic);
+    /* Create topic — extensibility is carried by the type via HelloWorld_type_info(),
+       so no extensibility argument is passed (parity with the Rust/Python/C# examples). */
+    ret = HelloWorld_create_topic(participant, topic_name, NULL, &topic);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create topic: %d\n", ret);
         goto cleanup;
@@ -109,14 +129,24 @@ int main(int argc, char* argv[]) {
         goto cleanup;
     }
 
-    /* Create DataReader */
-    ret = int2dds_create_datareader(subscriber, topic, qos, &reader);
+    /* Create DataReader (no listener) */
+    ret = int2dds_create_datareader(subscriber, topic, qos, NULL, 0, &reader);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create datareader: %d\n", ret);
         goto cleanup;
     }
 
-    printf("Subscriber ready. Waiting for publisher...\n");
+    int32_t rel_kind = 0, dur_kind = 0, hist_kind = 0, hist_depth = 0;
+    int64_t max_blocking_ns = 0;
+    char hist_text[32];
+    int2dds_datareader_qos_get_reliability(qos, &rel_kind, &max_blocking_ns);
+    int2dds_datareader_qos_get_durability(qos, &dur_kind);
+    int2dds_datareader_qos_get_history(qos, &hist_kind, &hist_depth);
+    history_name(hist_kind, hist_depth, hist_text, sizeof(hist_text));
+
+    printf("[subscriber INFO] domain_id: %d, topic: %s\n", domain_id, topic_name);
+    printf("[subscriber qos] reliability: %s, durability: %s, history: %s\n",
+           reliability_name(rel_kind), durability_name(dur_kind), hist_text);
 
     /* Create WaitSet */
     ret = int2dds_waitset_new(&waitset);
@@ -140,34 +170,33 @@ int main(int argc, char* argv[]) {
         goto cleanup;
     }
 
-    ret = int2dds_waitset_attach_condition(waitset, condition);
+    ret = int2dds_waitset_attach_statuscondition(waitset, condition);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to attach condition to waitset: %d\n", ret);
         goto cleanup;
     }
 
     /* Loop until a publisher actually matches; the finite timeout keeps Ctrl-C responsive */
-    int32_t total_count = 0;
-    int32_t current_count = 0;
+    struct Int2DdsSubscriptionMatchedStatus matched = {0};
     do {
-        ret = int2dds_waitset_wait(waitset, 200);
+        ret = int2dds_waitset_wait_ex(waitset, 1000, NULL);
         if (ret != INT2DDS_RET_OK && ret != INT2DDS_RET_TIMEOUT) {
             fprintf(stderr, "WaitSet wait failed: %d\n", ret);
             goto cleanup;
         }
         if (g_stop) {
+            ret = INT2DDS_RET_OK;
             goto cleanup;
         }
 
-        ret = int2dds_get_subscription_matched_status(reader, &total_count, &current_count);
+        ret = int2dds_datareader_get_subscription_matched_status(reader, &matched);
         if (ret != INT2DDS_RET_OK) {
             fprintf(stderr, "Failed to get subscription matched status: %d\n", ret);
             goto cleanup;
         }
-    } while (current_count <= 0);
+    } while (matched.current_count <= 0);
 
-    printf("Publisher matched! (total: %d, current: %d)\n", total_count, current_count);
-    printf("Waiting for messages...\n\n");
+    printf("Publisher matched!\n");
 
     /* Receive messages using IDL-generated deserialization */
     uint8_t recv_buf[4096];
@@ -177,26 +206,26 @@ int main(int argc, char* argv[]) {
     int received_count = 0;
 
     while (!g_stop) {
-        ret = int2dds_take_serialized(reader, recv_buf, sizeof(recv_buf), &actual_size, &valid_data);
+        ret = int2dds_datareader_take_serialized(reader, recv_buf, sizeof(recv_buf), &actual_size, &valid_data);
 
         if (ret == INT2DDS_RET_OK && valid_data) {
             /* Deserialize CDR bytes to HelloWorld struct */
             if (HelloWorld_deserialize_cdr(recv_buf, actual_size, &hw)) {
-                printf("[%u] Received: %s\n", hw.index, hw.message);
+                printf("Read sample: HelloWorld { index: %u, message: \"%s\" }\n", hw.index, hw.message);
                 received_count++;
             } else {
                 fprintf(stderr, "Deserialization failed\n");
             }
         } else if (ret == INT2DDS_RET_NO_DATA) {
             /* No data yet - wait for data available */
-            int2dds_waitset_wait(waitset, 1000);
+            int2dds_waitset_wait_ex(waitset, 1000, NULL);
         }
     }
 
 cleanup:
     if (waitset) {
         if (condition) {
-            int2dds_waitset_detach_condition(waitset, condition);
+            int2dds_waitset_detach_statuscondition(waitset, condition);
         }
         int2dds_waitset_delete(waitset);
     }

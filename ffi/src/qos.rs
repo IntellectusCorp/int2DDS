@@ -27,8 +27,8 @@ use int2dds::{
     domain::qos::DomainParticipantQos,
     infrastructure::qos_policy::{
         DataRepresentationId, DataRepresentationQosPolicy, DestinationOrderQosPolicyKind,
-        DurabilityQosPolicyKind, HistoryQosPolicyKind, LivelinessQosPolicyKind,
-        OwnershipQosPolicyKind, ReliabilityQosPolicyKind,
+        DurabilityQosPolicyKind, HistoryQosPolicyKind, LifespanReferenceQosPolicyKind,
+        LivelinessQosPolicyKind, OwnershipQosPolicyKind, ReliabilityQosPolicyKind,
     },
     publication::qos::{DataWriterQos, PublisherQos},
     subscription::qos::{DataReaderQos, SubscriberQos},
@@ -89,6 +89,10 @@ pub const INT2DDS_QOS_OWNERSHIP_EXCLUSIVE: i32 = 1;
 // DestinationOrder kinds
 pub const INT2DDS_QOS_DEST_ORDER_BY_RECEPTION: i32 = 0;
 pub const INT2DDS_QOS_DEST_ORDER_BY_SOURCE: i32 = 1;
+
+// LifespanReference kinds
+pub const INT2DDS_QOS_LIFESPAN_REF_BY_SOURCE: i32 = 0;
+pub const INT2DDS_QOS_LIFESPAN_REF_BY_RECEPTION: i32 = 1;
 
 /// Opaque QoS handle for DataWriter
 pub struct Int2DdsDataWriterQos {
@@ -275,6 +279,26 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_set_ownership_strength(
     INT2DDS_RET_OK
 }
 
+/// Set the DataFrag QoS (per-writer RTPS DATA_FRAG fragment size, in bytes) for
+/// DataWriter. Resolved when the writer is created: values `> 65000` are clamped
+/// to 65000, and `<= 0` means unspecified, falling back to the
+/// `INT2DDS_DATA_FRAG_SIZE` environment variable and then to 65000.
+///
+/// # Safety
+/// - `qos` must be a valid QoS handle
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_qos_set_data_frag(
+    qos: *mut Int2DdsDataWriterQos,
+    value: i32,
+) -> Int2DdsRet {
+    check_null!(qos);
+
+    let qos_ref = &mut *qos;
+    qos_ref.inner.data_frag.max_size = value;
+
+    INT2DDS_RET_OK
+}
+
 /// Set resource limits QoS for DataWriter
 ///
 /// # Safety
@@ -420,6 +444,11 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_set_writer_data_lifecycle(
 // ============================================================================
 
 /// Get reliability QoS from DataWriter QoS handle
+///
+/// # Safety
+/// - `qos` must be a valid datawriter QoS handle
+/// - `kind_out` must be a valid pointer
+/// - `max_blocking_time_ns_out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datawriter_qos_get_reliability(
     qos: *const Int2DdsDataWriterQos,
@@ -435,11 +464,15 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_get_reliability(
         ReliabilityQosPolicyKind::Reliable => INT2DDS_QOS_RELIABILITY_RELIABLE,
     };
     let d = &q.inner.reliability.max_blocking_time;
-    *max_blocking_time_ns_out = duration_to_ns(&d);
+    *max_blocking_time_ns_out = duration_to_ns(d);
     INT2DDS_RET_OK
 }
 
 /// Get durability QoS from DataWriter QoS handle
+///
+/// # Safety
+/// - `qos` must be a valid datawriter QoS handle
+/// - `kind_out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datawriter_qos_get_durability(
     qos: *const Int2DdsDataWriterQos,
@@ -458,6 +491,11 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_get_durability(
 }
 
 /// Get history QoS from DataWriter QoS handle
+///
+/// # Safety
+/// - `qos` must be a valid datawriter QoS handle
+/// - `kind_out` must be a valid pointer
+/// - `depth_out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datawriter_qos_get_history(
     qos: *const Int2DdsDataWriterQos,
@@ -482,6 +520,10 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_get_history(
 }
 
 /// Get ownership QoS from DataWriter QoS handle
+///
+/// # Safety
+/// - `qos` must be a valid datawriter QoS handle
+/// - `kind_out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datawriter_qos_get_ownership(
     qos: *const Int2DdsDataWriterQos,
@@ -498,6 +540,10 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_get_ownership(
 }
 
 /// Get ownership strength from DataWriter QoS handle
+///
+/// # Safety
+/// - `qos` must be a valid datawriter QoS handle
+/// - `value_out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datawriter_qos_get_ownership_strength(
     qos: *const Int2DdsDataWriterQos,
@@ -509,7 +555,31 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_get_ownership_strength(
     INT2DDS_RET_OK
 }
 
+/// Get the DataFrag QoS (fragment size, in bytes) from a DataWriter QoS handle.
+/// Returns the value as set, not the resolved size: `0` means unspecified, so the
+/// writer will use `INT2DDS_DATA_FRAG_SIZE` if set and 65000 otherwise.
+///
+/// # Safety
+/// - `qos` must be a valid datawriter QoS handle
+/// - `value_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_qos_get_data_frag(
+    qos: *const Int2DdsDataWriterQos,
+    value_out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(value_out);
+    *value_out = (*qos).inner.data_frag.max_size;
+    INT2DDS_RET_OK
+}
+
 /// Get resource limits from DataWriter QoS handle
+///
+/// # Safety
+/// - `qos` must be a valid datawriter QoS handle
+/// - `max_samples_out` must be a valid pointer
+/// - `max_instances_out` must be a valid pointer
+/// - `max_per_instance_out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datawriter_qos_get_resource_limits(
     qos: *const Int2DdsDataWriterQos,
@@ -529,6 +599,10 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_get_resource_limits(
 }
 
 /// Get lifespan from DataWriter QoS handle
+///
+/// # Safety
+/// - `qos` must be a valid datawriter QoS handle
+/// - `duration_ns_out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datawriter_qos_get_lifespan(
     qos: *const Int2DdsDataWriterQos,
@@ -537,11 +611,15 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_get_lifespan(
     check_null!(qos);
     check_null!(duration_ns_out);
     let d = &(*qos).inner.lifespan.duration;
-    *duration_ns_out = duration_to_ns(&d);
+    *duration_ns_out = duration_to_ns(d);
     INT2DDS_RET_OK
 }
 
 /// Get destination order from DataWriter QoS handle
+///
+/// # Safety
+/// - `qos` must be a valid datawriter QoS handle
+/// - `kind_out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datawriter_qos_get_destination_order(
     qos: *const Int2DdsDataWriterQos,
@@ -557,6 +635,10 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_get_destination_order(
 }
 
 /// Get deadline from DataWriter QoS handle
+///
+/// # Safety
+/// - `qos` must be a valid datawriter QoS handle
+/// - `period_ns_out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datawriter_qos_get_deadline(
     qos: *const Int2DdsDataWriterQos,
@@ -565,11 +647,16 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_get_deadline(
     check_null!(qos);
     check_null!(period_ns_out);
     let d = &(*qos).inner.deadline.period;
-    *period_ns_out = duration_to_ns(&d);
+    *period_ns_out = duration_to_ns(d);
     INT2DDS_RET_OK
 }
 
 /// Get liveliness from DataWriter QoS handle
+///
+/// # Safety
+/// - `qos` must be a valid datawriter QoS handle
+/// - `kind_out` must be a valid pointer
+/// - `lease_duration_ns_out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datawriter_qos_get_liveliness(
     qos: *const Int2DdsDataWriterQos,
@@ -588,11 +675,15 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_get_liveliness(
         LivelinessQosPolicyKind::ManualByTopic => INT2DDS_QOS_LIVELINESS_MANUAL_BY_TOPIC,
     };
     let d = &q.inner.liveliness.lease_duration;
-    *lease_duration_ns_out = duration_to_ns(&d);
+    *lease_duration_ns_out = duration_to_ns(d);
     INT2DDS_RET_OK
 }
 
 /// Get data representation from DataWriter QoS handle
+///
+/// # Safety
+/// - `qos` must be a valid datawriter QoS handle
+/// - `kind_out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datawriter_qos_get_data_representation(
     qos: *const Int2DdsDataWriterQos,
@@ -602,7 +693,7 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_get_data_representation(
     check_null!(kind_out);
     let q = &*qos;
     *kind_out = q.inner.data_representation.value.first().map_or(
-        INT2DDS_QOS_DATA_REPR_XCDR2,
+        INT2DDS_QOS_DATA_REPR_XCDR1,
         |v| match v {
             DataRepresentationId::XcdrDataRepresentation => INT2DDS_QOS_DATA_REPR_XCDR1,
             DataRepresentationId::Xcdr2DataRepresentation => INT2DDS_QOS_DATA_REPR_XCDR2,
@@ -612,7 +703,37 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_get_data_representation(
     INT2DDS_RET_OK
 }
 
+/// Returns the library's default data representation (`INT2DDS_QOS_DATA_REPR_*`)
+/// used when an application creates an endpoint without setting one explicitly.
+///
+/// Single source of truth for language bindings: instead of hardcoding XCDR1,
+/// bindings should query this so a change to the Rust core default propagates
+/// automatically to what they serialize and advertise.
+#[no_mangle]
+pub extern "C" fn int2dds_default_data_representation() -> i32 {
+    match DataRepresentationQosPolicy::default().value.first() {
+        Some(DataRepresentationId::Xcdr2DataRepresentation) => INT2DDS_QOS_DATA_REPR_XCDR2,
+        _ => INT2DDS_QOS_DATA_REPR_XCDR1,
+    }
+}
+
+/// Returns the library's default type extensibility (`0` = Final, `1` = Appendable,
+/// `2` = Mutable) applied when a type does not declare one explicitly.
+///
+/// Single source of truth for language bindings: instead of hardcoding Appendable,
+/// bindings should query this so a change to the Rust core default (the
+/// `ExtensibilityKind` enum default) propagates automatically to how they frame
+/// serialized samples (DHEADER presence) and advertise types.
+#[no_mangle]
+pub extern "C" fn int2dds_default_extensibility() -> i32 {
+    int2dds::xtypes::ExtensibilityKind::default() as i32
+}
+
 /// Get transport priority from DataWriter QoS handle
+///
+/// # Safety
+/// - `qos` must be a valid datawriter QoS handle
+/// - `value_out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datawriter_qos_get_transport_priority(
     qos: *const Int2DdsDataWriterQos,
@@ -625,6 +746,10 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_get_transport_priority(
 }
 
 /// Get latency budget from DataWriter QoS handle
+///
+/// # Safety
+/// - `qos` must be a valid datawriter QoS handle
+/// - `duration_ns_out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datawriter_qos_get_latency_budget(
     qos: *const Int2DdsDataWriterQos,
@@ -633,11 +758,15 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_get_latency_budget(
     check_null!(qos);
     check_null!(duration_ns_out);
     let d = &(*qos).inner.latency_budget.duration;
-    *duration_ns_out = duration_to_ns(&d);
+    *duration_ns_out = duration_to_ns(d);
     INT2DDS_RET_OK
 }
 
 /// Get writer data lifecycle from DataWriter QoS handle
+///
+/// # Safety
+/// - `qos` must be a valid datawriter QoS handle
+/// - `autodispose_out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datawriter_qos_get_writer_data_lifecycle(
     qos: *const Int2DdsDataWriterQos,
@@ -951,6 +1080,10 @@ pub unsafe extern "C" fn int2dds_datareader_qos_set_reader_data_lifecycle(
 // DataReader QoS Getters
 // ============================================================================
 
+/// # Safety
+/// - `qos` must be a valid datareader QoS handle
+/// - `kind_out` must be a valid pointer
+/// - `max_blocking_time_ns_out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datareader_qos_get_reliability(
     qos: *const Int2DdsDataReaderQos,
@@ -966,10 +1099,13 @@ pub unsafe extern "C" fn int2dds_datareader_qos_get_reliability(
         ReliabilityQosPolicyKind::Reliable => INT2DDS_QOS_RELIABILITY_RELIABLE,
     };
     let d = &q.inner.reliability.max_blocking_time;
-    *max_blocking_time_ns_out = duration_to_ns(&d);
+    *max_blocking_time_ns_out = duration_to_ns(d);
     INT2DDS_RET_OK
 }
 
+/// # Safety
+/// - `qos` must be a valid datareader QoS handle
+/// - `kind_out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datareader_qos_get_durability(
     qos: *const Int2DdsDataReaderQos,
@@ -986,6 +1122,10 @@ pub unsafe extern "C" fn int2dds_datareader_qos_get_durability(
     INT2DDS_RET_OK
 }
 
+/// # Safety
+/// - `qos` must be a valid datareader QoS handle
+/// - `kind_out` must be a valid pointer
+/// - `depth_out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datareader_qos_get_history(
     qos: *const Int2DdsDataReaderQos,
@@ -1008,6 +1148,9 @@ pub unsafe extern "C" fn int2dds_datareader_qos_get_history(
     INT2DDS_RET_OK
 }
 
+/// # Safety
+/// - `qos` must be a valid datareader QoS handle
+/// - `kind_out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datareader_qos_get_ownership(
     qos: *const Int2DdsDataReaderQos,
@@ -1022,6 +1165,11 @@ pub unsafe extern "C" fn int2dds_datareader_qos_get_ownership(
     INT2DDS_RET_OK
 }
 
+/// # Safety
+/// - `qos` must be a valid datareader QoS handle
+/// - `max_samples_out` must be a valid pointer
+/// - `max_instances_out` must be a valid pointer
+/// - `max_per_instance_out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datareader_qos_get_resource_limits(
     qos: *const Int2DdsDataReaderQos,
@@ -1040,6 +1188,9 @@ pub unsafe extern "C" fn int2dds_datareader_qos_get_resource_limits(
     INT2DDS_RET_OK
 }
 
+/// # Safety
+/// - `qos` must be a valid datareader QoS handle
+/// - `kind_out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datareader_qos_get_destination_order(
     qos: *const Int2DdsDataReaderQos,
@@ -1054,6 +1205,52 @@ pub unsafe extern "C" fn int2dds_datareader_qos_get_destination_order(
     INT2DDS_RET_OK
 }
 
+/// # Safety
+/// - `qos` must be a valid datareader QoS handle
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_qos_set_lifespan_reference(
+    qos: *mut Int2DdsDataReaderQos,
+    kind: i32,
+) -> Int2DdsRet {
+    check_null!(qos);
+
+    let qos_ref = &mut *qos;
+
+    let reference_kind = match kind {
+        INT2DDS_QOS_LIFESPAN_REF_BY_SOURCE => LifespanReferenceQosPolicyKind::BySourceTimestamp,
+        INT2DDS_QOS_LIFESPAN_REF_BY_RECEPTION => {
+            LifespanReferenceQosPolicyKind::ByReceptionTimestamp
+        }
+        _ => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    qos_ref.inner.lifespan_reference.kind = reference_kind;
+
+    INT2DDS_RET_OK
+}
+
+/// # Safety
+/// - `qos` must be a valid datareader QoS handle
+/// - `kind_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_qos_get_lifespan_reference(
+    qos: *const Int2DdsDataReaderQos,
+    kind_out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(kind_out);
+    *kind_out = match (*qos).inner.lifespan_reference.kind {
+        LifespanReferenceQosPolicyKind::BySourceTimestamp => INT2DDS_QOS_LIFESPAN_REF_BY_SOURCE,
+        LifespanReferenceQosPolicyKind::ByReceptionTimestamp => {
+            INT2DDS_QOS_LIFESPAN_REF_BY_RECEPTION
+        }
+    };
+    INT2DDS_RET_OK
+}
+
+/// # Safety
+/// - `qos` must be a valid datareader QoS handle
+/// - `period_ns_out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datareader_qos_get_deadline(
     qos: *const Int2DdsDataReaderQos,
@@ -1062,10 +1259,14 @@ pub unsafe extern "C" fn int2dds_datareader_qos_get_deadline(
     check_null!(qos);
     check_null!(period_ns_out);
     let d = &(*qos).inner.deadline.period;
-    *period_ns_out = duration_to_ns(&d);
+    *period_ns_out = duration_to_ns(d);
     INT2DDS_RET_OK
 }
 
+/// # Safety
+/// - `qos` must be a valid datareader QoS handle
+/// - `kind_out` must be a valid pointer
+/// - `lease_duration_ns_out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datareader_qos_get_liveliness(
     qos: *const Int2DdsDataReaderQos,
@@ -1084,10 +1285,13 @@ pub unsafe extern "C" fn int2dds_datareader_qos_get_liveliness(
         LivelinessQosPolicyKind::ManualByTopic => INT2DDS_QOS_LIVELINESS_MANUAL_BY_TOPIC,
     };
     let d = &q.inner.liveliness.lease_duration;
-    *lease_duration_ns_out = duration_to_ns(&d);
+    *lease_duration_ns_out = duration_to_ns(d);
     INT2DDS_RET_OK
 }
 
+/// # Safety
+/// - `qos` must be a valid datareader QoS handle
+/// - `kind_out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datareader_qos_get_data_representation(
     qos: *const Int2DdsDataReaderQos,
@@ -1106,6 +1310,9 @@ pub unsafe extern "C" fn int2dds_datareader_qos_get_data_representation(
     INT2DDS_RET_OK
 }
 
+/// # Safety
+/// - `qos` must be a valid datareader QoS handle
+/// - `duration_ns_out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datareader_qos_get_latency_budget(
     qos: *const Int2DdsDataReaderQos,
@@ -1114,10 +1321,13 @@ pub unsafe extern "C" fn int2dds_datareader_qos_get_latency_budget(
     check_null!(qos);
     check_null!(duration_ns_out);
     let d = &(*qos).inner.latency_budget.duration;
-    *duration_ns_out = duration_to_ns(&d);
+    *duration_ns_out = duration_to_ns(d);
     INT2DDS_RET_OK
 }
 
+/// # Safety
+/// - `qos` must be a valid datareader QoS handle
+/// - `min_separation_ns_out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datareader_qos_get_time_based_filter(
     qos: *const Int2DdsDataReaderQos,
@@ -1126,10 +1336,14 @@ pub unsafe extern "C" fn int2dds_datareader_qos_get_time_based_filter(
     check_null!(qos);
     check_null!(min_separation_ns_out);
     let d = &(*qos).inner.time_based_filter.minimum_separation;
-    *min_separation_ns_out = duration_to_ns(&d);
+    *min_separation_ns_out = duration_to_ns(d);
     INT2DDS_RET_OK
 }
 
+/// # Safety
+/// - `qos` must be a valid datareader QoS handle
+/// - `autopurge_nowriter_ns_out` must be a valid pointer
+/// - `autopurge_disposed_ns_out` must be a valid pointer
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_datareader_qos_get_reader_data_lifecycle(
     qos: *const Int2DdsDataReaderQos,
@@ -1141,9 +1355,9 @@ pub unsafe extern "C" fn int2dds_datareader_qos_get_reader_data_lifecycle(
     check_null!(autopurge_disposed_ns_out);
     let q = &*qos;
     let d1 = &q.inner.reader_data_lifecycle.autopurge_nowriter_samples_delay;
-    *autopurge_nowriter_ns_out = duration_to_ns(&d1);
+    *autopurge_nowriter_ns_out = duration_to_ns(d1);
     let d2 = &q.inner.reader_data_lifecycle.autopurge_disposed_samples_delay;
-    *autopurge_disposed_ns_out = duration_to_ns(&d2);
+    *autopurge_disposed_ns_out = duration_to_ns(d2);
     INT2DDS_RET_OK
 }
 
@@ -1985,6 +2199,78 @@ mod tests {
     use std::ptr;
 
     #[test]
+    fn writer_qos_default_data_representation_is_xcdr1() {
+        unsafe {
+            let mut qos: *mut Int2DdsDataWriterQos = ptr::null_mut();
+            assert_eq!(int2dds_datawriter_qos_create_default(&mut qos as *mut _), INT2DDS_RET_OK);
+            assert!(!qos.is_null());
+
+            let mut kind = -1;
+            assert_eq!(
+                int2dds_datawriter_qos_get_data_representation(qos, &mut kind),
+                INT2DDS_RET_OK
+            );
+            assert_eq!(kind, INT2DDS_QOS_DATA_REPR_XCDR1);
+
+            int2dds_datawriter_qos_destroy(qos);
+        }
+    }
+
+    #[test]
+    fn writer_qos_empty_data_representation_reports_xcdr1() {
+        let qos = Int2DdsDataWriterQos {
+            inner: DataWriterQos {
+                data_representation: DataRepresentationQosPolicy { value: Vec::new() },
+                ..DataWriterQos::default()
+            },
+        };
+
+        let mut kind = -1;
+        assert_eq!(
+            unsafe { int2dds_datawriter_qos_get_data_representation(&qos, &mut kind) },
+            INT2DDS_RET_OK
+        );
+        assert_eq!(kind, INT2DDS_QOS_DATA_REPR_XCDR1);
+    }
+
+    // Drift guard: the exported default is XCDR1 (spec effective write default).
+    #[test]
+    fn default_data_representation_is_xcdr1() {
+        assert_eq!(int2dds_default_data_representation(), INT2DDS_QOS_DATA_REPR_XCDR1);
+    }
+
+    // Single-source invariant: the export is derived from the core
+    // `DataRepresentationQosPolicy::default()`, not an independent hardcode. If
+    // the core default changes, this stays green and the export tracks it — so
+    // bindings that read the export follow automatically.
+    #[test]
+    fn default_data_representation_tracks_core_default() {
+        let expected = match DataRepresentationQosPolicy::default().value.first() {
+            Some(DataRepresentationId::Xcdr2DataRepresentation) => INT2DDS_QOS_DATA_REPR_XCDR2,
+            _ => INT2DDS_QOS_DATA_REPR_XCDR1,
+        };
+        assert_eq!(int2dds_default_data_representation(), expected);
+    }
+
+    // Drift guard: the exported default extensibility is Appendable (1), the
+    // XTypes spec default applied when a type declares none.
+    #[test]
+    fn default_extensibility_is_appendable() {
+        assert_eq!(int2dds_default_extensibility(), 1);
+    }
+
+    // Single-source invariant: the export is derived from the core
+    // `ExtensibilityKind` enum default, not an independent hardcode. If the core
+    // default changes, this tracks it — so bindings that read the export follow.
+    #[test]
+    fn default_extensibility_tracks_core_default() {
+        assert_eq!(
+            int2dds_default_extensibility(),
+            int2dds::xtypes::ExtensibilityKind::default() as i32
+        );
+    }
+
+    #[test]
     fn test_qos_create_destroy() {
         unsafe {
             let mut qos: *mut Int2DdsDataWriterQos = ptr::null_mut();
@@ -2099,8 +2385,8 @@ mod tests {
             let ret = int2dds_publisher_qos_create_default(&mut qos as *mut _);
             assert_eq!(ret, INT2DDS_RET_OK);
 
-            let p1 = b"partition_a\0".as_ptr() as *const c_char;
-            let p2 = b"partition_b\0".as_ptr() as *const c_char;
+            let p1 = c"partition_a".as_ptr();
+            let p2 = c"partition_b".as_ptr();
             let partitions = [p1, p2];
             let ret = int2dds_publisher_qos_set_partition(qos, partitions.as_ptr(), 2);
             assert_eq!(ret, INT2DDS_RET_OK);

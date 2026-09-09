@@ -36,6 +36,13 @@ fn cs_ident(name: &str) -> String {
     naming::escape_keyword(&naming::to_pascal_case(name), naming::TargetLang::CSharp)
 }
 
+/// PascalCase a struct/enum/bitmask type reference by its leaf name. A cross-file
+/// reference may be written qualified (`dep::msg::Header`); every generated type
+/// shares one namespace, so C# resolves the leaf directly and the scope is dropped.
+fn cs_type_ref(name: &str) -> String {
+    naming::to_pascal_case(name.rsplit("::").next().unwrap_or(name))
+}
+
 /// Render a constant value as a C# literal (float constants need an `f` suffix).
 fn cs_const_value(value: &ConstValue, ty: &ResolvedType) -> String {
     match value {
@@ -64,6 +71,7 @@ impl<'a> CsGen<'a> {
         self.line("// DO NOT EDIT");
         self.line("");
         self.line("using System;");
+        self.line("using System.Collections.Generic;");
         self.line("using Int2Dds.Cdr;");
         self.line("using Int2Dds.Types;");
         self.line("");
@@ -192,7 +200,7 @@ impl<'a> CsGen<'a> {
         self.line("");
 
         // SerializeCdr
-        self.line("public byte[] SerializeCdr() => SerializeCdr(true);");
+        self.line("public byte[] SerializeCdr() => SerializeCdr(false);");
         self.line("");
         self.line("public byte[] SerializeCdr(bool xcdr2)");
         self.line("{");
@@ -405,7 +413,7 @@ impl<'a> CsGen<'a> {
         self.line("");
 
         // SerializeCdr
-        self.line("public byte[] SerializeCdr() => SerializeCdr(true);");
+        self.line("public byte[] SerializeCdr() => SerializeCdr(false);");
         self.line("");
         self.line("public byte[] SerializeCdr(bool xcdr2)");
         self.line("{");
@@ -542,7 +550,7 @@ impl<'a> CsGen<'a> {
     fn collect_all_members(&self, s: &ResolvedStruct) -> Vec<ResolvedMember> {
         let mut all = Vec::new();
         if let Some(ref base_name) = s.base_type {
-            if let Some(base) = self.model.structs.iter().find(|st| &st.name == base_name) {
+            if let Some(base) = self.find_struct(base_name) {
                 all.extend(self.collect_all_members(base));
             }
         }
@@ -550,10 +558,12 @@ impl<'a> CsGen<'a> {
         all
     }
 
-    /// Emit `DdsTypeInfoFields` for flat structs (all members are primitives, strings, or
-    /// sequences/arrays of primitives). The runtime reads it to advertise a TypeObject.
+    /// Emit `DdsTypeInfoFields` for advertisable structs (all members are primitives, strings,
+    /// sequences/arrays of primitives, or nested structs that are themselves recursively
+    /// advertisable). The runtime reads it to advertise a TypeObject.
     fn emit_type_info_metadata(&mut self, members: &[ResolvedMember]) {
-        if !members.iter().all(|m| Self::is_flat_advertisable(&m.resolved_type)) {
+        let mut visited = std::collections::HashSet::new();
+        if !members.iter().all(|m| self.member_advertisable(m, &mut visited)) {
             return;
         }
         self.line(
@@ -592,15 +602,72 @@ impl<'a> CsGen<'a> {
         })
     }
 
-    /// A member is advertisable byte-correctly when it is a primitive/string, or a
-    /// sequence/array whose element is a primitive/string. Named types and maps are excluded.
-    fn is_flat_advertisable(ty: &ResolvedType) -> bool {
+    /// A member is advertisable byte-correctly when its type is a primitive/string, an enum, a
+    /// (non-@external) nested struct that is itself recursively advertisable, or a sequence/array
+    /// whose element is one of those (single-level). Bitmask, map, union, and nested collections
+    /// are excluded (they fall back to the name-based keyed path).
+    fn member_advertisable(
+        &self,
+        m: &ResolvedMember,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        if m.is_external && matches!(m.resolved_type, ResolvedType::Struct(_)) {
+            return false;
+        }
+        self.type_advertisable(&m.resolved_type, visited)
+    }
+
+    /// Recursively decide advertisability of a member/element type.
+    fn type_advertisable(
+        &self,
+        ty: &ResolvedType,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> bool {
         match ty {
+            ResolvedType::Struct(name) => self.struct_advertisable(name, visited),
+            ResolvedType::Enum(_) => true,
             ResolvedType::Sequence { element, .. } | ResolvedType::Array { element, .. } => {
-                Self::field_constant(element).is_some()
+                match element.as_ref() {
+                    ResolvedType::Struct(name) => self.struct_advertisable(name, visited),
+                    ResolvedType::Enum(_) => true,
+                    other => Self::field_constant(other).is_some(),
+                }
             }
             other => Self::field_constant(other).is_some(),
         }
+    }
+
+    /// The generated CLR class name (PascalCase) for an advertisable named element
+    /// (Struct/Enum), else None. Used to gate collection elements and emit nested refs.
+    fn element_class_name(ty: &ResolvedType) -> Option<String> {
+        match ty {
+            ResolvedType::Struct(name) | ResolvedType::Enum(name) => {
+                let simple = name.rsplit("::").next().unwrap_or(name);
+                Some(naming::to_pascal_case(simple))
+            }
+            _ => None,
+        }
+    }
+
+    /// A named struct is advertisable when it exists in the model and all of its members are
+    /// recursively advertisable. `visited` guards against @external-induced type cycles.
+    fn struct_advertisable(
+        &self,
+        name: &str,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        let simple = name.rsplit("::").next().unwrap_or(name);
+        if !visited.insert(simple.to_string()) {
+            return false;
+        }
+        let ok = match self.find_struct(simple).cloned() {
+            Some(s) => {
+                self.collect_all_members(&s).iter().all(|m| self.member_advertisable(m, visited))
+            }
+            None => false,
+        };
+        visited.remove(simple);
+        ok
     }
 
     /// Member flag bitmask (KEY=1, OPTIONAL=2, MUST_UNDERSTAND=4, EXTERNAL=8). The FFI adds
@@ -639,20 +706,46 @@ impl<'a> CsGen<'a> {
                 flags
             ),
             ResolvedType::Sequence { element, bound } => {
-                let ec = Self::field_constant(element).unwrap_or(0);
-                format!(
-                    "new DdsTypeInfoField(\"seq\", \"{}\", {}, {}u, {}),",
-                    m.name,
-                    ec,
-                    bound.unwrap_or(0),
-                    flags
-                )
+                if let Some(cls) = Self::element_class_name(element) {
+                    format!(
+                        "new DdsTypeInfoField(\"seq_nested\", \"{}\", typeof({}), {}u, {}),",
+                        m.name,
+                        cls,
+                        bound.unwrap_or(0),
+                        flags
+                    )
+                } else {
+                    let ec = Self::field_constant(element).unwrap_or(0);
+                    format!(
+                        "new DdsTypeInfoField(\"seq\", \"{}\", {}, {}u, {}),",
+                        m.name,
+                        ec,
+                        bound.unwrap_or(0),
+                        flags
+                    )
+                }
             }
             ResolvedType::Array { element, size } => {
-                let ec = Self::field_constant(element).unwrap_or(0);
+                if let Some(cls) = Self::element_class_name(element) {
+                    format!(
+                        "new DdsTypeInfoField(\"arr_nested\", \"{}\", typeof({}), {}u, {}),",
+                        m.name, cls, size, flags
+                    )
+                } else {
+                    let ec = Self::field_constant(element).unwrap_or(0);
+                    format!(
+                        "new DdsTypeInfoField(\"arr\", \"{}\", {}, {}u, {}),",
+                        m.name, ec, size, flags
+                    )
+                }
+            }
+            ResolvedType::Struct(name) | ResolvedType::Enum(name) => {
+                // Mirror the field-type rendering (type_to_csharp) so typeof(...) names the
+                // exact generated class (struct or enum) that declares this member.
+                let cls = cs_type_ref(name);
                 format!(
-                    "new DdsTypeInfoField(\"arr\", \"{}\", {}, {}u, {}),",
-                    m.name, ec, size, flags
+                    "new DdsTypeInfoField(\"nested\", \"{}\", typeof({}), {}),",
+                    m.name, cls, flags
                 )
             }
             other => {
@@ -755,9 +848,6 @@ impl<'a> CsGen<'a> {
         self.emit_serialize_cdr_inline(&full_struct);
         self.line("");
 
-        // SerializeKey method
-        self.emit_serialize_key(&full_struct);
-
         self.indent -= 1;
         self.line("}");
     }
@@ -811,9 +901,9 @@ impl<'a> CsGen<'a> {
                     Self::type_to_csharp(value)
                 )
             }
-            ResolvedType::Struct(name) => naming::to_pascal_case(name),
-            ResolvedType::Enum(name) => naming::to_pascal_case(name),
-            ResolvedType::Bitmask(name) => naming::to_pascal_case(name),
+            ResolvedType::Struct(name) => cs_type_ref(name),
+            ResolvedType::Enum(name) => cs_type_ref(name),
+            ResolvedType::Bitmask(name) => cs_type_ref(name),
         }
     }
 
@@ -871,12 +961,12 @@ impl<'a> CsGen<'a> {
                 )
             }
             ResolvedType::Struct(name) => {
-                format!("new {}()", naming::to_pascal_case(name))
+                format!("new {}()", cs_type_ref(name))
             }
             ResolvedType::Enum(name) => {
                 // Use 0 cast to enum type
-                let cs_name = naming::to_pascal_case(name);
-                if let Some(e) = self.model.enums.iter().find(|e| &e.name == name) {
+                let cs_name = cs_type_ref(name);
+                if let Some(e) = self.find_enum(name) {
                     if let Some(v) = e.variants.first() {
                         return format!("{}.{}", cs_name, cs_ident(&v.name));
                     }
@@ -884,7 +974,7 @@ impl<'a> CsGen<'a> {
                 format!("({})0", cs_name)
             }
             ResolvedType::Bitmask(name) => {
-                format!("({})0", naming::to_pascal_case(name))
+                format!("({})0", cs_type_ref(name))
             }
         }
     }
@@ -892,8 +982,8 @@ impl<'a> CsGen<'a> {
     // ---- Serialization ----
 
     fn emit_serialize_cdr(&mut self, s: &ResolvedStruct) {
-        // SerializeCdr() - default uses XCDR2
-        self.line("public byte[] SerializeCdr() => SerializeCdr(true);");
+        // SerializeCdr() - default uses XCDR1 (spec effective write default)
+        self.line("public byte[] SerializeCdr() => SerializeCdr(false);");
         self.line("");
 
         // SerializeCdr(bool xcdr2) - actual implementation
@@ -918,19 +1008,19 @@ impl<'a> CsGen<'a> {
                 self.line("w.DheaderFinalize(_dt);");
             }
             ExtensibilityKind::Mutable => {
-                self.line("var _dt = w.DheaderBegin();");
-                for (i, m) in s.members.iter().enumerate() {
-                    let member_id = m.member_id.unwrap_or(i as u32);
-                    let must_understand = if m.must_understand { "true" } else { "false" };
-                    self.line(&format!(
-                        "var _et{} = w.EmheaderBegin({}, {});",
-                        i, member_id, must_understand
-                    ));
-                    let accessor = cs_ident(&m.name);
-                    self.emit_write_field(&m.resolved_type, &accessor);
-                    self.line(&format!("w.EmheaderFinalize(_et{});", i));
-                }
-                self.line("w.DheaderFinalize(_dt);");
+                // XCDR2: DHEADER + EMHEADER per field. XCDR1: PL_CDR headers + sentinel.
+                self.line("if (w.IsXcdr2)");
+                self.line("{");
+                self.indent += 1;
+                self.emit_mutable_ser_xcdr2_cs(&s.members);
+                self.indent -= 1;
+                self.line("}");
+                self.line("else");
+                self.line("{");
+                self.indent += 1;
+                self.emit_mutable_ser_xcdr1_cs(&s.members);
+                self.indent -= 1;
+                self.line("}");
             }
         }
 
@@ -1019,6 +1109,66 @@ impl<'a> CsGen<'a> {
         }
     }
 
+    /// XCDR2 mutable serialize body: DHEADER + EMHEADER per field (no sentinel).
+    fn emit_mutable_ser_xcdr2_cs(&mut self, members: &[ResolvedMember]) {
+        self.line("var _dt = w.DheaderBegin();");
+        for (i, m) in members.iter().enumerate() {
+            let member_id = m.member_id.unwrap_or(i as u32);
+            let must_understand = if m.must_understand { "true" } else { "false" };
+            self.line(&format!(
+                "var _et{} = w.EmheaderBegin({}, {});",
+                i, member_id, must_understand
+            ));
+            let accessor = cs_ident(&m.name);
+            self.emit_write_field(&m.resolved_type, &accessor);
+            self.line(&format!("w.EmheaderFinalize(_et{});", i));
+        }
+        self.line("w.DheaderFinalize(_dt);");
+    }
+
+    /// XCDR1 mutable serialize body: PL_CDR member headers terminated by a sentinel.
+    fn emit_mutable_ser_xcdr1_cs(&mut self, members: &[ResolvedMember]) {
+        for (i, m) in members.iter().enumerate() {
+            let member_id = m.member_id.unwrap_or(i as u32);
+            let must_understand = if m.must_understand { "true" } else { "false" };
+            self.line(&format!("var _mt{} = w.MemberV1Begin({});", i, member_id));
+            let accessor = cs_ident(&m.name);
+            self.emit_write_field(&m.resolved_type, &accessor);
+            self.line(&format!(
+                "w.MemberV1Finalize(_mt{}, {}, {});",
+                i, member_id, must_understand
+            ));
+        }
+        self.line("w.EndMutableStruct();");
+    }
+
+    /// The `if (_mid == N) { <read> } ... else { r.Skip((int)_mlen); }` dispatch shared by
+    /// the XCDR2 (EMHEADER) and XCDR1 (PL_CDR) mutable deserialize loops.
+    fn emit_mutable_deser_dispatch_cs(&mut self, members: &[ResolvedMember]) {
+        let mut first = true;
+        for (i, m) in members.iter().enumerate() {
+            let member_id = m.member_id.unwrap_or(i as u32);
+            let prop_name = cs_ident(&m.name);
+            if first {
+                self.line(&format!("if (_mid == {})", member_id));
+                first = false;
+            } else {
+                self.line(&format!("else if (_mid == {})", member_id));
+            }
+            self.line("{");
+            self.indent += 1;
+            self.emit_read_field(&m.resolved_type, &prop_name, "obj");
+            self.indent -= 1;
+            self.line("}");
+        }
+        self.line("else");
+        self.line("{");
+        self.indent += 1;
+        self.line("r.Skip((int)_mlen);");
+        self.indent -= 1;
+        self.line("}");
+    }
+
     fn emit_deserialize_cdr(&mut self, s: &ResolvedStruct) {
         let class_name = naming::to_pascal_case(&s.name);
 
@@ -1044,39 +1194,35 @@ impl<'a> CsGen<'a> {
                 self.line("r.ReadDheaderEnd(_dSize, _dStart);");
             }
             ExtensibilityKind::Mutable => {
+                // XCDR2: DHEADER-bounded EMHEADER loop. XCDR1: PL_CDR headers until sentinel.
+                self.line("if (r.IsXcdr2)");
+                self.line("{");
+                self.indent += 1;
                 self.line("var (_dSize, _dStart) = r.ReadDheader();");
                 self.line("int _dEnd = _dStart + (int)_dSize;");
                 self.line("while (r.Position < _dEnd)");
                 self.line("{");
                 self.indent += 1;
                 self.line("var (_mid, _mlen, _mu) = r.ReadEmheader();");
-
-                let mut first = true;
-                for (i, m) in s.members.iter().enumerate() {
-                    let member_id = m.member_id.unwrap_or(i as u32);
-                    let prop_name = cs_ident(&m.name);
-                    if first {
-                        self.line(&format!("if (_mid == {})", member_id));
-                        first = false;
-                    } else {
-                        self.line(&format!("else if (_mid == {})", member_id));
-                    }
-                    self.line("{");
-                    self.indent += 1;
-                    self.emit_read_field(&m.resolved_type, &prop_name, "obj");
-                    self.indent -= 1;
-                    self.line("}");
-                }
-                self.line("else");
-                self.line("{");
-                self.indent += 1;
-                self.line("r.Skip((int)_mlen);");
-                self.indent -= 1;
-                self.line("}");
-
+                self.emit_mutable_deser_dispatch_cs(&s.members);
                 self.indent -= 1;
                 self.line("}");
                 self.line("r.ReadDheaderEnd(_dSize, _dStart);");
+                self.indent -= 1;
+                self.line("}");
+                self.line("else");
+                self.line("{");
+                self.indent += 1;
+                self.line("while (true)");
+                self.line("{");
+                self.indent += 1;
+                self.line("var (_mid, _mlen, _mu, _sentinel) = r.ReadParameterHeader();");
+                self.line("if (_sentinel) break;");
+                self.emit_mutable_deser_dispatch_cs(&s.members);
+                self.indent -= 1;
+                self.line("}");
+                self.indent -= 1;
+                self.line("}");
             }
         }
 
@@ -1116,39 +1262,35 @@ impl<'a> CsGen<'a> {
                 self.line("r.ReadDheaderEnd(_dSize, _dStart);");
             }
             ExtensibilityKind::Mutable => {
+                // XCDR2: DHEADER-bounded EMHEADER loop. XCDR1: PL_CDR headers until sentinel.
+                self.line("if (r.IsXcdr2)");
+                self.line("{");
+                self.indent += 1;
                 self.line("var (_dSize, _dStart) = r.ReadDheader();");
                 self.line("int _dEnd = _dStart + (int)_dSize;");
                 self.line("while (r.Position < _dEnd)");
                 self.line("{");
                 self.indent += 1;
                 self.line("var (_mid, _mlen, _mu) = r.ReadEmheader();");
-
-                let mut first = true;
-                for (i, m) in s.members.iter().enumerate() {
-                    let member_id = m.member_id.unwrap_or(i as u32);
-                    let prop_name = cs_ident(&m.name);
-                    if first {
-                        self.line(&format!("if (_mid == {})", member_id));
-                        first = false;
-                    } else {
-                        self.line(&format!("else if (_mid == {})", member_id));
-                    }
-                    self.line("{");
-                    self.indent += 1;
-                    self.emit_read_field(&m.resolved_type, &prop_name, "obj");
-                    self.indent -= 1;
-                    self.line("}");
-                }
-                self.line("else");
-                self.line("{");
-                self.indent += 1;
-                self.line("r.Skip((int)_mlen);");
-                self.indent -= 1;
-                self.line("}");
-
+                self.emit_mutable_deser_dispatch_cs(&s.members);
                 self.indent -= 1;
                 self.line("}");
                 self.line("r.ReadDheaderEnd(_dSize, _dStart);");
+                self.indent -= 1;
+                self.line("}");
+                self.line("else");
+                self.line("{");
+                self.indent += 1;
+                self.line("while (true)");
+                self.line("{");
+                self.indent += 1;
+                self.line("var (_mid, _mlen, _mu, _sentinel) = r.ReadParameterHeader();");
+                self.line("if (_sentinel) break;");
+                self.emit_mutable_deser_dispatch_cs(&s.members);
+                self.indent -= 1;
+                self.line("}");
+                self.indent -= 1;
+                self.line("}");
             }
         }
 
@@ -1178,19 +1320,18 @@ impl<'a> CsGen<'a> {
                 self.line("w.DheaderFinalize(_dt);");
             }
             ExtensibilityKind::Mutable => {
-                self.line("var _dt = w.DheaderBegin();");
-                for (i, m) in s.members.iter().enumerate() {
-                    let member_id = m.member_id.unwrap_or(i as u32);
-                    let must_understand = if m.must_understand { "true" } else { "false" };
-                    self.line(&format!(
-                        "var _et{} = w.EmheaderBegin({}, {});",
-                        i, member_id, must_understand
-                    ));
-                    let accessor = cs_ident(&m.name);
-                    self.emit_write_field(&m.resolved_type, &accessor);
-                    self.line(&format!("w.EmheaderFinalize(_et{});", i));
-                }
-                self.line("w.DheaderFinalize(_dt);");
+                self.line("if (w.IsXcdr2)");
+                self.line("{");
+                self.indent += 1;
+                self.emit_mutable_ser_xcdr2_cs(&s.members);
+                self.indent -= 1;
+                self.line("}");
+                self.line("else");
+                self.line("{");
+                self.indent += 1;
+                self.emit_mutable_ser_xcdr1_cs(&s.members);
+                self.indent -= 1;
+                self.line("}");
             }
         }
 
@@ -1246,17 +1387,17 @@ impl<'a> CsGen<'a> {
                 self.line(&format!("{}.{} = r.ReadWString();", obj, name));
             }
             ResolvedType::Enum(enum_name) => {
-                let cs_name = naming::to_pascal_case(enum_name);
+                let cs_name = cs_type_ref(enum_name);
                 self.line(&format!("{}.{} = ({})r.ReadEnum();", obj, name, cs_name));
             }
             ResolvedType::Bitmask(bitmask_name) => {
-                let cs_name = naming::to_pascal_case(bitmask_name);
+                let cs_name = cs_type_ref(bitmask_name);
                 let bit_bound = self.find_bitmask(bitmask_name).map(|b| b.bit_bound).unwrap_or(32);
                 let (_, _, read_method, _) = Self::bitmask_backing_info(bit_bound);
                 self.line(&format!("{}.{} = ({})r.{}();", obj, name, cs_name, read_method));
             }
             ResolvedType::Struct(struct_name) => {
-                let cs_name = naming::to_pascal_case(struct_name);
+                let cs_name = cs_type_ref(struct_name);
                 self.line(&format!("{}.{} = {}.DeserializeCdrInline(r);", obj, name, cs_name));
             }
             ResolvedType::Sequence { element, .. } => {
@@ -1366,17 +1507,17 @@ impl<'a> CsGen<'a> {
                 self.line(&format!("var {} = r.ReadWString();", var_name));
             }
             ResolvedType::Enum(enum_name) => {
-                let cs_name = naming::to_pascal_case(enum_name);
+                let cs_name = cs_type_ref(enum_name);
                 self.line(&format!("var {} = ({})r.ReadEnum();", var_name, cs_name));
             }
             ResolvedType::Bitmask(bitmask_name) => {
-                let cs_name = naming::to_pascal_case(bitmask_name);
+                let cs_name = cs_type_ref(bitmask_name);
                 let bit_bound = self.find_bitmask(bitmask_name).map(|b| b.bit_bound).unwrap_or(32);
                 let (_, _, read_method, _) = Self::bitmask_backing_info(bit_bound);
                 self.line(&format!("var {} = ({})r.{}();", var_name, cs_name, read_method));
             }
             ResolvedType::Struct(struct_name) => {
-                let cs_name = naming::to_pascal_case(struct_name);
+                let cs_name = cs_type_ref(struct_name);
                 self.line(&format!("var {} = {}.DeserializeCdrInline(r);", var_name, cs_name));
             }
             ResolvedType::Sequence { element, .. } => {
@@ -1437,76 +1578,29 @@ impl<'a> CsGen<'a> {
         }
     }
 
-    fn emit_serialize_key(&mut self, s: &ResolvedStruct) {
-        let key_fields: Vec<&ResolvedMember> = s.members.iter().filter(|m| m.is_key).collect();
-
-        if key_fields.is_empty() {
-            // Cached zero-length array. Cannot use Array.Empty<byte>() because
-            // it requires .NET Framework 4.6+ (this binding also targets net45).
-            self.line("private static readonly byte[] s_emptyKey = new byte[0];");
-            self.line("public byte[] SerializeKey() => s_emptyKey;");
-        } else {
-            self.line("public byte[] SerializeKey()");
-            self.line("{");
-            self.indent += 1;
-            self.line("var w = new CdrKeyWriter();");
-            for m in key_fields {
-                let accessor = cs_ident(&m.name);
-                self.emit_write_key_field(&m.resolved_type, &accessor);
-            }
-            self.line("return w.ToBytes();");
-            self.indent -= 1;
-            self.line("}");
-        }
-    }
-
-    fn emit_write_key_field(&mut self, ty: &ResolvedType, accessor: &str) {
-        match ty {
-            ResolvedType::Bool => self.line(&format!("w.WriteBool({});", accessor)),
-            ResolvedType::U8 | ResolvedType::UInt8 => {
-                self.line(&format!("w.WriteU8({});", accessor))
-            }
-            ResolvedType::I8 => self.line(&format!("w.WriteI8({});", accessor)),
-            ResolvedType::I16 => self.line(&format!("w.WriteI16({});", accessor)),
-            ResolvedType::U16 => self.line(&format!("w.WriteU16({});", accessor)),
-            ResolvedType::I32 => self.line(&format!("w.WriteI32({});", accessor)),
-            ResolvedType::U32 => self.line(&format!("w.WriteU32({});", accessor)),
-            ResolvedType::I64 => self.line(&format!("w.WriteI64({});", accessor)),
-            ResolvedType::U64 => self.line(&format!("w.WriteU64({});", accessor)),
-            ResolvedType::F32 => self.line(&format!("w.WriteF32({});", accessor)),
-            ResolvedType::F64 => self.line(&format!("w.WriteF64({});", accessor)),
-            ResolvedType::Char => {
-                self.line(&format!("w.WriteU8((byte){});", accessor));
-            }
-            ResolvedType::WChar => {
-                self.line(&format!("w.WriteU16((ushort){});", accessor));
-            }
-            ResolvedType::String { .. } => {
-                self.line(&format!("w.WriteString({});", accessor));
-            }
-            ResolvedType::WString { .. } => {
-                self.line(&format!("w.WriteWString({});", accessor));
-            }
-            ResolvedType::Enum(_) => {
-                self.line(&format!("w.WriteEnum((int){});", accessor));
-            }
-            ResolvedType::Bitmask(bitmask_name) => {
-                let bit_bound = self.find_bitmask(bitmask_name).map(|b| b.bit_bound).unwrap_or(32);
-                let (cs_type, write_method, _, _) = Self::bitmask_backing_info(bit_bound);
-                self.line(&format!("w.{}(({}){}); ", write_method, cs_type, accessor));
-            }
-            ResolvedType::Struct(_)
-            | ResolvedType::Sequence { .. }
-            | ResolvedType::Array { .. }
-            | ResolvedType::Map { .. } => {
-                // Complex types in keys are not common
-                self.line(&format!("// TODO: Complex key field {}", accessor));
-            }
-        }
-    }
-
     fn find_bitmask(&self, name: &str) -> Option<&ResolvedBitmask> {
-        self.model.bitmasks.iter().find(|b| b.name == name)
+        let simple = name.rsplit("::").next().unwrap_or(name);
+        self.model
+            .bitmasks
+            .iter()
+            .chain(self.model.imported.bitmasks.iter())
+            .find(|b| b.name == simple)
+    }
+
+    /// Locate a struct by leaf name in this file or in an `#include`d file.
+    fn find_struct(&self, name: &str) -> Option<&ResolvedStruct> {
+        let simple = name.rsplit("::").next().unwrap_or(name);
+        self.model
+            .structs
+            .iter()
+            .chain(self.model.imported.structs.iter())
+            .find(|s| s.name == simple)
+    }
+
+    /// Locate an enum by leaf name in this file or in an `#include`d file.
+    fn find_enum(&self, name: &str) -> Option<&ResolvedEnum> {
+        let simple = name.rsplit("::").next().unwrap_or(name);
+        self.model.enums.iter().chain(self.model.imported.enums.iter()).find(|e| e.name == simple)
     }
 
     // ---- Helpers ----
@@ -1572,18 +1666,115 @@ mod tests {
     }
 
     #[test]
-    fn test_type_info_metadata_omitted_for_named_members() {
+    fn test_type_info_metadata_for_nested_struct_key() {
         let defs = parse_idl(
             r#"
-            enum Color { RED, GREEN };
-            struct Widget { Color c; long x; };
+            @final
+            struct NestedKey {
+                long a;
+                long b;
+            };
+            @final
+            struct Composite {
+                @key NestedKey loc;
+                long value;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Composite.idl", &CSharpOptions::default());
+
+        // Composite advertises: the nested @key member references the nested CLR type.
+        assert!(
+            code.contains(r#"new DdsTypeInfoField("nested", "loc", typeof(NestedKey), 1),"#),
+            "{}",
+            code
+        );
+        assert!(code.contains(r#"new DdsTypeInfoField("field", "value", 5, 0u, 0),"#), "{}", code);
+        // The nested struct still emits its own flat metadata (recursion source of truth).
+        assert!(code.contains(r#"new DdsTypeInfoField("field", "a", 5, 0u, 0),"#), "{}", code);
+        assert!(code.contains(r#"new DdsTypeInfoField("field", "b", 5, 0u, 0),"#), "{}", code);
+    }
+
+    /// The no-arg convenience `SerializeCdr()` must default to XCDR1 (spec effective
+    /// write default), mirroring the core `int2dds_default_data_representation()`. The
+    /// explicit `SerializeCdr(bool xcdr2)` overload stays for the QoS-driven write path.
+    #[test]
+    fn test_serialize_cdr_convenience_defaults_to_xcdr1() {
+        let defs = parse_idl(
+            r#"
+            @appendable
+            struct ShapeType {
+                @key long id;
+                long value;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "ShapeType.idl", &CSharpOptions::default());
+        assert!(
+            code.contains("public byte[] SerializeCdr() => SerializeCdr(false);"),
+            "no-arg SerializeCdr() must default to XCDR1 (false): {}",
+            code
+        );
+        assert!(!code.contains("SerializeCdr(true)"), "no XCDR2-default convenience: {}", code);
+        assert!(
+            code.contains("public byte[] SerializeCdr(bool xcdr2)"),
+            "explicit xcdr2 overload must stay for QoS-driven writes: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn test_type_info_metadata_omitted_for_unsupported_members() {
+        let defs = parse_idl(
+            r#"
+            struct Widget { map<long, long> m; long x; };
             "#,
         )
         .unwrap();
         let model = resolve(defs).unwrap();
         let code = generate(&model, "Widget.idl", &CSharpOptions::default());
-        // Widget has a named (enum) member -> not flat -> advertisement metadata omitted.
+        // Widget has a map member -> not advertisable -> advertisement metadata omitted.
         assert!(!code.contains("DdsTypeInfoFields"), "{}", code);
+    }
+
+    #[test]
+    fn test_type_info_metadata_for_enum_and_collection_members() {
+        let defs = parse_idl(
+            r#"
+            enum Color { RED, GREEN, BLUE };
+            @final struct Point { long x; long y; };
+            struct Widget {
+                @key Color c;
+                sequence<Point> path;
+                Point grid[3];
+                long x;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Widget.idl", &CSharpOptions::default());
+        // Enum member -> nested typeof reference (built by reflection at runtime).
+        assert!(
+            code.contains(r#"new DdsTypeInfoField("nested", "c", typeof(Color), 1),"#),
+            "{}",
+            code
+        );
+        // sequence<Point> / Point[3] -> collection-of-nested with element typeof + size.
+        assert!(
+            code.contains(r#"new DdsTypeInfoField("seq_nested", "path", typeof(Point), 0u, 0),"#),
+            "{}",
+            code
+        );
+        assert!(
+            code.contains(r#"new DdsTypeInfoField("arr_nested", "grid", typeof(Point), 3u, 0),"#),
+            "{}",
+            code
+        );
     }
 
     #[test]

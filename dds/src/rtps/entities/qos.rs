@@ -8,7 +8,7 @@ use crate::{
         publication_builtin_topic_data::PublicationBuiltinTopicData,
         subscription_builtin_topic_data::SubscriptionBuiltinTopicData,
     },
-    infrastructure::qos_policy::{DataRepresentationId, DataRepresentationQosPolicy, QosPolicyId},
+    infrastructure::qos_policy::{DataRepresentationQosPolicy, QosPolicyId},
 };
 
 pub(crate) fn check_qos_compatibility(
@@ -42,15 +42,9 @@ pub(crate) fn is_data_representation_compatible(
     requested: &DataRepresentationQosPolicy,
     offered: &DataRepresentationQosPolicy,
 ) -> bool {
-    // Default representation when empty (backward compatibility for ConstDefault)
-    const DEFAULT_REP: [DataRepresentationId; 1] = [DataRepresentationId::XcdrDataRepresentation];
-
-    // Get effective representations (empty treated as XCDR1 per spec)
-    let requested_reps: &[DataRepresentationId] =
-        if requested.value.is_empty() { &DEFAULT_REP } else { &requested.value };
-
-    let offered_reps: &[DataRepresentationId] =
-        if offered.value.is_empty() { &DEFAULT_REP } else { &offered.value };
+    // Empty list resolves to the default representation (single source).
+    let requested_reps = requested.effective_ids();
+    let offered_reps = offered.effective_ids();
 
     // DDS-XTypes spec 7.6.3.4.1:
     // DataRepresentation QoS is compatible if the intersection of Writer and Reader is not empty
@@ -119,10 +113,10 @@ mod tests {
     };
     use crate::core::time::Duration;
     use crate::dcps::infrastructure::qos_policy::{
-        DeadlineQosPolicy, DestinationOrderQosPolicyKind, DurabilityQosPolicyKind,
-        LivelinessQosPolicy, LivelinessQosPolicyKind, OwnershipQosPolicy, OwnershipQosPolicyKind,
-        PresentationQosAccessScopeKind, PresentationQosPolicy, ReliabilityQosPolicy,
-        ReliabilityQosPolicyKind,
+        DataRepresentationId, DeadlineQosPolicy, DestinationOrderQosPolicyKind,
+        DurabilityQosPolicyKind, LivelinessQosPolicy, LivelinessQosPolicyKind, OwnershipQosPolicy,
+        OwnershipQosPolicyKind, PresentationQosAccessScopeKind, PresentationQosPolicy,
+        ReliabilityQosPolicy, ReliabilityQosPolicyKind,
     };
     use crate::infrastructure::qos_policy::DurabilityQosPolicy;
     use crate::publication::qos::{DataWriterQos, PublisherQos};

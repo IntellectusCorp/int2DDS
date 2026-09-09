@@ -47,7 +47,8 @@ pub struct CdrFieldDescriptor {
 ///
 /// This type exists solely to satisfy the `DdsType` trait bound on
 /// `DataWriter<T>` and `DataReader<T>`. All actual data flows through
-/// raw serialized bytes via `int2dds_write_serialized` / `int2dds_take_serialized`.
+/// raw serialized bytes via `int2dds_datawriter_write_serialized` /
+/// `int2dds_datareader_take_serialized`.
 #[derive(Debug, Clone)]
 pub struct Int2DdsData {
     /// Raw CDR bytes stored during deserialize() for compute_key() fallback
@@ -162,24 +163,33 @@ impl DdsType for Int2DdsData {
 // ============================================================================
 
 /// Align position to N-byte boundary
-fn cdr_align(pos: usize, alignment: usize) -> usize {
+pub(crate) fn cdr_align(pos: usize, alignment: usize) -> usize {
     (pos + alignment - 1) & !(alignment - 1)
 }
 
+/// Align a stream position whose CDR alignment origin is `base` (the first byte
+/// after the 4-byte encapsulation header), per the RTPS/CDR alignment rule.
+pub(crate) fn align_body(pos: usize, base: usize, alignment: usize) -> usize {
+    base + cdr_align(pos - base, alignment)
+}
+
 /// Skip a CDR field and return the new position
-fn cdr_skip_field(data: &[u8], pos: usize, field_type: &CdrFieldType) -> Option<usize> {
+fn cdr_skip_field(
+    data: &[u8],
+    pos: usize,
+    base: usize,
+    src_le: bool,
+    field_type: &CdrFieldType,
+) -> Option<usize> {
     match field_type {
         CdrFieldType::String => {
-            let aligned = cdr_align(pos, 4);
+            let aligned = align_body(pos, base, 4);
             if aligned + 4 > data.len() {
                 return None;
             }
-            let str_len = u32::from_le_bytes([
-                data[aligned],
-                data[aligned + 1],
-                data[aligned + 2],
-                data[aligned + 3],
-            ]) as usize;
+            let raw = [data[aligned], data[aligned + 1], data[aligned + 2], data[aligned + 3]];
+            let str_len =
+                if src_le { u32::from_le_bytes(raw) } else { u32::from_be_bytes(raw) } as usize;
             let end = aligned + 4 + str_len;
             if end > data.len() {
                 return None;
@@ -193,21 +203,21 @@ fn cdr_skip_field(data: &[u8], pos: usize, field_type: &CdrFieldType) -> Option<
             Some(pos + 1)
         }
         CdrFieldType::Int16 | CdrFieldType::UInt16 => {
-            let aligned = cdr_align(pos, 2);
+            let aligned = align_body(pos, base, 2);
             if aligned + 2 > data.len() {
                 return None;
             }
             Some(aligned + 2)
         }
         CdrFieldType::Int32 | CdrFieldType::UInt32 => {
-            let aligned = cdr_align(pos, 4);
+            let aligned = align_body(pos, base, 4);
             if aligned + 4 > data.len() {
                 return None;
             }
             Some(aligned + 4)
         }
         CdrFieldType::Int64 | CdrFieldType::UInt64 => {
-            let aligned = cdr_align(pos, 8);
+            let aligned = align_body(pos, base, 8);
             if aligned + 8 > data.len() {
                 return None;
             }
@@ -220,20 +230,19 @@ fn cdr_skip_field(data: &[u8], pos: usize, field_type: &CdrFieldType) -> Option<
 fn cdr_read_field(
     data: &[u8],
     pos: usize,
+    base: usize,
+    src_le: bool,
     field_type: &CdrFieldType,
 ) -> Option<(Parameter, usize)> {
     match field_type {
         CdrFieldType::String => {
-            let aligned = cdr_align(pos, 4);
+            let aligned = align_body(pos, base, 4);
             if aligned + 4 > data.len() {
                 return None;
             }
-            let str_len = u32::from_le_bytes([
-                data[aligned],
-                data[aligned + 1],
-                data[aligned + 2],
-                data[aligned + 3],
-            ]) as usize;
+            let raw = [data[aligned], data[aligned + 1], data[aligned + 2], data[aligned + 3]];
+            let str_len =
+                if src_le { u32::from_le_bytes(raw) } else { u32::from_be_bytes(raw) } as usize;
             let str_start = aligned + 4;
             if str_start + str_len > data.len() {
                 return None;
@@ -247,53 +256,47 @@ fn cdr_read_field(
             Some((Parameter::String(s), str_start + str_len))
         }
         CdrFieldType::Int32 => {
-            let aligned = cdr_align(pos, 4);
+            let aligned = align_body(pos, base, 4);
             if aligned + 4 > data.len() {
                 return None;
             }
-            let val = i32::from_le_bytes([
-                data[aligned],
-                data[aligned + 1],
-                data[aligned + 2],
-                data[aligned + 3],
-            ]);
-            Some((Parameter::IntegerValue(val as i32), aligned + 4))
+            let raw = [data[aligned], data[aligned + 1], data[aligned + 2], data[aligned + 3]];
+            let val = if src_le { i32::from_le_bytes(raw) } else { i32::from_be_bytes(raw) };
+            Some((Parameter::IntegerValue(val as i128), aligned + 4))
         }
         CdrFieldType::UInt32 => {
-            let aligned = cdr_align(pos, 4);
+            let aligned = align_body(pos, base, 4);
             if aligned + 4 > data.len() {
                 return None;
             }
-            let val = u32::from_le_bytes([
-                data[aligned],
-                data[aligned + 1],
-                data[aligned + 2],
-                data[aligned + 3],
-            ]);
-            Some((Parameter::IntegerValue(val as i32), aligned + 4))
+            let raw = [data[aligned], data[aligned + 1], data[aligned + 2], data[aligned + 3]];
+            let val = if src_le { u32::from_le_bytes(raw) } else { u32::from_be_bytes(raw) };
+            Some((Parameter::IntegerValue(val as i128), aligned + 4))
         }
         CdrFieldType::Int16 => {
-            let aligned = cdr_align(pos, 2);
+            let aligned = align_body(pos, base, 2);
             if aligned + 2 > data.len() {
                 return None;
             }
-            let val = i16::from_le_bytes([data[aligned], data[aligned + 1]]);
-            Some((Parameter::IntegerValue(val as i32), aligned + 2))
+            let raw = [data[aligned], data[aligned + 1]];
+            let val = if src_le { i16::from_le_bytes(raw) } else { i16::from_be_bytes(raw) };
+            Some((Parameter::IntegerValue(val as i128), aligned + 2))
         }
         CdrFieldType::UInt16 => {
-            let aligned = cdr_align(pos, 2);
+            let aligned = align_body(pos, base, 2);
             if aligned + 2 > data.len() {
                 return None;
             }
-            let val = u16::from_le_bytes([data[aligned], data[aligned + 1]]);
-            Some((Parameter::IntegerValue(val as i32), aligned + 2))
+            let raw = [data[aligned], data[aligned + 1]];
+            let val = if src_le { u16::from_le_bytes(raw) } else { u16::from_be_bytes(raw) };
+            Some((Parameter::IntegerValue(val as i128), aligned + 2))
         }
         CdrFieldType::Int64 => {
-            let aligned = cdr_align(pos, 8);
+            let aligned = align_body(pos, base, 8);
             if aligned + 8 > data.len() {
                 return None;
             }
-            let val = i64::from_le_bytes([
+            let raw = [
                 data[aligned],
                 data[aligned + 1],
                 data[aligned + 2],
@@ -302,15 +305,16 @@ fn cdr_read_field(
                 data[aligned + 5],
                 data[aligned + 6],
                 data[aligned + 7],
-            ]);
-            Some((Parameter::IntegerValue(val as i32), aligned + 8))
+            ];
+            let val = if src_le { i64::from_le_bytes(raw) } else { i64::from_be_bytes(raw) };
+            Some((Parameter::IntegerValue(val as i128), aligned + 8))
         }
         CdrFieldType::UInt64 => {
-            let aligned = cdr_align(pos, 8);
+            let aligned = align_body(pos, base, 8);
             if aligned + 8 > data.len() {
                 return None;
             }
-            let val = u64::from_le_bytes([
+            let raw = [
                 data[aligned],
                 data[aligned + 1],
                 data[aligned + 2],
@@ -319,26 +323,27 @@ fn cdr_read_field(
                 data[aligned + 5],
                 data[aligned + 6],
                 data[aligned + 7],
-            ]);
-            Some((Parameter::IntegerValue(val as i32), aligned + 8))
+            ];
+            let val = if src_le { u64::from_le_bytes(raw) } else { u64::from_be_bytes(raw) };
+            Some((Parameter::IntegerValue(val as i128), aligned + 8))
         }
         CdrFieldType::Int8 => {
             if pos >= data.len() {
                 return None;
             }
-            Some((Parameter::IntegerValue(data[pos] as i8 as i32), pos + 1))
+            Some((Parameter::IntegerValue(data[pos] as i8 as i128), pos + 1))
         }
         CdrFieldType::UInt8 => {
             if pos >= data.len() {
                 return None;
             }
-            Some((Parameter::IntegerValue(data[pos] as i32), pos + 1))
+            Some((Parameter::IntegerValue(data[pos] as i128), pos + 1))
         }
         CdrFieldType::Bool => {
             if pos >= data.len() {
                 return None;
             }
-            Some((Parameter::IntegerValue(data[pos] as i32), pos + 1))
+            Some((Parameter::IntegerValue(data[pos] as i128), pos + 1))
         }
     }
 }
@@ -356,29 +361,30 @@ fn cdr_parse_field_value(
 
     // Skip encapsulation header (4 bytes)
     let encoding_id = u16::from_be_bytes([cdr_bytes[0], cdr_bytes[1]]);
-    let is_xcdr2 = matches!(encoding_id, 0x0006 | 0x0007 | 0x0008 | 0x0009 | 0x000A | 0x000B);
-    let mut pos = 4;
+    let is_xcdr2 = matches!(encoding_id, 0x0006..=0x000B);
+    let src_le = (encoding_id & 1) == 1;
+    let base = 4;
+    let mut pos = base;
 
     // Skip DHEADER for Appendable/Mutable XCDR2
     if is_xcdr2
         && matches!(extensibility, ExtensibilityKind::Appendable | ExtensibilityKind::Mutable)
+        && pos + 4 <= cdr_bytes.len()
     {
-        if pos + 4 <= cdr_bytes.len() {
-            pos += 4;
-        }
+        pos += 4;
     }
 
     // Parse fields sequentially until we find the target
     for field in fields {
         if field.name == field_name {
-            return cdr_read_field(cdr_bytes, pos, &field.field_type)
+            return cdr_read_field(cdr_bytes, pos, base, src_le, &field.field_type)
                 .map(|(param, _)| param)
                 .ok_or_else(|| {
                     DdsError::Error(format!("Failed to parse field '{}' from CDR data", field_name))
                 });
         }
         // Not the target - skip this field
-        pos = cdr_skip_field(cdr_bytes, pos, &field.field_type).ok_or_else(|| {
+        pos = cdr_skip_field(cdr_bytes, pos, base, src_le, &field.field_type).ok_or_else(|| {
             DdsError::Error(format!("Failed to skip field '{}' in CDR data", field.name))
         })?;
     }

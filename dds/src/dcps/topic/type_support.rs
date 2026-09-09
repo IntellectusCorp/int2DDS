@@ -458,4 +458,34 @@ mod key_payload_tests {
         let decoded = ts.deserialize_key_payload(&payload).unwrap();
         assert_eq!(decoded.downcast_ref::<KeyedShape>().unwrap().color, "BLUE");
     }
+
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+    struct MixedAlignKey {
+        #[dds(key)]
+        a: u32,
+        #[dds(key)]
+        b: u64,
+    }
+
+    #[test]
+    fn serialize_key_payload_xcdr1_reencodes_8byte_alignment() {
+        // A u32 followed by a u64: XCDR1 (8-byte max alignment) and the KeyHash body
+        // (max-align-4) place `b` at different offsets. The XCDR1 wire serializedKey must
+        // re-encode with 8-byte alignment so the CDR_BE header agrees with the body;
+        // otherwise a header-honoring reader (this crate's own deserialize_key_payload, and
+        // any spec-compliant peer) misparses `b`. Round-tripping proves header/body agree.
+        let ts = MixedAlignKey::get_type_support();
+        let key = MixedAlignKey { a: 1, b: 2 };
+
+        let payload =
+            ts.serialize_key_payload(&key as &dyn Any, &SerializationFormat::Cdr).unwrap();
+        // CDR_BE header (4) + u32 a @0 (4) + 4 pad + u64 b @8 (8) = 20 bytes.
+        assert_eq!(&payload[..2], &[0x00, 0x00], "expected CDR_BE encapsulation id");
+        assert_eq!(payload.len(), 20, "u64 key member must be 8-byte aligned under XCDR1");
+
+        let decoded = ts.deserialize_key_payload(&payload).unwrap();
+        let decoded = decoded.downcast_ref::<MixedAlignKey>().unwrap();
+        assert_eq!((decoded.a, decoded.b), (1, 2));
+    }
 }

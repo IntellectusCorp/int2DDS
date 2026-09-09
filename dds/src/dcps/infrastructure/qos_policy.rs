@@ -112,6 +112,8 @@ const TYPECONSISTENCYENFORCEMENT_QOS_POLICY_NAME: &str = "TypeConsistencyEnforce
 const WRITER_RELIABILITY_EXTENSION_QOS_POLICY_NAME: &str = "WriterReliabilityExtension";
 const READER_RELIABILITY_EXTENSION_QOS_POLICY_NAME: &str = "ReaderReliabilityExtension";
 const PROPERTY_QOS_POLICY_NAME: &str = "Property";
+const DATA_FRAG_QOS_POLICY_NAME: &str = "DataFrag";
+const LIFESPAN_REFERENCE_QOS_POLICY_NAME: &str = "LifespanReference";
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash, Readable, Writable)]
 pub enum QosPolicyId {
@@ -844,7 +846,9 @@ pub const PROP_MULTICAST_TTL: &str = "int2dds.transport.UDPv4.multicast_ttl";
 /// `INT2DDS_TRANSPORT` env var when absent.
 pub const PROP_TRANSPORT: &str = "int2dds.transport";
 
-/// SPDP initial peers, comma-separated `ip:port` list. Falls back to the
+/// SPDP initial peers, comma-separated `ip:port` list. Port `0` is a wildcard
+/// the TCP transport reads as every participant slot of the domain on that host;
+/// any other port names one exact address. Falls back to the
 /// `INT2DDS_INITIAL_PEERS` env var when absent.
 pub const PROP_INITIAL_PEERS: &str = "int2dds.initial_peers";
 
@@ -855,20 +859,42 @@ pub const PROP_INITIAL_PEERS: &str = "int2dds.initial_peers";
 pub const PROP_ACCEPT_UNDEFINED_PEERS: &str = "int2dds.accept_undefined_peers";
 
 /// ---------TCP QoS ----------
-/// TCP listen (server bind) port. When absent, defaults to the domain port
-/// formula `PB + DG * domain_id`.
+/// TCP listen (server bind) port. Used exactly as given, so a port already
+/// taken fails participant creation rather than being searched around. When
+/// absent, the formula `PB + DG * domain_id + PG * participant_id` is walked
+/// upwards until a free slot within the domain's own port block is found.
 pub const PROP_TCP_BIND_PORT: &str = "int2dds.transport.TCPv4.bind_port";
 /// Public `ip:port` advertised in SPDP for WAN/NAT traversal.
 pub const PROP_TCP_PUBLIC_ADDRESS: &str = "int2dds.transport.TCPv4.public_address";
+/// How many participant slots a host named in `int2dds.initial_peers` with the
+/// wildcard port stands for. Default `16`, and `1..=125` — the number of slots
+/// one domain's port block holds — with anything outside that range pulled back
+/// to it. Raise it on a host that runs more participants than the default, lower
+/// it to cut the addresses a fresh participant announces to before the list
+/// settles. Falls back to the `INT2DDS_TCP_PEER_SEARCH_SLOTS` env var when
+/// absent.
+pub const PROP_TCP_PEER_SEARCH_SLOTS: &str = "int2dds.transport.TCPv4.peer_search_slots";
 /// Disable Nagle (`TCP_NODELAY`). Default `true`.
 pub const PROP_TCP_NODELAY: &str = "int2dds.transport.TCPv4.nodelay";
-/// Outbound connect timeout, milliseconds. Default `5000`.
+/// Outbound connect timeout, milliseconds. Default `1000`.
 pub const PROP_TCP_CONNECT_TIMEOUT_MS: &str = "int2dds.transport.TCPv4.connect_timeout_ms";
-/// BIND handshake response timeout, milliseconds. Default `5000`.
-pub const PROP_TCP_BIND_TIMEOUT_MS: &str = "int2dds.transport.TCPv4.bind_timeout_ms";
+/// First-frame timeout for an accepted TCP connection, milliseconds.
+///
+/// The legacy property name is retained for configuration compatibility after
+/// removal of the TCP control handshake. It now bounds the time from TLS
+/// completion (or plain accept) to the first valid framed message. Default `20000`.
+pub const PROP_TCP_PEER_HANDSHAKE_TIMEOUT_MS: &str =
+    "int2dds.transport.TCPv4.peer_handshake_timeout_ms";
+/// TLS handshake timeout, milliseconds. Default `5000`.
+pub const PROP_TCP_TLS_HANDSHAKE_TIMEOUT_MS: &str =
+    "int2dds.transport.TCPv4.tls_handshake_timeout_ms";
 /// Max time (ms) unacknowledged data may stay outstanding before the OS drops
-/// the connection, so a dead link surfaces as a write error instead of blocking
-/// the sender ~indefinitely. Default `5000`; `0` uses the OS default.
+/// the connection (`TCP_USER_TIMEOUT`), so a dead link surfaces as a write error
+/// instead of blocking the sender ~indefinitely. When keepalive is also set,
+/// `TCP_USER_TIMEOUT` bounds the keepalive sequence too, so keep this aligned
+/// with the keepalive schedule
+/// (`keepalive_interval + keepalive_timeout * keepalive_max_misses`).
+/// Default `25000`. `0` uses the OS default (no bound).
 pub const PROP_TCP_UNACKED_TIMEOUT_MS: &str = "int2dds.transport.TCPv4.unacked_timeout_ms";
 /// OS keepalive idle time before the first probe (`TCP_KEEPIDLE`), ms. Default `10000`.
 pub const PROP_TCP_KEEPALIVE_INTERVAL_MS: &str = "int2dds.transport.TCPv4.keepalive_interval_ms";
@@ -880,8 +906,6 @@ pub const PROP_TCP_KEEPALIVE_MAX_MISSES: &str = "int2dds.transport.TCPv4.keepali
 pub const PROP_TCP_SO_RCVBUF: &str = "int2dds.transport.TCPv4.so_rcvbuf";
 /// Forced `SO_SNDBUF` in bytes. Default OS-managed (absent).
 pub const PROP_TCP_SO_SNDBUF: &str = "int2dds.transport.TCPv4.so_sndbuf";
-/// Tokio worker thread count for the TCP runtime.
-pub const PROP_TCP_ASYNC_WORKERS: &str = "int2dds.transport.TCPv4.async_workers";
 
 /// Generic name/value extension channel for QoS-driven configuration.
 ///
@@ -1942,6 +1966,75 @@ impl QosPolicy for DestinationOrderQosPolicy {
     }
 }
 
+/// int2DDS extension: reference timestamp for a reader's Lifespan expiry.
+/// Reader-local; not wire-propagated.
+#[derive(DdsType, PartialEq, Default, Copy, Eq)]
+#[dds_type(crate_path = "crate", no_default, no_partialeq)]
+pub enum LifespanReferenceQosPolicyKind {
+    /// Expire relative to the writer's source timestamp (default).
+    #[default]
+    BySourceTimestamp,
+    /// Expire relative to this reader's reception timestamp (clock-skew immune).
+    ByReceptionTimestamp,
+}
+
+impl ConstDefault for LifespanReferenceQosPolicyKind {
+    const DEFAULT: Self = LifespanReferenceQosPolicyKind::BySourceTimestamp;
+}
+
+/// Reader-local policy selecting the Lifespan expiry reference timestamp.
+/// `ByReceptionTimestamp` is immune to writer/reader clock skew. Mutable at
+/// runtime; not RxO and not wire-propagated.
+///
+/// # Example
+/// ```no_run
+/// use int2dds::{
+///     infrastructure::{
+///         qos_policy::{LifespanReferenceQosPolicy, LifespanReferenceQosPolicyKind},
+///         status::StatusMask,
+///     },
+///     subscription::qos::{DataReaderQos, SubscriberQos},
+/// #     domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
+/// #     topic::{qos::TopicQos, type_support::DdsType},
+/// };
+/// #
+/// # #[derive(DdsType)]
+/// # #[dds_type(crate_path = "int2dds")]
+/// # struct HelloWorldType { index: u32, message: String }
+/// #
+/// # let factory = DomainParticipantFactory::get_instance();
+/// # let participant = factory.create_participant(0, DomainParticipantQos::default(), None, StatusMask::default()).unwrap();
+/// # let topic = participant.create_topic::<HelloWorldType>("topic", "HelloWorld", TopicQos::default(), None, StatusMask::default()).unwrap();
+///
+/// let subscriber = participant
+///     .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+///     .unwrap();
+///
+/// // Expire samples relative to this reader's reception time (immune to clock skew).
+/// let reader_qos = DataReaderQos {
+///     lifespan_reference: LifespanReferenceQosPolicy {
+///         kind: LifespanReferenceQosPolicyKind::ByReceptionTimestamp,
+///     },
+///     ..Default::default()
+/// };
+///
+/// let _reader = subscriber
+///     .create_datareader::<HelloWorldType>(&topic, reader_qos, None, StatusMask::default())
+///     .unwrap();
+/// ```
+#[derive(DdsType, ConstDefault, Copy, Eq)]
+#[dds_type(crate_path = "crate")]
+pub struct LifespanReferenceQosPolicy {
+    /// Expiry reference timestamp selection.
+    pub kind: LifespanReferenceQosPolicyKind,
+}
+
+impl QosPolicy for LifespanReferenceQosPolicy {
+    fn name(&self) -> &str {
+        LIFESPAN_REFERENCE_QOS_POLICY_NAME
+    }
+}
+
 /// Data representation identifiers for DDS-XTypes.
 ///
 /// Specifies the encoding format used for data serialization.
@@ -2047,15 +2140,32 @@ pub struct DataRepresentationQosPolicy {
     pub value: Vec<DataRepresentationId>,
 }
 
+pub(crate) const DEFAULT_DATA_REPRESENTATION: [DataRepresentationId; 1] =
+    [<DataRepresentationId as ConstDefault>::DEFAULT];
+
+impl DataRepresentationQosPolicy {
+    /// Resolves the effective representation ids, treating an empty list (the
+    /// heap-free `ConstDefault` sentinel) as [`DEFAULT_DATA_REPRESENTATION`] per
+    /// DDS-XTypes. Every consumer that needs to interpret an empty policy must
+    /// go through this so the default lives in exactly one place.
+    pub(crate) fn effective_ids(&self) -> &[DataRepresentationId] {
+        if self.value.is_empty() {
+            &DEFAULT_DATA_REPRESENTATION
+        } else {
+            &self.value
+        }
+    }
+}
+
 impl Default for DataRepresentationQosPolicy {
     fn default() -> Self {
-        Self { value: vec![DataRepresentationId::XcdrDataRepresentation] }
+        Self { value: DEFAULT_DATA_REPRESENTATION.to_vec() }
     }
 }
 
 impl ConstDefault for DataRepresentationQosPolicy {
-    // Note: Rust const context doesn't support heap allocation,
-    // so DEFAULT is empty. Compatibility check treats empty as XCDR1.
+    // Rust const context doesn't support heap allocation, so DEFAULT is empty.
+    // `effective_ids()` resolves empty to DEFAULT_DATA_REPRESENTATION.
     const DEFAULT: Self = Self { value: Vec::new() };
 }
 
@@ -2199,11 +2309,13 @@ impl QosPolicy for TypeConsistencyEnforcementQosPolicy {
 ///
 /// # Default
 /// - `disable_piggyback_heartbeat: false` - Piggybacked heartbeats are enabled by default.
+///   The default is overridable via the `INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT` env var.
 /// - `heartbeat_period: 2 seconds` - Period for sending periodic heartbeat messages.
 /// - `initial_heartbeat_delay: 10ms` - Delay before sending initial heartbeat after reader discovery.
 /// - `push_mode: true` - (Unsupported) Writer pushes data to readers.
 /// - `nack_suppression_duration: 0` - (Unsupported) Duration to suppress NACKs.
-/// - `nack_response_delay: 10ms` - Delay before responding to a NACK.
+/// - `nack_response_delay: 0` - Delay before responding to a NACK.
+///   Overridable via `INT2DDS_NACK_RESPONSE_DELAY_MS`.
 #[derive(DdsType, Copy, Eq)]
 #[dds_type(crate_path = "crate", no_default)]
 pub struct WriterReliabilityExtensionQosPolicy {
@@ -2229,14 +2341,28 @@ pub struct WriterReliabilityExtensionQosPolicy {
     /// Default: 0 (no suppression)
     pub nack_suppression_duration: Duration,
 
-    /// Delay before responding to a NACK.
-    /// Default: 10ms
+    /// Delay before responding to a NACK, both for a whole-sample ACKNACK and for a NACK_FRAG.
+    ///
+    /// Default: 0. This was a merge window folding several requests into one repair round.
+    /// A fragmented send is now bounded by the peer's receive buffer and carries one heartbeat
+    /// per window, so the reader asks once per round and there is nothing left to merge; the
+    /// delay would only add a fixed cost to every round. Set it back to 100ms to restore the
+    /// merge.
     pub nack_response_delay: Duration,
 }
 
 impl Default for WriterReliabilityExtensionQosPolicy {
     fn default() -> Self {
-        Self::DEFAULT
+        let mut qos = Self::DEFAULT;
+
+        if let Some(is_disabled) = crate::common::env::get_disable_piggyback_heartbeat_default() {
+            qos.disable_piggyback_heartbeat = is_disabled;
+        }
+        if let Some(ms) = crate::common::env::get_nack_response_delay_ms_override() {
+            qos.nack_response_delay = Duration::from_millis(ms.into());
+        }
+
+        qos
     }
 }
 
@@ -2247,7 +2373,7 @@ impl ConstDefault for WriterReliabilityExtensionQosPolicy {
         initial_heartbeat_delay: Duration { sec: 0, nanosec: 10_000_000 },
         push_mode: true,
         nack_suppression_duration: Duration { sec: 0, nanosec: 0 },
-        nack_response_delay: Duration { sec: 0, nanosec: 10_000_000 },
+        nack_response_delay: Duration { sec: 0, nanosec: 0 },
     };
 }
 
@@ -2257,18 +2383,90 @@ impl QosPolicy for WriterReliabilityExtensionQosPolicy {
     }
 }
 
+/// int2DDS extension: per-writer RTPS DATA_FRAG fragment size. Writer-local,
+/// not propagated over the wire. Unset falls back to env, then `DEFAULT_SIZE`.
+#[derive(DdsType, Copy, Eq)]
+#[dds_type(crate_path = "crate", no_default)]
+pub struct DataFragQosPolicy {
+    /// Max serialized payload bytes per DATA_FRAG fragment. Range 1..=65000.
+    /// `UNSET` means unspecified; resolve through `effective_max_size()`.
+    pub max_size: i32,
+}
+
+impl DataFragQosPolicy {
+    pub const MAX: i32 = 65000;
+    pub const DEFAULT_SIZE: i32 = 65000;
+    /// Sentinel meaning "no size specified".
+    pub const UNSET: i32 = 0;
+
+    /// Validated size: clamp `> MAX` to MAX, fall back `<= 0` to the
+    /// `INT2DDS_DATA_FRAG_SIZE` env override, then to DEFAULT_SIZE.
+    pub fn effective_max_size(&self) -> i32 {
+        if self.max_size > Self::MAX {
+            log::warn!(
+                "DataFrag max_size={} exceeds max {}, clamping to {}",
+                self.max_size,
+                Self::MAX,
+                Self::MAX
+            );
+            Self::MAX
+        } else if self.max_size > 0 {
+            self.max_size
+        } else {
+            Self::env_default_size().unwrap_or(Self::DEFAULT_SIZE)
+        }
+    }
+
+    /// `INT2DDS_DATA_FRAG_SIZE`, rejected with a warning when outside `1..=MAX`.
+    /// Out-of-range env values are ignored rather than clamped, unlike an explicit QoS.
+    fn env_default_size() -> Option<i32> {
+        let size = crate::common::env::get_data_frag_size_override()?;
+        if (1..=Self::MAX).contains(&size) {
+            return Some(size);
+        }
+        log::warn!(
+            "INT2DDS_DATA_FRAG_SIZE={} is outside 1..={}, ignoring env override",
+            size,
+            Self::MAX
+        );
+        None
+    }
+}
+
+impl Default for DataFragQosPolicy {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl ConstDefault for DataFragQosPolicy {
+    const DEFAULT: Self = Self { max_size: Self::UNSET };
+}
+
+impl QosPolicy for DataFragQosPolicy {
+    fn name(&self) -> &str {
+        DATA_FRAG_QOS_POLICY_NAME
+    }
+}
+
 /// Extension to ReliabilityQosPolicy for int2DDS-specific reader reliability options.
 /// This policy provides additional control over reliable communication behavior.
 ///
 /// # Default
-/// - `heartbeat_response_delay: 10ms` - Delay before responding to a heartbeat.
+/// - `heartbeat_response_delay: 80ms` - Delay before responding to a heartbeat.
 /// - `heartbeat_suppression_duration: 0` - (Unsupported) Duration to suppress heartbeats.
 /// - `preemptive_acknack_delay: 80ms` - Delay before sending preemptive ACKNACK.
+/// - `nack_frag_response_delay: 5ms` - Delay before the first NACK_FRAG for missing fragments.
+///   Overridable via `INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS`.
+/// - `nack_frag_retry_delay: 200ms` - Delay before retrying a NACK_FRAG that got no reply.
+///   Overridable via `INT2DDS_NACK_FRAG_RETRY_MS`.
+/// - `nack_frag_max_retries: 10` - Retries before yielding to the periodic heartbeat.
+///   Overridable via `INT2DDS_NACK_FRAG_MAX_RETRIES`.
 #[derive(DdsType, Copy, Eq)]
 #[dds_type(crate_path = "crate", no_default)]
 pub struct ReaderReliabilityExtensionQosPolicy {
     /// Delay before responding to a heartbeat.
-    /// Default: 10ms
+    /// Default: 80ms
     pub heartbeat_response_delay: Duration,
 
     /// (Unsupported) Duration to suppress heartbeats from the same writer.
@@ -2278,25 +2476,284 @@ pub struct ReaderReliabilityExtensionQosPolicy {
     /// Delay before sending preemptive ACKNACK after writer discovery.
     /// Default: 80ms
     pub preemptive_acknack_delay: Duration,
+
+    /// Delay before sending the first NACK_FRAG for a sample's missing fragments.
+    ///
+    /// Default: 0. This was a debounce against one NACK_FRAG per DATA_FRAG. A fragmented send
+    /// is now bounded by the peer's receive buffer and carries one heartbeat per window, so the
+    /// reader is triggered once per window and there is nothing left to collapse. Set it back to
+    /// 80ms to restore the debounce.
+    pub nack_frag_response_delay: Duration,
+
+    /// Delay before retrying a NACK_FRAG that got no reply.
+    /// Default: 200ms
+    pub nack_frag_retry_delay: Duration,
+
+    /// Retries before a stalled fragment repair yields to the periodic heartbeat.
+    /// Default: 10
+    pub nack_frag_max_retries: u32,
 }
 
 impl Default for ReaderReliabilityExtensionQosPolicy {
     fn default() -> Self {
-        Self::DEFAULT
+        let mut qos = Self::DEFAULT;
+
+        if let Some(ms) = crate::common::env::get_nack_frag_response_delay_ms_override() {
+            qos.nack_frag_response_delay = Duration::from_millis(ms.into());
+        }
+        if let Some(ms) = crate::common::env::get_nack_frag_retry_ms_override() {
+            qos.nack_frag_retry_delay = Duration::from_millis(ms.into());
+        }
+        if let Some(retries) = crate::common::env::get_nack_frag_max_retries_override() {
+            qos.nack_frag_max_retries = retries;
+        }
+
+        qos
     }
 }
 
 impl ConstDefault for ReaderReliabilityExtensionQosPolicy {
     const DEFAULT: Self = Self {
-        heartbeat_response_delay: Duration { sec: 0, nanosec: 10_000_000 },
+        heartbeat_response_delay: Duration { sec: 0, nanosec: 80_000_000 },
         heartbeat_suppression_duration: Duration { sec: 0, nanosec: 0 },
         preemptive_acknack_delay: Duration { sec: 0, nanosec: 80_000_000 },
+        // 5ms rather than none: a windowed round already carries one heartbeat, so debouncing
+        // the answer this briefly costs nothing per round and measured far fewer NACK_FRAGs and
+        // far fewer duplicate fragments on a loaded bus.
+        nack_frag_response_delay: Duration { sec: 0, nanosec: 5_000_000 },
+        // Kept at 200ms: when a window's heartbeat is lost the reader has no trigger at all, and
+        // this self-re-arming retry is the only thing that recovers the round.
+        nack_frag_retry_delay: Duration { sec: 0, nanosec: 200_000_000 },
+        nack_frag_max_retries: 10,
     };
 }
 
 impl QosPolicy for ReaderReliabilityExtensionQosPolicy {
     fn name(&self) -> &str {
         READER_RELIABILITY_EXTENSION_QOS_POLICY_NAME
+    }
+}
+
+#[cfg(test)]
+mod data_frag_tests {
+    use super::*;
+
+    const ENV_KEY: &str = "INT2DDS_DATA_FRAG_SIZE";
+
+    fn effective(max_size: i32) -> i32 {
+        DataFragQosPolicy { max_size }.effective_max_size()
+    }
+
+    #[test]
+    fn data_frag_explicit_size_ignores_env() {
+        assert_eq!(effective(1344), 1344);
+        assert_eq!(effective(70000), 65000, "above MAX clamps");
+    }
+
+    #[test]
+    fn data_frag_default_is_unset() {
+        assert_eq!(DataFragQosPolicy::DEFAULT.max_size, DataFragQosPolicy::UNSET);
+        assert_eq!(DataFragQosPolicy::default().max_size, DataFragQosPolicy::UNSET);
+    }
+
+    // Env is process-global and tests run in parallel: keep every
+    // INT2DDS_DATA_FRAG_SIZE assertion inside this single test.
+    #[test]
+    fn data_frag_unset_resolves_through_env() {
+        unsafe { std::env::remove_var(ENV_KEY) };
+        assert_eq!(effective(0), 65000, "no env -> DEFAULT_SIZE");
+        assert_eq!(effective(-5), 65000, "negative, no env -> DEFAULT_SIZE");
+
+        crate::common::env::set_data_frag_size(8000);
+        assert_eq!(effective(0), 8000, "env applies");
+        assert_eq!(effective(1344), 1344, "explicit qos wins over env");
+
+        for (raw, why) in
+            [("abc", "non-numeric"), ("0", "zero"), ("70000", "above MAX"), ("", "empty")]
+        {
+            unsafe { std::env::set_var(ENV_KEY, raw) };
+            assert_eq!(effective(0), 65000, "{} env is ignored, not clamped", why);
+        }
+
+        for raw in ["1", "65000"] {
+            unsafe { std::env::set_var(ENV_KEY, raw) };
+            assert_eq!(effective(0), raw.parse::<i32>().unwrap(), "boundary accepted");
+        }
+
+        unsafe { std::env::remove_var(ENV_KEY) };
+    }
+}
+
+#[cfg(test)]
+mod writer_reliability_extension_tests {
+    use super::*;
+
+    const ENV_KEY: &str = "INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT";
+
+    // Env is process-global and tests run in parallel: keep every
+    // INT2DDS_DISABLE_PIGGYBACK_HEARTBEAT_DEFAULT assertion inside this single test.
+    #[test]
+    fn disable_piggyback_heartbeat_default_resolves_through_env() {
+        unsafe { std::env::remove_var(ENV_KEY) };
+        assert!(!WriterReliabilityExtensionQosPolicy::default().disable_piggyback_heartbeat);
+
+        crate::common::env::set_disable_piggyback_heartbeat_default(true);
+        assert!(WriterReliabilityExtensionQosPolicy::default().disable_piggyback_heartbeat);
+
+        unsafe { std::env::set_var(ENV_KEY, "false") };
+        assert!(!WriterReliabilityExtensionQosPolicy::default().disable_piggyback_heartbeat);
+
+        unsafe { std::env::set_var(ENV_KEY, "yes") };
+        assert!(
+            !WriterReliabilityExtensionQosPolicy::default().disable_piggyback_heartbeat,
+            "unrecognized env is ignored"
+        );
+
+        unsafe { std::env::remove_var(ENV_KEY) };
+    }
+
+    // Env is process-global and tests run in parallel: keep every
+    // INT2DDS_NACK_RESPONSE_DELAY_MS assertion inside this single test.
+    #[test]
+    fn nack_response_delay_defaults_to_zero_and_resolves_through_env() {
+        const DELAY_KEY: &str = "INT2DDS_NACK_RESPONSE_DELAY_MS";
+        unsafe { std::env::remove_var(DELAY_KEY) };
+        assert_eq!(
+            WriterReliabilityExtensionQosPolicy::default().nack_response_delay,
+            Duration::from_millis(0)
+        );
+
+        // The pre-window value, which a deployment can put back.
+        crate::common::env::set_nack_response_delay_ms(100);
+        assert_eq!(
+            WriterReliabilityExtensionQosPolicy::default().nack_response_delay,
+            Duration::from_millis(100)
+        );
+
+        for (raw, why) in [("abc", "non-numeric"), ("-1", "negative"), ("", "empty")] {
+            unsafe { std::env::set_var(DELAY_KEY, raw) };
+            assert_eq!(
+                WriterReliabilityExtensionQosPolicy::default().nack_response_delay,
+                Duration::from_millis(0),
+                "{} env falls back to default",
+                why
+            );
+        }
+
+        unsafe { std::env::remove_var(DELAY_KEY) };
+    }
+}
+
+#[cfg(test)]
+mod reader_reliability_extension_tests {
+    use super::*;
+
+    #[test]
+    /// Zero response delay is what makes a windowed round cost a round trip instead of a round
+    /// trip plus a debounce. The retry pair stays non-zero on purpose: it is the only recovery
+    /// when a window's heartbeat is lost.
+    fn nack_frag_defaults_are_5ms_200ms_10() {
+        let default = ReaderReliabilityExtensionQosPolicy::DEFAULT;
+        assert_eq!(default.nack_frag_response_delay, Duration::from_millis(5));
+        assert_eq!(default.nack_frag_retry_delay, Duration::from_millis(200));
+        assert_eq!(default.nack_frag_max_retries, 10);
+    }
+
+    #[test]
+    fn nack_frag_fields_are_overridable_through_struct() {
+        let qos = ReaderReliabilityExtensionQosPolicy {
+            nack_frag_response_delay: Duration::from_millis(1),
+            nack_frag_retry_delay: Duration::from_millis(2),
+            nack_frag_max_retries: 3,
+            ..ReaderReliabilityExtensionQosPolicy::DEFAULT
+        };
+        assert_eq!(qos.nack_frag_response_delay, Duration::from_millis(1));
+        assert_eq!(qos.nack_frag_retry_delay, Duration::from_millis(2));
+        assert_eq!(qos.nack_frag_max_retries, 3);
+    }
+
+    // Env is process-global and tests run in parallel: keep every
+    // INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS assertion inside this single test.
+    #[test]
+    fn nack_frag_response_delay_resolves_through_env() {
+        const ENV_KEY: &str = "INT2DDS_NACK_FRAG_RESPONSE_DELAY_MS";
+        unsafe { std::env::remove_var(ENV_KEY) };
+        assert_eq!(
+            ReaderReliabilityExtensionQosPolicy::default().nack_frag_response_delay,
+            Duration::from_millis(5)
+        );
+
+        crate::common::env::set_nack_frag_response_delay_ms(500);
+        assert_eq!(
+            ReaderReliabilityExtensionQosPolicy::default().nack_frag_response_delay,
+            Duration::from_millis(500)
+        );
+
+        for (raw, why) in [("abc", "non-numeric"), ("-1", "negative"), ("", "empty")] {
+            unsafe { std::env::set_var(ENV_KEY, raw) };
+            assert_eq!(
+                ReaderReliabilityExtensionQosPolicy::default().nack_frag_response_delay,
+                Duration::from_millis(5),
+                "{} env falls back to default",
+                why
+            );
+        }
+
+        unsafe { std::env::remove_var(ENV_KEY) };
+    }
+
+    // Env is process-global and tests run in parallel: keep every
+    // INT2DDS_NACK_FRAG_RETRY_MS assertion inside this single test.
+    #[test]
+    fn nack_frag_retry_delay_resolves_through_env() {
+        const ENV_KEY: &str = "INT2DDS_NACK_FRAG_RETRY_MS";
+        unsafe { std::env::remove_var(ENV_KEY) };
+        assert_eq!(
+            ReaderReliabilityExtensionQosPolicy::default().nack_frag_retry_delay,
+            Duration::from_millis(200)
+        );
+
+        crate::common::env::set_nack_frag_retry_ms(750);
+        assert_eq!(
+            ReaderReliabilityExtensionQosPolicy::default().nack_frag_retry_delay,
+            Duration::from_millis(750)
+        );
+
+        for (raw, why) in [("abc", "non-numeric"), ("-1", "negative"), ("", "empty")] {
+            unsafe { std::env::set_var(ENV_KEY, raw) };
+            assert_eq!(
+                ReaderReliabilityExtensionQosPolicy::default().nack_frag_retry_delay,
+                Duration::from_millis(200),
+                "{} env falls back to default",
+                why
+            );
+        }
+
+        unsafe { std::env::remove_var(ENV_KEY) };
+    }
+
+    // Env is process-global and tests run in parallel: keep every
+    // INT2DDS_NACK_FRAG_MAX_RETRIES assertion inside this single test.
+    #[test]
+    fn nack_frag_max_retries_resolves_through_env() {
+        const ENV_KEY: &str = "INT2DDS_NACK_FRAG_MAX_RETRIES";
+        unsafe { std::env::remove_var(ENV_KEY) };
+        assert_eq!(ReaderReliabilityExtensionQosPolicy::default().nack_frag_max_retries, 10);
+
+        crate::common::env::set_nack_frag_max_retries(25);
+        assert_eq!(ReaderReliabilityExtensionQosPolicy::default().nack_frag_max_retries, 25);
+
+        for (raw, why) in [("abc", "non-numeric"), ("-1", "negative"), ("", "empty")] {
+            unsafe { std::env::set_var(ENV_KEY, raw) };
+            assert_eq!(
+                ReaderReliabilityExtensionQosPolicy::default().nack_frag_max_retries,
+                10,
+                "{} env falls back to default",
+                why
+            );
+        }
+
+        unsafe { std::env::remove_var(ENV_KEY) };
     }
 }
 
@@ -2366,5 +2823,23 @@ mod property_qos_tests {
         assert_eq!(QosPolicyId::Property.as_u32(), 25);
         assert_eq!(QosPolicyId::from_u32(25), Some(QosPolicyId::Property));
         assert_eq!(QosPolicyId::Property.as_str(), "Property");
+    }
+}
+
+#[cfg(test)]
+mod lifespan_reference_tests {
+    use super::*;
+
+    #[test]
+    fn default_reference_is_by_source_timestamp() {
+        // Backward compatibility: default keeps writer-timestamp semantics.
+        assert_eq!(
+            LifespanReferenceQosPolicy::default().kind,
+            LifespanReferenceQosPolicyKind::BySourceTimestamp
+        );
+        assert_eq!(
+            LifespanReferenceQosPolicyKind::DEFAULT,
+            LifespanReferenceQosPolicyKind::BySourceTimestamp
+        );
     }
 }

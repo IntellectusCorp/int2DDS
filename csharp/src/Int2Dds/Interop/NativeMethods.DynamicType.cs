@@ -14,25 +14,18 @@ namespace Int2Dds.Interop
     internal static partial class NativeMethods
     {
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern int int2dds_get_builtin_subscriber(IntPtr participant, out IntPtr subscriber_out);
+        internal static extern int int2dds_participant_get_builtin_subscriber(IntPtr participant, out IntPtr subscriber_out);
+
+        // Returns an Int2DdsPublicationBuiltinTopicData handle (see NativeMethods.Discovery.cs
+        // for the accessor/destroy family).
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_subscriber_take_publication_data(IntPtr builtin_sub, byte* topic_name_filter, int timeout_ms, out IntPtr data_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static unsafe extern int int2dds_take_publication_data(IntPtr builtin_sub, byte* topic_name_filter, int timeout_ms, out IntPtr data_out);
+        internal static extern int int2dds_publication_builtin_topic_data_take_type_object(IntPtr data, out IntPtr type_object_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern void int2dds_publication_data_destroy(IntPtr p);
-
-        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static unsafe extern int int2dds_publication_data_topic_name(IntPtr p, byte* buf, UIntPtr buf_len, out UIntPtr out_len);
-
-        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static unsafe extern int int2dds_publication_data_type_name(IntPtr p, byte* buf, UIntPtr buf_len, out UIntPtr out_len);
-
-        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern int int2dds_publication_data_take_type_object(IntPtr p, out IntPtr type_object_out);
-
-        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static unsafe extern int int2dds_wait_for_type_object(IntPtr participant, byte* topic_name, int timeout_ms, out IntPtr type_obj_out, byte* type_name_buf, UIntPtr type_name_buf_len, out UIntPtr out_len);
+        internal static unsafe extern int int2dds_participant_wait_for_type_object(IntPtr participant, byte* topic_name, int timeout_ms, out IntPtr type_obj_out, byte* type_name_buf, UIntPtr type_name_buf_len, out UIntPtr out_len);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern void int2dds_type_object_destroy(IntPtr t);
@@ -105,5 +98,47 @@ namespace Int2Dds.Interop
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static unsafe extern int int2dds_dynamic_data_get_member(IntPtr data, byte* field_path, out IntPtr data_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_dynamic_sample_get_bool(byte* bytes, UIntPtr len, IntPtr type_obj, byte* field_name, [MarshalAs(UnmanagedType.U1)] out bool value_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_dynamic_sample_get_i8(byte* bytes, UIntPtr len, IntPtr type_obj, byte* field_name, out sbyte value_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_dynamic_sample_get_u8(byte* bytes, UIntPtr len, IntPtr type_obj, byte* field_name, out byte value_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_dynamic_sample_get_byte(byte* bytes, UIntPtr len, IntPtr type_obj, byte* field_name, out byte value_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_dynamic_sample_get_char8(byte* bytes, UIntPtr len, IntPtr type_obj, byte* field_name, out byte value_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_dynamic_sample_get_i16(byte* bytes, UIntPtr len, IntPtr type_obj, byte* field_name, out short value_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_dynamic_sample_get_u16(byte* bytes, UIntPtr len, IntPtr type_obj, byte* field_name, out ushort value_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_dynamic_sample_get_i32(byte* bytes, UIntPtr len, IntPtr type_obj, byte* field_name, out int value_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_dynamic_sample_get_u32(byte* bytes, UIntPtr len, IntPtr type_obj, byte* field_name, out uint value_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_dynamic_sample_get_i64(byte* bytes, UIntPtr len, IntPtr type_obj, byte* field_name, out long value_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_dynamic_sample_get_u64(byte* bytes, UIntPtr len, IntPtr type_obj, byte* field_name, out ulong value_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_dynamic_sample_get_f32(byte* bytes, UIntPtr len, IntPtr type_obj, byte* field_name, out float value_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_dynamic_sample_get_f64(byte* bytes, UIntPtr len, IntPtr type_obj, byte* field_name, out double value_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_dynamic_sample_get_string(byte* bytes, UIntPtr len, IntPtr type_obj, byte* field_name, byte* out_buf, UIntPtr buf_cap, out UIntPtr out_len);
     }
 }

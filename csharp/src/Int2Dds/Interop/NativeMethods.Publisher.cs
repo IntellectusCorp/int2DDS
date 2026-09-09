@@ -6,10 +6,7 @@ namespace Int2Dds.Interop
     internal static partial class NativeMethods
     {
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern int int2dds_create_publisher(IntPtr participant, out IntPtr publisher_out);
-
-        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern int int2dds_create_publisher_with_qos(IntPtr participant, IntPtr qos, out IntPtr publisher_out);
+        internal static extern int int2dds_create_publisher(IntPtr participant, IntPtr qos, out IntPtr publisher_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static unsafe extern int int2dds_create_publisher_with_profile(IntPtr participant,
@@ -22,6 +19,9 @@ namespace Int2Dds.Interop
         internal static extern int int2dds_publisher_get_qos(IntPtr publisher, out IntPtr qos_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_publisher_get_instance_handle(IntPtr publisher, byte* handle_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_delete_publisher(IntPtr publisher);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
@@ -31,17 +31,10 @@ namespace Int2Dds.Interop
         internal static extern int int2dds_publisher_wait_for_acknowledgments(IntPtr publisher, long timeout_ms);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern int int2dds_create_datawriter(IntPtr publisher, IntPtr topic, IntPtr qos, out IntPtr writer_out);
-
-        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static unsafe extern int int2dds_create_datawriter_with_listener(IntPtr publisher, IntPtr topic, IntPtr qos, NativeDataWriterListener* listener, uint mask, out IntPtr writer_out);
+        internal static unsafe extern int int2dds_create_datawriter(IntPtr publisher, IntPtr topic, IntPtr qos, NativeDataWriterListener* listener, uint mask, out IntPtr writer_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static unsafe extern int int2dds_create_datawriter_with_profile(IntPtr publisher, IntPtr topic,
-            byte* qos_path, out IntPtr writer_out);
-
-        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static unsafe extern int int2dds_create_datawriter_with_profile_and_listener(IntPtr publisher, IntPtr topic,
             byte* qos_path, NativeDataWriterListener* listener, uint mask, out IntPtr writer_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
@@ -57,13 +50,16 @@ namespace Int2Dds.Interop
         internal static extern int int2dds_datawriter_get_qos(IntPtr writer, out IntPtr qos_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datawriter_data_representation(IntPtr writer);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_delete_datawriter(IntPtr writer);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static unsafe extern int int2dds_write_serialized(IntPtr writer, byte* data, UIntPtr data_len, byte* key, UIntPtr key_len);
+        internal static unsafe extern int int2dds_datawriter_write_serialized(IntPtr writer, byte* data, UIntPtr data_len);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static unsafe extern int int2dds_write_serialized_w_timestamp(IntPtr writer, byte* data, UIntPtr data_len, byte* key, UIntPtr key_len, int timestamp_sec, uint timestamp_nanosec);
+        internal static unsafe extern int int2dds_datawriter_write_serialized_w_timestamp(IntPtr writer, byte* data, UIntPtr data_len, int timestamp_sec, uint timestamp_nanosec);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_datawriter_wait_for_acknowledgments(IntPtr writer, long timeout_ms);
@@ -87,7 +83,7 @@ namespace Int2Dds.Interop
         internal static extern int int2dds_datawriter_assert_liveliness(IntPtr writer);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern int int2dds_get_publication_matched_status(IntPtr writer, out int total_count_out, out int current_count_out);
+        internal static unsafe extern int int2dds_datawriter_get_publication_matched_status(IntPtr writer, NativePublicationMatchedStatus* status_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static unsafe extern int int2dds_datawriter_get_liveliness_lost_status(IntPtr writer, NativeLivelinessLostStatus* status_out);
@@ -97,5 +93,20 @@ namespace Int2Dds.Interop
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static unsafe extern int int2dds_datawriter_get_offered_incompatible_qos_status(IntPtr writer, NativeOfferedIncompatibleQosStatus* status_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datawriter_prepare_serialized_write(IntPtr writer, UIntPtr capacity, out byte* data_out, out UIntPtr capacity_out, out IntPtr loan_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datawriter_commit_serialized_write(IntPtr writer, IntPtr loan, UIntPtr actual_size);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datawriter_abort_serialized_write(IntPtr loan);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datawriter_get_guid(IntPtr writer, byte* guid_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datawriter_get_offered_incompatible_type_status(IntPtr writer, NativeOfferedIncompatibleTypeStatus* status_out);
     }
 }

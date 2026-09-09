@@ -2,12 +2,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     config::types::qos_policy::{
-        DataRepresentationQosPolicy, DestinationOrderQosPolicy, DurabilityQosPolicy,
-        DurabilityServiceQosPolicy, GroupDataQosPolicy, HistoryQosPolicy, LivelinessQosPolicy,
-        OwnershipQosPolicy, PartitionQosPolicy, PresentationQosPolicy, PropertyQosPolicy,
-        ReaderReliabilityExtensionQosPolicy, ReliabilityQosPolicy, TopicDataQosPolicy,
-        TypeConsistencyEnforcementQosPolicy, UserDataQosPolicy,
-        WriterReliabilityExtensionQosPolicy, DEFAULT_MAX_BLOCKING_TIME,
+        DataFragQosPolicy, DataRepresentationQosPolicy, DestinationOrderQosPolicy,
+        DurabilityQosPolicy, DurabilityServiceQosPolicy, GroupDataQosPolicy, HistoryQosPolicy,
+        LifespanReferenceQosPolicy, LivelinessQosPolicy, OwnershipQosPolicy, PartitionQosPolicy,
+        PresentationQosPolicy, PropertyQosPolicy, ReaderReliabilityExtensionQosPolicy,
+        ReliabilityQosPolicy, TopicDataQosPolicy, TypeConsistencyEnforcementQosPolicy,
+        UserDataQosPolicy, WriterReliabilityExtensionQosPolicy, DEFAULT_MAX_BLOCKING_TIME,
     },
     domain,
     infrastructure::qos_policy as internal_qos_policy,
@@ -62,6 +62,8 @@ pub(crate) struct DataWriterQos {
     pub(crate) data_representation: Option<DataRepresentationQosPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) writer_reliability_extension: Option<WriterReliabilityExtensionQosPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) data_frag: Option<DataFragQosPolicy>,
 }
 
 impl MergeQos for DataWriterQos {
@@ -91,6 +93,7 @@ impl MergeQos for DataWriterQos {
                 .writer_reliability_extension
                 .clone()
                 .or(base.writer_reliability_extension.clone()),
+            data_frag: self.data_frag.clone().or(base.data_frag.clone()),
         }
     }
 }
@@ -189,6 +192,10 @@ impl From<DataWriterQos> for publication::qos::DataWriterQos {
             qos.writer_reliability_extension = writer_reliability_extension.into();
         }
 
+        if let Some(data_frag) = external.data_frag {
+            qos.data_frag = data_frag.into();
+        }
+
         qos
     }
 }
@@ -214,6 +221,7 @@ impl From<publication::qos::DataWriterQos> for DataWriterQos {
             writer_data_lifecycle: Some(internal.writer_data_lifecycle),
             data_representation: Some(internal.data_representation.into()),
             writer_reliability_extension: Some(internal.writer_reliability_extension.into()),
+            data_frag: Some(internal.data_frag.into()),
         }
     }
 }
@@ -235,6 +243,8 @@ pub(crate) struct DataReaderQos {
     pub(crate) reliability: Option<ReliabilityQosPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) destination_order: Option<DestinationOrderQosPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) lifespan_reference: Option<LifespanReferenceQosPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) history: Option<HistoryQosPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -271,6 +281,7 @@ impl MergeQos for DataReaderQos {
             ownership: self.ownership.clone().or(base.ownership.clone()),
             time_based_filter: self.time_based_filter.or(base.time_based_filter),
             reader_data_lifecycle: self.reader_data_lifecycle.or(base.reader_data_lifecycle),
+            lifespan_reference: self.lifespan_reference.clone().or(base.lifespan_reference.clone()),
             reader_reliability_extension: self
                 .reader_reliability_extension
                 .clone()
@@ -361,6 +372,10 @@ impl From<DataReaderQos> for subscription::qos::DataReaderQos {
             qos.reader_data_lifecycle = reader_data_lifecycle;
         }
 
+        if let Some(lifespan_reference) = external.lifespan_reference {
+            qos.lifespan_reference = lifespan_reference.into();
+        }
+
         if let Some(reader_reliability_extension) = external.reader_reliability_extension {
             qos.reader_reliability_extension = reader_reliability_extension.into();
         }
@@ -393,6 +408,7 @@ impl From<subscription::qos::DataReaderQos> for DataReaderQos {
             ownership: Some(internal.ownership.into()),
             time_based_filter: Some(internal.time_based_filter),
             reader_data_lifecycle: Some(internal.reader_data_lifecycle),
+            lifespan_reference: Some(internal.lifespan_reference.into()),
             reader_reliability_extension: Some(internal.reader_reliability_extension.into()),
             data_representation: Some(internal.data_representation.into()),
             type_consistency_enforcement: Some(internal.type_consistency_enforcement.into()),
@@ -882,5 +898,33 @@ mod property_qos_config_tests {
         let external: DomainParticipantQos = internal.clone().into();
         let internal2: domain::qos::DomainParticipantQos = external.into();
         assert_eq!(internal2, internal);
+    }
+
+    #[test]
+    fn datareader_qos_lifespan_reference_round_trips_through_json() {
+        // XML config is fed to serde as JSON; verify the vendor-extension policy parses,
+        // converts to the internal kind, and survives the reverse conversion.
+        let json = r#"{
+            "lifespan_reference": { "kind": "BY_RECEPTION" }
+        }"#;
+        let parsed: DataReaderQos = serde_json::from_str(json).expect("parse");
+        let internal: subscription::qos::DataReaderQos = parsed.into();
+        assert_eq!(
+            internal.lifespan_reference.kind,
+            internal_qos_policy::LifespanReferenceQosPolicyKind::ByReceptionTimestamp
+        );
+
+        let external: DataReaderQos = internal.clone().into();
+        let internal2: subscription::qos::DataReaderQos = external.into();
+        assert_eq!(internal2.lifespan_reference.kind, internal.lifespan_reference.kind);
+    }
+
+    #[test]
+    fn datawriter_qos_data_frag_without_max_size_stays_unset() {
+        // A data_frag block with no max_size must not read back as an explicit
+        // size, or the INT2DDS_DATA_FRAG_SIZE fallback would be suppressed.
+        let parsed: DataWriterQos = serde_json::from_str(r#"{"data_frag": {}}"#).expect("parse");
+        let internal: publication::qos::DataWriterQos = parsed.into();
+        assert_eq!(internal.data_frag.max_size, internal_qos_policy::DataFragQosPolicy::UNSET);
     }
 }

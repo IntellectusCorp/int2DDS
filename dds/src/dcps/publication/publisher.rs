@@ -42,7 +42,8 @@ use crate::{
     },
     dcps::topic::type_support::{DdsType, TypeSupport},
     domain::{
-        domain_participant::DomainParticipant, domain_participant_factory::DomainParticipantFactory,
+        domain_participant::{DomainParticipant, ParticipantRef},
+        domain_participant_factory::DomainParticipantFactory,
     },
     infrastructure::{
         domain_entity::DomainEntity,
@@ -239,6 +240,28 @@ impl Publisher {
     /// * Type support for the topic is not found
     /// * The QoS policies are inconsistent
     /// * The DCPS bridge is not initialized
+    /// Resolution chain for `QosKind::Default`: registered default → configured
+    /// default profile → spec default. `QosKind::Specific` is used as-is.
+    ///
+    /// Shared by `create_datawriter` and `create_datawriter_dynamic` so both entry
+    /// points resolve the default sentinel identically.
+    fn resolve_datawriter_qos(&self, qos: QosKind<DataWriterQos>) -> DataWriterQos {
+        match qos {
+            QosKind::Specific(q) => q,
+            QosKind::Default => {
+                if let Some(registered) =
+                    self.default_datawriter_qos.lock().ok().and_then(|g| g.clone())
+                {
+                    registered
+                } else {
+                    DomainParticipantFactory::get_instance()
+                        .get_datawriter_qos_from_profile("")
+                        .unwrap_or_default()
+                }
+            }
+        }
+    }
+
     pub fn create_datawriter<Foo: 'static + Clone>(
         &self,
         topic: &Topic,
@@ -251,24 +274,7 @@ impl Publisher {
         }
         self.is_deleted()?;
 
-        // Resolution chain for QosKind::Default: registered default → configured
-        // default profile → spec default. QosKind::Specific is used as-is.
-        let qos = match qos.into() {
-            QosKind::Specific(q) => q,
-            QosKind::Default => {
-                if let Some(registered) =
-                    self.default_datawriter_qos.lock().ok().and_then(|g| g.clone())
-                {
-                    registered
-                } else if let Ok(profile_qos) =
-                    DomainParticipantFactory::get_instance().get_datawriter_qos_from_profile("")
-                {
-                    profile_qos
-                } else {
-                    DataWriterQos::default()
-                }
-            }
-        };
+        let qos = self.resolve_datawriter_qos(qos.into());
 
         let type_support = self.get_participant()?.find_typesupport(topic.get_type_name());
         if type_support.is_none() {
@@ -458,7 +464,7 @@ impl Publisher {
         &self,
         topic: &Topic,
         type_support: Arc<crate::xtypes::DynamicTypeSupport>,
-        qos: DataWriterQos,
+        qos: impl Into<QosKind<DataWriterQos>>,
         listener: Option<Arc<dyn DataWriterListener<Foo = crate::xtypes::DynamicData>>>,
         mask: StatusMask,
     ) -> DdsResult<DataWriter<crate::xtypes::DynamicData>> {
@@ -466,6 +472,12 @@ impl Publisher {
             return Err(DdsError::PreconditionNotMet);
         }
         self.is_deleted()?;
+
+        // Same default-resolution chain as the typed create_datawriter: a caller that
+        // wants the QoS profile applied passes DATAWRITER_QOS_DEFAULT. Passing a
+        // concrete DataWriterQos still means "use exactly this" via the blanket
+        // From<T> for QosKind<T>, so existing callers are unaffected.
+        let qos = self.resolve_datawriter_qos(qos.into());
 
         self.create_datawriter_impl(type_support, topic, qos, listener, mask)
     }
@@ -1082,6 +1094,32 @@ impl Publisher {
         Err(DdsError::Error("Participant reference is invalid or expired".to_string()))
     }
 
+    /// Upgraded parent handle without the deep clone [`Self::get_participant`] performs.
+    ///
+    /// Same failure modes and messages -- `AlreadyDeleted` when this publisher is deleted,
+    /// `Error` when the parent `Weak` has expired -- but two atomic read-modify-writes instead
+    /// of ~52. `get_participant` clones a struct of 25 `Arc` fields to call one method on it,
+    /// and `write()` does that on every sample.
+    ///
+    /// Returns [`ParticipantRef`], not a bare `Arc`: `get_participant` force-sets `self_ref` on
+    /// the value it hands back, so that value performs the factory orphan handoff when it is
+    /// the last reference standing. `ParticipantRef` reproduces it for two plain atomic loads.
+    ///
+    /// Only for internal call sites that need `get_current_time`, `get_listener`,
+    /// `set_communication_status` or the QoS accessors. The value behind the returned handle
+    /// has `self_ref: None`, so it must not reach `create_*`/`delete_*`; use
+    /// [`Self::get_participant`] for those.
+    pub(crate) fn participant_arc(&self) -> DdsResult<ParticipantRef> {
+        self.is_deleted()?;
+        self.participant
+            .as_ref()
+            .and_then(|weak_ref| weak_ref.upgrade())
+            .map(ParticipantRef::new)
+            .ok_or_else(|| {
+                DdsError::Error("Participant reference is invalid or expired".to_string())
+            })
+    }
+
     pub(crate) fn has_active_entities(&self) -> DdsResult<bool> {
         self.is_deleted()?;
         {
@@ -1306,7 +1344,7 @@ mod tests {
         let writer = publisher
             .create_datawriter::<HelloWorld>(
                 &topic1,
-                DataWriterQos { reliability: reliable_qos.clone(), ..Default::default() },
+                DataWriterQos { reliability: reliable_qos, ..Default::default() },
                 None,
                 StatusMask::default(),
             )
