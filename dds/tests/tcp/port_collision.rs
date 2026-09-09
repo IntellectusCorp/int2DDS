@@ -5,6 +5,11 @@
 //! application can react (a `panic!` would also be UB across the C ABI). Pinning
 //! *distinct* ports lets both coexist, which is the whole point of moving the
 //! TCP listen port into per-participant QoS.
+//!
+//! Pinning nothing has to work too: an application reached through a layer that
+//! cannot inject per-participant QoS never gets to name a port, so the listen
+//! port is taken from the domain formula and walked upwards until a free slot
+//! is found.
 
 use crate::common::*;
 use int2dds::{
@@ -21,6 +26,33 @@ fn tcp_qos(bind_port: u16) -> DomainParticipantQos {
     property.add_property("int2dds.initial_peers", "127.0.0.1:1", false);
     property.set_tcp_bind_port(bind_port);
     DomainParticipantQos { property, ..Default::default() }
+}
+
+/// Pure-TCP participant QoS with no pinned port, leaving the listen port to the
+/// domain formula.
+fn tcp_qos_unpinned() -> DomainParticipantQos {
+    let mut property = PropertyQosPolicy::default();
+    property.add_property("int2dds.transport", "tcp", false);
+    property.add_property("int2dds.initial_peers", "127.0.0.1:1", false);
+    DomainParticipantQos { property, ..Default::default() }
+}
+
+#[test]
+fn two_tcp_participants_coexist_without_a_pinned_port() {
+    let factory = DomainParticipantFactory::get_instance();
+    let domain = next_domain_id();
+
+    let first = factory
+        .create_participant(domain, tcp_qos_unpinned(), None, StatusMask::default())
+        .expect("first participant takes the domain's first listen slot");
+    let second = factory
+        .create_participant(domain, tcp_qos_unpinned(), None, StatusMask::default())
+        .expect("second participant walks to the next free slot in the same domain");
+
+    first.delete_contained_entities().unwrap();
+    factory.delete_participant(first).unwrap();
+    second.delete_contained_entities().unwrap();
+    factory.delete_participant(second).unwrap();
 }
 
 #[test]
