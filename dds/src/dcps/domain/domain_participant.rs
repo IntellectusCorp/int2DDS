@@ -3096,22 +3096,26 @@ impl DomainParticipant {
         // Clean up builtin entities to break self-reference cycles
         self.cleanup_builtin_entities();
 
-        let mut bridge_guard =
-            self.dcps_bridge.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        {
+            let mut bridge_guard =
+                self.dcps_bridge.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
-        if let Some(dcps_bridge) = bridge_guard.as_mut() {
-            dcps_bridge.disable().map_err(|rtps_err| {
-                // Handle sending handler related errors specifically
-                match rtps_err.code {
-                    RtpsErrorCode::LockError | RtpsErrorCode::ThreadJoinError => {
-                        DdsError::PreconditionNotMet
+            if let Some(dcps_bridge) = bridge_guard.as_mut() {
+                dcps_bridge.disable().map_err(|rtps_err| {
+                    // Handle sending handler related errors specifically
+                    match rtps_err.code {
+                        RtpsErrorCode::LockError | RtpsErrorCode::ThreadJoinError => {
+                            DdsError::PreconditionNotMet
+                        }
+                        _ => DdsError::Error("Failed to disable RTPS participant".to_string()), // Or other appropriate mapping
                     }
-                    _ => DdsError::Error("Failed to disable RTPS participant".to_string()), // Or other appropriate mapping
-                }
-            })?;
+                })?;
+            }
+
+            // Drops the bridge, closing its socket and turning later bridge lookups into errors.
+            *bridge_guard = None;
         }
 
-        *bridge_guard = None;
         self.self_ref = None;
 
         self.lifecycle.mark_deleted_and_await_operation_completion();
