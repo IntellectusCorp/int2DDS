@@ -889,6 +889,11 @@ impl DomainParticipant {
     }
 
     fn try_delete_publisher(&self, publisher: &mut Publisher) -> DdsResult<()> {
+        if crate::utils::notify::in_listener_callback() {
+            log::debug!("[delete] refusing delete_publisher from inside a listener callback");
+            return Err(DdsError::IllegalOperation);
+        }
+
         {
             let mut orphaned = self.orphaned_entities.lock().unwrap();
             orphaned.remove_publisher(publisher)
@@ -1106,6 +1111,11 @@ impl DomainParticipant {
     }
 
     fn try_delete_subscriber(&self, subscriber: &mut Subscriber) -> DdsResult<()> {
+        if crate::utils::notify::in_listener_callback() {
+            log::debug!("[delete] refusing delete_subscriber from inside a listener callback");
+            return Err(DdsError::IllegalOperation);
+        }
+
         {
             let mut orphaned = self.orphaned_entities.lock().unwrap();
             orphaned.remove_subscriber(subscriber)
@@ -1364,6 +1374,13 @@ impl DomainParticipant {
         &self,
         content_filtered_topic: &mut ContentFilteredTopic,
     ) -> DdsResult<()> {
+        if crate::utils::notify::in_listener_callback() {
+            log::debug!(
+                "[delete] refusing delete_contentfilteredtopic from inside a listener callback"
+            );
+            return Err(DdsError::IllegalOperation);
+        }
+
         {
             let mut orphaned = self.orphaned_entities.lock().unwrap();
             orphaned.remove_content_filtered_topic(content_filtered_topic)
@@ -1852,6 +1869,11 @@ impl DomainParticipant {
     }
 
     fn try_delete_topic(&self, topic: &mut Topic) -> DdsResult<()> {
+        if crate::utils::notify::in_listener_callback() {
+            log::debug!("[delete] refusing delete_topic from inside a listener callback");
+            return Err(DdsError::IllegalOperation);
+        }
+
         {
             let mut orphaned = self.orphaned_entities.lock().unwrap();
             orphaned.remove_topic(topic)

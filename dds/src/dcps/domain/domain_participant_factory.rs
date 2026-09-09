@@ -221,6 +221,11 @@ impl DomainParticipantFactory {
         &self,
         participant: &mut DomainParticipant,
     ) -> DdsResult<()> {
+        if crate::utils::notify::in_listener_callback() {
+            log::debug!("[delete] refusing delete_participant from inside a listener callback");
+            return Err(DdsError::IllegalOperation);
+        }
+
         self.remove_orphaned_participant(participant)?;
         if let Ok(true) = participant.has_active_entities() {
             return Err(DdsError::PreconditionNotMet);
