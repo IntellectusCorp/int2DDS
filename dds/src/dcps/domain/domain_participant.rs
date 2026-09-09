@@ -87,7 +87,7 @@ use crate::{
     infrastructure::{
         entity::{
             impl_dds_entity, impl_dds_entity_impl, BaseEntity, EnableChild, Entity, EntityInternal,
-            UpdateStatus,
+            EntityLifecycle, UpdateStatus,
         },
         qos_policy::{
             DeadlineQosPolicy, DestinationOrderQosPolicy, DestinationOrderQosPolicyKind,
@@ -144,7 +144,7 @@ pub struct DomainParticipant {
     status_condition: Arc<Mutex<StatusCondition<DomainParticipantQos>>>,
     pub(crate) self_ref: Option<Arc<DomainParticipant>>,
     enabled: Arc<AtomicBool>,
-    deleted: Arc<AtomicBool>,
+    lifecycle: Arc<EntityLifecycle>,
     // rtps_participant: Arc<Mutex<Option<RtpsParticipant>>>,
     dcps_bridge: Arc<Mutex<Option<DcpsBridge>>>,
     builtin_subscriber: Arc<Mutex<Option<Subscriber>>>,
@@ -200,7 +200,7 @@ impl Drop for DomainParticipant {
             return; // Never fully initialized
         }
 
-        if !self.deleted.load(Ordering::SeqCst) {
+        if !self.lifecycle.is_deleted() {
             let factory = DomainParticipantFactory::get_instance();
             factory.handle_participant_drop(
                 &self.domain_id,
@@ -249,7 +249,7 @@ impl Drop for ParticipantRef {
         if Arc::strong_count(&self.0) > 1 {
             return;
         }
-        if self.0.deleted.load(Ordering::SeqCst) {
+        if self.0.lifecycle.is_deleted() {
             return;
         }
         if let Ok(guid) = self.0.guid() {
@@ -433,7 +433,7 @@ impl DomainParticipant {
             status_condition: Arc::new(Mutex::new(StatusCondition::new(None))),
             self_ref: None,
             enabled: Arc::new(AtomicBool::new(false)),
-            deleted: Arc::new(AtomicBool::new(false)),
+            lifecycle: Arc::new(EntityLifecycle::default()),
             // rtps_participant: Arc::new(Mutex::new(None)),
             dcps_bridge: Arc::new(Mutex::new(Some(dcps_bridge))),
             builtin_subscriber: Arc::new(Mutex::new(None)),
@@ -606,7 +606,6 @@ impl DomainParticipant {
     }
 
     pub(crate) fn has_active_entities(&self) -> DdsResult<bool> {
-        self.is_deleted()?;
         {
             // Check non-builtin publishers
             match self.get_publishers() {
@@ -787,7 +786,7 @@ impl DomainParticipant {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         // Resolution chain for QosKind::Default: registered default → configured
         // default profile → spec default. QosKind::Specific is used as-is.
@@ -870,7 +869,7 @@ impl DomainParticipant {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         match self.try_delete_publisher(&mut publisher) {
             Ok(()) => Ok(()),
@@ -890,6 +889,11 @@ impl DomainParticipant {
     }
 
     fn try_delete_publisher(&self, publisher: &mut Publisher) -> DdsResult<()> {
+        if crate::utils::notify::in_listener_callback() {
+            log::debug!("[delete] refusing delete_publisher from inside a listener callback");
+            return Err(DdsError::IllegalOperation);
+        }
+
         {
             let mut orphaned = self.orphaned_entities.lock().unwrap();
             orphaned.remove_publisher(publisher)
@@ -904,31 +908,34 @@ impl DomainParticipant {
 
         let handle = publisher.get_instance_handle()?;
 
-        let mut publishers = self
-            .publishers
-            .lock()
-            .map_err(|_| DdsError::Error("Failed to lock publishers".to_string()))?;
-        let mut publishers_by_handle = self
-            .publishers_by_handle
-            .lock()
-            .map_err(|_| DdsError::Error("Failed to lock publishers_by_handle".to_string()))?;
+        {
+            let mut publishers = self
+                .publishers
+                .lock()
+                .map_err(|_| DdsError::Error("Failed to lock publishers".to_string()))?;
+            let mut publishers_by_handle = self
+                .publishers_by_handle
+                .lock()
+                .map_err(|_| DdsError::Error("Failed to lock publishers_by_handle".to_string()))?;
 
-        // Check existence by handle
-        if !publishers_by_handle.contains_key(&handle) {
-            return Err(DdsError::Error("Publisher not found".to_string()));
+            // Check existence by handle
+            if !publishers_by_handle.contains_key(&handle) {
+                return Err(DdsError::Error("Publisher not found".to_string()));
+            }
+
+            // Clean up dead references and remove the publisher
+            publishers.retain(|weak_publisher| {
+                match weak_publisher.upgrade() {
+                    Some(p) => p.get_instance_handle().is_ok_and(|h| h != handle),
+                    None => false, // Remove dead references
+                }
+            });
+
+            publishers_by_handle.remove(&handle);
         }
 
-        // Clean up dead references and remove the publisher
-        publishers.retain(|weak_publisher| {
-            match weak_publisher.upgrade() {
-                Some(p) => p.get_instance_handle().is_ok_and(|h| h != handle),
-                None => false, // Remove dead references
-            }
-        });
-
-        publishers_by_handle.remove(&handle);
-
         publisher.delete();
+
         Ok(())
     }
 
@@ -1003,7 +1010,7 @@ impl DomainParticipant {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         let qos = match qos.into() {
             QosKind::Specific(q) => q,
@@ -1084,7 +1091,7 @@ impl DomainParticipant {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         match self.try_delete_subscriber(&mut subscriber) {
             Ok(()) => Ok(()),
@@ -1104,7 +1111,10 @@ impl DomainParticipant {
     }
 
     fn try_delete_subscriber(&self, subscriber: &mut Subscriber) -> DdsResult<()> {
-        self.is_deleted()?;
+        if crate::utils::notify::in_listener_callback() {
+            log::debug!("[delete] refusing delete_subscriber from inside a listener callback");
+            return Err(DdsError::IllegalOperation);
+        }
 
         {
             let mut orphaned = self.orphaned_entities.lock().unwrap();
@@ -1121,31 +1131,34 @@ impl DomainParticipant {
 
         let handle = subscriber.get_instance_handle()?;
 
-        let mut subscribers = self
-            .subscribers
-            .lock()
-            .map_err(|_| DdsError::Error("Failed to lock Subscribers".to_string()))?;
-        let mut subscribers_by_handle = self
-            .subscribers_by_handle
-            .lock()
-            .map_err(|_| DdsError::Error("Failed to lock subscribers_by_handle".to_string()))?;
+        {
+            let mut subscribers = self
+                .subscribers
+                .lock()
+                .map_err(|_| DdsError::Error("Failed to lock Subscribers".to_string()))?;
+            let mut subscribers_by_handle = self
+                .subscribers_by_handle
+                .lock()
+                .map_err(|_| DdsError::Error("Failed to lock subscribers_by_handle".to_string()))?;
 
-        // Check existence by handle
-        if !subscribers_by_handle.contains_key(&handle) {
-            return Err(DdsError::Error("Subscriber not found".to_string()));
+            // Check existence by handle
+            if !subscribers_by_handle.contains_key(&handle) {
+                return Err(DdsError::Error("Subscriber not found".to_string()));
+            }
+
+            // Clean up dead references and remove the subscriber
+            subscribers.retain(|weak_subscriber| {
+                match weak_subscriber.upgrade() {
+                    Some(p) => p.get_instance_handle().is_ok_and(|h| h != handle),
+                    None => false, // Remove dead references
+                }
+            });
+
+            subscribers_by_handle.remove(&handle);
         }
 
-        // Clean up dead references and remove the subscriber
-        subscribers.retain(|weak_subscriber| {
-            match weak_subscriber.upgrade() {
-                Some(p) => p.get_instance_handle().is_ok_and(|h| h != handle),
-                None => false, // Remove dead references
-            }
-        });
-
-        subscribers_by_handle.remove(&handle);
-
         subscriber.delete();
+
         Ok(())
     }
 
@@ -1196,7 +1209,7 @@ impl DomainParticipant {
             Built-in Topics are used to convey information about other DomainParticipant, Topic, DataReader, and DataWriter objects.
             Descriptions of these built-in objects are covered in Section 2.2.5, Built-in Topics.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         self.builtin_subscriber
             .lock()
             .map_err(|e| DdsError::Error(e.to_string()))?
@@ -1229,7 +1242,7 @@ impl DomainParticipant {
             If the operation fails to find a TopicDescription, a platform-defined .nil. value is returned.
         */
 
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         match self.find_topic_description_by_name(topic_name) {
             Ok(Some(topic)) => Ok(Some(topic)),
             Ok(None) => Ok(None),
@@ -1247,7 +1260,7 @@ impl DomainParticipant {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         // let multi_topic = MultiTopic::new(
         //     type_name,
         //     topic_name,
@@ -1271,7 +1284,7 @@ impl DomainParticipant {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         Err(DdsError::Unsupported)
     }
 
@@ -1282,7 +1295,7 @@ impl DomainParticipant {
         filter_expression: &str,
         expression_parameters: Vec<String>,
     ) -> DdsResult<ContentFilteredTopic> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         let topic_arc = self.find_internal_topic(related_topic)?;
 
@@ -1337,7 +1350,7 @@ impl DomainParticipant {
         &self,
         mut content_filtered_topic: ContentFilteredTopic,
     ) -> DdsResult<()> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         match self.try_delete_contentfilteredtopic(&mut content_filtered_topic) {
             Ok(()) => Ok(()),
@@ -1361,6 +1374,13 @@ impl DomainParticipant {
         &self,
         content_filtered_topic: &mut ContentFilteredTopic,
     ) -> DdsResult<()> {
+        if crate::utils::notify::in_listener_callback() {
+            log::debug!(
+                "[delete] refusing delete_contentfilteredtopic from inside a listener callback"
+            );
+            return Err(DdsError::IllegalOperation);
+        }
+
         {
             let mut orphaned = self.orphaned_entities.lock().unwrap();
             orphaned.remove_content_filtered_topic(content_filtered_topic)
@@ -1475,6 +1495,7 @@ impl DomainParticipant {
 
             For details, see Section 2.2.3.11 LIVELINESS.
         */
+        let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
 
         if !self.has_manual_by_participant_writers()? {
@@ -1504,7 +1525,7 @@ impl DomainParticipant {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         {
             match self.get_publishers() {
                 Ok(publishers) => {
@@ -1647,7 +1668,7 @@ impl DomainParticipant {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         let qos = self.resolve_topic_qos(qos.into());
 
@@ -1828,7 +1849,7 @@ impl DomainParticipant {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         match self.try_delete_topic(&mut topic) {
             Ok(()) => Ok(()),
@@ -1848,6 +1869,11 @@ impl DomainParticipant {
     }
 
     fn try_delete_topic(&self, topic: &mut Topic) -> DdsResult<()> {
+        if crate::utils::notify::in_listener_callback() {
+            log::debug!("[delete] refusing delete_topic from inside a listener callback");
+            return Err(DdsError::IllegalOperation);
+        }
+
         {
             let mut orphaned = self.orphaned_entities.lock().unwrap();
             orphaned.remove_topic(topic)
@@ -1957,21 +1983,21 @@ impl DomainParticipant {
            Regardless of whether the middleware provides Topic propagation, the delete_topic operation only deletes the local proxy object.
            If the operation reaches a timeout, it returns a platform-defined .nil. value.
         */
-        self.is_deleted()?;
-
-        if let Ok(Some(topic)) = self.find_topic_by_name(topic_name) {
-            return Ok((*topic).clone());
-        }
-
-        if timeout.is_zero() {
-            return Err(DdsError::Timeout);
-        }
-
         let start_time = Time::now();
 
         loop {
-            if let Ok(Some(topic)) = self.find_topic_by_name(topic_name) {
-                return Ok((*topic).clone());
+            // Held only for the probe. Keeping it across the sleep would pin the participant
+            // open, so a concurrent delete could never drain and the topic could never be created.
+            {
+                let _operation = self.lifecycle.begin_operation()?;
+
+                if let Ok(Some(topic)) = self.find_topic_by_name(topic_name) {
+                    return Ok((*topic).clone());
+                }
+            }
+
+            if timeout.is_zero() {
+                return Err(DdsError::Timeout);
             }
 
             if !timeout.is_infinite() {
@@ -2038,7 +2064,7 @@ impl DomainParticipant {
             If the infrastructure does not maintain connectivity information locally
         */
         // TODO: Filter out participants ignored via ignore_participant operation
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         let rtps_participant = self.get_rtps_participant()?;
         let proxy_datas = rtps_participant.remote_participant_proxy_datas();
         let result = match proxy_datas.lock() {
@@ -2068,7 +2094,7 @@ impl DomainParticipant {
             If the infrastructure does not maintain the information needed to fill participant_data,
         */
         // TODO: Filter out participants ignored via ignore_participant operation
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         let participant_guid = participant_handle.to_guid();
         let rtps_participant = self.get_rtps_participant()?;
         let proxy_datas = rtps_participant.remote_participant_proxy_datas();
@@ -2081,7 +2107,7 @@ impl DomainParticipant {
     }
 
     pub fn get_discovered_publications(&self) -> DdsResult<Vec<PublicationBuiltinTopicData>> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         let rtps_participant = self.get_rtps_participant()?;
         let remote_publications = rtps_participant.remote_publications();
         let mut result = Vec::new();
@@ -2092,7 +2118,7 @@ impl DomainParticipant {
     }
 
     pub fn get_discovered_subscriptions(&self) -> DdsResult<Vec<SubscriptionBuiltinTopicData>> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         let rtps_participant = self.get_rtps_participant()?;
         let remote_subscriptions = rtps_participant.remote_subscriptions();
         let mut result = Vec::new();
@@ -2108,7 +2134,7 @@ impl DomainParticipant {
             Among the Topics discovered in the domain,
             retrieves a list of Topics that the application has not specified to "ignore" through the ignore_topic operation.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         Err(DdsError::Unsupported)
     }
 
@@ -2125,12 +2151,12 @@ impl DomainParticipant {
             If the infrastructure does not maintain the information needed to fill topic_data, this operation may fail and return UNSUPPORTED.
             This operation may also fail if the infrastructure does not maintain connectivity information locally, in which case it returns UNSUPPORTED.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         Err(DdsError::Unsupported)
     }
 
     pub fn contains_entity(&self, handle: InstanceHandle) -> DdsResult<bool> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         match self.get_publishers_by_handle() {
             Ok(publishers_by_handle) => {
@@ -2180,7 +2206,7 @@ impl DomainParticipant {
     }
 
     pub fn get_current_time(&self) -> DdsResult<Time> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         let now_system_time = SystemTime::now();
         match now_system_time.duration_since(UNIX_EPOCH) {
@@ -2195,7 +2221,7 @@ impl DomainParticipant {
         &self,
         qos: impl Into<QosKind<PublisherQos>>,
     ) -> DdsResult<()> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         match qos.into() {
             QosKind::Default => self.reset_default_publisher_qos(),
@@ -2223,7 +2249,7 @@ impl DomainParticipant {
     }
 
     pub fn get_default_publisher_qos(&self) -> DdsResult<PublisherQos> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         Ok(self
             .default_publisher_qos
@@ -2243,7 +2269,7 @@ impl DomainParticipant {
     ///
     /// Returns an error if the participant is deleted or the profile is not found.
     pub fn get_publisher_qos_from_profile(&self, qos_path: &str) -> DdsResult<PublisherQos> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         DomainParticipantFactory::get_instance().get_publisher_qos_from_profile(qos_path)
     }
 
@@ -2251,7 +2277,7 @@ impl DomainParticipant {
         &self,
         qos: impl Into<QosKind<SubscriberQos>>,
     ) -> DdsResult<()> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         match qos.into() {
             QosKind::Default => self.reset_default_subscriber_qos(),
@@ -2279,7 +2305,7 @@ impl DomainParticipant {
     }
 
     pub fn get_default_subscriber_qos(&self) -> DdsResult<SubscriberQos> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         Ok(self
             .default_subscriber_qos
@@ -2299,12 +2325,12 @@ impl DomainParticipant {
     ///
     /// Returns an error if the participant is deleted or the profile is not found.
     pub fn get_subscriber_qos_from_profile(&self, qos_path: &str) -> DdsResult<SubscriberQos> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         DomainParticipantFactory::get_instance().get_subscriber_qos_from_profile(qos_path)
     }
 
     pub fn set_default_topic_qos(&self, qos: impl Into<QosKind<TopicQos>>) -> DdsResult<()> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         match qos.into() {
             QosKind::Default => self.reset_default_topic_qos(),
@@ -2332,7 +2358,7 @@ impl DomainParticipant {
     }
 
     pub fn get_default_topic_qos(&self) -> DdsResult<TopicQos> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         Ok(self
             .default_topic_qos
@@ -2352,12 +2378,12 @@ impl DomainParticipant {
     ///
     /// Returns an error if the participant is deleted or the profile is not found.
     pub fn get_topic_qos_from_profile(&self, qos_path: &str) -> DdsResult<TopicQos> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         DomainParticipantFactory::get_instance().get_topic_qos_from_profile(qos_path)
     }
 
     pub fn get_domain_id(&self) -> DdsResult<DomainId> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         Ok(self.domain_id)
     }
 
@@ -2367,7 +2393,7 @@ impl DomainParticipant {
         listener: Option<Arc<dyn DomainParticipantListener>>,
         mask: StatusMask,
     ) -> DdsResult<()> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         {
             match self.listener.write() {
@@ -2390,7 +2416,7 @@ impl DomainParticipant {
 
     // For Entity
     pub fn get_listener(&self) -> DdsResult<Option<Arc<dyn DomainParticipantListener>>> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         match self.listener.read() {
             Ok(guard) => Ok(guard.clone()),
@@ -2671,7 +2697,7 @@ impl DomainParticipant {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         // Same default-resolution chain as the typed create_topic: a caller that wants
         // the QoS profile applied passes TOPIC_QOS_DEFAULT. Passing a concrete TopicQos
@@ -3012,7 +3038,6 @@ impl DomainParticipant {
     }
 
     pub(crate) fn is_enabled(&self) -> DdsResult<()> {
-        self.is_deleted()?;
         if self.enabled.load(Ordering::SeqCst) {
             Ok(())
         } else {
@@ -3099,24 +3124,29 @@ impl DomainParticipant {
         // Clean up builtin entities to break self-reference cycles
         self.cleanup_builtin_entities();
 
-        let mut bridge_guard =
-            self.dcps_bridge.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        {
+            let mut bridge_guard =
+                self.dcps_bridge.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
-        if let Some(dcps_bridge) = bridge_guard.as_mut() {
-            dcps_bridge.disable().map_err(|rtps_err| {
-                // Handle sending handler related errors specifically
-                match rtps_err.code {
-                    RtpsErrorCode::LockError | RtpsErrorCode::ThreadJoinError => {
-                        DdsError::PreconditionNotMet
+            if let Some(dcps_bridge) = bridge_guard.as_mut() {
+                dcps_bridge.disable().map_err(|rtps_err| {
+                    // Handle sending handler related errors specifically
+                    match rtps_err.code {
+                        RtpsErrorCode::LockError | RtpsErrorCode::ThreadJoinError => {
+                            DdsError::PreconditionNotMet
+                        }
+                        _ => DdsError::Error("Failed to disable RTPS participant".to_string()), // Or other appropriate mapping
                     }
-                    _ => DdsError::Error("Failed to disable RTPS participant".to_string()), // Or other appropriate mapping
-                }
-            })?;
+                })?;
+            }
+
+            // Drops the bridge, closing its socket and turning later bridge lookups into errors.
+            *bridge_guard = None;
         }
 
-        *bridge_guard = None;
         self.self_ref = None;
-        self.deleted.store(true, Ordering::SeqCst);
+
+        self.lifecycle.mark_deleted_and_await_operation_completion();
         Ok(())
     }
 
@@ -3134,14 +3164,6 @@ impl DomainParticipant {
             for mut topic in builtin_topics.drain(..) {
                 topic.delete();
             }
-        }
-    }
-
-    fn is_deleted(&self) -> DdsResult<()> {
-        if self.deleted.load(Ordering::SeqCst) {
-            Err(DdsError::AlreadyDeleted)
-        } else {
-            Ok(())
         }
     }
 }
@@ -3391,6 +3413,45 @@ mod domain_participant_tests {
     pub struct TestData {
         #[dds(key)]
         id: u32,
+    }
+
+    // find_topic must not hold the participant's lifecycle open across its wait. If it did, a
+    // concurrent delete could never drain and the topic that ends the wait could never be created.
+    #[test]
+    fn find_topic_does_not_hold_the_participant_open_against_a_delete() {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        // A name nothing creates, so every probe misses and the wait runs its full course.
+        let searcher_participant = participant.clone();
+        let searcher = thread::spawn(move || {
+            searcher_participant.find_topic("NeverCreatedTopic", Duration::from_seconds(10))
+        });
+
+        // Let the searcher reach its poll loop.
+        thread::sleep(StdDuration::from_millis(100));
+
+        participant.delete_contained_entities().unwrap();
+
+        let start = Instant::now();
+        factory.delete_participant(participant).unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < StdDuration::from_secs(5),
+            "delete waited {elapsed:?} for find_topic to release the participant"
+        );
+        assert!(
+            matches!(searcher.join().unwrap(), Err(DdsError::AlreadyDeleted)),
+            "find_topic did not observe the deletion"
+        );
     }
 
     #[test]

@@ -64,7 +64,7 @@ use crate::{
         domain_entity::DomainEntity,
         entity::{
             impl_check_parent_enabled, impl_dds_entity, impl_dds_entity_impl, BaseEntity,
-            EnableChild, Entity, EntityInternal, UpdateStatus,
+            EnableChild, Entity, EntityInternal, EntityLifecycle, UpdateStatus,
         },
         history_cache::HistoryCache as DcpsHistoryCache,
         qos_policy::Qos,
@@ -146,7 +146,7 @@ pub(crate) trait DataReaderInternal: DataReaderBase {
     fn notify_data_available(&self);
     fn get_type_id(&self) -> TypeId;
     fn delete(&self);
-    fn is_deleted(&self) -> DdsResult<()>;
+    fn mark_deleted_and_await_operation_completion(&self);
     fn is_builtin(&self) -> bool;
     fn get_topic(&self) -> DdsResult<Topic>;
     fn get_readconditions(&self) -> DdsResult<Vec<Arc<dyn ReadConditionTrait + Send + Sync>>>;
@@ -179,7 +179,7 @@ pub struct DataReader<Foo> {
     read_conditions: Arc<Mutex<Vec<Arc<dyn ReadConditionTrait + Send + Sync>>>>,
     pub(crate) self_ref: Arc<Mutex<Option<Arc<DataReader<Foo>>>>>,
     enabled: Arc<AtomicBool>,
-    deleted: Arc<AtomicBool>,
+    lifecycle: Arc<EntityLifecycle>,
     instance_infos: Arc<Mutex<HashMap<InstanceHandle, InstanceInfo>>>,
     read_samples: Arc<Mutex<HashMap<Guid, BTreeSet<SequenceNumber>>>>,
     topic: Option<Weak<Topic>>,
@@ -215,7 +215,7 @@ impl<Foo> Debug for DataReader<Foo> {
             .field("status_condition", &self.status_condition.lock().unwrap())
             .field("self_ref", &self.self_ref.lock().unwrap().as_ref().map(|_| "Arc<DataReader>"))
             .field("enabled", &self.enabled.load(std::sync::atomic::Ordering::Acquire))
-            .field("deleted", &self.deleted.load(std::sync::atomic::Ordering::Acquire))
+            .field("deleted", &self.lifecycle.is_deleted())
             .field("topic", &self.topic.as_ref().map(|_| "Weak<Topic>"))
             .field("type_support", &"Arc<dyn TypeSupport>")
             .field("publisher", &self.subscriber.as_ref().map(|_| "Weak<Subscriber>"))
@@ -255,7 +255,7 @@ impl<Foo: 'static + Clone + Debug> Clone for DataReader<Foo> {
             read_conditions: self.read_conditions.clone(),
             self_ref: self.self_ref.clone(),
             enabled: self.enabled.clone(),
-            deleted: self.deleted.clone(),
+            lifecycle: self.lifecycle.clone(),
             instance_infos: self.instance_infos.clone(),
             read_samples: self.read_samples.clone(),
             topic: self.topic.clone(),
@@ -300,7 +300,7 @@ impl<Foo> Drop for DataReader<Foo> {
             return; // Never fully initialized
         }
 
-        if !self.deleted.load(Ordering::SeqCst) {
+        if !self.lifecycle.is_deleted() {
             if let Some(ref subscriber_weak) = self.subscriber {
                 if let Some(subscriber) = subscriber_weak.upgrade() {
                     if let Some(ref topic_weak) = self.topic {
@@ -652,6 +652,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     pub fn get_key_value(&self, handle: InstanceHandle) -> DdsResult<Foo> {
         // in: key_holder: <Foo>, handle: InstanceHandle
         // out: DdsError_t, key_holder: <Foo>
+        let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
 
         if handle.is_nil() {
@@ -684,6 +685,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     /// (which cannot deserialize/re-serialize a key) it returns the stored instance
     /// handle bytes, which still round-trip through `lookup_instance_serialized`.
     pub fn get_key_value_serialized(&self, handle: InstanceHandle) -> DdsResult<Arc<[u8]>> {
+        let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
 
         if handle.is_nil() {
@@ -761,7 +763,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
             If the instance has not been previously registered, or for any other reason the service
             cannot provide an instance handle, this operation returns the special value HANDLE_NIL.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         let handle = self.type_support.compute_key(instance as &dyn Any);
 
         {
@@ -783,7 +785,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     /// on the stored key bytes — as returned by [`get_key_value_serialized`](Self::get_key_value_serialized).
     /// Returns `InstanceHandle::NIL` if the instance is not known to this reader.
     pub fn lookup_instance_serialized(&self, key: &[u8]) -> DdsResult<InstanceHandle> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         if key.is_empty() {
             return Ok(InstanceHandle::NIL);
@@ -806,7 +808,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         listener: Option<Arc<dyn DataReaderListener<Foo = Foo>>>,
         mask: StatusMask,
     ) -> DdsResult<()> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         {
             match self.listener.write() {
                 Ok(mut guard) => {
@@ -828,7 +830,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
     // For Entity
     pub fn get_listener(&self) -> DdsResult<Option<Arc<dyn DataReaderListener<Foo = Foo>>>> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         match self.listener.read() {
             Ok(guard) => Ok(guard.clone()),
             Err(e) => Err(DdsError::Error(e.to_string())),
@@ -949,7 +951,6 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     }
 
     pub(crate) fn is_enabled(&self) -> DdsResult<()> {
-        self.is_deleted()?;
         if self.enabled.load(Ordering::SeqCst) {
             {
                 let _ = self.get_rtps_reader()?;
@@ -1628,14 +1629,13 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
     /// Upgraded parent handle without the deep clone [`DataReaderBase::get_subscriber`] performs.
     ///
-    /// Same failure modes and messages -- `AlreadyDeleted` when this reader is deleted, `Error`
-    /// when the parent `Weak` has expired -- but two atomic read-modify-writes instead of ~28.
-    /// Needs no drop guard, unlike the participant equivalent: the value inside the `Arc` has
-    /// `self_ref: None`, so `Drop for Subscriber` early-returns either way.
+    /// Same failure mode and message -- `Error` when the parent `Weak` has expired -- but two
+    /// atomic read-modify-writes instead of ~28. Needs no drop guard, unlike the participant
+    /// equivalent: the value inside the `Arc` has `self_ref: None`, so `Drop for Subscriber`
+    /// early-returns either way.
     ///
     /// Only for internal call sites that never read `Subscriber::self_ref`.
     pub(crate) fn subscriber_arc(&self) -> DdsResult<Arc<Subscriber>> {
-        self.is_deleted()?;
         self.subscriber.as_ref().and_then(|weak_ref| weak_ref.upgrade()).ok_or_else(|| {
             DdsError::Error("Subscriber reference is invalid or expired".to_string())
         })
@@ -2164,7 +2164,7 @@ impl<Foo: DdsType> DataReader<Foo> {
             subscriber: Some(Arc::downgrade(subscriber)),
             rtps_reader: Arc::new(Mutex::new(rtps_reader.map(|r| Arc::downgrade(&r)))),
             enabled: Arc::new(AtomicBool::new(false)),
-            deleted: Arc::new(AtomicBool::new(false)),
+            lifecycle: Arc::new(EntityLifecycle::default()),
             liveliness_changed_status: Arc::new(Mutex::new(LivelinessChangedStatus::default())),
             sample_rejected_status: Arc::new(Mutex::new(SampleRejectedStatus::default())),
             sample_lost_status: Arc::new(Mutex::new(SampleLostStatus::default())),
@@ -2241,7 +2241,7 @@ impl<Foo: DdsType> DataReader<Foo> {
             If the ReadCondition is not attached to this DataReader, this operation returns error code PRECONDITION_NOT_MET.
             Error codes that can be returned in addition to the standard error codes: PRECONDITION_NOT_MET.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         let condition_trait: Arc<dyn ReadConditionTrait + Send + Sync> = condition.into();
         self.owns_read_condition(&condition_trait)?;
         {
@@ -2811,6 +2811,7 @@ impl<Foo: DdsType> DataReader<Foo> {
         max_bytes: Option<usize>,
         instance_handle: Option<InstanceHandle>,
     ) -> DdsResult<(Vec<(Bytes, SampleInfo)>, Option<usize>)> {
+        let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
 
         if max_samples == 0 {
@@ -2969,6 +2970,7 @@ impl<Foo: DdsType> DataReader<Foo> {
         );
         log::debug!("condition: {:?}", condition.is_some());
 
+        let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
 
         if max_samples == 0 {
@@ -3533,7 +3535,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderBase for DataReader<Foo> {
             This operation provides access to the LIVELINESS_CHANGED communication status.
             Communication status is described in Section 2.2.4.1, Communication Status.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         self.set_communication_status_propagation(&StatusKind::LIVELINESS_CHANGED, false)?;
         self.take_liveliness_changed_status()
@@ -3545,7 +3547,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderBase for DataReader<Foo> {
             This operation provides access to the SAMPLE_REJECTED communication status.
             Communication status is described in Section 2.2.4.1, Communication Status.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         self.set_communication_status_propagation(&StatusKind::SAMPLE_REJECTED, false)?;
         self.take_sample_rejected_status()
@@ -3557,7 +3559,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderBase for DataReader<Foo> {
             This operation provides access to the REQUESTED_DEADLINE_MISSED communication status.
             Communication status is described in Section 2.2.4.1, Communication Status.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         self.set_communication_status_propagation(&StatusKind::REQUESTED_DEADLINE_MISSED, false)?;
         self.take_requested_deadline_missed_status()
@@ -3569,7 +3571,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderBase for DataReader<Foo> {
             This operation provides access to the REQUESTED_INCOMPATIBLE_QOS communication status.
             Communication status is described in Section 2.2.4.1, Communication Status.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         self.set_communication_status_propagation(&StatusKind::REQUESTED_INCOMPATIBLE_QOS, false)?;
         self.take_requested_incompatible_qos_status()
@@ -3581,7 +3583,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderBase for DataReader<Foo> {
             This operation provides access to the REQUESTED_INCOMPATIBLE_TYPE communication status.
             Communication status is described in Section 2.2.4.1, Communication Status.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         self.set_communication_status_propagation(&StatusKind::REQUESTED_INCOMPATIBLE_TYPE, false)?;
         self.take_requested_incompatible_type_status()
@@ -3593,7 +3595,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderBase for DataReader<Foo> {
             This operation provides access to the SUBSCRIPTION_MATCHED communication status.
             Communication status is described in Section 2.2.4.1, Communication Status.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         self.set_communication_status_propagation(&StatusKind::SUBSCRIPTION_MATCHED, false)?;
         self.take_subscription_matched_status()
@@ -3605,7 +3607,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderBase for DataReader<Foo> {
             This operation provides access to the SAMPLE_LOST communication status.
             Communication status is described in Section 2.2.4.1, Communication Status.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         self.set_communication_status_propagation(&StatusKind::SAMPLE_LOST, false)?;
         self.take_sample_lost_status()
@@ -3624,6 +3626,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderBase for DataReader<Foo> {
             Additionally, this operation may fail and return UNSUPPORTED if the infrastructure does not hold
             the information needed to fill in the publication_data.
         */
+        let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
         let matched_writers_guids;
         {
@@ -3653,6 +3656,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderBase for DataReader<Foo> {
             the "DCPSPublications" builtin topic.
             This operation may fail if the infrastructure does not maintain association information locally.
         */
+        let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
         let writer_guid = publication_handle.to_guid();
         {
@@ -3675,7 +3679,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderBase for DataReader<Foo> {
             The returned ReadCondition is attached to and belongs to this DataReader.
             On failure, this operation returns a platform-defined 'nil' value.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         let self_ref = self.self_ref.lock().map_err(|e| DdsError::Error(e.to_string()))?;
         let self_ref = self_ref
             .as_ref()
@@ -3706,7 +3710,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderBase for DataReader<Foo> {
             The syntax for the query_expression and query_parameters parameters is described in Annex B.
             On failure, this operation returns a platform-defined 'nil' value.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         let self_ref = self.self_ref.lock().map_err(|e| DdsError::Error(e.to_string()))?;
         let self_ref = self_ref
             .as_ref()
@@ -3747,12 +3751,12 @@ impl<Foo: 'static + Clone + Debug> DataReaderBase for DataReader<Foo> {
         // if self.get_qos()?.durability.kind == DurabilityQosPolicyKind::Volatile {
 
         // }
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         Err(DdsError::Unsupported)
     }
 
     fn get_topicdescription(&self) -> DdsResult<Arc<dyn TopicDescription>> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         if let Some(weak_cft) = &self.content_filtered_topic {
             return Ok(weak_cft
@@ -3772,7 +3776,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderBase for DataReader<Foo> {
     }
 
     fn get_subscriber(&self) -> DdsResult<Subscriber> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         if let Some(weak_ref) = self.subscriber.as_ref() {
             // Attempt to upgrade Weak<T> to Arc<T>
             if let Some(subscriber_arc) = weak_ref.upgrade() {
@@ -3791,7 +3795,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderBase for DataReader<Foo> {
             Once delete_contained_entities returns successfully, the application knows that this DataReader
             no longer has any contained ReadCondition and QueryCondition objects, and the DataReader can be safely deleted.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         match self.get_readconditions() {
             Ok(conditions) => {
                 for condition in conditions {
@@ -3842,15 +3846,11 @@ impl<Foo: 'static + Clone + Debug> DataReaderInternal for DataReader<Foo> {
         let value_to_drop = self.self_ref.lock().ok().and_then(|mut guard| guard.take());
         drop(value_to_drop);
 
-        self.deleted.store(true, Ordering::SeqCst);
+        self.lifecycle.mark_deleted_and_await_operation_completion();
     }
 
-    fn is_deleted(&self) -> DdsResult<()> {
-        if self.deleted.load(Ordering::SeqCst) {
-            Err(DdsError::AlreadyDeleted)
-        } else {
-            Ok(())
-        }
+    fn mark_deleted_and_await_operation_completion(&self) {
+        self.lifecycle.mark_deleted_and_await_operation_completion();
     }
 
     fn is_builtin(&self) -> bool {
@@ -3906,7 +3906,6 @@ impl<Foo: 'static + Clone + Debug> DataReaderInternal for DataReader<Foo> {
             If the ReadCondition is not attached to this DataReader, this operation returns error code PRECONDITION_NOT_MET.
             Error codes that can be returned in addition to the standard error codes: PRECONDITION_NOT_MET.
         */
-        self.is_deleted()?;
         self.owns_read_condition(&condition)?;
         {
             let mut conditions =

@@ -95,6 +95,11 @@ impl ReaderStore {
     pub(crate) fn iter_all(&self) -> Vec<Arc<dyn Reader + Send + Sync>> {
         self.by_id.iter().map(|r| r.value().clone()).collect()
     }
+
+    // Snapshot of every reader's EntityId in the store
+    pub(crate) fn all_entity_ids(&self) -> Vec<EntityId> {
+        self.by_id.iter().map(|r| *r.key()).collect()
+    }
 }
 
 #[cfg(test)]
