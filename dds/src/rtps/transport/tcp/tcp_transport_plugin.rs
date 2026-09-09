@@ -488,9 +488,7 @@ impl TcpTransportPlugin {
     /// one locator per NIC, and skipping the ones not named is expected rather
     /// than a fault.
     fn report_unreachable_peer(&self, addr: &SocketAddr) {
-        let host_is_configured =
-            self.dial_allowed_hosts.contains(&addr.ip()) || is_same_host(*addr);
-        if !host_is_configured && !is_same_host(*addr) {
+        if !self.dial_allowed_hosts.contains(&addr.ip()) && !is_same_host(*addr) {
             return;
         }
         let first_report = match self.reported_unreachable.lock() {
