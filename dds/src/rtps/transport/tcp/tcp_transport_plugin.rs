@@ -140,7 +140,7 @@ impl TcpTransportPlugin {
         }
 
         let dial_allowed = Self::allowed_dial_addresses(&peers);
-        let dial_allowed_hosts: HashSet<IpAddr> = peers.iter().map(|peer| peer.ip).collect();
+        let dial_allowed_hosts = Self::allowed_dial_hosts(&peers);
         let announce_targets = Mutex::new(AnnounceTargets::new(
             Self::candidates(domain_id, &peers, tcp_config.peer_search_slots),
             Some(PEER_PRUNE_DELAY),
@@ -345,37 +345,44 @@ impl TcpTransportPlugin {
             .collect()
     }
 
+    /// The loopback address a peer on this host is reached under, and `None` for
+    /// a peer anywhere else.
+    fn loopback_form(ip: IpAddr) -> Option<IpAddr> {
+        if !is_same_host(SocketAddr::new(ip, 0)) {
+            return None;
+        }
+        Some(match ip {
+            IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        })
+    }
+
     /// Every address an outbound dial is permitted to reach: the configured
     /// peers, plus the loopback address discovery substitutes for the ones that
     /// live on this host.
-    ///
-    /// A same-host peer's advertised locators are rewritten to loopback before
-    /// anything is sent to them, so a peer named by its LAN address is reached
-    /// under an address that never appears in the configuration. Without the
-    /// substituted form the gate rejects it, and the peer is discovered over
-    /// SPDP and then never spoken to again.
     fn allowed_dial_addresses(initial_peers: &[PeerSpec]) -> Vec<SocketAddr> {
         let mut allowed = Vec::new();
         for peer in initial_peers {
             let Some(port) = peer.port else {
                 continue;
             };
-            let declared = SocketAddr::new(peer.ip, port);
-            if !allowed.contains(&declared) {
-                allowed.push(declared);
-            }
-            if !is_same_host(declared) {
-                continue;
-            }
-            let loopback = match peer.ip {
-                IpAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
-                IpAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port),
-            };
-            if !allowed.contains(&loopback) {
-                allowed.push(loopback);
+            let forms = std::iter::once(peer.ip).chain(Self::loopback_form(peer.ip));
+            for addr in forms.map(|ip| SocketAddr::new(ip, port)) {
+                if !allowed.contains(&addr) {
+                    allowed.push(addr);
+                }
             }
         }
         allowed
+    }
+
+    /// Every host an outbound dial is permitted to reach: the configured hosts,
+    /// plus the loopback address that stands for the ones living on this host.
+    fn allowed_dial_hosts(initial_peers: &[PeerSpec]) -> HashSet<IpAddr> {
+        initial_peers
+            .iter()
+            .flat_map(|peer| std::iter::once(peer.ip).chain(Self::loopback_form(peer.ip)))
+            .collect()
     }
 
     /// Settle the configured list into the peers this participant announces to.
@@ -893,6 +900,42 @@ mod tests {
 
         let slot = PortManager::get_tcp_physical_port(DOMAIN, 5);
         assert!(plugin.should_dial(&format!("127.0.0.1:{slot}").parse().unwrap()));
+        assert!(
+            !plugin.should_dial(&format!("203.0.113.7:{slot}").parse().unwrap()),
+            "a host nobody named stays out"
+        );
+
+        plugin.close();
+    }
+
+    /// A host given the wildcard carries no port, so the gate has to admit it by
+    /// host alone — including under the loopback address its locators are
+    /// rewritten to once the peer turns out to live here.
+    #[test]
+    fn a_same_host_peer_named_by_the_wildcard_is_dialable_at_its_loopback_form() {
+        const DOMAIN: u32 = 9;
+        let own_ip: IpAddr = "127.0.0.2".parse().unwrap();
+        let cfg = TcpConfig {
+            bind_port: Some(0),
+            initial_peers: vec![PeerSpec::searched(own_ip)],
+            ..TcpConfig::default()
+        };
+        let plugin = TcpTransportPlugin::new(
+            DOMAIN,
+            0,
+            "127.0.0.1".to_string(),
+            vec!["127.0.0.1".to_string()],
+            [0u8; 12],
+            cfg,
+        )
+        .expect("plugin creation");
+
+        let slot = PortManager::get_tcp_physical_port(DOMAIN, 5);
+        assert!(plugin.should_dial(&SocketAddr::new(own_ip, slot)), "the declared form");
+        assert!(
+            plugin.should_dial(&format!("127.0.0.1:{slot}").parse().unwrap()),
+            "the loopback form discovery substitutes for it"
+        );
         assert!(
             !plugin.should_dial(&format!("203.0.113.7:{slot}").parse().unwrap()),
             "a host nobody named stays out"
