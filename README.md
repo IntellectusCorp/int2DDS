@@ -33,8 +33,8 @@ Add int2DDS to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-int2dds = "0.1.4"
-int2dds-derive = "0.1.4"
+int2dds = "0.1.5"
+int2dds-derive = "0.1.5"
 ```
 
 ### Basic Example

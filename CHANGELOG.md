@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-09-10
+
+Entity deletion no longer races with in-flight operations, and the TCP transport
+gets a peer list that settles on the peers that actually answer.
+
+### Added
+
+- The TCP peer search width can be set through the environment, both for an
+  explicit peer list and for a wildcard (`ip:0`) entry
+- A TCP peer list that narrows from what was declared to what answers, with a
+  peer that is gone leaving the announcement list
+
+### Fixed
+
+- Deleting an entity now waits for its in-flight operations instead of racing
+  them: callbacks are drained, readers and writers are unregistered before being
+  marked deleted, and public operations are gated on the lifecycle
+- Deleting a Publisher, Subscriber, Topic or DomainParticipant from inside a
+  listener is refused rather than deadlocking
+- A WaitSet waiter is woken when its condition's entity is deleted, and a reader
+  with an outstanding ReadCondition is not deleted underneath it
+- Each TCP Participant takes its own listen port within its domain block, so two
+  Participants on one host no longer collide
+- A same-host peer is accepted at the loopback address discovery substitutes for
+  it, and the dial gate opens for a same-host peer named by the wildcard
+
 ## [0.1.4] - 2026-09-04
 
 Same-host communication now settles on a single loopback address, plus a
@@ -333,7 +359,8 @@ repository were migrated together.
 - Unused C code-generation output in `idl` and unused declarations in the
   `hello_world` FFI example header.
 
-[unreleased]: https://github.com/IntellectusCorp/int2DDS/compare/v0.1.4...HEAD
+[unreleased]: https://github.com/IntellectusCorp/int2DDS/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/IntellectusCorp/int2DDS/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/IntellectusCorp/int2DDS/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/IntellectusCorp/int2DDS/compare/v0.1.1...v0.1.3
 [0.1.1]: https://github.com/IntellectusCorp/int2DDS/releases/tag/v0.1.1
