@@ -7,6 +7,7 @@ use log::{info, warn};
 
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::transport::shm::config::ShmConfig;
+use crate::rtps::transport::shm::fallback::FallbackCounters;
 use crate::rtps::transport::shm::participant_slot::{ParticipantSlot, HEARTBEAT_PERIOD};
 use crate::rtps::transport::shm::peer_map::PeerMap;
 use crate::rtps::transport::shm::registry::Registry;
@@ -20,9 +21,13 @@ pub(crate) struct ShmRuntime {
     // peer racing to attach during that window only sees a benign attach
     // failure -> UDP fallback, never a claim on our slot racing our own
     // unlink. Same pattern as `segment.rs`'s `_shm` field.
-    own: OwnedSegment,
+    // `Arc` because a writer-side `ShmSlotHandle` holds a clone: a handle
+    // outliving this `ShmRuntime` defers the segment's actual drop (and thus
+    // the unlink) until it too is gone, same as `_shm`'s own `Arc` clones.
+    own: Arc<OwnedSegment>,
     slot: ParticipantSlot,
     peers: PeerMap,
+    fallbacks: FallbackCounters,
 }
 
 impl ShmRuntime {
@@ -68,7 +73,12 @@ impl ShmRuntime {
 
         let peers = PeerMap::new(domain, slot.slot());
         info!("[shm] runtime started on domain {domain} slot {}", slot.slot());
-        let runtime = Arc::new(ShmRuntime { own, slot, peers });
+        let runtime = Arc::new(ShmRuntime {
+            own: Arc::new(own),
+            slot,
+            peers,
+            fallbacks: FallbackCounters::default(),
+        });
 
         // Reclaim peers that died without unmatching. Holds a Weak so it never
         // keeps the runtime alive on its own, and exits on the first tick
@@ -96,8 +106,24 @@ impl ShmRuntime {
         &self.own
     }
 
+    /// A clone of the segment handle, for building a writer-side
+    /// `ShmSlotHandle`, which must own one.
+    pub(crate) fn own_arc(&self) -> Arc<OwnedSegment> {
+        Arc::clone(&self.own)
+    }
+
     pub(crate) fn peers(&self) -> &PeerMap {
         &self.peers
+    }
+
+    /// Spec §7 rule 1: is `prefix` a participant we can reach through SHM?
+    /// Never ourselves -- see `PeerMap::find_peer` for why self is not a peer.
+    pub(crate) fn peer_is_registered(&self, prefix: &GuidPrefix) -> bool {
+        self.peers.find_peer(self.registry(), prefix).is_some()
+    }
+
+    pub(crate) fn fallbacks(&self) -> &FallbackCounters {
+        &self.fallbacks
     }
 
     pub(crate) fn registry(&self) -> &Registry {

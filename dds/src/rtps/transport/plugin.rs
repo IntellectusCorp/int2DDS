@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::locator::Locator;
+use crate::rtps::transport::shm::runtime::ShmRuntime;
 use crate::rtps::transport::shm::shm_listener::ShmListener;
 use crate::rtps::transport::tcp::connection_registry::ConnectionRegistry;
 use crate::rtps::transport::tcp::tcp_listener::TcpListener;
@@ -83,6 +84,22 @@ pub(crate) trait TransportPlugin: Send + Sync {
     /// The caller expresses *what* to do (announce, discovery, user data).
     /// The implementation decides *how* (multicast, framed TCP, SHM write, etc.).
     fn send(&self, data: &[u8], target: &SendTarget) -> io::Result<()>;
+
+    /// Deliver user data to one peer over the zero-copy ring. `Unsupported`
+    /// when this transport has no such path, which is every transport but SHM
+    /// and SHM without a runtime -- the caller then falls back to `send`.
+    ///
+    /// `SendTarget::UserData` carries a locator alone, and a locator does not
+    /// name the participant whose ring to push into; that is why this takes
+    /// the destination prefix instead of being another `SendTarget` variant.
+    fn send_to_peer(
+        &self,
+        _data: &[u8],
+        _locator: &Locator,
+        _dst_prefix: GuidPrefix,
+    ) -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "no zero-copy ring"))
+    }
 
     /// True iff this plugin can route to `locator`.
     ///
@@ -168,6 +185,13 @@ pub(crate) trait TransportPlugin: Send + Sync {
     /// GUID prefix release them here; `disconnect_peer` covers the ones keyed
     /// by locator.
     fn peer_lost(&self, _prefix: GuidPrefix) {}
+
+    /// The zero-copy runtime, when this transport brought one up. `None` for
+    /// every transport that has none, and for SHM when spec §7 rule 3 or 7
+    /// kept it from starting.
+    fn shm_runtime(&self) -> Option<std::sync::Arc<ShmRuntime>> {
+        None
+    }
 }
 
 /// Factory for creating transport plugin instances.

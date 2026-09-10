@@ -313,24 +313,6 @@ impl RingBufferWriter {
 
         Ok(data.len())
     }
-
-    /// Get current reserve position (for diagnostics)
-    pub fn reserve_position(&self) -> u64 {
-        let header = unsafe { &*self.header };
-        header.reserve_pos.load(Ordering::Acquire)
-    }
-
-    /// Get current commit position (for diagnostics)
-    pub fn commit_position(&self) -> u64 {
-        let header = unsafe { &*self.header };
-        header.commit_pos.load(Ordering::Acquire)
-    }
-
-    /// Get current global sequence number (for diagnostics)
-    pub fn sequence(&self) -> u64 {
-        let header = unsafe { &*self.header };
-        header.sequence.load(Ordering::Acquire)
-    }
 }
 
 /// Ring buffer reader (used by receiver in MPMC pattern)
@@ -481,25 +463,6 @@ impl RingBufferReader {
         self.local_read_pos = read_pos + total_size as u64;
 
         Ok(Some((data_len, lost)))
-    }
-
-    /// Check if there are committed messages available to read
-    pub fn has_data(&self) -> bool {
-        let header = unsafe { &*self.header };
-        let commit_pos = header.commit_pos.load(Ordering::Acquire);
-        commit_pos != self.local_read_pos
-    }
-
-    /// Get the number of committed bytes available for reading
-    pub fn available_data(&self) -> usize {
-        let header = unsafe { &*self.header };
-        let commit_pos = header.commit_pos.load(Ordering::Acquire);
-        commit_pos.saturating_sub(self.local_read_pos) as usize
-    }
-
-    /// Get current local read position (for diagnostics)
-    pub fn read_position(&self) -> u64 {
-        self.local_read_pos
     }
 }
 

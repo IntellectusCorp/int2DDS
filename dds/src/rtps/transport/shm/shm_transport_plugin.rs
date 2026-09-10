@@ -11,6 +11,7 @@ use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::locator::Locator;
 use crate::rtps::transport::plugin::{MessageSource, SendTarget, TransportPlugin};
 use crate::rtps::transport::port_manager::PortManager;
+use crate::rtps::transport::shm::ring::{RingError, SPILL_NONE};
 use crate::rtps::transport::shm::runtime::ShmRuntime;
 use crate::rtps::transport::shm::shm_listener::ShmListener;
 use crate::rtps::transport::shm::shm_sender::ShmSender;
@@ -237,6 +238,43 @@ impl TransportPlugin for ShmTransportPlugin {
         }
     }
 
+    /// Spec §7 rules 8 and 9. The legacy SHM branch of `send` stays as it is:
+    /// SEDP and SPDP still travel on it.
+    ///
+    /// Reports why it failed through `ErrorKind` and counts nothing: one sample
+    /// may be offered here once per SHM locator the destination advertises, so
+    /// only the caller -- which knows when every one of them has refused -- can
+    /// tell a fallback from a retry. `NotFound` is rule 9 (the peer left the
+    /// registry), `WouldBlock` rule 8 (the ring refused the push), and
+    /// `Unsupported` neither: it means this transport has no zero-copy path.
+    fn send_to_peer(
+        &self,
+        data: &[u8],
+        locator: &Locator,
+        dst_prefix: GuidPrefix,
+    ) -> io::Result<()> {
+        if !locator.is_shm() || !shm_locator_is_local(locator, &self.host_ip_addrs) {
+            return Err(io::Error::new(io::ErrorKind::Unsupported, "not a local shm locator"));
+        }
+        let Some(rt) = &self.runtime else {
+            return Err(io::Error::new(io::ErrorKind::Unsupported, "no zero-copy runtime"));
+        };
+        let Some(peer) = rt.peers().resolve(rt.own(), rt.registry(), dst_prefix) else {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "peer gone"));
+        };
+        // Spec §7: a first `Preempted` is not a fallback reason.
+        // `recover_if_wedged` freed the cell this producer had claimed, so the
+        // payload was never published and one more try on the same ring
+        // publishes it. A second one is rule 8: reaching recovery twice needs
+        // the ring to fill another lap, which is not contention but a ring that
+        // is effectively unusable.
+        let mut pushed = peer.push_and_signal(data, SPILL_NONE);
+        if pushed == Err(RingError::Preempted) {
+            pushed = peer.push_and_signal(data, SPILL_NONE);
+        }
+        pushed.map_err(|e| io::Error::new(io::ErrorKind::WouldBlock, format!("{e:?}")))
+    }
+
     fn can_handle(&self, locator: &Locator) -> bool {
         if locator.is_shm() {
             // Independent of the zero-copy runtime: the legacy SHM path works
@@ -328,11 +366,79 @@ impl TransportPlugin for ShmTransportPlugin {
             rt.peer_lost(prefix);
         }
     }
+
+    fn shm_runtime(&self) -> Option<Arc<ShmRuntime>> {
+        self.runtime.clone()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rtps::transport::shm::config::{DEFAULT_CLASSES, DEFAULT_RING_ENTRIES};
+    use crate::rtps::transport::shm::notify::notify_supported;
+    use crate::rtps::transport::shm::participant_slot::now_tick;
+    use crate::rtps::transport::shm::registry_segment::unlink_registry;
+    use crate::rtps::transport::shm::ring::RING_INLINE;
+    use crate::rtps::transport::shm::segment::{unlink_segment, OwnedSegment};
+
+    /// Unused elsewhere in `shm/`, and low enough that the UDP ports the
+    /// plugin binds stay inside `u16`.
+    const DOMAIN: u32 = 229;
+
+    #[test]
+    fn send_to_peer_lands_in_the_peers_ring() {
+        // `OwnedSegment::create` needs a notifier, so there is nothing to
+        // exercise where notification is unsupported.
+        if !notify_supported() {
+            return;
+        }
+        const OWN_PREFIX: GuidPrefix = [76; 12];
+        const PEER_PREFIX: GuidPrefix = [77; 12];
+
+        unlink_registry(DOMAIN);
+        let plugin = ShmTransportPlugin::new(
+            DOMAIN,
+            0,
+            "127.0.0.1".to_string(),
+            "127.0.0.1".to_string(),
+            vec!["127.0.0.1".to_string()],
+            OWN_PREFIX,
+            UdpConfig { multicast_ttl: 1 },
+        )
+        .unwrap();
+        let rt = plugin.shm_runtime().expect("the zero-copy runtime must be up");
+        let own_slot = rt.slot();
+
+        // Stand the peer up by hand, the way `runtime.rs`'s tests do.
+        let (peer_slot, peer_epoch) =
+            rt.registry().claim(std::process::id(), PEER_PREFIX, now_tick()).unwrap();
+        assert_ne!(peer_slot, own_slot, "the peer must not land on our own slot");
+        unlink_segment(DOMAIN, peer_slot);
+        let peer = OwnedSegment::create(
+            DOMAIN,
+            peer_slot,
+            peer_epoch,
+            &DEFAULT_CLASSES,
+            DEFAULT_RING_ENTRIES,
+        )
+        .unwrap();
+
+        let locator = Locator::from_shm(&Ipv4Addr::new(127, 0, 0, 1), 7410);
+        plugin.send_to_peer(b"descriptor", &locator, PEER_PREFIX).unwrap();
+
+        let mut out = [0u8; RING_INLINE];
+        let (len, _) = peer.ring_mut().pop(&mut out).expect("the peer's ring must carry it");
+        assert_eq!(&out[..len as usize], b"descriptor");
+
+        plugin.close();
+        drop(peer);
+        drop(rt);
+        drop(plugin);
+        unlink_registry(DOMAIN);
+        unlink_segment(DOMAIN, own_slot);
+        unlink_segment(DOMAIN, peer_slot);
+    }
 
     #[test]
     fn shm_locator_is_local_accepts_our_own_ip_and_rejects_others() {

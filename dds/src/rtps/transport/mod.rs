@@ -21,6 +21,7 @@
 //! - [`tcp`] - TCP transport implementation
 //! - [`udp`] - UDP transport implementation
 //! - [`shm`] - Shared memory transport implementation
+//! - [`shm_write_policy`] - Spec §7's write()-time judgment over that substrate
 //!
 //! ## Key Traits
 //!
@@ -35,6 +36,7 @@ pub(crate) mod hybrid_transport_plugin;
 pub(crate) mod plugin;
 pub(crate) mod port_manager;
 pub(crate) mod shm;
+pub(crate) mod shm_write_policy;
 pub(crate) mod socket;
 pub(crate) mod tcp;
 pub(crate) mod tokens;

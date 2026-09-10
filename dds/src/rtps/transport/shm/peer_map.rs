@@ -54,9 +54,22 @@ impl PeerMap {
         debug!("[shm] cleared {cleared} slot refs for peer slot {slot}");
     }
 
+    /// The registry entry of a peer, which is never ourselves.
+    ///
+    /// `SlotMeta.refs` is a per-participant bitmap indexed by registry slot, so
+    /// our own segment holds no bit that could tell a reader's claim apart from
+    /// the writer's own: an eviction's `release_own` would clear a live reader's
+    /// claim and the pool would hand the slot out again underneath it. Self is
+    /// therefore not a peer, at either end of the path -- this is what spec §7
+    /// rule 1 asks about a matched reader, and what `resolve` asks about a
+    /// descriptor's origin.
+    pub(crate) fn find_peer(&self, registry: &Registry, prefix: &[u8; 12]) -> Option<(u32, u64)> {
+        registry.find_active(prefix).filter(|(slot, _)| *slot != self.my_slot)
+    }
+
     /// The peer's segment, attaching on first use. `None` when the participant
-    /// is not in the registry or its segment cannot be mapped -- the caller
-    /// falls back to UDP.
+    /// is not in the registry, is ourselves, or its segment cannot be mapped --
+    /// the caller falls back to UDP.
     pub(crate) fn resolve(
         &self,
         own: &OwnedSegment,
@@ -81,7 +94,7 @@ impl PeerMap {
             self.reclaim_if_not_reissued(own, registry, slot, Some(epoch));
             debug!("[shm] peer slot {slot} was re-issued; re-resolving");
         }
-        let (slot, epoch) = registry.find_active(&prefix)?;
+        let (slot, epoch) = self.find_peer(registry, &prefix)?;
         let segment = match PeerSegment::attach(self.domain, slot, self.my_slot) {
             Ok(segment) => Arc::new(segment),
             Err(e) => {
@@ -175,6 +188,10 @@ mod tests {
             return;
         }
         let (reg, mine, _theirs) = fresh();
+        // Occupy our own registry slot first so the peer lands elsewhere --
+        // otherwise the claim below would land on slot 0 == ME, and `resolve`
+        // refuses our own slot.
+        reg.registry().claim(std::process::id(), [0; 12], now_tick()).unwrap();
         reg.registry().claim(std::process::id(), [9; 12], now_tick()).unwrap();
         let map = PeerMap::new(DOMAIN, ME);
 
@@ -200,6 +217,28 @@ mod tests {
         let (reg, mine, _theirs) = fresh();
         let map = PeerMap::new(DOMAIN, ME);
         assert!(map.resolve(&mine, reg.registry(), [200; 12]).is_none());
+        unlink_registry(DOMAIN);
+        unlink_segment(DOMAIN, ME);
+        unlink_segment(DOMAIN, PEER);
+    }
+
+    #[test]
+    fn resolve_refuses_our_own_slot() {
+        if !notify_supported() {
+            return;
+        }
+        let (reg, mine, _theirs) = fresh();
+        // The first claim lands on slot 0, which is ME: this prefix is us.
+        let (slot, _) = reg.registry().claim(std::process::id(), [9; 12], now_tick()).unwrap();
+        assert_eq!(slot, ME, "the first claim must land on our own slot");
+        let map = PeerMap::new(DOMAIN, ME);
+
+        assert!(
+            map.resolve(&mine, reg.registry(), [9; 12]).is_none(),
+            "our own segment must never resolve as a peer"
+        );
+        assert_eq!(map.len(), 0, "nothing is cached for ourselves");
+
         unlink_registry(DOMAIN);
         unlink_segment(DOMAIN, ME);
         unlink_segment(DOMAIN, PEER);

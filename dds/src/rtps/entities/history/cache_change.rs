@@ -12,12 +12,15 @@ use bytes::Bytes;
 use crate::{
     common::instance_handle::InstanceHandle,
     core::time::Duration,
-    rtps::common::{
-        guid::Guid,
-        // parameters::ParameterList,
-        sequence::SequenceNumber,
-        time::RtpsTime,
-        types::ChangeKind,
+    rtps::{
+        common::{
+            guid::Guid,
+            // parameters::ParameterList,
+            sequence::SequenceNumber,
+            time::RtpsTime,
+            types::ChangeKind,
+        },
+        transport::shm::{slot_handle::ShmSlotHandle, slot_ref::SlotRef},
     },
 };
 
@@ -32,6 +35,7 @@ use crate::{
 pub(crate) enum DataPayload {
     Owned(Vec<u8>),
     Shared(Bytes),
+    ShmSlot(ShmSlotHandle),
 }
 
 impl Clone for DataPayload {
@@ -39,6 +43,11 @@ impl Clone for DataPayload {
         match self {
             DataPayload::Owned(v) => DataPayload::Owned(v.clone()),
             DataPayload::Shared(b) => DataPayload::Shared(b.clone()),
+            // `ShmSlotHandle` can't be cloned: its `ClaimedSlot`/owner bit is
+            // move-only, and cloning would double-release on drop. Materialize
+            // the bytes into an owned copy instead -- the clone silently loses
+            // SHM resend eligibility (`shm_slot_ref()` becomes `None` on it).
+            DataPayload::ShmSlot(h) => DataPayload::Owned(h.as_slice().to_vec()),
         }
     }
 }
@@ -56,6 +65,7 @@ impl DataPayload {
         match self {
             DataPayload::Owned(v) => v,
             DataPayload::Shared(b) => b,
+            DataPayload::ShmSlot(h) => h.as_slice(),
         }
     }
 
@@ -63,6 +73,7 @@ impl DataPayload {
         match self {
             DataPayload::Owned(v) => v.is_empty(),
             DataPayload::Shared(b) => b.is_empty(),
+            DataPayload::ShmSlot(h) => h.as_slice().is_empty(),
         }
     }
 }
@@ -196,7 +207,8 @@ impl CacheChange {
         self.instance_handle = instance_handle;
         match &mut self.data_payload {
             DataPayload::Owned(v) => v.clear(),
-            DataPayload::Shared(_) => {
+            // Dropping the handle here (if any) is what clears its bit.
+            DataPayload::Shared(_) | DataPayload::ShmSlot(_) => {
                 self.data_payload = DataPayload::Owned(Vec::new());
             }
         }
@@ -270,6 +282,8 @@ impl CacheChange {
             DataPayload::Shared(b) => b.clone(),
             // Owned payload: copy into a fresh Bytes (writer-side path).
             DataPayload::Owned(v) => Bytes::copy_from_slice(v),
+            // SHM slot: copy out of the mapping (same cost as the owned path).
+            DataPayload::ShmSlot(h) => Bytes::copy_from_slice(h.as_slice()),
         }
     }
 
@@ -279,6 +293,10 @@ impl CacheChange {
         match &mut self.data_payload {
             DataPayload::Owned(v) => v,
             DataPayload::Shared(_) => unreachable!("data_mut called on shared payload"),
+            // Invariant kept by `CacheChangePool::release`: it drops any
+            // non-`Owned` payload before a change goes back into the pool, so
+            // a change fresh out of `acquire` is never `ShmSlot` here.
+            DataPayload::ShmSlot(_) => unreachable!("data_mut called on an shm slot payload"),
         }
     }
 
@@ -290,6 +308,30 @@ impl CacheChange {
     /// Set a shared payload for zero-copy multi-reader delivery.
     pub(crate) fn set_shared_payload(&mut self, data: Bytes) {
         self.data_payload = DataPayload::Shared(data);
+    }
+
+    /// Back this change's payload with an SHM pool slot (writer- or
+    /// reader-side handle).
+    pub(crate) fn set_shm_slot_payload(&mut self, handle: ShmSlotHandle) {
+        self.data_payload = DataPayload::ShmSlot(handle);
+    }
+
+    /// The slot descriptor backing this change's payload, if it has SHM
+    /// backing.
+    pub(crate) fn shm_slot_ref(&self) -> Option<SlotRef> {
+        match &self.data_payload {
+            DataPayload::ShmSlot(h) => Some(h.slot_ref()),
+            _ => None,
+        }
+    }
+
+    /// Give up a `Shared` or `ShmSlot` backing, keeping any `Owned` buffer's
+    /// capacity. An `ShmSlot` dropped here lowers the writer's own bit, which is
+    /// what returns the slot to the pool.
+    pub(crate) fn drop_non_owned_payload(&mut self) {
+        if !matches!(self.data_payload, DataPayload::Owned(_)) {
+            self.data_payload = DataPayload::Owned(Vec::new());
+        }
     }
 
     pub(crate) fn source_timestamp(&self) -> Option<RtpsTime> {

@@ -44,6 +44,13 @@ pub enum EncodingKind {
     DCdr2Le = 0x0009,     // DELIMITED_CDR Little Endian (APPENDABLE v2)
     PlCdr2Be = 0x000A,    // PL_CDR2 Big Endian (MUTABLE v2)
     PlCdr2Le = 0x000B,    // PL_CDR2 Little Endian (MUTABLE v2)
+
+    /// Vendor-specific: the payload is a 20-byte `SlotRef`, not CDR. Only ever
+    /// written toward a same-host SHM locator (spec §6.3), so it never reaches
+    /// another vendor's parser. Must stay equal to
+    /// `rtps::transport::shm::slot_ref::SLOT_REF_ENCAPSULATION_ID` (duplicated,
+    /// not imported, so the shm tree stays free of the serialize module).
+    ShmSlotRef = 0x8001,
 }
 
 /// Member header for mutable extensibility
@@ -681,5 +688,20 @@ impl XcdrDeserialize for WChar {
     fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
         let c = deserializer.deserialize_wchar16()?;
         Ok(WChar::from(c))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shm tree cannot import this enum -- the cross-target harness compiles
+    /// `shm/` alone -- so the value lives in two places. Pin them together.
+    #[test]
+    fn the_slot_ref_encapsulation_id_matches_the_shm_constant() {
+        assert_eq!(
+            EncodingKind::ShmSlotRef as u16,
+            crate::rtps::transport::shm::slot_ref::SLOT_REF_ENCAPSULATION_ID
+        );
     }
 }

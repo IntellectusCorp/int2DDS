@@ -174,6 +174,12 @@ impl DcpsBridge {
         })
     }
 
+    /// The transport plugin this bridge built. Set before the bridge exists,
+    /// so it is always present.
+    pub(crate) fn transport(&self) -> Arc<dyn TransportPlugin> {
+        self.socket.transport()
+    }
+
     pub(crate) fn init(&mut self) -> RtpsResult<()> {
         let transport = self.socket.transport();
 

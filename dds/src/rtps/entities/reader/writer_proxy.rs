@@ -546,6 +546,8 @@ pub(crate) struct FragmentInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::instance_handle::InstanceHandle;
+    use crate::rtps::common::types::ChangeKind;
     use crate::rtps::messages::{
         message_creator::MessageCreator,
         message_receiver::{MessageReceiver, TypedSubmessage},
@@ -578,6 +580,44 @@ mod tests {
         proxy.mark_change_received(SequenceNumber::new(0, 3), None);
 
         assert_eq!(proxy.calculate_bitmap_base(), SequenceNumber::new(0, 4));
+    }
+
+    /// The primitive `handle_gap_message` uses to unblock a fan-out behind a sequence
+    /// number that will never carry data (Task 9's SHM claim-failure path reuses the same
+    /// shape): mark it irrelevant, advance `expected_sn` past it, and flush whatever was
+    /// buffered behind it. `irrelevant_change_set` alone does not advance `expected_sn` --
+    /// the caller must do that itself, which is the part `handle_gap_message`'s
+    /// flush-then-mark block and Task 9's `drop_shm_sample_and_advance_ledger` both add.
+    #[test]
+    fn advancing_expected_sn_past_an_irrelevant_change_flushes_what_was_buffered_behind_it() {
+        let mut proxy = empty_writer_proxy();
+        proxy.set_expected_sn(SequenceNumber::new(0, 1));
+
+        let mut buffered = CacheChange::empty();
+        buffered.reset(
+            ChangeKind::Alive,
+            Guid::UNKNOWN,
+            InstanceHandle::default(),
+            SequenceNumber::new(0, 2),
+            None,
+        );
+        proxy.add_buffered_change(buffered);
+
+        // SN 1 will never carry data; mark it irrelevant and advance past it.
+        proxy.irrelevant_change_set(SequenceNumber::new(0, 1));
+        proxy.set_expected_sn(SequenceNumber::new(0, 2));
+        let flushed = proxy.flush_buffered_changes();
+
+        assert_eq!(
+            flushed.iter().map(|c| c.sequence_number()).collect::<Vec<_>>(),
+            vec![SequenceNumber::new(0, 2)],
+            "the change buffered behind SN 1 must flush once expected_sn passes it"
+        );
+        assert_eq!(
+            proxy.expected_sn(),
+            SequenceNumber::new(0, 3),
+            "flushing SN 2 must advance expected_sn past it too"
+        );
     }
 
     /// Nothing is known about this writer yet, so the reader cannot claim any sample arrived.

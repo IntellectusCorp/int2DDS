@@ -79,11 +79,6 @@ impl ShmListener {
         })
     }
 
-    /// Check if shared memory is available
-    pub fn is_available(&self) -> bool {
-        self.shm.is_some()
-    }
-
     /// Get a message from shared memory
     ///
     /// # Returns
@@ -112,11 +107,6 @@ impl ShmListener {
                 None
             }
         }
-    }
-
-    /// Check if there are messages available to read
-    pub fn has_data(&self) -> bool {
-        self.reader.as_ref().map(|r| r.has_data()).unwrap_or(false)
     }
 
     /// Close the listener and release resources

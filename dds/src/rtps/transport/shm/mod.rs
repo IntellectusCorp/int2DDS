@@ -17,6 +17,7 @@
 //! - [`platform`] - Platform-specific shared memory implementations
 
 pub(crate) mod config;
+pub(crate) mod fallback;
 pub(crate) mod layout;
 pub(crate) mod notify;
 pub(crate) mod participant_slot;
@@ -25,6 +26,7 @@ pub(crate) mod platform;
 pub(crate) mod pool;
 pub(crate) mod pool_owner;
 pub(crate) mod pool_reader;
+pub(crate) mod recv;
 pub(crate) mod registry;
 pub(crate) mod registry_segment;
 pub(crate) mod ring;
@@ -34,6 +36,7 @@ pub(crate) mod segment;
 pub(crate) mod shm_listener;
 pub(crate) mod shm_sender;
 pub(crate) mod shm_transport_plugin;
+pub(crate) mod slot_handle;
 pub(crate) mod slot_ref;
 
 #[cfg(test)]

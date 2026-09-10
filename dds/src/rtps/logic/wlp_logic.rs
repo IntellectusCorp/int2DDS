@@ -1580,6 +1580,7 @@ impl UnicastMessageProcessor for WlpLogic {
                     heartbeat_info, // Include heartbeat in the same message
                     false,
                     None,
+                    false, // WLP is never an shm zero-copy destination
                     &mut send_buffer,
                 );
 

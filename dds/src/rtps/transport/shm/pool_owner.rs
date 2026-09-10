@@ -6,8 +6,16 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
+use crate::rtps::transport::shm::participant_slot::HEARTBEAT_PERIOD;
 use crate::rtps::transport::shm::pool::{Pool, SLOT_READY, SLOT_WRITING};
 use crate::rtps::transport::shm::slot_ref::SlotRef;
+
+/// How long a `Writing` slot must have sat with its lease already dropped
+/// before `acquire` takes it back. The `_live` guard is what actually keeps a
+/// lease in the caller's hands safe, so any delay would do; spec 5.2 says
+/// "long-standing", and this is the period the rest of the module already
+/// runs on.
+pub(crate) const STALE_LEASE_AFTER: Duration = HEARTBEAT_PERIOD;
 
 pub(crate) struct SlotLease {
     pub(crate) class: u16,
@@ -80,6 +88,19 @@ impl PoolOwner {
     }
 
     pub(crate) fn acquire(&mut self, len: usize) -> Option<SlotLease> {
+        if let Some(lease) = self.try_acquire(len) {
+            return Some(lease);
+        }
+        // Spec 5.2: a loan dropped without `commit` or `abort` leaves its slot
+        // in Writing. Nothing else reclaims it, so allocation failure is where
+        // we sweep -- the guard in `reclaim_stale_leases` keeps live loans.
+        if self.reclaim_stale_leases(STALE_LEASE_AFTER) == 0 {
+            return None;
+        }
+        self.try_acquire(len)
+    }
+
+    fn try_acquire(&mut self, len: usize) -> Option<SlotLease> {
         let class = self.pool.class_for(len)?;
         let queue_len = self.free[class as usize].len();
         for _ in 0..queue_len {
@@ -449,6 +470,20 @@ mod tests {
 
         drop(lease);
         assert_eq!(o.reclaim_stale_leases(Duration::from_millis(10)), 1);
+    }
+
+    #[test]
+    fn allocation_failure_reclaims_a_lease_that_was_dropped_without_commit() {
+        let (_region, mut o) = owner();
+        // Take both slots in the class, then abandon one the way a dropped FFI
+        // loan does -- no `commit`, no `abort`.
+        let a = o.acquire(10).unwrap();
+        let _b = o.acquire(10).unwrap();
+        assert!(o.acquire(10).is_none(), "the class is exhausted");
+        drop(a);
+
+        std::thread::sleep(STALE_LEASE_AFTER + Duration::from_millis(50));
+        assert!(o.acquire(10).is_some(), "the abandoned slot must come back");
     }
 
     #[test]

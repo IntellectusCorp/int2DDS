@@ -3,10 +3,12 @@
 //! This module handles user-level data exchange including
 //! writer/reader message processing and data fragmentation.
 
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use log::{debug, trace, warn};
+use log::{debug, info, trace, warn};
 // use rand::Rng;
 use std::collections::{BTreeSet, HashMap};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::ops::Add;
 use std::time::{Duration, Instant};
@@ -50,6 +52,13 @@ use crate::rtps::messages::submessages::nack_frag::NackFrag;
 use crate::rtps::task::sending_handler::{MessageType, SendingHandler};
 use crate::rtps::task::user_traffic::user_unicast_listening_task::UserUnicastListeningTask;
 use crate::rtps::transport::plugin::{MessageSource, SendTarget, TransportPlugin};
+use crate::rtps::transport::shm::fallback::{
+    descriptor_rejects, DescriptorRejectReason, FallbackReason,
+};
+use crate::rtps::transport::shm::recv::spawn_receiver;
+use crate::rtps::transport::shm::segment::PeerSegment;
+use crate::rtps::transport::shm::slot_handle::ShmSlotHandle;
+use crate::rtps::transport::shm::slot_ref::SlotRef;
 use crate::rtps::{
     entities::participant::Participant, messages::message_receiver::MessageReceiver,
 };
@@ -492,6 +501,82 @@ fn select_eviction_victims(
     victims
 }
 
+/// A DATA payload is a slot descriptor only when it carries the vendor
+/// encapsulation. Everything else stays on the copy path untouched.
+fn shm_descriptor(payload: &[u8]) -> Option<SlotRef> {
+    SlotRef::from_payload(payload)
+}
+
+/// The highest-priority kind reachable on both sides: SHM > TCP > UDP. Falls back to
+/// the whole list when no kind is reachable, so a peer is never left unaddressed.
+fn pick_locators<'a, T>(locators: T, can_handle: impl Fn(&Locator) -> bool) -> Vec<&'a Locator>
+where
+    T: IntoIterator<Item = &'a Locator>,
+{
+    let locators: Vec<&Locator> = locators.into_iter().collect();
+    let pick = |is_kind: fn(&Locator) -> bool| -> Option<Vec<&Locator>> {
+        let v: Vec<&Locator> =
+            locators.iter().copied().filter(|l| is_kind(l) && can_handle(l)).collect();
+        (!v.is_empty()).then_some(v)
+    };
+    pick(Locator::is_shm)
+        .or_else(|| pick(Locator::is_tcp))
+        .or_else(|| pick(Locator::is_udp))
+        .unwrap_or(locators)
+}
+
+/// Which `ReaderLocator` entries a stateless writer may send to: one kind per remote
+/// reader, not one copy per advertised locator.
+///
+/// A peer advertising both an SHM and a UDP locator appears here as two entries for the
+/// same reader GUID. Sending to both puts two copies of every sample on the wire, and the
+/// per-entry `locators_to_send_to` call cannot see it -- a one-element list has nothing to
+/// choose between. Grouping by reader first restores the same SHM > TCP > UDP choice the
+/// stateful path makes.
+fn stateless_send_mask(
+    readers: &[(GuidPrefix, EntityId, Locator)],
+    can_handle: impl Fn(&Locator) -> bool,
+) -> Vec<bool> {
+    let mut mask = vec![false; readers.len()];
+    let mut seen: Vec<(GuidPrefix, EntityId)> = Vec::new();
+    for (prefix, entity, _) in readers.iter() {
+        let key = (*prefix, *entity);
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.push(key);
+        let group: Vec<Locator> =
+            readers.iter().filter(|(p, e, _)| (*p, *e) == key).map(|(_, _, l)| l.clone()).collect();
+        let picked = pick_locators(&group, &can_handle);
+        for (slot, (p, e, l)) in mask.iter_mut().zip(readers.iter()) {
+            if (*p, *e) == key && picked.contains(&l) {
+                *slot = true;
+            }
+        }
+    }
+    mask
+}
+
+/// Where a stateless writer's send-time fallback (spec §7 rules 8 and 9) puts the copy.
+///
+/// The three stateful send sites hand `copy_targets` the reader's whole locator list and
+/// let `non_shm_locators_to_send_to` drop the SHM one. A stateless writer holds *one
+/// locator per entry*, so the entry that carried the descriptor has no non-SHM locator of
+/// its own: the destination is a sibling entry of the same reader -- the one
+/// `stateless_send_mask` turned off. Empty when the reader advertises SHM only, which is
+/// the one case with nowhere left to send.
+fn stateless_fallback_locators(
+    readers: &[(GuidPrefix, EntityId, Locator)],
+    prefix: GuidPrefix,
+    entity: EntityId,
+) -> Vec<Locator> {
+    readers
+        .iter()
+        .filter(|(p, e, l)| (*p, *e) == (prefix, entity) && !l.is_shm())
+        .map(|(_, _, l)| l.clone())
+        .collect()
+}
+
 #[allow(dead_code)]
 #[derive(Clone)]
 pub(crate) struct UserLogic {
@@ -564,9 +649,43 @@ impl UserLogic {
             if let Ok(mut handle_guard) = self.unicast_listening_handle.lock() {
                 *handle_guard = Some(unicast_handle);
             }
+
+            // The zero-copy ring has no fd, so it gets its own thread instead
+            // of a branch in the mio loop above.
+            self.start_shm_receiving(&participant);
         }
 
         Ok(())
+    }
+
+    /// Drains the zero-copy ring into `process_rtps_message`, the same entry
+    /// point UDP and the legacy SHM path use. A no-op on a transport without a
+    /// zero-copy runtime.
+    ///
+    /// The sink is rebuilt each round rather than captured once: it holds an
+    /// `Arc<Option<UserLogic>>`, which owns the transport plugin and so the
+    /// `ShmRuntime` whose absence ends the loop. Captured once, that condition
+    /// would never come true.
+    fn start_shm_receiving(&self, participant: &Arc<Participant>) {
+        let Some(runtime) = self.transport.shm_runtime() else {
+            return;
+        };
+        let runtime = Arc::downgrade(&runtime);
+        let participant = Arc::downgrade(participant);
+        // Loopback with port 0 marks an SHM source, same as `ShmListener`.
+        let from_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        spawn_receiver(move || {
+            let runtime = runtime.upgrade()?;
+            let participant = participant.upgrade()?;
+            if participant.is_terminated() {
+                return None;
+            }
+            let mut task = UserUnicastListeningTask::new(participant);
+            let sink = move |bytes: &[u8]| {
+                task.process_rtps_message(Bytes::copy_from_slice(bytes), from_addr)
+            };
+            Some((runtime.own_arc(), sink))
+        });
     }
 }
 
@@ -697,6 +816,11 @@ impl UserLogic {
         let mut windows =
             SendWindows::new(self.transport.as_ref(), self.shared_send_credit(stateful_writer));
         let dst_prefix = remote_reader_guid.prefix();
+        // Pick the destination before anything is assembled: only the picked kind says
+        // whether a datagram may carry a slot descriptor instead of the payload, and the
+        // fragmentation decision below already needs that answer.
+        let selected = self.locators_to_send_to(locators.iter());
+        let is_shm_destination = self.destination_is_shm(&selected, dst_prefix);
 
         for change_type in requested_change_types {
             let a_change = match change_type {
@@ -707,9 +831,35 @@ impl UserLogic {
                 RequestedChangeType::Data(a_change) => a_change,
             };
 
+            // Try the destination's zero-copy ring first; see `try_send_to_peers`.
+            let to_shm = is_shm_destination && a_change.shm_slot_ref().is_some();
+            let shm_delivered = to_shm
+                && MessageCreator::create_data_msg(
+                    &a_change,
+                    remote_reader_guid,
+                    group_id,
+                    writer.endpoint_id(),
+                    None, // No heartbeat
+                    true, // Use inline QoS (default)
+                    None, // No content filter for retransmission
+                    true,
+                    &mut send_buffer,
+                )
+                .is_ok()
+                && self.try_send_to_peers(&selected, dst_prefix, &send_buffer);
+            if shm_delivered {
+                continue;
+            }
+
             if a_change.is_fragmented() {
                 let requested_change_sn = a_change.sequence_number();
                 debug!("[UserLogic] [RequestedChanges] Fragmented change: {}", requested_change_sn);
+
+                // Same destination the non-fragmented branch below falls back to: once
+                // `to_shm` was tried and no ring took it, spec §7 rules 8 and 9 send the
+                // copy on this destination's non-SHM locators. Sample size must not
+                // change where a fallback goes.
+                let frag_targets = self.copy_targets(&selected, locators.iter(), to_shm);
 
                 let timestamp = Utc::now();
 
@@ -770,7 +920,7 @@ impl UserLogic {
                     )
                     .is_ok()
                     {
-                        match self.send_rtps_message_to_locators(locators.iter(), &send_buffer) {
+                        match self.send_rtps_message_to_selected(&frag_targets, &send_buffer) {
                             Ok(_) => {
                                 if heartbeat_info.is_some() {
                                     stateful_writer.increase_heartbeat_count();
@@ -790,11 +940,13 @@ impl UserLogic {
                 None, // No heartbeat
                 true, // Use inline QoS (default)
                 None, // No content filter for retransmission (TODO: consider adding filter)
+                false,
                 &mut send_buffer,
             )
             .is_ok()
             {
-                if let Err(e) = self.send_rtps_message_to_locators(locators.iter(), &send_buffer) {
+                let targets = self.copy_targets(&selected, locators.iter(), to_shm);
+                if let Err(e) = self.send_rtps_message_to_selected(&targets, &send_buffer) {
                     warn!("Failed to send DATA for requested change: {:?}", e);
                 }
             }
@@ -1148,13 +1300,53 @@ impl UserLogic {
             // non-decreasing series, which is all HEARTBEAT.count requires.
             let heartbeat_count = writer.heartbeat_count();
 
+            // Try the destination's zero-copy ring first; see `try_send_to_peers`. The
+            // piggyback decision is hoisted above it so the ring carries the same
+            // heartbeat the datagram would have.
+            let selected = self.locators_to_send_to(locators.iter());
+            let to_shm =
+                self.destination_is_shm(&selected, dst_prefix) && a_change.shm_slot_ref().is_some();
+            let is_piggyback_wanted =
+                members.iter().any(|(_, plan)| plan.reliable && plan.piggyback);
+            let heartbeat_info =
+                is_piggyback_wanted.then_some((heartbeat_count, first, last, false, false));
+            let shm_delivered = to_shm
+                && MessageCreator::create_data_msg(
+                    &a_change,
+                    Guid::new(dst_prefix, EntityId::UNKNOWN),
+                    EntityId::UNKNOWN,
+                    writer.endpoint_id(),
+                    heartbeat_info,
+                    true, // Use inline QoS (default)
+                    None,
+                    true,
+                    &mut send_buffer,
+                )
+                .is_ok()
+                && self.try_send_to_peers(&selected, dst_prefix, &send_buffer);
+            if shm_delivered {
+                if heartbeat_info.is_some() {
+                    writer.increase_heartbeat_count();
+                }
+                for (reader_guid, plan) in &members {
+                    if plan.piggyback {
+                        readers_with_sent_data.push(*reader_guid);
+                    }
+                }
+                continue;
+            }
+
             if a_change.is_fragmented() {
                 // The fragment burst goes out once per participant: reader id UNKNOWN
                 // reaches every matched reader behind dst_prefix.
-                let is_piggyback_wanted =
-                    members.iter().any(|(_, plan)| plan.reliable && plan.piggyback);
                 let timestamp = Utc::now();
                 let mut is_any_fragment_sent = false;
+
+                // Same destination the non-fragmented branch below falls back to: once
+                // `to_shm` was tried and no ring took it, spec §7 rules 8 and 9 send the
+                // copy on this destination's non-SHM locators. Sample size must not
+                // change where a fallback goes.
+                let frag_targets = self.copy_targets(&selected, locators.iter(), to_shm);
 
                 debug!(
                     "[Data] Batched DATA_FRAG sn={} to {} readers behind one participant",
@@ -1217,7 +1409,7 @@ impl UserLogic {
                         &mut send_buffer,
                     )
                     .is_ok()
-                        && self.send_rtps_message_to_locators(locators.iter(), &send_buffer).is_ok()
+                        && self.send_rtps_message_to_selected(&frag_targets, &send_buffer).is_ok()
                     {
                         is_any_fragment_sent = true;
                         if heartbeat_info.is_some() {
@@ -1236,11 +1428,6 @@ impl UserLogic {
                 continue;
             }
 
-            let is_piggyback_wanted =
-                members.iter().any(|(_, plan)| plan.reliable && plan.piggyback);
-            let heartbeat_info =
-                is_piggyback_wanted.then_some((heartbeat_count, first, last, false, false));
-
             debug!(
                 "[Data] Batched DATA sn={} to {} readers behind one participant",
                 sn.to_i64(),
@@ -1255,6 +1442,7 @@ impl UserLogic {
                 heartbeat_info,
                 true, // Use inline QoS (default)
                 None,
+                false,
                 &mut send_buffer,
             ) {
                 warn!("[Data] Failed to build batched DATA: {:?}", e);
@@ -1262,7 +1450,8 @@ impl UserLogic {
                 continue;
             }
 
-            if self.send_rtps_message_to_locators(locators.iter(), &send_buffer).is_ok() {
+            let targets = self.copy_targets(&selected, locators.iter(), to_shm);
+            if self.send_rtps_message_to_selected(&targets, &send_buffer).is_ok() {
                 if heartbeat_info.is_some() {
                     writer.increase_heartbeat_count();
                 }
@@ -1332,7 +1521,48 @@ impl UserLogic {
                             }
                         };
 
-                        if a_change.is_fragmented() {
+                        // Try the destination's zero-copy ring first; see
+                        // `try_send_to_peers`. The piggyback heartbeat is hoisted above
+                        // it so the ring carries the same one the datagram would have.
+                        let selected = self.locators_to_send_to(locators.iter());
+                        let to_shm = self.destination_is_shm(&selected, reader_guid.prefix())
+                            && a_change.shm_slot_ref().is_some();
+                        let heartbeat_info = if reliable && piggyback {
+                            Some((writer.heartbeat_count(), first_sn, last_sn, false, false))
+                        } else {
+                            None
+                        };
+                        let shm_delivered = to_shm
+                            && MessageCreator::create_data_msg(
+                                &a_change,
+                                reader_guid,
+                                group_id,
+                                writer.endpoint_id(),
+                                heartbeat_info,
+                                true, // Use inline QoS (default)
+                                content_filter.clone(),
+                                true,
+                                &mut send_buffer,
+                            )
+                            .is_ok()
+                            && self.try_send_to_peers(
+                                &selected,
+                                reader_guid.prefix(),
+                                &send_buffer,
+                            );
+
+                        if shm_delivered {
+                            data_sent = true;
+                            if piggyback {
+                                writer.increase_heartbeat_count();
+                            }
+                        } else if a_change.is_fragmented() {
+                            // Same destination the non-fragmented branch below falls back
+                            // to: once `to_shm` was tried and no ring took it, spec §7
+                            // rules 8 and 9 send the copy on this destination's non-SHM
+                            // locators. Sample size must not change where a fallback goes.
+                            let frag_targets =
+                                self.copy_targets(&selected, locators.iter(), to_shm);
                             let timestamp = Utc::now();
                             let total_fragments = a_change.total_fragments();
                             let frags_per_msg: NonZeroU32 =
@@ -1347,7 +1577,7 @@ impl UserLogic {
                                 &plan,
                                 a_change.fragment_size() as usize,
                                 a_change.data_value().len(),
-                                self.locators_to_send_to(locators.iter()).len(),
+                                selected.len(),
                                 remaining,
                                 untouched,
                                 reliable && piggyback,
@@ -1392,10 +1622,7 @@ impl UserLogic {
                                 .is_ok()
                                 {
                                     if self
-                                        .send_rtps_message_to_locators(
-                                            locators.iter(),
-                                            &send_buffer,
-                                        )
+                                        .send_rtps_message_to_selected(&frag_targets, &send_buffer)
                                         .is_ok()
                                     {
                                         data_sent = true;
@@ -1406,12 +1633,6 @@ impl UserLogic {
                                 }
                             }
                         } else {
-                            let heartbeat_info = if reliable && piggyback {
-                                Some((writer.heartbeat_count(), first_sn, last_sn, false, false))
-                            } else {
-                                None
-                            };
-
                             MessageCreator::create_data_msg(
                                 &a_change,
                                 reader_guid,
@@ -1420,14 +1641,13 @@ impl UserLogic {
                                 heartbeat_info,
                                 true, // Use inline QoS (default)
                                 content_filter.clone(),
+                                false,
                                 &mut send_buffer,
                             )
                             .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
 
-                            if self
-                                .send_rtps_message_to_locators(locators.iter(), &send_buffer)
-                                .is_ok()
-                            {
+                            let targets = self.copy_targets(&selected, locators.iter(), to_shm);
+                            if self.send_rtps_message_to_selected(&targets, &send_buffer).is_ok() {
                                 data_sent = true;
                                 if piggyback {
                                     writer.increase_heartbeat_count();
@@ -1518,8 +1738,96 @@ impl UserLogic {
         // Read once per call: bounds how many fragments ride in one DATA_FRAG.
         let max_message_size = crate::common::env::get_max_message_size();
 
-        for (reader_locator, changes) in reader_tasks.iter() {
+        // One copy per remote reader. `highest_sent_change_sn` is still advanced for every
+        // entry below, so a locator skipped here is not resent later as unsent.
+        let readers: Vec<(GuidPrefix, EntityId, Locator)> = reader_tasks
+            .iter()
+            .map(|(rl, _)| (rl.guid_prefix(), rl.remote_entity_id(), rl.locator()))
+            .collect();
+        let send_mask = stateless_send_mask(&readers, |l| self.transport.can_handle(l));
+
+        for ((reader_locator, changes), send) in reader_tasks.iter().zip(send_mask.iter()) {
+            if !send {
+                continue;
+            }
+            // Pick the destination before anything is assembled: only the picked kind says
+            // whether a datagram may carry a slot descriptor instead of the payload, and the
+            // fragmentation decision below already needs that answer.
+            let target = [reader_locator.locator()];
+            let selected = self.locators_to_send_to(&target);
+            let is_shm_destination =
+                self.destination_is_shm(&selected, reader_locator.guid_prefix());
+            // A refused ring needs somewhere to put the copy, and `target` cannot hold it:
+            // this reader's non-SHM locator is a separate entry the mask turned off.
+            let fallback = stateless_fallback_locators(
+                &readers,
+                reader_locator.guid_prefix(),
+                reader_locator.remote_entity_id(),
+            );
+
             for change in changes.iter() {
+                // Try the destination's zero-copy ring first; see `try_send_to_peers`.
+                let to_shm = is_shm_destination && change.shm_slot_ref().is_some();
+                let shm_delivered = if to_shm {
+                    let mut send_buffer = participant
+                        .wire_buffer_pool()
+                        .lock()
+                        .map_err(|_| {
+                            RtpsError::new(
+                                RtpsErrorCode::LockError,
+                                "Failed to lock wire buffer pool",
+                            )
+                        })?
+                        .acquire();
+                    let delivered = MessageCreator::create_data_msg(
+                        change,
+                        Guid::new(reader_locator.guid_prefix(), EntityId::PARTICIPANT),
+                        reader_locator.remote_entity_id(),
+                        writer.endpoint_id(),
+                        None, // No heartbeat
+                        true, // Use inline QoS (default)
+                        None, // No content filter for stateless writer
+                        true,
+                        &mut send_buffer,
+                    )
+                    .is_ok()
+                        && self.try_send_to_peers(
+                            &selected,
+                            reader_locator.guid_prefix(),
+                            &send_buffer,
+                        );
+                    participant
+                        .wire_buffer_pool()
+                        .lock()
+                        .map_err(|_| {
+                            RtpsError::new(
+                                RtpsErrorCode::LockError,
+                                "Failed to lock wire buffer pool",
+                            )
+                        })?
+                        .release(send_buffer);
+                    delivered
+                } else {
+                    false
+                };
+                if shm_delivered {
+                    continue;
+                }
+
+                // One answer for both branches below: sample size must not change where a
+                // fallback goes. Empty only when `to_shm` was tried and this reader has no
+                // non-SHM entry at all.
+                let copy_to = self.copy_targets(&selected, fallback.iter(), to_shm);
+                if copy_to.is_empty() {
+                    warn!(
+                        "[UserLogic] zero-copy ring refused sn={} and reader {:?} advertises \
+                         no non-SHM locator; sample dropped",
+                        change.sequence_number().to_i64(),
+                        reader_locator.guid_prefix()
+                    );
+                    continue;
+                }
+
                 // Create DATA or DATA_FRAG message
                 if change.is_fragmented() {
                     let timestamp = Utc::now();
@@ -1571,10 +1879,9 @@ impl UserLogic {
 
                         if result.is_ok() {
                             // Send fragmented message immediately
-                            if let Err(e) = self.send_rtps_message_to_locators(
-                                &[reader_locator.locator()],
-                                &send_buffer,
-                            ) {
+                            if let Err(e) =
+                                self.send_rtps_message_to_selected(&copy_to, &send_buffer)
+                            {
                                 warn!("Failed to send DATA_FRAG message: {:?}", e);
                             }
                         }
@@ -1610,13 +1917,12 @@ impl UserLogic {
                         None, // No heartbeat
                         true, // Use inline QoS (default)
                         None, // No content filter for stateless writer
+                        false,
                         &mut send_buffer,
                     )
                     .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
 
-                    if let Err(e) = self
-                        .send_rtps_message_to_locators(&[reader_locator.locator()], &send_buffer)
-                    {
+                    if let Err(e) = self.send_rtps_message_to_selected(&copy_to, &send_buffer) {
                         warn!("Failed to send DATA message: {:?}", e);
                         // Continue sending other messages instead of aborting
                     }
@@ -2365,19 +2671,7 @@ impl UserLogic {
     where
         T: IntoIterator<Item = &'a Locator>,
     {
-        let locators: Vec<&Locator> = locators.into_iter().collect();
-        let pick = |is_kind: fn(&Locator) -> bool| -> Option<Vec<&Locator>> {
-            let v: Vec<&Locator> = locators
-                .iter()
-                .copied()
-                .filter(|l| is_kind(l) && self.transport.can_handle(l))
-                .collect();
-            (!v.is_empty()).then_some(v)
-        };
-        pick(Locator::is_shm)
-            .or_else(|| pick(Locator::is_tcp))
-            .or_else(|| pick(Locator::is_udp))
-            .unwrap_or(locators)
+        pick_locators(locators, |l| self.transport.can_handle(l))
     }
 
     /// Send `buffer` via the highest-priority transport reachable on both
@@ -2388,11 +2682,125 @@ impl UserLogic {
     where
         T: IntoIterator<Item = &'a Locator>,
     {
-        let locators = self.locators_to_send_to(locators);
+        self.send_rtps_message_to_selected(&self.locators_to_send_to(locators), buffer)
+    }
 
+    /// True when every locator `locators_to_send_to` picked is SHM *and* the destination
+    /// is another participant, so a slot-backed change may travel as its descriptor. That
+    /// pick is by kind, so it is normally all one kind; the one list it can return mixed
+    /// is the untouched input it falls back to when it could reach none of them, and `all`
+    /// admits that list only when it holds nothing but SHM -- which today it never does,
+    /// since an SHM-mode participant advertises a UDP locator alongside every SHM one.
+    ///
+    /// The single place `to_shm` is decided, so that both consumers of that answer agree:
+    /// `try_send_to_peers` (which ring, if any, gets the descriptor) and `copy_targets`
+    /// (where the copy goes once no ring took it).
+    ///
+    /// A descriptor addressed to our own participant would come back into our own segment,
+    /// where `SlotMeta.refs` -- a bitmap indexed by registry slot -- has no bit that tells
+    /// a reader's claim apart from the writer's own. Evicting the change would then clear
+    /// a live reader's claim and the pool would hand that slot out again underneath it.
+    /// So the sample takes the copy path instead; being the same process, that copy is a
+    /// memcpy inside one address space, which is all shared memory would have saved.
+    fn destination_is_shm(&self, locators: &[&Locator], dst_prefix: GuidPrefix) -> bool {
+        if locators.is_empty() || !locators.iter().all(|l| l.is_shm()) {
+            return false;
+        }
+        !self.is_own_participant(dst_prefix)
+    }
+
+    /// Whether `prefix` names this participant. GUID prefix, not registry slot: it is the
+    /// RTPS identity of a participant and stays answerable with no `ShmRuntime` and while
+    /// one is being torn down, where a slot lookup can transiently fail.
+    fn is_own_participant(&self, prefix: GuidPrefix) -> bool {
+        self.get_upgraded_participant().is_ok_and(|p| p.guid().prefix() == prefix)
+    }
+
+    /// The same pick with SHM ruled out: where a send-time fallback (spec §7 rules 8
+    /// and 9) re-routes a sample whose descriptor no peer ring took. Empty when the
+    /// destination advertises SHM only.
+    fn non_shm_locators_to_send_to<'a, T>(&self, locators: T) -> Vec<&'a Locator>
+    where
+        T: IntoIterator<Item = &'a Locator>,
+    {
+        let plain: Vec<&'a Locator> = locators.into_iter().filter(|l| !l.is_shm()).collect();
+        if plain.is_empty() {
+            return Vec::new();
+        }
+        self.locators_to_send_to(plain)
+    }
+
+    /// Where a copy of the sample goes: the picked destination, or -- once `to_shm`
+    /// was tried and no ring took it -- the same destination's non-SHM locators.
+    fn copy_targets<'a, T>(
+        &self,
+        selected: &[&'a Locator],
+        locators: T,
+        to_shm: bool,
+    ) -> Vec<&'a Locator>
+    where
+        T: IntoIterator<Item = &'a Locator>,
+    {
+        if to_shm {
+            self.non_shm_locators_to_send_to(locators)
+        } else {
+            selected.to_vec()
+        }
+    }
+
+    /// Hand an assembled descriptor to the destination participant's zero-copy ring.
+    ///
+    /// The destination has to be picked before the datagram is assembled: only its kind
+    /// says whether a slot descriptor may stand in for the payload. Every SHM locator in
+    /// `selected` names the same participant, so the first ring that takes it is the only
+    /// one written to.
+    ///
+    /// `false` when none did -- spec §7 rules 8 and 9 -- and the caller then carries the
+    /// sample as a copy on its ordinary path, which is what keeps a fragmented change
+    /// fragmented. The fallback is counted here, once, after every locator has refused:
+    /// counting inside `send_to_peer` would charge one fallback per locator tried and
+    /// would charge one even where a later locator succeeded.
+    fn try_send_to_peers(
+        &self,
+        selected: &[&Locator],
+        dst_prefix: GuidPrefix,
+        buffer: &[u8],
+    ) -> bool {
+        let mut last_error = None;
+        for locator in selected.iter().copied() {
+            match self.transport.send_to_peer(buffer, locator, dst_prefix) {
+                Ok(_) => return true,
+                Err(e) => last_error = Some(e),
+            }
+        }
+
+        let Some(rt) = self.transport.shm_runtime() else {
+            return false;
+        };
+        let reason = match last_error.map(|e| e.kind()) {
+            Some(std::io::ErrorKind::NotFound) => FallbackReason::PeerGone,
+            Some(std::io::ErrorKind::WouldBlock) => FallbackReason::RingFull,
+            // `Unsupported`, or no locator tried at all: neither is a rule 8 or 9
+            // fallback. Spec §7 reports a transport without a zero-copy path through
+            // `ShmRuntime::start` instead.
+            _ => return false,
+        };
+        if rt.fallbacks().note(reason) {
+            info!("[shm] send-time fallback for {dst_prefix:?}: {reason:?}");
+        }
+        false
+    }
+
+    /// `send_rtps_message_to_locators` once the caller has already picked, which is what
+    /// lets it learn the destination kind before the datagram is assembled.
+    fn send_rtps_message_to_selected(
+        &self,
+        locators: &[&Locator],
+        buffer: &[u8],
+    ) -> RtpsResult<()> {
         let mut is_sent = false;
         let mut last_error = None;
-        for locator in locators {
+        for locator in locators.iter().copied() {
             match self.transport.send(buffer, &SendTarget::UserData(locator)) {
                 Ok(_) => is_sent = true,
                 Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
@@ -2588,6 +2996,108 @@ impl UserLogic {
             writer_proxy.forget_fragments(seq_num);
         }
     }
+
+    /// Resolves `remote_writer_guid`'s peer segment once per DATA message, ahead of the
+    /// fan-out: a `PeerMap::resolve` cache hit still reads `registry.epoch` out of shared
+    /// memory (`peer_map.rs:69`), and the peer segment is the same for every matched
+    /// reader. Only `claim_shm_slot` -- the actual pool-slot handoff -- runs once per
+    /// reader (Task 1's per-slot local count is what makes that safe: N claims raise the
+    /// local count to N while the shared bit is set only on the first).
+    ///
+    /// `None` when this participant has no local `ShmRuntime` (warns once via
+    /// `DescriptorRejectReason::NoLocalRuntime` -- `handle_data_message` also runs for
+    /// UDP and TCP arrivals, so a slot descriptor reaching a participant with SHM never
+    /// brought up is a real case, not dead code) or the peer never registered / could not
+    /// be mapped (`PeerUnresolved`).
+    fn resolve_shm_peer(&self, remote_writer_guid: Guid) -> Option<Arc<PeerSegment>> {
+        let Some(rt) = self.transport.shm_runtime() else {
+            if descriptor_rejects().note(DescriptorRejectReason::NoLocalRuntime) {
+                warn!(
+                    "[shm] received a slot descriptor with no local SHM runtime; dropping \
+                     descriptor sample"
+                );
+            }
+            return None;
+        };
+        match rt.peers().resolve(rt.own(), rt.registry(), remote_writer_guid.prefix()) {
+            Some(segment) => Some(segment),
+            None => {
+                if descriptor_rejects().note(DescriptorRejectReason::PeerUnresolved) {
+                    warn!(
+                        "[shm] cannot resolve peer segment for {remote_writer_guid}; \
+                         dropping descriptor sample"
+                    );
+                }
+                None
+            }
+        }
+    }
+
+    /// A slot descriptor's claim failed for `reader` (its peer never resolved, or
+    /// `ShmSlotHandle::claim` rejected it -- spec §5.6's four-step validation), so this
+    /// reader gets no sample. Its receive ledger must still advance past `seq_num`: spec
+    /// §6.4 drops only the sample, not the writer's connection to this reader. Left
+    /// alone, `expected_sn` never moves, every later sample from this writer buffers
+    /// forever behind it, and a RELIABLE writer retransmits `seq_num` forever.
+    ///
+    /// Marks `seq_num` irrelevant with the same primitive `handle_gap_message` uses
+    /// (`WriterProxy::irrelevant_change_set`), then advances `expected_sn` and flushes
+    /// anything that was buffered behind it, the same shape as `handle_gap_message`'s own
+    /// flush-then-mark block. A no-op for a stateless reader: it has no per-writer ledger
+    /// to stall.
+    fn drop_shm_sample_and_advance_ledger(
+        &self,
+        reader: &dyn Reader,
+        remote_writer_guid: Guid,
+        seq_num: SequenceNumber,
+    ) -> RtpsResult<()> {
+        let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() else {
+            return Ok(());
+        };
+
+        let mut pending_delivery: Vec<CacheChange> = Vec::new();
+        {
+            let writer_proxies = stateful_reader.writer_proxies();
+            let mut matched_writers = writer_proxies
+                .lock()
+                .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+            let Some(writer_proxy) = matched_writers
+                .iter_mut()
+                .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
+            else {
+                return Ok(());
+            };
+
+            if seq_num >= writer_proxy.expected_sn() {
+                writer_proxy.set_expected_sn(seq_num.add(1));
+                pending_delivery = writer_proxy.flush_buffered_changes();
+            }
+            writer_proxy.irrelevant_change_set(seq_num);
+            // `matched_writers` drops here, before delivery -- same lock-order rule
+            // `deliver_change_to_reader` documents (`:2300-2320`).
+        }
+
+        if !pending_delivery.is_empty() {
+            self.add_change_to_reader_cache_and_notify(reader, pending_delivery)?;
+        }
+        Ok(())
+    }
+}
+
+/// The reader side of a slot descriptor: `ShmSlotHandle::claim` on `segment`, warning once
+/// if `PoolReader::claim` rejects it (spec §5.6's four-step validation). A free function,
+/// not a method -- it needs no participant state beyond the segment `resolve_shm_peer`
+/// already resolved.
+fn claim_shm_slot(
+    remote_writer_guid: Guid,
+    segment: Arc<PeerSegment>,
+    r: SlotRef,
+) -> Option<ShmSlotHandle> {
+    let handle = ShmSlotHandle::claim(segment, &r);
+    if handle.is_none() && descriptor_rejects().note(DescriptorRejectReason::ClaimRejected) {
+        warn!("[shm] slot claim rejected for {remote_writer_guid}; dropping descriptor sample");
+    }
+    handle
 }
 
 impl_participant_accessor!(UserLogic);
@@ -2613,10 +3123,18 @@ impl UnicastMessageProcessor for UserLogic {
             return Ok(());
         }
 
+        let serialized_data = data.serialized_data();
+        let shm_ref = shm_descriptor(&serialized_data);
+
         // Detach from the receive arena before retaining. A `Bytes` slice keeps its
         // whole arena chunk resident, so copy once here and let every matched reader
-        // share that right-sized copy.
-        let detached_payload = bytes::Bytes::copy_from_slice(&data.serialized_data());
+        // share that right-sized copy. Skipped for a slot descriptor: there each
+        // reader claims its own pool slot below instead of sharing a `Bytes`.
+        let detached_payload =
+            shm_ref.is_none().then(|| bytes::Bytes::copy_from_slice(&serialized_data));
+
+        // Resolved once per message, ahead of the fan-out -- see `resolve_shm_peer`.
+        let peer_segment = shm_ref.and_then(|_| self.resolve_shm_peer(remote_writer_guid));
 
         for reader in matched_readers {
             let mut change = match reader.reader_cache().lock() {
@@ -2635,9 +3153,33 @@ impl UnicastMessageProcessor for UserLogic {
                 data.writer_sn,
                 message_receiver.get_source_timestamp(),
             );
-            // Every matched reader shares the one detached copy made above, so
-            // fanning out costs a refcount bump per reader, not a payload copy.
-            change.set_shared_payload(detached_payload.clone());
+            match shm_ref {
+                // A cloned `ShmSlotHandle` cannot exist, so this reader claims its own
+                // slot from the segment resolved once above.
+                Some(r) => {
+                    let handle = peer_segment.as_ref().and_then(|segment| {
+                        claim_shm_slot(remote_writer_guid, Arc::clone(segment), r)
+                    });
+                    match handle {
+                        Some(handle) => change.set_shm_slot_payload(handle),
+                        // No sample for this reader, but its receive ledger must still
+                        // advance past this SN -- see `drop_shm_sample_and_advance_ledger`.
+                        None => {
+                            self.drop_shm_sample_and_advance_ledger(
+                                reader.as_ref(),
+                                remote_writer_guid,
+                                data.writer_sn,
+                            )?;
+                            continue;
+                        }
+                    }
+                }
+                // Every matched reader shares the one detached copy made above, so
+                // fanning out costs a refcount bump per reader, not a payload copy.
+                None => change.set_shared_payload(
+                    detached_payload.clone().expect("built above when shm_ref is None"),
+                ),
+            }
 
             self.apply_writer_attributes_to_change(
                 reader.clone(),
@@ -3542,6 +4084,11 @@ impl UnicastMessageProcessor for UserLogic {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rtps::transport::shm::config::{DEFAULT_CLASSES, DEFAULT_RING_ENTRIES};
+    use crate::rtps::transport::shm::notify::notify_supported;
+    use crate::rtps::transport::shm::segment::{unlink_segment, OwnedSegment};
+    use crate::rtps::transport::shm::slot_handle::ShmSlotHandle;
+    use crate::rtps::transport::shm::slot_ref::SLOT_REF_ENCAPSULATION_ID;
     use std::collections::BTreeSet;
 
     fn fpm(n: u32) -> NonZeroU32 {
@@ -4029,6 +4576,20 @@ mod tests {
         locator_count: usize,
         advertised: Option<usize>,
     ) -> (Arc<Participant>, UserLogic, Arc<DatagramRecorder>, Arc<StatefulWriter>, GuidPrefix) {
+        let locators: Vec<Locator> = (0..locator_count)
+            .map(|i| Locator::from_ip(Ipv4Addr::new(127, 0, 0, (i + 1) as u8), 7411))
+            .collect();
+        windowed_writer_with_locators(reader_count, locators, advertised)
+    }
+
+    /// `windowed_writer` with the reader locators spelled out, so a test can advertise a
+    /// kind other than UDP.
+    #[allow(clippy::type_complexity)]
+    fn windowed_writer_with_locators(
+        reader_count: usize,
+        locators: Vec<Locator>,
+        advertised: Option<usize>,
+    ) -> (Arc<Participant>, UserLogic, Arc<DatagramRecorder>, Arc<StatefulWriter>, GuidPrefix) {
         let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
         let recorder = Arc::new(DatagramRecorder::default());
         let transport: Arc<dyn TransportPlugin> = recorder.clone();
@@ -4061,9 +4622,6 @@ mod tests {
             Weak::new(),
         ));
 
-        let locators: Vec<Locator> = (0..locator_count)
-            .map(|i| Locator::from_ip(Ipv4Addr::new(127, 0, 0, (i + 1) as u8), 7411))
-            .collect();
         for r in 0..reader_count {
             let reader_entity_id =
                 EntityId::new([0x20 + r as u8, 0x00, 0x00], EntityKind::USER_DEFINED_READER_NO_KEY);
@@ -4152,6 +4710,72 @@ mod tests {
             );
             *expected += datagram.fragment_count as u32;
         }
+    }
+
+    /// The zero-copy path skips fragmentation, so a slot-backed sample larger than one
+    /// datagram must not come back as a single oversized DATA when no ring takes the
+    /// descriptor. `DatagramRecorder` leaves `send_to_peer` at the trait default, which
+    /// refuses, so this drives exactly the spec §7 rule 8/9 fallback.
+    #[test]
+    fn a_fragmented_change_the_ring_refused_still_goes_out_as_data_frag() {
+        // `OwnedSegment::create` needs a notifier, so there is nothing to exercise where
+        // notification is unsupported.
+        if !notify_supported() {
+            return;
+        }
+        // Unused elsewhere; this test needs no registry, only a segment of its own.
+        const DOMAIN: u32 = 230;
+        const SLOT: u32 = 0;
+        const SAMPLE: usize = 1024 * 1024;
+
+        unlink_segment(DOMAIN, SLOT);
+        let segment = Arc::new(
+            OwnedSegment::create(DOMAIN, SLOT, 1, &DEFAULT_CLASSES, DEFAULT_RING_ENTRIES).unwrap(),
+        );
+        let lease = segment.owner_mut().acquire(SAMPLE).unwrap();
+        let slot_ref = segment.owner_mut().commit(lease, SAMPLE as u32);
+        let handle = ShmSlotHandle::own(Arc::clone(&segment), slot_ref).unwrap();
+
+        // SHM outranks UDP, so `locators_to_send_to` picks the SHM locator alone and
+        // `destination_is_shm` holds; the UDP one is what the fallback has left.
+        let locators = vec![
+            Locator::from_shm(&Ipv4Addr::new(127, 0, 0, 1), 7411),
+            Locator::from_ip(Ipv4Addr::new(127, 0, 0, 1), 7411),
+        ];
+        let (_participant, user_logic, recorder, writer, _) =
+            windowed_writer_with_locators(1, locators, Some(WINDOW_TEST_ADVERTISED));
+
+        let mut change = CacheChange::create_fragmented(
+            ChangeKind::Alive,
+            writer.guid(),
+            InstanceHandle::NIL,
+            SequenceNumber::new(0, 1),
+            &vec![0xA5; SAMPLE],
+            None,
+            WINDOW_TEST_FRAGS_PER_MSG as usize * WINDOW_TEST_FRAG_SIZE,
+            WINDOW_TEST_FRAG_SIZE,
+        );
+        change.set_shm_slot_payload(handle);
+        assert!(change.shm_slot_ref().is_some(), "the change must be slot-backed");
+        assert!(change.is_fragmented(), "the sample must be larger than one datagram");
+        writer
+            .writer_cache()
+            .lock()
+            .unwrap()
+            .add_change(Arc::new(change), writer.as_ref())
+            .unwrap();
+
+        let round = first_transmission(&user_logic, &writer, &recorder);
+        assert!(!round.is_empty(), "the refused descriptor left nothing to send");
+        for datagram in &round {
+            assert!(
+                datagram.fragment_count >= 1,
+                "the fallback sent a whole {SAMPLE}-byte DATA instead of DATA_FRAG"
+            );
+        }
+
+        drop(segment);
+        unlink_segment(DOMAIN, SLOT);
     }
 
     #[test]
@@ -5730,5 +6354,115 @@ mod tests {
             user_logic.send_credit.get(&remote_prefix).is_none(),
             "a builtin writer's send left a charge on the shared budget"
         );
+    }
+
+    /// `shm_descriptor` delegates to `SlotRef::from_payload`, both for the round trip and
+    /// for its length guard (`slot_ref.rs:57-59`). A first draft of this test kept passing
+    /// with that guard deleted: every input shorter than `SLOT_REF_PAYLOAD_LEN` it tried
+    /// was still caught by `SlotRef::decode`'s own length check inside `from_payload`, so
+    /// none of its assertions actually exercised `from_payload`'s own guard. Only a length
+    /// under 4 does: `from_payload` slices `&bytes[4..]` before ever calling `decode`, so
+    /// without the guard that slice panics instead of `decode` returning `None`.
+    #[test]
+    fn only_the_vendor_encapsulation_is_read_as_a_descriptor() {
+        let r = SlotRef {
+            owner_slot: 3,
+            owner_epoch_low: 9,
+            class: 1,
+            index: 4,
+            generation: 2,
+            len: 128,
+        };
+        // Delegation: the round trip through `to_payload` reproduces `r` exactly.
+        assert_eq!(shm_descriptor(&r.to_payload()), Some(r));
+
+        // The length guard itself: the encapsulation id alone, with nothing after it for
+        // `&bytes[4..]` to slice.
+        assert_eq!(shm_descriptor(&SLOT_REF_ENCAPSULATION_ID.to_be_bytes()), None);
+
+        // An ordinary sample never reads as a descriptor.
+        assert_eq!(shm_descriptor(&[0x00, 0x01, 0x00, 0x00, b'h', b'i']), None);
+    }
+
+    fn reader_id(n: u8) -> EntityId {
+        EntityId::new([n, 0, 0], EntityKind::USER_DEFINED_READER_NO_KEY)
+    }
+
+    #[test]
+    fn a_peer_advertising_shm_and_udp_gets_one_copy_over_shm() {
+        let shm = Locator::from_shm(&Ipv4Addr::new(127, 0, 0, 1), 7411);
+        let udp = Locator::from_ip(Ipv4Addr::new(127, 0, 0, 1), 7411);
+        let readers = vec![
+            ([0xA0; 12], reader_id(0x10), shm.clone()),
+            ([0xA0; 12], reader_id(0x10), udp.clone()),
+        ];
+
+        // Both kinds reachable: the same reader must not be sent to twice.
+        assert_eq!(stateless_send_mask(&readers, |_| true), vec![true, false]);
+    }
+
+    #[test]
+    fn two_readers_each_get_their_own_copy() {
+        let shm = Locator::from_shm(&Ipv4Addr::new(127, 0, 0, 1), 7411);
+        let udp = Locator::from_ip(Ipv4Addr::new(127, 0, 0, 1), 7411);
+        let readers = vec![
+            ([0xA0; 12], reader_id(0x10), shm.clone()),
+            ([0xA0; 12], reader_id(0x10), udp.clone()),
+            ([0xB0; 12], reader_id(0x20), shm.clone()),
+            ([0xB0; 12], reader_id(0x20), udp.clone()),
+        ];
+
+        // Grouping is per reader, not per participant or per locator kind.
+        assert_eq!(stateless_send_mask(&readers, |_| true), vec![true, false, true, false]);
+    }
+
+    #[test]
+    fn a_udp_only_peer_still_gets_its_copy() {
+        let udp = Locator::from_ip(Ipv4Addr::new(127, 0, 0, 1), 7411);
+        let readers = vec![([0xA0; 12], reader_id(0x10), udp.clone())];
+
+        assert_eq!(stateless_send_mask(&readers, |_| true), vec![true]);
+
+        // And an SHM locator the transport cannot reach does not shadow the UDP one.
+        let shm = Locator::from_shm(&Ipv4Addr::new(10, 0, 0, 1), 7411);
+        let mixed =
+            vec![([0xA0; 12], reader_id(0x10), shm), ([0xA0; 12], reader_id(0x10), udp.clone())];
+        assert_eq!(stateless_send_mask(&mixed, |l| !l.is_shm()), vec![false, true]);
+    }
+
+    /// A stateless writer carries one locator per entry, so the entry that took the
+    /// descriptor holds nothing to fall back to: the copy's destination is the sibling
+    /// entry `stateless_send_mask` turned off. Reverting `stateless_fallback_locators` to
+    /// what the send site used to look at -- the picked entry's own locator, with SHM
+    /// filtered out, i.e. nothing -- makes this fail.
+    #[test]
+    fn a_refused_ring_falls_back_to_the_masked_off_udp_sibling() {
+        let shm = Locator::from_shm(&Ipv4Addr::new(127, 0, 0, 1), 7411);
+        let udp = Locator::from_ip(Ipv4Addr::new(127, 0, 0, 1), 7411);
+        let readers = vec![
+            ([0xA0; 12], reader_id(0x10), shm.clone()),
+            ([0xA0; 12], reader_id(0x10), udp.clone()),
+            ([0xB0; 12], reader_id(0x20), udp.clone()),
+        ];
+
+        // The SHM entry is the one that sends; the UDP sibling is masked off.
+        assert_eq!(stateless_send_mask(&readers, |_| true), vec![true, false, true]);
+
+        // And that masked-off sibling is exactly where a refused ring sends the copy.
+        assert_eq!(
+            stateless_fallback_locators(&readers, [0xA0; 12], reader_id(0x10)),
+            vec![udp.clone()]
+        );
+
+        // Another reader's locator is never a destination for this one.
+        assert_eq!(stateless_fallback_locators(&readers, [0xB0; 12], reader_id(0x20)), vec![udp]);
+    }
+
+    #[test]
+    fn an_shm_only_peer_has_no_fallback_destination() {
+        let shm = Locator::from_shm(&Ipv4Addr::new(127, 0, 0, 1), 7411);
+        let readers = vec![([0xA0; 12], reader_id(0x10), shm)];
+
+        assert!(stateless_fallback_locators(&readers, [0xA0; 12], reader_id(0x10)).is_empty());
     }
 }
