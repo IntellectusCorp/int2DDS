@@ -90,11 +90,6 @@ mod tests {
 
     #[test]
     fn the_loop_drains_every_queued_message_before_waiting_again() {
-        // `OwnedSegment::create` needs a notifier, so there is nothing to
-        // exercise where notification is unsupported.
-        if !notify_supported() {
-            return;
-        }
         unlink_segment(DOMAIN, 0);
         let owned = OwnedSegment::create(DOMAIN, 0, 1, &[(64, 2)], 8).unwrap();
         let peer = PeerSegment::attach(DOMAIN, 0, 1).unwrap();
@@ -116,9 +111,6 @@ mod tests {
 
     #[test]
     fn the_loop_delivers_then_stops_once_the_session_is_gone() {
-        if !notify_supported() {
-            return;
-        }
         unlink_segment(DOMAIN, 2);
         let owned = Arc::new(OwnedSegment::create(DOMAIN, 2, 1, &[(64, 2)], 8).unwrap());
         let peer = PeerSegment::attach(DOMAIN, 2, 3).unwrap();
@@ -161,9 +153,6 @@ mod tests {
 
     #[test]
     fn queued_messages_come_out_without_waiting_a_round() {
-        if !notify_supported() {
-            return;
-        }
         unlink_segment(DOMAIN, 4);
         let owned = Arc::new(OwnedSegment::create(DOMAIN, 4, 1, &[(64, 2)], 8).unwrap());
         let peer = PeerSegment::attach(DOMAIN, 4, 5).unwrap();
@@ -207,9 +196,6 @@ mod tests {
 
     #[test]
     fn an_empty_ring_does_not_spin_the_loop() {
-        if !notify_supported() {
-            return;
-        }
         unlink_segment(DOMAIN, 6);
         let owned = Arc::new(OwnedSegment::create(DOMAIN, 6, 1, &[(64, 2)], 8).unwrap());
 
@@ -235,9 +221,12 @@ mod tests {
         stop.store(true, Ordering::Relaxed);
         worker.join().unwrap();
 
-        // 300 ms is well inside one `RECV_WAIT`, so the loop should still be
-        // parked in its first wait. Without the wait it runs millions.
-        assert!(spun < 10, "the loop spun {spun} times on an empty ring");
+        // With a kernel wakeup, 300 ms is well inside one `RECV_WAIT` and the
+        // loop should still be parked in its first wait. A polling waiter
+        // instead returns every 200 us, so ~1500 rounds is its floor. Either
+        // way, a wait that does not wait runs millions.
+        let bound = if notify_supported() { 10 } else { 4000 };
+        assert!(spun < bound, "the loop spun {spun} times on an empty ring");
 
         drop(owned);
         unlink_segment(DOMAIN, 6);

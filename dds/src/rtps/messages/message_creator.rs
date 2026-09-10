@@ -48,7 +48,6 @@ mod tests {
     use crate::common::instance_handle::InstanceHandle;
     use crate::rtps::common::entity_kind::EntityKind;
     use crate::rtps::messages::message_receiver::{MessageReceiver, TypedSubmessage};
-    use crate::rtps::transport::shm::notify::notify_supported;
     use crate::rtps::transport::shm::segment::{unlink_segment, OwnedSegment};
     use crate::rtps::transport::shm::slot_handle::ShmSlotHandle;
     use crate::rtps::transport::shm::slot_ref::{SlotRef, SLOT_REF_LEN};
@@ -249,9 +248,6 @@ mod tests {
 
     #[test]
     fn an_shm_destination_carries_the_descriptor_not_the_payload() {
-        if !notify_supported() {
-            return;
-        }
         const DOMAIN: u32 = 253;
         unlink_segment(DOMAIN, 0);
         let owned = Arc::new(OwnedSegment::create(DOMAIN, 0, 1, &[(64, 2)], 4).unwrap());
@@ -283,9 +279,6 @@ mod tests {
 
     #[test]
     fn a_non_shm_destination_carries_the_payload() {
-        if !notify_supported() {
-            return;
-        }
         const DOMAIN: u32 = 254;
         unlink_segment(DOMAIN, 0);
         let owned = Arc::new(OwnedSegment::create(DOMAIN, 0, 1, &[(64, 2)], 4).unwrap());
@@ -321,9 +314,6 @@ mod tests {
     // there is nothing left to fragment.
     #[test]
     fn a_sample_past_the_message_size_budget_still_fits_one_shm_datagram() {
-        if !notify_supported() {
-            return;
-        }
         let _guard = lock_env();
         let max_message_size = crate::common::env::get_max_message_size();
 

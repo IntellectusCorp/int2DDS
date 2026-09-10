@@ -7,7 +7,6 @@ use std::process::Command;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use super::notify::notify_supported;
 use super::participant_slot::{now_tick, ParticipantSlot, STALE_AFTER_TICKS};
 use super::registry::Registry;
 use super::registry_segment::unlink_registry;
@@ -129,11 +128,6 @@ fn child_notifier() {
 
 #[test]
 fn payload_survives_the_process_boundary() {
-    // `OwnedSegment::create` needs a notifier, so there is nothing to
-    // exercise where notification is unsupported.
-    if !notify_supported() {
-        return;
-    }
     unlink_segment(DOMAIN, PARENT_SLOT);
     unlink_segment(DOMAIN, CHILD_SLOT);
 
@@ -234,9 +228,6 @@ fn two_processes_share_one_registry() {
 
 #[test]
 fn a_peer_process_wakes_a_blocked_owner() {
-    if !notify_supported() {
-        return;
-    }
     unlink_segment(RUNTIME_SEGMENT_DOMAIN, PARENT_SLOT);
     let owned =
         OwnedSegment::create(RUNTIME_SEGMENT_DOMAIN, PARENT_SLOT, 1, &[(64, 2)], 4).unwrap();
@@ -484,11 +475,6 @@ fn report_path(tag: &str, domain: i32) -> PathBuf {
 /// observation that the bytes came out of the parent's pool.
 #[test]
 fn a_dds_sample_crosses_two_processes_through_a_pool_slot() {
-    // `OwnedSegment::create` needs a notifier, so there is nothing to
-    // exercise where notification is unsupported.
-    if !notify_supported() {
-        return;
-    }
     let domain = crate::test_utils::unique_domain_id();
     let participant = e2e_participant(domain, "shm");
     let topic = participant
@@ -667,11 +653,6 @@ fn kept_samples(reader: &DataReader<E2eSample>) -> Vec<E2eSample> {
 /// samples back instead of asserting on the path.
 #[test]
 fn samples_kept_by_a_reader_in_the_writers_own_participant_stay_distinct() {
-    // `OwnedSegment::create` needs a notifier, so there is nothing to
-    // exercise where notification is unsupported.
-    if !notify_supported() {
-        return;
-    }
     let domain = crate::test_utils::unique_domain_id();
     let participant = e2e_participant(domain, "shm");
     let topic = participant
@@ -947,9 +928,6 @@ fn nonzero_counters(text: &str, prefix: &str) -> Vec<String> {
 #[test]
 #[ignore]
 fn end_to_end_latency_across_three_transports() {
-    if !notify_supported() {
-        return;
-    }
     println!(
         "config: INT2DDS_UDP_SOCKET_BUFFER={}, INT2DDS_SHM_POOL_CLASSES={PERF_POOL_CLASSES}",
         std::env::var(E2E_UDP_BUFFER_ENV).unwrap_or_else(|_| "(OS default)".to_string())

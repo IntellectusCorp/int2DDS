@@ -158,7 +158,6 @@ impl PeerMap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rtps::transport::shm::notify::notify_supported;
     use crate::rtps::transport::shm::participant_slot::now_tick;
     use crate::rtps::transport::shm::registry_segment::{unlink_registry, RegistrySegment};
     use crate::rtps::transport::shm::segment::unlink_segment;
@@ -179,11 +178,6 @@ mod tests {
 
     #[test]
     fn resolve_finds_a_registered_peer_and_caches_it() {
-        // `OwnedSegment::create` needs a notifier, so there is nothing to
-        // exercise where notification is unsupported.
-        if !notify_supported() {
-            return;
-        }
         let (reg, mine, _theirs) = fresh();
         // Occupy our own registry slot first so the peer lands elsewhere --
         // otherwise the claim below would land on slot 0 == ME, and `resolve`
@@ -208,9 +202,6 @@ mod tests {
 
     #[test]
     fn resolve_returns_none_for_an_unregistered_prefix() {
-        if !notify_supported() {
-            return;
-        }
         let (reg, mine, _theirs) = fresh();
         let map = PeerMap::new(DOMAIN, ME);
         assert!(map.resolve(&mine, reg.registry(), [200; 12]).is_none());
@@ -221,9 +212,6 @@ mod tests {
 
     #[test]
     fn resolve_refuses_our_own_slot() {
-        if !notify_supported() {
-            return;
-        }
         let (reg, mine, _theirs) = fresh();
         // The first claim lands on slot 0, which is ME: this prefix is us.
         let (slot, _) = reg.registry().claim(std::process::id(), [9; 12], now_tick()).unwrap();
@@ -243,9 +231,6 @@ mod tests {
 
     #[test]
     fn forget_clears_the_peers_bit_from_our_pool() {
-        if !notify_supported() {
-            return;
-        }
         let (reg, mine, _theirs) = fresh();
         // Occupy our own registry slot first so the peer lands elsewhere --
         // otherwise the first claim below would land on slot 0 == ME and the
@@ -282,9 +267,6 @@ mod tests {
 
     #[test]
     fn drop_mapping_releases_the_peer_without_touching_its_bits() {
-        if !notify_supported() {
-            return;
-        }
         let (reg, mine, _theirs) = fresh();
         // Occupy our own registry slot first so the peer lands elsewhere --
         // otherwise the first claim below would land on slot 0 == ME and the
@@ -326,9 +308,6 @@ mod tests {
 
     #[test]
     fn a_reissued_slot_is_not_served_from_the_cache() {
-        if !notify_supported() {
-            return;
-        }
         const DOMAIN2: u32 = 246;
         const ME2: u32 = 0;
         const PEER2: u32 = 1;
@@ -393,9 +372,6 @@ mod tests {
 
     #[test]
     fn a_leftover_segment_at_an_older_epoch_is_not_adopted() {
-        if !notify_supported() {
-            return;
-        }
         // A slot is published ACTIVE before its new owner unlinks and re-creates
         // the segment, and on Windows the dead owner's object outlives it while
         // any peer holds a handle. So the name can resolve to the previous
@@ -429,9 +405,6 @@ mod tests {
 
     #[test]
     fn forget_slot_reclaims_only_when_the_slot_is_free_or_still_unmapped() {
-        if !notify_supported() {
-            return;
-        }
         let (reg, mine, _theirs) = fresh();
         // Occupy our own slot first so the participants below land elsewhere.
         reg.registry().claim(std::process::id(), [0; 12], now_tick()).unwrap();

@@ -371,7 +371,6 @@ impl TransportPlugin for ShmTransportPlugin {
 mod tests {
     use super::*;
     use crate::rtps::transport::shm::config::{DEFAULT_CLASSES, DEFAULT_RING_ENTRIES};
-    use crate::rtps::transport::shm::notify::notify_supported;
     use crate::rtps::transport::shm::participant_slot::now_tick;
     use crate::rtps::transport::shm::registry_segment::unlink_registry;
     use crate::rtps::transport::shm::ring::RING_INLINE;
@@ -383,11 +382,6 @@ mod tests {
 
     #[test]
     fn send_to_peer_lands_in_the_peers_ring() {
-        // `OwnedSegment::create` needs a notifier, so there is nothing to
-        // exercise where notification is unsupported.
-        if !notify_supported() {
-            return;
-        }
         const OWN_PREFIX: GuidPrefix = [76; 12];
         const PEER_PREFIX: GuidPrefix = [77; 12];
 

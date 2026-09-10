@@ -274,11 +274,6 @@ mod tests {
 
     #[test]
     fn owner_and_peer_share_one_segment() {
-        // `OwnedSegment::create` needs a notifier, so there is nothing to
-        // exercise where notification is unsupported.
-        if !notify_supported() {
-            return;
-        }
         // A leftover segment is no longer adopted, so clear one first.
         unlink_segment(DOMAIN, 0);
         let owned = OwnedSegment::create(DOMAIN, 0, 1, &[(64, 2)], 4).unwrap();
@@ -342,9 +337,6 @@ mod tests {
 
     #[test]
     fn waiting_returns_immediately_when_the_ring_already_has_a_message() {
-        if !notify_supported() {
-            return;
-        }
         unlink_segment(DOMAIN, 4);
         let owned = OwnedSegment::create(DOMAIN, 4, 1, &[(64, 2)], 4).unwrap();
         let peer = PeerSegment::attach(DOMAIN, 4, 5).unwrap();

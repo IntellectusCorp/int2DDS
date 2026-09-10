@@ -4085,7 +4085,6 @@ impl UnicastMessageProcessor for UserLogic {
 mod tests {
     use super::*;
     use crate::rtps::transport::shm::config::{DEFAULT_CLASSES, DEFAULT_RING_ENTRIES};
-    use crate::rtps::transport::shm::notify::notify_supported;
     use crate::rtps::transport::shm::segment::{unlink_segment, OwnedSegment};
     use crate::rtps::transport::shm::slot_handle::ShmSlotHandle;
     use crate::rtps::transport::shm::slot_ref::SLOT_REF_ENCAPSULATION_ID;
@@ -4718,11 +4717,6 @@ mod tests {
     /// refuses, so this drives exactly the send-time fallback.
     #[test]
     fn a_fragmented_change_the_ring_refused_still_goes_out_as_data_frag() {
-        // `OwnedSegment::create` needs a notifier, so there is nothing to exercise where
-        // notification is unsupported.
-        if !notify_supported() {
-            return;
-        }
         // Unused elsewhere; this test needs no registry, only a segment of its own.
         const DOMAIN: u32 = 230;
         const SLOT: u32 = 0;

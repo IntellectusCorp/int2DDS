@@ -124,14 +124,10 @@ mod tests {
     use std::sync::Arc;
 
     use super::ShmSlotHandle;
-    use crate::rtps::transport::shm::notify::notify_supported;
     use crate::rtps::transport::shm::segment::{unlink_segment, OwnedSegment, PeerSegment};
 
     #[test]
     fn a_handle_holds_the_bit_until_it_is_dropped() {
-        if !notify_supported() {
-            return;
-        }
         const DOMAIN: u32 = 251;
         unlink_segment(DOMAIN, 0);
         let owned = OwnedSegment::create(DOMAIN, 0, 1, &[(64, 2)], 4).unwrap();
@@ -157,9 +153,6 @@ mod tests {
 
     #[test]
     fn an_owner_handle_frees_the_slot_when_it_is_dropped() {
-        if !notify_supported() {
-            return;
-        }
         const DOMAIN: u32 = 252;
         unlink_segment(DOMAIN, 0);
         // One slot in the class, so the next `acquire` can only succeed once

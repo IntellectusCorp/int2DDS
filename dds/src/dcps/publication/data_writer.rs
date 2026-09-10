@@ -3780,13 +3780,9 @@ mod tests {
     /// alone, so a hand-built loan is enough.
     #[test]
     fn loan_backed_by_a_slot_exposes_the_slots_bytes_and_capacity() {
-        use crate::rtps::transport::shm::notify::notify_supported;
         use crate::rtps::transport::shm::registry_segment::unlink_registry;
         use crate::rtps::transport::shm::segment::unlink_segment;
 
-        if !notify_supported() {
-            return;
-        }
         const DOMAIN: u32 = 253;
         unlink_registry(DOMAIN);
         let rt = ShmRuntime::start(DOMAIN, [40; 12]).expect("shm runtime");
@@ -3821,13 +3817,9 @@ mod tests {
     /// then pick the copy path for a sample that is already in the pool.
     #[test]
     fn commit_serialized_write_keeps_a_slot_backed_loan_on_the_change() {
-        use crate::rtps::transport::shm::notify::notify_supported;
         use crate::rtps::transport::shm::registry_segment::unlink_registry;
         use crate::rtps::transport::shm::segment::unlink_segment;
 
-        if !notify_supported() {
-            return;
-        }
         const DOMAIN: u32 = 254;
         unlink_registry(DOMAIN);
         let rt = ShmRuntime::start(DOMAIN, [41; 12]).expect("shm runtime");
@@ -4016,10 +4008,6 @@ mod tests {
     /// -> `DcpsBridge` -> `DataWriter`.
     #[test]
     fn a_writer_on_the_shm_transport_reaches_its_participants_runtime() {
-        use crate::rtps::transport::shm::notify::notify_supported;
-        if !notify_supported() {
-            return;
-        }
         let writer = shm_writer::<SlotLoanSample>("ShmRuntimeSeamTopic", "SlotLoanSample");
         assert!(
             writer.shm_runtime().is_some(),
@@ -4071,10 +4059,6 @@ mod tests {
     /// The typed `write()` path takes the same loan the raw-byte path does.
     #[test]
     fn a_typed_write_serializes_into_a_pool_slot_when_a_matched_reader_is_local() {
-        use crate::rtps::transport::shm::notify::notify_supported;
-        if !notify_supported() {
-            return;
-        }
         let writer = shm_writer::<SlotLoanSample>("ShmTypedSlotTopic", "SlotLoanSample");
         let rt = writer.shm_runtime().expect("the shm transport must have a runtime");
         match_a_local_reader(&writer, &rt);
@@ -4102,10 +4086,6 @@ mod tests {
     /// to a class that fits.
     #[test]
     fn a_sample_that_overruns_its_slot_gives_it_back_and_the_next_write_fits() {
-        use crate::rtps::transport::shm::notify::notify_supported;
-        if !notify_supported() {
-            return;
-        }
         let writer = shm_writer::<SlotBlobSample>("ShmOverflowTopic", "SlotBlobSample");
         let rt = writer.shm_runtime().expect("the shm transport must have a runtime");
         match_a_local_reader(&writer, &rt);
