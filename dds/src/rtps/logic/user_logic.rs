@@ -666,6 +666,11 @@ impl UserLogic {
     /// `Arc<Option<UserLogic>>`, which owns the transport plugin and so the
     /// `ShmRuntime` whose absence ends the loop. Captured once, that condition
     /// would never come true.
+    ///
+    /// Within a round the task is built on the first message rather than up
+    /// front. A polling backend runs this closure every `POLL_INTERVAL` and
+    /// nearly every round drains nothing, so an eager build is an allocation per
+    /// poll for a task no message ever reaches.
     fn start_shm_receiving(&self, participant: &Arc<Participant>) {
         let Some(runtime) = self.transport.shm_runtime() else {
             return;
@@ -680,9 +685,10 @@ impl UserLogic {
             if participant.is_terminated() {
                 return None;
             }
-            let mut task = UserUnicastListeningTask::new(participant);
+            let mut task: Option<UserUnicastListeningTask> = None;
             let sink = move |bytes: &[u8]| {
-                task.process_rtps_message(Bytes::copy_from_slice(bytes), from_addr)
+                task.get_or_insert_with(|| UserUnicastListeningTask::new(Arc::clone(&participant)))
+                    .process_rtps_message(Bytes::copy_from_slice(bytes), from_addr)
             };
             Some((runtime.own_arc(), sink))
         });
@@ -851,15 +857,23 @@ impl UserLogic {
                 continue;
             }
 
+            // One answer for both branches below: sample size must not change where a
+            // fallback goes. Empty only when `to_shm` was tried and this destination
+            // advertises no non-SHM locator.
+            let copy_to = self.copy_targets(&selected, locators.iter(), to_shm);
+            if copy_to.is_empty() {
+                warn!(
+                    "[UserLogic] zero-copy ring refused sn={} and {:?} advertises no non-SHM \
+                     locator; sample dropped",
+                    a_change.sequence_number().to_i64(),
+                    dst_prefix
+                );
+                continue;
+            }
+
             if a_change.is_fragmented() {
                 let requested_change_sn = a_change.sequence_number();
                 debug!("[UserLogic] [RequestedChanges] Fragmented change: {}", requested_change_sn);
-
-                // Same destination the non-fragmented branch below falls back to: once
-                // `to_shm` was tried and no ring took it, the send-time fallback sends
-                // the copy on this destination's non-SHM locators. Sample size must not
-                // change where a fallback goes.
-                let frag_targets = self.copy_targets(&selected, locators.iter(), to_shm);
 
                 let timestamp = Utc::now();
 
@@ -878,7 +892,7 @@ impl UserLogic {
                     &plan,
                     a_change.fragment_size() as usize,
                     a_change.data_value().len(),
-                    self.locators_to_send_to(locators.iter()).len(),
+                    selected.len(),
                     remaining,
                     untouched,
                     piggyback,
@@ -920,7 +934,7 @@ impl UserLogic {
                     )
                     .is_ok()
                     {
-                        match self.send_rtps_message_to_selected(&frag_targets, &send_buffer) {
+                        match self.send_rtps_message_to_selected(&copy_to, &send_buffer) {
                             Ok(_) => {
                                 if heartbeat_info.is_some() {
                                     stateful_writer.increase_heartbeat_count();
@@ -945,8 +959,7 @@ impl UserLogic {
             )
             .is_ok()
             {
-                let targets = self.copy_targets(&selected, locators.iter(), to_shm);
-                if let Err(e) = self.send_rtps_message_to_selected(&targets, &send_buffer) {
+                if let Err(e) = self.send_rtps_message_to_selected(&copy_to, &send_buffer) {
                     warn!("Failed to send DATA for requested change: {:?}", e);
                 }
             }
@@ -1336,17 +1349,25 @@ impl UserLogic {
                 continue;
             }
 
+            // One answer for both branches below: sample size must not change where a
+            // fallback goes. Empty only when `to_shm` was tried and this destination
+            // advertises no non-SHM locator.
+            let copy_to = self.copy_targets(&selected, locators.iter(), to_shm);
+            if copy_to.is_empty() {
+                warn!(
+                    "[Data] zero-copy ring refused sn={} and {:?} advertises no non-SHM \
+                     locator; sample dropped",
+                    sn.to_i64(),
+                    dst_prefix
+                );
+                continue;
+            }
+
             if a_change.is_fragmented() {
                 // The fragment burst goes out once per participant: reader id UNKNOWN
                 // reaches every matched reader behind dst_prefix.
                 let timestamp = Utc::now();
                 let mut is_any_fragment_sent = false;
-
-                // Same destination the non-fragmented branch below falls back to: once
-                // `to_shm` was tried and no ring took it, the send-time fallback sends
-                // the copy on this destination's non-SHM locators. Sample size must not
-                // change where a fallback goes.
-                let frag_targets = self.copy_targets(&selected, locators.iter(), to_shm);
 
                 debug!(
                     "[Data] Batched DATA_FRAG sn={} to {} readers behind one participant",
@@ -1370,7 +1391,7 @@ impl UserLogic {
                     &plan,
                     a_change.fragment_size() as usize,
                     a_change.data_value().len(),
-                    self.locators_to_send_to(locators.iter()).len(),
+                    selected.len(),
                     remaining,
                     untouched,
                     is_piggyback_wanted,
@@ -1409,7 +1430,7 @@ impl UserLogic {
                         &mut send_buffer,
                     )
                     .is_ok()
-                        && self.send_rtps_message_to_selected(&frag_targets, &send_buffer).is_ok()
+                        && self.send_rtps_message_to_selected(&copy_to, &send_buffer).is_ok()
                     {
                         is_any_fragment_sent = true;
                         if heartbeat_info.is_some() {
@@ -1450,8 +1471,7 @@ impl UserLogic {
                 continue;
             }
 
-            let targets = self.copy_targets(&selected, locators.iter(), to_shm);
-            if self.send_rtps_message_to_selected(&targets, &send_buffer).is_ok() {
+            if self.send_rtps_message_to_selected(&copy_to, &send_buffer).is_ok() {
                 if heartbeat_info.is_some() {
                     writer.increase_heartbeat_count();
                 }
@@ -1551,19 +1571,24 @@ impl UserLogic {
                                 &send_buffer,
                             );
 
+                        // One answer for both branches below: sample size must not change
+                        // where a fallback goes. Empty only when `to_shm` was tried and
+                        // this destination advertises no non-SHM locator.
+                        let copy_to = self.copy_targets(&selected, locators.iter(), to_shm);
+
                         if shm_delivered {
                             data_sent = true;
                             if piggyback {
                                 writer.increase_heartbeat_count();
                             }
+                        } else if copy_to.is_empty() {
+                            warn!(
+                                "[Data] zero-copy ring refused sn={} and {:?} advertises no \
+                                 non-SHM locator; sample dropped",
+                                a_change.sequence_number().to_i64(),
+                                reader_guid.prefix()
+                            );
                         } else if a_change.is_fragmented() {
-                            // Same destination the non-fragmented branch below falls back
-                            // to: once `to_shm` was tried and no ring took it, the
-                            // send-time fallback sends the copy on this destination's
-                            // non-SHM locators. Sample size must not change where a
-                            // fallback goes.
-                            let frag_targets =
-                                self.copy_targets(&selected, locators.iter(), to_shm);
                             let timestamp = Utc::now();
                             let total_fragments = a_change.total_fragments();
                             let frags_per_msg: NonZeroU32 =
@@ -1623,7 +1648,7 @@ impl UserLogic {
                                 .is_ok()
                                 {
                                     if self
-                                        .send_rtps_message_to_selected(&frag_targets, &send_buffer)
+                                        .send_rtps_message_to_selected(&copy_to, &send_buffer)
                                         .is_ok()
                                     {
                                         data_sent = true;
@@ -1647,8 +1672,7 @@ impl UserLogic {
                             )
                             .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
 
-                            let targets = self.copy_targets(&selected, locators.iter(), to_shm);
-                            if self.send_rtps_message_to_selected(&targets, &send_buffer).is_ok() {
+                            if self.send_rtps_message_to_selected(&copy_to, &send_buffer).is_ok() {
                                 data_sent = true;
                                 if piggyback {
                                     writer.increase_heartbeat_count();
@@ -4767,6 +4791,61 @@ mod tests {
                 "the fallback sent a whole {SAMPLE}-byte DATA instead of DATA_FRAG"
             );
         }
+
+        drop(segment);
+        unlink_segment(DOMAIN, SLOT);
+    }
+
+    /// The stateless path warns and skips when a refused ring leaves nowhere to put the
+    /// copy (`an_shm_only_peer_has_no_fallback_destination`); the stateful paths must do
+    /// the same. Without that check the fragment burst still runs: it charges the peer's
+    /// receive window for a sample every `send_rtps_message_to_selected` then refuses to
+    /// send, so the next sample -- which does have somewhere to go -- finds the window
+    /// already spent.
+    #[test]
+    fn an_shm_only_destination_whose_ring_refused_spends_no_window() {
+        // Unused elsewhere; this test needs no registry, only a segment of its own.
+        const DOMAIN: u32 = 229;
+        const SLOT: u32 = 0;
+        const SAMPLE: usize = 1024 * 1024;
+
+        unlink_segment(DOMAIN, SLOT);
+        let segment = Arc::new(
+            OwnedSegment::create(DOMAIN, SLOT, 1, &DEFAULT_CLASSES, DEFAULT_RING_ENTRIES).unwrap(),
+        );
+        let lease = segment.owner_mut().acquire(SAMPLE).unwrap();
+        let slot_ref = segment.owner_mut().commit(lease, SAMPLE as u32);
+        let handle = ShmSlotHandle::own(Arc::clone(&segment), slot_ref).unwrap();
+
+        // SHM alone: `destination_is_shm` holds and the fallback has nothing left.
+        let locators = vec![Locator::from_shm(&Ipv4Addr::new(127, 0, 0, 1), 7411)];
+        let (_participant, user_logic, recorder, writer, remote_prefix) =
+            windowed_writer_with_locators(1, locators, Some(WINDOW_TEST_ADVERTISED));
+
+        let mut change = CacheChange::create_fragmented(
+            ChangeKind::Alive,
+            writer.guid(),
+            InstanceHandle::NIL,
+            SequenceNumber::new(0, 1),
+            &vec![0xA5; SAMPLE],
+            None,
+            WINDOW_TEST_FRAGS_PER_MSG as usize * WINDOW_TEST_FRAG_SIZE,
+            WINDOW_TEST_FRAG_SIZE,
+        );
+        change.set_shm_slot_payload(handle);
+        writer
+            .writer_cache()
+            .lock()
+            .unwrap()
+            .add_change(Arc::new(change), writer.as_ref())
+            .unwrap();
+
+        let round = first_transmission(&user_logic, &writer, &recorder);
+        assert!(round.is_empty(), "there is no non-SHM locator, so nothing can go out");
+        assert!(
+            user_logic.send_credit.get(&remote_prefix).is_none(),
+            "a sample that went nowhere must not spend the peer's receive window"
+        );
 
         drop(segment);
         unlink_segment(DOMAIN, SLOT);
