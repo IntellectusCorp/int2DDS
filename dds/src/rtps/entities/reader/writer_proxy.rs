@@ -583,11 +583,11 @@ mod tests {
     }
 
     /// The primitive `handle_gap_message` uses to unblock a fan-out behind a sequence
-    /// number that will never carry data (Task 9's SHM claim-failure path reuses the same
+    /// number that will never carry data (the SHM claim-failure path reuses the same
     /// shape): mark it irrelevant, advance `expected_sn` past it, and flush whatever was
     /// buffered behind it. `irrelevant_change_set` alone does not advance `expected_sn` --
     /// the caller must do that itself, which is the part `handle_gap_message`'s
-    /// flush-then-mark block and Task 9's `drop_shm_sample_and_advance_ledger` both add.
+    /// flush-then-mark block and `drop_shm_sample_and_advance_ledger` both add.
     #[test]
     fn advancing_expected_sn_past_an_irrelevant_change_flushes_what_was_buffered_behind_it() {
         let mut proxy = empty_writer_proxy();

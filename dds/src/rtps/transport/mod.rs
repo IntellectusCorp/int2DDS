@@ -21,7 +21,7 @@
 //! - [`tcp`] - TCP transport implementation
 //! - [`udp`] - UDP transport implementation
 //! - [`shm`] - Shared memory transport implementation
-//! - [`shm_write_policy`] - Spec §7's write()-time judgment over that substrate
+//! - [`shm_write_policy`] - Whether a sample may take a pool slot, judged at `write()`
 //!
 //! ## Key Traits
 //!

@@ -28,11 +28,8 @@ impl PeerMap {
     /// Clear a departed peer's bits unless the slot looks re-issued. Refs bits
     /// are indexed by slot id, so a new owner's bits are indistinguishable from
     /// the old owner's; clearing them would erase a live reader's claim.
-    /// Leaking the dead peer's bits is the safer half of that trade -- the
-    /// slots stay unallocatable, nothing is corrupted, and a later owner of
-    /// the same slot id clears the bit only for the pool slots it itself
-    /// claims or releases; bits in slots that owner never touches stay
-    /// leaked for the rest of this process's life.
+    /// Leaking them is the safer half of that trade: the slots stay
+    /// unallocatable but nothing is corrupted.
     ///
     /// This narrows the race, it does not close it: both checks are loads
     /// separate from the `fetch_and` that follows, so a claim landing in
@@ -60,9 +57,9 @@ impl PeerMap {
     /// our own segment holds no bit that could tell a reader's claim apart from
     /// the writer's own: an eviction's `release_own` would clear a live reader's
     /// claim and the pool would hand the slot out again underneath it. Self is
-    /// therefore not a peer, at either end of the path -- this is what spec §7
-    /// rule 1 asks about a matched reader, and what `resolve` asks about a
-    /// descriptor's origin.
+    /// therefore not a peer, at either end of the path -- this is what the
+    /// `NoLocalReader` rule asks about a matched reader, and what `resolve` asks
+    /// about a descriptor's origin.
     pub(crate) fn find_peer(&self, registry: &Registry, prefix: &[u8; 12]) -> Option<(u32, u64)> {
         registry.find_active(prefix).filter(|(slot, _)| *slot != self.my_slot)
     }

@@ -1,5 +1,5 @@
-//! Spec §7's write()-time judgment: whether a sample may take an SHM pool
-//! slot at all, and the size hint the next one is borrowed against.
+//! The write()-time judgment: whether a sample may take an SHM pool slot at
+//! all, and the size hint the next one is borrowed against.
 //!
 //! Outside `shm/` on purpose. `shm/` is the substrate -- every non-excluded
 //! file in it refers only to `shm::*`, which is what lets the Unix
@@ -18,12 +18,12 @@ use crate::{
 };
 
 /// A matched reader's SHM reachability, as this participant's `ShmRuntime`
-/// registry would answer it, for spec §7 rule 1.
+/// registry would answer it, for the `NoLocalReader` rule.
 ///
 /// Two-valued because the registry is per host: an entry in it, other than our
-/// own, *is* a same-host SHM peer. That same lookup is what rule 2
-/// (`PeerNotRegistered`) asks, so rule 1's answer already carries it and no
-/// separate rule-2 judgment is left to make. A reader in this writer's own
+/// own, *is* a same-host SHM peer. That same lookup is what `PeerNotRegistered`
+/// asks, so the `NoLocalReader` answer already carries it and no separate
+/// judgment is left to make. A reader in this writer's own
 /// participant is `NotLocal`: a descriptor cannot cross to it -- see
 /// `PeerMap::find_peer`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,24 +32,23 @@ pub(crate) enum ShmReaderReachability {
     Local,
 }
 
-/// Spec §7 rules 1 and 6 -- the write()-time checks answerable from this
-/// writer's own QoS and matched readers, with no live `ShmRuntime` needed.
-/// Rules 3 and 7 (no `ShmRuntime` at all) and rules 4 and 5
-/// (`PoolOwner::acquire`'s return) are decided elsewhere -- see
-/// task-4-report.md's judgment-point table.
+/// `NoLocalReader` and `DurabilityTooStrong` -- the write()-time checks answerable
+/// from this writer's own QoS and matched readers, with no live `ShmRuntime`
+/// needed. `NoSlotId` (no `ShmRuntime` at all) and `SampleTooLarge`/`PoolExhausted`
+/// (`PoolOwner::acquire`'s return) are decided at the call site.
 pub(crate) fn shm_write_time_fallback(
     durability: DurabilityQosPolicyKind,
     matched_readers: &[Guid],
     reachability: impl Fn(GuidPrefix) -> ShmReaderReachability,
 ) -> Option<FallbackReason> {
-    // Rule 6: a TRANSIENT_LOCAL-or-stronger writer keeps changes for
+    // `DurabilityTooStrong`: a TRANSIENT_LOCAL-or-stronger writer keeps changes for
     // late-joining readers indefinitely, so a slot it took would never come
     // back.
     if durability >= DurabilityQosPolicyKind::TransientLocal {
         return Some(FallbackReason::DurabilityTooStrong);
     }
 
-    // Rule 1: the loan is per-`CacheChange`, not per-destination, so one
+    // `NoLocalReader`: the loan is per-`CacheChange`, not per-destination, so one
     // reachable same-host reader is enough to borrow a slot -- remote readers
     // are served from that same slot at send time.
     for reader in matched_readers {

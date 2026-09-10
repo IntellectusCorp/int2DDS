@@ -46,8 +46,8 @@ pub enum EncodingKind {
     PlCdr2Le = 0x000B,    // PL_CDR2 Little Endian (MUTABLE v2)
 
     /// Vendor-specific: the payload is a 20-byte `SlotRef`, not CDR. Only ever
-    /// written toward a same-host SHM locator (spec §6.3), so it never reaches
-    /// another vendor's parser. Must stay equal to
+    /// written toward a same-host SHM locator, so it never reaches another
+    /// vendor's parser. Must stay equal to
     /// `rtps::transport::shm::slot_ref::SLOT_REF_ENCAPSULATION_ID` (duplicated,
     /// not imported, so the shm tree stays free of the serialize module).
     ShmSlotRef = 0x8001,

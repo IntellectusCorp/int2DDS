@@ -187,8 +187,8 @@ pub(crate) trait TransportPlugin: Send + Sync {
     fn peer_lost(&self, _prefix: GuidPrefix) {}
 
     /// The zero-copy runtime, when this transport brought one up. `None` for
-    /// every transport that has none, and for SHM when spec §7 rule 3 or 7
-    /// kept it from starting.
+    /// every transport that has none, and for SHM when `FallbackReason::NoSlotId`
+    /// or `NotifyUnsupported` kept it from starting.
     fn shm_runtime(&self) -> Option<std::sync::Arc<ShmRuntime>> {
         None
     }

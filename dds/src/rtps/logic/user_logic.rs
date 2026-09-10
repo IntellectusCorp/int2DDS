@@ -557,7 +557,7 @@ fn stateless_send_mask(
     mask
 }
 
-/// Where a stateless writer's send-time fallback (spec §7 rules 8 and 9) puts the copy.
+/// Where a stateless writer's send-time fallback (`RingFull`, `PeerGone`) puts the copy.
 ///
 /// The three stateful send sites hand `copy_targets` the reader's whole locator list and
 /// let `non_shm_locators_to_send_to` drop the SHM one. A stateless writer holds *one
@@ -856,8 +856,8 @@ impl UserLogic {
                 debug!("[UserLogic] [RequestedChanges] Fragmented change: {}", requested_change_sn);
 
                 // Same destination the non-fragmented branch below falls back to: once
-                // `to_shm` was tried and no ring took it, spec §7 rules 8 and 9 send the
-                // copy on this destination's non-SHM locators. Sample size must not
+                // `to_shm` was tried and no ring took it, the send-time fallback sends
+                // the copy on this destination's non-SHM locators. Sample size must not
                 // change where a fallback goes.
                 let frag_targets = self.copy_targets(&selected, locators.iter(), to_shm);
 
@@ -1343,8 +1343,8 @@ impl UserLogic {
                 let mut is_any_fragment_sent = false;
 
                 // Same destination the non-fragmented branch below falls back to: once
-                // `to_shm` was tried and no ring took it, spec §7 rules 8 and 9 send the
-                // copy on this destination's non-SHM locators. Sample size must not
+                // `to_shm` was tried and no ring took it, the send-time fallback sends
+                // the copy on this destination's non-SHM locators. Sample size must not
                 // change where a fallback goes.
                 let frag_targets = self.copy_targets(&selected, locators.iter(), to_shm);
 
@@ -1558,9 +1558,10 @@ impl UserLogic {
                             }
                         } else if a_change.is_fragmented() {
                             // Same destination the non-fragmented branch below falls back
-                            // to: once `to_shm` was tried and no ring took it, spec §7
-                            // rules 8 and 9 send the copy on this destination's non-SHM
-                            // locators. Sample size must not change where a fallback goes.
+                            // to: once `to_shm` was tried and no ring took it, the
+                            // send-time fallback sends the copy on this destination's
+                            // non-SHM locators. Sample size must not change where a
+                            // fallback goes.
                             let frag_targets =
                                 self.copy_targets(&selected, locators.iter(), to_shm);
                             let timestamp = Utc::now();
@@ -2716,9 +2717,9 @@ impl UserLogic {
         self.get_upgraded_participant().is_ok_and(|p| p.guid().prefix() == prefix)
     }
 
-    /// The same pick with SHM ruled out: where a send-time fallback (spec §7 rules 8
-    /// and 9) re-routes a sample whose descriptor no peer ring took. Empty when the
-    /// destination advertises SHM only.
+    /// The same pick with SHM ruled out: where a send-time fallback (`RingFull`,
+    /// `PeerGone`) re-routes a sample whose descriptor no peer ring took. Empty when
+    /// the destination advertises SHM only.
     fn non_shm_locators_to_send_to<'a, T>(&self, locators: T) -> Vec<&'a Locator>
     where
         T: IntoIterator<Item = &'a Locator>,
@@ -2755,8 +2756,8 @@ impl UserLogic {
     /// `selected` names the same participant, so the first ring that takes it is the only
     /// one written to.
     ///
-    /// `false` when none did -- spec §7 rules 8 and 9 -- and the caller then carries the
-    /// sample as a copy on its ordinary path, which is what keeps a fragmented change
+    /// `false` when none did -- `RingFull` or `PeerGone` -- and the caller then carries
+    /// the sample as a copy on its ordinary path, which is what keeps a fragmented change
     /// fragmented. The fallback is counted here, once, after every locator has refused:
     /// counting inside `send_to_peer` would charge one fallback per locator tried and
     /// would charge one even where a later locator succeeded.
@@ -2780,9 +2781,9 @@ impl UserLogic {
         let reason = match last_error.map(|e| e.kind()) {
             Some(std::io::ErrorKind::NotFound) => FallbackReason::PeerGone,
             Some(std::io::ErrorKind::WouldBlock) => FallbackReason::RingFull,
-            // `Unsupported`, or no locator tried at all: neither is a rule 8 or 9
-            // fallback. Spec §7 reports a transport without a zero-copy path through
-            // `ShmRuntime::start` instead.
+            // `Unsupported`, or no locator tried at all: neither is a `RingFull` or
+            // `PeerGone` fallback. A transport with no zero-copy path is reported
+            // through `ShmRuntime::start` instead.
             _ => return false,
         };
         if rt.fallbacks().note(reason) {
@@ -3001,7 +3002,7 @@ impl UserLogic {
     /// fan-out: a `PeerMap::resolve` cache hit still reads `registry.epoch` out of shared
     /// memory (`peer_map.rs:69`), and the peer segment is the same for every matched
     /// reader. Only `claim_shm_slot` -- the actual pool-slot handoff -- runs once per
-    /// reader (Task 1's per-slot local count is what makes that safe: N claims raise the
+    /// reader (the per-slot local count is what makes that safe: N claims raise the
     /// local count to N while the shared bit is set only on the first).
     ///
     /// `None` when this participant has no local `ShmRuntime` (warns once via
@@ -3034,9 +3035,9 @@ impl UserLogic {
     }
 
     /// A slot descriptor's claim failed for `reader` (its peer never resolved, or
-    /// `ShmSlotHandle::claim` rejected it -- spec §5.6's four-step validation), so this
-    /// reader gets no sample. Its receive ledger must still advance past `seq_num`: spec
-    /// §6.4 drops only the sample, not the writer's connection to this reader. Left
+    /// `ShmSlotHandle::claim` rejected it -- see `PoolReader::claim`), so this reader
+    /// gets no sample. Its receive ledger must still advance past `seq_num`: a rejected
+    /// descriptor drops only the sample, not the writer's connection to this reader. Left
     /// alone, `expected_sn` never moves, every later sample from this writer buffers
     /// forever behind it, and a RELIABLE writer retransmits `seq_num` forever.
     ///
@@ -3085,9 +3086,8 @@ impl UserLogic {
 }
 
 /// The reader side of a slot descriptor: `ShmSlotHandle::claim` on `segment`, warning once
-/// if `PoolReader::claim` rejects it (spec §5.6's four-step validation). A free function,
-/// not a method -- it needs no participant state beyond the segment `resolve_shm_peer`
-/// already resolved.
+/// if `PoolReader::claim` rejects the descriptor. A free function, not a method -- it
+/// needs no participant state beyond the segment `resolve_shm_peer` already resolved.
 fn claim_shm_slot(
     remote_writer_guid: Guid,
     segment: Arc<PeerSegment>,
@@ -4715,7 +4715,7 @@ mod tests {
     /// The zero-copy path skips fragmentation, so a slot-backed sample larger than one
     /// datagram must not come back as a single oversized DATA when no ring takes the
     /// descriptor. `DatagramRecorder` leaves `send_to_peer` at the trait default, which
-    /// refuses, so this drives exactly the spec §7 rule 8/9 fallback.
+    /// refuses, so this drives exactly the send-time fallback.
     #[test]
     fn a_fragmented_change_the_ring_refused_still_goes_out_as_data_frag() {
         // `OwnedSegment::create` needs a notifier, so there is nothing to exercise where

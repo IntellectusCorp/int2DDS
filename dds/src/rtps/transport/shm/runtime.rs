@@ -116,7 +116,7 @@ impl ShmRuntime {
         &self.peers
     }
 
-    /// Spec §7 rule 1: is `prefix` a participant we can reach through SHM?
+    /// The `NoLocalReader` rule: is `prefix` a participant we can reach through SHM?
     /// Never ourselves -- see `PeerMap::find_peer` for why self is not a peer.
     pub(crate) fn peer_is_registered(&self, prefix: &GuidPrefix) -> bool {
         self.peers.find_peer(self.registry(), prefix).is_some()
@@ -144,21 +144,11 @@ impl ShmRuntime {
 
     /// Reclaim the slots of participants that died without unmatching.
     ///
-    /// Known cost: a slot can outrun this. If a peer dies and, before our
-    /// next tick, a new participant starts, runs its own startup sweep
-    /// (which frees that same stale slot), and claims it into a fresh
-    /// epoch, the slot is ACTIVE with an epoch we have never seen by the
-    /// time we look at it -- `Registry::sweep_dead` returns slots it judged
-    /// dead in the epoch it observed, whether it or another sweeper performed
-    /// the CAS. A slot re-claimed into a newer epoch is filtered out earlier
-    /// than that: the new owner refreshes the heartbeat, so `stale_slots` never
-    /// offers it, and its pid is alive. So it is not `dead` here and
-    /// `forget_slot` never runs for it. Every
-    /// pool-slot bit the original dead peer held stays
-    /// leaked for the rest of this process's life; not corruption, a
-    /// capacity leak that eventually degrades to the copy path. Closing
-    /// this needs a `PeerMap` iteration API to reconcile the cache against
-    /// the registry directly -- out of scope for this round.
+    /// Known cost: a slot re-claimed into a fresh epoch before our next tick is
+    /// no longer `dead` here, so `forget_slot` never runs for it and the dead
+    /// peer's pool-slot bits stay leaked for this process's life. A capacity
+    /// leak that degrades to the copy path, not corruption. Closing it needs a
+    /// `PeerMap` iteration API to reconcile the cache against the registry.
     pub(crate) fn sweep(&self) {
         for slot in self.slot.sweep() {
             self.peers.forget_slot(&self.own, self.registry(), slot);
@@ -179,8 +169,8 @@ mod tests {
 
     #[test]
     fn start_registers_the_participant_and_stops_cleanly() {
-        // `OwnedSegment::create` needs a notifier, so there is nothing to
-        // exercise where notification is unsupported.
+        // The polling backend lets this run without a kernel wakeup, but that
+        // combination has not been exercised on a real such platform yet.
         if !notify_supported() {
             return;
         }

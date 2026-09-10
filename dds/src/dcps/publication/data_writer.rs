@@ -94,8 +94,8 @@ use crate::{
     DdsType,
 };
 
-/// What backs a [`SerializedWriteLoan`]'s bytes. Spec §6.2: `prepare_serialized_write`
-/// picks `Slot` whenever spec §7's seven write()-time rules all pass, `Heap` otherwise.
+/// What backs a [`SerializedWriteLoan`]'s bytes. `prepare_serialized_write` picks `Slot`
+/// whenever every write()-time fallback rule passes, `Heap` otherwise.
 enum LoanBacking {
     /// `change.data_mut()`, as every loan was backed before this task.
     Heap,
@@ -1025,7 +1025,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         Ok(SerializedWriteLoan { change, backing })
     }
 
-    /// Spec §7's write()-time rules. `None` whenever any of them rules the
+    /// The write()-time fallback rules. `None` whenever any of them rules the
     /// sample out; the caller falls back to the heap `Vec` exactly as before.
     fn try_borrow_shm_slot(&self, len: usize) -> Option<(Arc<ShmRuntime>, SlotLease)> {
         let rt = self.shm_runtime()?;
@@ -1046,10 +1046,10 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             return None;
         }
 
-        // Rules 4 and 5: `class_for` answers rule 4 (no class fits `len`),
-        // `acquire`'s `None` (once a class exists) answers rule 5 (that
-        // class's free queue is empty). One guard covers both calls -- see
-        // `PoolOwner::acquire`, which does not re-lock internally.
+        // `class_for` answers `SampleTooLarge` (no class fits `len`), `acquire`'s
+        // `None` (once a class exists) answers `PoolExhausted` (that class's free
+        // queue is empty). One guard covers both calls -- see `PoolOwner::acquire`,
+        // which does not re-lock internally.
         let mut owner = rt.own().owner_mut();
         if owner.pool().class_for(len).is_none() {
             drop(owner);
@@ -1644,9 +1644,8 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
 
     /// Pooled add_change for typed data: fills the buffer via TypeSupport serialization.
     ///
-    /// Spec §6.2: this path takes the same loan the raw-byte path does, so a
-    /// user who never touches the loan API still serializes straight into a
-    /// pool slot.
+    /// This path takes the same loan the raw-byte path does, so a user who
+    /// never touches the loan API still serializes straight into a pool slot.
     fn add_change(
         &self,
         kind: ChangeKind,
@@ -1668,10 +1667,10 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
     /// Serialize `data` into a pool slot and hang that slot on `change`.
     ///
     /// `Ok(false)` means no slot backs the change and the caller must
-    /// serialize onto the heap as before -- either spec §7 ruled the sample
-    /// out, or it overran the slot the size hint asked for. An overrun is not
-    /// one of §7's reasons: nothing about the transport failed, the hint was
-    /// simply too small, so it is not counted as a fallback.
+    /// serialize onto the heap as before -- either a fallback rule ruled the
+    /// sample out, or it overran the slot the size hint asked for. An overrun
+    /// is not a `FallbackReason`: nothing about the transport failed, the hint
+    /// was simply too small, so it is not counted as a fallback.
     fn serialize_into_shm_slot(
         &self,
         data: &dyn Any,
@@ -3764,7 +3763,7 @@ mod tests {
         );
     }
 
-    // --- Task 4: slot-backed loans (the §7 judgment itself lives in `shm::fallback`) ---
+    // --- slot-backed loans (the write()-time judgment lives in `shm_write_policy`) ---
 
     /// Keyed on purpose: `serialized_key_info` returns at its first line for a
     /// keyless type, so only a keyed sample actually drives the key derivation
@@ -3814,12 +3813,12 @@ mod tests {
         unlink_segment(DOMAIN, own_slot);
     }
 
-    /// `try_borrow_shm_slot` cannot reach a live runtime yet (see
-    /// task-4-report.md), so this builds a `Slot`-backed loan by hand to
-    /// exercise `commit_serialized_write`'s `Slot` arm: the change must come
+    /// `try_borrow_shm_slot` needs a participant with a live runtime, so this
+    /// builds a `Slot`-backed loan by hand to exercise
+    /// `commit_serialized_write`'s `Slot` arm: the change must come
     /// out backed by the slot itself, not by a copy of its bytes -- a copy
-    /// would leave `shm_slot_ref()` `None` and send-time §7 would then pick
-    /// the copy path for a sample that is already in the pool.
+    /// would leave `shm_slot_ref()` `None` and the send-time fallback would
+    /// then pick the copy path for a sample that is already in the pool.
     #[test]
     fn commit_serialized_write_keeps_a_slot_backed_loan_on_the_change() {
         use crate::rtps::transport::shm::notify::notify_supported;
@@ -3948,8 +3947,7 @@ mod tests {
         assert_eq!(changes[0].instance_handle(), handle);
     }
 
-    /// Spec §6.2: writing past what the loan handed out is the caller's error,
-    /// on either backing.
+    /// Writing past what the loan handed out is the caller's error, on either backing.
     #[test]
     fn commit_serialized_write_rejects_an_actual_size_past_the_loan_capacity() {
         let writer = create_pool_test_writer("LoanOverflowTopic", 4);
@@ -4030,9 +4028,9 @@ mod tests {
     }
 
     /// Match a reader in *another* participant of this domain, registered in the
-    /// same SHM registry, so spec §7 rule 1 passes. Rule 1 reads nothing but the
-    /// registry, so the peer is claimed straight into it rather than stood up as a
-    /// second participant; the pid it carries is ours, so the sweep never reclaims
+    /// same SHM registry, so the `NoLocalReader` rule passes. That rule reads nothing
+    /// but the registry, so the peer is claimed straight into it rather than stood up
+    /// as a second participant; the pid it carries is ours, so the sweep never reclaims
     /// it. Not this writer's own prefix: a participant is not its own SHM peer
     /// (`PeerMap::find_peer`), and a reader behind it can take no descriptor.
     fn match_a_local_reader<Foo: 'static + Clone>(writer: &DataWriter<Foo>, rt: &ShmRuntime) {
@@ -4070,8 +4068,7 @@ mod tests {
         ));
     }
 
-    /// Spec §6.2: the typed `write()` path takes the same loan the raw-byte
-    /// path does.
+    /// The typed `write()` path takes the same loan the raw-byte path does.
     #[test]
     fn a_typed_write_serializes_into_a_pool_slot_when_a_matched_reader_is_local() {
         use crate::rtps::transport::shm::notify::notify_supported;
@@ -4090,7 +4087,7 @@ mod tests {
         assert_eq!(
             rt.fallbacks().count(FallbackReason::NoLocalReader),
             0,
-            "a locally reachable reader must not be read as rule 1"
+            "a locally reachable reader must not count as NoLocalReader"
         );
     }
 
@@ -4099,9 +4096,9 @@ mod tests {
         blob: Vec<u8>,
     }
 
-    /// A sample that overruns the slot the size hint asked for is none of spec
-    /// §7's reasons -- the hint was simply too small. The slot goes back and the
-    /// sample takes the heap; the length recorded there steers the next write
+    /// A sample that overruns the slot the size hint asked for is no
+    /// `FallbackReason` -- the hint was simply too small. The slot goes back and
+    /// the sample takes the heap; the length recorded there steers the next write
     /// to a class that fits.
     #[test]
     fn a_sample_that_overruns_its_slot_gives_it_back_and_the_next_write_fits() {

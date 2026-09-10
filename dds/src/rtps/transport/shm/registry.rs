@@ -389,7 +389,7 @@ mod tests {
 
     /// Never a live pid: Linux caps pids far below this, and Windows pids are
     /// multiples of 4. Do NOT use 0 — on Unix `kill(0, 0)` signals the caller's
-    /// own process group and reports alive. Task 10 exercises a real kill.
+    /// own process group and reports alive.
     const DEAD_PID: u32 = i32::MAX as u32;
 
     #[test]

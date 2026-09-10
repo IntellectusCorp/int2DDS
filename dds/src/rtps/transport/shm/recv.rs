@@ -10,8 +10,9 @@ use crate::rtps::transport::shm::ring::RING_INLINE;
 use crate::rtps::transport::shm::segment::OwnedSegment;
 
 /// Bounds two things and nothing else: how long a wedged ring stays wedged
-/// before a `pop` recovers it (spec §5.7), and how long this thread takes to
-/// notice the runtime is gone. Normal delivery latency comes from the notifier.
+/// before a `pop` recovers it (`Ring::recover_if_wedged`), and how long this
+/// thread takes to notice the runtime is gone. Normal delivery latency comes
+/// from the notifier.
 pub(crate) const RECV_WAIT: Duration = Duration::from_secs(1);
 
 /// Pops until the ring is empty, handing each message to `sink`. Returns how
@@ -54,7 +55,7 @@ where
     loop {
         let Some((segment, sink)) = session() else { return };
         // Drain first, wait second: `Ring::pop` is the only thing that
-        // recovers a wedged cell (spec §5.7).
+        // recovers a wedged cell (`Ring::recover_if_wedged`).
         drain(&segment, sink);
         segment.wait_for_message(RECV_WAIT);
     }

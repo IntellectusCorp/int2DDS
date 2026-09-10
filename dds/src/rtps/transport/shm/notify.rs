@@ -1,7 +1,8 @@
 //! Cross-process wakeup for a ring's consumer.
 //!
 //! Windows uses a named auto-reset event; Linux uses a futex on a word inside
-//! the shared segment. Other platforms report unsupported and callers fall back.
+//! the shared segment. Elsewhere there is no kernel wakeup, so the consumer
+//! polls: `signal` does nothing and `wait_if` hands control straight back.
 
 use std::io;
 use std::sync::atomic::AtomicU32;
@@ -9,6 +10,13 @@ use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+/// How long a polling waiter sleeps before handing control back. The legacy
+/// listener asks for 10 us, which Windows rounds up to a whole millisecond;
+/// 200 us is the smallest value whose intent survives that rounding.
+const POLL_INTERVAL: Duration = Duration::from_micros(200);
+
+/// Whether this platform has a kernel wakeup. Not "whether SHM works" -- a
+/// platform without one still runs, polling instead of sleeping.
 pub(crate) fn notify_supported() -> bool {
     cfg!(any(windows, target_os = "linux"))
 }
@@ -19,6 +27,7 @@ pub(crate) struct Notifier {
     // Unused where neither backend applies; kept so the struct shape is uniform.
     #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
     futex: *const AtomicU32,
+    polling: bool,
 }
 
 // Safety: `handle` is a Windows kernel event HANDLE. Kernel objects are
@@ -58,20 +67,32 @@ impl Notifier {
         if handle.is_null() {
             return Err(io::Error::last_os_error());
         }
-        Ok(Notifier { handle, futex })
+        Ok(Notifier { handle, futex, polling: false })
     }
 
     #[cfg(all(unix, target_os = "linux"))]
     fn make(_name: &str, futex: *const AtomicU32) -> io::Result<Notifier> {
-        Ok(Notifier { futex })
+        Ok(Notifier { futex, polling: false })
     }
 
     #[cfg(not(any(windows, target_os = "linux")))]
-    fn make(_name: &str, _futex: *const AtomicU32) -> io::Result<Notifier> {
-        Err(io::Error::new(io::ErrorKind::Unsupported, "notification unsupported"))
+    fn make(_name: &str, futex: *const AtomicU32) -> io::Result<Notifier> {
+        Ok(Notifier { futex, polling: true })
+    }
+
+    /// The polling backend on a platform that has a real one, so the path the
+    /// notification-less platforms take is exercised where tests actually run.
+    #[cfg(test)]
+    pub(crate) fn create_polling(name: &str, futex: *const AtomicU32) -> io::Result<Notifier> {
+        let mut n = Self::make(name, futex)?;
+        n.polling = true;
+        Ok(n)
     }
 
     pub(crate) fn signal(&self) {
+        if self.polling {
+            return;
+        }
         #[cfg(windows)]
         // Safety: `self.handle` was created by `make` and is closed only in
         // `Drop`, which cannot run concurrently with this `&self` call, so the
@@ -111,6 +132,14 @@ impl Notifier {
     /// Sleep until signalled or `timeout` elapses. `expected` must come from a
     /// `prepare_wait` taken before the caller tested its condition.
     pub(crate) fn wait_if(&self, expected: u32, timeout: Duration) {
+        if self.polling {
+            let _ = expected;
+            std::thread::sleep(timeout.min(POLL_INTERVAL));
+            return;
+        }
+        // Nothing follows the early return where neither backend is compiled in.
+        #[cfg(not(any(windows, target_os = "linux")))]
+        let _ = timeout;
         #[cfg(windows)]
         // Safety: same handle-validity argument as in `signal`; the timeout is
         // a plain millisecond count, not a pointer. The event is auto-reset and
@@ -140,11 +169,6 @@ impl Notifier {
                 0,
                 0,
             );
-        }
-        #[cfg(not(any(windows, target_os = "linux")))]
-        {
-            let _ = expected;
-            std::thread::sleep(timeout);
         }
     }
 }
@@ -202,5 +226,28 @@ mod tests {
         let start = std::time::Instant::now();
         n.wait_if(token, Duration::from_millis(50));
         assert!(start.elapsed() >= Duration::from_millis(40));
+    }
+
+    #[test]
+    fn a_polling_waiter_hands_control_back_and_never_touches_the_backend() {
+        let word = AtomicU32::new(0);
+        let name = format!("int2dds_test_polling_{}", std::process::id());
+        let n = Notifier::create_polling(&name, &word as *const AtomicU32).unwrap();
+
+        // The caller's budget is `RECV_WAIT`; a polling waiter must return long
+        // before it so the ring gets re-checked.
+        let token = n.prepare_wait();
+        let start = std::time::Instant::now();
+        n.wait_if(token, Duration::from_secs(5));
+        let waited = start.elapsed();
+        assert!(waited < Duration::from_millis(50), "polling waiter slept the budget: {waited:?}");
+
+        // On the futex backend a live `signal` bumps this word.
+        n.signal();
+        assert_eq!(
+            word.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "a polling notifier must leave the wakeup word alone"
+        );
     }
 }

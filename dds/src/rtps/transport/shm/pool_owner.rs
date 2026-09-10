@@ -12,9 +12,8 @@ use crate::rtps::transport::shm::slot_ref::SlotRef;
 
 /// How long a `Writing` slot must have sat with its lease already dropped
 /// before `acquire` takes it back. The `_live` guard is what actually keeps a
-/// lease in the caller's hands safe, so any delay would do; spec 5.2 says
-/// "long-standing", and this is the period the rest of the module already
-/// runs on.
+/// lease in the caller's hands safe, so any delay would do; this is the period
+/// the rest of the module already runs on.
 pub(crate) const STALE_LEASE_AFTER: Duration = HEARTBEAT_PERIOD;
 
 pub(crate) struct SlotLease {
@@ -91,8 +90,7 @@ impl PoolOwner {
         if let Some(lease) = self.try_acquire(len) {
             return Some(lease);
         }
-        // Spec 5.2: a loan dropped without `commit` or `abort` leaves its slot
-        // in Writing. Nothing else reclaims it, so allocation failure is where
+        // A loan dropped without `commit` or `abort` leaves its slot in Writing. Nothing else reclaims it, so allocation failure is where
         // we sweep -- the guard in `reclaim_stale_leases` keeps live loans.
         if self.reclaim_stale_leases(STALE_LEASE_AFTER) == 0 {
             return None;

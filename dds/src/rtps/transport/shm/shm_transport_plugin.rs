@@ -19,25 +19,21 @@ use crate::rtps::transport::udp::udp_listener::UdpListener;
 use crate::rtps::transport::udp::udp_sender::UdpSender;
 use crate::rtps::transport::UdpConfig;
 
-/// Spec §8: an SHM locator names a segment on the host that advertised it, so
-/// only our own are reachable. Without this a peer on another machine that
-/// also runs SHM is "reached" by writing into our own ring, and the sample
-/// is lost -- `user_logic`'s SHM > TCP > UDP filter tries SHM first and
-/// relies on `can_handle` to rule out what is not local.
+/// An SHM locator names a segment on the host that advertised it, so only our
+/// own are reachable. Without this a peer on another machine that also runs SHM
+/// is "reached" by writing into our own ring, and the sample is lost --
+/// `user_logic`'s SHM > TCP > UDP filter tries SHM first and relies on
+/// `can_handle` to rule out what is not local.
 ///
 /// `ours` must be real NIC addresses, never `INT2DDS_EXTERNAL_ADDRESS`: every
 /// host behind the same NAT advertises that same external address, so
 /// comparing against it would accept a remote peer's SHM locator as our own
-/// and silently drop all user data between the two hosts. This still
-/// misjudges when two hosts behind different NATs share a private IP (e.g.
-/// both 192.168.1.10) -- closing that requires a host/boot id, not an IP
-/// comparison.
+/// and silently drop all user data between the two hosts. Two hosts behind
+/// different NATs sharing a private IP still misjudge; closing that needs a
+/// host id, not an IP comparison.
 ///
-/// A free function so it is testable without a plugin instance, and so it
-/// stays independent of the zero-copy runtime: the legacy SHM data path
-/// (`shm_sender`/`shm_listener`/`ring_buffer`) works whether or not
-/// `ShmRuntime` started, so gating this on the runtime would turn
-/// `INT2DDS_SHM_ZERO_COPY=0` into "no SHM at all" instead of "no zero-copy".
+/// Independent of the zero-copy runtime on purpose: the legacy SHM path works
+/// whether or not `ShmRuntime` started.
 fn shm_locator_is_local(locator: &Locator, ours: &[Ipv4Addr]) -> bool {
     locator.is_shm() && ours.contains(&locator.to_ip_v4_addr())
 }
@@ -238,14 +234,14 @@ impl TransportPlugin for ShmTransportPlugin {
         }
     }
 
-    /// Spec §7 rules 8 and 9. The legacy SHM branch of `send` stays as it is:
+    /// The zero-copy send path. The legacy SHM branch of `send` stays as it is:
     /// SEDP and SPDP still travel on it.
     ///
     /// Reports why it failed through `ErrorKind` and counts nothing: one sample
     /// may be offered here once per SHM locator the destination advertises, so
     /// only the caller -- which knows when every one of them has refused -- can
-    /// tell a fallback from a retry. `NotFound` is rule 9 (the peer left the
-    /// registry), `WouldBlock` rule 8 (the ring refused the push), and
+    /// tell a fallback from a retry. `NotFound` is `PeerGone` (the peer left the
+    /// registry), `WouldBlock` is `RingFull` (the ring refused the push), and
     /// `Unsupported` neither: it means this transport has no zero-copy path.
     fn send_to_peer(
         &self,
@@ -262,12 +258,11 @@ impl TransportPlugin for ShmTransportPlugin {
         let Some(peer) = rt.peers().resolve(rt.own(), rt.registry(), dst_prefix) else {
             return Err(io::Error::new(io::ErrorKind::NotFound, "peer gone"));
         };
-        // Spec §7: a first `Preempted` is not a fallback reason.
-        // `recover_if_wedged` freed the cell this producer had claimed, so the
-        // payload was never published and one more try on the same ring
-        // publishes it. A second one is rule 8: reaching recovery twice needs
-        // the ring to fill another lap, which is not contention but a ring that
-        // is effectively unusable.
+        // A first `Preempted` is not a fallback reason: `recover_if_wedged` freed
+        // the cell this producer had claimed, so the payload was never published
+        // and one more try on the same ring publishes it. A second one is
+        // `RingFull`: reaching recovery twice needs the ring to fill another lap,
+        // which is not contention but a ring that is effectively unusable.
         let mut pushed = peer.push_and_signal(data, SPILL_NONE);
         if pushed == Err(RingError::Preempted) {
             pushed = peer.push_and_signal(data, SPILL_NONE);

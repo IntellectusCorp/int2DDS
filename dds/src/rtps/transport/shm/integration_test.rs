@@ -274,8 +274,8 @@ fn a_peer_process_wakes_a_blocked_owner() {
 
 // ---------------------------------------------------------------------------
 // DDS end to end. The substrate tests above stop at the ring; what follows runs
-// real participants through the whole path spec §11 asks for -- writer loan,
-// descriptor, ring, parser, claim -- in two processes on one host.
+// real participants through the whole path -- writer loan, descriptor, ring,
+// parser, claim -- in two processes on one host.
 // ---------------------------------------------------------------------------
 
 use std::path::PathBuf;
@@ -319,8 +319,8 @@ const E2E_DEPTH_ENV: &str = "INT2DDS_E2E_DEPTH";
 /// gets -- and, at the default 65000 fragment size, a receive window that holds
 /// exactly one fragment. See `end_to_end_latency_across_three_transports`.
 const E2E_UDP_BUFFER_ENV: &str = "INT2DDS_E2E_UDP_BUFFER";
-/// Spec §9. Set on the child only, never on this process: mutating the
-/// environment of a running test binary would leak into every later test.
+/// Set on the child only, never on this process: mutating the environment of a
+/// running test binary would leak into every later test.
 const ZERO_COPY_ENV: &str = "INT2DDS_SHM_ZERO_COPY";
 
 const E2E_TOPIC: &str = "ShmZeroCopyE2eTopic";
@@ -467,26 +467,21 @@ fn report_path(tag: &str, domain: i32) -> PathBuf {
     std::env::temp_dir().join(format!("int2dds_e2e_{}_{tag}_{domain}.txt", std::process::id()))
 }
 
-/// Spec §11's DDS integration case.
+/// The DDS end-to-end case.
 ///
-/// The green here has to mean "through a pool slot", not merely "delivered",
-/// and no single check says that. Three together do:
+/// The green has to mean "through a pool slot", not merely "delivered". Three
+/// checks together say that:
 ///
-/// 1. the child compares what it read against the pattern the parent wrote, so
-///    something really crossed and arrived intact;
-/// 2. the parent's own `FallbackCounters` -- a fresh instance belonging to this
-///    participant's runtime and nothing else, so `== 0` is not order-dependent
-///    here the way the process-wide reject counters would be -- must be zero on
-///    all nine of spec §7's reasons, so no sample took the copy path at write or
-///    send time; and
-/// 3. the child, from a mapping of the parent's segment it opens itself rather
-///    than one the DDS layer handed it, must find its own participant bit
-///    standing in the parent's pool `refs` bitmap.
+/// 1. the child compares what it read against the pattern the parent wrote;
+/// 2. the parent's own `FallbackCounters` -- this runtime's instance, so `== 0`
+///    is not order-dependent the way the process-wide reject counters are --
+///    must be zero on all nine `FallbackReason`s;
+/// 3. the child, from a mapping it opens itself rather than one the DDS layer
+///    handed it, must find its own bit in the parent's pool `refs` bitmap.
 ///
 /// Each covers the others' blind spot: (1) alone passes over plain UDP, (2)
-/// alone passes on a run where nothing was delivered at all, and (3) is the
-/// direct observation that the bytes the child read came out of the parent's
-/// pool.
+/// alone passes on a run that delivered nothing, and (3) is the direct
+/// observation that the bytes came out of the parent's pool.
 #[test]
 fn a_dds_sample_crosses_two_processes_through_a_pool_slot() {
     // `OwnedSegment::create` needs a notifier, so there is nothing to
@@ -529,8 +524,8 @@ fn a_dds_sample_crosses_two_processes_through_a_pool_slot() {
         ],
     ));
 
-    // Not one sample before the match: with no matched reader yet, spec §7 rule
-    // 1 is the correct answer and would bump the counter this test then reads.
+    // Not one sample before the match: with no matched reader yet, `NoLocalReader`
+    // is the correct answer and would bump the counter this test then reads.
     //
     // The wait watches the child as well as the status, so a failure here says
     // which of the three happened -- the child died, or it stayed up and never
@@ -575,7 +570,7 @@ fn a_dds_sample_crosses_two_processes_through_a_pool_slot() {
         assert_eq!(
             runtime.fallbacks().count(reason),
             0,
-            "spec 7 {reason:?} fired, so the sample did not go through a slot"
+            "{reason:?} fired, so the sample did not go through a slot"
         );
     }
 
@@ -599,9 +594,9 @@ fn self_blob(seq: u64) -> Vec<u8> {
 /// Match a reader in another participant that this domain's SHM registry knows, on a
 /// loopback UDP locator nothing listens on.
 ///
-/// Spec §7 rule 1 asks only whether some matched reader is an SHM peer, and a reader
-/// in the writer's own participant is not one (`PeerMap::find_peer`). Without this the
-/// write path would fall back at `write()` time and the caller's test would pass
+/// The `NoLocalReader` rule asks only whether some matched reader is an SHM peer, and a
+/// reader in the writer's own participant is not one (`PeerMap::find_peer`). Without this
+/// the write path would fall back at `write()` time and the caller's test would pass
 /// without ever borrowing a slot. The locator is UDP so the fake peer never gets a
 /// descriptor, and its pid is ours so the registry sweep never reclaims it.
 fn match_a_registered_shm_peer(
@@ -740,7 +735,7 @@ fn samples_kept_by_a_reader_in_the_writers_own_participant_stay_distinct() {
     assert_eq!(
         runtime.fallbacks().count(FallbackReason::NoLocalReader),
         0,
-        "spec 7 rule 1 fired, so no write reached the pool and this proves nothing"
+        "NoLocalReader fired, so no write reached the pool and this proves nothing"
     );
 
     let mut seen: Vec<u64> = kept.iter().map(|s| s.seq).collect();
@@ -879,7 +874,7 @@ const PERF_SIZES: [(usize, u64, u64, u64); 4] = [
 ];
 
 /// The default 8 MiB class cannot hold an 8 MiB user payload -- header and
-/// encapsulation push the serialized sample past it, and spec §7 rule 4 rules it
+/// encapsulation push the serialized sample past it, and `SampleTooLarge` rules it
 /// out -- so measuring the zero-copy path at 8 MiB needs a class that fits.
 const PERF_POOL_CLASSES: &str = "65536:64,1048576:12,16777216:4";
 
@@ -929,35 +924,26 @@ fn nonzero_counters(text: &str, prefix: &str) -> Vec<String> {
         .collect()
 }
 
-/// Spec §11's performance comparison, and the deliverable of this plan.
+/// The performance comparison.
 ///
-/// An `#[ignore]` test rather than a separate binary or example, for one
-/// reason that decides it: the run has to read `FallbackCounters`, which is
-/// `pub(crate)` and lives inside `ShmRuntime`. Without it a zero-copy row would
-/// not be known to be a zero-copy row -- spec §7 says so in as many words -- and
-/// only in-crate code can read it. `#[ignore]` because 12 combinations of
-/// 1100 samples in two spawned processes each is minutes of wall clock, not
-/// something every CI run should carry.
+/// In-crate because a zero-copy row is only known to be one by reading
+/// `FallbackCounters`, which is `pub(crate)`. `#[ignore]` because 12
+/// combinations of 1100 samples in two spawned processes each is minutes of
+/// wall clock.
 ///
 /// Run it with `--ignored --nocapture --test-threads=1`; the table goes to
 /// stdout.
 ///
-/// **Combinations interfere.** Run back to back in one process, a combination
-/// inherits the tail of the load the previous one left, and its subscriber can
-/// run out of budget before the publisher has written anything -- the row then
-/// reads `received=0` for a transport that delivers everything when measured on
-/// its own. The numbers in `task-10-report.md` were taken one combination per
-/// process by `measure.sh` next to that report, which is the same two child
-/// roles this test drives. Prefer that script when the numbers matter; use this
-/// test to check the wiring end to end.
+/// **Combinations interfere.** Back to back in one process, a combination
+/// inherits the previous one's load and can read `received=0` for a transport
+/// that delivers everything on its own. Numbers worth quoting are taken one
+/// combination per process; use this test for the wiring, not for numbers.
 ///
-/// **Two configurations, and the difference is not small.** With the socket
-/// buffer left at the OS default the receive window is 87381 B and one 65112 B
-/// DATA_FRAG fills it, so every fragment after the first costs a repair round
-/// trip and the copy paths take hundreds of milliseconds for a 1 MiB sample.
-/// `INT2DDS_E2E_UDP_BUFFER` raises the window out of that regime. Both are worth
-/// running: the first is what an unconfigured deployment gets, the second is the
-/// only one on which the copy and zero-copy paths can be fairly compared.
+/// **Two configurations.** At the OS default socket buffer the receive window
+/// holds one DATA_FRAG, so the copy paths spend a repair round trip per
+/// fragment. `INT2DDS_E2E_UDP_BUFFER` raises it out of that regime. The first
+/// is what an unconfigured deployment gets; only the second compares the copy
+/// and zero-copy paths fairly.
 #[test]
 #[ignore]
 fn end_to_end_latency_across_three_transports() {
@@ -1125,8 +1111,8 @@ fn child_perf_publisher() {
 /// Stamps the arrival twice: once on entry, before anything is deserialized,
 /// and once after `data()` has handed the sample over. The gap between the two
 /// columns is what the reader-side copy costs -- `CacheChange::data_bytes()`
-/// still copies a `ShmSlot` out of the mapping, which spec §6.5's loan API
-/// removes and this plan does not.
+/// still copies a `ShmSlot` out of the mapping; a reader loan API is what would
+/// remove it.
 struct PerfListener {
     seen: Arc<Mutex<Vec<(u64, u64, u64)>>>,
     /// When the last sample landed. A run that loses samples never reaches the

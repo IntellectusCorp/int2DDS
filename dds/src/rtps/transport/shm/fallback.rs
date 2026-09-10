@@ -1,13 +1,14 @@
-//! Why a sample took the copy path instead of a pool slot. Spec §7.
+//! Why a sample took the copy path instead of a pool slot.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Spec §7. 1-7 are decided at `write()`, 8-9 at send time.
+/// `NoLocalReader` through `NotifyUnsupported` are decided at `write()`,
+/// `RingFull` and `PeerGone` at send time.
 ///
-/// `NoSlotId` and `NotifyUnsupported` (rules 3 and 7) can never reach these
-/// counters: the counters live inside `ShmRuntime`, and those two rules apply
-/// exactly when no runtime came up. Spec §7 reports them through
-/// `ShmRuntime::start`'s `warn` instead, once per participant.
+/// `NoSlotId` can never reach these counters: they live inside `ShmRuntime`, and
+/// it applies exactly when no runtime came up -- `ShmRuntime::start` warns once
+/// per participant instead. `NotifyUnsupported` is never produced at all -- a
+/// platform without a kernel wakeup polls and keeps using slots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FallbackReason {
     NoLocalReader,
@@ -59,9 +60,8 @@ impl FallbackCounters {
 }
 
 /// Why a receive-time descriptor was rejected, dropping just that sample.
-/// Spec §5.6's validation, §6.4, §10.
 ///
-/// Deliberately not a `FallbackReason`: those nine are spec §7's write/send-time
+/// Deliberately not a `FallbackReason`: those nine are write- and send-time
 /// rules, each of which retries the same sample on the copy path. A rejected
 /// descriptor has no copy path to retry -- the 24 bytes that arrived are a
 /// pointer, not the sample.
@@ -73,7 +73,7 @@ pub(crate) enum DescriptorRejectReason {
     NoLocalRuntime,
     /// `PeerMap::resolve` could not map the remote writer's segment.
     PeerUnresolved,
-    /// `ShmSlotHandle::claim` rejected the descriptor (spec §5.6 steps 1-4).
+    /// `ShmSlotHandle::claim` rejected the descriptor (see `PoolReader::claim`).
     ClaimRejected,
 }
 
@@ -92,7 +92,7 @@ impl DescriptorRejectReason {
 const DESCRIPTOR_REJECT_REASONS: usize = 3;
 
 /// Same shape as `FallbackCounters`: a count per reason plus a read accessor, so a test
-/// (Task 10's zero-copy path) can assert "no rejects" instead of only grepping logs.
+/// can assert "no rejects" instead of only grepping logs.
 ///
 /// Process-wide, not one instance per `ShmRuntime` like `FallbackCounters`: `NoLocalRuntime`
 /// has no `ShmRuntime` to live inside by definition, and splitting the three reasons across
