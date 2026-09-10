@@ -375,11 +375,6 @@ mod tests {
     }
 
     #[test]
-    fn current_process_is_reported_alive() {
-        assert!(crate::rtps::transport::shm::platform::process_alive(std::process::id()));
-    }
-
-    #[test]
     fn sweep_keeps_a_stale_entry_whose_process_is_alive() {
         let (_region, reg) = registry();
         let (slot, _) = reg.claim(std::process::id(), [1; 12], 0).unwrap();

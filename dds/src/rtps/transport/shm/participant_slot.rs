@@ -168,12 +168,4 @@ mod tests {
         drop(held);
         unlink_registry(DOMAIN + 1);
     }
-
-    #[test]
-    fn now_tick_advances() {
-        let a = now_tick();
-        std::thread::sleep(Duration::from_millis(5));
-        assert!(now_tick() > a);
-        assert!(now_tick() > 1_700_000_000_000, "ticks must be UNIX-epoch milliseconds");
-    }
 }

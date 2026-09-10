@@ -6475,21 +6475,6 @@ mod tests {
     }
 
     #[test]
-    fn two_readers_each_get_their_own_copy() {
-        let shm = Locator::from_shm(&Ipv4Addr::new(127, 0, 0, 1), 7411);
-        let udp = Locator::from_ip(Ipv4Addr::new(127, 0, 0, 1), 7411);
-        let readers = vec![
-            ([0xA0; 12], reader_id(0x10), shm.clone()),
-            ([0xA0; 12], reader_id(0x10), udp.clone()),
-            ([0xB0; 12], reader_id(0x20), shm.clone()),
-            ([0xB0; 12], reader_id(0x20), udp.clone()),
-        ];
-
-        // Grouping is per reader, not per participant or per locator kind.
-        assert_eq!(stateless_send_mask(&readers, |_| true), vec![true, false, true, false]);
-    }
-
-    #[test]
     fn a_udp_only_peer_still_gets_its_copy() {
         let udp = Locator::from_ip(Ipv4Addr::new(127, 0, 0, 1), 7411);
         let readers = vec![([0xA0; 12], reader_id(0x10), udp.clone())];

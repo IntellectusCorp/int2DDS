@@ -691,17 +691,9 @@ impl XcdrDeserialize for WChar {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The shm tree cannot import this enum -- the cross-target harness compiles
-    /// `shm/` alone -- so the value lives in two places. Pin them together.
-    #[test]
-    fn the_slot_ref_encapsulation_id_matches_the_shm_constant() {
-        assert_eq!(
-            EncodingKind::ShmSlotRef as u16,
-            crate::rtps::transport::shm::slot_ref::SLOT_REF_ENCAPSULATION_ID
-        );
-    }
-}
+// The shm tree cannot import this enum -- the cross-target harness compiles
+// `shm/` alone -- so the value lives in two places. Pin them together.
+const _: () = assert!(
+    EncodingKind::ShmSlotRef as u16
+        == crate::rtps::transport::shm::slot_ref::SLOT_REF_ENCAPSULATION_ID
+);

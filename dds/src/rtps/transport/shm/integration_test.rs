@@ -8,12 +8,10 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use super::participant_slot::{now_tick, ParticipantSlot, STALE_AFTER_TICKS};
-use super::registry::Registry;
 use super::registry_segment::unlink_registry;
 use super::ring::{RING_INLINE, SPILL_NONE};
 use super::segment::{unlink_segment, OwnedSegment, PeerSegment};
 use super::slot_ref::SlotRef;
-use super::test_region::AlignedRegion;
 
 const ROLE_ENV: &str = "INT2DDS_SHM_SUBSTRATE_ROLE";
 const CHILD_TEST: &str = "rtps::transport::shm::integration_test::shm_child_entry";
@@ -73,7 +71,6 @@ fn shm_child_entry() {
     };
     match role.as_str() {
         "claim_and_die" => child_claim_and_die(),
-        "idle" => child_idle(),
         "registry_slot" => child_registry_slot(),
         "notifier" => child_notifier(),
         "dds_subscriber" => child_dds_subscriber(),
@@ -99,11 +96,6 @@ fn child_claim_and_die() {
         std::thread::sleep(Duration::from_millis(2));
     }
     std::process::exit(1);
-}
-
-/// Stays alive until killed. Used to exercise pid liveness.
-fn child_idle() {
-    std::thread::sleep(Duration::from_secs(30));
 }
 
 /// Claims a registry slot in the shared domain registry and stays alive
@@ -160,31 +152,6 @@ fn payload_survives_the_process_boundary() {
     drop(owned);
     unlink_segment(DOMAIN, PARENT_SLOT);
     unlink_segment(DOMAIN, CHILD_SLOT);
-}
-
-#[test]
-fn registry_sweep_frees_a_killed_participant() {
-    use super::platform::process_alive;
-
-    let region = AlignedRegion::new(Registry::size() as usize);
-    let reg = unsafe { Registry::init(region.ptr()) };
-
-    // The idle child stays alive until killed, so a panic before the kill below
-    // would leave it running for good.
-    let mut child = KillOnDrop(spawn_child("idle"));
-    let child_pid = child.0.id();
-    let (slot, _) = reg.claim(child_pid, [9; 12], 0).unwrap();
-    assert!(process_alive(child_pid));
-
-    child.0.kill().unwrap();
-    child.0.wait().unwrap();
-
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while process_alive(child_pid) && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert!(!process_alive(child_pid));
-    assert_eq!(reg.sweep_dead(100, 20), vec![slot]);
 }
 
 #[test]

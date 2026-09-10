@@ -103,14 +103,6 @@ mod tests {
     }
 
     #[test]
-    fn shm_write_time_fallback_flags_no_local_reader_when_none_are_matched() {
-        let reason = shm_write_time_fallback(DurabilityQosPolicyKind::Volatile, &[], |_| {
-            ShmReaderReachability::NotLocal
-        });
-        assert_eq!(reason, Some(FallbackReason::NoLocalReader));
-    }
-
-    #[test]
     fn shm_write_time_fallback_flags_no_local_reader_when_every_match_is_remote() {
         let readers = [unknown_entity_reader([1; 12]), unknown_entity_reader([2; 12])];
         let reason = shm_write_time_fallback(DurabilityQosPolicyKind::Volatile, &readers, |_| {

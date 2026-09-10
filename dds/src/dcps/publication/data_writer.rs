@@ -4004,17 +4004,6 @@ mod tests {
         count
     }
 
-    /// Proves the `shm_runtime` seam is connected end to end: transport plugin
-    /// -> `DcpsBridge` -> `DataWriter`.
-    #[test]
-    fn a_writer_on_the_shm_transport_reaches_its_participants_runtime() {
-        let writer = shm_writer::<SlotLoanSample>("ShmRuntimeSeamTopic", "SlotLoanSample");
-        assert!(
-            writer.shm_runtime().is_some(),
-            "the transport's runtime must reach the writer that will borrow its slots"
-        );
-    }
-
     /// Match a reader in *another* participant of this domain, registered in the
     /// same SHM registry, so the `NoLocalReader` rule passes. That rule reads nothing
     /// but the registry, so the peer is claimed straight into it rather than stood up

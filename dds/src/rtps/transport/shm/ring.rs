@@ -18,6 +18,9 @@ pub(crate) struct RingEntry {
     pub inline: [u8; RING_INLINE],
 }
 
+// Cells are addressed by index across processes, so the stride is wire format.
+const _: () = assert!(std::mem::size_of::<RingEntry>() == 256);
+
 #[repr(C, align(64))]
 pub(crate) struct RingHeader {
     pub magic: AtomicU64,
@@ -281,11 +284,6 @@ mod tests {
         let region = AlignedRegion::new(Ring::size_for(capacity) as usize);
         let r = unsafe { Ring::init(region.ptr(), capacity) }.unwrap();
         (region, r)
-    }
-
-    #[test]
-    fn entry_is_256_bytes() {
-        assert_eq!(std::mem::size_of::<RingEntry>(), 256);
     }
 
     #[test]

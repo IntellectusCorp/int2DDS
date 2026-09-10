@@ -43,6 +43,9 @@ pub(crate) struct SlotMeta {
     pub refs: AtomicU64,
 }
 
+// Read out of the mapping by every peer, so its size is wire format.
+const _: () = assert!(std::mem::size_of::<SlotMeta>() == 64);
+
 pub(crate) struct PoolLayout {
     classes: Vec<ClassDesc>,
     total: u64,
@@ -222,11 +225,6 @@ mod tests {
 
     fn pool_region(layout: &PoolLayout) -> AlignedRegion {
         AlignedRegion::new(layout.total_size() as usize)
-    }
-
-    #[test]
-    fn slot_meta_is_cache_line_sized() {
-        assert_eq!(std::mem::size_of::<SlotMeta>(), 64);
     }
 
     #[test]

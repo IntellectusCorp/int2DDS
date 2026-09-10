@@ -24,6 +24,9 @@ pub(crate) struct SegmentHeader {
     pub owner_slot: u32,
 }
 
+// The first thing a peer reads out of the mapping, so its size is wire format.
+const _: () = assert!(std::mem::size_of::<SegmentHeader>() == 64);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LayoutError {
     NotReady,
@@ -169,10 +172,5 @@ mod tests {
         unsafe { SegmentView::init(r.ptr(), 4096, 0, 1, 64, 1025) };
         let err = unsafe { SegmentView::attach(r.ptr(), 4096) }.unwrap_err();
         assert_eq!(err, LayoutError::BadOffset);
-    }
-
-    #[test]
-    fn header_is_cache_line_sized() {
-        assert_eq!(std::mem::size_of::<SegmentHeader>(), 64);
     }
 }

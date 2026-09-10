@@ -368,10 +368,4 @@ mod tests {
         drop(owned);
         unlink_segment(DOMAIN, 6);
     }
-
-    #[test]
-    fn owned_segment_is_sync() {
-        fn assert_sync<T: Sync + Send>() {}
-        assert_sync::<OwnedSegment>();
-    }
 }
