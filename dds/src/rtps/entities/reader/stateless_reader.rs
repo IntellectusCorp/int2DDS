@@ -43,7 +43,7 @@ use std::{
     any::Any,
     fmt::Debug,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex, Weak,
     },
 };
@@ -78,6 +78,8 @@ pub(crate) struct StatelessReader {
     // Callback-producing accesses currently in flight against this reader. `remove_reader`
     // drains this to zero before returning.
     in_flight_callbacks: AtomicUsize,
+    // Set when `remove_reader` starts draining this reader.
+    deleted: AtomicBool,
 }
 
 impl StatelessReader {
@@ -124,6 +126,7 @@ impl StatelessReader {
                 RequestedIncompatibleTypeStatus::default(),
             )),
             in_flight_callbacks: AtomicUsize::new(0),
+            deleted: AtomicBool::new(false),
         }
     }
 
@@ -359,6 +362,14 @@ impl Reader for StatelessReader {
 
     fn in_flight_callbacks(&self) -> usize {
         self.in_flight_callbacks.load(Ordering::SeqCst)
+    }
+
+    fn mark_deleted(&self) {
+        self.deleted.store(true, Ordering::SeqCst);
+    }
+
+    fn is_deleted(&self) -> bool {
+        self.deleted.load(Ordering::SeqCst)
     }
 
     fn reader_cache(&self) -> Arc<Mutex<ReaderHistoryCache>> {

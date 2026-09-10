@@ -53,6 +53,11 @@ pub(crate) trait Reader: Entity + Endpoint + Debug + Any {
     fn exit_callback(&self);
     fn in_flight_callbacks(&self) -> usize;
 
+    // Set once `remove_reader` starts draining, so a callback path that raised the in-flight
+    // count after the drain already passed can see the reader is gone and skip.
+    fn mark_deleted(&self);
+    fn is_deleted(&self) -> bool;
+
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
     fn set_datareader_cache(

@@ -52,6 +52,7 @@ pub fn init_from_env() {
     // - INT2DDS_SEND_CREDIT_BACKSTOP_MS: Writer age at which a send charge toward a silent peer stops counting (ms) - Default: 250
 
     // - INT2DDS_INITIAL_PEERS: Set initial peers for SPDP unicast discovery (comma-separated, e.g., "192.168.1.10:7400,192.168.1.11:7400") - Default: none
+    // - INT2DDS_TCP_PEER_SEARCH_SLOTS: Set how many participant slots a TCP peer named with the wildcard port stands for (1-125, one domain's port block) - Default: 16
 
     // - INT2DDS_MULTICAST_TTL: Set IPv4 multicast TTL fallback (0-255) when no PropertyQosPolicy entry is present - Default: OS default (1)
 
@@ -330,6 +331,24 @@ pub fn get_multicast_ttl_override() -> Option<u8> {
 pub fn set_multicast_ttl(ttl: u8) {
     log::info!("Environment variable set: INT2DDS_MULTICAST_TTL = {}", ttl);
     unsafe { std::env::set_var("INT2DDS_MULTICAST_TTL", ttl.to_string()) };
+}
+
+/// Read the TCP peer search width from `INT2DDS_TCP_PEER_SEARCH_SLOTS`.
+/// Returns `None` when unset, empty, or not an integer; the range is the
+/// transport's to check, since the ceiling is one domain's port block.
+pub fn get_tcp_peer_search_slots() -> Option<u32> {
+    let raw = std::env::var("INT2DDS_TCP_PEER_SEARCH_SLOTS").ok().filter(|s| !s.is_empty())?;
+    match raw.parse::<u32>() {
+        Ok(slots) => Some(slots),
+        Err(e) => {
+            log::warn!(
+                "Invalid INT2DDS_TCP_PEER_SEARCH_SLOTS value '{}': {}. Ignoring env default.",
+                raw,
+                e
+            );
+            None
+        }
+    }
 }
 
 /// Read the DATA_FRAG fragment size fallback from `INT2DDS_DATA_FRAG_SIZE`.

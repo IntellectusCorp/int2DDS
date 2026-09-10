@@ -37,7 +37,7 @@ use crate::{
 use std::{
     any::Any,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex, Weak,
     },
 };
@@ -58,6 +58,8 @@ pub(crate) struct SPDPBuiltinParticipantReader {
     nack_frag_max_retries: u32,
     reader_cache: Arc<Mutex<ReaderHistoryCache>>,
     in_flight_callbacks: AtomicUsize,
+    // Set when `remove_reader` starts draining this reader.
+    deleted: AtomicBool,
 }
 
 impl SPDPBuiltinParticipantReader {
@@ -87,6 +89,7 @@ impl SPDPBuiltinParticipantReader {
             nack_frag_max_retries: 10,
             reader_cache: Arc::new(Mutex::new(ReaderHistoryCache::new(endpoint_id, None))),
             in_flight_callbacks: AtomicUsize::new(0),
+            deleted: AtomicBool::new(false),
         }
     }
 
@@ -146,6 +149,14 @@ impl Reader for SPDPBuiltinParticipantReader {
 
     fn in_flight_callbacks(&self) -> usize {
         self.in_flight_callbacks.load(Ordering::SeqCst)
+    }
+
+    fn mark_deleted(&self) {
+        self.deleted.store(true, Ordering::SeqCst);
+    }
+
+    fn is_deleted(&self) -> bool {
+        self.deleted.load(Ordering::SeqCst)
     }
 
     fn reader_cache(&self) -> Arc<Mutex<ReaderHistoryCache>> {

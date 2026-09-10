@@ -4,7 +4,8 @@
 //! RTPS communication based on domain ID and participant ID following the RTPS
 //! specification (Figure 9.6.2.3).
 //!
-//! Also provides the domain-derived physical port for the single TCP listener.
+//! Also provides the TCP listening port, which follows the same shape so that
+//! several participants can share a host without leaving their domain block.
 
 pub(crate) struct PortManager {}
 
@@ -54,10 +55,18 @@ impl PortManager {
             + Self::PG_PARTICIPANT_ID_GAIN * participant_id) as u16
     }
 
-    /// Get the TCP physical port (base port for a domain)
-    /// = PB + DG * domain_id
-    pub(crate) fn get_tcp_physical_port(domain_id: u32) -> u16 {
-        (Self::PB_DEFAULT_BASE_NUMBER + Self::DG_DOMAIN_ID_GAIN * domain_id) as u16
+    /// Highest participant id whose TCP port still falls inside its own domain
+    /// block: one step further the offset equals DG, which is the next domain's
+    /// base port.
+    pub(crate) const MAX_TCP_PARTICIPANT_ID: u32 =
+        Self::DG_DOMAIN_ID_GAIN / Self::PG_PARTICIPANT_ID_GAIN - 1;
+
+    /// Get the TCP physical port for one participant
+    /// = PB + DG * domain_id + PG * participant_id
+    pub(crate) fn get_tcp_physical_port(domain_id: u32, participant_id: u32) -> u16 {
+        (Self::PB_DEFAULT_BASE_NUMBER
+            + Self::DG_DOMAIN_ID_GAIN * domain_id
+            + Self::PG_PARTICIPANT_ID_GAIN * participant_id) as u16
     }
 }
 
@@ -113,8 +122,17 @@ mod tests {
 
     #[test]
     fn test_tcp_physical_port() {
-        assert_eq!(PortManager::get_tcp_physical_port(0), 7400);
-        assert_eq!(PortManager::get_tcp_physical_port(1), 7650);
-        assert_eq!(PortManager::get_tcp_physical_port(2), 7900);
+        assert_eq!(PortManager::get_tcp_physical_port(0, 0), 7400);
+        assert_eq!(PortManager::get_tcp_physical_port(1, 0), 7650);
+        assert_eq!(PortManager::get_tcp_physical_port(2, 0), 7900);
+        assert_eq!(PortManager::get_tcp_physical_port(0, 1), 7402);
+        assert_eq!(PortManager::get_tcp_physical_port(1, 3), 7656);
+    }
+
+    #[test]
+    fn tcp_port_of_last_participant_stays_in_its_domain_block() {
+        let last = PortManager::get_tcp_physical_port(0, PortManager::MAX_TCP_PARTICIPANT_ID);
+        assert_eq!(last, 7648);
+        assert!(last < PortManager::get_tcp_physical_port(1, 0));
     }
 }

@@ -9,7 +9,7 @@ on:
       dry_run_tag:
         description: "Tag to use for the dry run (no release is created)"
         required: true
-        default: "v0.1.4"
+        default: "v0.1.5"
 
 concurrency:
   group: release-${{ github.ref }}

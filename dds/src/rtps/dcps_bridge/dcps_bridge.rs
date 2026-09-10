@@ -120,12 +120,7 @@ impl DcpsBridge {
             .map_err(|e| {
                 RtpsError::new(
                     RtpsErrorCode::Io,
-                    format!(
-                        "Failed to create transport plugin (domain={domain_id}): {e}. \
-                         When multiple participants share one process, give each a unique \
-                         TCP listen port via the int2dds.transport.TCPv4.bind_port \
-                         property."
-                    ),
+                    format!("Failed to create transport plugin (domain={domain_id}): {e}"),
                 )
             })?,
         );

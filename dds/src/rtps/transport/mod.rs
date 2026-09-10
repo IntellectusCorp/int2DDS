@@ -33,6 +33,7 @@
 
 pub(crate) mod error;
 pub(crate) mod hybrid_transport_plugin;
+pub(crate) mod peer_spec;
 pub(crate) mod plugin;
 pub(crate) mod port_manager;
 pub(crate) mod shm;

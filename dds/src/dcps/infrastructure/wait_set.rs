@@ -395,32 +395,15 @@ impl WaitSet {
         }
 
         let mut triggered = Vec::new();
-        for (idx, condition) in conditions.values().enumerate() {
+
+        for condition in conditions.values() {
             match condition.get_trigger_value() {
-                Ok(true) => {
-                    debug!("[WaitSet-{}] Condition #{} TRIGGERED", self.instance_id, idx + 1);
-                    triggered.push(Arc::clone(condition));
-                }
-                Ok(false) => continue,
+                Ok(true) => triggered.push(Arc::clone(condition)),
+                Ok(false) => {}
                 Err(e) => {
-                    debug!(
-                        "[WaitSet-{}] Condition #{} check failed: {:?}",
-                        self.instance_id,
-                        idx + 1,
-                        e
-                    );
-                    continue;
+                    debug!("[WaitSet-{}] Condition check failed: {:?}", self.instance_id, e);
                 }
             }
-        }
-
-        if !triggered.is_empty() {
-            debug!(
-                "[WaitSet-{}] Total triggered conditions: {}/{}",
-                self.instance_id,
-                triggered.len(),
-                conditions.len()
-            );
         }
 
         Ok(triggered)
