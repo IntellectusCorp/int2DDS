@@ -310,6 +310,17 @@ const E2E_DEPTH_ENV: &str = "INT2DDS_E2E_DEPTH";
 /// gets -- and, at the default 65000 fragment size, a receive window that holds
 /// exactly one fragment. See `end_to_end_latency_across_three_transports`.
 const E2E_UDP_BUFFER_ENV: &str = "INT2DDS_E2E_UDP_BUFFER";
+
+/// What the children will actually see as `INT2DDS_UDP_SOCKET_BUFFER`. Reading
+/// `E2E_UDP_BUFFER_ENV` alone is not the same question: `spawn_child_with` skips
+/// an empty value, so a run that set the product variable on this process passes
+/// it down by inheritance, and a header taken from the test knob alone reports
+/// `(OS default)` for a table that was not measured at one.
+fn effective_udp_buffer() -> String {
+    std::env::var(E2E_UDP_BUFFER_ENV)
+        .or_else(|_| std::env::var("INT2DDS_UDP_SOCKET_BUFFER"))
+        .unwrap_or_default()
+}
 /// Set on the child only, never on this process: mutating the environment of a
 /// running test binary would leak into every later test.
 const ZERO_COPY_ENV: &str = "INT2DDS_SHM_ZERO_COPY";
@@ -930,7 +941,10 @@ fn nonzero_counters(text: &str, prefix: &str) -> Vec<String> {
 fn end_to_end_latency_across_three_transports() {
     println!(
         "config: INT2DDS_UDP_SOCKET_BUFFER={}, INT2DDS_SHM_POOL_CLASSES={PERF_POOL_CLASSES}",
-        std::env::var(E2E_UDP_BUFFER_ENV).unwrap_or_else(|_| "(OS default)".to_string())
+        match effective_udp_buffer() {
+            v if v.is_empty() => "(OS default)".to_string(),
+            v => v,
+        }
     );
     println!("the high column is the 99th percentile; below n=100 that is the maximum");
     println!(
@@ -973,7 +987,7 @@ fn run_perf_combo(
             (E2E_WARMUP_ENV, warmup.to_string()),
             (E2E_PACE_ENV, pace_us.to_string()),
             ("INT2DDS_SHM_POOL_CLASSES", PERF_POOL_CLASSES.to_string()),
-            ("INT2DDS_UDP_SOCKET_BUFFER", std::env::var(E2E_UDP_BUFFER_ENV).unwrap_or_default()),
+            ("INT2DDS_UDP_SOCKET_BUFFER", effective_udp_buffer()),
         ]
     };
     // Subscriber first: the publisher waits for a match and would otherwise

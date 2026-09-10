@@ -10,10 +10,10 @@ use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-/// How long a polling waiter sleeps before handing control back. The legacy
-/// listener asks for 10 us, which Windows rounds up to a whole millisecond;
-/// 200 us is the smallest value whose intent survives that rounding.
-const POLL_INTERVAL: Duration = Duration::from_micros(200);
+/// How long a polling waiter sleeps before handing control back. Only platforms
+/// without a kernel wakeup poll, so Windows' millisecond sleep granularity never
+/// applies here; 10 us is what the legacy listener already asks for on them.
+pub(crate) const POLL_INTERVAL: Duration = Duration::from_micros(10);
 
 /// Whether this platform has a kernel wakeup. Not "whether SHM works" -- a
 /// platform without one still runs, polling instead of sleeping.

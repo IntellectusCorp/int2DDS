@@ -80,7 +80,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rtps::transport::shm::notify::notify_supported;
+    use crate::rtps::transport::shm::notify::{notify_supported, POLL_INTERVAL};
     use crate::rtps::transport::shm::ring::SPILL_NONE;
     use crate::rtps::transport::shm::segment::{unlink_segment, OwnedSegment, PeerSegment};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -196,6 +196,7 @@ mod tests {
 
     #[test]
     fn an_empty_ring_does_not_spin_the_loop() {
+        const OBSERVE: Duration = Duration::from_millis(300);
         unlink_segment(DOMAIN, 6);
         let owned = Arc::new(OwnedSegment::create(DOMAIN, 6, 1, &[(64, 2)], 8).unwrap());
 
@@ -216,16 +217,21 @@ mod tests {
             })
         };
 
-        std::thread::sleep(Duration::from_millis(300));
+        std::thread::sleep(OBSERVE);
         let spun = rounds.load(Ordering::Relaxed);
         stop.store(true, Ordering::Relaxed);
         worker.join().unwrap();
 
-        // With a kernel wakeup, 300 ms is well inside one `RECV_WAIT` and the
-        // loop should still be parked in its first wait. A polling waiter
-        // instead returns every 200 us, so ~1500 rounds is its floor. Either
-        // way, a wait that does not wait runs millions.
-        let bound = if notify_supported() { 10 } else { 4000 };
+        // With a kernel wakeup, `OBSERVE` is well inside one `RECV_WAIT` and the
+        // loop should still be parked in its first wait. A polling waiter instead
+        // returns every `POLL_INTERVAL`, so its floor is the number of intervals
+        // in `OBSERVE`; doubling that leaves room for jitter. Either way, a wait
+        // that does not wait runs orders of magnitude past this.
+        let bound = if notify_supported() {
+            10
+        } else {
+            (OBSERVE.as_micros() / POLL_INTERVAL.as_micros()) as usize * 2
+        };
         assert!(spun < bound, "the loop spun {spun} times on an empty ring");
 
         drop(owned);
