@@ -53,12 +53,15 @@ pub struct NodeConfig {
     pub transport: String,
     /// Optional list of initial peers (used by TCP transport to reach the remote gateway).
     /// Format per entry: `"<ip>:<port>"`. The peer's TCP listen port is its
-    /// `bind_port` (else the domain formula `7400 + 250 * domain_id`).
+    /// `bind_port` (else the domain formula
+    /// `7400 + 250 * domain_id + 2 * participant_id`).
     #[serde(default)]
     pub initial_peers: Vec<String>,
     /// Optional TCP listen (bind) port for this participant. When omitted, the
-    /// domain formula `7400 + 250 * domain_id` is used. Pin a distinct value per
-    /// participant when several share a host.
+    /// formula `7400 + 250 * domain_id + 2 * participant_id` is walked upwards
+    /// until a free port is found. Pin a value only when the port has to be
+    /// known in advance, since a pinned port is used as given and never
+    /// searched around.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind_port: Option<u16>,
     /// Optional TLS configuration. When present, TCP connections are wrapped

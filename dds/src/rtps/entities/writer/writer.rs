@@ -91,6 +91,13 @@ pub(crate) trait Writer: Entity + Endpoint + Debug + Any {
     ) -> RtpsResult<SubscriptionBuiltinTopicData>;
     fn remove_matched_reader_and_update_status(&self, reader_guid: Guid) -> RtpsResult<bool>;
 
+    // Mark that a callback-producing access to this writer has started. Balanced by
+    // `exit_callback`. `remove_writer` waits for `in_flight_callbacks` to reach zero so no
+    // listener callback runs after deletion returns.
+    fn enter_callback(&self);
+    fn exit_callback(&self);
+    fn in_flight_callbacks(&self) -> usize;
+
     //any
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;

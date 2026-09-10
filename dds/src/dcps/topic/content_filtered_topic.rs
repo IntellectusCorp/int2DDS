@@ -28,6 +28,7 @@ use crate::{
     common::instance_handle::InstanceHandle,
     core::error::{DdsError, DdsResult},
     domain::domain_participant::DomainParticipant,
+    infrastructure::entity::EntityLifecycle,
     rtps::common::guid::Guid,
     topic::sql::{ast::Expression, parse_expression},
 };
@@ -44,7 +45,7 @@ use super::{
 pub struct ContentFilteredTopic {
     guid: Guid,
     pub(crate) self_ref: Option<Arc<ContentFilteredTopic>>,
-    deleted: Arc<AtomicBool>,
+    lifecycle: Arc<EntityLifecycle>,
     enabled: Arc<AtomicBool>,
     related_topic: Option<Weak<Topic>>,
     topic_name: String,
@@ -71,7 +72,7 @@ impl Drop for ContentFilteredTopic {
             return; // Never fully initialized
         }
 
-        if !self.deleted.load(Ordering::SeqCst) {
+        if !self.lifecycle.is_deleted() {
             if let Ok(ref participant) = self.get_participant() {
                 if let Ok(topic) = self.get_related_topic() {
                     if let Ok(topic_handle) = topic.get_instance_handle() {
@@ -102,7 +103,7 @@ impl ContentFilteredTopic {
         let mut cft = Self {
             guid: handle.to_guid(),
             self_ref: None,
-            deleted: Arc::new(AtomicBool::new(false)),
+            lifecycle: Arc::new(EntityLifecycle::default()),
             enabled: Arc::new(AtomicBool::new(true)),
             related_topic: Some(Arc::downgrade(related_topic)),
             topic_name: topic_name.to_owned(),
@@ -117,7 +118,7 @@ impl ContentFilteredTopic {
         Ok(cft)
     }
     pub fn get_filter_expression(&self) -> DdsResult<String> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         match self.filter_expression.lock() {
             Ok(filter_expression) => Ok(filter_expression.clone()),
             Err(e) => Err(DdsError::Error(e.to_string())),
@@ -125,7 +126,7 @@ impl ContentFilteredTopic {
     }
 
     pub fn get_related_topic(&self) -> DdsResult<Topic> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         if let Some(weak_ref) = self.related_topic.as_ref() {
             // Attempt to upgrade Weak<T> to Arc<T>
             if let Some(related_topic_arc) = weak_ref.upgrade() {
@@ -138,7 +139,7 @@ impl ContentFilteredTopic {
     }
 
     pub fn get_expression_parameters(&self) -> DdsResult<Vec<String>> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         match self.expression_parameters.lock() {
             Ok(expression_parameters) => Ok(expression_parameters.clone()),
             Err(e) => Err(DdsError::Error(e.to_string())),
@@ -146,7 +147,7 @@ impl ContentFilteredTopic {
     }
 
     pub fn set_expression_parameters(&self, expression_parameters: Vec<String>) -> DdsResult<()> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         match self.parsed_expression.lock() {
             Ok(parsed_expression) => {
                 parsed_expression.validate_expression_parameters(&expression_parameters)?
@@ -168,7 +169,7 @@ impl ContentFilteredTopic {
         filter_expression: &str,
         expression_parameters: Vec<String>,
     ) -> DdsResult<()> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         let expression = parse_expression(filter_expression, false)?;
         expression.validate_expression_parameters(&expression_parameters)?;
 
@@ -198,18 +199,17 @@ impl ContentFilteredTopic {
     }
 
     pub fn set_enabled(&self, enabled: bool) -> DdsResult<()> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         self.enabled.store(enabled, Ordering::SeqCst);
         Ok(())
     }
 
     pub fn is_filter_enabled(&self) -> DdsResult<bool> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         Ok(self.enabled.load(Ordering::SeqCst))
     }
 
     pub(crate) fn get_parsed_expression(&self) -> DdsResult<Expression> {
-        self.is_deleted()?;
         match self.parsed_expression.lock() {
             Ok(parsed_expression) => Ok(parsed_expression.clone()),
             Err(e) => Err(DdsError::Error(e.to_string())),
@@ -222,15 +222,7 @@ impl ContentFilteredTopic {
 
     pub(crate) fn delete(&mut self) {
         self.self_ref = None;
-        self.deleted.store(true, Ordering::SeqCst);
-    }
-
-    fn is_deleted(&self) -> DdsResult<()> {
-        if self.deleted.load(Ordering::SeqCst) {
-            Err(DdsError::AlreadyDeleted)
-        } else {
-            Ok(())
-        }
+        self.lifecycle.mark_deleted_and_await_operation_completion();
     }
 }
 

@@ -5,7 +5,10 @@
 //! DDS domain through periodic participant data messages.
 
 #![allow(dead_code)]
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 
 use log::debug;
 
@@ -55,6 +58,7 @@ pub(crate) struct SPDPbuiltinParticipantWriter {
     data_max_size_serialized: i32,
     reader_locators: Arc<Mutex<Vec<ReaderLocator>>>,
     writer_cache: Arc<Mutex<WriterHistoryCache>>,
+    in_flight_callbacks: AtomicUsize,
 }
 
 impl SPDPbuiltinParticipantWriter {
@@ -91,6 +95,7 @@ impl SPDPbuiltinParticipantWriter {
                 std::sync::Weak::new(),
                 endpoint_id,
             ))),
+            in_flight_callbacks: AtomicUsize::new(0),
         }
     }
 
@@ -175,6 +180,18 @@ impl HasReaderLocator for SPDPbuiltinParticipantWriter {
 }
 
 impl Writer for SPDPbuiltinParticipantWriter {
+    fn enter_callback(&self) {
+        self.in_flight_callbacks.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn exit_callback(&self) {
+        self.in_flight_callbacks.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    fn in_flight_callbacks(&self) -> usize {
+        self.in_flight_callbacks.load(Ordering::SeqCst)
+    }
+
     fn writer_cache(&self) -> Arc<Mutex<WriterHistoryCache>> {
         Arc::clone(&self.writer_cache)
     }

@@ -51,7 +51,7 @@ use crate::{
         domain_entity::DomainEntity,
         entity::{
             impl_check_parent_enabled, impl_dds_entity, impl_dds_entity_impl, BaseEntity,
-            EnableChild, Entity, EntityInternal, UpdateStatus,
+            EnableChild, Entity, EntityInternal, EntityLifecycle, UpdateStatus,
         },
         history_cache::HistoryCache as _,
         qos_policy::{
@@ -128,7 +128,7 @@ pub(crate) trait DataWriterInternal: DataWriterBase {
     fn as_any(&self) -> &dyn Any;
     fn get_type_id(&self) -> TypeId;
     fn delete(&self);
-    fn is_deleted(&self) -> DdsResult<()>;
+    fn mark_deleted_and_await_operation_completion(&self);
     fn is_builtin(&self) -> bool;
     fn end_coherent_set(&self) -> DdsResult<()>;
 }
@@ -152,7 +152,7 @@ pub struct DataWriter<Foo> {
     status_condition: Arc<Mutex<StatusCondition<DataWriterQos>>>,
     pub(crate) self_ref: Arc<Mutex<Option<Arc<DataWriter<Foo>>>>>,
     enabled: Arc<AtomicBool>,
-    deleted: Arc<AtomicBool>,
+    lifecycle: Arc<EntityLifecycle>,
     topic: Option<Weak<Topic>>,
     type_support: Arc<dyn TypeSupport>,
     publisher: Option<Weak<Publisher>>,
@@ -186,7 +186,7 @@ impl<Foo> Debug for DataWriter<Foo> {
             .field("status_condition", &self.status_condition.lock().unwrap())
             .field("self_ref", &self.self_ref.lock().unwrap().as_ref().map(|_| "Arc<DataWriter>"))
             .field("enabled", &self.enabled.load(std::sync::atomic::Ordering::Acquire))
-            .field("deleted", &self.deleted.load(std::sync::atomic::Ordering::Acquire))
+            .field("deleted", &self.lifecycle.is_deleted())
             .field("topic", &self.topic.as_ref().map(|_| "Weak<Topic>"))
             .field("type_support", &"Arc<dyn TypeSupport>")
             .field("publisher", &self.publisher.as_ref().map(|_| "Weak<Publisher>"))
@@ -224,7 +224,7 @@ impl<Foo: 'static + Clone> Clone for DataWriter<Foo> {
             status_condition: self.status_condition.clone(),
             self_ref: self.self_ref.clone(),
             enabled: self.enabled.clone(),
-            deleted: self.deleted.clone(),
+            lifecycle: self.lifecycle.clone(),
             topic: self.topic.clone(),
             type_support: self.type_support.clone(),
             publisher: self.publisher.clone(),
@@ -266,7 +266,7 @@ impl<Foo> Drop for DataWriter<Foo> {
             return; // Never fully initialized
         }
 
-        if !self.deleted.load(Ordering::SeqCst) {
+        if !self.lifecycle.is_deleted() {
             if let Some(ref publisher_weak) = self.publisher {
                 if let Some(publisher) = publisher_weak.upgrade() {
                     if let Some(ref topic_weak) = self.topic {
@@ -462,14 +462,13 @@ impl<Foo: 'static + Clone> UpdateStatus for DataWriter<Foo> {
 impl<Foo: 'static + Clone> DataWriter<Foo> {
     /// Upgraded parent handle without the deep clone [`DataWriterBase::get_publisher`] performs.
     ///
-    /// Same failure modes and messages -- `AlreadyDeleted` when this writer is deleted, `Error`
-    /// when the parent `Weak` has expired -- but two atomic read-modify-writes instead of ~26.
-    /// Needs no drop guard, unlike the participant equivalent: the value inside the `Arc` has
-    /// `self_ref: None`, so `Drop for Publisher` early-returns either way.
+    /// Same failure mode and message -- `Error` when the parent `Weak` has expired -- but two
+    /// atomic read-modify-writes instead of ~26. Needs no drop guard, unlike the participant
+    /// equivalent: the value inside the `Arc` has `self_ref: None`, so `Drop for Publisher`
+    /// early-returns either way.
     ///
     /// Only for internal call sites that never read `Publisher::self_ref`.
     pub(crate) fn publisher_arc(&self) -> DdsResult<Arc<Publisher>> {
-        self.is_deleted()?;
         self.publisher
             .as_ref()
             .and_then(|weak_ref| weak_ref.upgrade())
@@ -506,7 +505,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             key_instances: Arc::new(Mutex::new(HashMap::new())),
             instances: Arc::new(Mutex::new(HashMap::new())),
             enabled: Arc::new(AtomicBool::new(false)),
-            deleted: Arc::new(AtomicBool::new(false)),
+            lifecycle: Arc::new(EntityLifecycle::default()),
             liveliness_lost_status: Arc::new(Mutex::new(LivelinessLostStatus::default())),
             offered_deadline_missed_status: Arc::new(Mutex::new(
                 OfferedDeadlineMissedStatus::default(),
@@ -694,6 +693,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         timestamp: Time,
     ) -> DdsResult<()> {
         // let start_time = Time::now();
+        let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
 
         if !self.type_support.is_compute_key_provided() {
@@ -808,6 +808,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         handle: InstanceHandle,
         on_identity_assigned: impl FnOnce(&mut Foo, Guid, SequenceNumber),
     ) -> DdsResult<(Guid, SequenceNumber)> {
+        let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
         let timestamp = self.publisher_arc()?.participant_arc()?.get_current_time()?;
         Self::validate_timestamp(&timestamp)?;
@@ -868,6 +869,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         handle: InstanceHandle,
         timestamp: Time,
     ) -> DdsResult<SequenceNumber> {
+        let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
         Self::validate_timestamp(&timestamp)?;
 
@@ -931,6 +933,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         serialized_key: Option<&[u8]>,
         timestamp: Time,
     ) -> DdsResult<()> {
+        let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
         Self::validate_timestamp(&timestamp)?;
 
@@ -955,6 +958,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
     }
 
     pub fn prepare_serialized_write(&self, capacity: usize) -> DdsResult<SerializedWriteLoan> {
+        let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
         let mut change = {
             let mut datawriter_cache =
@@ -977,6 +981,8 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         actual_size: usize,
         serialized_key: Option<&[u8]>,
     ) -> DdsResult<()> {
+        let _operation = self.lifecycle.begin_operation()?;
+
         if actual_size > loan.change.data_mut().capacity() {
             return Err(DdsError::BadParameter);
         }
@@ -1076,6 +1082,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         sample: &[u8],
         timestamp: Time,
     ) -> DdsResult<InstanceHandle> {
+        let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
         Self::validate_timestamp(&timestamp)?;
 
@@ -1100,6 +1107,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         handle: InstanceHandle,
         timestamp: Time,
     ) -> DdsResult<()> {
+        let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
         Self::validate_timestamp(&timestamp)?;
 
@@ -1130,6 +1138,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         handle: InstanceHandle,
         timestamp: Time,
     ) -> DdsResult<()> {
+        let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
         Self::validate_timestamp(&timestamp)?;
 
@@ -1146,6 +1155,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
     /// Dispose an instance identified only by its handle; the serialized key is
     /// looked up from the writer's instance registry.
     pub fn dispose_serialized_by_handle(&self, handle: InstanceHandle) -> DdsResult<()> {
+        let _operation = self.lifecycle.begin_operation()?;
         let timestamp = self.publisher_arc()?.participant_arc()?.get_current_time()?;
         self.is_enabled()?;
         Self::validate_timestamp(&timestamp)?;
@@ -1163,6 +1173,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         &self,
         handle: InstanceHandle,
     ) -> DdsResult<()> {
+        let _operation = self.lifecycle.begin_operation()?;
         let timestamp = self.publisher_arc()?.participant_arc()?.get_current_time()?;
         self.is_enabled()?;
         Self::validate_timestamp(&timestamp)?;
@@ -1206,6 +1217,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             If the InstanceHandle_t given as a_handle does not correspond to an existing data object known by the DataWriter, this operation may return BAD_PARAMETER.
             If the implementation cannot check for an invalid handle, the result in this situation is undefined (i.e., may exhibit unspecified behavior).
         */
+        let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
 
         if handle.is_nil() {
@@ -1243,7 +1255,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             or if for any other reason the service cannot provide an instance handle,
             the service returns the special value HANDLE_NIL.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         let handle = self.type_support.compute_key(instance as &dyn Any);
 
         // Verify that the handle is actually registered
@@ -1263,7 +1275,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         listener: Option<Arc<dyn DataWriterListener<Foo = Foo>>>,
         mask: StatusMask,
     ) -> DdsResult<()> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         {
             match self.listener.write() {
                 Ok(mut guard) => {
@@ -1285,7 +1297,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
 
     // For Entity
     pub fn get_listener(&self) -> DdsResult<Option<Arc<dyn DataWriterListener<Foo = Foo>>>> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         match self.listener.read() {
             Ok(guard) => Ok(guard.clone()),
             Err(e) => Err(DdsError::Error(e.to_string())),
@@ -1376,7 +1388,6 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
     }
 
     pub(crate) fn is_enabled(&self) -> DdsResult<()> {
-        self.is_deleted()?;
         if self.enabled.load(Ordering::SeqCst) {
             {
                 let _ = self.get_rtps_writer()?;
@@ -1868,6 +1879,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         handle: InstanceHandle,
         timestamp: Time,
     ) -> DdsResult<InstanceHandle> {
+        let _operation = self.lifecycle.begin_operation()?;
         self.register_instance_to_datawriter_cache(handle)?;
 
         {
@@ -1942,6 +1954,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         timestamp: Time,
         typed: Option<&Foo>,
     ) -> DdsResult<()> {
+        let _operation = self.lifecycle.begin_operation()?;
         let mut instances = self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
         match instances.get(&resolved_handle) {
@@ -1989,6 +2002,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         timestamp: Time,
         typed: Option<&Foo>,
     ) -> DdsResult<()> {
+        let _operation = self.lifecycle.begin_operation()?;
         let mut instances = self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
         match instances.get(&resolved_handle) {
@@ -2180,6 +2194,7 @@ where
             and may also return an OUT_OF_RESOURCES error under the same conditions
         */
         // let start_time = Time::now();
+        let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
 
         if !self.type_support.is_compute_key_provided() {
@@ -2242,6 +2257,7 @@ where
             This operation can result in TIMEOUT under the same conditions described for the write operation (section 2.2.2.4.2.11).
         */
         // let start_time = Time::now();
+        let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
         if !self.type_support.is_compute_key_provided() {
             log::warn!("unregister on no-key topic has no effect");
@@ -2267,6 +2283,7 @@ impl<Foo: 'static + Clone> DataWriterBase for DataWriter<Foo> {
             Note: When data is written through the write operation on a DataWriter, liveliness is automatically asserted for both that DataWriter itself and its DomainParticipant.
             Therefore, the assert_liveliness operation only needs to be used when the application does not write data regularly.
         */
+        let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
 
         match self.get_qos_arc()?.liveliness.kind {
@@ -2290,7 +2307,7 @@ impl<Foo: 'static + Clone> DataWriterBase for DataWriter<Foo> {
             This operation provides access to the LIVELINESS_LOST communication status.
             Refer to Section 2.2.4.1 Communication Status for a description of communication status.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         let mut status_guard =
             self.liveliness_lost_status.lock().map_err(|e| DdsError::Error(e.to_string()))?;
@@ -2309,7 +2326,7 @@ impl<Foo: 'static + Clone> DataWriterBase for DataWriter<Foo> {
             This operation provides access to the OFFERED_DEADLINE_MISSED communication status.
             Refer to Section 2.2.4.1 Communication Status for a description of communication status.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         let mut status_guard = self
             .offered_deadline_missed_status
@@ -2330,7 +2347,7 @@ impl<Foo: 'static + Clone> DataWriterBase for DataWriter<Foo> {
             This operation provides access to the OFFERED_INCOMPATIBLE_QOS communication status.
             Refer to Section 2.2.4.1 Communication Status for a description of communication status.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         let mut status_guard = self
             .offered_incompatible_qos_status
@@ -2351,7 +2368,7 @@ impl<Foo: 'static + Clone> DataWriterBase for DataWriter<Foo> {
             This operation provides access to the OFFERED_INCOMPATIBLE_TYPE communication status.
             Refer to Section 2.2.4.1 Communication Status for a description of communication status.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         let mut status_guard = self
             .offered_incompatible_type_status
@@ -2373,7 +2390,7 @@ impl<Foo: 'static + Clone> DataWriterBase for DataWriter<Foo> {
             This operation provides access to the PUBLICATION_MATCHED communication status.
             Refer to Section 2.2.4.1 Communication Status for a description of communication status.
         */
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
 
         let mut status_guard =
             self.publication_matched_status.lock().map_err(|e| DdsError::Error(e.to_string()))?;
@@ -2388,7 +2405,7 @@ impl<Foo: 'static + Clone> DataWriterBase for DataWriter<Foo> {
     }
 
     fn get_topic(&self) -> DdsResult<Topic> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         if let Some(weak_ref) = self.topic.as_ref() {
             // Attempt to upgrade Weak<T> to Arc<T>
             if let Some(topic_arc) = weak_ref.upgrade() {
@@ -2401,7 +2418,7 @@ impl<Foo: 'static + Clone> DataWriterBase for DataWriter<Foo> {
     }
 
     fn get_publisher(&self) -> DdsResult<Publisher> {
-        self.is_deleted()?;
+        let _operation = self.lifecycle.begin_operation()?;
         if let Some(weak_ref) = self.publisher.as_ref() {
             // Attempt to upgrade Weak<T> to Arc<T>
             if let Some(publisher_arc) = weak_ref.upgrade() {
@@ -2423,6 +2440,7 @@ impl<Foo: 'static + Clone> DataWriterBase for DataWriter<Foo> {
             These handles match the values that appear in the instance_handle field of SampleInfo when reading the "DCPSSubscriptions" Builtin Topic.
             If the DDS middleware does not maintain connection information locally, this operation may fail.
         */
+        let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
         let matched_readers_guids;
         {
@@ -2450,6 +2468,7 @@ impl<Foo: 'static + Clone> DataWriterBase for DataWriter<Foo> {
             The get_matched_subscriptions operation can be used to find subscriptions associated with the current DataWriter.
             Additionally, if the middleware does not internally possess the information needed to populate subscription_data, this operation may fail and return UNSUPPORTED.
         */
+        let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
         let reader_guid = subscription_handle.to_guid();
         {
@@ -2473,6 +2492,7 @@ impl<Foo: 'static + Clone> DataWriterBase for DataWriter<Foo> {
         An OK return value means all written samples have been acknowledged by all reliable matched data readers.
         A TIMEOUT return value indicates that max_wait has elapsed but some data has not yet been acknowledged.
         */
+        let _operation = self.lifecycle.begin_operation()?;
         self.is_enabled()?;
         let reliability = self.get_qos_arc()?.reliability;
         if reliability.kind == ReliabilityQosPolicyKind::Reliable {
@@ -2514,15 +2534,11 @@ impl<Foo: 'static + Clone> DataWriterInternal for DataWriter<Foo> {
         let value_to_drop = self.self_ref.lock().ok().and_then(|mut guard| guard.take());
         drop(value_to_drop);
 
-        self.deleted.store(true, Ordering::SeqCst);
+        self.lifecycle.mark_deleted_and_await_operation_completion();
     }
 
-    fn is_deleted(&self) -> DdsResult<()> {
-        if self.deleted.load(Ordering::SeqCst) {
-            Err(DdsError::AlreadyDeleted)
-        } else {
-            Ok(())
-        }
+    fn mark_deleted_and_await_operation_completion(&self) {
+        self.lifecycle.mark_deleted_and_await_operation_completion();
     }
 
     fn is_builtin(&self) -> bool {
