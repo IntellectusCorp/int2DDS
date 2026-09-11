@@ -56,7 +56,7 @@ use crate::{
         history_cache::HistoryCache as _,
         qos_policy::{
             DataRepresentationId, DurabilityQosPolicyKind, HistoryQosPolicyKind,
-            LivelinessQosPolicyKind, Qos, ReliabilityQosPolicyKind,
+            LivelinessQosPolicyKind, PresentationQosAccessScopeKind, Qos, ReliabilityQosPolicyKind,
         },
         status::{
             LivelinessLostStatus, OfferedDeadlineMissedStatus, OfferedIncompatibleQosStatus,
@@ -1012,7 +1012,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             seq_num,
             Some(timestamp.into()),
         );
-        self.configure_coherent_set(&mut loan.change, seq_num)?;
+        self.set_presentation_info(&mut loan.change, seq_num)?;
         unsafe {
             loan.change.data_mut().set_len(actual_size);
         }
@@ -1398,31 +1398,32 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         }
     }
 
-    // True while the owning publisher has an open coherent set.
-    fn publisher_in_coherent_changes(&self) -> bool {
-        self.publisher
-            .as_ref()
-            .and_then(Weak::upgrade)
-            .is_some_and(|publisher| publisher.in_coherent_changes())
-    }
-
-    // Stamp PID_COHERENT_SET on the change while the publisher's coherent set is open,
-    // recording this writer's first member seq as the set id. No-op outside a set.
-    fn configure_coherent_set(
+    // Set the change's inline presentation QoS: the group sequence number under GROUP access
+    // scope, and the coherent set ids while the publisher's coherent set is open.
+    fn set_presentation_info(
         &self,
         change: &mut CacheChange,
         seq_num: SequenceNumber,
     ) -> DdsResult<()> {
-        if !self.publisher_in_coherent_changes() {
+        let Some(publisher) = self.publisher.as_ref().and_then(Weak::upgrade) else {
             return Ok(());
+        };
+        let mut presentation_info = PresentationInfo::default();
+
+        let is_group_scope = publisher.get_qos_arc()?.presentation.access_scope
+            == PresentationQosAccessScopeKind::Group;
+        if is_group_scope {
+            presentation_info.group_seq_num = Some(publisher.increment_group_seq_num()?);
+            presentation_info.group_coherent_set = publisher.get_group_coherent_set_start()?;
         }
-        let mut start =
-            self.current_coherent_start.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-        let set_start = *start.get_or_insert(seq_num);
-        change.set_presentation_info(PresentationInfo {
-            coherent_set: Some(set_start),
-            ..Default::default()
-        });
+
+        if publisher.in_coherent_changes() {
+            let mut start =
+                self.current_coherent_start.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            presentation_info.coherent_set = Some(*start.get_or_insert(seq_num));
+        }
+
+        change.set_presentation_info(presentation_info);
         Ok(())
     }
 
@@ -1464,7 +1465,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
 
         // 3. Reset metadata + fill the reused buffer
         change.reset(kind, rtps_writer.guid(), handle, seq_num, source_timestamp);
-        self.configure_coherent_set(&mut change, seq_num)?;
+        self.set_presentation_info(&mut change, seq_num)?;
         fill(change.data_mut())?;
         let max_message_size = crate::common::env::get_max_message_size();
         change
@@ -3562,5 +3563,149 @@ mod tests {
             pool_len < depth as usize,
             "typed path should keep pool at working-set size, got {pool_len} (depth {depth})"
         );
+    }
+
+    // Inline QoS set on the change the writer stored under its own sequence number.
+    fn get_presentation_info_of_change(
+        writer: &DataWriter<TestData>,
+        writer_seq_num: i64,
+    ) -> PresentationInfo {
+        let rtps_writer = writer.get_rtps_writer().unwrap();
+        let writer_cache = rtps_writer.writer_cache();
+        let change =
+            writer_cache.lock().unwrap().get_change(SequenceNumber::from_i64(writer_seq_num));
+        change.unwrap().presentation_info().clone()
+    }
+
+    #[test]
+    fn writes_under_group_scope_carry_group_seq_num_shared_across_the_publisher() {
+        use crate::infrastructure::qos_policy::PresentationQosAccessScopeKind;
+
+        let participant = DomainParticipantFactory::get_instance()
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<TestData>(
+                "GroupSeqNumTopic",
+                "TestData",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let mut publisher_qos = PublisherQos::default();
+        publisher_qos.presentation.access_scope = PresentationQosAccessScopeKind::Group;
+        let publisher =
+            participant.create_publisher(publisher_qos, None, StatusMask::default()).unwrap();
+        let mut writer_qos = DataWriterQos::default();
+        writer_qos.history.kind = HistoryQosPolicyKind::KeepAll;
+        let first_writer = publisher
+            .create_datawriter::<TestData>(&topic, writer_qos.clone(), None, StatusMask::default())
+            .unwrap();
+        let second_writer = publisher
+            .create_datawriter::<TestData>(&topic, writer_qos, None, StatusMask::default())
+            .unwrap();
+
+        first_writer.write(&TestData { id: 1 }, InstanceHandle::NIL).unwrap();
+        second_writer.write(&TestData { id: 2 }, InstanceHandle::NIL).unwrap();
+        first_writer.write(&TestData { id: 3 }, InstanceHandle::NIL).unwrap();
+
+        let expected = |group_seq_num: i64| PresentationInfo {
+            coherent_set: None,
+            group_seq_num: Some(SequenceNumber::from_i64(group_seq_num)),
+            group_coherent_set: None,
+        };
+        assert_eq!(get_presentation_info_of_change(&first_writer, 1), expected(1));
+        assert_eq!(get_presentation_info_of_change(&second_writer, 1), expected(2));
+        assert_eq!(get_presentation_info_of_change(&first_writer, 2), expected(3));
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn writes_inside_a_group_coherent_set_carry_writer_and_group_set_ids() {
+        use crate::infrastructure::qos_policy::PresentationQosAccessScopeKind;
+
+        let participant = DomainParticipantFactory::get_instance()
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<TestData>(
+                "GroupCoherentSetTopic",
+                "TestData",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let mut publisher_qos = PublisherQos::default();
+        publisher_qos.presentation.access_scope = PresentationQosAccessScopeKind::Group;
+        publisher_qos.presentation.coherent_access = true;
+        let publisher =
+            participant.create_publisher(publisher_qos, None, StatusMask::default()).unwrap();
+        let mut writer_qos = DataWriterQos::default();
+        writer_qos.history.kind = HistoryQosPolicyKind::KeepAll;
+        let first_writer = publisher
+            .create_datawriter::<TestData>(&topic, writer_qos.clone(), None, StatusMask::default())
+            .unwrap();
+        let second_writer = publisher
+            .create_datawriter::<TestData>(&topic, writer_qos, None, StatusMask::default())
+            .unwrap();
+
+        // GSN 1 is consumed outside the set, so the set opens at GSN 2.
+        first_writer.write(&TestData { id: 1 }, InstanceHandle::NIL).unwrap();
+        publisher.begin_coherent_changes().unwrap();
+        second_writer.write(&TestData { id: 2 }, InstanceHandle::NIL).unwrap();
+        first_writer.write(&TestData { id: 3 }, InstanceHandle::NIL).unwrap();
+        first_writer.write(&TestData { id: 4 }, InstanceHandle::NIL).unwrap();
+        publisher.end_coherent_changes().unwrap();
+
+        assert_eq!(
+            get_presentation_info_of_change(&first_writer, 1),
+            PresentationInfo {
+                coherent_set: None,
+                group_seq_num: Some(SequenceNumber::from_i64(1)),
+                group_coherent_set: None,
+            }
+        );
+        let group_set_start = Some(SequenceNumber::from_i64(2));
+        assert_eq!(
+            get_presentation_info_of_change(&second_writer, 1),
+            PresentationInfo {
+                coherent_set: Some(SequenceNumber::from_i64(1)),
+                group_seq_num: Some(SequenceNumber::from_i64(2)),
+                group_coherent_set: group_set_start,
+            }
+        );
+        assert_eq!(
+            get_presentation_info_of_change(&first_writer, 2),
+            PresentationInfo {
+                coherent_set: Some(SequenceNumber::from_i64(2)),
+                group_seq_num: Some(SequenceNumber::from_i64(3)),
+                group_coherent_set: group_set_start,
+            }
+        );
+        assert_eq!(
+            get_presentation_info_of_change(&first_writer, 3),
+            PresentationInfo {
+                coherent_set: Some(SequenceNumber::from_i64(2)),
+                group_seq_num: Some(SequenceNumber::from_i64(4)),
+                group_coherent_set: group_set_start,
+            }
+        );
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
     }
 }

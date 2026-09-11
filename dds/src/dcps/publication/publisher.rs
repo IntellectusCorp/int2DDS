@@ -56,7 +56,7 @@ use crate::{
         status::StatusMask,
         status_condition::StatusCondition,
     },
-    rtps::common::{entity_kind::EntityKind, guid::Guid},
+    rtps::common::{entity_kind::EntityKind, guid::Guid, sequence::SequenceNumber},
     topic::{qos::TopicQos, topic::Topic},
 };
 
@@ -90,6 +90,14 @@ pub struct Publisher {
     participant: Option<Weak<DomainParticipant>>,
     // Nesting depth of begin/end_coherent_changes; the set is open while non-zero.
     coherent_depth: Arc<AtomicU32>,
+    group_seq_state: Arc<Mutex<GroupSeqState>>,
+}
+
+// Group sequence numbers issued to attached writers, and the first one of the open coherent set.
+#[derive(Default)]
+struct GroupSeqState {
+    last_group_seq_num: i64,
+    coherent_set_start: Option<SequenceNumber>,
 }
 
 impl Debug for Publisher {
@@ -192,6 +200,7 @@ impl Publisher {
             default_datawriter_qos: Arc::new(Mutex::new(None)),
             participant: Some(Arc::downgrade(participant)),
             coherent_depth: Arc::new(AtomicU32::new(0)),
+            group_seq_state: Arc::new(Mutex::new(GroupSeqState::default())),
         };
         let publisher_arc = Arc::new(publisher.clone());
         let weak_ref = Arc::downgrade(&publisher_arc);
@@ -907,7 +916,14 @@ impl Publisher {
         */
         let _operation = self.lifecycle.begin_operation()?;
         // Nested calls only deepen the current set; a new set starts at depth 0 -> 1.
-        self.coherent_depth.fetch_add(1, Ordering::AcqRel);
+        let previous_depth = self.coherent_depth.fetch_add(1, Ordering::AcqRel);
+
+        // The set's first sample takes the next group sequence number to be issued.
+        if previous_depth == 0 {
+            let mut state =
+                self.group_seq_state.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            state.coherent_set_start = Some(SequenceNumber::from_i64(state.last_group_seq_num + 1));
+        }
         Ok(())
     }
 
@@ -926,7 +942,14 @@ impl Publisher {
             // Depth was 0: no matching begin_coherent_changes.
             Err(_) => Err(DdsError::PreconditionNotMet),
             // Depth 1 -> 0: outermost end closes the set, writers send their end markers.
-            Ok(1) => self.end_writer_coherent_sets(),
+            Ok(1) => {
+                let end_result = self.end_writer_coherent_sets();
+                self.group_seq_state
+                    .lock()
+                    .map_err(|e| DdsError::Error(e.to_string()))?
+                    .coherent_set_start = None;
+                end_result
+            }
             // Depth 2+ -> 1+: nested end, the set stays open.
             Ok(_) => Ok(()),
         }
@@ -953,6 +976,19 @@ impl Publisher {
     // True while a coherent set is open (begin called without matching end).
     pub(crate) fn in_coherent_changes(&self) -> bool {
         self.coherent_depth.load(Ordering::Acquire) > 0
+    }
+
+    // Issue the next group sequence number; strictly increasing per publisher, starting at 1.
+    pub(crate) fn increment_group_seq_num(&self) -> DdsResult<SequenceNumber> {
+        let mut state = self.group_seq_state.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        state.last_group_seq_num += 1;
+        Ok(SequenceNumber::from_i64(state.last_group_seq_num))
+    }
+
+    // Group sequence number of the open coherent set's first sample; None outside a set.
+    pub(crate) fn get_group_coherent_set_start(&self) -> DdsResult<Option<SequenceNumber>> {
+        let state = self.group_seq_state.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        Ok(state.coherent_set_start)
     }
 
     pub fn delete_contained_entities(&self) -> DdsResult<()> {
@@ -1400,6 +1436,69 @@ mod tests {
         factory.delete_participant(pub_participant).unwrap();
         sub_participant.delete_contained_entities().unwrap();
         factory.delete_participant(sub_participant).unwrap();
+    }
+
+    #[test]
+    fn increment_group_seq_num_starts_at_one_and_is_independent_per_publisher() {
+        use crate::test_utils::unique_domain_id;
+
+        let domain_participant_factory = DomainParticipantFactory::get_instance();
+        let participant = domain_participant_factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let first_publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let second_publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+
+        assert_eq!(first_publisher.increment_group_seq_num().unwrap().to_i64(), 1);
+        assert_eq!(first_publisher.increment_group_seq_num().unwrap().to_i64(), 2);
+        assert_eq!(first_publisher.increment_group_seq_num().unwrap().to_i64(), 3);
+        assert_eq!(second_publisher.increment_group_seq_num().unwrap().to_i64(), 1);
+
+        participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn get_group_coherent_set_start_is_the_next_gsn_at_begin_and_none_after_end() {
+        use crate::test_utils::unique_domain_id;
+
+        let domain_participant_factory = DomainParticipantFactory::get_instance();
+        let participant = domain_participant_factory
+            .create_participant(
+                unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+
+        assert_eq!(publisher.increment_group_seq_num().unwrap().to_i64(), 1);
+        assert_eq!(publisher.get_group_coherent_set_start().unwrap(), None);
+
+        publisher.begin_coherent_changes().unwrap();
+        assert_eq!(publisher.get_group_coherent_set_start().unwrap().map(|s| s.to_i64()), Some(2));
+        assert_eq!(publisher.increment_group_seq_num().unwrap().to_i64(), 2);
+        assert_eq!(publisher.increment_group_seq_num().unwrap().to_i64(), 3);
+        assert_eq!(publisher.get_group_coherent_set_start().unwrap().map(|s| s.to_i64()), Some(2));
+        publisher.end_coherent_changes().unwrap();
+
+        assert_eq!(publisher.get_group_coherent_set_start().unwrap(), None);
+        assert_eq!(publisher.increment_group_seq_num().unwrap().to_i64(), 4);
+
+        participant.delete_contained_entities().unwrap();
+        domain_participant_factory.delete_participant(participant).unwrap();
     }
 
     #[test]
