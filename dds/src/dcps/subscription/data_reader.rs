@@ -2359,7 +2359,7 @@ impl<Foo: DdsType> DataReader<Foo> {
         )
     }
 
-    // TODO
+    // TODO: release loans from the subscriber's coherent access block when that block closes.
     pub fn return_loan(&self) -> DdsResult<Vec<DataSample<Foo>>> {
         // in: data_values: <Foo>[], sample_infos: SampleInfo[]
         // out: DdsError_t, data_values: <Foo>[], sample_infos: SampleInfo[]
