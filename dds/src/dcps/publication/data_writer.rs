@@ -305,6 +305,7 @@ impl<Foo: 'static + Clone> EnableChild for DataWriter<Foo> {
         publication_builtin_topic_data.set_topic_name(topic.get_name().to_string());
         publication_builtin_topic_data.set_type_name(topic.get_type_name().to_string());
         publication_builtin_topic_data.set_endpoint_guid(self.guid);
+        publication_builtin_topic_data.set_group_guid(publisher.get_instance_handle()?.to_guid());
 
         // Set TypeIdentifier and TypeObject for DDS-XTypes discovery
         if let Some(type_id) = self.type_support.get_type_identifier() {
@@ -376,6 +377,7 @@ impl<Foo: 'static + Clone> EnableChild for DataWriter<Foo> {
         publication_builtin_topic_data.set_topic_name(topic.get_name().to_string());
         publication_builtin_topic_data.set_type_name(topic.get_type_name().to_string());
         publication_builtin_topic_data.set_endpoint_guid(self.guid);
+        publication_builtin_topic_data.set_group_guid(publisher.get_instance_handle()?.to_guid());
 
         // Set TypeIdentifier and TypeObject for DDS-XTypes discovery
         if let Some(type_id) = self.type_support.get_type_identifier() {

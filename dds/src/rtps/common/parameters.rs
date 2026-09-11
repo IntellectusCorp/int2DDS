@@ -359,6 +359,7 @@ pub enum ParameterValue<'a> {
     ParticipantLeaseDuration(RtpsDuration),
     ParticipantGuid(Guid),
     EndpointGuid(Guid),
+    GroupGuid(Guid),
     BuiltinEndpointSet(u32),
     EntityName(String),
     UserData(&'a [u8]),

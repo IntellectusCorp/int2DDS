@@ -27,6 +27,7 @@ pub struct ParsedBuiltinTopicData {
     // GUID-related fields
     pub endpoint_guid: Option<Guid>,
     pub participant_guid: Option<Guid>,
+    pub group_guid: Option<Guid>,
     pub key: Option<BuiltinTopicKey>,
     pub participant_key: Option<BuiltinTopicKey>,
 
@@ -97,6 +98,7 @@ impl ParsedBuiltinTopicData {
         Self {
             endpoint_guid: Some(data.endpoint_guid()),
             participant_guid: None,
+            group_guid: data.group_guid(),
             key: Some(data.key().clone()),
             participant_key: Some(data.participant_key().clone()),
             topic_name: Some(data.topic_name().to_string()),
@@ -138,6 +140,7 @@ impl ParsedBuiltinTopicData {
         Self {
             endpoint_guid: Some(data.endpoint_guid()),
             participant_guid: None,
+            group_guid: None,
             key: Some(data.key().clone()),
             participant_key: Some(data.participant_key().clone()),
             topic_name: Some(data.topic_name()),
@@ -223,6 +226,11 @@ impl ParsedBuiltinTopicData {
                         value: Self::convert_u8_to_i32_array(guid.prefix().to_owned()),
                     });
                     self.participant_guid = Some(guid);
+                }
+            }
+            ParameterId::PidGroupGuid => {
+                if let ParameterValue::GroupGuid(guid) = parameter.value {
+                    self.group_guid = Some(guid);
                 }
             }
             ParameterId::PidTopicName => {

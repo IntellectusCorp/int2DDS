@@ -1449,9 +1449,13 @@ impl SedpLogic {
             MatchDecision::Reject(e) => return Err(e),
         }
 
+        let remote_group_entity_id = publication_builtin_topic_data
+            .group_guid()
+            .map(|group_guid| group_guid.entity_id())
+            .unwrap_or(EntityId::UNKNOWN);
         let writer_proxy = WriterProxy::new(
             publication_builtin_topic_data.endpoint_guid(),
-            publication_builtin_topic_data.endpoint_guid().entity_id(),
+            remote_group_entity_id,
             self.endpoint_unicast_locators(
                 publication_builtin_topic_data.unicast_locator_list(),
                 endpoint_guid.prefix(),

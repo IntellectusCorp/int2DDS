@@ -448,6 +448,10 @@ impl PlCdrParser {
                 let guid = self.parse_guid(data)?;
                 ParameterValue::EndpointGuid(guid)
             }
+            ParameterId::PidGroupGuid => {
+                let guid = self.parse_guid(data)?;
+                ParameterValue::GroupGuid(guid)
+            }
             ParameterId::PidParticipantLeaseDuration
             | ParameterId::PidDeadline
             | ParameterId::PidLatencyBudget
