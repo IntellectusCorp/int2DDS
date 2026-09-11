@@ -30,6 +30,8 @@ pub struct PublicationBuiltinTopicData {
     key: BuiltinTopicKey,
     #[dds(non_serialized)] // derived from endpoint_guid prefix
     participant_key: BuiltinTopicKey,
+    #[dds(optional, id = 0x0052)] // PidGroupGuid: the owning Publisher
+    group_guid: Option<Guid>,
     #[dds(id = 0x0005)] // PidTopicName
     topic_name: String,
     #[dds(id = 0x0007)] // PidTypeName
@@ -98,6 +100,7 @@ impl PublicationBuiltinTopicData {
             endpoint_guid: empty_guid,
             key: BuiltinTopicKey { value: Self::convert_u8_to_i32_array(prefix) },
             participant_key: BuiltinTopicKey { value: Self::convert_u8_to_i32_array(prefix) },
+            group_guid: None,
             topic_name: String::new(),
             type_name: String::new(),
             durability: datawriter_qos.durability,
@@ -145,6 +148,15 @@ impl PublicationBuiltinTopicData {
         self.participant_key = BuiltinTopicKey {
             value: Self::convert_u8_to_i32_array(endpoint_guid.prefix().to_owned()),
         };
+    }
+
+    // GUID of the Publisher the writer belongs to; None when the peer did not announce one.
+    pub fn group_guid(&self) -> Option<Guid> {
+        self.group_guid
+    }
+
+    pub fn set_group_guid(&mut self, group_guid: Guid) {
+        self.group_guid = Some(group_guid);
     }
 
     pub fn unicast_locator_list(&self) -> Vec<Locator> {
@@ -379,6 +391,7 @@ impl PublicationBuiltinTopicData {
         );
 
         // Handle Option<T> fields that are already Option in both source and target
+        publication_data.group_guid = parsed.group_guid;
         publication_data.key_hash = parsed.key_hash;
         publication_data.type_max_size_serialized = parsed.type_max_size_serialized;
         publication_data.unicast_locator_list = parsed.unicast_locator_list;
@@ -509,6 +522,32 @@ mod tests {
         assert_eq!(parsed.topic_name(), original.topic_name());
         assert_eq!(parsed.type_name(), original.type_name());
         assert_eq!(parsed.unicast_locator_list(), original.unicast_locator_list());
+    }
+
+    #[test]
+    fn publication_group_guid_roundtrips_as_pid_group_guid() {
+        let mut original = sample_publication();
+        original.set_group_guid(make_guid(0x33));
+
+        let bytes = original.to_serialized_data().to_vec();
+        assert_eq!(count_pid_occurrences(&bytes, 0x0052), 1, "PID_GROUP_GUID emitted once");
+        let parsed = PublicationBuiltinTopicData::from_serialized_data(&bytes)
+            .expect("PL_CDR parse should succeed");
+        assert_eq!(parsed.group_guid(), Some(make_guid(0x33)));
+
+        // DdsType::serialize must place the parameter where the PL_CDR helper does.
+        let dds_bytes = DdsType::serialize(&original).expect("serialize").to_vec();
+        assert_eq!(dds_bytes, bytes);
+    }
+
+    #[test]
+    fn publication_without_group_guid_parses_as_none() {
+        let bytes = sample_publication().to_serialized_data().to_vec();
+        assert_eq!(count_pid_occurrences(&bytes, 0x0052), 0);
+
+        let parsed = PublicationBuiltinTopicData::from_serialized_data(&bytes)
+            .expect("PL_CDR parse should succeed");
+        assert_eq!(parsed.group_guid(), None);
     }
 
     #[test]
