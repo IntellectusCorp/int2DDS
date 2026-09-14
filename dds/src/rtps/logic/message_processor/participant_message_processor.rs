@@ -333,7 +333,7 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
         // startup burst this is meant to survive.
         let sedp_period = match crate::common::env::get_sedp_heartbeat_ms() {
             Some(ms) => std::time::Duration::from_millis(ms),
-            None => period,
+            None => crate::rtps::logic::sedp_logic::BUILTIN_SEDP_HB_PERIOD,
         };
         let spdp_payload = self.create_spdp_message()?;
 
@@ -368,11 +368,8 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
 
         let (_, sedp_logic_arc, _) = participant.get_logics();
         if let Some(sedp_logic) = sedp_logic_arc.as_ref().as_ref() {
-            // Announcements made before this peer existed are only in the history; the heartbeats
-            // armed below advertise them but nothing pumps a builtin writer's unsent changes.
-            if let Err(e) = sedp_logic.push_sedp_history_to_participant(remote_prefix) {
-                log::warn!("Failed to push SEDP history to {:?}: {}", remote_prefix, e);
-            }
+            // The heartbeat armed below advertises the history and the peer asks for it; pushing it
+            // unasked makes every peer answer one discovery at once and overflows its receive buffer.
 
             let _ = sedp_logic.register_periodic_send_timer(
                 remote_prefix,

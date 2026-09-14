@@ -1135,6 +1135,10 @@ impl Participant {
             }
         }
 
+        if let Some(sedp_logic) = self.sedp_logic.get().and_then(|logic| logic.as_ref().as_ref()) {
+            sedp_logic.forget_sedp_hb_attempts(remote_prefix);
+        }
+
         self.remote_same_host.remove(&remote_prefix);
 
         // The peer is gone, so it will never answer to release what is charged against it, and

@@ -114,7 +114,16 @@ enum MatchDecision {
 
 const TYPE_LOOKUP_MATCH_TIMEOUT: StdDuration = StdDuration::from_secs(5);
 
-pub(crate) const BUILTIN_SEDP_HB_PERIOD: StdDuration = StdDuration::from_millis(2000);
+/// First interval of the SEDP heartbeat to a remote; it backs off to `BUILTIN_SEDP_HB_PERIOD_MAX`.
+pub(crate) const BUILTIN_SEDP_HB_PERIOD: StdDuration = StdDuration::from_millis(100);
+const BUILTIN_SEDP_HB_PERIOD_MAX: StdDuration = StdDuration::from_millis(2000);
+
+/// Heartbeat interval after `attempts` heartbeats: 100ms for the first five, then doubling
+/// every second heartbeat up to 2s.
+pub(crate) fn sedp_hb_interval(attempts: u32) -> StdDuration {
+    let doublings = attempts.saturating_sub(5) / 2;
+    BUILTIN_SEDP_HB_PERIOD.saturating_mul(1 << doublings.min(5)).min(BUILTIN_SEDP_HB_PERIOD_MAX)
+}
 
 #[derive(Clone)]
 #[allow(dead_code)]
@@ -131,6 +140,8 @@ pub(crate) struct SedpLogic {
     pub(crate) type_lookup_pending:
         Arc<Mutex<HashMap<SampleIdentity, (GuidPrefix, TypeIdentifier)>>>,
     deferred_type_matches: Arc<Mutex<HashMap<Guid, Instant>>>,
+    /// Heartbeats sent per (remote, builtin writer) since it was armed.
+    sedp_hb_attempts: Arc<dashmap::DashMap<(GuidPrefix, EntityId), u32>>,
 }
 
 impl SedpLogic {
@@ -387,6 +398,7 @@ impl SedpLogic {
             timer_handler,
             type_lookup_pending: Arc::new(Mutex::new(HashMap::new())),
             deferred_type_matches: Arc::new(Mutex::new(HashMap::new())),
+            sedp_hb_attempts: Arc::new(dashmap::DashMap::new()),
         }
     }
 
@@ -1770,6 +1782,7 @@ impl SedpLogic {
             );
             // The timer handler is a separate lock; do not hold the proxies while taking it.
             drop(reader_proxies);
+            self.sedp_hb_attempts.remove(&(*guid_prefix, entity_id));
             self.disarm_sedp_periodic_heartbeat(*guid_prefix, entity_id);
             return Ok(false);
         }
@@ -1817,7 +1830,30 @@ impl SedpLogic {
             }
         }
 
-        Ok(is_sent)
+        if !is_sent {
+            return Ok(false);
+        }
+        let attempts = {
+            let mut entry = self.sedp_hb_attempts.entry((*guid_prefix, entity_id)).or_insert(0);
+            *entry += 1;
+            *entry
+        };
+        let next = sedp_hb_interval(attempts);
+        if next != duration {
+            if let Ok(handler) = self.timer_handler.lock() {
+                let timer_id = TimerId::SedpScheduledMessage {
+                    remote_prefix: *guid_prefix,
+                    writer_entity_id: entity_id,
+                };
+                handler.modify_timer(timer_id, next);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Drop the heartbeat backoff state kept for a remote participant that is gone.
+    pub(crate) fn forget_sedp_hb_attempts(&self, remote_prefix: GuidPrefix) {
+        self.sedp_hb_attempts.retain(|(prefix, _), _| *prefix != remote_prefix);
     }
 
     /// Cancel the periodic heartbeat towards `remote_prefix` for one builtin writer. A later
@@ -1942,67 +1978,6 @@ impl SedpLogic {
                 RtpsError::new(RtpsErrorCode::LockError, "Failed to lock wire buffer pool")
             })?
             .release(send_buffer);
-
-        Ok(())
-    }
-
-    /// Send the endpoint announcements this participant already holds to a newly discovered peer.
-    ///
-    /// Discovery only arms heartbeats, and nothing pumps a builtin writer's unsent changes, so
-    /// without this the peer is told a range exists and is never sent any of it.
-    pub(crate) fn push_sedp_history_to_participant(
-        &self,
-        remote_prefix: GuidPrefix,
-    ) -> RtpsResult<()> {
-        let participant = self.get_upgraded_participant()?;
-
-        for (writer, reader_entity_id) in [
-            (
-                participant.sedp_builtin_publications_writer(),
-                EntityId::SEDP_BUILTIN_PUBLICATIONS_READER,
-            ),
-            (
-                participant.sedp_builtin_subscriptions_writer(),
-                EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_READER,
-            ),
-        ] {
-            // Copy the list out and drop the guard: the sends below go to the wire.
-            let changes = match writer.writer_cache().lock() {
-                Ok(cache) => cache.get_changes(),
-                Err(e) => {
-                    warn!("[SEDP] cannot read {} history to push: {}", reader_entity_id, e);
-                    continue;
-                }
-            };
-
-            let remote_reader_guid = Guid::new(remote_prefix, reader_entity_id);
-            let writer_entity_id = writer.guid().entity_id();
-
-            let datagrams = match MessageCreator::create_multiple_data_msgs(
-                writer.guid(),
-                remote_reader_guid,
-                reader_entity_id,
-                writer_entity_id,
-                &changes,
-                true,
-            ) {
-                Ok(datagrams) => datagrams,
-                Err(e) => {
-                    warn!("[SEDP] failed to build announcements to {}: {}", remote_reader_guid, e);
-                    continue;
-                }
-            };
-
-            for datagram in &datagrams {
-                if let Err(e) = self.send_to_participant_metatraffic_locators(
-                    &datagram[..],
-                    remote_reader_guid,
-                    "data",
-                ) {
-                    warn!("[SEDP] failed to push an announcement to {}: {}", remote_reader_guid, e);
-                }
-            }
-        }
 
         Ok(())
     }
@@ -3065,7 +3040,6 @@ mod tests {
     use crate::rtps::common::sequence::SequenceNumberSet;
     use crate::rtps::common::types::SubmessagePayload;
     use crate::rtps::entities::reader::WriterProxy;
-    use crate::rtps::messages::message_receiver::TypedSubmessage;
     use crate::rtps::messages::submessage_header_flag::{SubmessageFlagType, SubmessageHeaderFlag};
     use crate::rtps::messages::submessage_id::SubmessageId;
     use crate::rtps::messages::submessages::data::Data;
@@ -3204,72 +3178,6 @@ mod tests {
         );
     }
 
-    /// SEDP announcements made before a peer was discovered have to reach it.
-    ///
-    /// Unlike a user writer, whose reader proxy starts at `UNKNOWN` and whose history is pumped
-    /// by `send_unsent_changes`, nothing drives a builtin writer: discovery only arms heartbeats.
-    /// Without a push the peer is told a range exists and is never sent any of it.
-    #[test]
-    fn discovering_a_participant_pushes_the_sedp_announcements_already_made() {
-        let participant = Arc::new(Participant::new(0, 0, Vec::new(), Vec::new(), Vec::new()));
-        let transport = Arc::new(CountingTransport::default());
-        let buffers = transport.buffers.clone();
-        let sedp_logic = SedpLogic::new(participant.clone(), transport);
-
-        let sedp_writer = participant.sedp_builtin_publications_writer();
-        for i in 0..3u8 {
-            let change = Arc::new(sedp_writer.new_change(
-                ChangeKind::Alive,
-                vec![i],
-                InstanceHandle::from_guid(&Guid::new([i; 12], EntityId::PARTICIPANT)),
-                None,
-            ));
-            sedp_writer
-                .writer_cache()
-                .lock()
-                .expect("cache lock")
-                .add_change_builtin(change, sedp_writer.as_ref())
-                .expect("builtin add");
-        }
-
-        let remote_prefix = [7u8; 12];
-        let mut remote = SPDPDiscoveredParticipantData::new(
-            0,
-            remote_prefix,
-            Participant::init_builtin_endpoints(),
-        );
-        remote.add_metatraffic_unicast_locator(Locator::from_ip_v4_addr_and_port(
-            &"127.0.0.1".parse().unwrap(),
-            7410,
-        ));
-        participant.add_remote_participant_proxy_data(remote);
-
-        sedp_logic.push_sedp_history_to_participant(remote_prefix).expect("the push must not fail");
-
-        // Batched into as few datagrams as fit, so count the DATA submessages that reached
-        // the wire rather than the number of sends.
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7400);
-        let data_submessage_count: usize = buffers
-            .lock()
-            .expect("send buffers")
-            .iter()
-            .map(|buffer| {
-                let mut receiver = MessageReceiver::new(remote_prefix, &addr);
-                receiver.init(&bytes::Bytes::copy_from_slice(buffer)).expect("parse datagram");
-                receiver
-                    .parse_submessages()
-                    .iter()
-                    .filter(|submessage| matches!(submessage, TypedSubmessage::Data(..)))
-                    .count()
-            })
-            .sum();
-
-        assert_eq!(
-            data_submessage_count, 3,
-            "each announcement already in the history has to be sent to the new peer"
-        );
-    }
-
     /// A builtin writer transmits because it has data, not because a caller remembered to ask:
     /// `add_change_builtin` used to only insert, so a missed explicit send meant no DATA at all.
     #[test]
@@ -3368,6 +3276,16 @@ mod tests {
         ));
 
         (sedp_logic, participant, remote_prefix, last_sn, sends)
+    }
+
+    #[test]
+    fn the_sedp_heartbeat_starts_at_100ms_and_backs_off_to_2s() {
+        let ms = |a| sedp_hb_interval(a).as_millis();
+        assert_eq!(
+            [ms(0), ms(5), ms(6), ms(7), ms(9), ms(11), ms(13), ms(15)],
+            [100, 100, 100, 200, 400, 800, 1600, 2000]
+        );
+        assert_eq!(ms(u32::MAX), 2000);
     }
 
     /// An ACKNACK carrying `bitmap_base`, acking everything below it and reporting nothing
