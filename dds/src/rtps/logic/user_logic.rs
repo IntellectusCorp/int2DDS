@@ -5401,7 +5401,7 @@ mod tests {
         sn: SequenceNumber,
     ) {
         feed_fragment(user_logic, prefix, writer_guid, sn, reader_id, 1, 1, vec![1, 1, 1, 1]);
-        let heartbeat = Heartbeat::new(reader_id, writer_guid.entity_id(), sn, sn, 1);
+        let heartbeat = Heartbeat::new(reader_id, writer_guid.entity_id(), sn, sn, 1, None);
         let rtps_header = Header::new(writer_guid.prefix());
         let submessage_header = SubmessageHeader::new(SubmessageId::HEARTBEAT, 0, 0);
         user_logic

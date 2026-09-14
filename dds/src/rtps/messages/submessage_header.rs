@@ -86,6 +86,15 @@ impl SubmessageHeader {
         }
     }
 
+    // Set on HeartBeat and Gap when the group sequence number elements are present.
+    pub(crate) fn group_info_flag(&self) -> Option<bool> {
+        match self.submessage_id {
+            SubmessageId::HEARTBEAT => Some(self.flags & 0x08 != 0),
+            SubmessageId::GAP => Some(self.flags & 0x02 != 0),
+            _ => None,
+        }
+    }
+
     // 9.4.5.3 Data Submessage
     pub(crate) fn inline_qos_flag(&self) -> Option<bool> {
         if self.submessage_id == SubmessageId::DATA || self.submessage_id == SubmessageId::DATA_FRAG

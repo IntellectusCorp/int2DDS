@@ -71,8 +71,14 @@ impl SubmessageCreator {
         if final_flag {
             data_header_flag.add_flag(SubmessageFlagType::FinalFlag, SubmessageId::HEARTBEAT);
         }
-        let heartbeat_data =
-            Heartbeat::new(reader_entity_id, writer_entity_id, first_sn, last_sn, heartbeat_count);
+        let heartbeat_data = Heartbeat::new(
+            reader_entity_id,
+            writer_entity_id,
+            first_sn,
+            last_sn,
+            heartbeat_count,
+            None,
+        );
 
         let heartbeat_submessage = Submessage {
             header: SubmessageHeader::new(
