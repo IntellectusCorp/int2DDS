@@ -65,6 +65,8 @@ pub(crate) struct DataWriterHistoryCache<Foo> {
     has_key: bool,
     lifespan_timers: Arc<Mutex<HashMap<Guid, TimerId>>>, // writer_guid -> timer_id
     pool: CacheChangePool,
+    // Number of End Coherent Set markers in `changes`; they do not count toward resource limits.
+    end_coherent_set_count: usize,
 }
 
 impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
@@ -101,7 +103,7 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
     }
 
     fn sample_count(&self) -> DdsResult<usize> {
-        Ok(self.changes.len())
+        Ok(self.changes.len().saturating_sub(self.end_coherent_set_count))
     }
 
     fn instance_count(&self) -> DdsResult<usize> {
@@ -210,7 +212,14 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
 
     // Removes the given CacheChange from the history vector and map.
     fn remove_change(&mut self, a_change: Arc<CacheChange>) -> DdsResult<()> {
+        let len_before_removal = self.changes.len();
         self.changes.retain(|c| !Arc::ptr_eq(c, &a_change));
+
+        let is_removed = self.changes.len() < len_before_removal;
+        if is_removed && a_change.is_end_coherent_set() {
+            self.end_coherent_set_count = self.end_coherent_set_count.saturating_sub(1);
+        }
+
         self.remove_change_from_instance_map(&a_change)?;
         self.remove_change_from_rtps_writer_cache(a_change)?;
         Ok(())
@@ -361,6 +370,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
                 && !history_qos.strict,
             max_blocking_time: reliability_qos.max_blocking_time,
             has_key,
+            end_coherent_set_count: 0,
             lifespan_timers: Arc::new(Mutex::new(HashMap::new())),
             pool: {
                 // Cap without pre-filling, as ReaderHistoryCache does: pooled entries only pay off
@@ -375,6 +385,21 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
     /// Acquire a CacheChange from the pool (capacity preserved from previous use).
     pub(crate) fn acquire_change(&mut self) -> CacheChange {
         self.pool.acquire()
+    }
+
+    // Store an End Coherent Set marker without lifespan, capacity or instance bookkeeping.
+    pub(crate) fn add_end_coherent_set(&mut self, a_change: Arc<CacheChange>) -> DdsResult<()> {
+        // Sent changes are not retained: deliver, drop from the RTPS cache, reclaim the buffer.
+        if self.purge_sent_changes {
+            self.add_change_to_rtps_writer_cache(a_change.clone())?;
+            self.remove_change_from_rtps_writer_cache(a_change.clone())?;
+            self.pool.try_release(a_change);
+            return Ok(());
+        }
+
+        self.changes.push(a_change.clone());
+        self.end_coherent_set_count += 1;
+        self.add_change_to_rtps_writer_cache(a_change)
     }
 
     // current number of pooled (free) changes
@@ -515,17 +540,21 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
         Ok(())
     }
 
-    // Removes and returns the oldest change from all instances.
+    // Removes and returns the oldest sample from all instances. End Coherent Set markers ahead
+    // of it are removed on the way; a marker reaches the front only after its set members are gone.
     fn remove_oldest_change_of_all(&mut self) -> DdsResult<Arc<CacheChange>> {
-        // The oldest change is always at index 0. Read it directly instead of
-        // snapshotting the whole change list.
-        let oldest_change = self.changes.first().cloned();
-        match oldest_change {
-            Some(change) => {
-                self.remove_change(change.clone())?;
-                Ok(change)
+        loop {
+            let Some(oldest_change) = self.changes.first().cloned() else {
+                return Err(DdsError::Error("No changes found to remove".to_string()));
+            };
+            self.remove_change(oldest_change.clone())?;
+
+            if oldest_change.is_end_coherent_set() {
+                // The caller only releases the returned sample, so the marker is released here.
+                self.pool.try_release(oldest_change);
+                continue;
             }
-            None => Err(DdsError::Error("No changes found to remove".to_string())),
+            return Ok(oldest_change);
         }
     }
 
@@ -738,7 +767,9 @@ mod tests {
                 entity_id::EntityId, entity_kind::EntityKind, guid::Guid, sequence::SequenceNumber,
                 types::ChangeKind,
             },
-            entities::writer::reader_proxy::ReaderProxy,
+            entities::{
+                history::cache_change::PresentationInfo, writer::reader_proxy::ReaderProxy,
+            },
         },
         subscription::{
             data_reader::tests::TestData,
@@ -746,6 +777,99 @@ mod tests {
         },
         topic::qos::TopicQos,
     };
+
+    // Payload-less change naming a group coherent set, as an End Coherent Set marker is.
+    fn create_end_coherent_set(seq: i64) -> Arc<CacheChange> {
+        let mut change = CacheChange::new(
+            ChangeKind::Alive,
+            Guid::UNKNOWN,
+            InstanceHandle::NIL,
+            SequenceNumber::from_i64(seq),
+            Vec::new(),
+            None,
+        );
+        change.set_presentation_info(PresentationInfo {
+            group_coherent_set: Some(SequenceNumber::from_i64(1)),
+            ..Default::default()
+        });
+        Arc::new(change)
+    }
+
+    #[test]
+    fn end_coherent_set_marker_is_skipped_by_eviction_until_a_sample_is_removed() {
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepLast(2), strict: false },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::BestEffort,
+                max_blocking_time: Duration::from_millis(100),
+            },
+            ..Default::default()
+        };
+        let (participant, data_writer) = create_datawriter(writer_qos);
+        let datawriter_cache = data_writer.get_datawriter_cache().unwrap();
+        let mut cache_guard = datawriter_cache.lock().unwrap();
+        let instance = InstanceHandle::new([1; 16]);
+
+        // [1 2 ECS] -> [2 ECS 4] -> [ECS 4 5] -> [5 6]: the marker is skipped, not counted.
+        cache_guard.add_change_with_cleanup(create_change(1, instance), false).unwrap();
+        cache_guard.add_change_with_cleanup(create_change(2, instance), false).unwrap();
+        cache_guard.add_end_coherent_set(create_end_coherent_set(3)).unwrap();
+        cache_guard.add_change_with_cleanup(create_change(4, instance), false).unwrap();
+        cache_guard.add_change_with_cleanup(create_change(5, instance), false).unwrap();
+        assert_eq!(stored_sequence_numbers(&cache_guard), vec![3, 4, 5]);
+        cache_guard.add_change_with_cleanup(create_change(6, instance), false).unwrap();
+
+        assert_eq!(stored_sequence_numbers(&cache_guard), vec![5, 6]);
+        assert_eq!(cache_guard.sample_count().unwrap(), 2);
+
+        drop(cache_guard);
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn end_coherent_set_marker_does_not_count_toward_max_samples() {
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepLast(2), strict: false },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::BestEffort,
+                max_blocking_time: Duration::from_millis(100),
+            },
+            resource_limits: ResourceLimitsQosPolicy {
+                max_samples: 2,
+                max_samples_per_instance: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (participant, data_writer) = create_datawriter(writer_qos);
+        let datawriter_cache = data_writer.get_datawriter_cache().unwrap();
+        let mut cache_guard = datawriter_cache.lock().unwrap();
+        let instance = InstanceHandle::new([1; 16]);
+
+        // [1 ECS] holds one sample, so a second sample fits without evicting anything.
+        cache_guard.add_change_with_cleanup(create_change(1, instance), false).unwrap();
+        cache_guard.add_end_coherent_set(create_end_coherent_set(2)).unwrap();
+        cache_guard.add_change_with_cleanup(create_change(3, instance), false).unwrap();
+        assert_eq!(stored_sequence_numbers(&cache_guard), vec![1, 2, 3]);
+        assert_eq!(cache_guard.sample_count().unwrap(), 2);
+
+        // [1 ECS 3] -> [ECS 3 4] -> [4 5] -> [5 6]: from here the limit is full.
+        cache_guard.add_change_with_cleanup(create_change(4, instance), false).unwrap();
+        cache_guard.add_change_with_cleanup(create_change(5, instance), false).unwrap();
+        cache_guard.add_change_with_cleanup(create_change(6, instance), false).unwrap();
+
+        assert_eq!(stored_sequence_numbers(&cache_guard), vec![5, 6]);
+        assert_eq!(cache_guard.sample_count().unwrap(), 2);
+
+        drop(cache_guard);
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
+    }
+
+    fn stored_sequence_numbers(cache: &DataWriterHistoryCache<TestData>) -> Vec<i64> {
+        cache.get_changes().iter().map(|change| change.sequence_number().to_i64()).collect()
+    }
 
     // Helper function to create a test CacheChange.
     // Payload is non-empty so the change is not classified as a coherent-set end marker.
@@ -1487,6 +1611,7 @@ mod tests {
             max_blocking_time: Duration::from_millis(100),
             has_key: true,
             lifespan_timers: Arc::new(Mutex::new(HashMap::new())),
+            end_coherent_set_count: 0,
             pool: CacheChangePool::new(),
         };
 
@@ -1530,6 +1655,7 @@ mod tests {
             max_blocking_time: Duration::from_millis(100),
             has_key: true,
             lifespan_timers: Arc::new(Mutex::new(HashMap::new())),
+            end_coherent_set_count: 0,
             pool: CacheChangePool::new(),
         };
 

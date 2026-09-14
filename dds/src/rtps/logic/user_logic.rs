@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use crate::common::instance_handle::InstanceHandle;
 use crate::rtps::common::count_filter::should_accept_count;
 use crate::rtps::common::entity_id::EntityId;
-use crate::rtps::common::guid::{Guid, GuidPrefix};
+use crate::rtps::common::guid::{GroupDigest, Guid, GuidPrefix};
 use crate::rtps::common::locator::Locator;
 use crate::rtps::common::parameters::ParameterList;
 use crate::rtps::common::rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult};
@@ -2557,10 +2557,15 @@ impl UserLogic {
         }
 
         // Restore per-sample coherent/group presentation metadata.
+        let writer_group_info = inline_qos
+            .get_writer_group_info()
+            .and_then(|bytes| <[u8; 4]>::try_from(bytes.as_slice()).ok())
+            .map(GroupDigest::new);
         cache_change.set_presentation_info(PresentationInfo {
             coherent_set: inline_qos.get_coherent_set(),
             group_seq_num: inline_qos.get_group_seq_num(),
             group_coherent_set: inline_qos.get_group_coherent_set(),
+            writer_group_info,
         });
 
         Ok(())

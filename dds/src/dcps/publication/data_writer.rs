@@ -56,7 +56,7 @@ use crate::{
         history_cache::HistoryCache as _,
         qos_policy::{
             DataRepresentationId, DurabilityQosPolicyKind, HistoryQosPolicyKind,
-            LivelinessQosPolicyKind, PresentationQosAccessScopeKind, Qos, ReliabilityQosPolicyKind,
+            LivelinessQosPolicyKind, Qos, ReliabilityQosPolicyKind,
         },
         status::{
             LivelinessLostStatus, OfferedDeadlineMissedStatus, OfferedIncompatibleQosStatus,
@@ -130,7 +130,7 @@ pub(crate) trait DataWriterInternal: DataWriterBase {
     fn delete(&self);
     fn mark_deleted_and_await_operation_completion(&self);
     fn is_builtin(&self) -> bool;
-    fn end_coherent_set(&self) -> DdsResult<()>;
+    fn end_coherent_set(&self, presentation_info: Option<&PresentationInfo>) -> DdsResult<()>;
 }
 
 pub struct DataWriter<Foo> {
@@ -1412,9 +1412,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         };
         let mut presentation_info = PresentationInfo::default();
 
-        let is_group_scope = publisher.get_qos_arc()?.presentation.access_scope
-            == PresentationQosAccessScopeKind::Group;
-        if is_group_scope {
+        if publisher.is_group_access_scope()? {
             presentation_info.group_seq_num = Some(publisher.increment_group_seq_num()?);
             presentation_info.group_coherent_set = publisher.get_group_coherent_set_start()?;
         }
@@ -2548,16 +2546,15 @@ impl<Foo: 'static + Clone> DataWriterInternal for DataWriter<Foo> {
         self.is_builtin
     }
 
-    // Close this writer's open coherent set by sending a payload-less end marker that
-    // carries no coherent set id. No-op when no set is open.
-    fn end_coherent_set(&self) -> DdsResult<()> {
+    // Close this writer's open coherent set with a payload-less marker. Under GROUP scope it is
+    // an End Coherent Set carrying the group inline QoS; otherwise it carries no coherent set id.
+    fn end_coherent_set(&self, presentation_info: Option<&PresentationInfo>) -> DdsResult<()> {
         let started =
             self.current_coherent_start.lock().map_err(|e| DdsError::Error(e.to_string()))?.take();
-        if started.is_none() {
+        let Some(coherent_set_start) = started else {
             return Ok(());
-        }
+        };
 
-        // A payload-less Data carrying no coherent set id marks the end of the coherent set.
         let timestamp = self.publisher_arc()?.participant_arc()?.get_current_time()?;
         let rtps_writer = self.get_rtps_writer()?;
         let mut change = {
@@ -2575,8 +2572,16 @@ impl<Foo: 'static + Clone> DataWriterInternal for DataWriter<Foo> {
         );
 
         let mut cache = self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-        cache.add_change_with_cleanup(Arc::new(change), false)?;
-        Ok(())
+        let Some(presentation_info) = presentation_info else {
+            cache.add_change_with_cleanup(Arc::new(change), false)?;
+            return Ok(());
+        };
+
+        change.set_presentation_info(PresentationInfo {
+            coherent_set: Some(coherent_set_start),
+            ..presentation_info.clone()
+        });
+        cache.add_end_coherent_set(Arc::new(change))
     }
 }
 
@@ -3621,6 +3626,7 @@ mod tests {
             coherent_set: None,
             group_seq_num: Some(SequenceNumber::from_i64(group_seq_num)),
             group_coherent_set: None,
+            writer_group_info: None,
         };
         assert_eq!(get_presentation_info_of_change(&first_writer, 1), expected(1));
         assert_eq!(get_presentation_info_of_change(&second_writer, 1), expected(2));
@@ -3679,6 +3685,7 @@ mod tests {
                 coherent_set: None,
                 group_seq_num: Some(SequenceNumber::from_i64(1)),
                 group_coherent_set: None,
+                writer_group_info: None,
             }
         );
         let group_set_start = Some(SequenceNumber::from_i64(2));
@@ -3688,6 +3695,7 @@ mod tests {
                 coherent_set: Some(SequenceNumber::from_i64(1)),
                 group_seq_num: Some(SequenceNumber::from_i64(2)),
                 group_coherent_set: group_set_start,
+                writer_group_info: None,
             }
         );
         assert_eq!(
@@ -3696,6 +3704,7 @@ mod tests {
                 coherent_set: Some(SequenceNumber::from_i64(2)),
                 group_seq_num: Some(SequenceNumber::from_i64(3)),
                 group_coherent_set: group_set_start,
+                writer_group_info: None,
             }
         );
         assert_eq!(
@@ -3704,7 +3713,81 @@ mod tests {
                 coherent_set: Some(SequenceNumber::from_i64(2)),
                 group_seq_num: Some(SequenceNumber::from_i64(4)),
                 group_coherent_set: group_set_start,
+                writer_group_info: None,
             }
+        );
+
+        participant.delete_contained_entities().unwrap();
+        DomainParticipantFactory::get_instance().delete_participant(participant).unwrap();
+    }
+
+    #[test]
+    fn ending_a_group_coherent_set_sends_an_end_coherent_set_from_every_writer() {
+        use crate::infrastructure::qos_policy::PresentationQosAccessScopeKind;
+        use crate::rtps::common::guid::GroupDigest;
+
+        let participant = DomainParticipantFactory::get_instance()
+            .create_participant(
+                crate::test_utils::unique_domain_id(),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let topic = participant
+            .create_topic::<TestData>(
+                "GroupEcsTopic",
+                "TestData",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let mut publisher_qos = PublisherQos::default();
+        publisher_qos.presentation.access_scope = PresentationQosAccessScopeKind::Group;
+        publisher_qos.presentation.coherent_access = true;
+        let publisher =
+            participant.create_publisher(publisher_qos, None, StatusMask::default()).unwrap();
+        let mut writer_qos = DataWriterQos::default();
+        writer_qos.history.kind = HistoryQosPolicyKind::KeepAll;
+        let first_writer = publisher
+            .create_datawriter::<TestData>(&topic, writer_qos.clone(), None, StatusMask::default())
+            .unwrap();
+        let second_writer = publisher
+            .create_datawriter::<TestData>(&topic, writer_qos, None, StatusMask::default())
+            .unwrap();
+
+        // Members take GSN 1 and 2, so both markers carry GSN 3 and close the set opened at 1.
+        publisher.begin_coherent_changes().unwrap();
+        first_writer.write(&TestData { id: 1 }, InstanceHandle::NIL).unwrap();
+        second_writer.write(&TestData { id: 2 }, InstanceHandle::NIL).unwrap();
+        publisher.end_coherent_changes().unwrap();
+
+        let writer_set = GroupDigest::from_entity_ids(&[
+            first_writer.get_instance_handle().unwrap().to_guid().entity_id(),
+            second_writer.get_instance_handle().unwrap().to_guid().entity_id(),
+        ]);
+        let expected_marker = PresentationInfo {
+            coherent_set: Some(SequenceNumber::from_i64(1)),
+            group_seq_num: Some(SequenceNumber::from_i64(3)),
+            group_coherent_set: Some(SequenceNumber::from_i64(1)),
+            writer_group_info: Some(writer_set),
+        };
+        assert_eq!(get_presentation_info_of_change(&first_writer, 2), expected_marker);
+        assert_eq!(get_presentation_info_of_change(&second_writer, 2), expected_marker);
+
+        // The marker is stored but excluded from the resource-limit sample count.
+        let first_cache = first_writer.get_datawriter_cache().unwrap();
+        let first_cache = first_cache.lock().unwrap();
+        assert_eq!(first_cache.changes_len(), 2);
+        assert_eq!(first_cache.sample_count().unwrap(), 1);
+        drop(first_cache);
+
+        // The next write continues after the marker's group sequence number.
+        first_writer.write(&TestData { id: 3 }, InstanceHandle::NIL).unwrap();
+        assert_eq!(
+            get_presentation_info_of_change(&first_writer, 3).group_seq_num,
+            Some(SequenceNumber::from_i64(4))
         );
 
         participant.delete_contained_entities().unwrap();
