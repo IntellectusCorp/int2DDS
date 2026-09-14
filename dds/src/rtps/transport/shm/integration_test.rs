@@ -9,6 +9,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use super::pool::TEST_POOL_SIZE;
 use super::registry::{
     now_tick, unlink_registry, ParticipantSlot, RegistrySegment, STALE_AFTER_TICKS,
 };
@@ -93,7 +94,8 @@ fn shm_child_entry() {
 
 /// Claims the slot the parent published, then exits without releasing it.
 fn child_claim_and_die() {
-    let mine = OwnedSegment::create(DOMAIN, CHILD_SLOT, 1, &[(64, 1)], 4).expect("child segment");
+    let mine =
+        OwnedSegment::create(DOMAIN, CHILD_SLOT, 1, TEST_POOL_SIZE, 4).expect("child segment");
     let parent = attach_retry(DOMAIN, PARENT_SLOT, CHILD_SLOT);
     let mut out = [0u8; RING_INLINE];
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -131,7 +133,7 @@ fn payload_survives_the_process_boundary() {
     unlink_segment(DOMAIN, PARENT_SLOT);
     unlink_segment(DOMAIN, CHILD_SLOT);
 
-    let owned = OwnedSegment::create(DOMAIN, PARENT_SLOT, 1, &[(1024, 4)], 8).unwrap();
+    let owned = OwnedSegment::create(DOMAIN, PARENT_SLOT, 1, TEST_POOL_SIZE, 8).unwrap();
     let mut child = spawn_child("claim_and_die");
 
     let mut lease = owned.owner_mut().acquire(16).unwrap();
@@ -148,7 +150,7 @@ fn payload_survives_the_process_boundary() {
     let bit = 1u64 << CHILD_SLOT;
     let refs = |owned: &OwnedSegment| {
         let owner = owned.owner_mut();
-        owner.pool().meta(slot_ref.class, slot_ref.index).unwrap().refs.load(Ordering::Acquire)
+        owner.pool().meta(slot_ref.order, slot_ref.index).unwrap().refs.load(Ordering::Acquire)
     };
     assert_eq!(refs(&owned) & bit, bit, "dead child still holds its bit");
     assert_eq!(owned.owner_mut().reclaim_participant(CHILD_SLOT), 1);
@@ -196,7 +198,7 @@ fn two_processes_share_one_registry() {
 #[test]
 fn a_peer_process_wakes_a_blocked_owner() {
     unlink_segment(SEGMENT_DOMAIN, PARENT_SLOT);
-    let owned = OwnedSegment::create(SEGMENT_DOMAIN, PARENT_SLOT, 1, &[(64, 2)], 4).unwrap();
+    let owned = OwnedSegment::create(SEGMENT_DOMAIN, PARENT_SLOT, 1, TEST_POOL_SIZE, 4).unwrap();
 
     let mut child = KillOnDrop(spawn_child("notifier"));
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -319,9 +321,9 @@ fn wait_until(budget: Duration, mut ready: impl FnMut() -> bool) -> bool {
 fn slots_referenced_by(peer: &PeerSegment, bit: u64) -> usize {
     let pool = peer.reader.pool();
     let mut held = 0;
-    for class in 0..pool.class_count() {
-        for index in 0..pool.slot_count(class) {
-            if let Some(meta) = pool.meta(class, index) {
+    for order in 0..=pool.max_order() {
+        for index in 0..pool.block_count(order) {
+            if let Some(meta) = pool.meta(order, index) {
                 if meta.refs.load(Ordering::Acquire) & bit != 0 {
                     held += 1;
                 }

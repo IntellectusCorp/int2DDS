@@ -3988,7 +3988,7 @@ impl UnicastMessageProcessor for UserLogic {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rtps::transport::shm::runtime::{DEFAULT_CLASSES, DEFAULT_RING_ENTRIES};
+    use crate::rtps::transport::shm::runtime::{DEFAULT_POOL_SIZE, DEFAULT_RING_ENTRIES};
     use crate::rtps::transport::shm::segment::{unlink_segment, OwnedSegment};
     use crate::rtps::transport::shm::slot::ShmSlotHandle;
     use std::collections::BTreeSet;
@@ -4623,7 +4623,7 @@ mod tests {
 
         unlink_segment(DOMAIN, SLOT);
         let segment = Arc::new(
-            OwnedSegment::create(DOMAIN, SLOT, 1, &DEFAULT_CLASSES, DEFAULT_RING_ENTRIES).unwrap(),
+            OwnedSegment::create(DOMAIN, SLOT, 1, DEFAULT_POOL_SIZE, DEFAULT_RING_ENTRIES).unwrap(),
         );
         let lease = segment.owner_mut().acquire(SAMPLE).unwrap();
         let slot_ref = segment.owner_mut().commit(lease, SAMPLE as u32);
@@ -4680,7 +4680,7 @@ mod tests {
 
         unlink_segment(DOMAIN, SLOT);
         let segment = Arc::new(
-            OwnedSegment::create(DOMAIN, SLOT, 1, &DEFAULT_CLASSES, DEFAULT_RING_ENTRIES).unwrap(),
+            OwnedSegment::create(DOMAIN, SLOT, 1, DEFAULT_POOL_SIZE, DEFAULT_RING_ENTRIES).unwrap(),
         );
         let lease = segment.owner_mut().acquire(SAMPLE).unwrap();
         let slot_ref = segment.owner_mut().commit(lease, SAMPLE as u32);

@@ -1067,10 +1067,10 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             return fall_back(reason);
         }
 
-        // One guard for both: `class_for` answers `SampleTooLarge`, `acquire`
+        // One guard for both: `order_for` answers `SampleTooLarge`, `acquire`
         // answers `PoolExhausted`.
         let mut owner = rt.own().owner_mut();
-        if owner.pool().class_for(len).is_none() {
+        if owner.pool().order_for(len).is_none() {
             drop(owner);
             return fall_back(FallbackReason::SampleTooLarge);
         }

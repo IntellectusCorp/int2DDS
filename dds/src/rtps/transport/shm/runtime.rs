@@ -10,71 +10,40 @@ use dashmap::DashMap;
 use log::{debug, info, warn};
 
 use crate::rtps::common::guid::GuidPrefix;
-use crate::rtps::transport::shm::pool::{SlotLease, MAX_CLASSES};
+use crate::rtps::transport::shm::pool::{valid_pool_size, SlotLease};
 use crate::rtps::transport::shm::registry::{ParticipantSlot, Registry, HEARTBEAT_PERIOD};
 use crate::rtps::transport::shm::ring::RING_INLINE;
 use crate::rtps::transport::shm::segment::{unlink_segment, OwnedSegment, PeerSegment};
 use crate::rtps::transport::shm::slot::ShmSlotHandle;
 
-/// 4 MiB + 12 MiB + 16 MiB = 32 MiB per participant.
-pub(crate) const DEFAULT_CLASSES: [(u32, u32); 3] = [(65536, 64), (1048576, 12), (8388608, 2)];
+pub(crate) const DEFAULT_POOL_SIZE: u64 = 32 << 20;
 pub(crate) const DEFAULT_RING_ENTRIES: u32 = 1024;
 
-/// Environment-driven configuration. A bad value never fails a participant;
-/// it is logged once and replaced by the default.
-pub(crate) struct ShmConfig {
-    pub(crate) classes: Vec<(u32, u32)>,
-    pub(crate) ring_entries: u32,
-    pub(crate) enabled: bool,
-}
-
-impl ShmConfig {
-    pub(crate) fn from_env() -> ShmConfig {
-        let classes = match std::env::var("INT2DDS_SHM_POOL_CLASSES").ok().filter(|s| !s.is_empty())
-        {
-            Some(raw) => parse_classes(&raw).unwrap_or_else(|| {
-                warn!("[shm] INT2DDS_SHM_POOL_CLASSES is not usable, falling back to defaults");
-                DEFAULT_CLASSES.to_vec()
-            }),
-            None => DEFAULT_CLASSES.to_vec(),
-        };
-        let ring_entries =
-            match std::env::var("INT2DDS_SHM_RING_ENTRIES").ok().filter(|s| !s.is_empty()) {
-                Some(raw) => parse_ring_entries(&raw).unwrap_or_else(|| {
-                    warn!("[shm] INT2DDS_SHM_RING_ENTRIES is not usable, falling back to default");
-                    DEFAULT_RING_ENTRIES
-                }),
-                None => DEFAULT_RING_ENTRIES,
-            };
-        let enabled = match std::env::var("INT2DDS_SHM_ZERO_COPY").ok().filter(|s| !s.is_empty()) {
-            Some(raw) => !(raw.eq_ignore_ascii_case("false") || raw == "0"),
-            None => true,
-        };
-        ShmConfig { classes, ring_entries, enabled }
+/// `INT2DDS_SHM_POOL_SIZE`: the shared memory this participant sets aside for
+/// payloads, in bytes or with a K/M/G suffix; a power of two of at least 64K.
+/// A bad value is logged once and replaced by the default.
+fn pool_size_from_env() -> u64 {
+    let Some(raw) = std::env::var("INT2DDS_SHM_POOL_SIZE").ok().filter(|s| !s.is_empty()) else {
+        return DEFAULT_POOL_SIZE;
+    };
+    match parse_size(&raw).filter(|&size| valid_pool_size(size)) {
+        Some(size) => size,
+        None => {
+            warn!("[shm] INT2DDS_SHM_POOL_SIZE is not usable, falling back to the default");
+            DEFAULT_POOL_SIZE
+        }
     }
 }
 
-/// `size:count` entries, comma separated, sizes strictly ascending.
-fn parse_classes(raw: &str) -> Option<Vec<(u32, u32)>> {
-    let mut out: Vec<(u32, u32)> = Vec::new();
-    for entry in raw.split(',') {
-        let (size, count) = entry.split_once(':')?;
-        let size: u32 = size.trim().parse().ok()?;
-        let count: u32 = count.trim().parse().ok()?;
-        if size == 0 || count == 0 {
-            return None;
-        }
-        if out.last().is_some_and(|(prev, _)| *prev >= size) {
-            return None;
-        }
-        out.push((size, count));
-    }
-    (!out.is_empty() && out.len() <= MAX_CLASSES).then_some(out)
-}
-
-fn parse_ring_entries(raw: &str) -> Option<u32> {
-    let value: u32 = raw.trim().parse().ok()?;
-    (value >= 2 && value.is_power_of_two()).then_some(value)
+fn parse_size(raw: &str) -> Option<u64> {
+    let raw = raw.trim();
+    let (digits, shift) = match raw.chars().last()? {
+        'k' | 'K' => (&raw[..raw.len() - 1], 10),
+        'm' | 'M' => (&raw[..raw.len() - 1], 20),
+        'g' | 'G' => (&raw[..raw.len() - 1], 30),
+        _ => (raw, 0),
+    };
+    digits.trim().parse::<u64>().ok()?.checked_shl(shift)
 }
 
 /// Why a sample took the copy path. `NoLocalReader` through
@@ -356,12 +325,6 @@ impl ShmRuntime {
     /// `None` whenever SHM cannot be brought up; every caller falls back to
     /// the copy path.
     pub(crate) fn start(domain: u32, guid_prefix: GuidPrefix) -> Option<Arc<ShmRuntime>> {
-        let config = ShmConfig::from_env();
-        if !config.enabled {
-            info!("[shm] zero-copy disabled by INT2DDS_SHM_ZERO_COPY");
-            return None;
-        }
-
         let slot = match ParticipantSlot::claim(domain, guid_prefix) {
             Ok(slot) => slot,
             Err(e) => {
@@ -379,8 +342,8 @@ impl ShmRuntime {
             domain,
             slot.slot(),
             slot.epoch(),
-            &config.classes,
-            config.ring_entries,
+            pool_size_from_env(),
+            DEFAULT_RING_ENTRIES,
         ) {
             Ok(own) => own,
             Err(e) => {
@@ -430,7 +393,7 @@ impl ShmRuntime {
         let slot_ref = self.own.owner_mut().commit(lease, len);
         let handle = ShmSlotHandle::own(self.own_arc(), slot_ref);
         if handle.is_none() {
-            self.own.owner_mut().release_own(slot_ref.class, slot_ref.index);
+            self.own.owner_mut().release_own(slot_ref.order, slot_ref.index);
         }
         handle
     }
@@ -478,35 +441,25 @@ impl ShmRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rtps::transport::shm::pool::TEST_POOL_SIZE;
     use crate::rtps::transport::shm::registry::{now_tick, unlink_registry, RegistrySegment};
     use crate::rtps::transport::shm::ring::{notify_supported, POLL_INTERVAL, SPILL_NONE};
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::sync::Mutex;
 
     #[test]
-    fn config_parses_valid_input_and_rejects_the_rest() {
-        assert_eq!(parse_classes("65536:64,1048576:12"), Some(vec![(65536, 64), (1048576, 12)]));
-        assert_eq!(parse_classes("1048576:12,65536:64"), None, "not ascending");
-        assert_eq!(parse_classes("65536:64,65536:12"), None);
-        assert_eq!(parse_classes("65536:0"), None);
-        assert_eq!(parse_classes("0:64"), None);
-        assert_eq!(parse_classes("1:1,2:1,3:1,4:1,5:1"), None, "more than MAX_CLASSES");
-        assert_eq!(parse_classes(""), None);
-        assert_eq!(parse_classes("65536"), None);
-        assert_eq!(parse_classes("abc:64"), None);
+    fn pool_size_parses_suffixes_and_rejects_what_the_pool_cannot_take() {
+        assert_eq!(parse_size("65536"), Some(65536));
+        assert_eq!(parse_size("64K"), Some(64 << 10));
+        assert_eq!(parse_size("32m"), Some(32 << 20));
+        assert_eq!(parse_size("1G"), Some(1 << 30));
+        assert_eq!(parse_size("x"), None);
+        assert_eq!(parse_size(""), None);
 
-        assert_eq!(parse_ring_entries("1024"), Some(1024));
-        assert_eq!(parse_ring_entries("2"), Some(2));
-        assert_eq!(parse_ring_entries("1000"), None);
-        assert_eq!(parse_ring_entries("1"), None);
-        assert_eq!(parse_ring_entries("x"), None);
-
-        let raw: Vec<String> = DEFAULT_CLASSES.iter().map(|(s, c)| format!("{s}:{c}")).collect();
-        assert_eq!(parse_classes(&raw.join(",")), Some(DEFAULT_CLASSES.to_vec()));
-        assert_eq!(
-            parse_ring_entries(&DEFAULT_RING_ENTRIES.to_string()),
-            Some(DEFAULT_RING_ENTRIES)
-        );
+        assert!(valid_pool_size(DEFAULT_POOL_SIZE));
+        assert!(!valid_pool_size(100 << 20), "not a power of two");
+        assert!(valid_pool_size(4096), "one block is the floor");
+        assert!(!valid_pool_size(2048));
     }
 
     #[test]
@@ -541,22 +494,22 @@ mod tests {
         unlink_segment(domain, ME);
         unlink_segment(domain, PEER);
         let reg = RegistrySegment::open(domain).unwrap();
-        let mine = OwnedSegment::create(domain, ME, 1, &[(64, 2)], 4).unwrap();
-        let theirs = OwnedSegment::create(domain, PEER, 1, &[(64, 2)], 4).unwrap();
+        let mine = OwnedSegment::create(domain, ME, 1, TEST_POOL_SIZE, 4).unwrap();
+        let theirs = OwnedSegment::create(domain, PEER, 1, TEST_POOL_SIZE, 4).unwrap();
         reg.registry().claim(std::process::id(), [0; 12], now_tick()).unwrap();
         Fixture { reg, mine, _theirs: theirs, domain }
     }
 
     impl Fixture {
-        fn peer_bit_set(&self, class: u16, index: u32, slot: u32) {
+        fn peer_bit_set(&self, order: u16, index: u32, slot: u32) {
             let owner = self.mine.owner_mut();
-            let m = owner.pool().meta(class, index).unwrap();
+            let m = owner.pool().meta(order, index).unwrap();
             m.refs.fetch_or(1u64 << slot, Ordering::AcqRel);
         }
 
-        fn peer_bit(&self, class: u16, index: u32, slot: u32) -> u64 {
+        fn peer_bit(&self, order: u16, index: u32, slot: u32) -> u64 {
             let owner = self.mine.owner_mut();
-            let m = owner.pool().meta(class, index).unwrap();
+            let m = owner.pool().meta(order, index).unwrap();
             m.refs.load(Ordering::Acquire) & (1u64 << slot)
         }
     }
@@ -595,17 +548,17 @@ mod tests {
 
         let lease = f.mine.owner_mut().acquire(8).unwrap();
         let r = f.mine.owner_mut().commit(lease, 1);
-        f.peer_bit_set(r.class, r.index, slot);
+        f.peer_bit_set(r.order, r.index, slot);
 
         // Unmatch is not death: the peer may still be reading our slots.
         map.drop_mapping(&[9; 12]);
         assert_eq!(map.len(), 0);
-        assert_ne!(f.peer_bit(r.class, r.index, slot), 0, "an unmatched peer's bits survive");
+        assert_ne!(f.peer_bit(r.order, r.index, slot), 0, "an unmatched peer's bits survive");
 
         map.resolve(&f.mine, f.reg.registry(), [9; 12]).unwrap();
         map.forget(&f.mine, f.reg.registry(), &[9; 12]);
         assert_eq!(map.len(), 0);
-        assert_eq!(f.peer_bit(r.class, r.index, slot), 0);
+        assert_eq!(f.peer_bit(r.order, r.index, slot), 0);
     }
 
     #[test]
@@ -618,7 +571,7 @@ mod tests {
 
         let lease = f.mine.owner_mut().acquire(8).unwrap();
         let r = f.mine.owner_mut().commit(lease, 1);
-        f.peer_bit_set(r.class, r.index, slot);
+        f.peer_bit_set(r.order, r.index, slot);
 
         // The peer leaves, someone else takes its slot, and leaves too.
         f.reg.registry().release(slot, epoch);
@@ -629,7 +582,7 @@ mod tests {
 
         assert!(map.resolve(&f.mine, f.reg.registry(), [9; 12]).is_none(), "stale peer");
         assert_eq!(map.len(), 0, "the stale entry is evicted");
-        assert_eq!(f.peer_bit(r.class, r.index, slot), 0, "a free slot's bits are reclaimed");
+        assert_eq!(f.peer_bit(r.order, r.index, slot), 0, "a free slot's bits are reclaimed");
 
         // A new owner whose segment name still resolves to the old epoch.
         let (again, _) = f.reg.registry().claim(std::process::id(), [8; 12], now_tick()).unwrap();
@@ -649,24 +602,24 @@ mod tests {
 
         // Cached and still current: cleared.
         map.resolve(&f.mine, f.reg.registry(), [9; 12]).unwrap();
-        f.peer_bit_set(r.class, r.index, dead_slot);
+        f.peer_bit_set(r.order, r.index, dead_slot);
         map.forget_slot(&f.mine, f.reg.registry(), dead_slot);
         assert_eq!(map.len(), 0);
-        assert_eq!(f.peer_bit(r.class, r.index, dead_slot), 0);
+        assert_eq!(f.peer_bit(r.order, r.index, dead_slot), 0);
 
         // Not cached, slot free: cleared.
         f.reg.registry().release(dead_slot, dead_epoch);
-        f.peer_bit_set(r.class, r.index, dead_slot);
+        f.peer_bit_set(r.order, r.index, dead_slot);
         map.forget_slot(&f.mine, f.reg.registry(), dead_slot);
-        assert_eq!(f.peer_bit(r.class, r.index, dead_slot), 0);
+        assert_eq!(f.peer_bit(r.order, r.index, dead_slot), 0);
 
         // Re-issued to a new participant: its bits are left alone.
         let (new_slot, _) =
             f.reg.registry().claim(std::process::id(), [8; 12], now_tick()).unwrap();
         assert_eq!(new_slot, dead_slot);
-        f.peer_bit_set(r.class, r.index, new_slot);
+        f.peer_bit_set(r.order, r.index, new_slot);
         map.forget_slot(&f.mine, f.reg.registry(), new_slot);
-        assert_ne!(f.peer_bit(r.class, r.index, new_slot), 0);
+        assert_ne!(f.peer_bit(r.order, r.index, new_slot), 0);
     }
 
     const RECV_DOMAIN: u32 = 232;
@@ -674,7 +627,7 @@ mod tests {
     #[test]
     fn the_loop_drains_every_queued_message_before_it_waits() {
         unlink_segment(RECV_DOMAIN, 0);
-        let owned = Arc::new(OwnedSegment::create(RECV_DOMAIN, 0, 1, &[(64, 2)], 8).unwrap());
+        let owned = Arc::new(OwnedSegment::create(RECV_DOMAIN, 0, 1, TEST_POOL_SIZE, 8).unwrap());
         let peer = PeerSegment::attach(RECV_DOMAIN, 0, 1).unwrap();
         for msg in [b"one".as_slice(), b"two".as_slice(), b"three".as_slice()] {
             peer.push_and_signal(msg, SPILL_NONE).unwrap();
@@ -716,7 +669,7 @@ mod tests {
     fn an_empty_ring_does_not_spin_the_loop() {
         const OBSERVE: Duration = Duration::from_millis(300);
         unlink_segment(RECV_DOMAIN, 6);
-        let owned = Arc::new(OwnedSegment::create(RECV_DOMAIN, 6, 1, &[(64, 2)], 8).unwrap());
+        let owned = Arc::new(OwnedSegment::create(RECV_DOMAIN, 6, 1, TEST_POOL_SIZE, 8).unwrap());
 
         let rounds = Arc::new(AtomicUsize::new(0));
         let stop = Arc::new(AtomicBool::new(false));
@@ -769,7 +722,7 @@ mod tests {
     #[test]
     fn drain_hands_each_message_to_the_sink_in_order() {
         unlink_segment(RECV_DOMAIN, 8);
-        let owned = OwnedSegment::create(RECV_DOMAIN, 8, 1, &[(64, 2)], 8).unwrap();
+        let owned = OwnedSegment::create(RECV_DOMAIN, 8, 1, TEST_POOL_SIZE, 8).unwrap();
         let peer = PeerSegment::attach(RECV_DOMAIN, 8, 9).unwrap();
         for msg in [b"a".as_slice(), b"b".as_slice()] {
             peer.push_and_signal(msg, SPILL_NONE).unwrap();

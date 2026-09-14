@@ -15,6 +15,7 @@ This document describes the environment variables available in int2dds.
 | `INT2DDS_USE_LOOPBACK_INTERFACE`     | Enable loopback interface                  | false                   |
 | `INT2DDS_FORCE_LOOPBACK_MULTICAST`   | Force multicast egress via 127.0.0.1       | false                   |
 | `INT2DDS_UDP_SOCKET_BUFFER`          | UDP socket buffer size (bytes)             | OS default              |
+| `INT2DDS_SHM_POOL_SIZE`              | SHM zero-copy pool per participant         | 32M                     |
 | `INT2DDS_DATA_FRAG_SIZE`             | DATA_FRAG fragment size (bytes)            | 65000                   |
 | `INT2DDS_MAX_MESSAGE_SIZE`           | Max RTPS message size (bytes)              | 65000                   |
 | `INT2DDS_MULTICAST_TTL`              | IPv4 multicast TTL fallback (0-255)        | 1                       |
@@ -266,6 +267,36 @@ cargo run --example hello_world_pub
 ```bash
 # Linux/macOS
 export INT2DDS_UDP_SOCKET_BUFFER=1048576
+
+cargo run --example hello_world_pub
+```
+
+
+### INT2DDS_SHM_POOL_SIZE
+
+Sets the shared memory each participant sets aside for zero-copy payloads when
+`INT2DDS_TRANSPORT=shm`. Bytes, or a number with a `K`, `M` or `G` suffix; must
+be a power of two of at least 4K. Default: 32M.
+
+Samples are placed in blocks carved out of this pool, so the largest sample that
+can travel zero-copy is bounded by the pool size, and the number of samples
+readers may hold at once is bounded by it too. A sample that does not fit, or
+finds the pool exhausted, is sent over UDP instead and logged once. Windows
+commits this memory at participant creation, so deployments with many
+participants may want a smaller value.
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_SHM_POOL_SIZE = "64M"
+
+cargo run --example hello_world_pub
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_SHM_POOL_SIZE=64M
 
 cargo run --example hello_world_pub
 ```

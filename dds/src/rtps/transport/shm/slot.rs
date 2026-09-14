@@ -15,7 +15,7 @@ pub(crate) const SLOT_REF_ENCAPSULATION_ID: u16 = 0x8001;
 pub(crate) struct SlotRef {
     pub(crate) owner_slot: u16,
     pub(crate) owner_epoch_low: u16,
-    pub(crate) class: u16,
+    pub(crate) order: u16,
     pub(crate) index: u32,
     pub(crate) generation: u32,
     pub(crate) len: u32,
@@ -26,7 +26,7 @@ impl SlotRef {
         let mut out = [0u8; SLOT_REF_LEN];
         out[0..2].copy_from_slice(&self.owner_slot.to_le_bytes());
         out[2..4].copy_from_slice(&self.owner_epoch_low.to_le_bytes());
-        out[4..6].copy_from_slice(&self.class.to_le_bytes());
+        out[4..6].copy_from_slice(&self.order.to_le_bytes());
         // out[6..8] reserved
         out[8..12].copy_from_slice(&self.index.to_le_bytes());
         out[12..16].copy_from_slice(&self.generation.to_le_bytes());
@@ -41,7 +41,7 @@ impl SlotRef {
         Some(SlotRef {
             owner_slot: u16::from_le_bytes(bytes[0..2].try_into().ok()?),
             owner_epoch_low: u16::from_le_bytes(bytes[2..4].try_into().ok()?),
-            class: u16::from_le_bytes(bytes[4..6].try_into().ok()?),
+            order: u16::from_le_bytes(bytes[4..6].try_into().ok()?),
             index: u32::from_le_bytes(bytes[8..12].try_into().ok()?),
             generation: u32::from_le_bytes(bytes[12..16].try_into().ok()?),
             len: u32::from_le_bytes(bytes[16..20].try_into().ok()?),
@@ -91,8 +91,8 @@ impl ShmSlotHandle {
         let ptr = {
             let owner = segment.owner_mut();
             let pool = owner.pool();
-            let ptr = pool.data(slot_ref.class, slot_ref.index)?;
-            if slot_ref.len > pool.slot_size(slot_ref.class) {
+            let ptr = pool.data(slot_ref.order, slot_ref.index)?;
+            if slot_ref.len as u64 > pool.block_size(slot_ref.order) {
                 return None;
             }
             ptr
@@ -134,7 +134,7 @@ impl Drop for ShmSlotHandle {
     fn drop(&mut self) {
         match &mut self.inner {
             SlotOwnership::Owner { segment, .. } => {
-                segment.owner_mut().release_own(self.slot_ref.class, self.slot_ref.index);
+                segment.owner_mut().release_own(self.slot_ref.order, self.slot_ref.index);
             }
             SlotOwnership::Peer { segment, claimed } => {
                 if let Some(c) = claimed.take() {
@@ -157,13 +157,14 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::rtps::transport::shm::pool::TEST_POOL_SIZE;
     use crate::rtps::transport::shm::segment::unlink_segment;
 
     fn sample() -> SlotRef {
         SlotRef {
             owner_slot: 7,
             owner_epoch_low: 0xBEEF,
-            class: 2,
+            order: 2,
             index: 11,
             generation: 5,
             len: 4096,
@@ -190,7 +191,7 @@ mod tests {
     fn a_peer_handle_holds_the_bit_until_it_is_dropped() {
         const DOMAIN: u32 = 251;
         unlink_segment(DOMAIN, 0);
-        let owned = OwnedSegment::create(DOMAIN, 0, 1, &[(64, 2)], 4).unwrap();
+        let owned = OwnedSegment::create(DOMAIN, 0, 1, TEST_POOL_SIZE, 4).unwrap();
         let peer = Arc::new(PeerSegment::attach(DOMAIN, 0, 1).unwrap());
 
         let mut lease = owned.owner_mut().acquire(8).unwrap();
@@ -199,7 +200,7 @@ mod tests {
 
         let handle = ShmSlotHandle::claim(Arc::clone(&peer), &r).unwrap();
         assert_eq!(handle.as_slice(), b"abc");
-        let meta = peer.reader.pool().meta(r.class, r.index).unwrap();
+        let meta = peer.reader.pool().meta(r.order, r.index).unwrap();
         assert_eq!(meta.refs.load(Ordering::Acquire) & (1 << 1), 1 << 1);
 
         drop(handle);
@@ -214,9 +215,10 @@ mod tests {
     fn an_owner_handle_frees_the_slot_when_it_is_dropped() {
         const DOMAIN: u32 = 252;
         unlink_segment(DOMAIN, 0);
-        let owned = Arc::new(OwnedSegment::create(DOMAIN, 0, 1, &[(64, 1)], 4).unwrap());
+        let owned = Arc::new(OwnedSegment::create(DOMAIN, 0, 1, TEST_POOL_SIZE, 4).unwrap());
 
-        let lease = owned.owner_mut().acquire(8).unwrap();
+        // The whole pool, so nothing else can be handed out while it is held.
+        let lease = owned.owner_mut().acquire(TEST_POOL_SIZE as usize).unwrap();
         let r = owned.owner_mut().commit(lease, 3);
         let handle = ShmSlotHandle::own(Arc::clone(&owned), r).unwrap();
         assert!(owned.owner_mut().acquire(8).is_none());

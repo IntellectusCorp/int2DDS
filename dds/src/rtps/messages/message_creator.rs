@@ -48,6 +48,7 @@ mod tests {
     use crate::common::instance_handle::InstanceHandle;
     use crate::rtps::common::entity_kind::EntityKind;
     use crate::rtps::messages::message_receiver::{MessageReceiver, TypedSubmessage};
+    use crate::rtps::transport::shm::pool::TEST_POOL_SIZE;
     use crate::rtps::transport::shm::segment::{unlink_segment, OwnedSegment};
     use crate::rtps::transport::shm::slot::ShmSlotHandle;
     use crate::rtps::transport::shm::slot::{SlotRef, SLOT_REF_LEN};
@@ -266,7 +267,7 @@ mod tests {
     fn only_an_shm_destination_carries_the_descriptor_instead_of_the_payload() {
         const DOMAIN: u32 = 253;
         unlink_segment(DOMAIN, 0);
-        let owned = Arc::new(OwnedSegment::create(DOMAIN, 0, 1, &[(64, 2)], 4).unwrap());
+        let owned = Arc::new(OwnedSegment::create(DOMAIN, 0, 1, TEST_POOL_SIZE, 4).unwrap());
         let change = shm_backed_change(&owned, b"payload-bytes");
 
         let payload = data_payload_of(&data_msg(&change, true));
@@ -291,8 +292,8 @@ mod tests {
 
         const DOMAIN: u32 = 255;
         unlink_segment(DOMAIN, 0);
-        let slot_size = (max_message_size as u32 + 1).next_power_of_two();
-        let owned = Arc::new(OwnedSegment::create(DOMAIN, 0, 1, &[(slot_size, 1)], 4).unwrap());
+        let pool_size = (max_message_size as u64 + 1).next_power_of_two().max(TEST_POOL_SIZE);
+        let owned = Arc::new(OwnedSegment::create(DOMAIN, 0, 1, pool_size, 4).unwrap());
         let body = vec![0xABu8; max_message_size + 1];
         let change = shm_backed_change(&owned, &body);
         assert!(change.data_value().len() > max_message_size, "the sample must exceed the budget");

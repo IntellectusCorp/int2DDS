@@ -137,11 +137,11 @@ impl OwnedSegment {
         domain: u32,
         slot: u32,
         epoch: u64,
-        classes: &[(u32, u32)],
+        pool_size: u64,
         ring_capacity: u32,
     ) -> io::Result<OwnedSegment> {
-        let pool_layout = PoolLayout::new(classes)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "bad pool class config"))?;
+        let pool_layout = PoolLayout::new(pool_size)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "bad pool size"))?;
         let ring_offset = HEADER_RESERVE;
         let pool_offset = ring_offset + Ring::size_for(ring_capacity);
         let total = pool_offset + pool_layout.total_size();
@@ -308,6 +308,7 @@ pub(crate) fn unlink_segment(domain: u32, slot: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rtps::transport::shm::pool::TEST_POOL_SIZE;
     use crate::rtps::transport::shm::ring::{notify_supported, RING_INLINE, SPILL_NONE};
     use crate::rtps::transport::shm::slot::SlotRef;
     use crate::rtps::transport::shm::test_region::AlignedRegion;
@@ -347,7 +348,7 @@ mod tests {
     #[test]
     fn owner_and_peer_share_one_segment() {
         unlink_segment(DOMAIN, 0);
-        let owned = OwnedSegment::create(DOMAIN, 0, 1, &[(64, 2)], 4).unwrap();
+        let owned = OwnedSegment::create(DOMAIN, 0, 1, TEST_POOL_SIZE, 4).unwrap();
         let peer = PeerSegment::attach(DOMAIN, 0, 1).unwrap();
         assert!(PeerSegment::attach(DOMAIN, 63, 1).is_err(), "no such segment");
 
@@ -375,7 +376,7 @@ mod tests {
             return;
         }
         unlink_segment(DOMAIN, 2);
-        let owned = Arc::new(OwnedSegment::create(DOMAIN, 2, 1, &[(64, 2)], 4).unwrap());
+        let owned = Arc::new(OwnedSegment::create(DOMAIN, 2, 1, TEST_POOL_SIZE, 4).unwrap());
         let peer = PeerSegment::attach(DOMAIN, 2, 3).unwrap();
 
         let waiter = {
@@ -405,7 +406,7 @@ mod tests {
     #[test]
     fn waiting_returns_at_once_when_a_message_is_already_queued() {
         unlink_segment(DOMAIN, 4);
-        let owned = OwnedSegment::create(DOMAIN, 4, 1, &[(64, 2)], 4).unwrap();
+        let owned = OwnedSegment::create(DOMAIN, 4, 1, TEST_POOL_SIZE, 4).unwrap();
         let peer = PeerSegment::attach(DOMAIN, 4, 5).unwrap();
         peer.push_and_signal(b"early", SPILL_NONE).unwrap();
 
@@ -425,7 +426,7 @@ mod tests {
             return;
         }
         unlink_segment(DOMAIN, 6);
-        let owned = OwnedSegment::create(DOMAIN, 6, 1, &[(64, 2)], 4).unwrap();
+        let owned = OwnedSegment::create(DOMAIN, 6, 1, TEST_POOL_SIZE, 4).unwrap();
 
         let start = Instant::now();
         owned.wait_for_message(Duration::from_millis(50));

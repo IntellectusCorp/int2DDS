@@ -47,11 +47,34 @@ pub(crate) struct ShmTransportPlugin {
 impl ShmTransportPlugin {
     pub(crate) fn new(
         domain_id: u32,
-        mut participant_id: u32,
+        participant_id: u32,
         bind_ip: String,
         multicast_if_ip: String,
         working_ips: Vec<String>,
         guid_prefix: GuidPrefix,
+        udp_config: UdpConfig,
+    ) -> io::Result<Self> {
+        let runtime = ShmRuntime::start(domain_id, guid_prefix);
+        Self::with_runtime(
+            domain_id,
+            participant_id,
+            bind_ip,
+            multicast_if_ip,
+            working_ips,
+            runtime,
+            udp_config,
+        )
+    }
+
+    /// `runtime` is `None` when zero-copy could not be brought up; the plugin
+    /// then behaves as a UDP transport.
+    fn with_runtime(
+        domain_id: u32,
+        mut participant_id: u32,
+        bind_ip: String,
+        multicast_if_ip: String,
+        working_ips: Vec<String>,
+        runtime: Option<Arc<ShmRuntime>>,
         udp_config: UdpConfig,
     ) -> io::Result<Self> {
         let udp_sender = UdpSender::new(bind_ip, multicast_if_ip, udp_config)?;
@@ -61,7 +84,6 @@ impl ShmTransportPlugin {
             Some(ext_ip) => vec![ext_ip],
             None => host_ip_addrs.clone(),
         };
-        let runtime = ShmRuntime::start(domain_id, guid_prefix);
 
         // Create UDP multicast listeners (shared ports, no per-pid collision).
         let discovery_mc_port = PortManager::get_discovery_traffic_multicast_port(domain_id);
@@ -269,14 +291,11 @@ mod tests {
     use super::*;
     use crate::rtps::transport::shm::registry::{now_tick, unlink_registry};
     use crate::rtps::transport::shm::ring::RING_INLINE;
-    use crate::rtps::transport::shm::runtime::{DEFAULT_CLASSES, DEFAULT_RING_ENTRIES};
+    use crate::rtps::transport::shm::runtime::{DEFAULT_POOL_SIZE, DEFAULT_RING_ENTRIES};
     use crate::rtps::transport::shm::segment::{unlink_segment, OwnedSegment};
 
     /// Low enough that the UDP ports the plugin binds stay inside `u16`.
     const DOMAIN: u32 = 229;
-
-    /// `INT2DDS_SHM_ZERO_COPY` is process-wide, so only one test at a time may move it.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn plugin(domain: u32, prefix: GuidPrefix) -> ShmTransportPlugin {
         ShmTransportPlugin::new(
@@ -291,21 +310,25 @@ mod tests {
         .unwrap()
     }
 
-    /// Without a runtime the plugin must look like a UDP transport to both sides.
+    /// Without a runtime (no registry slot, no segment) the plugin must look
+    /// like a UDP transport to both sides.
     #[test]
     fn without_a_zero_copy_runtime_the_plugin_neither_advertises_nor_accepts_shm() {
-        const DISABLED_DOMAIN: u32 = 228;
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        unlink_registry(DISABLED_DOMAIN);
-        unsafe { std::env::set_var("INT2DDS_SHM_ZERO_COPY", "0") };
-        let plugin = plugin(DISABLED_DOMAIN, [78; 12]);
-        unsafe { std::env::remove_var("INT2DDS_SHM_ZERO_COPY") };
+        let plugin = ShmTransportPlugin::with_runtime(
+            228,
+            0,
+            "127.0.0.1".to_string(),
+            "127.0.0.1".to_string(),
+            vec!["127.0.0.1".to_string()],
+            None,
+            UdpConfig { multicast_ttl: 1 },
+        )
+        .unwrap();
 
-        assert!(plugin.shm_runtime().is_none());
         let shm = Locator::from_shm(&Ipv4Addr::new(127, 0, 0, 1), 7411);
         assert!(!plugin.can_handle(&shm));
         assert!(plugin.advertised_default_unicast_locators().iter().all(|l| !l.is_shm()));
-        unlink_registry(DISABLED_DOMAIN);
+        plugin.close();
     }
 
     #[test]
@@ -326,7 +349,7 @@ mod tests {
             DOMAIN,
             peer_slot,
             peer_epoch,
-            &DEFAULT_CLASSES,
+            DEFAULT_POOL_SIZE,
             DEFAULT_RING_ENTRIES,
         )
         .unwrap();
