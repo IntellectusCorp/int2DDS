@@ -10,26 +10,13 @@ use log::{debug, info};
 use crate::rtps::common::locator::Locator;
 use crate::rtps::transport::plugin::{MessageSource, SendTarget, TransportPlugin};
 use crate::rtps::transport::port_manager::PortManager;
-use crate::rtps::transport::shm::shm_listener::ShmListener;
-use crate::rtps::transport::shm::shm_sender::ShmSender;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use crate::rtps::transport::udp::udp_sender::UdpSender;
 use crate::rtps::transport::UdpConfig;
 
-/// SHM transport plugin — UDP for discovery, SHM for user data.
-///
-/// Discovery (both multicast and unicast) always uses UDP.
-/// User data routes by locator kind:
-///   - SHM locator → SHM sender (shared memory ring buffer)
-///   - UDP locator → UDP sender (fallback for non-SHM peers)
-///
-/// User data unicast is handed out as `MessageSource::Shm`,
-/// letting the listening task poll both UDP and SHM in the same loop
-/// (mirroring the develop-branch single-task receive pattern; no extra
-/// merge thread or inter-thread channel).
+/// SHM transport plugin. Discovery and user data both travel on UDP.
 pub(crate) struct ShmTransportPlugin {
     udp_sender: UdpSender,
-    shm_sender: ShmSender,
     domain_id: u32,
     participant_id: u32,
     working_ips: Vec<String>,
@@ -38,10 +25,8 @@ pub(crate) struct ShmTransportPlugin {
     discovery_multicast_listener: Mutex<Option<UdpListener>>,
     discovery_unicast_listener: Mutex<Option<UdpListener>>,
 
-    // User-traffic listeners (UDP fallback + SHM ring buffer)
     user_multicast_listener: Mutex<Option<UdpListener>>,
     user_unicast_listener: Mutex<Option<UdpListener>>,
-    shm_listener: Mutex<Option<ShmListener>>,
 }
 
 impl ShmTransportPlugin {
@@ -54,7 +39,6 @@ impl ShmTransportPlugin {
         udp_config: UdpConfig,
     ) -> io::Result<Self> {
         let udp_sender = UdpSender::new(bind_ip, multicast_if_ip, udp_config)?;
-        let shm_sender = ShmSender::new(domain_id)?;
 
         // Create UDP multicast listeners (shared ports, no per-pid collision).
         let discovery_mc_port = PortManager::get_discovery_traffic_multicast_port(domain_id);
@@ -93,18 +77,10 @@ impl ShmTransportPlugin {
                 }
             }
         };
-        let shm_listener = ShmListener::new(domain_id).ok();
-
-        info!(
-            "[ShmTransportPlugin] Created (domain={}, pid={}, shm_available={})",
-            domain_id,
-            participant_id,
-            shm_sender.is_available()
-        );
+        info!("[ShmTransportPlugin] Created (domain={}, pid={})", domain_id, participant_id);
 
         Ok(Self {
             udp_sender,
-            shm_sender,
             domain_id,
             participant_id,
             working_ips,
@@ -112,7 +88,6 @@ impl ShmTransportPlugin {
             discovery_unicast_listener: Mutex::new(discovery_uc),
             user_multicast_listener: Mutex::new(user_mc),
             user_unicast_listener: Mutex::new(user_uc),
-            shm_listener: Mutex::new(shm_listener),
         })
     }
 
@@ -132,16 +107,6 @@ impl ShmTransportPlugin {
             }
         }
         locators
-    }
-
-    /// Resolve the IPs to advertise — `INT2DDS_EXTERNAL_ADDRESS` override, or
-    /// the parsed working_ips. Used by `advertised_default_unicast_locators`
-    /// to emit per-NIC SHM + UDP locators in develop's order.
-    fn advertised_ips(&self) -> Vec<Ipv4Addr> {
-        if let Some(ext_ip) = crate::common::env::get_external_address() {
-            return vec![ext_ip];
-        }
-        self.working_ips.iter().filter_map(|s| s.parse::<Ipv4Addr>().ok()).collect()
     }
 }
 
@@ -171,27 +136,20 @@ impl TransportPlugin for ShmTransportPlugin {
                 Ok(())
             }
             SendTarget::UserData(locator) => {
-                if locator.is_shm() {
-                    let dummy_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-                    self.shm_sender.send(&dummy_addr, data)?;
-                    Ok(())
-                } else if locator.is_udp() {
-                    let ip = locator.to_ip_v4_addr();
-                    let port = locator.port() as u16;
-                    let addr = SocketAddr::new(IpAddr::V4(ip), port);
-                    self.udp_sender.send(&addr, data)?;
-                    Ok(())
-                } else {
-                    Err(io::Error::new(io::ErrorKind::Unsupported, locator.kind_name()))
+                if !locator.is_udp() {
+                    return Err(io::Error::new(io::ErrorKind::Unsupported, locator.kind_name()));
                 }
+                let ip = locator.to_ip_v4_addr();
+                let port = locator.port() as u16;
+                let addr = SocketAddr::new(IpAddr::V4(ip), port);
+                self.udp_sender.send(&addr, data)?;
+                Ok(())
             }
         }
     }
 
     fn can_handle(&self, locator: &Locator) -> bool {
-        // SHM plugin owns both a SHM ring buffer and a UDP fallback for
-        // non-SHM peers, so it claims both kinds.
-        locator.is_shm() || locator.is_udp()
+        locator.is_udp()
     }
 
     fn advertised_metatraffic_unicast_locators(&self) -> Vec<Locator> {
@@ -202,18 +160,9 @@ impl TransportPlugin for ShmTransportPlugin {
     }
 
     fn advertised_default_unicast_locators(&self) -> Vec<Locator> {
-        // Mirrors develop's `add_locators_for_ip` for SHM mode: for every
-        // advertised IP (env override or each working_ip), emit an SHM
-        // locator and a UDP locator at user_port — SHM first so peers'
-        // SHM > UDP priority filter picks SHM when reachable.
-        let user_port =
+        let port =
             PortManager::get_user_traffic_unicast_port(self.domain_id, self.participant_id) as u32;
-        let mut locators = Vec::new();
-        for ip in self.advertised_ips() {
-            locators.push(Locator::from_shm(&ip, user_port));
-            locators.push(Locator::from_ip_v4_addr_and_port(&ip, user_port));
-        }
-        locators
+        self.udp_locators(port)
     }
 
     fn take_discovery_multicast_source(&self) -> Option<MessageSource> {
@@ -228,11 +177,7 @@ impl TransportPlugin for ShmTransportPlugin {
 
     fn take_user_data_unicast_source(&self) -> Option<MessageSource> {
         let listener = self.user_unicast_listener.lock().expect("lock poisoned").take()?;
-        let shm = self.shm_listener.lock().expect("lock poisoned").take();
-        Some(match shm {
-            Some(shm) => MessageSource::Shm { listener, shm },
-            None => MessageSource::Udp { listener },
-        })
+        Some(MessageSource::Udp { listener })
     }
 
     fn port(&self) -> u16 {
@@ -245,7 +190,6 @@ impl TransportPlugin for ShmTransportPlugin {
 
     fn close(&self) {
         self.udp_sender.force_close();
-        self.shm_sender.force_close();
 
         for guard_arc in [
             &self.discovery_multicast_listener,
@@ -259,12 +203,6 @@ impl TransportPlugin for ShmTransportPlugin {
                 }
             }
         }
-        if let Ok(mut guard) = self.shm_listener.lock() {
-            if let Some(mut listener) = guard.take() {
-                listener.close();
-            }
-        }
-
         debug!("[ShmTransportPlugin] Closed");
     }
 }
